@@ -843,6 +843,9 @@ pub struct CompiledIlpProgram {
     pub(crate) compiled_schema_size: usize,
     pub(crate) head_rel_name: String,
     pub(crate) max_active_rules: usize,
+    /// The `max_active_rules` argument as given (None = compiler default);
+    /// replayed verbatim by `compile_variant`.
+    pub(crate) max_active_rules_arg: Option<usize>,
     pub(crate) candidate_map: Option<HashMap<(u32, u32, u32), u32>>,
     pub(crate) candidate_order: Option<Vec<(u32, u32, u32)>>,
     pub(crate) relation_overrides: HashMap<String, CudaBuffer>,
@@ -853,6 +856,11 @@ pub struct CompiledIlpProgram {
     /// When true, raise instead of falling back to chunked COO path.
     /// Use in zero-D2H benchmarks and CI gates. Default: false.
     pub(crate) strict_zero_dtoh: bool,
+    /// Fact buffers as loaded at compile time (before plan execution),
+    /// keyed by predicate. Source for `compile_variant`'s device-side reuse.
+    pub(crate) edb_snapshot: HashMap<String, CudaBuffer>,
+    /// Per-phase wall-clock of the compile that built this program (ms).
+    pub(crate) compile_timing: Vec<(&'static str, f64)>,
 }
 
 #[pymodule]

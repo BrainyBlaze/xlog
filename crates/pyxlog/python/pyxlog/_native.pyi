@@ -1230,6 +1230,28 @@ class CompiledIlpProgram:
     """A compiled GPU-resident ILP program."""
 
     # ------------------------------------------------------------------
+    # Variants / diagnostics
+    # ------------------------------------------------------------------
+
+    def compile_variant(self, source: str) -> CompiledIlpProgram:
+        """Compile ``source`` as a variant of this program.
+
+        Reuses this program's CUDA provider and, for every fact predicate whose
+        rows and schema are unchanged, its already-uploaded fact buffers
+        (device-to-device clone). The result is an independent program in the
+        same state ``IlpProgramFactory.compile(source, ...)`` would produce.
+        """
+        ...
+
+    def compile_timing_ms(self) -> dict[str, float]:
+        """Wall-clock breakdown of the compile that produced this program.
+
+        Keys: ``provider`` (absent for variants), ``frontend``, ``facts``,
+        ``edb_snapshot``, ``execute``; values in milliseconds.
+        """
+        ...
+
+    # ------------------------------------------------------------------
     # Candidate management
     # ------------------------------------------------------------------
 

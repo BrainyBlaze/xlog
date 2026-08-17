@@ -5,13 +5,14 @@
 use std::collections::HashMap as StdHashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
 use xlog_core::{RelId, ScalarType, Schema};
-use xlog_cuda::{CudaKernelProvider, JoinType};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, JoinType};
 use xlog_ir::{ExecutionPlan, RirNode};
 use xlog_logic::ast::{Program as AstProgram, Term, TypeRef};
 use xlog_logic::ground_term_encoding::append_ground_term_bytes;
@@ -305,13 +306,11 @@ pub(crate) fn pack_i64_columns_typed(
     Ok(columns)
 }
 
-pub(crate) fn load_facts_into_store(
-    ast: &AstProgram,
-    provider: &CudaKernelProvider,
-    executor: &mut Executor,
-    schemas: &HashMap<String, Schema>,
-) -> xlog_core::Result<()> {
-    use xlog_core::XlogError;
+/// Ground-fact rows of `ast`, grouped by predicate, in source order.
+///
+/// Shared by [`load_facts_into_store`] and [`CompiledIlpProgram::compile_variant`]
+/// so both agree on what "the facts of predicate P" are.
+pub(crate) fn fact_rows_by_pred(ast: &AstProgram) -> HashMap<&str, Vec<&[Term]>> {
     let mut rows_by_pred: HashMap<&str, Vec<&[Term]>> = HashMap::new();
     for fact in ast.facts() {
         rows_by_pred
@@ -319,8 +318,34 @@ pub(crate) fn load_facts_into_store(
             .or_default()
             .push(&fact.head.terms);
     }
+    rows_by_pred
+}
+
+pub(crate) fn load_facts_into_store(
+    ast: &AstProgram,
+    provider: &CudaKernelProvider,
+    executor: &mut Executor,
+    schemas: &HashMap<String, Schema>,
+) -> xlog_core::Result<()> {
+    load_facts_into_store_except(ast, provider, executor, schemas, &HashSet::new())
+}
+
+/// Like [`load_facts_into_store`], but predicates in `skip` are left untouched
+/// (the caller has already put their fact buffer into the store).
+pub(crate) fn load_facts_into_store_except(
+    ast: &AstProgram,
+    provider: &CudaKernelProvider,
+    executor: &mut Executor,
+    schemas: &HashMap<String, Schema>,
+    skip: &HashSet<String>,
+) -> xlog_core::Result<()> {
+    use xlog_core::XlogError;
+    let rows_by_pred = fact_rows_by_pred(ast);
 
     for (pred, rows) in rows_by_pred {
+        if skip.contains(pred) {
+            continue;
+        }
         let schema = schemas.get(pred).ok_or_else(|| {
             XlogError::Execution(format!("Missing schema for fact predicate {}", pred))
         })?;
@@ -476,73 +501,149 @@ impl IlpProgramFactory {
             }
         }
 
-        let ast = xlog_logic::parse_program(source).map_err(types::val_err)?;
-
-        let base_source = strip_learnable_declarations(source);
-        let learnable_source = extract_learnable_declarations(source);
-
-        let mut compiler = xlog_logic::Compiler::new();
-        if let Some(max) = max_active_rules {
-            compiler.set_max_active_rules(max);
-        }
-        let plan = compiler.compile_program(&ast).map_err(types::xlog_err)?;
-
-        let mut rel_index: Vec<(RelId, String)> = compiler
-            .rel_ids()
-            .iter()
-            .map(|(name, id)| (*id, name.clone()))
-            .collect();
-        rel_index.sort_by_key(|(id, _)| id.0);
-        let schemas = compiler.schemas().clone();
-
+        let mut timing = Vec::new();
+        let t0 = Instant::now();
         let mut config = GpuConfig::default();
         config.device_ordinal = device;
         config.memory_bytes = memory_mb * 1024 * 1024;
         let provider = Arc::new(provider_from_config(config).map_err(types::xlog_err)?);
+        timing.push(("provider", ms_since(t0)));
 
-        let mut executor = Executor::new(provider.clone());
-
-        for (name, rel_id) in compiler.rel_ids() {
-            executor.register_relation(*rel_id, name);
-        }
-
-        for (name, schema) in &schemas {
-            let empty = provider
-                .create_empty_buffer(schema.clone())
-                .map_err(types::xlog_err)?;
-            executor.store_mut().put(name, empty);
-        }
-
-        load_facts_into_store(&ast, &provider, &mut executor, &schemas).map_err(types::xlog_err)?;
-
-        executor.execute_plan(&plan).map_err(types::xlog_err)?;
-
-        let tmj = extract_tmj_meta(&plan);
-
-        let active_rules = max_active_rules.unwrap_or(32);
-
-        Ok(CompiledIlpProgram {
-            base_source,
-            _learnable_source: learnable_source,
-            ast,
-            executor,
-            provider,
-            plan,
-            rel_index,
-            schemas,
-            left_keys: tmj.left_keys,
-            right_keys: tmj.right_keys,
-            head_projection: tmj.head_projection,
-            compiled_schema_size: tmj.schema_size,
-            head_rel_name: tmj.head_rel_name,
-            max_active_rules: active_rules,
-            candidate_map: None,
-            candidate_order: None,
-            relation_overrides: HashMap::new(),
-            coo_chunk_budget: 16 * 1024 * 1024,
-            strict_zero_dtoh: false,
-        })
+        build_ilp_program(source, max_active_rules, provider, None, timing)
     }
+}
+
+/// Where a program being built takes its base-fact buffers from.
+struct EdbSource<'a> {
+    /// AST of the program whose snapshot this is (to check fact equality).
+    ast: &'a AstProgram,
+    /// Schemas of that program (a predicate is reusable only if its schema matches).
+    schemas: &'a HashMap<String, Schema>,
+    /// Post-load, pre-execution fact buffers, keyed by predicate.
+    snapshot: &'a HashMap<String, CudaBuffer>,
+}
+
+fn ms_since(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1000.0
+}
+
+/// Shared body of [`IlpProgramFactory::compile`] and
+/// [`CompiledIlpProgram::compile_variant`].
+///
+/// `edb` — when given, fact predicates whose rows and schema are identical to
+/// the snapshot's are seeded by an on-device clone of the snapshot buffer
+/// instead of host-side encoding + upload; everything else goes through
+/// [`load_facts_into_store_except`] exactly as a fresh compile would.
+fn build_ilp_program(
+    source: &str,
+    max_active_rules: Option<usize>,
+    provider: Arc<CudaKernelProvider>,
+    edb: Option<EdbSource<'_>>,
+    mut timing: Vec<(&'static str, f64)>,
+) -> PyResult<CompiledIlpProgram> {
+    let t = Instant::now();
+    let ast = xlog_logic::parse_program(source).map_err(types::val_err)?;
+
+    let base_source = strip_learnable_declarations(source);
+    let learnable_source = extract_learnable_declarations(source);
+
+    let mut compiler = xlog_logic::Compiler::new();
+    if let Some(max) = max_active_rules {
+        compiler.set_max_active_rules(max);
+    }
+    let plan = compiler.compile_program(&ast).map_err(types::xlog_err)?;
+
+    let mut rel_index: Vec<(RelId, String)> = compiler
+        .rel_ids()
+        .iter()
+        .map(|(name, id)| (*id, name.clone()))
+        .collect();
+    rel_index.sort_by_key(|(id, _)| id.0);
+    let schemas = compiler.schemas().clone();
+    timing.push(("frontend", ms_since(t)));
+
+    let t = Instant::now();
+    let mut executor = Executor::new(provider.clone());
+
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+
+    for (name, schema) in &schemas {
+        let empty = provider
+            .create_empty_buffer(schema.clone())
+            .map_err(types::xlog_err)?;
+        executor.store_mut().put(name, empty);
+    }
+
+    // Seed reusable fact predicates from the base snapshot (device-to-device).
+    let mut reused: HashSet<String> = HashSet::new();
+    if let Some(edb) = &edb {
+        let mine = fact_rows_by_pred(&ast);
+        let theirs = fact_rows_by_pred(edb.ast);
+        for (pred, rows) in &mine {
+            let same_rows = theirs.get(pred).is_some_and(|r| r == rows);
+            let same_schema = schemas
+                .get(*pred)
+                .is_some_and(|s| edb.schemas.get(*pred) == Some(s));
+            if let (true, true, Some(buf)) = (same_rows, same_schema, edb.snapshot.get(*pred)) {
+                let clone = provider.clone_buffer(buf).map_err(types::xlog_err)?;
+                executor.store_mut().put(pred, clone);
+                reused.insert((*pred).to_string());
+            }
+        }
+    }
+    load_facts_into_store_except(&ast, &provider, &mut executor, &schemas, &reused)
+        .map_err(types::xlog_err)?;
+    timing.push(("facts", ms_since(t)));
+
+    // Snapshot the loaded (pre-execution) fact buffers so this program can in
+    // turn serve as a variant base. Taken before execute_plan on purpose: the
+    // store buffer at this point is exactly `union(empty, facts)`.
+    let t = Instant::now();
+    let mut edb_snapshot: HashMap<String, CudaBuffer> = HashMap::new();
+    for pred in fact_rows_by_pred(&ast).keys() {
+        if let Some(buf) = executor.store().get(pred) {
+            edb_snapshot.insert(
+                (*pred).to_string(),
+                provider.clone_buffer(buf).map_err(types::xlog_err)?,
+            );
+        }
+    }
+    timing.push(("edb_snapshot", ms_since(t)));
+
+    let t = Instant::now();
+    executor.execute_plan(&plan).map_err(types::xlog_err)?;
+    timing.push(("execute", ms_since(t)));
+
+    let tmj = extract_tmj_meta(&plan);
+
+    let active_rules = max_active_rules.unwrap_or(32);
+
+    Ok(CompiledIlpProgram {
+        base_source,
+        _learnable_source: learnable_source,
+        ast,
+        executor,
+        provider,
+        plan,
+        rel_index,
+        schemas,
+        left_keys: tmj.left_keys,
+        right_keys: tmj.right_keys,
+        head_projection: tmj.head_projection,
+        compiled_schema_size: tmj.schema_size,
+        head_rel_name: tmj.head_rel_name,
+        max_active_rules: active_rules,
+        max_active_rules_arg: max_active_rules,
+        candidate_map: None,
+        candidate_order: None,
+        relation_overrides: HashMap::new(),
+        coo_chunk_budget: 16 * 1024 * 1024,
+        strict_zero_dtoh: false,
+        edb_snapshot,
+        compile_timing: timing,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +652,41 @@ impl IlpProgramFactory {
 
 #[pymethods]
 impl CompiledIlpProgram {
+    /// Compile `source` as a variant of this program, reusing this program's
+    /// CUDA provider and — for every fact predicate whose rows and schema are
+    /// unchanged — its already-uploaded fact buffers (device-to-device clone).
+    ///
+    /// The result is a fully independent `CompiledIlpProgram` in the same
+    /// state as `IlpProgramFactory.compile(source, ...)` would produce
+    /// (frontend re-run, plan executed once); only the fixed per-compile
+    /// costs are skipped. Intended for ILP loops that compile many one-rule
+    /// variants of one program (hold-out folds, candidate scans).
+    pub fn compile_variant(&self, py: Python<'_>, source: &str) -> PyResult<CompiledIlpProgram> {
+        py.detach(|| {
+            build_ilp_program(
+                source,
+                self.max_active_rules_arg,
+                Arc::clone(&self.provider),
+                Some(EdbSource {
+                    ast: &self.ast,
+                    schemas: &self.schemas,
+                    snapshot: &self.edb_snapshot,
+                }),
+                Vec::new(),
+            )
+        })
+    }
+
+    /// Wall-clock breakdown of the compile that produced this program, in
+    /// milliseconds per phase (`provider`, `frontend`, `facts`,
+    /// `edb_snapshot`, `execute`). A variant has no `provider` entry.
+    pub fn compile_timing_ms(&self) -> StdHashMap<String, f64> {
+        self.compile_timing
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), *v))
+            .collect()
+    }
+
     /// Upload candidate (i,j,k) -> index mapping. Called once per attempt.
     pub fn set_candidate_map(&mut self, candidates: Vec<(u32, u32, u32)>) -> PyResult<()> {
         let mut map = HashMap::with_capacity(candidates.len());

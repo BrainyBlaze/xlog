@@ -389,9 +389,9 @@ def _scan_ambiguity(
 
         trial_source = _commit_rule(source, mask_name, rule_str)
         try:
-            trial = pyxlog.IlpProgramFactory.compile(
-                trial_source, device=config.device, memory_mb=config.memory_mb,
-            )
+            # Variant of `prog`: same facts, one committed rule — reuses the
+            # provider and uploaded facts instead of a full fresh compile.
+            trial = prog.compile_variant(trial_source)
             trial.evaluate()
 
             all_pos = all(trial.fact_exists(r, v) for r, v in positives)
