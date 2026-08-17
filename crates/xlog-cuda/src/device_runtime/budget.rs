@@ -25,7 +25,8 @@
 //!
 //!   1. Lock state.
 //!   2. If `reserved + bytes > limit`: return
-//!      `ResourceError::OutOfBudget { requested, remaining }`.
+//!      `ResourceError::OutOfBudget` with exact current, requested,
+//!      remaining, and configured-limit bytes.
 //!   3. Optimistically reserve: `reserved += bytes`.
 //!   4. Call `inner.allocate(bytes, ..)` under the lock. The inner's
 //!      own bookkeeping moves `bytes` from "free" to "live".
@@ -156,7 +157,9 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
             if bytes > self.limit {
                 return Err(ResourceError::OutOfBudget {
                     requested: bytes,
+                    current: state.reserved,
                     remaining,
+                    limit: self.limit,
                 });
             }
         }
@@ -184,7 +187,9 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
         if bytes > remaining {
             return Err(ResourceError::OutOfBudget {
                 requested: bytes,
+                current: state.reserved,
                 remaining,
+                limit: self.limit,
             });
         }
         state.reserved = state.reserved.saturating_add(bytes);
@@ -283,7 +288,16 @@ mod tests {
     use crate::CudaDevice;
 
     fn try_device() -> Option<Arc<CudaDevice>> {
-        CudaDevice::new(0).ok().map(Arc::new)
+        match CudaDevice::new(0) {
+            Ok(device) => Some(Arc::new(device)),
+            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+            }
+            Err(error) => {
+                eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+                None
+            }
+        }
     }
 
     /// Test fixture that always fails `allocate` so we can exercise
@@ -365,7 +379,9 @@ mod tests {
                 err,
                 Err(ResourceError::OutOfBudget {
                     requested: 1,
-                    remaining: 0
+                    current: 4096,
+                    remaining: 0,
+                    limit: 4096,
                 })
             ),
             "expected OutOfBudget {{1,0}}, got {:?}",
@@ -398,13 +414,38 @@ mod tests {
                 err,
                 Err(ResourceError::OutOfBudget {
                     requested: 512,
-                    remaining: 256
+                    current: 768,
+                    remaining: 256,
+                    limit: 1024,
                 })
             ),
             "expected OutOfBudget {{512,256}}, got {:?}",
             err
         );
 
+        budget.deallocate(block).expect("dealloc");
+    }
+
+    #[test]
+    fn memory_pressure_runtime_budget_reports_exact_limit() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let inner = Box::new(DirectCudaResource::new(Arc::clone(&device), 0));
+        let budget = GlobalDeviceBudget::new(inner, 1024);
+        let block = budget
+            .allocate(768, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .expect("baseline allocation");
+
+        let error = budget
+            .allocate(512, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .expect_err("cumulative allocation must exceed the runtime budget");
+
+        assert_eq!(
+            format!("{error:?}"),
+            "OutOfBudget { requested: 512, current: 768, remaining: 256, limit: 1024 }"
+        );
+        assert_eq!(budget.reserved_bytes(), 768);
         budget.deallocate(block).expect("dealloc");
     }
 

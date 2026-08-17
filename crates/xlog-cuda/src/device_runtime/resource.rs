@@ -170,9 +170,14 @@ pub struct DeviceBlock {
 #[derive(Debug)]
 pub enum ResourceError {
     /// The requested allocation would exceed the resource's budget.
-    /// Carries the requested bytes and the remaining budget so tests
-    /// can assert deterministic refusal.
-    OutOfBudget { requested: usize, remaining: usize },
+    /// Carries the exact accounting state captured at the rejecting
+    /// decision point so callers can report cumulative pressure.
+    OutOfBudget {
+        requested: usize,
+        current: usize,
+        remaining: usize,
+        limit: usize,
+    },
     /// CUDA driver returned an error. Carries the wrapped message.
     Driver(String),
     /// A stream-ordered contract was violated (e.g. dealloc on a
@@ -192,11 +197,17 @@ impl fmt::Display for ResourceError {
         match self {
             Self::OutOfBudget {
                 requested,
+                current,
                 remaining,
+                limit,
             } => write!(
                 f,
-                "out of budget: requested {} bytes, remaining {} bytes",
-                requested, remaining
+                "out of budget: current {} bytes, requested {} bytes, required {} bytes, limit {} bytes, remaining {} bytes",
+                current,
+                requested,
+                *current as u128 + *requested as u128,
+                limit,
+                remaining,
             ),
             Self::Driver(msg) => write!(f, "CUDA driver error: {}", msg),
             Self::StreamMisuse(msg) => write!(f, "stream-ordered contract violated: {}", msg),

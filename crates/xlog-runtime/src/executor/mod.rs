@@ -515,9 +515,12 @@ impl Executor {
 
     /// Get execution statistics
     ///
-    /// Returns collected statistics if profiling was enabled.
+    /// Returns collected statistics if profiling was enabled. Peak memory is
+    /// the provider memory manager's reservation high-water mark, so it spans
+    /// the provider lifetime rather than a single execution.
     pub fn execution_stats(&self, total_output_rows: u64) -> ExecutionStats {
         let mut stats = self.profiler.execution_stats(total_output_rows);
+        stats.peak_memory_bytes = self.provider.memory().peak_bytes();
         // WCOJ/multiway dispatch counters live on the executor, not the
         // profiler. Surface them so a `--stats` run can be *verified* to have
         // used the WCOJ kernels rather than silently falling back to binary
@@ -1952,6 +1955,137 @@ mod tests {
         let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
         let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
         Some(Executor::new_with_config(provider, config))
+    }
+
+    fn create_manager_stats_fixture() -> Option<(Arc<GpuMemoryManager>, Arc<CudaKernelProvider>)> {
+        let device = match CudaDevice::new(0) {
+            Ok(device) => Arc::new(device),
+            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+            }
+            Err(error) => {
+                eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+                return None;
+            }
+        };
+        let memory = Arc::new(GpuMemoryManager::new(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024 * 1024),
+        ));
+        let provider = match CudaKernelProvider::new(device, Arc::clone(&memory)) {
+            Ok(provider) => Arc::new(provider),
+            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                panic!("XLOG_REQUIRE_CUDA=1 but provider initialization failed: {error}")
+            }
+            Err(error) => {
+                eprintln!("Skipping test: provider initialization failed: {error}");
+                return None;
+            }
+        };
+        Some((memory, provider))
+    }
+
+    #[test]
+    fn manager_reservation_peak_transient_drop_before_stats() {
+        let Some((memory, provider)) = create_manager_stats_fixture() else {
+            return;
+        };
+        let mut executor = Executor::new(provider);
+        executor.set_profiling(true);
+        let baseline = memory.allocated_bytes();
+        let transient = memory.alloc::<u8>(4096).expect("transient allocation");
+        let expected_peak = baseline + 4096;
+        drop(transient);
+        assert_eq!(memory.allocated_bytes(), baseline);
+
+        assert_eq!(
+            executor.execution_stats(0).peak_memory_bytes,
+            expected_peak,
+            "stats must retain a transient reservation dropped before sampling"
+        );
+    }
+
+    #[test]
+    fn manager_reservation_peak_enabled_no_op_preserves_provider_history() {
+        let Some((memory, provider)) = create_manager_stats_fixture() else {
+            return;
+        };
+        let baseline = memory.allocated_bytes();
+        let transient = memory.alloc::<u8>(2048).expect("historical allocation");
+        let expected_peak = baseline + 2048;
+        drop(transient);
+
+        let mut executor = Executor::new(provider);
+        executor.set_profiling(true);
+        assert_eq!(
+            executor.execution_stats(0).peak_memory_bytes,
+            expected_peak,
+            "an enabled executor with no operations must expose provider history"
+        );
+    }
+
+    #[test]
+    fn manager_reservation_peak_disabled_stats_still_report_manager_peak() {
+        let Some((memory, provider)) = create_manager_stats_fixture() else {
+            return;
+        };
+        let baseline = memory.allocated_bytes();
+        let transient = memory.alloc::<u8>(3072).expect("transient allocation");
+        let expected_peak = baseline + 3072;
+        drop(transient);
+
+        let executor = Executor::new(provider);
+        assert!(!executor.is_profiling());
+        assert_eq!(
+            executor.execution_stats(0).peak_memory_bytes,
+            expected_peak,
+            "manager peak is available independently of profiler sampling"
+        );
+    }
+
+    #[test]
+    fn manager_reservation_peak_shared_manager_has_provider_lifetime_scope() {
+        let Some((memory, provider)) = create_manager_stats_fixture() else {
+            return;
+        };
+        let mut first = Executor::new(Arc::clone(&provider));
+        first.set_profiling(true);
+        let baseline = memory.allocated_bytes();
+        let transient = memory
+            .alloc::<u8>(5120)
+            .expect("shared transient allocation");
+        let expected_peak = baseline + 5120;
+        drop(transient);
+        assert_eq!(first.execution_stats(0).peak_memory_bytes, expected_peak);
+
+        let mut second = Executor::new(provider);
+        second.set_profiling(true);
+        assert_eq!(
+            second.execution_stats(0).peak_memory_bytes,
+            expected_peak,
+            "constructing another executor must not reset the shared manager"
+        );
+    }
+
+    #[test]
+    fn manager_reservation_peak_quiescent_reset_starts_new_window() {
+        let Some((memory, provider)) = create_manager_stats_fixture() else {
+            return;
+        };
+        let old = memory.alloc::<u8>(4096).expect("old-window allocation");
+        drop(old);
+        assert_eq!(memory.allocated_bytes(), 0, "reset requires quiescence");
+        memory.reset_peak();
+        assert_eq!(memory.peak_bytes(), 0);
+
+        let new = memory.alloc::<u8>(1024).expect("new-window allocation");
+        drop(new);
+        let executor = Executor::new(provider);
+        assert_eq!(
+            executor.execution_stats(0).peak_memory_bytes,
+            1024,
+            "stats must reflect the explicit reset window"
+        );
     }
 
     fn device_row_count(executor: &Executor, rows: u64) -> TrackedCudaSlice<u32> {

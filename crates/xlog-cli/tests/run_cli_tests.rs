@@ -1,6 +1,13 @@
+use arrow::array::{ArrayRef, UInt32Array};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::ipc::writer::StreamWriter;
+use arrow::record_batch::RecordBatch;
 use assert_cmd::cargo::cargo_bin_cmd;
 use cudarc::driver::result::mem_get_info;
+use serde_json::Value;
+use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
 use xlog_cuda::CudaDevice;
 
@@ -40,6 +47,105 @@ fn test_xlog_run_basic() {
         "16384",
     ]);
     cmd.assert().success();
+}
+
+#[test]
+fn test_xlog_run_rejects_overflowing_memory_budget() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root");
+    let program = repo_root.join("examples/xlog/00-basics/01_tc_reachability.xlog");
+    let overflowing_mib = u64::MAX / (1024 * 1024) + 1;
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid path"),
+            "--memory-mb",
+            &overflowing_mib.to_string(),
+        ])
+        .output()
+        .expect("run xlog with overflowing memory budget");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("memory budget") && stderr.contains("overflows bytes"),
+        "expected checked MiB conversion diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_xlog_run_stats_preserve_peak_memory_json_contract() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    // Upload enough Arrow input to exceed one MiB of manager-accounted
+    // reservations. JSON reports whole MiB by flooring.
+    const ROWS: u32 = 140_000;
+    let temp = TempDir::new().expect("temp dir");
+    let program = temp.path().join("memory_stats.xlog");
+    std::fs::write(&program, "pred edge(u32, u32).\n?- edge(X, Y).\n")
+        .expect("write memory stats program");
+    let input = temp.path().join("edge.arrow");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("src", DataType::UInt32, false),
+        Field::new("dst", DataType::UInt32, false),
+    ]));
+    let src: ArrayRef = Arc::new(UInt32Array::from_iter_values(0..ROWS));
+    let dst: ArrayRef = Arc::new(UInt32Array::from_iter_values(1..=ROWS));
+    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![src, dst]).expect("record batch");
+    let mut writer = StreamWriter::try_new(File::create(&input).expect("create input"), &schema)
+        .expect("Arrow writer");
+    writer.write(&batch).expect("write Arrow batch");
+    writer.finish().expect("finish Arrow input");
+    drop(writer);
+    let input_arg = format!("edge={}", input.display());
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid path"),
+            "--memory-mb",
+            "128",
+            "--input",
+            &input_arg,
+            "--stats",
+            "--stats-format",
+            "json",
+        ])
+        .output()
+        .expect("run xlog with JSON stats");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stats_line = stderr
+        .lines()
+        .find(|line| line.starts_with('{') && line.contains("\"peak_memory_mb\""))
+        .unwrap_or_else(|| panic!("missing JSON stats object in stderr: {stderr}"));
+    let stats: Value = serde_json::from_str(stats_line).expect("valid JSON stats");
+    let peak = stats
+        .get("peak_memory_mb")
+        .expect("stable peak_memory_mb key");
+    assert!(
+        peak.is_u64(),
+        "peak_memory_mb must remain an integer: {peak}"
+    );
+    assert!(
+        peak.as_u64().expect("u64 peak") > 0,
+        "an executed GPU plan must report a nonzero manager reservation peak"
+    );
 }
 
 #[test]

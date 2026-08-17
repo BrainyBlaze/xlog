@@ -4296,9 +4296,9 @@ mod tests {
         let exhausted = relation_clone_error(
             "cloning relation 'fact'".to_string(),
             XlogError::ResourceExhausted {
-                context: "GPU memory allocation".to_string(),
+                context: "GPU memory pressure: layer=manager_alloc current_bytes=60 requested_bytes=4 required_bytes=64 required_u64_overflow=false budget_bytes=63 prior_peak_bytes=60".to_string(),
                 estimated_bytes: 64,
-                budget_bytes: 32,
+                budget_bytes: 63,
             },
         );
         match exhausted {
@@ -4307,9 +4307,12 @@ mod tests {
                 estimated_bytes,
                 budget_bytes,
             } => {
-                assert_eq!(context, "cloning relation 'fact': GPU memory allocation");
+                assert_eq!(
+                    context,
+                    "cloning relation 'fact': GPU memory pressure: layer=manager_alloc current_bytes=60 requested_bytes=4 required_bytes=64 required_u64_overflow=false budget_bytes=63 prior_peak_bytes=60"
+                );
                 assert_eq!(estimated_bytes, 64);
-                assert_eq!(budget_bytes, 32);
+                assert_eq!(budget_bytes, 63);
             }
             error => panic!("expected resource exhaustion, got {error}"),
         }
@@ -5969,6 +5972,18 @@ mod relation_delta_preparation_tests {
         let pressure_len = usize::try_from(pressure_bytes)
             .expect("calibrated pressure allocation must fit in usize");
         let pressure_guard = tight_provider.memory().alloc::<u8>(pressure_len)?;
+        let clone_start_bytes = tight_provider.memory().allocated_bytes();
+        let expected_current_bytes = clone_start_bytes
+            .checked_add(stable_clone_bytes)
+            .expect("current bytes before the refused staged clone must fit in u64");
+        let expected_required_bytes = expected_current_bytes
+            .checked_add(staged_column_bytes)
+            .expect("cumulative required bytes must fit in u64");
+        assert_eq!(
+            expected_required_bytes,
+            tight_budget + 1,
+            "the calibrated request must exceed the configured budget by exactly one byte"
+        );
 
         let error = match prepared_commit.clone_prospective_base_store() {
             Ok(_) => panic!("one-byte-tight prospective base cloning must fail"),
@@ -5983,11 +5998,18 @@ mod relation_delta_preparation_tests {
             panic!("expected GPU resource exhaustion, got {error}");
         };
         assert_eq!(*budget_bytes, tight_budget);
-        assert_eq!(*estimated_bytes, staged_column_bytes);
+        assert_eq!(*estimated_bytes, expected_required_bytes);
         assert_eq!(
             context,
-            "cloning staged prospective base relation 'alpha_input': GPU memory allocation",
+            &format!(
+                "cloning staged prospective base relation 'alpha_input': GPU memory pressure: layer=manager_alloc current_bytes={expected_current_bytes} requested_bytes={staged_column_bytes} required_bytes={expected_required_bytes} required_u64_overflow=false budget_bytes={tight_budget} prior_peak_bytes={expected_current_bytes}"
+            ),
             "the authoritative base clone must complete before the staged overlay exhausts memory"
+        );
+        assert_eq!(
+            tight_provider.memory().peak_bytes(),
+            expected_current_bytes,
+            "the refused request must not enter the admitted allocation high-water mark"
         );
         drop(prepared_commit);
 
@@ -6132,6 +6154,19 @@ mod relation_delta_preparation_tests {
         )?;
 
         tight_provider.memory().reset_alloc_count();
+        let final_row_count_clone_bytes =
+            u64::try_from(std::mem::size_of::<u32>()).expect("device row-count width fits in u64");
+        let expected_current_bytes = tight_budget
+            .checked_sub(final_row_count_clone_bytes - 1)
+            .expect("one-byte-tight budget must cover earlier snapshot clones");
+        let expected_required_bytes = expected_current_bytes
+            .checked_add(final_row_count_clone_bytes)
+            .expect("cumulative required bytes must fit in u64");
+        assert_eq!(
+            expected_required_bytes,
+            tight_budget + 1,
+            "the calibrated final clone must exceed the configured budget by exactly one byte"
+        );
         let error = match program.prepare_relation_delta_commit_with_session_runtime(
             tight_provider.clone(),
             &mut base_store,
@@ -6144,16 +6179,24 @@ mod relation_delta_preparation_tests {
         };
         let XlogError::ResourceExhausted {
             context,
+            estimated_bytes,
             budget_bytes,
-            ..
         } = &error
         else {
             panic!("expected GPU resource exhaustion, got {error}");
         };
         assert_eq!(*budget_bytes, tight_budget);
+        assert_eq!(*estimated_bytes, expected_required_bytes);
         assert_eq!(
             context,
-            "cloning prospective relation snapshot 'stable_input': GPU memory allocation"
+            &format!(
+                "cloning prospective relation snapshot 'stable_input': GPU memory pressure: layer=manager_alloc current_bytes={expected_current_bytes} requested_bytes={final_row_count_clone_bytes} required_bytes={expected_required_bytes} required_u64_overflow=false budget_bytes={tight_budget} prior_peak_bytes={expected_current_bytes}"
+            )
+        );
+        assert_eq!(
+            tight_provider.memory().peak_bytes(),
+            expected_current_bytes,
+            "the refused final clone must leave the high-water mark at the last admitted allocation"
         );
         let failed_preparation_allocations = tight_provider.memory().alloc_count();
         assert!(

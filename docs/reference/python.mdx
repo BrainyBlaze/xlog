@@ -656,7 +656,12 @@ program.neural_hot_loop_diagnostics()
 ```
 
 `memory_stats()` reports `allocated_bytes`, `memory_limit_bytes`,
-`peak_memory_bytes`, and `status`. CUDA Graph stats report
+`peak_memory_bytes`, and `status`. `peak_memory_bytes` is the high-water mark of
+successful reservations recorded by the shared provider's memory manager. It
+spans the provider lifetime (or the window after an explicit quiescent reset),
+so it is not reset between evaluations or executors that reuse that provider.
+It is not physical/NVML usage, and direct CUDA allocations that bypass the
+manager are not included. CUDA Graph stats report
 `csm_cuda_graph_captures`, `csm_cuda_graph_launches`,
 `csm_cuda_graph_fallbacks`, and `csm_cuda_graph_cache_hits`. If an environment
 cannot supply a given diagnostic, it reports an explicit unavailable status or
