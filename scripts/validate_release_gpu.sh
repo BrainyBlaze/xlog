@@ -109,6 +109,12 @@ run_cmd bash scripts/preflight_release_publish.sh
 run_cmd cargo build --workspace --locked --release --exclude pyxlog
 run_cmd cargo build --locked --release -p xlog-cli --features host-io
 run_cmd cargo test --locked --release \
+  -p xlog-cuda \
+  --lib \
+  -- \
+  --nocapture \
+  --test-threads=1
+run_cmd cargo test --locked --release \
   -p xlog-cli \
   --features host-io \
   --test prob_cli_tests \

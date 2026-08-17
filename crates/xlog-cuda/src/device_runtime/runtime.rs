@@ -364,7 +364,22 @@ mod tests {
     use super::*;
 
     fn try_runtime() -> Option<&'static XlogDeviceRuntime> {
-        XlogDeviceRuntime::try_get(0).ok()
+        match XlogDeviceRuntime::try_get(0) {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+                    panic!(
+                        "XLOG_REQUIRE_CUDA=1 but CUDA is unavailable \
+                         (XlogDeviceRuntime::try_get): {error}"
+                    );
+                }
+                eprintln!(
+                    "Skipping device-runtime test: CUDA unavailable \
+                     (XlogDeviceRuntime::try_get): {error}"
+                );
+                None
+            }
+        }
     }
 
     #[test]
