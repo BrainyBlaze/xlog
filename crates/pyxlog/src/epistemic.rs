@@ -14,7 +14,7 @@ use pyo3::types::PyDict;
 #[cfg(feature = "host-io")]
 use xlog_core::{ScalarType, Schema};
 #[cfg(feature = "host-io")]
-use xlog_cuda::CudaKernelProvider;
+use xlog_cuda::{CudaKernelProvider, DlpackManagedTensor};
 #[cfg(feature = "host-io")]
 use xlog_prob::epistemic_production::{
     EpistemicProbProductionAdapter, EpistemicProbProductionTrace,
@@ -79,34 +79,40 @@ impl CompiledLogicProgram {
         memory_mb: Option<u64>,
     ) -> PyResult<EpistemicEvalResult> {
         enforce_call_memory_limit(&self.provider, memory_mb)?;
+        let program = self.program.clone();
+        let provider = self.provider.clone();
+        let inputs = HashMap::new();
+        let prob_source = prob_source.to_owned();
 
-        let evidence = self
-            .program
-            .execute_epistemic_evidence(self.provider.clone(), HashMap::new())
+        let prepared = py
+            .detach(move || {
+                let evidence = program.execute_epistemic_evidence(provider.clone(), inputs)?;
+
+                // IMPORTANT: not `GpuConfig::default()`. The adapter does not reuse our
+                // provider — `ExactDdnnfProgram::compile_provenance_with_gpu` builds its
+                // OWN device from `config.device_ordinal` and `config.memory_bytes`.
+                //
+                // `GpuConfig` is `#[non_exhaustive]`, so it cannot be built with a struct
+                // literal naming every field from outside `xlog-prob`; start from
+                // `Default::default()` and overwrite the two fields we need to match.
+                let mut config = GpuConfig::default();
+                config.device_ordinal = provider.device().ordinal();
+                config.memory_bytes = provider.memory().budget().device_bytes;
+                let mut adapter = EpistemicProbProductionAdapter::new(config);
+                let exact = adapter
+                    .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+                        &prob_source,
+                        &provider,
+                        &evidence,
+                        Vec::new(),
+                    )?;
+                let trace = adapter.trace();
+
+                prepare_epistemic_eval_result(&provider, exact, trace)
+            })
             .map_err(types::xlog_err)?;
 
-        // IMPORTANT: not `GpuConfig::default()`. The adapter does not reuse our provider —
-        // `ExactDdnnfProgram::compile_provenance_with_gpu` (crates/xlog-prob/src/exact.rs:1606)
-        // builds its OWN device from `config.device_ordinal` and `config.memory_bytes`.
-        //
-        // `GpuConfig` is `#[non_exhaustive]`, so it cannot be built with a struct
-        // literal naming every field from outside `xlog-prob`; start from
-        // `Default::default()` and overwrite the two fields we need to match.
-        let mut config = GpuConfig::default();
-        config.device_ordinal = self.provider.device().ordinal();
-        config.memory_bytes = self.provider.memory().budget().device_bytes;
-        let mut adapter = EpistemicProbProductionAdapter::new(config);
-        let exact = adapter
-            .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
-                prob_source,
-                &self.provider,
-                &evidence,
-                Vec::new(),
-            )
-            .map_err(types::xlog_err)?;
-        let trace = adapter.trace();
-
-        pack_epistemic_eval_result(py, &self.provider, exact, &trace)
+        pack_epistemic_eval_result(py, prepared)
     }
 
     #[cfg(not(feature = "host-io"))]
@@ -136,10 +142,12 @@ impl CompiledLogicProgram {
     /// zero, not "every counter". Calling `evaluate_conditioned()` on that same program
     /// RAISES rather than returning an unconditioned result, so this method is the
     /// non-raising way to probe for the case first.
-    pub fn epistemic_evidence(&self) -> PyResult<EpistemicEvidence> {
-        let result = self
-            .program
-            .execute_epistemic_evidence(self.provider.clone(), HashMap::new())
+    pub fn epistemic_evidence(&self, py: Python<'_>) -> PyResult<EpistemicEvidence> {
+        let program = self.program.clone();
+        let provider = self.provider.clone();
+        let inputs = HashMap::new();
+        let result = py
+            .detach(move || program.execute_epistemic_evidence(provider, inputs))
             .map_err(types::xlog_err)?;
         let epistemic_mode = match result.prepared.preflight.epistemic_mode {
             xlog_ir::EirEpistemicMode::G91 => "g91",
@@ -159,12 +167,20 @@ impl CompiledLogicProgram {
 }
 
 #[cfg(feature = "host-io")]
-fn pack_epistemic_eval_result(
-    py: Python<'_>,
+struct PreparedEpistemicEvalResult {
+    atoms: Vec<String>,
+    prob_tensor: DlpackManagedTensor,
+    log_prob_tensor: DlpackManagedTensor,
+    log_z_e: f64,
+    trace: EpistemicProbProductionTrace,
+}
+
+#[cfg(feature = "host-io")]
+fn prepare_epistemic_eval_result(
     provider: &Arc<CudaKernelProvider>,
     result: ExactResult,
-    trace: &EpistemicProbProductionTrace,
-) -> PyResult<EpistemicEvalResult> {
+    trace: EpistemicProbProductionTrace,
+) -> xlog_core::Result<PreparedEpistemicEvalResult> {
     let mut atoms: Vec<String> = Vec::with_capacity(result.query_probs.len());
     let mut probs: Vec<f64> = Vec::with_capacity(result.query_probs.len());
     let mut log_probs: Vec<f64> = Vec::with_capacity(result.query_probs.len());
@@ -176,20 +192,32 @@ fn pack_epistemic_eval_result(
     }
 
     let schema = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
-    let prob_buf = provider
-        .create_buffer_from_slice::<f64>(&probs, schema.clone())
-        .map_err(types::xlog_err)?;
-    let log_prob_buf = provider
-        .create_buffer_from_slice::<f64>(&log_probs, schema)
-        .map_err(types::xlog_err)?;
-    let prob_tensor = provider
-        .to_dlpack_table(prob_buf)
-        .column(0)
-        .map_err(types::xlog_err)?;
-    let log_prob_tensor = provider
-        .to_dlpack_table(log_prob_buf)
-        .column(0)
-        .map_err(types::xlog_err)?;
+    let prob_buf = provider.create_buffer_from_slice::<f64>(&probs, schema.clone())?;
+    let log_prob_buf = provider.create_buffer_from_slice::<f64>(&log_probs, schema)?;
+    let prob_tensor = provider.to_dlpack_table(prob_buf).column(0)?;
+    let log_prob_tensor = provider.to_dlpack_table(log_prob_buf).column(0)?;
+
+    Ok(PreparedEpistemicEvalResult {
+        atoms,
+        prob_tensor,
+        log_prob_tensor,
+        log_z_e: result.log_z_e,
+        trace,
+    })
+}
+
+#[cfg(feature = "host-io")]
+fn pack_epistemic_eval_result(
+    py: Python<'_>,
+    prepared: PreparedEpistemicEvalResult,
+) -> PyResult<EpistemicEvalResult> {
+    let PreparedEpistemicEvalResult {
+        atoms,
+        prob_tensor,
+        log_prob_tensor,
+        log_z_e,
+        trace,
+    } = prepared;
 
     let dict = PyDict::new(py);
     dict.set_item(
@@ -261,7 +289,7 @@ fn pack_epistemic_eval_result(
         atoms,
         prob: dlpack_capsule_from_tensor(py, prob_tensor)?,
         log_prob: dlpack_capsule_from_tensor(py, log_prob_tensor)?,
-        log_z_e: result.log_z_e,
+        log_z_e,
         trace: dict.into(),
     })
 }
