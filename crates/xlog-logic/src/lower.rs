@@ -885,6 +885,12 @@ impl Lowerer {
         for pred_decl in &program.predicates {
             self.get_or_create_rel_id(&pred_decl.name);
         }
+        // Facts are grouped and materialized directly into the relation store.
+        // They still need stable relation IDs even when no declaration or rule
+        // mentions their predicates.
+        for fact in program.facts() {
+            self.get_or_create_rel_id(&fact.head.predicate);
+        }
 
         Ok(())
     }
@@ -961,25 +967,6 @@ impl Lowerer {
                 .entry(rule.head.predicate.clone())
                 .or_default()
                 .push(rule);
-        }
-
-        // Add facts as scan-only rules
-        for fact in program.facts() {
-            let pred = &fact.head.predicate;
-            let scc_id = self.find_scc_for_predicate(pred);
-            let rel_id = self.get_or_create_rel_id(pred);
-
-            let body = RirNode::Scan { rel: rel_id };
-            let meta = self.create_meta_for_predicate(pred);
-
-            builder.add_rule(
-                scc_id,
-                CompiledRule {
-                    head: pred.clone(),
-                    body,
-                    meta,
-                },
-            );
         }
 
         // Lower proper rules
@@ -3748,6 +3735,40 @@ mod tests {
 
         let plan = result.unwrap();
         assert!(!plan.sccs.is_empty());
+    }
+
+    #[test]
+    fn facts_are_metadata_and_not_executable_rules() {
+        let mut program = Program::new();
+        for value in [1, 2, 2] {
+            program.rules.push(Rule {
+                head: Atom {
+                    predicate: "base".to_string(),
+                    terms: vec![Term::Integer(value)],
+                },
+                body: vec![],
+            });
+        }
+
+        let mut lowerer = Lowerer::new();
+        lowerer.set_strata(vec![vec!["base".to_string()]]);
+
+        let plan = lowerer.lower_program(&program).unwrap();
+
+        assert_eq!(
+            plan.rules_by_scc.iter().map(Vec::len).sum::<usize>(),
+            0,
+            "facts are materialized by the relation loader, not executed as rules"
+        );
+        assert_eq!(lowerer.schemas.get("base").unwrap().arity(), 1);
+        assert_eq!(lowerer.est_cardinality.get("base"), Some(&3));
+        assert!(lowerer
+            .sccs
+            .iter()
+            .any(|scc| scc.predicates.iter().any(|predicate| predicate == "base")));
+
+        let base_id = lowerer.rel_ids().get("base").copied().unwrap();
+        assert_eq!(plan.rel_arities.get(&base_id), Some(&1));
     }
 
     #[test]

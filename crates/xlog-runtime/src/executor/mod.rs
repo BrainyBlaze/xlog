@@ -1862,12 +1862,22 @@ impl Executor {
         }
 
         let d_num_rows = self.clone_device_row_count(buffer)?;
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            buffer.num_rows(),
-            d_num_rows,
-            buffer.schema().clone(),
-        ))
+        let cloned = match buffer.cached_row_count() {
+            Some(row_count) => CudaBuffer::from_columns_with_host_count(
+                result_columns,
+                buffer.num_rows(),
+                d_num_rows,
+                buffer.schema().clone(),
+                row_count,
+            ),
+            None => CudaBuffer::from_columns(
+                result_columns,
+                buffer.num_rows(),
+                d_num_rows,
+                buffer.schema().clone(),
+            ),
+        };
+        Ok(cloned)
     }
 
     fn clone_device_row_count(&self, buffer: &CudaBuffer) -> Result<TrackedCudaSlice<u32>> {
@@ -2119,6 +2129,55 @@ mod tests {
         let rows = data.len() as u64;
         let d_num_rows = device_row_count(executor, rows);
         CudaBuffer::from_columns(vec![col.into()], rows, d_num_rows, schema)
+    }
+
+    #[test]
+    fn clone_buffer_preserves_cached_logical_rows_without_host_transfer() {
+        let Some((_memory, provider)) = create_manager_stats_fixture() else {
+            return;
+        };
+        let executor = Executor::new(provider);
+        let schema = Schema::new(vec![("value".to_string(), ScalarType::U32)]);
+        let values = [10u32, 20, 99];
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let mut column = executor
+            .provider
+            .memory()
+            .alloc::<u8>(bytes.len())
+            .expect("column allocation");
+        executor
+            .provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&bytes, &mut column)
+            .expect("column upload");
+        let source = CudaBuffer::from_columns_with_host_count(
+            vec![column.into()],
+            values.len() as u64,
+            device_row_count(&executor, 2),
+            schema,
+            2,
+        );
+
+        executor.provider.reset_host_transfer_stats();
+        let cloned = executor.clone_buffer(&source).expect("device clone");
+        let clone_transfers = executor.provider.host_transfer_stats();
+
+        assert_eq!(cloned.cached_row_count(), Some(2));
+        assert_eq!(clone_transfers.dtoh_calls, 0);
+        assert_eq!(read_buffer_u32(&executor, &cloned, 0), vec![10, 20]);
+
+        let uncached = create_test_buffer(&executor, &[30, 40], "value");
+        assert_eq!(uncached.cached_row_count(), None);
+        executor.provider.reset_host_transfer_stats();
+        let uncached_clone = executor
+            .clone_buffer(&uncached)
+            .expect("uncached device clone");
+        assert_eq!(uncached_clone.cached_row_count(), None);
+        assert_eq!(executor.provider.host_transfer_stats().dtoh_calls, 0);
     }
 
     fn read_buffer_u32(executor: &Executor, buffer: &CudaBuffer, col: usize) -> Vec<u32> {

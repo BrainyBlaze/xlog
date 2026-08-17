@@ -112,14 +112,13 @@ out(X) :- in7(X).
     let stats = result.stats.expect("stats");
     let totals = op_totals(&stats);
     let union_ops = totals.get("union").copied().unwrap_or_default().0;
-    // Every declared relation is pre-seeded with an empty buffer, which the
-    // install path treats as row-free: each single-rule SCC (8 fact
-    // predicates + 1 query rule) records one single-input union on its lone
-    // fresh result, and the eight-rule `out` head records exactly one
-    // multiway union. Before batching, `out` alone recorded eight unions.
+    // Facts are loaded directly into the relation store and never execute as
+    // single-rule SCCs. The query records one single-input union and the
+    // eight-rule `out` head records exactly one multiway union. Before
+    // batching, `out` alone recorded eight unions.
     assert_eq!(
         union_ops,
-        8 + 1 + 1,
+        1 + 1,
         "eight same-head rules must merge in one multiway union; totals={totals:?}"
     );
 }
@@ -213,16 +212,17 @@ path(X, Z) :- path(X, Y), e2(Y, Z).
     let union_ops = summary.get("union").copied().unwrap_or_default().0;
     let num_rules = recursive_stratum.num_rules;
     let iterations = recursive_stratum.iterations;
-    // The stratum holds 26 rules: 12 facts, 13 `path` rules, 1 query rule.
-    // Each single-rule SCC (12 facts + 1 query) records one single-input
-    // union on its lone fresh result; the recursive `path` SCC seeds all 13
-    // rule contributions in one multiway union and then merges one
-    // non-empty delta per productive iteration (the final iteration
-    // converges without a merge). Before batching, the seeding pass alone
-    // recorded one union per `path` rule.
+    // The stratum holds 14 executable rules: 13 `path` rules and 1 query
+    // rule. Facts are already resident and do not execute. The query records
+    // one single-input union; the recursive `path` SCC seeds all 13 rule
+    // contributions in one multiway union and then merges one non-empty delta
+    // per productive iteration (the final iteration converges without a
+    // merge). Before batching, the seeding pass alone recorded one union per
+    // `path` rule.
+    assert_eq!(num_rules, 14, "facts must not enter executable rule stats");
     assert_eq!(
         union_ops,
-        12 + 1 + 1 + (iterations - 1),
+        1 + 1 + (iterations - 1),
         "recursive stratum must union once per pass, not once per rule: \
          union_ops={union_ops} rules={num_rules} iterations={iterations} summary={summary:?}"
     );
@@ -230,5 +230,47 @@ path(X, Z) :- path(X, Y), e2(Y, Z).
         union_ops < num_rules,
         "union count must not scale with same-head rule count: \
          union_ops={union_ops} rules={num_rules}"
+    );
+}
+
+#[test]
+fn direct_fact_on_recursive_head_seeds_fixpoint_without_fact_rule() {
+    let _lock = test_lock();
+    let Some(provider) = provider() else {
+        eprintln!("CUDA unavailable; skipping");
+        return;
+    };
+
+    let source = r#"
+edge(2, 3).
+reach(1, 2).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+?- reach(X, Y).
+"#;
+    let program = LogicProgram::compile(source).expect("compile");
+    let result = program
+        .evaluate_with_options(Arc::clone(&provider), HashMap::new(), true)
+        .expect("evaluate");
+
+    let xs = provider
+        .download_column::<u32>(&result.queries[0].buffer, 0)
+        .expect("query xs");
+    let ys = provider
+        .download_column::<u32>(&result.queries[0].buffer, 1)
+        .expect("query ys");
+    let mut rows: Vec<(u32, u32)> = xs.into_iter().zip(ys).collect();
+    rows.sort_unstable();
+    assert_eq!(rows, vec![(1, 2), (1, 3)]);
+
+    let executable_rules = result
+        .stats
+        .expect("stats")
+        .strata
+        .iter()
+        .map(|stratum| stratum.num_rules)
+        .sum::<usize>();
+    assert_eq!(
+        executable_rules, 2,
+        "only the recursive production and query may execute; direct facts must seed the relation store"
     );
 }
