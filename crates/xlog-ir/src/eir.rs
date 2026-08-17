@@ -117,6 +117,8 @@ pub struct EirRule {
 /// rather than being silently rewritten into ordinary relational constraints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EirConstraint {
+    /// Stable index of this constraint in the complete authored program.
+    pub authored_index: Option<usize>,
     /// Constraint body whose conjunction must never hold in an accepted world view.
     pub body: Vec<EirBodyLiteral>,
 }

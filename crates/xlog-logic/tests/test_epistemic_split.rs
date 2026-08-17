@@ -3,13 +3,15 @@ use xlog_ir::ExecutionPlan;
 use xlog_ir::{EpistemicExecutionBackend, EpistemicFallbackPolicy};
 use xlog_logic::epistemic::{
     build_epistemic_dependency_graph, classify_recursive_epistemic_program,
-    compile_epistemic_gpu_split_execution, plan_epistemic_gpu_execution, prepare_epistemic_program,
+    compile_epistemic_gpu_execution, compile_epistemic_gpu_split_execution,
+    plan_epistemic_gpu_execution, prepare_epistemic_program,
     reduce_case_a_epistemic_program_to_ordinary, reduce_epistemic_program_to_ordinary,
-    split_epistemic_program, try_prepare_g91_compatibility_reduction,
-    try_reduce_case_a_recursive_epistemic_program, EpistemicComponentMergeReason,
+    split_epistemic_program, try_plan_stratified_epistemic_program,
+    try_prepare_g91_compatibility_reduction, try_reduce_case_a_recursive_epistemic_program,
+    try_reduce_prepared_recursive_epistemic_program, EpistemicComponentMergeReason,
     RecursiveEpistemicClass,
 };
-use xlog_logic::{parse_program, BodyLiteral};
+use xlog_logic::{parse_program, BodyLiteral, Compiler};
 
 #[test]
 fn positive_modal_over_co_evolving_relation_is_accepted_case_b() {
@@ -748,6 +750,417 @@ fn split_component_constraints_stay_with_own_component() {
         1,
         "the b/q component must not inherit the a-only constraint"
     );
+}
+
+#[test]
+fn authored_constraint_identity_split_preserves_sparse_duplicate_bodies() {
+    let mut program = parse_program(
+        r#"
+        a() :- know p().
+        b() :- know q().
+        :- a().
+        :- a().
+        "#,
+    )
+    .unwrap();
+    program.constraints[0].authored_index = Some(1);
+    program.constraints[1].authored_index = Some(3);
+    program
+        .prepare_authored_constraint_identity(4)
+        .expect("validate sparse authored identities");
+
+    let split = compile_epistemic_gpu_split_execution(&program).unwrap();
+    let owned = split
+        .components
+        .iter()
+        .find(|component| {
+            component
+                .component
+                .predicates
+                .iter()
+                .any(|name| name == "a")
+        })
+        .expect("a component");
+    let heads = owned
+        .executable
+        .reduced_runtime_plan
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .map(|rule| rule.head.as_str())
+        .collect::<Vec<_>>();
+    assert!(heads.contains(&"__xlog_constraint_1"), "{heads:?}");
+    assert!(heads.contains(&"__xlog_constraint_3"), "{heads:?}");
+    assert!(!heads.contains(&"__xlog_constraint_0"), "{heads:?}");
+}
+
+#[test]
+fn authored_constraint_identity_strata_preserve_reverse_order() {
+    let mut program = parse_program(
+        r#"
+        pred p(u32). pred node(u32). pred a(u32). pred b(u32).
+        p(1). node(1).
+        a(X) :- node(X), know p(X).
+        b(X) :- node(X), know a(X).
+        :- a(1).
+        :- b(1).
+        "#,
+    )
+    .unwrap();
+    program.constraints[0].authored_index = Some(3);
+    program.constraints[1].authored_index = Some(1);
+    program
+        .prepare_authored_constraint_identity(4)
+        .expect("validate reverse sparse authored identities");
+
+    let plan = try_plan_stratified_epistemic_program(&program)
+        .unwrap()
+        .expect("two epistemic strata");
+    assert!(plan.strata[0].program.constraints.is_empty());
+    assert!(plan.strata[1].program.constraints.is_empty());
+    assert_eq!(
+        plan.ordinary_post_program
+            .constraints
+            .iter()
+            .map(|constraint| constraint.authored_index)
+            .collect::<Vec<_>>(),
+        vec![Some(3), Some(1)]
+    );
+    assert_eq!(
+        plan.ordinary_post_program.authored_constraint_source_bound,
+        Some(4)
+    );
+
+    let lower = compile_epistemic_gpu_execution(&plan.strata[0].program).unwrap();
+    let lower_heads = lower
+        .reduced_runtime_plan
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .map(|rule| rule.head.as_str())
+        .collect::<Vec<_>>();
+    let mut post_compiler = Compiler::new();
+    let post_plan = post_compiler
+        .compile_prepared_program(&plan.ordinary_post_program)
+        .expect("compile one ordinary post-stratification stage");
+    let post_heads = post_plan
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .map(|rule| rule.head.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !lower_heads.contains(&"__xlog_constraint_3"),
+        "{lower_heads:?}"
+    );
+    assert!(
+        post_heads.contains(&"__xlog_constraint_3"),
+        "{post_heads:?}"
+    );
+    assert!(
+        post_heads.contains(&"__xlog_constraint_1"),
+        "{post_heads:?}"
+    );
+}
+
+#[test]
+fn authored_constraint_identity_cross_stratum_ordinary_constraint_is_owned_once() {
+    let mut program = parse_program(
+        r#"
+        pred base(u32). pred src(u32). pred a(u32). pred b(u32).
+        base(1). src(1).
+        a(X) :- src(X), know base(X).
+        b(X) :- src(X), know a(X).
+        :- a(X), b(X).
+        "#,
+    )
+    .unwrap();
+    program.constraints[0].authored_index = Some(3);
+    program
+        .prepare_authored_constraint_identity(4)
+        .expect("validate sparse authored identity");
+
+    let plan = try_plan_stratified_epistemic_program(&program)
+        .unwrap()
+        .expect("two epistemic strata");
+    assert_eq!(plan.strata.len(), 2);
+    assert!(plan.strata[0].program.constraints.is_empty());
+    assert!(plan.strata[1].program.constraints.is_empty());
+    assert_eq!(
+        plan.strata[0].program.authored_constraint_source_bound,
+        Some(4)
+    );
+    assert_eq!(plan.ordinary_post_program.constraints.len(), 1);
+    assert_eq!(
+        plan.ordinary_post_program.constraints[0].authored_index,
+        Some(3)
+    );
+    assert_eq!(
+        plan.ordinary_post_program.authored_constraint_source_bound,
+        Some(4)
+    );
+
+    let mut post_compiler = Compiler::new();
+    let post = post_compiler
+        .compile_prepared_program(&plan.ordinary_post_program)
+        .expect("compile ordinary post-stratification stage");
+    let constraint_rule_count = post
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .filter(|rule| rule.head == "__xlog_constraint_3")
+        .count();
+    assert_eq!(constraint_rule_count, 1);
+}
+
+#[test]
+fn authored_constraint_identity_post_stratification_stage_computes_deferred_ordinary_closure() {
+    let mut program = parse_program(
+        r#"
+        pred base(u32). pred src(u32). pred a(u32). pred b(u32). pred c(u32).
+        base(1). src(1).
+        a(X) :- src(X), know base(X).
+        b(X) :- src(X), know a(X).
+        c(X) :- b(X).
+        :- c(X).
+        ?- c(X).
+        "#,
+    )
+    .unwrap();
+    program.constraints[0].authored_index = Some(3);
+    program
+        .prepare_authored_constraint_identity(4)
+        .expect("validate sparse authored identity");
+
+    let plan = try_plan_stratified_epistemic_program(&program)
+        .unwrap()
+        .expect("two epistemic strata");
+    assert!(plan
+        .strata
+        .iter()
+        .all(|stratum| stratum.program.constraints.is_empty()));
+    assert_eq!(plan.ordinary_post_program.constraints.len(), 1);
+    assert_eq!(plan.ordinary_post_program.queries.len(), 1);
+    assert_eq!(plan.ordinary_post_program.queries[0].atom.predicate, "c");
+    assert_eq!(
+        plan.ordinary_post_program.constraints[0].authored_index,
+        Some(3)
+    );
+    assert_eq!(
+        plan.ordinary_post_program.authored_constraint_source_bound,
+        Some(4)
+    );
+
+    let mut compiler = Compiler::new();
+    let post = compiler
+        .compile_prepared_program(&plan.ordinary_post_program)
+        .expect("compile deferred ordinary closure and constraints once");
+    let heads = post
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .map(|rule| rule.head.as_str())
+        .collect::<Vec<_>>();
+    assert!(heads.contains(&"c"), "{heads:?}");
+    assert!(heads.contains(&"__xlog_query_0"), "{heads:?}");
+    assert_eq!(
+        heads
+            .iter()
+            .filter(|head| **head == "__xlog_constraint_3")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn stratified_authored_queries_are_owned_only_by_the_post_stage() {
+    let program = parse_program(
+        r#"
+        pred base(u32). pred src(u32). pred edge(u32, u32).
+        pred a(u32). pred b(u32, u32).
+        base(1). src(1). edge(1, 2).
+        a(X) :- src(X), know base(X).
+        b(X, Y) :- edge(X, Y), know a(X).
+        ?- a(X).
+        ?- b(X, Y).
+        "#,
+    )
+    .unwrap();
+
+    let plan = try_plan_stratified_epistemic_program(&program)
+        .unwrap()
+        .expect("two epistemic strata");
+    assert_eq!(plan.strata.len(), 2);
+    assert!(
+        plan.strata
+            .iter()
+            .all(|stratum| stratum.program.queries.is_empty()),
+        "modal strata must not compile local query relations"
+    );
+    assert_eq!(
+        plan.ordinary_post_program
+            .queries
+            .iter()
+            .map(|query| query.atom.predicate.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+}
+
+#[test]
+fn authored_constraint_identity_public_stratified_planner_prepares_root_before_post_stage() {
+    let program = parse_program(
+        r#"
+        pred base(u32). pred src(u32). pred a(u32). pred b(u32).
+        base(1). src(1).
+        a(X) :- src(X), know base(X).
+        b(X) :- src(X), know a(X).
+        :- a(X), b(X).
+        "#,
+    )
+    .unwrap();
+    assert_eq!(program.constraints[0].authored_index, None);
+    assert_eq!(program.authored_constraint_source_bound, None);
+
+    let plan = try_plan_stratified_epistemic_program(&program)
+        .expect("public stratified planner prepares a full authored root")
+        .expect("two epistemic strata");
+    assert_eq!(
+        plan.ordinary_post_program.authored_constraint_source_bound,
+        Some(1)
+    );
+    assert_eq!(
+        plan.ordinary_post_program.constraints[0].authored_index,
+        Some(0)
+    );
+    assert!(plan.strata.iter().all(|stratum| {
+        stratum.program.authored_constraint_source_bound == Some(1)
+            && stratum.program.constraints.is_empty()
+    }));
+}
+
+#[test]
+fn authored_constraint_identity_multi_head_stratum_centralizes_edb_constraint_once() {
+    let mut program = parse_program(
+        r#"
+        pred base(u32). pred other_base(u32). pred src(u32). pred shared(u32).
+        pred a(u32). pred d(u32). pred b(u32). pred c(u32).
+        base(1). other_base(1). src(1). shared(2).
+        a(X) :- src(X), know base(X).
+        d(X) :- src(X), know other_base(X).
+        b(X) :- src(X), know a(X).
+        c(X) :- src(X), know d(X).
+        :- shared(2).
+        "#,
+    )
+    .unwrap();
+    program.constraints[0].authored_index = Some(3);
+    program
+        .prepare_authored_constraint_identity(4)
+        .expect("validate sparse authored identity");
+
+    let plan = try_plan_stratified_epistemic_program(&program)
+        .unwrap()
+        .expect("lower a stratum and multi-head b/c stratum");
+    assert_eq!(plan.strata[1].head_predicates, vec!["b", "c"]);
+    assert!(plan.strata[1].program.constraints.is_empty());
+
+    let split = compile_epistemic_gpu_split_execution(&plan.strata[1].program)
+        .expect("compile multi-head stratum split");
+    assert_eq!(split.components.len(), 2);
+    let component_constraint_rules = split
+        .components
+        .iter()
+        .flat_map(|component| {
+            component
+                .executable
+                .reduced_runtime_plan
+                .rules_by_scc
+                .iter()
+        })
+        .flatten()
+        .filter(|rule| rule.head.starts_with("__xlog_constraint_"))
+        .count();
+    assert_eq!(component_constraint_rules, 0);
+
+    assert_eq!(plan.ordinary_post_program.constraints.len(), 1);
+    let mut compiler = Compiler::new();
+    let post = compiler
+        .compile_prepared_program(&plan.ordinary_post_program)
+        .expect("compile shared EDB constraint once after all modal components");
+    let post_constraint_rules = post
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .filter(|rule| rule.head == "__xlog_constraint_3")
+        .count();
+    assert_eq!(post_constraint_rules, 1);
+}
+
+#[test]
+fn authored_constraint_identity_g91_compatibility_preserves_source_bound() {
+    let mut program = parse_program(
+        r#"
+        #pragma epistemic_mode = g91
+        pred domain(u32). pred p(u32). pred q(u32).
+        domain(1).
+        p(X) :- domain(X), possible q(X).
+        q(X) :- domain(X), possible p(X).
+        :- p(1).
+        "#,
+    )
+    .expect("parse G91 program with ordinary constraint");
+    program.constraints[0].authored_index = Some(3);
+    program
+        .prepare_authored_constraint_identity(4)
+        .expect("prepare sparse G91 authored identity");
+
+    let prepared = prepare_epistemic_program(&program).expect("prepare G91 source");
+    let compatibility = try_prepare_g91_compatibility_reduction(&prepared)
+        .expect("plan G91 compatibility")
+        .expect("recursive possible cycle uses G91 compatibility");
+    for transformed in [
+        compatibility.upper_bound_program(),
+        compatibility.refinement_program(),
+    ] {
+        assert_eq!(transformed.authored_constraint_source_bound, Some(4));
+        assert_eq!(transformed.constraints[0].authored_index, Some(3));
+        Compiler::new()
+            .compile_prepared_program(transformed)
+            .expect("G91 transformed program compiles as prepared");
+    }
+}
+
+#[test]
+fn authored_constraint_identity_wfs_reduction_preserves_source_bound() {
+    let mut program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred vertex(u32). pred seed(u32, u32). pred linked(u32, u32).
+        pred reach(u32, u32).
+        vertex(1). vertex(2). vertex(3). seed(1, 2).
+        reach(X, Y) :- linked(X, Y).
+        reach(X, Z) :- reach(X, Y), linked(Y, Z).
+        linked(X, Y) :- vertex(X), vertex(Y), not know reach(X, Y).
+        linked(X, Y) :- seed(X, Y).
+        :- linked(1, 2).
+        "#,
+    )
+    .expect("parse WFS program with ordinary constraint");
+    program.constraints[0].authored_index = Some(3);
+    program
+        .prepare_authored_constraint_identity(4)
+        .expect("prepare sparse WFS authored identity");
+
+    let prepared = prepare_epistemic_program(&program).expect("prepare WFS source");
+    let reduced = try_reduce_prepared_recursive_epistemic_program(&prepared)
+        .expect("reduce WFS source")
+        .expect("Case-B source selects a WFS reduction");
+    assert_eq!(reduced.authored_constraint_source_bound, Some(4));
+    assert_eq!(reduced.constraints[0].authored_index, Some(3));
+    reduced
+        .validate_prepared_authored_constraint_identity()
+        .expect("WFS transformed program validates as prepared");
 }
 
 #[test]

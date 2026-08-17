@@ -2785,6 +2785,62 @@ fn test_xlog_run_reports_ordinary_constraint_violation_after_modal_evaluation() 
 }
 
 #[test]
+fn test_xlog_run_reports_authored_constraint_after_epistemic_constraint_reduction() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+    let cases = [
+        (
+            "modal_first.xlog",
+            ":- q(X), know p(X).\n:- p(X).",
+            "Constraint 1 violated: :- p(X).",
+        ),
+        (
+            "ordinary_first.xlog",
+            ":- p(X).\n:- q(X), know p(X).",
+            "Constraint 0 violated: :- p(X).",
+        ),
+        (
+            "duplicate_ordinary_bodies.xlog",
+            ":- q(X), know p(X).\n:- p(X).\n:- p(X).",
+            "Constraint 1 violated: :- p(X).",
+        ),
+    ];
+
+    for (filename, constraints, expected) in cases {
+        let source = format!(
+            "#pragma epistemic_mode = faeel\n\
+             pred p(u32).\n\
+             pred q(u32).\n\
+             pred kp(u32).\n\
+             p(1).\n\
+             kp(X) :- p(X), know p(X).\n\
+             {constraints}\n\
+             ?- kp(X).\n"
+        );
+        let output = run_inline_xlog_program(&fixture, filename, &source);
+        assert!(
+            !output.status.success(),
+            "{filename} must violate a constraint"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+        assert_eq!(
+            stderr,
+            format!("Error: Execution(\"{expected}\")\n"),
+            "{filename} must emit exactly one authored constraint diagnostic"
+        );
+    }
+}
+
+#[test]
 fn test_xlog_run_scopes_g91_compatibility_to_exact_tuple_support() {
     let _device = match CudaDevice::new(0) {
         Ok(device) => device,

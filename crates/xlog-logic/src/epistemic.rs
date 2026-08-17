@@ -326,6 +326,17 @@ impl EpistemicWorldView {
 /// required device buffers, WCOJ planning obligations, and a typed policy that
 /// rejects unsupported execution shapes instead of falling back.
 pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPlan> {
+    let mut prepared = program.clone();
+    if prepared.authored_constraint_source_bound.is_some() {
+        prepared.validate_prepared_authored_constraint_identity()?;
+    } else {
+        prepared.prepare_authored_constraint_identity_at_root()?;
+    }
+    plan_prepared_epistemic_gpu_execution(&prepared)
+}
+
+fn plan_prepared_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPlan> {
+    program.validate_prepared_authored_constraint_identity()?;
     reject_recursive_epistemic_program(program)?;
     validate_epistemic_relation_shapes(program, &BTreeSet::new())?;
     let eir = build_eir(program)?;
@@ -468,7 +479,12 @@ fn lower_epistemic_constraints(
     solver_assumption_bindings: &mut Vec<EpistemicSolverAssumptionBinding>,
 ) -> Result<Vec<EpistemicConstraintPlan>> {
     let mut constraint_plans = Vec::new();
-    for (constraint_index, constraint) in eir.constraints.iter().enumerate() {
+    for constraint in &eir.constraints {
+        let constraint_index = constraint.authored_index.ok_or_else(|| {
+            XlogError::Compilation(
+                "prepared constraint compilation requires authored identities".to_string(),
+            )
+        })?;
         let has_epistemic = constraint
             .body
             .iter()
@@ -1414,7 +1430,13 @@ pub fn compile_epistemic_gpu_execution_with_stats_snapshot(
     program: &Program,
     stats_snapshot: Option<&StatsSnapshot>,
 ) -> Result<EpistemicExecutablePlan> {
-    compile_epistemic_gpu_execution_inner(program, stats_snapshot, false)
+    let mut prepared = program.clone();
+    if prepared.authored_constraint_source_bound.is_some() {
+        prepared.validate_prepared_authored_constraint_identity()?;
+    } else {
+        prepared.prepare_authored_constraint_identity_at_root()?;
+    }
+    compile_epistemic_gpu_execution_inner(&prepared, stats_snapshot, false)
 }
 
 /// Lower an epistemic program to its GPU contract and reduced runtime plan.
@@ -1431,7 +1453,8 @@ fn compile_epistemic_gpu_execution_inner(
     stats_snapshot: Option<&StatsSnapshot>,
     allow_multiple_output_heads: bool,
 ) -> Result<EpistemicExecutablePlan> {
-    let gpu_plan = plan_epistemic_gpu_execution(program)?;
+    program.validate_prepared_authored_constraint_identity()?;
+    let gpu_plan = plan_prepared_epistemic_gpu_execution(program)?;
     if !allow_multiple_output_heads {
         require_single_epistemic_output_relation(&gpu_plan)?;
     }
@@ -1446,7 +1469,7 @@ fn compile_epistemic_gpu_execution_inner(
     let reduced_program = reduce_epistemic_program_to_ordinary(program)?;
     let mut compiler = Compiler::new();
     let reduced_runtime_plan =
-        compiler.compile_program_with_stats_snapshot(&reduced_program, stats_snapshot)?;
+        compiler.compile_prepared_program_with_stats_snapshot(&reduced_program, stats_snapshot)?;
     let relation_ids = compiler
         .rel_ids()
         .iter()
@@ -1524,10 +1547,11 @@ impl PreparedEpistemicProgram {
 /// Validate authored contracts before semantics can remove a rule, then exclude only
 /// positive exact-tuple FAEEL self-support with no independent founded support.
 pub fn prepare_epistemic_program(program: &Program) -> Result<PreparedEpistemicProgram> {
-    validate_epistemic_source_program(program)?;
-    let removed_rule_indices = faeel_unfounded_exact_tuple_self_support_rule_indices(program);
+    let prepared = prepare_root_authored_constraint_identity(program)?;
+    validate_prepared_epistemic_source_program(&prepared)?;
+    let removed_rule_indices = faeel_unfounded_exact_tuple_self_support_rule_indices(&prepared);
     Ok(PreparedEpistemicProgram {
-        active_program: program_without_rule_indices(program, &removed_rule_indices),
+        active_program: program_without_rule_indices(&prepared, &removed_rule_indices),
         removed_unfounded_rule_count: removed_rule_indices.len(),
     })
 }
@@ -1905,7 +1929,8 @@ fn reject_epistemic_constraints_for_boundary(
     construct: &str,
     boundary: &str,
 ) -> Result<()> {
-    for (constraint_index, constraint) in program.constraints.iter().enumerate() {
+    for constraint in &program.constraints {
+        let constraint_index = constraint.require_authored_index()?;
         for lit in &constraint.body {
             let BodyLiteral::Epistemic(lit) = lit else {
                 continue;
@@ -2238,6 +2263,11 @@ fn program_without_rule_indices(program: &Program, removed_rule_indices: &[usize
 /// lowering checks without requiring ordinary stratification, because supported negated
 /// modal cycles are dispatched to well-founded execution later.
 pub fn validate_epistemic_source_program(program: &Program) -> Result<()> {
+    let prepared = prepare_root_authored_constraint_identity(program)?;
+    validate_prepared_epistemic_source_program(&prepared)
+}
+
+fn validate_prepared_epistemic_source_program(program: &Program) -> Result<()> {
     validate_authored_modal_key_shapes(program)?;
     let invariant = InvariantRelations::analyze(program);
     let determined = EpistemicallyDeterminedPredicates::analyze(program);
@@ -2527,10 +2557,11 @@ fn validate_modal_variable_bindings(
 /// point. See [`reduce_epistemic_program_to_ordinary_for_stratified_schema`] for the
 /// schema-only relaxation used by the stratified driver.
 pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Result<Program> {
-    if let Some(reduced) = try_reduce_case_a_recursive_epistemic_program(program)? {
+    let prepared = prepare_root_authored_constraint_identity(program)?;
+    if let Some(reduced) = try_reduce_case_a_recursive_epistemic_program(&prepared)? {
         return Ok(reduced);
     }
-    reduce_epistemic_program_to_ordinary_inner(program, &BTreeSet::new(), &BTreeMap::new())
+    reduce_epistemic_program_to_ordinary_inner(&prepared, &BTreeSet::new(), &BTreeMap::new())
 }
 
 /// Schema-only reduction for the stratified epistemic driver.
@@ -2557,13 +2588,24 @@ pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Result<Program
 pub fn reduce_epistemic_program_to_ordinary_for_stratified_schema(
     program: &Program,
 ) -> Result<Program> {
-    let determined = EpistemicallyDeterminedPredicates::analyze(program);
-    let path_specific_rules = stratified_schema_reduction_overrides(program)?;
+    let prepared = prepare_root_authored_constraint_identity(program)?;
+    let determined = EpistemicallyDeterminedPredicates::analyze(&prepared);
+    let path_specific_rules = stratified_schema_reduction_overrides(&prepared)?;
     reduce_epistemic_program_to_ordinary_inner(
-        program,
+        &prepared,
         &determined.determined,
         &path_specific_rules,
     )
+}
+
+fn prepare_root_authored_constraint_identity(program: &Program) -> Result<Program> {
+    let mut prepared = program.clone();
+    if prepared.authored_constraint_source_bound.is_some() {
+        prepared.validate_prepared_authored_constraint_identity()?;
+    } else {
+        prepared.prepare_authored_constraint_identity_at_root()?;
+    }
+    Ok(prepared)
 }
 
 /// Shared body of the epistemic-to-ordinary reduction.
@@ -4230,6 +4272,9 @@ pub struct EpistemicStratum {
 pub struct EpistemicStratifiedPlan {
     /// Strata in execution (topological) order.
     pub strata: Vec<EpistemicStratum>,
+    /// One prepared ordinary closure and constraint stage executed after every
+    /// stratum has materialized its gated heads.
+    pub ordinary_post_program: Program,
 }
 
 /// Predicates whose epistemic extension is DETERMINED once lower strata are fixed.
@@ -4369,6 +4414,8 @@ impl EpistemicallyDeterminedPredicates {
 pub fn try_plan_stratified_epistemic_program(
     program: &Program,
 ) -> Result<Option<EpistemicStratifiedPlan>> {
+    let prepared = prepare_root_authored_constraint_identity(program)?;
+    let program = &prepared;
     let determined = EpistemicallyDeterminedPredicates::analyze(program);
 
     // A stratification is needed only when some modal literal ranges over a
@@ -4455,7 +4502,36 @@ pub fn try_plan_stratified_epistemic_program(
         }
     }
 
-    Ok(Some(EpistemicStratifiedPlan { strata }))
+    let ordinary_post_program = build_post_stratification_ordinary_program(program);
+    ordinary_post_program.validate_prepared_authored_constraint_identity()?;
+
+    Ok(Some(EpistemicStratifiedPlan {
+        strata,
+        ordinary_post_program,
+    }))
+}
+
+/// Build the single ordinary epilogue for a stratified epistemic execution.
+///
+/// Modal rules belong to their ordered strata. Every non-modal rule is replayed once
+/// after all gated heads are materialized so deferred transitive closure (for example
+/// `c :- b` where `b` is a top-stratum head) reaches its final extension before the
+/// authored ordinary constraints are evaluated. Queries stay attached so the
+/// high-level executor can surface relations derived only by this final stage.
+fn build_post_stratification_ordinary_program(program: &Program) -> Program {
+    let mut post = program.clone();
+    post.rules.retain(|rule| {
+        rule.body
+            .iter()
+            .all(|literal| !matches!(literal, BodyLiteral::Epistemic(_)))
+    });
+    post.constraints.retain(|constraint| {
+        constraint
+            .body
+            .iter()
+            .all(|literal| !matches!(literal, BodyLiteral::Epistemic(_)))
+    });
+    post
 }
 
 /// Build the rule rewrites used only for plan-wide schema inference in a
@@ -4740,22 +4816,27 @@ fn build_stratum_subprogram(
         })
         .collect();
 
-    // Keep only the queries whose predicate this stratum materializes, so each
-    // stratum's executable surfaces its own head(s).
+    // Authored queries are compiled exactly once by the post-stratification stage.
+    // Keeping compiler-local `__xlog_query_N` relations in modal strata would reuse
+    // the same local names across strata and can collide when query projections have
+    // different schemas.
     let head_set: BTreeSet<&str> = head_predicates.iter().map(String::as_str).collect();
-    stratum.queries = program
-        .queries
-        .iter()
-        .filter(|query| head_set.contains(query.atom.predicate.as_str()))
-        .cloned()
-        .collect();
+    stratum.queries.clear();
 
-    // Drop constraints that reference predicates this stratum does not own, to keep
-    // the sub-program self-contained.
+    // Ordinary constraints are global postconditions and belong only to the single
+    // post-stratification ordinary stage. Modal constraints retain predicate-local
+    // ownership because they participate in candidate/world-view semantics here.
     stratum.constraints = program
         .constraints
         .iter()
         .filter(|constraint| {
+            let is_ordinary = constraint
+                .body
+                .iter()
+                .all(|literal| !matches!(literal, BodyLiteral::Epistemic(_)));
+            if is_ordinary {
+                return false;
+            }
             constraint_predicate_set(constraint)
                 .iter()
                 .all(|p| head_set.contains(p.as_str()) || !is_program_head(program, p))
@@ -4816,6 +4897,13 @@ pub fn compile_epistemic_gpu_split_execution_with_stats_snapshot(
     program: &Program,
     stats_snapshot: Option<&StatsSnapshot>,
 ) -> Result<EpistemicSplitExecutablePlan> {
+    let mut prepared = program.clone();
+    if prepared.authored_constraint_source_bound.is_some() {
+        prepared.validate_prepared_authored_constraint_identity()?;
+    } else {
+        prepared.prepare_authored_constraint_identity_at_root()?;
+    }
+    let program = &prepared;
     validate_epistemic_relation_shapes(program, &BTreeSet::new())?;
     reject_epistemic_constraints(program)?;
     let split_plan = split_epistemic_program(program)?;

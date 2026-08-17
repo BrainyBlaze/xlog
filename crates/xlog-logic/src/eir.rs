@@ -22,6 +22,7 @@ pub fn build_eir(program: &Program) -> Result<EirProgram> {
 
 fn convert_constraint(constraint: &AstConstraint) -> EirConstraint {
     EirConstraint {
+        authored_index: constraint.authored_index,
         body: constraint.body.iter().map(convert_body_literal).collect(),
     }
 }

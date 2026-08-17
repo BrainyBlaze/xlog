@@ -1,6 +1,6 @@
 //! Abstract Syntax Tree for XLOG programs
 
-use xlog_core::ScalarType;
+use xlog_core::{Result, ScalarType, XlogError};
 
 /// A term in an atom
 #[derive(Debug, Clone, PartialEq)]
@@ -503,8 +503,21 @@ impl Rule {
 /// A constraint (:- body)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Constraint {
+    /// Stable index of this constraint in the complete authored program.
+    pub authored_index: Option<usize>,
     /// Body literals whose conjunction must never be satisfiable.
     pub body: Vec<BodyLiteral>,
+}
+
+impl Constraint {
+    /// Return the authored identity required by prepared compilation paths.
+    pub fn require_authored_index(&self) -> Result<usize> {
+        self.authored_index.ok_or_else(|| {
+            XlogError::Compilation(
+                "prepared constraint compilation requires authored identities".to_string(),
+            )
+        })
+    }
 }
 
 /// A query (`?- atom.`)
@@ -914,6 +927,11 @@ pub struct Program {
     pub rules: Vec<Rule>,
     /// Integrity constraints (`:- ...`).
     pub constraints: Vec<Constraint>,
+    /// Number of integrity constraints in the authored source program.
+    ///
+    /// This is carried through transforms so sparse constraint subsets can
+    /// validate their authored identities without being locally re-enumerated.
+    pub authored_constraint_source_bound: Option<usize>,
     /// Queries (`?- ...`).
     pub queries: Vec<Query>,
     /// Probabilistic facts (`p::atom.`).
@@ -936,6 +954,113 @@ impl Program {
     /// Create an empty program.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Assign or validate stable authored identities before any program transforms.
+    pub fn prepare_authored_constraint_identity(
+        &mut self,
+        authored_source_constraint_count: usize,
+    ) -> Result<()> {
+        if let Some(existing_bound) = self.authored_constraint_source_bound {
+            if existing_bound != authored_source_constraint_count {
+                return Err(XlogError::Compilation(format!(
+                    "authored constraint source bound {existing_bound} does not match requested bound {authored_source_constraint_count}"
+                )));
+            }
+        }
+
+        let assigned = self
+            .constraints
+            .iter()
+            .filter(|constraint| constraint.authored_index.is_some())
+            .count();
+
+        if assigned == 0 {
+            if self.constraints.len() != authored_source_constraint_count {
+                return Err(XlogError::Compilation(format!(
+                    "unassigned constraint count {} does not match authored source bound {}",
+                    self.constraints.len(),
+                    authored_source_constraint_count
+                )));
+            }
+            for (authored_index, constraint) in self.constraints.iter_mut().enumerate() {
+                constraint.authored_index = Some(authored_index);
+            }
+            self.authored_constraint_source_bound = Some(authored_source_constraint_count);
+            return Ok(());
+        }
+
+        if assigned != self.constraints.len() {
+            return Err(XlogError::Compilation(
+                "mixed assigned and unassigned authored constraint identities".to_string(),
+            ));
+        }
+
+        let mut seen = std::collections::HashSet::with_capacity(self.constraints.len());
+        for constraint in &self.constraints {
+            let authored_index = constraint
+                .authored_index
+                .expect("all constraint identities were checked as assigned");
+            if authored_index >= authored_source_constraint_count {
+                return Err(XlogError::Compilation(format!(
+                    "authored constraint index {authored_index} is outside source bound {authored_source_constraint_count}"
+                )));
+            }
+            if !seen.insert(authored_index) {
+                return Err(XlogError::Compilation(format!(
+                    "duplicate authored constraint index {authored_index}"
+                )));
+            }
+        }
+        self.authored_constraint_source_bound = Some(authored_source_constraint_count);
+        Ok(())
+    }
+
+    /// Assign dense authored identities at the outer full-program boundary.
+    pub fn prepare_authored_constraint_identity_at_root(&mut self) -> Result<()> {
+        let authored_source_constraint_count = self.constraints.len();
+        self.prepare_authored_constraint_identity(authored_source_constraint_count)
+    }
+
+    /// Validate identities on a program already prepared at the outer boundary.
+    pub fn validate_prepared_authored_constraint_identity(&self) -> Result<()> {
+        if self.constraints.is_empty() && self.authored_constraint_source_bound.is_none() {
+            return Ok(());
+        }
+        let authored_source_constraint_count =
+            self.authored_constraint_source_bound.ok_or_else(|| {
+                XlogError::Compilation(
+                "prepared constraint compilation requires authored identities and a source bound"
+                    .to_string(),
+            )
+            })?;
+        if self
+            .constraints
+            .iter()
+            .any(|constraint| constraint.authored_index.is_none())
+        {
+            return Err(XlogError::Compilation(
+                "prepared constraint compilation requires authored identities".to_string(),
+            ));
+        }
+
+        let mut seen = std::collections::HashSet::with_capacity(self.constraints.len());
+        for constraint in &self.constraints {
+            let authored_index = constraint
+                .authored_index
+                .expect("all prepared constraint identities were checked as assigned");
+            if authored_index >= authored_source_constraint_count {
+                return Err(XlogError::Compilation(format!(
+                    "authored constraint index {authored_index} is outside source bound {authored_source_constraint_count}"
+                )));
+            }
+            if !seen.insert(authored_index) {
+                return Err(XlogError::Compilation(format!(
+                    "duplicate authored constraint index {authored_index}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Iterate over ground facts (rules with empty bodies).

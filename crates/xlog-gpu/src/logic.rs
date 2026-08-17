@@ -439,6 +439,14 @@ struct StratumExecutable {
 }
 
 #[derive(Clone)]
+struct StratifiedExecutable {
+    strata: Vec<StratumExecutable>,
+    /// Single ordinary closure and authored-constraint stage executed only after
+    /// every modal stratum has materialized its gated heads.
+    ordinary_post: GpuOrdinaryPass,
+}
+
+#[derive(Clone)]
 enum StratumPlanKind {
     Single(Box<EpistemicExecutablePlan>),
     Split(Box<EpistemicSplitExecutablePlan>),
@@ -465,7 +473,7 @@ enum LogicExecutionPlan {
     EpistemicSplit(Box<EpistemicSplitExecutablePlan>),
     /// Stratified epistemic execution: ordered strata, each materializing its
     /// gated head(s) into the store before the next stratum runs.
-    EpistemicStratified(Vec<StratumExecutable>),
+    EpistemicStratified(Box<StratifiedExecutable>),
 }
 
 #[derive(Clone)]
@@ -577,7 +585,12 @@ impl LogicProgram {
     ///
     /// This method does not resolve imports; import-aware callers merge them
     /// first. The program enters the canonical execution normalizer once here.
-    pub fn compile_program(program: Program) -> Result<Self> {
+    pub fn compile_program(mut program: Program) -> Result<Self> {
+        if program.authored_constraint_source_bound.is_some() {
+            program.validate_prepared_authored_constraint_identity()?;
+        } else {
+            program.prepare_authored_constraint_identity_at_root()?;
+        }
         let source_program = program.clone();
         let normalized = normalize_program_for_execution(program)?;
         Self::compile_normalized_program(normalized, source_program)
@@ -598,7 +611,7 @@ impl LogicProgram {
             );
         }
         let mut compiler = Compiler::new();
-        let plan = compiler.compile_program(&normalized)?;
+        let plan = compiler.compile_prepared_program(&normalized)?;
         Ok(Self {
             source_program,
             program: normalized,
@@ -674,7 +687,7 @@ impl LogicProgram {
             let reduced =
                 reduce_epistemic_program_to_ordinary_for_stratified_schema(active_program)?;
             let mut schema_compiler = Compiler::new();
-            schema_compiler.compile_program(&reduced)?;
+            schema_compiler.compile_prepared_program(&reduced)?;
             let mut schemas = schema_compiler.schemas().clone();
             augment_same_name_multi_arity_schemas(active_program, &mut schemas)?;
 
@@ -684,7 +697,16 @@ impl LogicProgram {
                     plan: Self::compile_stratum_plan(&stratum.program)?,
                 });
             }
-            let plan = LogicExecutionPlan::EpistemicStratified(strata);
+            let ordinary_post = compile_gpu_ordinary_pass(&stratified.ordinary_post_program)?;
+            for (name, schema) in &ordinary_post.schemas {
+                schemas
+                    .entry(name.clone())
+                    .or_insert_with(|| schema.clone());
+            }
+            let plan = LogicExecutionPlan::EpistemicStratified(Box::new(StratifiedExecutable {
+                strata,
+                ordinary_post,
+            }));
             let rel_ids = epistemic_relation_ids(&plan)?;
             return Ok(Self {
                 source_program,
@@ -696,7 +718,7 @@ impl LogicProgram {
                 epistemic_provenance: Some(EpistemicProvenance {
                     reduction: "stratified",
                     literals: provenance_literals,
-                    surface_source_queries: false,
+                    surface_source_queries: true,
                 }),
             });
         }
@@ -728,7 +750,7 @@ impl LogicProgram {
                 });
             }
             let mut compiler = Compiler::new();
-            let plan = compiler.compile_program(&recursive_reduced)?;
+            let plan = compiler.compile_prepared_program(&recursive_reduced)?;
             return Ok(Self {
                 source_program,
                 program: recursive_reduced,
@@ -746,7 +768,7 @@ impl LogicProgram {
 
         let reduced = reduce_epistemic_program_to_ordinary(active_program)?;
         let mut schema_compiler = Compiler::new();
-        schema_compiler.compile_program(&reduced)?;
+        schema_compiler.compile_prepared_program(&reduced)?;
         let mut schemas = schema_compiler.schemas().clone();
         augment_same_name_multi_arity_schemas(active_program, &mut schemas)?;
 
@@ -796,7 +818,7 @@ impl LogicProgram {
             try_reduce_case_a_recursive_epistemic_program(stratum_program)?
         {
             let mut compiler = Compiler::new();
-            let plan = compiler.compile_program(&case_a_reduced)?;
+            let plan = compiler.compile_prepared_program(&case_a_reduced)?;
             let head_predicates = epistemic_stratum_output_heads(stratum_program);
             return Ok(StratumPlanKind::Ordinary {
                 plan: Box::new(plan),
@@ -856,6 +878,7 @@ impl LogicProgram {
     /// records observed dispatch, kernel, device-buffer, candidate-accounting,
     /// solver/probability event, and scoped-transfer behavior.
     pub fn epistemic_plan_json(&self) -> Option<String> {
+        let mut has_ordinary_post = false;
         let gpu_plans: Vec<(String, &xlog_ir::EpistemicGpuPlan)> = match &self.plan {
             // A program whose source was epistemic but whose executable plan is
             // ordinary either resolved admissible recursive modal literals into joins
@@ -898,9 +921,9 @@ impl LogicProgram {
                 .enumerate()
                 .map(|(i, c)| (format!("split[{i}]"), &c.executable.gpu_plan))
                 .collect(),
-            LogicExecutionPlan::EpistemicStratified(strata) => {
+            LogicExecutionPlan::EpistemicStratified(stratified) => {
                 let mut plans = Vec::new();
-                for (i, stratum) in strata.iter().enumerate() {
+                for (i, stratum) in stratified.strata.iter().enumerate() {
                     match &stratum.plan {
                         StratumPlanKind::Single(plan) => {
                             plans.push((format!("stratum[{i}]"), &plan.gpu_plan));
@@ -920,12 +943,14 @@ impl LogicProgram {
                         StratumPlanKind::Ordinary { .. } => {}
                     }
                 }
+                has_ordinary_post = true;
                 plans
             }
         };
         Some(epistemic_plan_summary_json(
             self.plan_kind_label(),
             &gpu_plans,
+            has_ordinary_post,
         ))
     }
 
@@ -1426,7 +1451,7 @@ impl LogicProgram {
         }
 
         let LogicExecutionPlan::Ordinary(plan) = &self.plan else {
-            return self.evaluate_epistemic_with_executor(executor, profiling);
+            return self.evaluate_epistemic_with_executor(&provider, executor, profiling);
         };
 
         executor.execute_plan(plan)?;
@@ -1995,7 +2020,13 @@ impl LogicProgram {
                 .put(name, provider.create_empty_buffer(schema.clone())?);
         }
         for name in base_store.names() {
-            if pass.schemas.contains_key(name) {
+            // Query and constraint relations are outputs of this compiled pass.
+            // Seeding them from an earlier epistemic stratum would union stale,
+            // ungated candidates into the authoritative recomputation.
+            if pass.schemas.contains_key(name)
+                && !name.starts_with("__xlog_query_")
+                && !name.starts_with("__xlog_constraint_")
+            {
                 let buffer = base_store.get(name).ok_or_else(|| {
                     XlogError::Execution(format!("WFS base relation {name} disappeared"))
                 })?;
@@ -2135,10 +2166,12 @@ impl LogicProgram {
 
     fn evaluate_epistemic_with_executor(
         &self,
+        provider: &Arc<CudaKernelProvider>,
         mut executor: Executor,
         profiling: bool,
     ) -> Result<LogicEvalResult> {
         let mut queries = Vec::new();
+        let mut accumulated_stats = None;
         match &self.plan {
             LogicExecutionPlan::EpistemicSingle(executable) => {
                 let result = executor
@@ -2159,10 +2192,12 @@ impl LogicProgram {
                     .iter()
                     .map(|component| &component.executable)
                     .collect();
-                let batch = executor.execute_epistemic_gpu_execution_batch_with_trace(
-                    &executables,
-                    capacities_for_epistemic_split(split)?,
-                )?;
+                let batch = executor
+                    .execute_epistemic_gpu_execution_batch_with_trace(
+                        &executables,
+                        capacities_for_epistemic_split(split)?,
+                    )
+                    .map_err(|error| self.present_epistemic_constraint_violation(error))?;
                 batch
                     .require_trace_matches_components("xlog high-level epistemic GPU execution")?;
                 for result in &batch.results {
@@ -2179,7 +2214,7 @@ impl LogicProgram {
                     ));
                 }
             }
-            LogicExecutionPlan::EpistemicStratified(strata) => {
+            LogicExecutionPlan::EpistemicStratified(stratified) => {
                 // Execute strata in topological order on the SAME executor. After
                 // each stratum, write its GATED head output(s) into the store as
                 // base relations so the NEXT stratum's `know`/`possible` over a
@@ -2188,34 +2223,31 @@ impl LogicProgram {
                 // relation, Case-A resolve-into-body) — never double-gating against
                 // a still-modal relation.
                 //
-                // A head is surfaced as a user-visible query result when the source
-                // program explicitly queries it (`?- head(...)`), regardless of
-                // which stratum produced it; otherwise only the TOP stratum's heads
-                // are surfaced (lower-stratum heads are intermediate, materialized
-                // for gating only).
-                let queried_predicates: BTreeSet<&str> = self
-                    .program
-                    .queries
-                    .iter()
-                    .map(|query| query.atom.predicate.as_str())
-                    .collect();
-                let stratum_count = strata.len();
-                for (stratum_index, stratum) in strata.iter().enumerate() {
+                // Every authored query is evaluated by its compiled query rule only
+                // after the modal heads and ordinary closure are final. This preserves
+                // source order, constants, repeated-variable filters, projections and
+                // logical zero-column truth without exposing whole head relations.
+                let has_authored_queries = !self.program.queries.is_empty();
+                let stratum_count = stratified.strata.len();
+                for (stratum_index, stratum) in stratified.strata.iter().enumerate() {
                     let is_last = stratum_index + 1 == stratum_count;
                     match &stratum.plan {
                         StratumPlanKind::Single(executable) => {
-                            let result = executor.execute_epistemic_gpu_execution(
-                                executable,
-                                capacities_for_epistemic_executable(executable)?,
-                            )?;
+                            let result = executor
+                                .execute_epistemic_gpu_execution(
+                                    executable,
+                                    capacities_for_epistemic_executable(executable)?,
+                                )
+                                .map_err(|error| {
+                                    self.present_epistemic_constraint_violation(error)
+                                })?;
                             result.require_runtime_dispatch_certification()?;
                             let primary_head = epistemic_output_relation_name(executable)?;
-                            Self::materialize_and_surface_epistemic_stratum_result(
+                            Self::materialize_epistemic_stratum_result(
                                 &mut executor,
                                 primary_head,
                                 result,
-                                is_last,
-                                &queried_predicates,
+                                is_last && !has_authored_queries,
                                 &mut queries,
                             )?;
                         }
@@ -2225,10 +2257,14 @@ impl LogicProgram {
                                 .iter()
                                 .map(|component| &component.executable)
                                 .collect();
-                            let batch = executor.execute_epistemic_gpu_execution_batch_with_trace(
-                                &executables,
-                                capacities_for_epistemic_split(split)?,
-                            )?;
+                            let batch = executor
+                                .execute_epistemic_gpu_execution_batch_with_trace(
+                                    &executables,
+                                    capacities_for_epistemic_split(split)?,
+                                )
+                                .map_err(|error| {
+                                    self.present_epistemic_constraint_violation(error)
+                                })?;
                             batch.require_trace_matches_components(
                                 "xlog high-level stratified epistemic GPU execution",
                             )?;
@@ -2243,12 +2279,11 @@ impl LogicProgram {
                                 })
                                 .collect::<Result<Vec<_>>>()?;
                             for (primary_head, result) in primaries.into_iter().zip(batch.results) {
-                                Self::materialize_and_surface_epistemic_stratum_result(
+                                Self::materialize_epistemic_stratum_result(
                                     &mut executor,
                                     primary_head,
                                     result,
-                                    is_last,
-                                    &queried_predicates,
+                                    is_last && !has_authored_queries,
                                     &mut queries,
                                 )?;
                             }
@@ -2262,13 +2297,13 @@ impl LogicProgram {
                             // the (correctly gated) head relation into the store.
                             executor.execute_plan(plan)?;
                             for head in head_predicates {
-                                if is_last || queried_predicates.contains(head.as_str()) {
+                                if is_last && !has_authored_queries {
                                     let buffer =
                                         executor.store().get(head.as_str()).ok_or_else(|| {
                                             XlogError::Execution(format!(
-                                                "missing stratified ordinary stratum output \
-                                                 relation {head}"
-                                            ))
+                                            "missing stratified ordinary stratum output relation \
+                                             {head}"
+                                        ))
                                         })?;
                                     let cloned = executor.clone_store_relation(buffer)?;
                                     queries.push(epistemic_buffer_to_query_result(
@@ -2280,6 +2315,43 @@ impl LogicProgram {
                         }
                     }
                 }
+
+                // Compiler-local relation IDs cannot safely be registered into the
+                // modal executor. Run the ordinary closure, authored query rules and
+                // generated constraint relations in an isolated executor seeded from
+                // the final gated store, then make that store authoritative.
+                if profiling {
+                    accumulated_stats = Some(executor.execution_stats(0));
+                }
+                executor = self.run_gpu_ordinary_pass(
+                    provider,
+                    &stratified.ordinary_post,
+                    executor.store(),
+                    &[],
+                    profiling,
+                )?;
+                if profiling {
+                    collect_iterative_execution_stats(&mut accumulated_stats, &executor);
+                }
+                for (query_index, query) in self.program.queries.iter().enumerate() {
+                    let internal_relation_name = format!("__xlog_query_{query_index}");
+                    let buffer = executor
+                        .store_mut()
+                        .remove(&internal_relation_name)
+                        .ok_or_else(|| {
+                            XlogError::Execution(format!(
+                                "missing stratified post-stage query relation \
+                                 {internal_relation_name}"
+                            ))
+                        })?;
+                    queries.push(self.logic_query_result(
+                        provider,
+                        query_index,
+                        query,
+                        internal_relation_name,
+                        buffer,
+                    )?);
+                }
             }
             LogicExecutionPlan::EpistemicG91Compatibility(_)
             | LogicExecutionPlan::EpistemicWfsGpu(_) => {
@@ -2290,55 +2362,41 @@ impl LogicProgram {
             }
         }
 
+        self.enforce_constraints_in_store(provider, executor.store())?;
         let total_output_rows: u64 = queries.iter().map(|q| q.buffer.num_rows()).sum();
         let stats = if profiling {
-            Some(executor.execution_stats(total_output_rows))
+            if let Some(mut stats) = accumulated_stats {
+                stats.total_output_rows = total_output_rows;
+                Some(stats)
+            } else {
+                Some(executor.execution_stats(total_output_rows))
+            }
         } else {
             None
         };
         Ok(LogicEvalResult { queries, stats })
     }
 
-    /// Materialize one epistemic stratum result's GATED head(s) into the store and
-    /// surface them as query results when appropriate.
+    /// Materialize one epistemic stratum result's GATED head(s) into the store.
     ///
     /// Every gated head (primary `final_output` plus joint additional heads) is
-    /// written to the store so higher strata can gate against it. A head is added
-    /// to `queries` when its stratum is the TOP stratum OR the source program
-    /// explicitly queries it.
-    fn materialize_and_surface_epistemic_stratum_result(
+    /// written to the store so higher strata can gate against it. Explicit authored
+    /// queries are projected from this store after all strata and the ordinary post
+    /// stage complete.
+    fn materialize_epistemic_stratum_result(
         executor: &mut Executor,
         primary_head: String,
         result: EpistemicGpuExecutionResult,
-        is_last: bool,
-        queried_predicates: &BTreeSet<&str>,
+        surface_default_results: bool,
         queries: &mut Vec<LogicQueryResult>,
     ) -> Result<()> {
         executor.materialize_epistemic_head_relation(&primary_head, &result.final_output)?;
         for (head, buffer) in &result.additional_head_outputs {
             executor.materialize_epistemic_head_relation(head, buffer)?;
         }
-
-        // Collect the heads to surface: primary + additional, filtered by
-        // top-stratum-or-explicitly-queried.
-        let surface_primary = is_last || queried_predicates.contains(primary_head.as_str());
-        let additional_heads: Vec<String> = result
-            .additional_head_outputs
-            .iter()
-            .map(|(head, _)| head.clone())
-            .collect();
-
-        let mut all_results = epistemic_result_to_query_results(primary_head.clone(), result);
-        all_results.retain(|query_result| {
-            if query_result.relation_name == primary_head {
-                surface_primary
-            } else {
-                is_last
-                    || (additional_heads.contains(&query_result.relation_name)
-                        && queried_predicates.contains(query_result.relation_name.as_str()))
-            }
-        });
-        queries.extend(all_results);
+        if surface_default_results {
+            queries.extend(epistemic_result_to_query_results(primary_head, result));
+        }
         Ok(())
     }
 
@@ -2354,9 +2412,26 @@ impl LogicProgram {
         let presentation_constraint = self
             .authored_constraints
             .as_ref()
-            .and_then(|constraints| constraints.get(constraint_index))
-            .or_else(|| self.source_program.constraints.get(constraint_index))
-            .unwrap_or(&self.program.constraints[constraint_index]);
+            .and_then(|constraints| {
+                constraints
+                    .iter()
+                    .find(|constraint| constraint.authored_index == Some(constraint_index))
+            })
+            .or_else(|| {
+                self.source_program
+                    .constraints
+                    .iter()
+                    .find(|constraint| constraint.authored_index == Some(constraint_index))
+            })
+            .or_else(|| {
+                self.program
+                    .constraints
+                    .iter()
+                    .find(|constraint| constraint.authored_index == Some(constraint_index))
+            });
+        let Some(presentation_constraint) = presentation_constraint else {
+            return XlogError::Execution(format!("Constraint {constraint_index} violated"));
+        };
         XlogError::Execution(format!(
             "Constraint {} violated: {}",
             constraint_index,
@@ -2368,9 +2443,7 @@ impl LogicProgram {
         match error {
             XlogError::ConstraintViolation {
                 constraint_index, ..
-            } if constraint_index < self.program.constraints.len() => {
-                self.constraint_violation_error(constraint_index)
-            }
+            } => self.constraint_violation_error(constraint_index),
             other => other,
         }
     }
@@ -2380,8 +2453,21 @@ impl LogicProgram {
         provider: &CudaKernelProvider,
         store: &RelationStore,
     ) -> Result<()> {
-        for i in 0..self.program.constraints.len() {
-            let name = format!("__xlog_constraint_{}", i);
+        for constraint in &self.program.constraints {
+            if constraint
+                .body
+                .iter()
+                .any(|literal| matches!(literal, BodyLiteral::Epistemic(_)))
+            {
+                continue;
+            }
+            let i = constraint.authored_index.ok_or_else(|| {
+                XlogError::Execution(
+                    "ordinary constraint reached execution without an authored identity"
+                        .to_string(),
+                )
+            })?;
+            let name = format!("__xlog_constraint_{i}");
             let buf = store.get(&name).ok_or_else(|| {
                 XlogError::Execution(format!(
                     "Missing constraint result relation {} (compiler bug?)",
@@ -2453,7 +2539,12 @@ const DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION: usize = 1024;
 /// This helper does not resolve imports; import-aware callers merge them first. It
 /// expands user-defined functions with the entry program's recursion limit, normalizes
 /// meta and list builtins, and desugars shared-variable epistemic constraints.
-pub fn normalize_program_for_execution(program: Program) -> Result<Program> {
+pub fn normalize_program_for_execution(mut program: Program) -> Result<Program> {
+    if program.authored_constraint_source_bound.is_some() {
+        program.validate_prepared_authored_constraint_identity()?;
+    } else {
+        program.prepare_authored_constraint_identity_at_root()?;
+    }
     let max_recursion = program.directives.max_recursion_depth_or_default();
     let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
         .map_err(|e| XlogError::Compilation(e.to_string()))?;
@@ -2605,13 +2696,13 @@ fn infer_wfs_source_schemas(program: &Program) -> Result<HashMap<String, Schema>
     }
 
     let mut compiler = Compiler::new();
-    compiler.compile_program(&inference_program)?;
+    compiler.compile_prepared_program(&inference_program)?;
     Ok(compiler.schemas().clone())
 }
 
 fn compile_gpu_ordinary_pass(program: &Program) -> Result<GpuOrdinaryPass> {
     let mut compiler = Compiler::new();
-    let plan = compiler.compile_program(program)?;
+    let plan = compiler.compile_prepared_program(program)?;
     Ok(GpuOrdinaryPass {
         plan,
         schemas: compiler.schemas().clone(),
@@ -3213,8 +3304,8 @@ fn epistemic_relation_ids(plan: &LogicExecutionPlan) -> Result<HashMap<String, R
                 }
             }
         }
-        LogicExecutionPlan::EpistemicStratified(strata) => {
-            for stratum in strata {
+        LogicExecutionPlan::EpistemicStratified(stratified) => {
+            for stratum in &stratified.strata {
                 match &stratum.plan {
                     StratumPlanKind::Single(executable) => {
                         for (name, rel_id) in &executable.relation_ids {
@@ -4004,8 +4095,9 @@ fn epistemic_gpu_plan_json(plan: &xlog_ir::EpistemicGpuPlan) -> String {
 fn epistemic_plan_summary_json(
     plan_kind: &str,
     gpu_plans: &[(String, &xlog_ir::EpistemicGpuPlan)],
+    has_ordinary_post: bool,
 ) -> String {
-    let units = gpu_plans
+    let mut units = gpu_plans
         .iter()
         .map(|(label, plan)| {
             format!(
@@ -4014,8 +4106,14 @@ fn epistemic_plan_summary_json(
                 epistemic_gpu_plan_json(plan)
             )
         })
-        .collect::<Vec<_>>()
-        .join(",");
+        .collect::<Vec<_>>();
+    if has_ordinary_post {
+        units.push(
+            "{\"unit\":\"ordinary_post\",\"stage_kind\":\"ordinary_closure_and_constraints\"}"
+                .to_string(),
+        );
+    }
+    let units = units.join(",");
     // Canonical body (without the id) hashed for the stable plan id.
     let body = format!(
         "{{\"plan_kind\":\"{}\",\"units\":[{}],\"execution_backend\":\"{}\",\"fallback_policy\":\"{}\"}}",

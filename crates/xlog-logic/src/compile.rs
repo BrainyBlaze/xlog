@@ -163,6 +163,12 @@ impl Compiler {
         self.compile_program_with_stats_snapshot(program, None)
     }
 
+    /// Compile a program whose authored constraint identities were prepared at
+    /// the outer full-program boundary.
+    pub fn compile_prepared_program(&mut self, program: &Program) -> Result<ExecutionPlan> {
+        self.compile_prepared_program_with_stats_snapshot(program, None)
+    }
+
     /// Compile a parsed XLOG program into an execution plan, optionally seeding the optimizer.
     ///
     /// Delegates to [`Self::compile_program_with_config_and_stats_snapshot`]
@@ -173,6 +179,19 @@ impl Compiler {
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
         self.compile_program_with_config_and_stats_snapshot(
+            program,
+            &CompilerConfig::default(),
+            stats_snapshot,
+        )
+    }
+
+    /// Compile an already prepared program with an optional statistics snapshot.
+    pub fn compile_prepared_program_with_stats_snapshot(
+        &mut self,
+        program: &Program,
+        stats_snapshot: Option<&StatsSnapshot>,
+    ) -> Result<ExecutionPlan> {
+        self.compile_prepared_program_with_config_and_stats_snapshot(
             program,
             &CompilerConfig::default(),
             stats_snapshot,
@@ -190,7 +209,8 @@ impl Compiler {
         &mut self,
         program: &Program,
     ) -> Result<()> {
-        let program = desugar_queries_and_constraints(program);
+        program.validate_prepared_authored_constraint_identity()?;
+        let program = desugar_queries_and_constraints(program)?;
         let program = normalize_meta_builtins(&program)?;
         let program = normalize_list_builtins(&program)?;
         let program = rewrite_magic_sets(&program)?.program;
@@ -209,7 +229,28 @@ impl Compiler {
         config: &CompilerConfig,
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
-        let program = desugar_queries_and_constraints(program);
+        let mut prepared = program.clone();
+        if prepared.authored_constraint_source_bound.is_some() {
+            prepared.validate_prepared_authored_constraint_identity()?;
+        } else {
+            prepared.prepare_authored_constraint_identity_at_root()?;
+        }
+        self.compile_prepared_program_with_config_and_stats_snapshot(
+            &prepared,
+            config,
+            stats_snapshot,
+        )
+    }
+
+    /// Config-aware compilation for an already prepared program.
+    pub fn compile_prepared_program_with_config_and_stats_snapshot(
+        &mut self,
+        program: &Program,
+        config: &CompilerConfig,
+        stats_snapshot: Option<&StatsSnapshot>,
+    ) -> Result<ExecutionPlan> {
+        program.validate_prepared_authored_constraint_identity()?;
+        let program = desugar_queries_and_constraints(program)?;
         let program = normalize_meta_builtins(&program)?;
         let program = normalize_list_builtins(&program)?;
         let program = rewrite_magic_sets(&program)?.program;
@@ -455,12 +496,13 @@ impl Compiler {
     }
 }
 
-fn desugar_queries_and_constraints(program: &Program) -> Program {
+fn desugar_queries_and_constraints(program: &Program) -> Result<Program> {
     let mut out = program.clone();
 
     // Constraints: `:- body.` becomes `__xlog_constraint_i(1) :- body.`
-    for (i, constraint) in program.constraints.iter().enumerate() {
-        let pred = format!("__xlog_constraint_{}", i);
+    for constraint in &program.constraints {
+        let authored_index = constraint.require_authored_index()?;
+        let pred = format!("__xlog_constraint_{authored_index}");
         out.rules.push(AstRule {
             head: crate::ast::Atom {
                 predicate: pred,
@@ -498,15 +540,18 @@ fn desugar_queries_and_constraints(program: &Program) -> Program {
         });
     }
 
-    out
+    Ok(out)
 }
 
 fn validate_negation_safety(program: &Program) -> Result<()> {
     for rule in &program.rules {
         validate_body_naf_safety(&rule.body, &format!("rule {}", rule.head.predicate))?;
     }
-    for (idx, constraint) in program.constraints.iter().enumerate() {
-        validate_body_naf_safety(&constraint.body, &format!("constraint {}", idx))?;
+    for constraint in &program.constraints {
+        validate_body_naf_safety(
+            &constraint.body,
+            &format!("constraint {}", constraint.require_authored_index()?),
+        )?;
     }
     for (idx, learnable) in program.learnable_rules.iter().enumerate() {
         validate_body_naf_safety(&learnable.body, &format!("learnable rule {}", idx))?;
