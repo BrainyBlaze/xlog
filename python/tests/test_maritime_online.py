@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "examples
 
 
 # ---------------------------------------------------------------------------
-# Task 2: online_stream.stream_windows — the chronological window iterator
+# online_stream.stream_windows — the chronological window iterator
 # (PREREG_ONLINE.md section 2: one pass in ascending pt_time order, global
 # time, mini-batch windows; tie on time broken by ascending row index;
 # reverse = the chrono sequence reversed exactly)
@@ -100,10 +100,11 @@ def test_stream_windows_empty_input_yields_no_windows():
 
 
 # ---------------------------------------------------------------------------
-# Task 3: soft_weights.partial_fit — the incremental refactor. The Adam
-# state (weights, m, v, t) moves into SoftState; train_soft_weights becomes
-# init + one partial_fit per step over the full batch, and MUST stay
-# byte-identical to the pre-refactor trainer (the batch column's pin).
+# soft_weights.partial_fit — the incremental refactor behind PREREG_ONLINE
+# section 2 (one Adam step per window). The Adam state (weights, m, v, t)
+# moves into SoftState; train_soft_weights becomes init + one partial_fit
+# per step over the full batch, and MUST stay byte-identical to the
+# pre-refactor trainer (the batch column's pin, PREREG_SOFT section (b)).
 # ---------------------------------------------------------------------------
 
 
@@ -221,7 +222,8 @@ def test_partial_fit_composition_matches_pre_refactor_reference():
 
 
 def test_partial_fit_state_after_n_windows_is_bitwise_deterministic():
-    # The plan's determinism pin: incremental training over windows is not
+    # Determinism (PREREG_ONLINE section 2: the run has no RNG, the order is
+    # fixed by the data): incremental training over windows is not
     # required to equal the full-batch run (the gradient steps differ by
     # definition) — but the state after N windows must be a pure function
     # of the inputs: two identical passes agree bitwise.
@@ -271,7 +273,7 @@ def test_partial_fit_rejects_bad_shapes_and_empty_batches():
 
 
 # ---------------------------------------------------------------------------
-# Task 4: run_maritime_cv --column online — the O-online column
+# run_maritime_cv --column online — the O-online column
 # (PREREG_ONLINE.md sections 1-3): the SAME pool + permutation-null gate as
 # the soft column, then ONE chronological pass of partial_fit over the
 # train fold's stream windows, the prequential curve (window error BEFORE
