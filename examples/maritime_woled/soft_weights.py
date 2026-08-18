@@ -24,16 +24,101 @@ bitwise-equal weights regardless of ambient RNG state. (The computation
 itself is seed-free — full batch, no dropout, fixed init — but the
 seeding pins the contract, not a fixture.)
 
+INCREMENTAL TRAINING (`PREREG_ONLINE.md`). The Adam state lives in
+`SoftState(weights, m, v, t)`; `partial_fit` performs EXACTLY ONE Adam
+step on one mini-batch (per-batch-mean BCE) and returns a new state —
+the online column threads one state through the chronological windows.
+`train_soft_weights` is now the composition `init_soft_state` + `steps`
+x `partial_fit` over the full batch, pinned bitwise-identical to the
+pre-refactor trainer by test
+(`test_maritime_online.test_train_soft_weights_bitwise_matches_pre_refactor_reference`,
+which carries the pre-refactor trainer verbatim and compares on the same machine).
+
 This module owns ONLY the weights and the scoring; it knows nothing
 about folds, gates or corpora (the CV runner owns those)."""
 
 from __future__ import annotations
+
+from typing import NamedTuple
 
 SOFT_STEPS = 300
 SOFT_LR = 0.05
 SOFT_SEED = 7
 INIT_LOGIT = -2.0
 _CLAMP_EPS = 1e-7
+
+# torch.optim.Adam's own defaults (see the comment in partial_fit).
+_BETA1, _BETA2, _ADAM_EPS = 0.9, 0.999, 1e-8
+
+
+class SoftState(NamedTuple):
+    """One logit + Adam moment per body, plus the step counter `t`
+    (the number of partial_fit steps already taken — Adam's
+    bias-correction exponent). Immutable: partial_fit returns a NEW
+    state and never mutates its input."""
+
+    weights: "torch.Tensor"  # [C] logits
+    m: "torch.Tensor"        # [C] first moment
+    v: "torch.Tensor"        # [C] second moment
+    t: int
+
+
+def init_soft_state(n_bodies: int) -> SoftState:
+    """The pre-registered start: every logit at INIT_LOGIT (-2.0, every
+    clause "off"), zero moments, step counter 0."""
+    import torch
+
+    if n_bodies < 1:
+        raise ValueError(f"n_bodies must be >= 1 (got {n_bodies!r}).")
+    weights = torch.full((n_bodies,), INIT_LOGIT)
+    return SoftState(weights, torch.zeros_like(weights), torch.zeros_like(weights), 0)
+
+
+def partial_fit(state: SoftState, cover, y, *, lr: float = SOFT_LR) -> SoftState:
+    """One Adam step on one mini-batch: BCE (mean over THIS batch's rows)
+    of the noisy-OR scores against `y`, gradients into a new state.
+    `cover` is `[C, B]` bool, `y` `[B]` bool, `B >= 1`; `C` must match the
+    state. Deterministic and RNG-free — two calls with equal arguments
+    return bitwise-equal states."""
+    import torch
+
+    if cover.ndim != 2 or y.ndim != 1 or cover.shape[1] != y.shape[0]:
+        raise ValueError(
+            f"cover {tuple(cover.shape)} and y {tuple(y.shape)} must be "
+            "[C, B] and [B] over the same B pt rows."
+        )
+    if cover.shape[0] != state.weights.shape[0]:
+        raise ValueError(
+            f"cover has {cover.shape[0]} bodies but the state carries "
+            f"{state.weights.shape[0]}."
+        )
+    if y.shape[0] == 0:
+        raise ValueError("an empty mini-batch has no gradient (B must be >= 1).")
+
+    torch.use_deterministic_algorithms(True)
+
+    target = y.to(torch.get_default_dtype())
+    weights = state.weights.detach().clone().requires_grad_(True)
+    scores = soft_scores(cover, weights).clamp(_CLAMP_EPS, 1.0 - _CLAMP_EPS)
+    loss = torch.nn.functional.binary_cross_entropy(scores, target)
+    loss.backward()
+    g = weights.grad
+
+    # The Adam update rule, written out by hand with torch.optim.Adam's own
+    # defaults (beta1=0.9, beta2=0.999, eps=1e-8, no weight decay; eps added
+    # AFTER the bias-corrected sqrt, as in the reference single-tensor
+    # implementation). NOT torch.optim.Adam itself: constructing any
+    # torch.optim optimizer imports torch._dynamo, which hard-requires
+    # sympy — absent from the pinned CPU test environment this experiment
+    # runs on. Same arithmetic, no optimizer object.
+    t = state.t + 1
+    m = _BETA1 * state.m + (1.0 - _BETA1) * g
+    v = _BETA2 * state.v + (1.0 - _BETA2) * g * g
+    m_hat = m / (1.0 - _BETA1 ** t)
+    v_hat = v / (1.0 - _BETA2 ** t)
+    with torch.no_grad():
+        weights -= lr * m_hat / (v_hat.sqrt() + _ADAM_EPS)
+    return SoftState(weights.detach(), m, v, t)
 
 
 def soft_scores(cover, weights):
@@ -65,30 +150,7 @@ def train_soft_weights(cover, y, *, steps: int = SOFT_STEPS, lr: float = SOFT_LR
     torch.use_deterministic_algorithms(True)
     torch.manual_seed(seed)
 
-    target = y.to(torch.get_default_dtype())
-    weights = torch.full((cover.shape[0],), INIT_LOGIT, requires_grad=True)
-
-    # The Adam update rule, written out by hand with torch.optim.Adam's own
-    # defaults (beta1=0.9, beta2=0.999, eps=1e-8, no weight decay; eps added
-    # AFTER the bias-corrected sqrt, as in the reference single-tensor
-    # implementation). NOT torch.optim.Adam itself: constructing any
-    # torch.optim optimizer imports torch._dynamo, which hard-requires
-    # sympy — absent from the pinned CPU test environment this experiment
-    # runs on. Same arithmetic, no optimizer object.
-    beta1, beta2, eps = 0.9, 0.999, 1e-8
-    m = torch.zeros_like(weights)
-    v = torch.zeros_like(weights)
-    for step in range(1, steps + 1):
-        if weights.grad is not None:
-            weights.grad = None
-        scores = soft_scores(cover, weights).clamp(_CLAMP_EPS, 1.0 - _CLAMP_EPS)
-        loss = torch.nn.functional.binary_cross_entropy(scores, target)
-        loss.backward()
-        g = weights.grad
-        m = beta1 * m + (1.0 - beta1) * g
-        v = beta2 * v + (1.0 - beta2) * g * g
-        m_hat = m / (1.0 - beta1 ** step)
-        v_hat = v / (1.0 - beta2 ** step)
-        with torch.no_grad():
-            weights -= lr * m_hat / (v_hat.sqrt() + eps)
-    return weights.detach()
+    state = init_soft_state(cover.shape[0])
+    for _ in range(steps):
+        state = partial_fit(state, cover, y, lr=lr)
+    return state.weights
