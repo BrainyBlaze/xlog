@@ -50,7 +50,7 @@ with the published times (different hardware and grid).
 ### 4. Hypotheses (fixed before any run)
 
 - **H-O1 (primary)**: single-pass weights lose little against batch —
-  micro F1 of O-online lands in [0.70; 0.75] (degradation <= 0.04 from
+  micro F1 of O-online lands in [0.70; 0.75] (degradation `<= 0.04` from
   0.7398); if it falls below 0.70, that is an honest negative and we
   publish it.
 - **H-O2 (order)**: the reverse-chronological pass (the diagnostic
@@ -89,6 +89,14 @@ Committed-bytes md5 pins (stored verbatim under the
 |---|---|
 | `results/online_cv5/MARITIME_CV_ONLINE.json` | `f9ccbc50a4db8c1a301995f4bf235907` |
 | `results/online_reverse_cv5/MARITIME_CV_ONLINE_REVERSE.json` | `d7e1c4381c6445e1a72e8745a44cfb8c` |
+
+Formatting convention for this page (the docs build parses every
+non-README `.md` under `docs/` as MDX; `README.md` files are not parsed):
+artifact references are code spans, not links (there is no docs page to
+link to, and `mint broken-links` fails on them); and a `<` directly
+followed by a non-space character is forbidden (MDX reads it as the start
+of a JSX tag and the page fails to parse) — write such comparisons in a
+code span (`<= 0.04`) or as the Unicode sign.
 
 | column (5-fold pair-atom CV) | micro point F1 | P / R | per-fold median |
 |---|---|---|---|
