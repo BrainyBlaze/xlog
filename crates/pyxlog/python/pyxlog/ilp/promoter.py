@@ -389,8 +389,10 @@ def _scan_ambiguity(
 
         trial_source = _commit_rule(source, mask_name, rule_str)
         try:
-            # Variant of `prog`: same facts, one committed rule — reuses the
-            # provider and uploaded facts instead of a full fresh compile.
+            # Variant of `prog`: compiled on the program's existing CUDA
+            # provider instead of standing up a new one. The budget is shared,
+            # so release the previous candidate's program first.
+            trial = None
             trial = prog.compile_variant(trial_source)
             # No evaluate(): compile already executed the plan; evaluate() on a
             # fresh program only reloads the same facts and re-runs the same plan.

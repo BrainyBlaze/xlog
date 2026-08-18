@@ -92,6 +92,9 @@ def loo_holdout_f1(
                 base = pyxlog.IlpProgramFactory.compile(
                     source, device=config.device, memory_mb=config.memory_mb,
                 )
+            # Variants share the base program's device-memory budget, so free
+            # the previous fold's program before allocating the next one.
+            trial = None
             trial = base.compile_variant(trial_source)
             # No evaluate(): compile already executed the plan; evaluate() on a
             # fresh program only reloads the same facts and re-runs the same plan.
@@ -168,6 +171,9 @@ def k_fold_holdout_f1_and_variance(
                 base = pyxlog.IlpProgramFactory.compile(
                     source, device=config.device, memory_mb=config.memory_mb,
                 )
+            # Variants share the base program's device-memory budget, so free
+            # the previous fold's program before allocating the next one.
+            trial = None
             trial = base.compile_variant(trial_source)
             # No evaluate(): compile already executed the plan; evaluate() on a
             # fresh program only reloads the same facts and re-runs the same plan.

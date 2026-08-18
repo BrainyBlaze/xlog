@@ -1234,12 +1234,17 @@ class CompiledIlpProgram:
     # ------------------------------------------------------------------
 
     def compile_variant(self, source: str) -> CompiledIlpProgram:
-        """Compile ``source`` as a variant of this program.
+        """Compile ``source`` on this program's CUDA provider instead of a new one.
 
-        Reuses this program's CUDA provider and, for every fact predicate whose
-        rows and schema are unchanged, its already-uploaded fact buffers
-        (device-to-device clone). The result is an independent program in the
-        same state ``IlpProgramFactory.compile(source, ...)`` would produce.
+        The result is a separate program with its own relation store, in the
+        state ``IlpProgramFactory.compile(source, ...)`` would produce; only
+        the per-compile CUDA provider setup is skipped.
+
+        Because the provider is shared, so are its device-memory budget, its
+        streams and its host-transfer counters (a variant's ``fact_exists``
+        bumps the counter this program's ``d2h_transfer_count`` reads).
+        Relation overrides uploaded with ``put_relation`` are NOT carried over.
+        The variant uses this program's ``max_active_rules``.
         """
         ...
 
@@ -1247,7 +1252,8 @@ class CompiledIlpProgram:
         """Wall-clock breakdown of the compile that produced this program.
 
         Keys: ``provider`` (absent for variants), ``frontend``, ``facts``,
-        ``edb_snapshot``, ``execute``; values in milliseconds.
+        ``execute``; values in milliseconds. Diagnostic only — the set of
+        phase names may change.
         """
         ...
 
