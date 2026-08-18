@@ -58,6 +58,14 @@ with the published times (different hardware and grid).
   the order is small; no direction is declared.
 - **H-O3**: the prequential curve decreases along the stream (learning
   actually happens).
+  *Operationalization — added at reporting time, not pre-registered
+  (recorded here rather than silently amended): per fold, the mean
+  window `error_rate` over the first half of the windows is greater than
+  the mean over the second half (windows split at `stream_windows // 2`,
+  the odd window going to the second half). The verdict below holds
+  under this criterion on all 5 folds in both stream orders, and it
+  holds unchanged under the pooled error (sum of `errors` over sum of
+  `n_pt` per half) as well.*
 
 ### 5. Prohibitions
 
@@ -112,8 +120,11 @@ code span (`<= 0.04`) or as the Unicode sign.
   micro 2,300 / 339 / 1,279).
 - **H-O2: CONFIRMED** — |chrono − reverse| = 0.0000 < 0.02.
 - **H-O3: CONFIRMED** — the prequential error rate decreases on all
-  5 folds (first-half vs second-half window means, e.g. fold 0:
-  0.0078 -> 0.0036).
+  5 folds (first-half vs second-half window means, criterion stated in
+  section 4; chrono: 0.0078 -> 0.0036, 0.0089 -> 0.0036, 0.0081 ->
+  0.0041, 0.0070 -> 0.0039, 0.0102 -> 0.0032; reverse: 0.0123 -> 0.0035,
+  0.0141 -> 0.0034, 0.0130 -> 0.0038, 0.0130 -> 0.0042, 0.0134 -> 0.0040;
+  the pooled-error halves give the same four decimals on every fold).
 
 ### The identity of predictions is a finding, not a failure to run
 
