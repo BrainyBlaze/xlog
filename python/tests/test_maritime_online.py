@@ -121,35 +121,103 @@ def _planted_cover_and_labels(torch, n_pt=40):
     return cover, y
 
 
-def test_train_soft_weights_bitwise_matches_pre_refactor_snapshot():
-    # The regression pin for the batch column: these values were computed
-    # by the PRE-REFACTOR train_soft_weights (commit 2c9eeade) on the
-    # planted fixture; the refactored wrapper must reproduce them bitwise
-    # (float32 round-trips through these double reprs exactly).
+def _pre_refactor_soft_scores(torch, cover, weights):
+    """The reference `soft_scores` — verbatim from the pre-refactor module
+    (`git show a79c16db:examples/maritime_woled/soft_weights.py`)."""
+    active = torch.sigmoid(weights).unsqueeze(1) * cover.to(torch.get_default_dtype())
+    return 1.0 - torch.prod(1.0 - active, dim=0)
+
+
+def _pre_refactor_train_soft_weights(torch, cover, y, *, steps=300, lr=0.05, seed=7):
+    """THE REFERENCE: the pre-refactor batch trainer, copied verbatim from
+    `git show a79c16db:examples/maritime_woled/soft_weights.py`
+    (constants inlined: INIT_LOGIT -2.0, clamp eps 1e-7, Adam defaults).
+    Kept here on purpose so the refactored trainer is compared against
+    the ORIGINAL ARITHMETIC ON THE SAME MACHINE — a platform-independent
+    statement (a literal bit-pin taken on one machine is not: the CI
+    Linux runner rounds the last float32 ulp differently, PR #270 review)."""
+    torch.use_deterministic_algorithms(True)
+    torch.manual_seed(seed)
+
+    target = y.to(torch.get_default_dtype())
+    weights = torch.full((cover.shape[0],), -2.0, requires_grad=True)
+
+    beta1, beta2, eps = 0.9, 0.999, 1e-8
+    m = torch.zeros_like(weights)
+    v = torch.zeros_like(weights)
+    for step in range(1, steps + 1):
+        if weights.grad is not None:
+            weights.grad = None
+        scores = _pre_refactor_soft_scores(torch, cover, weights).clamp(1e-7, 1.0 - 1e-7)
+        loss = torch.nn.functional.binary_cross_entropy(scores, target)
+        loss.backward()
+        g = weights.grad
+        m = beta1 * m + (1.0 - beta1) * g
+        v = beta2 * v + (1.0 - beta2) * g * g
+        m_hat = m / (1.0 - beta1 ** step)
+        v_hat = v / (1.0 - beta2 ** step)
+        with torch.no_grad():
+            weights -= lr * m_hat / (v_hat.sqrt() + eps)
+    return weights.detach()
+
+
+def test_train_soft_weights_bitwise_matches_pre_refactor_reference():
+    # The regression pin for the batch column (PREREG_SOFT section (b)):
+    # the refactored trainer (init_soft_state + steps x partial_fit) must
+    # reproduce the pre-refactor trainer BITWISE. Both run here, on the
+    # same machine, so the comparison holds on every platform.
     torch = pytest.importorskip("torch")
     from soft_weights import train_soft_weights
 
     cover, y = _planted_cover_and_labels(torch)
-    w50 = train_soft_weights(cover, y, steps=50)
+    for steps in (50, 300):
+        got = train_soft_weights(cover, y, steps=steps)
+        want = _pre_refactor_train_soft_weights(torch, cover, y, steps=steps)
+        assert torch.equal(got, want), (steps, got.tolist(), want.tolist())
+    # and the default step count is the pre-registered 300
     assert torch.equal(
-        w50, torch.tensor([0.30746927857398987, -1.1695338487625122])
-    )
-    w300 = train_soft_weights(cover, y)
-    assert torch.equal(
-        w300, torch.tensor([3.59657883644104, -4.932765960693359])
+        train_soft_weights(cover, y),
+        _pre_refactor_train_soft_weights(torch, cover, y, steps=300),
     )
 
 
-def test_train_soft_weights_equals_partial_fit_composition():
+def test_train_soft_weights_close_to_author_machine_values_smoke():
+    # NOT a bitwise pin (that is the reference test above): these are the
+    # values the pre-refactor trainer produced on the author's machine
+    # (Windows x86-64, torch 2.9.1+cpu); other platforms round the last
+    # float32 ulp differently (the CI Linux runner did, PR #270), so this
+    # is only a gross-drift smoke against a wrong lr/steps/init/loss.
     torch = pytest.importorskip("torch")
-    from soft_weights import init_soft_state, partial_fit, train_soft_weights
+    from soft_weights import train_soft_weights
+
+    cover, y = _planted_cover_and_labels(torch)
+    assert torch.allclose(
+        train_soft_weights(cover, y, steps=50),
+        torch.tensor([0.30746927857398987, -1.1695338487625122]),
+        rtol=0.0, atol=1e-4,
+    )
+    assert torch.allclose(
+        train_soft_weights(cover, y),
+        torch.tensor([3.59657883644104, -4.932765960693359]),
+        rtol=0.0, atol=1e-4,
+    )
+
+
+def test_partial_fit_composition_matches_pre_refactor_reference():
+    # partial_fit on its own (not through the train_soft_weights wrapper):
+    # init + N x partial_fit over the full batch is the pre-refactor
+    # trainer's N-th iterate, bitwise, and the step counter advances.
+    torch = pytest.importorskip("torch")
+    from soft_weights import init_soft_state, partial_fit
 
     cover, y = _planted_cover_and_labels(torch)
     state = init_soft_state(cover.shape[0])
     for _ in range(50):
         state = partial_fit(state, cover, y)
     assert state.t == 50
-    assert torch.equal(state.weights, train_soft_weights(cover, y, steps=50))
+    assert torch.equal(
+        state.weights, _pre_refactor_train_soft_weights(torch, cover, y, steps=50)
+    )
 
 
 def test_partial_fit_state_after_n_windows_is_bitwise_deterministic():

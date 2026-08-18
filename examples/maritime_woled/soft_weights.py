@@ -31,7 +31,8 @@ the online column threads one state through the chronological windows.
 `train_soft_weights` is now the composition `init_soft_state` + `steps`
 x `partial_fit` over the full batch, pinned bitwise-identical to the
 pre-refactor trainer by test
-(`test_maritime_online.test_train_soft_weights_bitwise_matches_pre_refactor_snapshot`).
+(`test_maritime_online.test_train_soft_weights_bitwise_matches_pre_refactor_reference`,
+which carries the pre-refactor trainer verbatim and compares on the same machine).
 
 This module owns ONLY the weights and the scoring; it knows nothing
 about folds, gates or corpora (the CV runner owns those)."""
