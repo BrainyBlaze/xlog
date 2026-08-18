@@ -402,18 +402,33 @@ def test_cv_online_prequential_curve_has_one_entry_per_window(tmp_path):
         assert sum(e["n_pt"] for e in record["prequential_curve"]) == record["n_train_pt"]
 
 
-def test_cv_online_reverse_runs_and_is_valid(tmp_path):
+def test_cv_online_reverse_pass_is_valid_and_differs_from_chrono(tmp_path):
+    # H-O2's diagnostic. With the default 1000-row window the whole train
+    # side of this fixture is ONE window and per-batch-mean BCE is
+    # invariant to the row order, so reverse == chrono bitwise and a
+    # runner that ignored --stream-order would pass a validity-only check
+    # (PR #270 review, section 8). A 7-row window makes the pass genuinely
+    # order-dependent: the reverse weights must differ from chrono's.
     pytest.importorskip("torch")
+    window = ["--stream-window", "7"]
+    chrono = _run_cv(tmp_path, ["--column", "online"] + window, out_name="chrono7.json")
     result = _run_cv(
-        tmp_path, ["--column", "online", "--stream-order", "reverse"],
-        out_name="reverse.json",
+        tmp_path, ["--column", "online", "--stream-order", "reverse"] + window,
+        out_name="reverse7.json",
     )
     assert result["params"]["stream_order"] == "reverse"
-    for record in result["folds"]:
+    assert result["params"]["stream_window"] == 7
+    for record, chrono_record in zip(result["folds"], chrono["folds"]):
         assert record["stream_order"] == "reverse"
         assert record["stream_windows"] == len(record["prequential_curve"])
+        assert record["stream_windows"] == chrono_record["stream_windows"]
         point = record["scoring"]["point"]
         assert 0.0 <= point["f1"] <= 1.0
+        # the same pool and gate as the chrono pass ...
+        assert record["n_bodies_gated"] == chrono_record["n_bodies_gated"]
+        assert record["null_summary"] == chrono_record["null_summary"]
+        # ... but a different pass: the learned weights are not the chrono ones
+        assert record["weights_top10"] != chrono_record["weights_top10"]
 
 
 def test_cv_online_two_runs_identical(tmp_path):
