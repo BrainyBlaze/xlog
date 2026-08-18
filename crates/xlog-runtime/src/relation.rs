@@ -46,6 +46,12 @@ pub struct RelationStore {
     provider: Arc<CudaKernelProvider>,
     /// Map of relation names to GPU buffers
     relations: HashMap<String, VersionedCudaBuffer>,
+    /// Monotonic semantic-mutation epoch used by staged transactions.
+    ///
+    /// Per-name versions are not sufficient to detect clear-and-reinsert ABA:
+    /// a replacement can return to version one while owning different device
+    /// allocations. This epoch never changes for read-only access or reserve.
+    mutation_epoch: u64,
 }
 
 struct VersionedCudaBuffer {
@@ -59,7 +65,20 @@ impl RelationStore {
         Self {
             provider,
             relations: HashMap::new(),
+            mutation_epoch: 0,
         }
+    }
+
+    fn advance_mutation_epoch(&mut self) {
+        self.mutation_epoch = self
+            .mutation_epoch
+            .checked_add(1)
+            .expect("relation-store mutation epoch exhausted");
+    }
+
+    /// Snapshot the semantic store revision for an optimistic transaction.
+    pub(crate) fn mutation_epoch(&self) -> u64 {
+        self.mutation_epoch
     }
 
     /// Get a reference to a relation by name
@@ -81,6 +100,9 @@ impl RelationStore {
     /// # Returns
     /// `Some(&mut CudaBuffer)` if the relation exists, `None` otherwise
     pub fn get_mut(&mut self, name: &str) -> Option<&mut CudaBuffer> {
+        if self.relations.contains_key(name) {
+            self.advance_mutation_epoch();
+        }
         self.relations.get_mut(name).map(|e| {
             // Any mutable access may change the contents; bump the version so cached
             // indexes can be invalidated conservatively.
@@ -117,6 +139,7 @@ impl RelationStore {
     /// owns. Call [`Self::try_reserve_relations`] before a sequence of inserts
     /// when that sequence must not grow the relation map.
     pub fn put_owned(&mut self, name: String, buffer: CudaBuffer) {
+        self.advance_mutation_epoch();
         let version = self
             .relations
             .get(name.as_str())
@@ -160,6 +183,7 @@ impl RelationStore {
             let buffer = self.provider.create_empty_buffer(schema.clone())?;
             self.relations
                 .insert(name.to_string(), VersionedCudaBuffer { buffer, version: 1 });
+            self.advance_mutation_epoch();
         }
         Ok(&self
             .relations
@@ -190,6 +214,7 @@ impl RelationStore {
             self.relations
                 .insert(name.to_string(), VersionedCudaBuffer { buffer, version: 1 });
         }
+        self.advance_mutation_epoch();
         let entry = self
             .relations
             .get_mut(name)
@@ -217,7 +242,11 @@ impl RelationStore {
     /// # Returns
     /// `Some(CudaBuffer)` if the relation existed, `None` otherwise
     pub fn remove(&mut self, name: &str) -> Option<CudaBuffer> {
-        self.relations.remove(name).map(|e| e.buffer)
+        let removed = self.relations.remove(name).map(|e| e.buffer);
+        if removed.is_some() {
+            self.advance_mutation_epoch();
+        }
+        removed
     }
 
     /// Clear all relations from the store
@@ -225,7 +254,10 @@ impl RelationStore {
     /// This removes all stored relations. The GPU memory will be freed
     /// when the CudaBuffer instances are dropped.
     pub fn clear(&mut self) {
-        self.relations.clear();
+        if !self.relations.is_empty() {
+            self.relations.clear();
+            self.advance_mutation_epoch();
+        }
     }
 
     /// Get the number of relations in the store
@@ -318,6 +350,34 @@ mod tests {
         provider
             .create_buffer_from_slices(&slices, schema)
             .expect("buffer")
+    }
+
+    #[test]
+    fn mutation_epoch_detects_clear_reinsert_aba_without_counting_reserve() {
+        let Some((mut store, provider)) = setup_store() else {
+            return;
+        };
+        let schema = test_schema();
+        assert_eq!(store.mutation_epoch(), 0);
+        store
+            .try_reserve_relations(4)
+            .expect("reserve must not be a semantic mutation");
+        assert_eq!(store.mutation_epoch(), 0);
+
+        store.put("rows", make_buffer(&provider, schema.clone(), 1));
+        let after_first_put = store.mutation_epoch();
+        assert_eq!(after_first_put, 1);
+        assert_eq!(store.version("rows"), Some(1));
+
+        store.clear();
+        let after_clear = store.mutation_epoch();
+        assert!(after_clear > after_first_put);
+        store.put("rows", make_buffer(&provider, schema, 1));
+        assert_eq!(store.version("rows"), Some(1));
+        assert!(
+            store.mutation_epoch() > after_clear,
+            "clear-and-reinsert must not recreate the original transaction revision"
+        );
     }
 
     #[test]

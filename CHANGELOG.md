@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- *(gpu)* [**breaking**] bind reusable materialized stores and retained session runtimes to the exact compiled `LogicProgram`. Cached evaluation and relation-delta cache parameters now use the opaque `LogicMaterializedStore` returned by `evaluate_with_relation_store_and_cache` or `evaluate_with_session_runtime`; use `as_relation_store` for read-only result inspection. Raw `RelationStore` values remain supported as authoritative input stores but can no longer be supplied as trusted derived caches.
+
 ## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.11.0...xlog-cli-v0.12.0) - 2026-08-06
 
 ### Added

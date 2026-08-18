@@ -26,10 +26,10 @@ use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, InMemorySink, LogAction,
-    LogResult, LoggingResource, LoggingSink, StreamPool, XlogDeviceRuntime,
+    AsyncCudaResource, DeviceMemoryResource, DirectCudaResource, GlobalDeviceBudget, InMemorySink,
+    LogAction, LogResult, LoggingResource, LoggingSink, StreamPool, XlogDeviceRuntime,
 };
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{dedup_kernels, CudaDevice, CudaKernelProvider, GpuMemoryManager, DEDUP_MODULE};
 
 const RUNTIME_LIMIT: usize = 256 * 1024;
 const LOCAL_BUDGET: u64 = 1024 * 1024;
@@ -40,6 +40,25 @@ type RuntimeProviderFixture = (
     Arc<XlogDeviceRuntime>,
     Arc<InMemorySink>,
 );
+
+fn async_runtime_for(
+    device: &Arc<CudaDevice>,
+    device_ordinal: u32,
+    limit: usize,
+) -> Arc<XlogDeviceRuntime> {
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(device), device_ordinal, Arc::clone(&pool)),
+    );
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(async_resource, limit));
+    Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(device),
+        device_ordinal,
+        pool,
+        budget,
+    ))
+}
 
 fn build_runtime_provider() -> Option<RuntimeProviderFixture> {
     let device = CudaDevice::new(0).ok().map(Arc::new)?;
@@ -212,5 +231,200 @@ fn provider_with_runtime_rejects_manager_without_runtime() {
             "expected XlogError::Kernel from with_runtime on a manager without runtime, got {:?}",
             other.is_err()
         ),
+    }
+}
+
+#[test]
+fn runtime_overlay_shares_budget_accounting_in_both_allocation_orders() {
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+    let parent = Arc::new(GpuMemoryManager::new(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(1024),
+    ));
+    let runtime = async_runtime_for(&device, 0, 1024);
+    let overlay = parent
+        .with_runtime_overlay(Arc::clone(&runtime))
+        .expect("same-device async runtime must produce an overlay");
+
+    assert!(Arc::ptr_eq(parent.device(), overlay.device()));
+    assert!(Arc::ptr_eq(
+        overlay.runtime().expect("overlay runtime"),
+        &runtime
+    ));
+    assert_eq!(parent.budget_limit_bytes(), 1024);
+    assert_eq!(overlay.budget_limit_bytes(), 1024);
+
+    let parent_first = parent.alloc::<u8>(128).expect("parent allocation");
+    let overlay_second = overlay.alloc::<u8>(256).expect("overlay allocation");
+    for manager in [&parent, &overlay] {
+        assert_eq!(manager.allocated_bytes(), 384);
+        assert_eq!(manager.remaining_bytes(), 640);
+        assert_eq!(manager.peak_bytes(), 384);
+        assert_eq!(manager.alloc_count(), 2);
+    }
+    assert!(
+        overlay.check_budget(641).is_err(),
+        "the overlay must include parent allocations in admission checks"
+    );
+
+    drop(parent_first);
+    assert_eq!(parent.allocated_bytes(), 256);
+    assert_eq!(overlay.allocated_bytes(), 256);
+    drop(overlay_second);
+    runtime.reap_pending().expect("reap first allocation order");
+    assert_eq!(parent.allocated_bytes(), 0);
+    assert_eq!(overlay.remaining_bytes(), 1024);
+
+    parent.reset_peak();
+    parent.reset_alloc_count();
+    let overlay_first = overlay.alloc::<u8>(192).expect("overlay allocation");
+    let parent_second = parent.alloc::<u8>(64).expect("parent allocation");
+    for manager in [&parent, &overlay] {
+        assert_eq!(manager.allocated_bytes(), 256);
+        assert_eq!(manager.remaining_bytes(), 768);
+        assert_eq!(manager.peak_bytes(), 256);
+        assert_eq!(manager.alloc_count(), 2);
+    }
+
+    drop(overlay_first);
+    assert_eq!(parent.allocated_bytes(), 64);
+    assert_eq!(overlay.allocated_bytes(), 64);
+    drop(parent_second);
+    runtime
+        .reap_pending()
+        .expect("reap second allocation order");
+    assert_eq!(parent.allocated_bytes(), 0);
+    assert_eq!(overlay.remaining_bytes(), 1024);
+    assert_eq!(parent.peak_bytes(), 256);
+    assert_eq!(overlay.alloc_count(), 2);
+}
+
+#[test]
+fn runtime_overlay_rejects_identity_ordinal_and_tracking_mismatches_without_mutation() {
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+    let parent = Arc::new(GpuMemoryManager::new(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(1024),
+    ));
+    let before = (
+        parent.allocated_bytes(),
+        parent.remaining_bytes(),
+        parent.peak_bytes(),
+        parent.alloc_count(),
+    );
+
+    let Some(other_device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+    let other_runtime = async_runtime_for(&other_device, 0, 1024);
+    assert!(parent.with_runtime_overlay(other_runtime).is_err());
+
+    let wrong_ordinal_runtime = async_runtime_for(&device, 1, 1024);
+    assert!(parent.with_runtime_overlay(wrong_ordinal_runtime).is_err());
+
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let direct: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(DirectCudaResource::new(Arc::clone(&device), 0));
+    let direct_runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        pool,
+        direct,
+    ));
+    assert!(!direct_runtime.supports_block_use_tracking());
+    assert!(parent.with_runtime_overlay(direct_runtime).is_err());
+
+    assert_eq!(
+        (
+            parent.allocated_bytes(),
+            parent.remaining_bytes(),
+            parent.peak_bytes(),
+            parent.alloc_count(),
+        ),
+        before,
+        "validation failures must not mutate the parent ledger"
+    );
+    assert!(parent.runtime().is_none());
+}
+
+#[test]
+fn runtime_memory_view_preserves_loaded_module_handles_and_runs_kernels() {
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+    let parent_memory = Arc::new(GpuMemoryManager::new(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(16 * 1024 * 1024),
+    ));
+    let original = CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&parent_memory))
+        .expect("load provider modules once");
+    let handle_before = format!(
+        "{:?}",
+        device
+            .inner()
+            .get_func(DEDUP_MODULE, dedup_kernels::MARK_DUPLICATES)
+            .expect("dedup handle before view")
+    );
+    assert!(original
+        .with_runtime_memory_view(Arc::clone(&parent_memory))
+        .is_err());
+
+    let wrong_ordinal_runtime = async_runtime_for(&device, 1, 16 * 1024 * 1024);
+    let wrong_ordinal_memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(16 * 1024 * 1024),
+        wrong_ordinal_runtime,
+    ));
+    assert!(original
+        .with_runtime_memory_view(wrong_ordinal_memory)
+        .is_err());
+
+    let other_device = Arc::new(CudaDevice::new(0).expect("second CUDA context"));
+    let other_runtime = async_runtime_for(&other_device, 0, 16 * 1024 * 1024);
+    let other_memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&other_device),
+        MemoryBudget::with_limit(16 * 1024 * 1024),
+        other_runtime,
+    ));
+    assert!(original.with_runtime_memory_view(other_memory).is_err());
+
+    let runtime = async_runtime_for(&device, 0, 16 * 1024 * 1024);
+    let overlay = parent_memory
+        .with_runtime_overlay(runtime)
+        .expect("same-device overlay");
+    let view = original
+        .with_runtime_memory_view(Arc::clone(&overlay))
+        .expect("no-reload runtime memory view");
+
+    assert!(Arc::ptr_eq(original.device(), view.device()));
+    assert!(Arc::ptr_eq(view.memory(), &overlay));
+    let handle_after = format!(
+        "{:?}",
+        device
+            .inner()
+            .get_func(DEDUP_MODULE, dedup_kernels::MARK_DUPLICATES)
+            .expect("dedup handle after view")
+    );
+    assert_eq!(
+        handle_after, handle_before,
+        "creating the view must not replace the already-loaded CUDA module"
+    );
+
+    let schema = Schema::new(vec![("value".to_string(), ScalarType::U32)]);
+    let input = [3u32, 1, 1, 2];
+    for provider in [&original, &view] {
+        let buffer = provider
+            .create_buffer_from_slice(&input, schema.clone())
+            .expect("upload input");
+        let deduped = provider.dedup_full_row(&buffer).expect("run dedup kernel");
+        let mut values = provider
+            .download_column::<u32>(&deduped, 0)
+            .expect("download deduplicated values");
+        values.sort_unstable();
+        assert_eq!(values, vec![1, 2, 3]);
     }
 }

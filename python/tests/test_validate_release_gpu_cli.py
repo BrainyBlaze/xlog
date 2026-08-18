@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 
 def test_validate_release_gpu_help() -> None:
@@ -27,3 +28,13 @@ def test_validate_release_gpu_dry_run() -> None:
     assert "cargo test --locked --release -p xlog-cuda --lib" in proc.stdout
     assert "cargo test -p xlog-cuda-tests --test certification_suite" in proc.stdout
     assert "Dry run complete." in proc.stdout
+
+
+def test_resident_runtime_gate_count_matches_current_module() -> None:
+    validator = Path("scripts/validate_release_gpu.sh").read_text()
+    workflow = Path(".github/workflows/cuda-ci.yml").read_text()
+
+    assert 'run_exact_rust_gate "resident graph runtime module" 22' in validator
+    assert 'run_exact_gate "resident graph runtime module" 22' in workflow
+    assert '"resident graph runtime module" 20' not in validator
+    assert '"resident graph runtime module" 20' not in workflow

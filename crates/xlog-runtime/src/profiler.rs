@@ -150,10 +150,21 @@ pub struct ExecutionStats {
     /// Factorized recursive-delta dispatches installed in the semi-naive
     /// fixpoint.
     pub factorized_delta_dispatch_count: u64,
+    /// Scan operations in embedded binary fallbacks that are logically
+    /// equivalent to successful ChainJoin specializations. These operations
+    /// did not execute and are therefore excluded from `strata[*].ops`.
+    pub chain_fallback_scan_equivalents: u64,
+    /// Filter operations in embedded binary fallbacks that are logically
+    /// equivalent to successful ChainJoin specializations. These operations
+    /// did not execute and are therefore excluded from `strata[*].ops`.
+    pub chain_fallback_filter_equivalents: u64,
     /// WCOJ pipeline errors converted into binary-join declines. 0 is
     /// healthy; a nonzero value signals a regressed WCOJ pipeline hiding
     /// behind the silent-fallback contract.
     pub wcoj_error_decline_count: u64,
+    /// Selection, transfer, and device-timing evidence for an attempted
+    /// resident conditional-graph execution.
+    pub resident_graph: Option<crate::resident_graph::ResidentGraphExecutionStats>,
 }
 
 impl ExecutionStats {
@@ -210,6 +221,10 @@ impl ExecutionStats {
             self.factorized_delta_dispatch_count,
             self.wcoj_error_decline_count,
         ));
+        output.push_str(&format!(
+            "chain fallback equivalents: scans {}, filters {}\n",
+            self.chain_fallback_scan_equivalents, self.chain_fallback_filter_equivalents
+        ));
 
         output
     }
@@ -231,8 +246,8 @@ impl ExecutionStats {
             )
         }).collect();
 
-        format!(
-            r#"{{"total_ms":{},"strata":[{}],"peak_memory_mb":{},"budget_memory_mb":{},"output_rows":{},"wcoj":{{"triangle_dispatch":{},"four_cycle_dispatch":{},"groupby_fusion_dispatch":{},"free_join_dispatch":{},"factorized_delta_dispatch":{},"error_decline":{}}}}}"#,
+        let mut json = format!(
+            r#"{{"total_ms":{},"strata":[{}],"peak_memory_mb":{},"budget_memory_mb":{},"output_rows":{},"wcoj":{{"triangle_dispatch":{},"four_cycle_dispatch":{},"groupby_fusion_dispatch":{},"free_join_dispatch":{},"factorized_delta_dispatch":{},"chain_fallback_scan_equivalents":{},"chain_fallback_filter_equivalents":{},"error_decline":{}}}}}"#,
             total_ms,
             strata_json.join(","),
             self.peak_memory_bytes / (1024 * 1024),
@@ -243,8 +258,55 @@ impl ExecutionStats {
             self.wcoj_groupby_fusion_dispatch_count,
             self.free_join_dispatch_count,
             self.factorized_delta_dispatch_count,
+            self.chain_fallback_scan_equivalents,
+            self.chain_fallback_filter_equivalents,
             self.wcoj_error_decline_count,
-        )
+        );
+        if let Some(resident) = &self.resident_graph {
+            json.pop();
+            let selection = match resident.selection {
+                crate::resident_graph::ResidentGraphSelectionKind::ExistingGpu => "existing_gpu",
+                crate::resident_graph::ResidentGraphSelectionKind::ResidentConditionalGraph => {
+                    "resident_conditional_graph"
+                }
+            };
+            let decline = resident
+                .decline
+                .as_ref()
+                .map(|reason| format!(r#","resident_graph_declined":"{reason:?}""#))
+                .unwrap_or_default();
+            json.push_str(&format!(
+                r#","resident_graph":{{"selection":"{}","conditional_graph_launches":{},"terminal_synchronizations":{},"host_iterations":{},"host_allocations":{},"host_status_injections":{},"deterministic_d2h_violations":{},"host_dispatched_scan_ops":{},"host_dispatched_filter_ops":{},"device_scan_invocations":{},"device_filter_invocations":{},"semantic_scan_invocations":{},"semantic_filter_invocations":{},"staged_store_mutations":{},"deferred_profile":{{"timed_scan_filter_invocations":{},"device_elapsed_ns":{},"final_sync_misattributed_ns":{}}},"core_transfers":{{"tracked_htod_calls":{},"tracked_htod_bytes":{},"tracked_dtoh_calls":{},"tracked_dtoh_bytes":{},"provider_dtoh_calls":{},"untracked_metadata_dtoh_calls":{}}},"final_observation":{{"dtoh_calls":{},"dtoh_bytes":{},"pinned_receipts":{}}}{}}}}}"#,
+                selection,
+                resident.conditional_graph_launches,
+                resident.terminal_synchronizations,
+                resident.host_iterations,
+                resident.host_allocations,
+                resident.host_status_injections,
+                resident.deterministic_d2h_violations,
+                resident.host_dispatched_scan_ops,
+                resident.host_dispatched_filter_ops,
+                resident.device_scan_invocations,
+                resident.device_filter_invocations,
+                resident.semantic_scan_invocations,
+                resident.semantic_filter_invocations,
+                resident.staged_store_mutations,
+                resident.deferred_profile.timed_scan_filter_invocations,
+                resident.deferred_profile.device_elapsed_ns,
+                resident.deferred_profile.final_sync_misattributed_ns,
+                resident.core_transfers.tracked_htod_calls,
+                resident.core_transfers.tracked_htod_bytes,
+                resident.core_transfers.tracked_dtoh_calls,
+                resident.core_transfers.tracked_dtoh_bytes,
+                resident.core_transfers.provider_dtoh_calls,
+                resident.core_transfers.untracked_metadata_dtoh_calls,
+                resident.final_observation.dtoh_calls,
+                resident.final_observation.dtoh_bytes,
+                resident.final_observation.pinned_receipts,
+                decline,
+            ));
+        }
+        json
     }
 }
 
@@ -637,6 +699,45 @@ fn truncate_name(name: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_chain_equivalents_and_resident_semantic_counts_are_serialized_separately() {
+        let mut resident = crate::resident_graph::ResidentGraphExecutionStats::declined(
+            crate::resident_graph::ResidentGraphDeclineReason::FullStoreRequested,
+        );
+        resident.device_scan_invocations = 17;
+        resident.device_filter_invocations = 19;
+        resident.semantic_scan_invocations = 13;
+        resident.semantic_filter_invocations = 11;
+        let stats = ExecutionStats {
+            chain_fallback_scan_equivalents: 2,
+            chain_fallback_filter_equivalents: 3,
+            resident_graph: Some(resident),
+            ..ExecutionStats::default()
+        };
+
+        let human = stats.format_human();
+        assert!(
+            human.contains("chain fallback equivalents: scans 2, filters 3"),
+            "{human}"
+        );
+        let json = stats.format_json();
+        assert!(
+            json.contains("\"chain_fallback_scan_equivalents\":2"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"chain_fallback_filter_equivalents\":3"),
+            "{json}"
+        );
+        assert!(json.contains("\"device_scan_invocations\":17"), "{json}");
+        assert!(json.contains("\"device_filter_invocations\":19"), "{json}");
+        assert!(json.contains("\"semantic_scan_invocations\":13"), "{json}");
+        assert!(
+            json.contains("\"semantic_filter_invocations\":11"),
+            "{json}"
+        );
+    }
 
     // ============== OpStats Tests ==============
 

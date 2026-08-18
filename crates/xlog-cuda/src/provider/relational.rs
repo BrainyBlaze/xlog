@@ -236,6 +236,9 @@ impl super::CudaKernelProvider {
     /// # Errors
     /// Returns `XlogError::Kernel` if kernel execution fails
     pub fn dedup(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
+        if !input.canonical_full_row_set_certified() {
+            self.validated_logical_row_count(input)?;
+        }
         if input.is_empty() {
             return self.create_empty_buffer(input.schema().clone());
         }
@@ -248,7 +251,9 @@ impl super::CudaKernelProvider {
                 if rows == 0 {
                     return self.create_empty_buffer(input.schema().clone());
                 }
-                return self.buffer_from_columns(Vec::new(), 1, input.schema().clone());
+                let mut result = self.buffer_from_columns(Vec::new(), 1, input.schema().clone())?;
+                result.certify_canonical_full_row_set();
+                return Ok(result);
             }
             return Err(XlogError::Kernel(
                 "Dedup requires at least one key column".to_string(),
@@ -281,6 +286,9 @@ impl super::CudaKernelProvider {
     /// # Returns
     /// A buffer containing one row per duplicate-equivalence class
     pub fn dedup_sorted(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
+        if !input.canonical_full_row_set_certified() {
+            self.validated_logical_row_count(input)?;
+        }
         if input.is_empty() {
             return self.create_empty_buffer(input.schema().clone());
         }
@@ -299,17 +307,11 @@ impl super::CudaKernelProvider {
         }
 
         if Self::is_full_row_key(key_cols, input.arity()) && input.arity() > 1 {
-            let mut result = self.dedup_full_row_deterministic(input)?;
-            result.certify_canonical_full_row_set();
-            return Ok(result);
+            return self.dedup_full_row_deterministic(input);
         }
 
         if input.num_rows() <= 1 {
-            let mut result = self.clone_buffer(input)?;
-            if Self::is_full_row_key(key_cols, input.arity()) {
-                result.certify_canonical_full_row_set();
-            }
-            return Ok(result);
+            return self.clone_buffer(input);
         }
 
         if input.num_rows() > u32::MAX as u64 {
@@ -447,16 +449,12 @@ impl super::CudaKernelProvider {
         self.device.synchronize()?;
 
         let d_out_count = self.capture_compact_count(&d_prefix_sum, &d_unique_mask, num_rows)?;
-        let mut result = self.compact_buffer_by_device_mask_device_count(
+        self.compact_buffer_by_device_mask_device_count(
             input,
             &d_unique_mask,
             &d_prefix_sum,
             d_out_count,
-        )?;
-        if Self::is_full_row_key(key_cols, input.arity()) {
-            result.certify_canonical_full_row_set();
-        }
-        Ok(result)
+        )
     }
     /// Compute union of two buffers (GPU-native, deduped)
     ///
@@ -870,6 +868,11 @@ impl super::CudaKernelProvider {
                     first.schema(),
                     other.schema()
                 )));
+            }
+        }
+        for input in inputs {
+            if !input.canonical_full_row_set_certified() {
+                self.validated_logical_row_count(input)?;
             }
         }
 
@@ -1453,6 +1456,9 @@ impl super::CudaKernelProvider {
     /// pipeline; single-column callers that want totalOrder semantics
     /// must call `dedup_full_row` directly.
     pub fn dedup_full_row(&self, input: &CudaBuffer) -> Result<CudaBuffer> {
+        if !input.canonical_full_row_set_certified() {
+            self.validated_logical_row_count(input)?;
+        }
         // Env-gated recorded dispatch. `dedup_full_row_recorded`
         // requires every column to be U32 / Symbol;
         // mixed-type schemas fall through to the legacy path.
@@ -1554,7 +1560,11 @@ impl super::CudaKernelProvider {
         // path below routes through); checked here too so the small-row
         // path and any future direct caller stay fail-closed.
         self.ensure_column_bytes_kernel_indexable(input)?;
-        let row_count = self.device_row_count(input)?;
+        let row_count = if input.canonical_full_row_set_certified() {
+            self.device_row_count(input)?
+        } else {
+            self.validated_logical_row_count(input)?
+        };
         if row_count == 0 {
             return self.create_empty_buffer(input.schema().clone());
         }
@@ -6902,6 +6912,9 @@ impl super::CudaKernelProvider {
         input: &CudaBuffer,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
+        if !input.canonical_full_row_set_certified() {
+            self.validated_logical_row_count(input)?;
+        }
         let runtime = self.memory.runtime().ok_or_else(|| {
             XlogError::Kernel(
                 "dedup_full_row_recorded requires a runtime-backed GpuMemoryManager".to_string(),

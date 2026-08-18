@@ -225,6 +225,19 @@ impl std::error::Error for ResourceError {}
 
 pub type ResourceResult<T> = std::result::Result<T, ResourceError>;
 
+/// Exact byte-accounting snapshot exposed by a reservable resource decorator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceBudgetSnapshot {
+    pub limit: usize,
+    pub reserved: usize,
+}
+
+impl ResourceBudgetSnapshot {
+    pub fn remaining(self) -> usize {
+        self.limit.saturating_sub(self.reserved)
+    }
+}
+
 /// Stream-ordered device memory resource. Implementations:
 ///   * [`crate::device_runtime::direct::DirectCudaResource`] —
 ///     cudarc default (non-pooled) backend; **candidate** for the
@@ -271,6 +284,13 @@ pub trait DeviceMemoryResource: Send + Sync {
     /// Bytes currently outstanding (live + retired-but-not-yet-freed).
     /// Used by tests and by the global budget adaptor.
     fn bytes_outstanding(&self) -> usize;
+
+    /// Return the outer resource stack's reservable budget, if one exists.
+    /// Base allocators have no declarative admission limit and return `None`;
+    /// decorators must forward this query unless they enforce their own limit.
+    fn budget_snapshot(&self) -> Option<ResourceBudgetSnapshot> {
+        None
+    }
 
     /// Drain any retired-but-not-yet-freed bytes whose underlying
     /// CUDA work has completed. For synchronous backends this is a

@@ -8,6 +8,7 @@ pub mod executor;
 pub mod ilp_registry;
 pub mod profiler;
 pub mod relation;
+pub mod resident_graph;
 mod statistics;
 
 pub use executor::{

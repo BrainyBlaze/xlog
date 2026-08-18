@@ -22,6 +22,8 @@ use crate::{
     CudaBuffer, CudaDevice, CudaStream, CudaViewMut, GpuMemoryManager,
 };
 
+static NEXT_PROVIDER_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
 mod arithmetic;
 mod filter;
 mod fj;
@@ -37,6 +39,9 @@ pub mod kernel_paths;
 mod launch_safe;
 mod probabilistic;
 mod relational;
+pub mod resident_filter_project;
+pub mod resident_relational;
+pub mod resident_schedule;
 mod transfer;
 mod wcoj;
 mod wcoj_metadata;
@@ -418,8 +423,8 @@ pub const EPISTEMIC_MODULE: &str = "xlog_epistemic";
 pub const WCOJ_MODULE: &str = "xlog_wcoj";
 pub const JOINT_SOLVE_MODULE: &str = "xlog_joint_solve";
 
-// Compile-time check: kernel manifest lists exactly 27 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 27);
+// Compile-time check: kernel manifest lists exactly 30 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 30);
 
 /// Kernel function names in the GPU WCOJ module.
 pub mod wcoj_kernels {
@@ -1132,12 +1137,18 @@ impl JoinIndexV2 {
 /// let provider = CudaKernelProvider::new(device, memory)?;
 /// ```
 pub struct CudaKernelProvider {
+    /// Process-local identity retained by prepared resident schedules.
+    provider_identity: u64,
     /// The CUDA device with loaded PTX modules
     device: Arc<CudaDevice>,
     /// GPU memory manager for kernel allocations
     memory: Arc<GpuMemoryManager>,
     /// Tracked host transfers for diagnostics
     transfer_tracker: HostTransferTracker,
+    /// Transfers for the one bounded, post-synchronization resident receipt.
+    final_observation_transfer_tracker: HostTransferTracker,
+    /// Number of final resident receipts copied into page-locked host memory.
+    final_observation_pinned_receipts: AtomicU64,
     /// PTX load profiling data (populated only when XLOG_WARMUP_PROFILE=1)
     ptx_load_profile: Option<PtxLoadProfile>,
     /// Column-level D2H transfer counter (incremented by each download_column_* call)
@@ -1239,6 +1250,17 @@ pub struct HostTransferStats {
     pub htod_calls: u64,
 }
 
+/// Separately accounted one-shot observation after resident execution ends.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FinalObservationTransferStats {
+    /// Device-to-host bytes copied for terminal receipts.
+    pub dtoh_bytes: u64,
+    /// Device-to-host terminal receipt copy calls.
+    pub dtoh_calls: u64,
+    /// Receipt copies whose destination was page-locked host memory.
+    pub pinned_receipts: u64,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HostLaunchMetadataTransferStats {
     pub htod_bytes: u64,
@@ -1312,10 +1334,23 @@ impl CudaKernelProvider {
         let profiling = warmup_profiling_enabled();
         let ptx_load_profile = Self::load_all_kernel_modules(&device, profiling)?;
 
-        Ok(Self {
+        Ok(Self::from_loaded_device(device, memory, ptx_load_profile))
+    }
+
+    /// Initialize provider-local state for a device whose kernel modules are
+    /// already loaded. This must never perform module insertion or replacement.
+    fn from_loaded_device(
+        device: Arc<CudaDevice>,
+        memory: Arc<GpuMemoryManager>,
+        ptx_load_profile: Option<PtxLoadProfile>,
+    ) -> Self {
+        Self {
+            provider_identity: NEXT_PROVIDER_IDENTITY.fetch_add(1, Ordering::Relaxed),
             device,
             memory,
             transfer_tracker: HostTransferTracker::default(),
+            final_observation_transfer_tracker: HostTransferTracker::default(),
+            final_observation_pinned_receipts: AtomicU64::new(0),
             ptx_load_profile,
             d2h_transfer_count: AtomicU64::new(0),
             untracked_metadata_dtoh_count: AtomicU64::new(0),
@@ -1336,7 +1371,7 @@ impl CudaKernelProvider {
             wcoj_triangle_hg_dispatch_count: AtomicU64::new(0),
             #[cfg(feature = "wcoj-phase-timing")]
             last_triangle_phase_timing: std::sync::Mutex::new(None),
-        })
+        }
     }
 
     /// Construct a provider whose `GpuMemoryManager` must already
@@ -1395,6 +1430,59 @@ impl CudaKernelProvider {
             ));
         }
         Self::new(device, memory)
+    }
+
+    /// Create a provider-local runtime allocation view over this provider's
+    /// already-loaded CUDA device.
+    ///
+    /// Unlike [`Self::with_runtime`], this method deliberately does not reload
+    /// PTX modules. Replacing a module can invalidate functions or graphs held
+    /// by the original provider. The supplied manager and attached runtime must
+    /// therefore share this exact [`CudaDevice`] handle and ordinal.
+    pub fn with_runtime_memory_view(&self, memory: Arc<GpuMemoryManager>) -> Result<Self> {
+        let runtime = memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "CudaKernelProvider::with_runtime_memory_view requires a GpuMemoryManager with an attached runtime"
+                    .to_string(),
+            )
+        })?;
+        if !Arc::ptr_eq(&self.device, memory.device()) {
+            return Err(XlogError::Kernel(
+                "CudaKernelProvider::with_runtime_memory_view requires the memory manager to share the provider's exact CUDA device handle"
+                    .to_string(),
+            ));
+        }
+        if !Arc::ptr_eq(&self.device, runtime.device()) {
+            return Err(XlogError::Kernel(
+                "CudaKernelProvider::with_runtime_memory_view requires the runtime to share the provider's exact CUDA device handle"
+                    .to_string(),
+            ));
+        }
+        let device_ordinal = u32::try_from(self.device.ordinal()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "CUDA device ordinal {} is not representable as u32",
+                self.device.ordinal()
+            ))
+        })?;
+        if runtime.device_ordinal() != device_ordinal {
+            return Err(XlogError::Kernel(format!(
+                "CudaKernelProvider::with_runtime_memory_view device ordinal mismatch: provider={} runtime={}",
+                device_ordinal,
+                runtime.device_ordinal()
+            )));
+        }
+        if !runtime.supports_block_use_tracking() {
+            return Err(XlogError::Kernel(
+                "CudaKernelProvider::with_runtime_memory_view requires a runtime with cross-stream block-use tracking"
+                    .to_string(),
+            ));
+        }
+
+        Ok(Self::from_loaded_device(
+            Arc::clone(&self.device),
+            memory,
+            None,
+        ))
     }
 
     /// Internal: parse a "boolean" env var. Empty / unset / `"0"`
@@ -1675,6 +1763,10 @@ impl CudaKernelProvider {
         &self.device
     }
 
+    pub(crate) fn provider_identity(&self) -> u64 {
+        self.provider_identity
+    }
+
     /// Get the GPU memory manager
     pub fn memory(&self) -> &Arc<GpuMemoryManager> {
         &self.memory
@@ -1693,6 +1785,68 @@ impl CudaKernelProvider {
     /// Snapshot tracked host transfer statistics.
     pub fn host_transfer_stats(&self) -> HostTransferStats {
         self.transfer_tracker.snapshot()
+    }
+
+    /// Reset the separately accounted final resident-receipt transfer.
+    pub fn reset_final_observation_transfer_stats(&self) {
+        self.final_observation_transfer_tracker.reset();
+        self.final_observation_pinned_receipts
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// Snapshot the separately accounted final resident-receipt transfer.
+    pub fn final_observation_transfer_stats(&self) -> FinalObservationTransferStats {
+        let transfers = self.final_observation_transfer_tracker.snapshot();
+        FinalObservationTransferStats {
+            dtoh_bytes: transfers.dtoh_bytes,
+            dtoh_calls: transfers.dtoh_calls,
+            pinned_receipts: self
+                .final_observation_pinned_receipts
+                .load(Ordering::Relaxed),
+        }
+    }
+
+    /// Record a successfully scheduled device-to-pinned-host final receipt.
+    ///
+    /// This deliberately does not increment ordinary hot-loop transfer
+    /// counters. Callers may invoke it only after the resident graph's single
+    /// terminal synchronization.
+    #[doc(hidden)]
+    pub fn record_final_observation_transfer(&self, bytes: u64) {
+        self.final_observation_transfer_tracker.record_dtoh(bytes);
+        self.final_observation_pinned_receipts
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Validate and publish logical row counts decoded from one resident receipt.
+    ///
+    /// Every entry is validated before any cache is changed. This keeps receipt
+    /// application all-or-nothing and ensures later query, constraint, export,
+    /// and statistics consumers never mistake reserved capacity for cardinality
+    /// or trigger another metadata download.
+    #[doc(hidden)]
+    pub fn finalize_resident_logical_counts(&self, entries: &[(&CudaBuffer, u32)]) -> Result<()> {
+        for (buffer, count) in entries {
+            if u64::from(*count) > buffer.num_rows() {
+                return Err(XlogError::Kernel(format!(
+                    "resident receipt logical row count {} exceeds buffer capacity {}",
+                    count,
+                    buffer.num_rows()
+                )));
+            }
+            if let Some(cached) = buffer.cached_row_count() {
+                if cached != *count {
+                    return Err(XlogError::Kernel(format!(
+                        "resident receipt logical row count {} conflicts with cached count {}",
+                        count, cached
+                    )));
+                }
+            }
+        }
+        for (buffer, count) in entries {
+            buffer.set_cached_row_count_if_unset(*count);
+        }
+        Ok(())
     }
 
     /// Snapshot launch-parameter H2D uploads tracked separately from
@@ -2708,9 +2862,12 @@ impl CudaKernelProvider {
         src: &CudaBuffer,
     ) -> Result<CudaBuffer> {
         let d_num_rows = self.clone_device_row_count(src)?;
-        Ok(CudaBuffer::from_columns(
-            columns, row_cap, d_num_rows, schema,
-        ))
+        Ok(match src.cached_row_count() {
+            Some(row_count) => CudaBuffer::from_columns_with_host_count(
+                columns, row_cap, d_num_rows, schema, row_count,
+            ),
+            None => CudaBuffer::from_columns(columns, row_cap, d_num_rows, schema),
+        })
     }
 
     fn column_bytes_view<'a>(
@@ -2894,9 +3051,12 @@ impl CudaKernelProvider {
         let mut d_num_rows = self.memory.alloc::<u32>(1)?;
         self.htod_launch_metadata_sync_copy_into(&[row_u32], &mut d_num_rows)
             .map_err(|e| XlogError::Kernel(format!("Failed to set row count: {}", e)))?;
-        Ok(CudaBuffer::from_columns_with_host_count(
-            columns, row_cap, d_num_rows, schema, row_u32,
-        ))
+        let mut result =
+            CudaBuffer::from_columns_with_host_count(columns, row_cap, d_num_rows, schema, row_u32);
+        if row_u32 <= 1 {
+            result.certify_canonical_full_row_set();
+        }
+        Ok(result)
     }
 
     /// Combine schemas from left and right buffers for join result

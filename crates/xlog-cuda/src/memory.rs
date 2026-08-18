@@ -13,9 +13,15 @@ use xlog_core::{MemoryBudget, Result, Schema, XlogError};
 
 use crate::arrow_device::ArrowDeviceImport;
 use crate::cuda_compat::{AsKernelParam, DeviceParamStorage, IntoKernelParamStorage};
-use crate::device_runtime::{AllocTag, DeviceBlock, ResourceError, StreamId, XlogDeviceRuntime};
+use crate::device_runtime::{
+    AllocTag, BlockId, BlockState, DeviceBlock, ResourceError, RuntimeMemoryReservation, StreamId,
+    XlogDeviceRuntime,
+};
 use crate::dlpack::DlpackManagedTensor;
 use crate::CudaDevice;
+
+#[cfg(test)]
+type AfterLocalReservationHook = std::sync::Mutex<Option<Arc<dyn Fn(u64) + Send + Sync + 'static>>>;
 
 /// GPU memory manager with budget enforcement
 ///
@@ -53,6 +59,24 @@ pub struct GpuMemoryManager {
     device: Arc<CudaDevice>,
     /// Memory budget configuration
     budget: MemoryBudget,
+    /// Accounting shared by every allocation view over this budget.
+    accounting: Arc<GpuMemoryAccounting>,
+    /// Optional v0.6 device runtime. When set, [`alloc_raw`]
+    /// reserves through the runtime's resource stack in addition
+    /// to enforcing the local budget; both must accept for the
+    /// allocation to proceed.
+    runtime: Option<Arc<XlogDeviceRuntime>>,
+    /// Unit-test seam used to pause a request after local reservation but
+    /// before runtime admission. Production builds contain no hook.
+    #[cfg(test)]
+    after_local_reservation_hook: AfterLocalReservationHook,
+}
+
+#[derive(Default)]
+struct GpuMemoryAccounting {
+    /// Serializes accounting mutations that must validate multiple counters
+    /// before changing any of them.
+    mutation_lock: std::sync::Mutex<()>,
     /// Bytes reserved against the local budget, including requests that have
     /// passed the local guard but are still awaiting allocator admission.
     /// This counter is intentionally conservative so concurrent requests
@@ -71,16 +95,134 @@ pub struct GpuMemoryManager {
     /// allocations happen inside the measured region (all arenas are allocated
     /// before it). Distinct from `allocated` (bytes).
     alloc_count: AtomicU64,
-    /// Optional v0.6 device runtime. When set, [`alloc_raw`]
-    /// reserves through the runtime's resource stack in addition
-    /// to enforcing the local budget; both must accept for the
-    /// allocation to proceed.
-    runtime: Option<Arc<XlogDeviceRuntime>>,
-    /// Unit-test seam used to pause a request after local reservation but
-    /// before runtime admission. Production builds contain no hook.
-    #[cfg(test)]
-    after_local_reservation_hook:
-        std::sync::Mutex<Option<Arc<dyn Fn(u64) + Send + Sync + 'static>>>,
+    /// Runtime deallocations that returned an error. Their bytes remain
+    /// charged locally because physical release was not proven.
+    deallocation_failure_count: AtomicU64,
+    deallocation_failure_bytes: AtomicU64,
+}
+
+/// One atomic claim on a [`GpuMemoryManager`] budget.
+///
+/// The claim protects a complete multi-allocation request from competing
+/// callers. Bytes remain reserved until they are transferred to returned
+/// allocation owners or released when this token is dropped.
+#[must_use = "dropping the reservation immediately releases its unused budget"]
+pub struct GpuMemoryReservation {
+    manager: Arc<GpuMemoryManager>,
+    runtime_reservation: Option<RuntimeMemoryReservation>,
+    total_bytes: u64,
+    remaining_bytes: u64,
+}
+
+impl std::fmt::Debug for GpuMemoryReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuMemoryReservation")
+            .field("total_bytes", &self.total_bytes)
+            .field("remaining_bytes", &self.remaining_bytes)
+            .finish()
+    }
+}
+
+impl GpuMemoryReservation {
+    /// Stable address of the memory manager that admitted this reservation.
+    pub fn memory_manager_ptr_value(&self) -> usize {
+        Arc::as_ptr(&self.manager) as usize
+    }
+
+    /// Complete byte claim made when this reservation was created.
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    /// Bytes still available for materialization through this token.
+    pub fn remaining_bytes(&self) -> u64 {
+        self.remaining_bytes
+    }
+
+    /// Bytes already transferred to allocation owners.
+    pub fn used_bytes(&self) -> u64 {
+        self.total_bytes - self.remaining_bytes
+    }
+
+    /// Allocate typed device memory from this reservation.
+    pub fn alloc<T: cudarc::driver::DeviceRepr>(
+        &mut self,
+        len: usize,
+    ) -> Result<TrackedCudaSlice<T>> {
+        self.manager
+            .accounting
+            .alloc_count
+            .fetch_add(1, Ordering::Relaxed);
+        let bytes = (len as u64)
+            .checked_mul(std::mem::size_of::<T>() as u64)
+            .ok_or_else(|| XlogError::Kernel("Allocation size overflow".to_string()))?;
+        let used = self.used_bytes();
+        if bytes > self.remaining_bytes {
+            return Err(MemoryPressure {
+                layer: "manager_reservation_alloc",
+                current_bytes: used as u128,
+                requested_bytes: bytes as u128,
+                budget_bytes: self.total_bytes,
+                prior_peak_bytes: self.manager.accounting.peak.load(Ordering::SeqCst),
+            }
+            .into_error());
+        }
+
+        self.remaining_bytes -= bytes;
+        let manager = Arc::clone(&self.manager);
+        let runtime_reservation = self.runtime_reservation.as_mut();
+        match manager.alloc_after_local_reservation::<T>(len, bytes, runtime_reservation) {
+            Ok(allocation) => Ok(allocation),
+            Err(error) => {
+                self.remaining_bytes = self
+                    .remaining_bytes
+                    .checked_add(bytes)
+                    .expect("reservation rollback overflow");
+                Err(error)
+            }
+        }
+    }
+
+    /// Allocate raw device bytes from this reservation through the attached
+    /// runtime resource stack.
+    pub fn alloc_raw(&mut self, bytes: usize, tag: AllocTag) -> Result<RuntimeAllocBlock> {
+        let bytes_u64 = u64::try_from(bytes)
+            .map_err(|_| XlogError::Kernel("Allocation size overflow".to_string()))?;
+        let used = self.used_bytes();
+        if bytes_u64 > self.remaining_bytes {
+            return Err(MemoryPressure {
+                layer: "manager_reservation_alloc_raw",
+                current_bytes: used as u128,
+                requested_bytes: bytes_u64 as u128,
+                budget_bytes: self.total_bytes,
+                prior_peak_bytes: self.manager.accounting.peak.load(Ordering::SeqCst),
+            }
+            .into_error());
+        }
+
+        self.remaining_bytes -= bytes_u64;
+        let manager = Arc::clone(&self.manager);
+        let runtime_reservation = self.runtime_reservation.as_mut();
+        match manager.alloc_raw_after_local_reservation(bytes, bytes_u64, tag, runtime_reservation)
+        {
+            Ok(allocation) => Ok(allocation),
+            Err(error) => {
+                self.remaining_bytes = self
+                    .remaining_bytes
+                    .checked_add(bytes_u64)
+                    .expect("reservation rollback overflow");
+                Err(error)
+            }
+        }
+    }
+}
+
+impl Drop for GpuMemoryReservation {
+    fn drop(&mut self) {
+        let unused = std::mem::take(&mut self.remaining_bytes);
+        let release = self.manager.rollback_local_reservation(unused);
+        debug_assert!(release.is_ok(), "reservation release must be balanced");
+    }
 }
 
 struct MemoryPressure {
@@ -227,6 +369,17 @@ pub struct TrackedCudaSlice<T: cudarc::driver::DeviceRepr> {
     backing: Backing,
 }
 
+#[derive(Clone)]
+pub(crate) struct RuntimeAllocationIdentity {
+    pub(crate) manager_id: usize,
+    pub(crate) allocation_ptr: u64,
+    pub(crate) allocation_bytes: usize,
+    pub(crate) block_id: BlockId,
+    pub(crate) block_bytes: usize,
+    pub(crate) block_state: BlockState,
+    pub(crate) context: Arc<cudarc::driver::CudaContext>,
+}
+
 impl<T: cudarc::driver::DeviceRepr> Deref for TrackedCudaSlice<T> {
     type Target = CudaSlice<T>;
 
@@ -283,6 +436,25 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
     /// Stable address of the memory manager that owns this allocation.
     pub fn memory_manager_ptr_value(&self) -> usize {
         Arc::as_ptr(&self.manager) as usize
+    }
+
+    pub(crate) fn runtime_allocation_identity(&self) -> Result<Option<RuntimeAllocationIdentity>> {
+        let Some(block) = self.runtime_block() else {
+            return Ok(None);
+        };
+        let allocation_bytes = self
+            .len()
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| XlogError::Kernel("runtime allocation byte size overflow".into()))?;
+        Ok(Some(RuntimeAllocationIdentity {
+            manager_id: self.memory_manager_ptr_value(),
+            allocation_ptr: self.device_ptr_value(),
+            allocation_bytes,
+            block_id: BlockId::from_block(block),
+            block_bytes: block.bytes,
+            block_state: block.state,
+            context: Arc::clone(DeviceSlice::stream(self).context()),
+        }))
     }
 
     /// Borrow the underlying [`DeviceBlock`] for runtime-backed
@@ -403,7 +575,7 @@ impl<T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &mut TrackedCudaS
 
 impl<T: cudarc::driver::DeviceRepr> Drop for TrackedCudaSlice<T> {
     fn drop(&mut self) {
-        match &mut self.backing {
+        let released = match &mut self.backing {
             Backing::Cudarc => {
                 // Debug probe (XLOG_DEBUG_POISON_FREE=1): overwrite the
                 // allocation with 0xDD before cudarc frees it, so any
@@ -425,6 +597,7 @@ impl<T: cudarc::driver::DeviceRepr> Drop for TrackedCudaSlice<T> {
                 // method (`into_bytes` consumes `self` by value and
                 // leaves the original ManuallyDrop forgotten).
                 unsafe { ManuallyDrop::drop(&mut self.inner) };
+                true
             }
             Backing::Runtime { runtime, block } => {
                 // Runtime owns the underlying memory. Tell it to
@@ -432,12 +605,22 @@ impl<T: cudarc::driver::DeviceRepr> Drop for TrackedCudaSlice<T> {
                 // a typed view that must NOT free on its own,
                 // which `ManuallyDrop` ensures by simply not
                 // calling its destructor here.
-                if let Some(block) = block.take() {
-                    let _ = runtime.deallocate(block);
+                match block.take() {
+                    Some(block) => match runtime.deallocate(block) {
+                        Ok(()) => true,
+                        Err(_) => {
+                            self.manager.record_deallocation_failure(self.bytes);
+                            false
+                        }
+                    },
+                    None => false,
                 }
             }
+        };
+        if released {
+            let release = self.manager.release_owned_allocation(self.bytes);
+            debug_assert!(release.is_ok(), "allocation release must be balanced");
         }
-        self.manager.record_free(self.bytes);
     }
 }
 
@@ -451,10 +634,7 @@ impl GpuMemoryManager {
         Self {
             device,
             budget,
-            budget_reserved: AtomicU64::new(0),
-            allocated: AtomicU64::new(0),
-            peak: AtomicU64::new(0),
-            alloc_count: AtomicU64::new(0),
+            accounting: Arc::new(GpuMemoryAccounting::default()),
             runtime: None,
             #[cfg(test)]
             after_local_reservation_hook: std::sync::Mutex::new(None),
@@ -480,13 +660,119 @@ impl GpuMemoryManager {
         Self {
             device,
             budget,
-            budget_reserved: AtomicU64::new(0),
-            allocated: AtomicU64::new(0),
-            peak: AtomicU64::new(0),
-            alloc_count: AtomicU64::new(0),
+            accounting: Arc::new(GpuMemoryAccounting::default()),
             runtime: Some(runtime),
             #[cfg(test)]
             after_local_reservation_hook: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Attach a stream-safe runtime while preserving this manager's exact
+    /// device, total budget, and atomic accounting ledger.
+    ///
+    /// The overlay is an allocation view, not an independent budget. Parent
+    /// and overlay allocations therefore cannot oversubscribe the configured
+    /// limit, including when they race. Validation is completed before the
+    /// shared ledger is cloned.
+    pub fn with_runtime_overlay(
+        self: &Arc<Self>,
+        runtime: Arc<XlogDeviceRuntime>,
+    ) -> Result<Arc<Self>> {
+        if !Arc::ptr_eq(&self.device, runtime.device()) {
+            return Err(XlogError::Kernel(
+                "GpuMemoryManager::with_runtime_overlay requires the runtime to share the exact CUDA device handle"
+                    .to_string(),
+            ));
+        }
+        let device_ordinal = u32::try_from(self.device.ordinal()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "CUDA device ordinal {} is not representable as u32",
+                self.device.ordinal()
+            ))
+        })?;
+        if runtime.device_ordinal() != device_ordinal {
+            return Err(XlogError::Kernel(format!(
+                "GpuMemoryManager::with_runtime_overlay device ordinal mismatch: manager={} runtime={}",
+                device_ordinal,
+                runtime.device_ordinal()
+            )));
+        }
+        if !runtime.supports_block_use_tracking() {
+            return Err(XlogError::Kernel(
+                "GpuMemoryManager::with_runtime_overlay requires a runtime with cross-stream block-use tracking"
+                    .to_string(),
+            ));
+        }
+
+        Ok(Arc::new(Self {
+            device: Arc::clone(&self.device),
+            budget: self.budget.clone(),
+            accounting: Arc::clone(&self.accounting),
+            runtime: Some(runtime),
+            #[cfg(test)]
+            after_local_reservation_hook: std::sync::Mutex::new(None),
+        }))
+    }
+
+    /// Atomically reserve `bytes` for one bounded multi-allocation request.
+    ///
+    /// The returned token owns the complete local-budget claim. A
+    /// runtime-backed manager also reserves the same bytes against the
+    /// runtime resource stack's finite global budget before touching local
+    /// accounting; runtimes without a reservable global budget are refused.
+    /// Creating the token performs no device allocation and does not increment
+    /// [`alloc_count`](Self::alloc_count).
+    pub fn reserve_bytes(self: &Arc<Self>, bytes: u64) -> Result<GpuMemoryReservation> {
+        let runtime_reservation = match &self.runtime {
+            Some(runtime) => {
+                let bytes_usize = usize::try_from(bytes).map_err(|_| {
+                    XlogError::Kernel(format!(
+                        "GPU reservation size {} bytes exceeds platform usize",
+                        bytes
+                    ))
+                })?;
+                Some(runtime.reserve_memory(bytes_usize).map_err(|error| {
+                    map_resource_error(error, self.accounting.peak.load(Ordering::SeqCst))
+                })?)
+            }
+            None => None,
+        };
+        self.reserve_local_bytes(bytes, "manager_reserve")?;
+        Ok(GpuMemoryReservation {
+            manager: Arc::clone(self),
+            runtime_reservation,
+            total_bytes: bytes,
+            remaining_bytes: bytes,
+        })
+    }
+
+    fn reserve_local_bytes(&self, bytes: u64, layer: &'static str) -> Result<()> {
+        let _mutation = self
+            .accounting
+            .mutation_lock
+            .lock()
+            .expect("GPU memory accounting poisoned");
+        loop {
+            let current = self.accounting.budget_reserved.load(Ordering::SeqCst);
+            let required = current as u128 + bytes as u128;
+            if required > self.budget.device_bytes as u128 {
+                return Err(MemoryPressure {
+                    layer,
+                    current_bytes: current as u128,
+                    requested_bytes: bytes as u128,
+                    budget_bytes: self.budget.device_bytes,
+                    prior_peak_bytes: self.accounting.peak.load(Ordering::SeqCst),
+                }
+                .into_error());
+            }
+            if self
+                .accounting
+                .budget_reserved
+                .compare_exchange(current, required as u64, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Ok(());
+            }
         }
     }
 
@@ -498,22 +784,100 @@ impl GpuMemoryManager {
         self.runtime.as_ref()
     }
 
+    /// Complete stream-ordered frees that are pending in the attached device
+    /// runtime.
+    ///
+    /// Diagnostic transactions use this after dropping temporary buffers on
+    /// an error path so a later operation observes the restored byte budget.
+    pub fn reap_pending_deallocations(&self) -> Result<()> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Ok(());
+        };
+        runtime
+            .reap_pending()
+            .map_err(|error| map_resource_error(error, self.peak_bytes()))
+    }
+
     /// Release a local-budget reservation that was not admitted by the
     /// underlying allocator. Admitted accounting is untouched because the
     /// request was never published there.
-    fn rollback_local_reservation(&self, bytes: u64) {
-        let previous = self.budget_reserved.fetch_sub(bytes, Ordering::SeqCst);
-        debug_assert!(previous >= bytes, "local reservation accounting underflow");
+    fn rollback_local_reservation(&self, bytes: u64) -> Result<()> {
+        let _mutation = self
+            .accounting
+            .mutation_lock
+            .lock()
+            .expect("GPU memory accounting poisoned");
+        let previous = self.accounting.budget_reserved.load(Ordering::SeqCst);
+        let next = previous.checked_sub(bytes).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "GPU memory reservation release underflow: current_bytes={} requested_bytes={}",
+                previous, bytes
+            ))
+        })?;
+        self.accounting
+            .budget_reserved
+            .store(next, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Publish a successful allocator admission. The local-budget reservation
     /// already includes `bytes`; only admitted current and peak are updated.
     fn publish_admission(&self, bytes: u64) {
-        let previous = self.allocated.fetch_add(bytes, Ordering::SeqCst);
+        let _mutation = self
+            .accounting
+            .mutation_lock
+            .lock()
+            .expect("GPU memory accounting poisoned");
+        let previous = self.accounting.allocated.load(Ordering::SeqCst);
         let admitted = previous
             .checked_add(bytes)
             .expect("admitted allocation accounting overflow");
-        self.peak.fetch_max(admitted, Ordering::SeqCst);
+        self.accounting.allocated.store(admitted, Ordering::SeqCst);
+        self.accounting.peak.fetch_max(admitted, Ordering::SeqCst);
+    }
+
+    /// Release bytes owned by a successfully destroyed tracked allocation.
+    /// Only allocation-owner drop paths may call this method.
+    fn release_owned_allocation(&self, bytes: u64) -> Result<()> {
+        let _mutation = self
+            .accounting
+            .mutation_lock
+            .lock()
+            .expect("GPU memory accounting poisoned");
+        let admitted = self.accounting.allocated.load(Ordering::SeqCst);
+        let reserved = self.accounting.budget_reserved.load(Ordering::SeqCst);
+        let next_admitted = admitted.checked_sub(bytes).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "GPU admitted allocation release underflow: current_bytes={} requested_bytes={}",
+                admitted, bytes
+            ))
+        })?;
+        let next_reserved = reserved.checked_sub(bytes).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "GPU local reservation release underflow: current_bytes={} requested_bytes={}",
+                reserved, bytes
+            ))
+        })?;
+        self.accounting
+            .allocated
+            .store(next_admitted, Ordering::SeqCst);
+        self.accounting
+            .budget_reserved
+            .store(next_reserved, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn record_deallocation_failure(&self, bytes: u64) {
+        let _ = self.accounting.deallocation_failure_count.fetch_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |current| Some(current.saturating_add(1)),
+        );
+        let _ = self.accounting.deallocation_failure_bytes.fetch_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |current| Some(current.saturating_add(bytes)),
+        );
     }
 
     /// Allocate GPU memory for `len` elements of type `T`
@@ -543,38 +907,29 @@ impl GpuMemoryManager {
         len: usize,
     ) -> Result<TrackedCudaSlice<T>> {
         // Count every device allocation request (resettable no-host-gate counter).
-        self.alloc_count.fetch_add(1, Ordering::Relaxed);
+        self.accounting.alloc_count.fetch_add(1, Ordering::Relaxed);
 
         // Fix Issue 2: Use checked_mul to prevent integer overflow before cast
         let bytes = (len as u64)
             .checked_mul(std::mem::size_of::<T>() as u64)
             .ok_or_else(|| XlogError::Kernel("Allocation size overflow".to_string()))?;
 
-        // Fix Issue 1: Use compare_exchange loop to prevent TOCTOU race condition
-        // Two threads could both pass check_budget() but exceed budget together
-        loop {
-            let current = self.budget_reserved.load(Ordering::SeqCst);
-            let required = current as u128 + bytes as u128;
-            if required > self.budget.device_bytes as u128 {
-                return Err(MemoryPressure {
-                    layer: "manager_alloc",
-                    current_bytes: current as u128,
-                    requested_bytes: bytes as u128,
-                    budget_bytes: self.budget.device_bytes,
-                    prior_peak_bytes: self.peak.load(Ordering::SeqCst),
-                }
-                .into_error());
-            }
-            let new_val = required as u64;
-            if self
-                .budget_reserved
-                .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                break;
+        self.reserve_local_bytes(bytes, "manager_alloc")?;
+        match self.alloc_after_local_reservation::<T>(len, bytes, None) {
+            Ok(allocation) => Ok(allocation),
+            Err(error) => {
+                self.rollback_local_reservation(bytes)?;
+                Err(error)
             }
         }
+    }
 
+    fn alloc_after_local_reservation<T: cudarc::driver::DeviceRepr>(
+        self: &Arc<Self>,
+        len: usize,
+        bytes: u64,
+        runtime_reservation: Option<&mut RuntimeMemoryReservation>,
+    ) -> Result<TrackedCudaSlice<T>> {
         #[cfg(test)]
         self.run_after_local_reservation_hook(bytes);
 
@@ -600,7 +955,6 @@ impl GpuMemoryManager {
             if bytes == 0 {
                 let slice = unsafe {
                     self.device.inner().alloc::<T>(len).map_err(|e| {
-                        self.rollback_local_reservation(bytes);
                         XlogError::Kernel(format!("GPU allocation failed (zero-byte): {}", e))
                     })?
                 };
@@ -623,23 +977,27 @@ impl GpuMemoryManager {
             // 32-bit a stray `bytes as usize` would silently
             // truncate and desync manager accounting (which still
             // tracks the full u64) from the runtime's view. Surface
-            // the overflow as `XlogError::Kernel` and roll back the
-            // local reservation so the manager stays consistent.
+            // the overflow as `XlogError::Kernel`; the caller retains or
+            // rolls back the local reservation as appropriate.
             let bytes_usize = match usize::try_from(bytes) {
                 Ok(v) => v,
                 Err(_) => {
-                    self.rollback_local_reservation(bytes);
                     return Err(XlogError::Kernel(format!(
                         "GPU allocation size {} bytes exceeds platform usize",
                         bytes
                     )));
                 }
             };
-            let block = match runtime.allocate(bytes_usize, StreamId::DEFAULT, AllocTag::UNTAGGED) {
+            let block_result = match runtime_reservation {
+                Some(reservation) => {
+                    reservation.allocate(bytes_usize, StreamId::DEFAULT, AllocTag::UNTAGGED)
+                }
+                None => runtime.allocate(bytes_usize, StreamId::DEFAULT, AllocTag::UNTAGGED),
+            };
+            let block = match block_result {
                 Ok(b) => b,
                 Err(e) => {
-                    let prior_peak = self.peak.load(Ordering::SeqCst);
-                    self.rollback_local_reservation(bytes);
+                    let prior_peak = self.accounting.peak.load(Ordering::SeqCst);
                     return Err(map_resource_error(e, prior_peak));
                 }
             };
@@ -669,11 +1027,10 @@ impl GpuMemoryManager {
         // atomically above and the device is valid; cudarc's
         // alloc returns properly aligned memory for type T.
         let slice = unsafe {
-            self.device.inner().alloc::<T>(len).map_err(|e| {
-                // Rollback the allocation tracking if CUDA allocation fails
-                self.rollback_local_reservation(bytes);
-                XlogError::Kernel(format!("GPU allocation failed: {}", e))
-            })?
+            self.device
+                .inner()
+                .alloc::<T>(len)
+                .map_err(|e| XlogError::Kernel(format!("GPU allocation failed: {}", e)))?
         };
         let (raw_ptr, sync) = DevicePtr::device_ptr(&slice, slice.stream());
         std::mem::forget(sync);
@@ -718,7 +1075,7 @@ impl GpuMemoryManager {
     pub fn check_budget(&self, bytes: u64) -> Result<()> {
         // Include provisional local reservations: this is a budget-admission
         // query, not a sample of already admitted allocations.
-        let current = self.budget_reserved.load(Ordering::SeqCst);
+        let current = self.accounting.budget_reserved.load(Ordering::SeqCst);
         let required = current as u128 + bytes as u128;
 
         if required > self.budget.device_bytes as u128 {
@@ -727,7 +1084,7 @@ impl GpuMemoryManager {
                 current_bytes: current as u128,
                 requested_bytes: bytes as u128,
                 budget_bytes: self.budget.device_bytes,
-                prior_peak_bytes: self.peak.load(Ordering::SeqCst),
+                prior_peak_bytes: self.accounting.peak.load(Ordering::SeqCst),
             }
             .into_error());
         }
@@ -737,34 +1094,52 @@ impl GpuMemoryManager {
 
     /// Get the current allocated memory in bytes
     pub fn allocated_bytes(&self) -> u64 {
-        self.allocated.load(Ordering::SeqCst)
+        self.accounting.allocated.load(Ordering::SeqCst)
+    }
+
+    /// Number of runtime deallocations that returned an error. Their bytes
+    /// remain charged locally because physical release was not proven.
+    pub fn deallocation_failure_count(&self) -> u64 {
+        self.accounting
+            .deallocation_failure_count
+            .load(Ordering::SeqCst)
+    }
+
+    /// Total bytes retained in local accounting after runtime deallocation
+    /// errors.
+    pub fn deallocation_failure_bytes(&self) -> u64 {
+        self.accounting
+            .deallocation_failure_bytes
+            .load(Ordering::SeqCst)
     }
 
     /// High-water mark of successful manager-accounted reservations since
     /// construction or the last [`reset_peak`](Self::reset_peak). Direct CUDA
     /// allocations that bypass this manager are not included.
     pub fn peak_bytes(&self) -> u64 {
-        self.peak.load(Ordering::SeqCst)
+        self.accounting.peak.load(Ordering::SeqCst)
     }
 
     /// Reset the peak high-water mark to the *current* allocated
     /// level, so a measurement window starts from live state rather
     /// than zero. Measurement-harness API.
     pub fn reset_peak(&self) {
-        self.peak
-            .store(self.allocated.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.accounting.peak.store(
+            self.accounting.allocated.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
     }
 
     /// Number of `alloc` calls issued so far (device allocation requests).
     /// The GPU-resident MC engine snapshots this around the measured region to
     /// prove `per_operator_host_allocations == 0` (all arenas pre-allocated).
     pub fn alloc_count(&self) -> u64 {
-        self.alloc_count.load(Ordering::Relaxed)
+        self.accounting.alloc_count.load(Ordering::Relaxed)
     }
 
     /// Reset the allocation-request counter to zero.
     pub fn reset_alloc_count(&self) {
-        self.alloc_count.store(0, Ordering::Relaxed);
+        self.accounting.alloc_count.store(0, Ordering::Relaxed);
     }
 
     /// Get the memory budget
@@ -772,23 +1147,43 @@ impl GpuMemoryManager {
         &self.budget
     }
 
+    /// Total local budget enforced jointly by this manager and any overlays.
+    pub fn budget_limit_bytes(&self) -> u64 {
+        self.budget.device_bytes
+    }
+
     /// Get the underlying CUDA device
     pub fn device(&self) -> &Arc<CudaDevice> {
         &self.device
     }
 
-    /// Record that memory has been freed
+    /// Validate a caller-requested manual accounting release.
     ///
-    /// Note: cudarc automatically frees memory when CudaSlice is dropped.
-    /// This method should be called to update tracking when memory is freed.
-    pub fn record_free(&self, bytes: u64) {
-        let admitted_previous = self.allocated.fetch_sub(bytes, Ordering::SeqCst);
-        let reserved_previous = self.budget_reserved.fetch_sub(bytes, Ordering::SeqCst);
-        debug_assert!(admitted_previous >= bytes, "admitted accounting underflow");
-        debug_assert!(
-            reserved_previous >= bytes,
-            "local reservation accounting underflow"
-        );
+    /// Tracked allocations release themselves through their private owner
+    /// path. A public caller cannot authenticate ownership, so nonzero manual
+    /// releases are refused while bytes are live and underflow is rejected
+    /// without mutating either counter.
+    pub fn record_free(&self, bytes: u64) -> Result<()> {
+        let _mutation = self
+            .accounting
+            .mutation_lock
+            .lock()
+            .expect("GPU memory accounting poisoned");
+        let admitted = self.accounting.allocated.load(Ordering::SeqCst);
+        let reserved = self.accounting.budget_reserved.load(Ordering::SeqCst);
+        if admitted != 0 || reserved != 0 {
+            return Err(XlogError::Kernel(format!(
+                "manual GPU accounting release refused with live tracked bytes: admitted_bytes={} reserved_bytes={}",
+                admitted, reserved
+            )));
+        }
+        if bytes != 0 {
+            return Err(XlogError::Kernel(format!(
+                "manual GPU accounting release underflow: current_bytes=0 requested_bytes={}",
+                bytes
+            )));
+        }
+        Ok(())
     }
 
     /// v0.6 device-runtime entry point: allocate `bytes` raw bytes
@@ -813,6 +1208,32 @@ impl GpuMemoryManager {
     /// * `XlogError::ResourceExhausted` if the runtime's budget rejects the
     ///   request. Other runtime errors are reported as `XlogError::Kernel`.
     pub fn alloc_raw(self: &Arc<Self>, bytes: usize, tag: AllocTag) -> Result<RuntimeAllocBlock> {
+        if self.runtime.is_none() {
+            return Err(XlogError::Kernel(
+                "GpuMemoryManager::alloc_raw called without an attached XlogDeviceRuntime; \
+                 construct via with_runtime to enable runtime routing"
+                    .to_string(),
+            ));
+        }
+        let bytes_u64 = u64::try_from(bytes)
+            .map_err(|_| XlogError::Kernel("Allocation size overflow".to_string()))?;
+        self.reserve_local_bytes(bytes_u64, "manager_alloc_raw")?;
+        match self.alloc_raw_after_local_reservation(bytes, bytes_u64, tag, None) {
+            Ok(allocation) => Ok(allocation),
+            Err(error) => {
+                self.rollback_local_reservation(bytes_u64)?;
+                Err(error)
+            }
+        }
+    }
+
+    fn alloc_raw_after_local_reservation(
+        self: &Arc<Self>,
+        bytes: usize,
+        bytes_u64: u64,
+        tag: AllocTag,
+        runtime_reservation: Option<&mut RuntimeMemoryReservation>,
+    ) -> Result<RuntimeAllocBlock> {
         let runtime = self.runtime.as_ref().ok_or_else(|| {
             XlogError::Kernel(
                 "GpuMemoryManager::alloc_raw called without an attached XlogDeviceRuntime; \
@@ -821,34 +1242,6 @@ impl GpuMemoryManager {
             )
         })?;
 
-        let requested_bytes = bytes as u128;
-
-        // Reserve against the local budget first (preserves the
-        // pre-existing semantics for callers that mix alloc and
-        // alloc_raw under a single MemoryBudget).
-        loop {
-            let current = self.budget_reserved.load(Ordering::SeqCst);
-            let required = current as u128 + requested_bytes;
-            if required > self.budget.device_bytes as u128 {
-                return Err(MemoryPressure {
-                    layer: "manager_alloc_raw",
-                    current_bytes: current as u128,
-                    requested_bytes,
-                    budget_bytes: self.budget.device_bytes,
-                    prior_peak_bytes: self.peak.load(Ordering::SeqCst),
-                }
-                .into_error());
-            }
-            let new_val = required as u64;
-            if self
-                .budget_reserved
-                .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                break;
-            }
-        }
-        let bytes_u64 = u64::try_from(bytes).expect("accepted local allocation fits u64");
         #[cfg(test)]
         self.run_after_local_reservation_hook(bytes_u64);
 
@@ -856,7 +1249,11 @@ impl GpuMemoryManager {
         // default for now; once stream-aware kernel launches start
         // routing through alloc_raw the caller will pass an
         // explicit StreamId.
-        match runtime.allocate(bytes, StreamId::DEFAULT, tag) {
+        let allocation = match runtime_reservation {
+            Some(reservation) => reservation.allocate(bytes, StreamId::DEFAULT, tag),
+            None => runtime.allocate(bytes, StreamId::DEFAULT, tag),
+        };
+        match allocation {
             Ok(block) => {
                 self.publish_admission(bytes_u64);
                 Ok(RuntimeAllocBlock {
@@ -867,10 +1264,7 @@ impl GpuMemoryManager {
                 })
             }
             Err(e) => {
-                // Roll back local reservation; runtime did not
-                // accept the bytes.
-                let prior_peak = self.peak.load(Ordering::SeqCst);
-                self.rollback_local_reservation(bytes_u64);
+                let prior_peak = self.accounting.peak.load(Ordering::SeqCst);
                 Err(map_resource_error(e, prior_peak))
             }
         }
@@ -878,20 +1272,27 @@ impl GpuMemoryManager {
 
     /// Get remaining budget in bytes
     pub fn remaining_bytes(&self) -> u64 {
-        let reserved = self.budget_reserved.load(Ordering::SeqCst);
+        let reserved = self.accounting.budget_reserved.load(Ordering::SeqCst);
         self.budget.device_bytes.saturating_sub(reserved)
     }
 
-    /// Reset allocation tracking
-    ///
-    /// This should be called when GPU memory has been freed but the tracker
-    /// hasn't been updated (e.g., when CudaSlice instances are dropped without
-    /// calling record_free). This is a temporary workaround until proper
-    /// RAII-based tracking is implemented.
-    pub fn reset_tracking(&self) {
-        self.budget_reserved.store(0, Ordering::SeqCst);
-        self.allocated.store(0, Ordering::SeqCst);
-        self.peak.store(0, Ordering::SeqCst);
+    /// Reset diagnostic tracking only when no tracked bytes are live.
+    pub fn reset_tracking(&self) -> Result<()> {
+        let _mutation = self
+            .accounting
+            .mutation_lock
+            .lock()
+            .expect("GPU memory accounting poisoned");
+        let admitted = self.accounting.allocated.load(Ordering::SeqCst);
+        let reserved = self.accounting.budget_reserved.load(Ordering::SeqCst);
+        if admitted != 0 || reserved != 0 {
+            return Err(XlogError::Kernel(format!(
+                "GPU accounting reset refused with live tracked bytes: admitted_bytes={} reserved_bytes={}",
+                admitted, reserved
+            )));
+        }
+        self.accounting.peak.store(0, Ordering::SeqCst);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1009,14 +1410,13 @@ impl std::fmt::Debug for RuntimeAllocBlock {
 impl Drop for RuntimeAllocBlock {
     fn drop(&mut self) {
         if let Some(block) = self.block.take() {
-            // Runtime deallocate may queue an async free (see
-            // AsyncCudaResource); the local manager counters are
-            // released immediately because the block.bytes are
-            // no longer "live from the manager's perspective".
-            // Runtime-side bookkeeping converges after
-            // `runtime.reap_pending()`.
-            let _ = self.runtime.deallocate(block);
-            self.manager.record_free(self.bytes);
+            match self.runtime.deallocate(block) {
+                Ok(()) => {
+                    let release = self.manager.release_owned_allocation(self.bytes);
+                    debug_assert!(release.is_ok(), "allocation release must be balanced");
+                }
+                Err(_) => self.manager.record_deallocation_failure(self.bytes),
+            }
         }
     }
 }
@@ -1169,6 +1569,52 @@ impl CudaColumn {
             CudaColumn::Owned(slice) => slice.device_ptr(),
             CudaColumn::Dlpack(col) => &col.ptr,
             CudaColumn::ArrowDevice(col) => &col.ptr,
+        }
+    }
+
+    /// Stable identity of the xlog memory manager that owns this column.
+    ///
+    /// True external DLPack and Arrow device columns return `None`; wrappers
+    /// retaining an xlog-owned source slice preserve that slice's identity.
+    pub fn memory_manager_ptr_value(&self) -> Option<usize> {
+        match self {
+            CudaColumn::Owned(slice) => Some(slice.memory_manager_ptr_value()),
+            CudaColumn::Dlpack(col) => col
+                .source_slice
+                .as_ref()
+                .map(|slice| slice.memory_manager_ptr_value()),
+            CudaColumn::ArrowDevice(col) => col
+                .source_slice
+                .as_ref()
+                .map(|slice| slice.memory_manager_ptr_value()),
+        }
+    }
+
+    pub(crate) fn runtime_allocation_identity(&self) -> Result<Option<RuntimeAllocationIdentity>> {
+        match self {
+            CudaColumn::Owned(slice) => slice.runtime_allocation_identity(),
+            CudaColumn::Dlpack(col) => {
+                let Some(source) = &col.source_slice else {
+                    return Ok(None);
+                };
+                let mut identity = source.runtime_allocation_identity()?;
+                if let Some(identity) = &mut identity {
+                    identity.allocation_ptr = col.ptr;
+                    identity.allocation_bytes = col.len_bytes;
+                }
+                Ok(identity)
+            }
+            CudaColumn::ArrowDevice(col) => {
+                let Some(source) = &col.source_slice else {
+                    return Ok(None);
+                };
+                let mut identity = source.runtime_allocation_identity()?;
+                if let Some(identity) = &mut identity {
+                    identity.allocation_ptr = col.ptr;
+                    identity.allocation_bytes = col.len_bytes;
+                }
+                Ok(identity)
+            }
         }
     }
 
@@ -1357,7 +1803,7 @@ impl CudaBuffer {
             d_num_rows,
             schema,
             cached_row_count: AtomicU32::new(u32::MAX),
-            canonical_full_row_set_certified: row_cap <= 1,
+            canonical_full_row_set_certified: false,
         }
     }
 
@@ -1383,7 +1829,7 @@ impl CudaBuffer {
             d_num_rows,
             schema,
             cached_row_count: AtomicU32::new(host_row_count),
-            canonical_full_row_set_certified: host_row_count <= 1,
+            canonical_full_row_set_certified: false,
         }
     }
 
@@ -1502,7 +1948,95 @@ pub fn validate_logical_row_count(row_cap: u64, logical_rows: usize) -> Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device_runtime::{DeviceMemoryResource, DirectCudaResource, ResourceResult};
     use xlog_core::ScalarType;
+
+    #[test]
+    fn reservation_exposes_exact_memory_manager_identity() {
+        let _: fn(&GpuMemoryReservation) -> usize = GpuMemoryReservation::memory_manager_ptr_value;
+    }
+
+    #[test]
+    fn cuda_column_exposes_optional_memory_manager_identity() {
+        let _: fn(&CudaColumn) -> Option<usize> = CudaColumn::memory_manager_ptr_value;
+    }
+
+    #[test]
+    fn tracked_slice_exposes_runtime_allocation_identity_snapshot() {
+        let _: fn(&TrackedCudaSlice<u32>) -> Result<Option<RuntimeAllocationIdentity>> =
+            TrackedCudaSlice::<u32>::runtime_allocation_identity;
+    }
+
+    #[test]
+    fn cuda_column_exposes_runtime_allocation_identity_snapshot() {
+        let _: fn(&CudaColumn) -> Result<Option<RuntimeAllocationIdentity>> =
+            CudaColumn::runtime_allocation_identity;
+    }
+
+    struct FailAfterDeallocateResource {
+        inner: DirectCudaResource,
+        deallocate_calls: Arc<AtomicU64>,
+    }
+
+    struct FailFirstAllocationResource {
+        inner: DirectCudaResource,
+        fail_next: std::sync::atomic::AtomicBool,
+    }
+
+    impl DeviceMemoryResource for FailFirstAllocationResource {
+        fn allocate(
+            &self,
+            bytes: usize,
+            stream: StreamId,
+            tag: AllocTag,
+        ) -> ResourceResult<DeviceBlock> {
+            if self.fail_next.swap(false, Ordering::SeqCst) {
+                return Err(ResourceError::Driver(
+                    "injected allocation failure".to_string(),
+                ));
+            }
+            self.inner.allocate(bytes, stream, tag)
+        }
+
+        fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
+            self.inner.deallocate(block)
+        }
+
+        fn device_ordinal(&self) -> u32 {
+            self.inner.device_ordinal()
+        }
+
+        fn bytes_outstanding(&self) -> usize {
+            self.inner.bytes_outstanding()
+        }
+    }
+
+    impl DeviceMemoryResource for FailAfterDeallocateResource {
+        fn allocate(
+            &self,
+            bytes: usize,
+            stream: StreamId,
+            tag: AllocTag,
+        ) -> ResourceResult<DeviceBlock> {
+            self.inner.allocate(bytes, stream, tag)
+        }
+
+        fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
+            self.inner.deallocate(block)?;
+            self.deallocate_calls.fetch_add(1, Ordering::SeqCst);
+            Err(ResourceError::Driver(
+                "injected deallocation completion failure".to_string(),
+            ))
+        }
+
+        fn device_ordinal(&self) -> u32 {
+            self.inner.device_ordinal()
+        }
+
+        fn bytes_outstanding(&self) -> usize {
+            self.inner.bytes_outstanding()
+        }
+    }
 
     fn try_device() -> Option<Arc<CudaDevice>> {
         match CudaDevice::new(0) {
@@ -1661,6 +2195,494 @@ mod tests {
     }
 
     #[test]
+    fn check_budget_does_not_reserve_a_multi_allocation_request() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::new(
+            device,
+            MemoryBudget::with_limit(8192),
+        ));
+        let checked = Arc::new(std::sync::Barrier::new(2));
+        let competitor_allocated = Arc::new(std::sync::Barrier::new(2));
+        let release_competitor = Arc::new(std::sync::Barrier::new(2));
+
+        let checked_in_thread = Arc::clone(&checked);
+        let allocated_in_thread = Arc::clone(&competitor_allocated);
+        let release_in_thread = Arc::clone(&release_competitor);
+        let competitor_manager = Arc::clone(&manager);
+        let competitor = std::thread::spawn(move || {
+            checked_in_thread.wait();
+            let allocation = competitor_manager
+                .alloc::<u8>(4096)
+                .expect("competing allocation must fit after the check-only query");
+            allocated_in_thread.wait();
+            release_in_thread.wait();
+            drop(allocation);
+        });
+
+        manager
+            .check_budget(8192)
+            .expect("the complete request fits before the competing allocation");
+        checked.wait();
+        competitor_allocated.wait();
+        let first = manager
+            .alloc::<u8>(4096)
+            .expect("the first materialized allocation must fit");
+        let second = manager.alloc::<u8>(4096);
+        assert!(
+            matches!(second, Err(XlogError::ResourceExhausted { .. })),
+            "a check-only query cannot protect later allocations from a competitor"
+        );
+
+        release_competitor.wait();
+        competitor.join().expect("competitor thread panicked");
+        drop(first);
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 8192);
+    }
+
+    #[test]
+    fn reservation_rejects_the_complete_request_before_any_allocation() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::new(
+            device,
+            MemoryBudget::with_limit(4095),
+        ));
+        manager.reset_alloc_count();
+
+        let error = manager
+            .reserve_bytes(4096)
+            .expect_err("a request one byte above the budget must be rejected atomically");
+
+        assert_memory_pressure(
+            error,
+            "GPU memory pressure: layer=manager_reserve current_bytes=0 requested_bytes=4096 required_bytes=4096 required_u64_overflow=false budget_bytes=4095 prior_peak_bytes=0",
+            4096,
+            4095,
+        );
+        assert_eq!(manager.alloc_count(), 0);
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.peak_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 4095);
+    }
+
+    #[test]
+    fn competing_complete_reservations_cannot_both_claim_the_budget() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::new(
+            device,
+            MemoryBudget::with_limit(4096),
+        ));
+        let attempted = Arc::new(std::sync::Barrier::new(2));
+
+        let reserve = |manager: Arc<GpuMemoryManager>, attempted: Arc<std::sync::Barrier>| {
+            std::thread::spawn(move || {
+                let reservation = manager.reserve_bytes(4096);
+                attempted.wait();
+                let admitted = reservation.is_ok();
+                drop(reservation);
+                admitted
+            })
+        };
+        let left = reserve(Arc::clone(&manager), Arc::clone(&attempted));
+        let right = reserve(Arc::clone(&manager), Arc::clone(&attempted));
+
+        let admitted = [
+            left.join().expect("left reservation thread panicked"),
+            right.join().expect("right reservation thread panicked"),
+        ];
+        assert_eq!(admitted.into_iter().filter(|value| *value).count(), 1);
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 4096);
+    }
+
+    #[test]
+    fn competing_managers_share_one_runtime_reservation_budget() {
+        let Some((device, runtime)) = try_runtime_with_budget(4096) else {
+            return;
+        };
+        let left_manager = Arc::new(GpuMemoryManager::with_runtime(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(4096),
+            Arc::clone(&runtime),
+        ));
+        let right_manager = Arc::new(GpuMemoryManager::with_runtime(
+            device,
+            MemoryBudget::with_limit(4096),
+            runtime,
+        ));
+        let attempted = Arc::new(std::sync::Barrier::new(2));
+
+        let reserve = |manager: Arc<GpuMemoryManager>, attempted: Arc<std::sync::Barrier>| {
+            std::thread::spawn(move || {
+                let reservation = manager.reserve_bytes(4096);
+                attempted.wait();
+                let admitted = reservation.is_ok();
+                drop(reservation);
+                admitted
+            })
+        };
+        let left = reserve(left_manager, Arc::clone(&attempted));
+        let right = reserve(right_manager, attempted);
+
+        let admitted = [
+            left.join().expect("left reservation thread panicked"),
+            right.join().expect("right reservation thread panicked"),
+        ];
+        assert_eq!(admitted.into_iter().filter(|value| *value).count(), 1);
+    }
+
+    #[test]
+    fn runtime_reservation_blocks_competing_ordinary_allocation_until_materialized() {
+        let Some((device, runtime)) = try_runtime_with_budget(4096) else {
+            return;
+        };
+        let reserving_manager = Arc::new(GpuMemoryManager::with_runtime(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(4096),
+            Arc::clone(&runtime),
+        ));
+        let competing_manager = Arc::new(GpuMemoryManager::with_runtime(
+            device,
+            MemoryBudget::with_limit(4096),
+            runtime,
+        ));
+        let mut reservation = reserving_manager
+            .reserve_bytes(4096)
+            .expect("complete runtime reservation");
+
+        assert!(matches!(
+            competing_manager.alloc::<u8>(1),
+            Err(XlogError::ResourceExhausted { .. })
+        ));
+        assert_eq!(competing_manager.allocated_bytes(), 0);
+        assert_eq!(competing_manager.remaining_bytes(), 4096);
+
+        let allocation = reservation
+            .alloc::<u8>(4096)
+            .expect("reserved bytes cannot be stolen by an ordinary allocator");
+        assert_eq!(reserving_manager.allocated_bytes(), 4096);
+        drop(reservation);
+        drop(allocation);
+        assert_eq!(reserving_manager.allocated_bytes(), 0);
+    }
+
+    #[test]
+    fn global_budget_rejects_complete_manifest_before_first_inner_allocation() {
+        let Some((device, runtime, sink)) = try_runtime_with_logging_budget(4095) else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::with_runtime(
+            device,
+            MemoryBudget::with_limit(8192),
+            runtime,
+        ));
+
+        let error = manager
+            .reserve_bytes(4096)
+            .expect_err("the complete request is one byte above the runtime budget");
+        assert_memory_pressure(
+            error,
+            "GPU memory pressure: layer=device_runtime current_bytes=0 requested_bytes=4096 required_bytes=4096 required_u64_overflow=false budget_bytes=4095 prior_peak_bytes=0",
+            4096,
+            4095,
+        );
+        assert!(sink.snapshot().is_empty());
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 8192);
+    }
+
+    #[test]
+    fn runtime_backed_reservation_requires_a_reservable_global_budget() {
+        let Some((device, runtime)) = try_unbudgeted_runtime() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::with_runtime(
+            device,
+            MemoryBudget::with_limit(4096),
+            runtime,
+        ));
+
+        let error = manager
+            .reserve_bytes(1024)
+            .expect_err("an unbudgeted runtime cannot promise complete admission");
+        assert!(
+            matches!(error, XlogError::Kernel(ref detail) if detail.contains("reservable global budget")),
+            "unexpected error: {error}"
+        );
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 4096);
+    }
+
+    #[test]
+    fn reservation_materializes_exactly_its_declared_bytes() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::new(
+            device,
+            MemoryBudget::with_limit(4096),
+        ));
+        let mut reservation = manager
+            .reserve_bytes(4096)
+            .expect("the exact complete request must fit");
+        assert_eq!(reservation.total_bytes(), 4096);
+        assert_eq!(reservation.remaining_bytes(), 4096);
+        assert_eq!(reservation.used_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 0);
+
+        let words = reservation
+            .alloc::<u32>(512)
+            .expect("first reserved allocation");
+        let bytes = reservation
+            .alloc::<u8>(2048)
+            .expect("second reserved allocation");
+        assert_eq!(reservation.remaining_bytes(), 0);
+        assert_eq!(reservation.used_bytes(), 4096);
+        assert_eq!(manager.allocated_bytes(), 4096);
+        assert_eq!(manager.peak_bytes(), 4096);
+
+        let error = match reservation.alloc::<u8>(1) {
+            Err(error) => error,
+            Ok(_) => panic!("a reservation cannot materialize more than its declaration"),
+        };
+        assert_memory_pressure(
+            error,
+            "GPU memory pressure: layer=manager_reservation_alloc current_bytes=4096 requested_bytes=1 required_bytes=4097 required_u64_overflow=false budget_bytes=4096 prior_peak_bytes=4096",
+            4097,
+            4096,
+        );
+
+        drop(reservation);
+        assert_eq!(manager.remaining_bytes(), 0);
+        drop(bytes);
+        assert_eq!(manager.remaining_bytes(), 2048);
+        drop(words);
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 4096);
+    }
+
+    #[test]
+    fn failed_reserved_raw_allocation_preserves_unused_claim_until_drop() {
+        let Some((device, runtime)) = try_runtime_with_first_allocation_failure(4096) else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::with_runtime(
+            device,
+            MemoryBudget::with_limit(4096),
+            runtime,
+        ));
+        let mut reservation = manager
+            .reserve_bytes(4096)
+            .expect("local complete request must fit");
+
+        let error = reservation
+            .alloc_raw(2048, AllocTag::UNTAGGED)
+            .expect_err("the injected underlying allocation must fail");
+        assert!(
+            matches!(error, XlogError::Kernel(ref detail) if detail.contains("injected allocation failure")),
+            "unexpected error: {error}"
+        );
+        assert_eq!(reservation.remaining_bytes(), 4096);
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 0);
+
+        let allocation = reservation
+            .alloc_raw(1024, AllocTag::UNTAGGED)
+            .expect("a smaller raw suballocation must fit both budgets");
+        assert_eq!(reservation.remaining_bytes(), 3072);
+        assert_eq!(manager.allocated_bytes(), 1024);
+
+        drop(reservation);
+        assert_eq!(manager.remaining_bytes(), 3072);
+        drop(allocation);
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 4096);
+    }
+
+    #[test]
+    fn partial_typed_materialization_releases_each_byte_once_in_either_drop_order() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::new(
+            device,
+            MemoryBudget::with_limit(4096),
+        ));
+        let mut reservation = manager.reserve_bytes(4096).expect("complete request");
+        let allocation = reservation
+            .alloc::<u8>(1024)
+            .expect("partial materialization");
+        let error = match reservation.alloc::<u8>(4096) {
+            Err(error) => error,
+            Ok(_) => panic!("the remaining reservation is only 3072 bytes"),
+        };
+        assert_memory_pressure(
+            error,
+            "GPU memory pressure: layer=manager_reservation_alloc current_bytes=1024 requested_bytes=4096 required_bytes=5120 required_u64_overflow=false budget_bytes=4096 prior_peak_bytes=1024",
+            5120,
+            4096,
+        );
+        assert_eq!(reservation.remaining_bytes(), 3072);
+
+        drop(allocation);
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 1024);
+        drop(reservation);
+        assert_eq!(manager.remaining_bytes(), 4096);
+    }
+
+    #[test]
+    fn ordinary_allocations_and_complete_reservations_share_one_budget() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::new(
+            device,
+            MemoryBudget::with_limit(4096),
+        ));
+        let ordinary = manager
+            .alloc::<u8>(1024)
+            .expect("ordinary allocation before reservation");
+        let mut reservation = manager
+            .reserve_bytes(3072)
+            .expect("reservation must fit beside the ordinary owner");
+        assert_eq!(manager.remaining_bytes(), 0);
+        assert!(matches!(
+            manager.alloc::<u8>(1),
+            Err(XlogError::ResourceExhausted { .. })
+        ));
+
+        let reserved = reservation
+            .alloc::<u8>(3072)
+            .expect("reserved allocation bypasses the already-paid local claim");
+        assert_eq!(manager.allocated_bytes(), 4096);
+        drop(reservation);
+        drop(reserved);
+        assert_eq!(manager.allocated_bytes(), 1024);
+        assert_eq!(manager.remaining_bytes(), 3072);
+        drop(ordinary);
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 4096);
+    }
+
+    #[test]
+    fn public_accounting_mutators_refuse_live_reservations_and_allocations() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::new(
+            device,
+            MemoryBudget::with_limit(4096),
+        ));
+        let reservation = manager.reserve_bytes(2048).expect("reservation");
+
+        let free_error = manager
+            .record_free(1)
+            .expect_err("public accounting cannot release a live reservation");
+        assert!(
+            matches!(free_error, XlogError::Kernel(detail) if detail.contains("live tracked bytes"))
+        );
+        let reset_error = manager
+            .reset_tracking()
+            .expect_err("public reset cannot erase a live reservation");
+        assert!(
+            matches!(reset_error, XlogError::Kernel(detail) if detail.contains("live tracked bytes"))
+        );
+        assert_eq!(manager.remaining_bytes(), 2048);
+
+        drop(reservation);
+        let allocation = manager.alloc::<u8>(1024).expect("allocation");
+        assert!(manager.record_free(1024).is_err());
+        assert!(manager.reset_tracking().is_err());
+        assert_eq!(manager.allocated_bytes(), 1024);
+        assert_eq!(manager.remaining_bytes(), 3072);
+
+        drop(allocation);
+        manager
+            .reset_tracking()
+            .expect("quiescent accounting can reset diagnostic peaks");
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 4096);
+    }
+
+    #[test]
+    fn public_record_free_refuses_underflow_without_mutation() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::new(
+            device,
+            MemoryBudget::with_limit(4096),
+        ));
+
+        let error = manager
+            .record_free(1)
+            .expect_err("unowned bytes cannot be released from accounting");
+        assert!(matches!(error, XlogError::Kernel(detail) if detail.contains("underflow")));
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 4096);
+        manager
+            .record_free(0)
+            .expect("zero-byte release is a no-op");
+    }
+
+    #[test]
+    fn typed_deallocation_failure_retains_local_charge_and_records_failure() {
+        let Some((device, runtime, deallocate_calls)) = try_runtime_with_deallocation_failure()
+        else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::with_runtime(
+            device,
+            MemoryBudget::with_limit(4096),
+            Arc::clone(&runtime),
+        ));
+        let allocation = manager.alloc::<u8>(1024).expect("typed allocation");
+
+        drop(allocation);
+
+        assert_eq!(deallocate_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.bytes_outstanding(), 0);
+        assert_eq!(manager.allocated_bytes(), 1024);
+        assert_eq!(manager.remaining_bytes(), 3072);
+        assert_eq!(manager.deallocation_failure_count(), 1);
+        assert_eq!(manager.deallocation_failure_bytes(), 1024);
+        assert!(manager.reset_tracking().is_err());
+    }
+
+    #[test]
+    fn raw_deallocation_failure_retains_local_charge_and_records_failure() {
+        let Some((device, runtime, deallocate_calls)) = try_runtime_with_deallocation_failure()
+        else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::with_runtime(
+            device,
+            MemoryBudget::with_limit(4096),
+            Arc::clone(&runtime),
+        ));
+        let allocation = manager
+            .alloc_raw(512, AllocTag::UNTAGGED)
+            .expect("raw allocation");
+
+        drop(allocation);
+
+        assert_eq!(deallocate_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.bytes_outstanding(), 0);
+        assert_eq!(manager.allocated_bytes(), 512);
+        assert_eq!(manager.remaining_bytes(), 3584);
+        assert_eq!(manager.deallocation_failure_count(), 1);
+        assert_eq!(manager.deallocation_failure_bytes(), 512);
+        assert!(manager.reset_tracking().is_err());
+    }
+
+    #[test]
     fn test_memory_manager_multiple_allocs() {
         let Some(device) = try_device() else {
             return;
@@ -1805,10 +2827,17 @@ mod tests {
             MemoryBudget::with_limit(u64::MAX),
         ));
         manager
+            .accounting
             .budget_reserved
             .store(u64::MAX - 3, Ordering::SeqCst);
-        manager.allocated.store(u64::MAX - 3, Ordering::SeqCst);
-        manager.peak.store(u64::MAX - 3, Ordering::SeqCst);
+        manager
+            .accounting
+            .allocated
+            .store(u64::MAX - 3, Ordering::SeqCst);
+        manager
+            .accounting
+            .peak
+            .store(u64::MAX - 3, Ordering::SeqCst);
 
         let error = manager
             .check_budget(8)
@@ -1824,9 +2853,12 @@ mod tests {
         assert_eq!(manager.peak_bytes(), u64::MAX - 3);
 
         // Restore the synthetic accounting state before dropping the fixture.
-        manager.budget_reserved.store(0, Ordering::SeqCst);
-        manager.allocated.store(0, Ordering::SeqCst);
-        manager.peak.store(0, Ordering::SeqCst);
+        manager
+            .accounting
+            .budget_reserved
+            .store(0, Ordering::SeqCst);
+        manager.accounting.allocated.store(0, Ordering::SeqCst);
+        manager.accounting.peak.store(0, Ordering::SeqCst);
     }
 
     #[test]
@@ -1918,6 +2950,82 @@ mod tests {
         ))
     }
 
+    fn try_unbudgeted_runtime() -> Option<(
+        Arc<CudaDevice>,
+        Arc<crate::device_runtime::XlogDeviceRuntime>,
+    )> {
+        use crate::device_runtime::{
+            AsyncCudaResource, DeviceMemoryResource, StreamPool, XlogDeviceRuntime,
+        };
+        let device = try_device()?;
+        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+        let resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+            AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+        );
+        Some((
+            Arc::clone(&device),
+            Arc::new(XlogDeviceRuntime::with_resource(
+                Arc::clone(&device),
+                0,
+                pool,
+                resource,
+            )),
+        ))
+    }
+
+    fn try_runtime_with_deallocation_failure() -> Option<(
+        Arc<CudaDevice>,
+        Arc<crate::device_runtime::XlogDeviceRuntime>,
+        Arc<AtomicU64>,
+    )> {
+        use crate::device_runtime::{StreamPool, XlogDeviceRuntime};
+        let device = try_device()?;
+        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+        let deallocate_calls = Arc::new(AtomicU64::new(0));
+        let resource: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(FailAfterDeallocateResource {
+                inner: DirectCudaResource::new(Arc::clone(&device), 0),
+                deallocate_calls: Arc::clone(&deallocate_calls),
+            });
+        Some((
+            Arc::clone(&device),
+            Arc::new(XlogDeviceRuntime::with_resource(
+                Arc::clone(&device),
+                0,
+                pool,
+                resource,
+            )),
+            deallocate_calls,
+        ))
+    }
+
+    fn try_runtime_with_first_allocation_failure(
+        limit: usize,
+    ) -> Option<(
+        Arc<CudaDevice>,
+        Arc<crate::device_runtime::XlogDeviceRuntime>,
+    )> {
+        use crate::device_runtime::{GlobalDeviceBudget, StreamPool, XlogDeviceRuntime};
+        let device = try_device()?;
+        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+        let failing_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(FailFirstAllocationResource {
+                inner: DirectCudaResource::new(Arc::clone(&device), 0),
+                fail_next: std::sync::atomic::AtomicBool::new(true),
+            });
+        let budget_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(GlobalDeviceBudget::new(failing_resource, limit));
+        Some((
+            Arc::clone(&device),
+            Arc::new(XlogDeviceRuntime::with_resource(
+                Arc::clone(&device),
+                0,
+                pool,
+                budget_resource,
+            )),
+        ))
+    }
+
     fn try_runtime_with_budget(
         limit: usize,
     ) -> Option<(
@@ -1942,6 +3050,39 @@ mod tests {
                 pool,
                 budget_resource,
             )),
+        ))
+    }
+
+    fn try_runtime_with_logging_budget(
+        limit: usize,
+    ) -> Option<(
+        Arc<CudaDevice>,
+        Arc<crate::device_runtime::XlogDeviceRuntime>,
+        Arc<crate::device_runtime::InMemorySink>,
+    )> {
+        use crate::device_runtime::{
+            DeviceMemoryResource, DirectCudaResource, GlobalDeviceBudget, InMemorySink,
+            LoggingResource, LoggingSink, StreamPool, XlogDeviceRuntime,
+        };
+        let device = try_device()?;
+        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+        let direct_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(DirectCudaResource::new(Arc::clone(&device), 0));
+        let budget_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(GlobalDeviceBudget::new(direct_resource, limit));
+        let sink = Arc::new(InMemorySink::new());
+        let logging_sink: Arc<dyn LoggingSink> = sink.clone();
+        let logging_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(LoggingResource::new(budget_resource, logging_sink));
+        Some((
+            Arc::clone(&device),
+            Arc::new(XlogDeviceRuntime::with_resource(
+                Arc::clone(&device),
+                0,
+                pool,
+                logging_resource,
+            )),
+            sink,
         ))
     }
 

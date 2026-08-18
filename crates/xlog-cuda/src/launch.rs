@@ -93,6 +93,7 @@
 //! the legacy-buffer policy.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::device_runtime::{
     Access, BlockId, DeviceBlock, Generation, ResourceError, ResourceResult, StreamId,
@@ -154,6 +155,8 @@ pub struct LaunchRecorder {
     /// were not preflighted.
     preflighted: bool,
     committed: bool,
+    bound_runtime: Option<Arc<XlogDeviceRuntime>>,
+    bound_domain: Option<Arc<()>>,
 }
 
 #[derive(Clone, Copy)]
@@ -179,6 +182,17 @@ impl LaunchRecorder {
         Self::new(launch_stream, RecorderMode::Strict)
     }
 
+    pub(crate) fn new_strict_bound(
+        launch_stream: StreamId,
+        runtime: Arc<XlogDeviceRuntime>,
+        domain: Arc<()>,
+    ) -> Self {
+        let mut recorder = Self::new(launch_stream, RecorderMode::Strict);
+        recorder.bound_runtime = Some(runtime);
+        recorder.bound_domain = Some(domain);
+        recorder
+    }
+
     fn new(launch_stream: StreamId, mode: RecorderMode) -> Self {
         Self {
             launch_stream,
@@ -187,6 +201,8 @@ impl LaunchRecorder {
             strict_reject: None,
             preflighted: false,
             committed: false,
+            bound_runtime: None,
+            bound_domain: None,
         }
     }
 
@@ -200,6 +216,37 @@ impl LaunchRecorder {
         self.mode
     }
 
+    pub(crate) fn require_bound_domain<'a>(
+        &'a mut self,
+        runtime: &Arc<XlogDeviceRuntime>,
+        domain: &Arc<()>,
+        launch_stream: StreamId,
+    ) -> &'a mut Self {
+        let matches = self.mode == RecorderMode::Strict
+            && self.launch_stream == launch_stream
+            && same_arc_identity(self.bound_runtime.as_ref(), runtime)
+            && same_arc_identity(self.bound_domain.as_ref(), domain);
+        if !matches && self.strict_reject.is_none() {
+            self.strict_reject = Some(ResourceError::StreamMisuse(
+                "LaunchRecorder: recorder is not bound to the resident execution domain"
+                    .to_string(),
+            ));
+        }
+        self
+    }
+
+    pub(crate) fn preflight_bound(
+        &mut self,
+        runtime: &Arc<XlogDeviceRuntime>,
+    ) -> ResourceResult<()> {
+        if !same_arc_identity(self.bound_runtime.as_ref(), runtime) || self.bound_domain.is_none() {
+            return Err(ResourceError::StreamMisuse(
+                "LaunchRecorder::preflight_bound: foreign or unbound runtime".to_string(),
+            ));
+        }
+        self.preflight(runtime.as_ref())
+    }
+
     /// Snapshot a block reference into a recorded use. Reject
     /// post-preflight additions so the validity check at
     /// preflight time stays the source of truth.
@@ -207,6 +254,16 @@ impl LaunchRecorder {
         &mut self,
         label: &'static str,
         block: Option<&DeviceBlock>,
+        access: Access,
+        external: bool,
+    ) -> &mut Self {
+        self.note_identity(label, block.map(BlockId::from_block), access, external)
+    }
+
+    fn note_identity(
+        &mut self,
+        label: &'static str,
+        block: Option<BlockId>,
         access: Access,
         external: bool,
     ) -> &mut Self {
@@ -224,7 +281,7 @@ impl LaunchRecorder {
         }
         if let Some(b) = block {
             self.uses.push(RecordedUse {
-                block: BlockId::from_block(b),
+                block: b,
                 access,
                 label,
             });
@@ -256,6 +313,24 @@ impl LaunchRecorder {
         slice: &crate::memory::TrackedCudaSlice<T>,
     ) -> &mut Self {
         self.note("read", slice.runtime_block(), Access::Read, false)
+    }
+
+    /// Record a read through an already-validated runtime block.
+    ///
+    /// Crate-internal owner capsules use this when a device pointer table
+    /// retains immutable host-side block identities instead of the typed
+    /// slices that originally supplied the pointees.
+    pub(crate) fn read_device_block(&mut self, block: &DeviceBlock) -> &mut Self {
+        self.note("read_device_block", Some(block), Access::Read, false)
+    }
+
+    /// Record a read through a prevalidated immutable block-identity snapshot.
+    pub(crate) fn read_block_identity(&mut self, block: BlockId) -> &mut Self {
+        self.note_identity("read_block_identity", Some(block), Access::Read, false)
+    }
+
+    pub(crate) fn read_optional_block_identity(&mut self, block: Option<BlockId>) -> &mut Self {
+        self.note_identity("read_optional_block_identity", block, Access::Read, false)
     }
 
     /// Record a runtime-backed slice the launch will write.
@@ -343,6 +418,14 @@ impl LaunchRecorder {
     /// strongest access kind wins): `read` + `write` of the
     /// same block becomes one `Access::ReadWrite` prepare.
     pub fn preflight(&mut self, runtime: &XlogDeviceRuntime) -> ResourceResult<()> {
+        if let Some(bound_runtime) = &self.bound_runtime {
+            if !std::ptr::eq(bound_runtime.as_ref(), runtime) {
+                return Err(ResourceError::StreamMisuse(
+                    "LaunchRecorder::preflight: bound recorder received a foreign runtime"
+                        .to_string(),
+                ));
+            }
+        }
         if let Some(err) = &self.strict_reject {
             // Surface the captured strict-mode rejection
             // verbatim. Do NOT mark preflighted.
@@ -390,7 +473,31 @@ impl LaunchRecorder {
     /// `outstanding_reads`; readers append to
     /// `outstanding_reads`). Repeated registrations of the same
     /// block are deduplicated identically to preflight.
-    pub fn commit(mut self, runtime: &XlogDeviceRuntime) -> ResourceResult<()> {
+    pub fn commit(self, runtime: &XlogDeviceRuntime) -> ResourceResult<()> {
+        if self.bound_runtime.is_some() || self.bound_domain.is_some() {
+            return Err(ResourceError::StreamMisuse(
+                "LaunchRecorder::commit: domain-bound recorder requires commit_bound".to_string(),
+            ));
+        }
+        self.commit_inner(runtime)
+    }
+
+    pub(crate) fn commit_bound(
+        self,
+        runtime: &Arc<XlogDeviceRuntime>,
+        domain: &Arc<()>,
+    ) -> ResourceResult<()> {
+        if !same_arc_identity(self.bound_runtime.as_ref(), runtime)
+            || !same_arc_identity(self.bound_domain.as_ref(), domain)
+        {
+            return Err(ResourceError::StreamMisuse(
+                "LaunchRecorder::commit_bound: foreign or unbound execution domain".to_string(),
+            ));
+        }
+        self.commit_inner(runtime.as_ref())
+    }
+
+    fn commit_inner(mut self, runtime: &XlogDeviceRuntime) -> ResourceResult<()> {
         // Re-check any strict reject that may have accumulated
         // — preflight may not have been called, or may not have
         // surfaced this particular path. (Same string as
@@ -421,7 +528,8 @@ impl LaunchRecorder {
 /// Collapse multiple registrations of the same block into one
 /// use with the strongest access.
 ///
-/// The dedup key is `(ptr, generation, device_ordinal)` — NOT
+/// The dedup key is the complete [`BlockId`] identity
+/// `(ptr, generation, alloc_stream, device_ordinal)` — NOT
 /// `ptr` alone. ABA reuse inside a single recorder is rare but
 /// possible (record use of buffer X, drop X, allocate a new
 /// block reusing X's address, record THAT) and a ptr-only key
@@ -434,12 +542,14 @@ impl LaunchRecorder {
 /// Access combine: Read+Write → ReadWrite; otherwise the
 /// strongest of the two operands wins.
 fn dedup_uses(uses: &[RecordedUse]) -> Vec<RecordedUse> {
-    let mut by_id: HashMap<(u64, Generation, u32), usize> = HashMap::with_capacity(uses.len());
+    let mut by_id: HashMap<(u64, Generation, StreamId, u32), usize> =
+        HashMap::with_capacity(uses.len());
     let mut deduped: Vec<RecordedUse> = Vec::with_capacity(uses.len());
     for use_ in uses {
         let key = (
             use_.block.ptr,
             use_.block.generation,
+            use_.block.alloc_stream,
             use_.block.device_ordinal,
         );
         match by_id.get(&key) {
@@ -463,6 +573,10 @@ fn combine_access(a: Access, b: Access) -> Access {
         (Access::Read, Access::Read) => Access::Read,
         (Access::Write, Access::Write) => Access::Write,
     }
+}
+
+fn same_arc_identity<T>(bound: Option<&Arc<T>>, expected: &Arc<T>) -> bool {
+    bound.is_some_and(|bound| Arc::ptr_eq(bound, expected))
 }
 
 impl Drop for LaunchRecorder {
@@ -817,6 +931,132 @@ mod tests {
         let collapsed = dedup_uses(&same_id);
         assert_eq!(collapsed.len(), 1);
         assert_eq!(collapsed[0].access, Access::ReadWrite);
+    }
+
+    #[test]
+    fn dedup_distinguishes_allocation_stream_in_full_block_identity() {
+        let block_a = BlockId {
+            ptr: 0xdead_beef,
+            generation: Generation(1),
+            alloc_stream: StreamId(7),
+            device_ordinal: 0,
+        };
+        let block_b = BlockId {
+            alloc_stream: StreamId(11),
+            ..block_a
+        };
+        let uses = vec![
+            RecordedUse {
+                block: block_a,
+                access: Access::Read,
+                label: "read",
+            },
+            RecordedUse {
+                block: block_b,
+                access: Access::Write,
+                label: "write",
+            },
+        ];
+
+        let deduped = dedup_uses(&uses);
+        assert_eq!(deduped.len(), 2, "allocation streams are part of BlockId");
+        assert_eq!(deduped[0].block.alloc_stream, StreamId(7));
+        assert_eq!(deduped[1].block.alloc_stream, StreamId(11));
+    }
+
+    #[test]
+    fn read_device_block_snapshots_complete_identity_as_read() {
+        let block = DeviceBlock {
+            ptr: 0x1234,
+            device_ordinal: 2,
+            alloc_stream: StreamId(5),
+            bytes: 64,
+            align: 16,
+            tag: crate::device_runtime::AllocTag::UNTAGGED,
+            generation: Generation(9),
+            state: crate::device_runtime::BlockState::Live,
+        };
+        let expected = BlockId::from_block(&block);
+        let mut recorder = LaunchRecorder::new_strict(StreamId(8));
+
+        recorder.read_device_block(&block);
+
+        assert_eq!(recorder.uses.len(), 1);
+        assert_eq!(recorder.uses[0].block, expected);
+        assert_eq!(recorder.uses[0].access, Access::Read);
+        recorder.committed = true;
+    }
+
+    #[test]
+    fn read_block_identity_records_prevalidated_receipt_pointee() {
+        let identity = BlockId {
+            ptr: 0x9876,
+            generation: Generation(12),
+            alloc_stream: StreamId(4),
+            device_ordinal: 3,
+        };
+        let mut recorder = LaunchRecorder::new_strict(StreamId(6));
+
+        recorder.read_block_identity(identity);
+
+        assert_eq!(recorder.uses.len(), 1);
+        assert_eq!(recorder.uses[0].block, identity);
+        assert_eq!(recorder.uses[0].access, Access::Read);
+        recorder.committed = true;
+    }
+
+    #[test]
+    fn bound_strict_recorder_retains_runtime_and_domain_identity() {
+        let _: fn(StreamId, Arc<XlogDeviceRuntime>, Arc<()>) -> LaunchRecorder =
+            LaunchRecorder::new_strict_bound;
+    }
+
+    #[test]
+    fn bound_identity_uses_arc_ownership_not_value_equality() {
+        let owner = Arc::new(());
+        let same_owner = Arc::clone(&owner);
+        let equal_value_foreign_owner = Arc::new(());
+
+        assert!(same_arc_identity(Some(&owner), &same_owner));
+        assert!(!same_arc_identity(Some(&owner), &equal_value_foreign_owner));
+        assert!(!same_arc_identity::<()>(None, &owner));
+    }
+
+    #[test]
+    fn bound_recorder_exposes_domain_check_and_arc_preflight() {
+        let _: for<'a> fn(
+            &'a mut LaunchRecorder,
+            &Arc<XlogDeviceRuntime>,
+            &Arc<()>,
+            StreamId,
+        ) -> &'a mut LaunchRecorder = LaunchRecorder::require_bound_domain;
+        let _: fn(&mut LaunchRecorder, &Arc<XlogDeviceRuntime>) -> ResourceResult<()> =
+            LaunchRecorder::preflight_bound;
+        let _: fn(LaunchRecorder, &Arc<XlogDeviceRuntime>, &Arc<()>) -> ResourceResult<()> =
+            LaunchRecorder::commit_bound;
+    }
+
+    #[test]
+    fn bound_commit_checks_arc_domain_before_finish_use_path() {
+        let source = include_str!("launch.rs");
+        let start = source
+            .find("pub(crate) fn commit_bound")
+            .expect("bound commit");
+        let end = source[start..]
+            .find("fn commit_inner")
+            .map(|offset| start + offset)
+            .expect("commit implementation");
+        let bound_commit = &source[start..end];
+        let runtime_check = bound_commit
+            .find("same_arc_identity(self.bound_runtime.as_ref(), runtime)")
+            .expect("runtime Arc check");
+        let domain_check = bound_commit
+            .find("same_arc_identity(self.bound_domain.as_ref(), domain)")
+            .expect("domain Arc check");
+        let finish_path = bound_commit
+            .find("self.commit_inner(runtime.as_ref())")
+            .expect("finish-use path");
+        assert!(runtime_check < finish_path && domain_check < finish_path);
     }
 
     #[test]

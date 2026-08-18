@@ -6,7 +6,7 @@ use xlog_cuda::device_runtime::{
     LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
 };
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_gpu::logic::{LogicEvalResult, LogicProgram};
+use xlog_gpu::logic::{LogicEvalResult, LogicMaterializedStore, LogicProgram};
 use xlog_logic::Compiler;
 use xlog_runtime::{Executor, RelationDelta};
 
@@ -137,6 +137,15 @@ fn sorted_query_rows(provider: &CudaKernelProvider, result: &LogicEvalResult) ->
         .expect("download query rows");
     rows.sort_unstable();
     rows
+}
+
+#[test]
+fn materialized_cache_public_api_requires_the_opaque_store_type() {
+    let _: fn(
+        &LogicProgram,
+        Arc<CudaKernelProvider>,
+        &LogicMaterializedStore,
+    ) -> Result<LogicEvalResult> = LogicProgram::evaluate_cached_relation_store;
 }
 
 fn sorted_triples(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<(u32, u32, u32)> {

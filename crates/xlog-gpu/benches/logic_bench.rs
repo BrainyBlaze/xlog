@@ -502,7 +502,7 @@ fn bench_multiway_join(c: &mut Criterion) {
 /// Aggregation program for counting.
 const AGGREGATE_PROGRAM: &str = r#"
 pred edge(u32, u32).
-pred degree(u32, i64).
+pred degree(u32, u64).
 
 degree(X, count(Y)) :- edge(X, Y).
 

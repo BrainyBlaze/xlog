@@ -70,8 +70,8 @@
 use std::sync::Mutex;
 
 use super::resource::{
-    Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, ResourceError, ResourceResult,
-    StreamId,
+    Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, ResourceBudgetSnapshot,
+    ResourceError, ResourceResult, StreamId,
 };
 
 /// Internal state guarded by the budget mutex. Kept in its own
@@ -227,6 +227,14 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
         // own `reserved` instead, but matching the inner sidesteps
         // any transient skew during error rollback.
         self.inner.bytes_outstanding()
+    }
+
+    fn budget_snapshot(&self) -> Option<ResourceBudgetSnapshot> {
+        let state = self.state.lock().expect("GlobalDeviceBudget poisoned");
+        Some(ResourceBudgetSnapshot {
+            limit: self.limit,
+            reserved: state.reserved,
+        })
     }
 
     fn reap_pending(&self) -> ResourceResult<()> {

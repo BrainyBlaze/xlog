@@ -36,6 +36,9 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
     "wcoj",
     "mc_resident",
     "joint_solve",
+    "resident_relational",
+    "resident_filter_project",
+    "resident_schedule",
 ];
 
 /// Describes a single CUDA module: the .cu file name, the runtime module name
@@ -599,6 +602,48 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "joint_label_memoized",
         ],
     },
+    KernelModuleSpec {
+        cu_name: "resident_relational",
+        module_name: "xlog_resident_relational",
+        kernels: &[
+            "resident_set_insert",
+            "resident_set_finalize",
+            "resident_join_build",
+            "resident_join_probe_inner",
+            "resident_join_probe_semi",
+            "resident_join_finalize",
+            "resident_control_initialize",
+            "resident_scc_begin",
+            "resident_changed_reset",
+            "resident_changed_mark",
+            "resident_convergence",
+            "resident_terminal_success",
+            "resident_test_status",
+            "resident_trace_initialize",
+            "resident_trace_increment",
+            "resident_schema_winners_initialize",
+            "resident_schema_winner_mark",
+            "resident_receipt_pack",
+        ],
+    },
+    KernelModuleSpec {
+        cu_name: "resident_filter_project",
+        module_name: "xlog_resident_filter_project",
+        kernels: &[
+            "resident_filter_mask_scan",
+            "resident_filter_scan_blocks",
+            "resident_filter_add_offsets",
+            "resident_filter_finalize",
+            "resident_filter_compact",
+            "resident_project_finalize",
+            "resident_project_materialize",
+        ],
+    },
+    KernelModuleSpec {
+        cu_name: "resident_schedule",
+        module_name: "xlog_resident_schedule",
+        kernels: &["resident_schedule_execute"],
+    },
 ];
 
 #[cfg(test)]
@@ -624,8 +669,8 @@ mod tests {
     }
 
     #[test]
-    fn kernel_modules_count_is_27() {
-        assert_eq!(KERNEL_MODULES.len(), 27);
+    fn kernel_modules_count_is_30() {
+        assert_eq!(KERNEL_MODULES.len(), 30);
     }
 
     #[test]

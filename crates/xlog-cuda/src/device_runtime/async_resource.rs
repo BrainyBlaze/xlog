@@ -71,7 +71,7 @@ use cudarc::driver::{CudaEvent, CudaSlice};
 
 use super::resource::{
     Access, AllocTag, BlockId, BlockState, DeviceBlock, DeviceMemoryResource, Generation,
-    ResourceError, ResourceResult, StreamId,
+    ResourceBudgetSnapshot, ResourceError, ResourceResult, StreamId,
 };
 use super::stream_pool::StreamPool;
 use crate::CudaDevice;
@@ -478,6 +478,10 @@ impl DeviceMemoryResource for AsyncCudaResource {
 
     fn bytes_outstanding(&self) -> usize {
         self.live_bytes.load(Ordering::Relaxed) + self.pending_bytes.load(Ordering::Relaxed)
+    }
+
+    fn budget_snapshot(&self) -> Option<ResourceBudgetSnapshot> {
+        None
     }
 
     fn reap_pending(&self) -> ResourceResult<()> {

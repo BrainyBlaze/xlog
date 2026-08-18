@@ -2185,6 +2185,7 @@ mod helper_split_pass_tests {
                     ("f".to_string(), ScalarType::U32),
                 ])),
             }]],
+            generated_query_rules: vec![],
             est_memory_peak: 0,
             rel_arities: std::collections::HashMap::new(),
         }

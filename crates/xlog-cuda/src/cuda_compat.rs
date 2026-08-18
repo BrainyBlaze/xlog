@@ -213,6 +213,19 @@ pub unsafe trait LaunchAsync<Params> {
         cfg: LaunchConfig,
         params: Params,
     ) -> Result<(), DriverError>;
+
+    /// Launch a cooperative kernel on an explicit CUDA stream.
+    ///
+    /// # Safety
+    /// The caller must uphold the same ABI, lifetime, and cooperative launch
+    /// guarantees as [`Self::launch_cooperative`] and ensure `stream` belongs
+    /// to the function's CUDA context.
+    unsafe fn launch_cooperative_on_stream(
+        self,
+        stream: &CudaStream,
+        cfg: LaunchConfig,
+        params: Params,
+    ) -> Result<(), DriverError>;
 }
 
 unsafe impl LaunchAsync<&mut [*mut c_void]> for CudaFunction {
@@ -240,6 +253,15 @@ unsafe impl LaunchAsync<&mut [*mut c_void]> for CudaFunction {
     ) -> Result<(), DriverError> {
         self.launch_raw_cooperative(cfg, params)
     }
+
+    unsafe fn launch_cooperative_on_stream(
+        self,
+        stream: &CudaStream,
+        cfg: LaunchConfig,
+        params: &mut [*mut c_void],
+    ) -> Result<(), DriverError> {
+        self.launch_raw_cooperative_on_stream(stream, cfg, params)
+    }
 }
 
 unsafe impl LaunchAsync<&mut Vec<*mut c_void>> for CudaFunction {
@@ -266,6 +288,15 @@ unsafe impl LaunchAsync<&mut Vec<*mut c_void>> for CudaFunction {
         params: &mut Vec<*mut c_void>,
     ) -> Result<(), DriverError> {
         self.launch_raw_cooperative(cfg, params)
+    }
+
+    unsafe fn launch_cooperative_on_stream(
+        self,
+        stream: &CudaStream,
+        cfg: LaunchConfig,
+        params: &mut Vec<*mut c_void>,
+    ) -> Result<(), DriverError> {
+        self.launch_raw_cooperative_on_stream(stream, cfg, params)
     }
 }
 
@@ -305,6 +336,18 @@ macro_rules! impl_launch_tuple {
                 $(let $var = $var.into_kernel_param_storage();)*
                 let mut raw = [$( $var.as_kernel_param(), )*];
                 self.launch_raw_cooperative(cfg, &mut raw)
+            }
+
+            unsafe fn launch_cooperative_on_stream(
+                self,
+                stream: &CudaStream,
+                cfg: LaunchConfig,
+                params: ($($var,)*),
+            ) -> Result<(), DriverError> {
+                let ($($var,)*) = params;
+                $(let $var = $var.into_kernel_param_storage();)*
+                let mut raw = [$( $var.as_kernel_param(), )*];
+                self.launch_raw_cooperative_on_stream(stream, cfg, &mut raw)
             }
         }
     };

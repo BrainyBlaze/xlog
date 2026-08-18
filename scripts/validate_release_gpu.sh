@@ -8,6 +8,8 @@ usage: scripts/validate_release_gpu.sh [--mode smoke|release] [--dry-run]
 Run the canonical manual release-validation flow on a supported Linux x86_64
 CUDA machine. GitHub Actions do not run this script; maintainers run it
 manually before dispatching the publish workflow.
+
+XLOG_PINNED_CORPUS_ROOT must name the exact clean pinned corpus checkout.
 EOF
 }
 
@@ -53,18 +55,101 @@ esac
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 
-run_cmd() {
+print_cmd() {
   printf '+'
   for arg in "$@"; do
     printf ' %q' "$arg"
   done
   printf '\n'
+}
+
+run_cmd() {
+  print_cmd "$@"
 
   if [[ "$dry_run" == "1" ]]; then
     return 0
   fi
 
   "$@"
+}
+
+run_exact_rust_gate() {
+  local label="$1"
+  local expected_passed="$2"
+  shift 2
+  print_cmd "$@"
+
+  if [[ "$dry_run" == "1" ]]; then
+    return 0
+  fi
+
+  local log_file
+  local cargo_status
+  local tee_status
+  local parser_status=0
+  local -a pipeline_status
+  log_file="$(mktemp "${TMPDIR:-/tmp}/xlog-resident-gate.XXXXXX")"
+
+  set +e
+  "$@" 2>&1 | tee "$log_file"
+  pipeline_status=("${PIPESTATUS[@]}")
+  set -e
+  cargo_status="${pipeline_status[0]}"
+  tee_status="${pipeline_status[1]}"
+
+  python3 - "$log_file" "$cargo_status" "$tee_status" "$expected_passed" "$label" <<'PY' || parser_status=$?
+import pathlib
+import re
+import sys
+
+output = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+cargo_status = int(sys.argv[2])
+tee_status = int(sys.argv[3])
+expected_passed = int(sys.argv[4])
+label = sys.argv[5]
+summary_lines = re.findall(r"(?im)^\s*test result:.*$", output)
+summary = None
+if len(summary_lines) == 1:
+    summary = re.search(
+        r"test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; "
+        r"(\d+) ignored; (\d+) measured; (\d+) filtered out",
+        summary_lines[0],
+    )
+problems = []
+if cargo_status != 0:
+    problems.append(f"cargo test exited with status {cargo_status}")
+if tee_status != 0:
+    problems.append(f"tee exited with status {tee_status}")
+if len(summary_lines) != 1:
+    problems.append(
+        f"expected one Rust test summary, found {len(summary_lines)}"
+    )
+elif summary is None:
+    problems.append("Rust test summary did not match the expected format")
+else:
+    status, passed, failed, ignored, measured, _filtered = summary.groups()
+    actual = tuple(map(int, (passed, failed, ignored, measured)))
+    expected = (expected_passed, 0, 0, 0)
+    if status != "ok" or actual != expected:
+        problems.append(
+            "expected "
+            f"{expected_passed} passed; 0 failed; 0 ignored; 0 measured, "
+            f"got {passed} passed; {failed} failed; {ignored} ignored; "
+            f"{measured} measured with status {status}"
+        )
+skipped = len(re.findall(r"(?im)^\s*Skipping test:", output))
+if skipped:
+    problems.append(f"{skipped} tests skipped CUDA execution")
+if problems:
+    raise SystemExit(f"{label}: " + "; ".join(problems))
+print(
+    f"{label}: exact Rust summary {expected_passed} passed; "
+    "0 failed; 0 ignored; 0 measured"
+)
+PY
+
+  rm -f "$log_file"
+  return "$parser_status"
 }
 
 require_cmd() {
@@ -104,6 +189,19 @@ if [[ "$dry_run" != "1" ]]; then
   fi
 fi
 
+if [[ -z "${XLOG_PINNED_CORPUS_ROOT:-}" ]]; then
+  if [[ "$dry_run" == "1" ]]; then
+    export XLOG_PINNED_CORPUS_ROOT=/path/to/clean-pinned-corpus
+  else
+    echo "FATAL: XLOG_PINNED_CORPUS_ROOT must name the clean pinned corpus checkout" >&2
+    exit 1
+  fi
+elif [[ "$dry_run" != "1" && ! -d "$XLOG_PINNED_CORPUS_ROOT" ]]; then
+  echo "FATAL: XLOG_PINNED_CORPUS_ROOT is not a directory: $XLOG_PINNED_CORPUS_ROOT" >&2
+  exit 1
+fi
+export XLOG_PINNED_CORPUS_ROOT
+
 run_cmd python3 scripts/xlog_doctor.py --workflow release
 run_cmd bash scripts/preflight_release_publish.sh
 run_cmd cargo build --workspace --locked --release --exclude pyxlog
@@ -129,6 +227,27 @@ run_cmd cargo test --locked --release \
   -- \
   --nocapture \
   --test-threads=1
+run_exact_rust_gate "resident graph runtime module" 22 \
+  cargo test --locked --release -p xlog-runtime --lib \
+  --features resident-graph-tests \
+  executor::resident_graph_tests -- \
+  --nocapture --test-threads=1
+run_exact_rust_gate "pinned corpus prepare-only" 1 \
+  cargo test --locked --release -p xlog-gpu --lib \
+  logic::tests::pinned_corpus_prepares_resident_graph_without_launching_it -- \
+  --ignored --exact --nocapture --test-threads=1
+run_exact_rust_gate "pinned corpus production launch" 1 \
+  cargo test --locked --release -p xlog-gpu --lib \
+  logic::tests::pinned_corpus_certifies_and_runs_through_the_resident_production_path -- \
+  --ignored --exact --nocapture --test-threads=1
+run_exact_rust_gate "disconnected-rule scaling acceptance" 1 \
+  cargo test --locked --release -p xlog-gpu --lib \
+  logic::tests::resident_disconnected_four_thousand_rule_scaling_acceptance -- \
+  --ignored --exact --nocapture --test-threads=1
+run_exact_rust_gate "resident semantic acceptance matrix" 1 \
+  cargo test --locked --release -p xlog-gpu --lib \
+  logic::tests::resident_semantic_acceptance_matrix -- \
+  --ignored --exact --nocapture --test-threads=1
 run_cmd bash scripts/stage_pyxlog_kernels.sh
 run_cmd maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out "$wheel_dir"
 run_cmd python3 -m venv --system-site-packages "$python_env_dir"

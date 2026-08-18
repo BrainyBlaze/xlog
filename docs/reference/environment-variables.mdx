@@ -46,10 +46,18 @@ catching memory bugs and are off in normal use. One variable, `XLOG_CDCL_TRACE`,
 traces the GPU SAT solver (CDCL, conflict-driven clause learning — the search
 behind exact probabilistic inference) and exists only in debug builds.
 
+Three controls select how ordinary recursive programs use the resident
+conditional graph, which keeps recursive scan and filter dispatch inside one
+GPU-side control-flow graph. They are mutually exclusive: enabling more than one
+stops evaluation with a configuration error.
+
 | Variable | Effect | Values / Default |
 |---|---|---|
 | `XLOG_WCOJ_POOL_MB_PER_STREAM` | Device memory pool budget per CUDA stream, in MiB. | positive integer; default `256` |
 | `XLOG_UNION_CHUNK_BYTES` | Byte budget per chunk of the multiway-union fold that merges same-head rule outputs. Bounds peak device memory for many-rule heads to the chunk budget plus the deduplicated accumulator. | positive integer bytes; default `1073741824` (1 GiB) |
+| `XLOG_USE_RESIDENT_RECURSION` | Prefer the resident conditional graph when the complete ordinary plan is supported; continue through the existing GPU route when resident preparation declines. | any non-empty value except `0`; default off |
+| `XLOG_REQUIRE_RESIDENT_RECURSION` | Require the complete ordinary plan to use the resident conditional graph; an unsupported plan or failed preparation is an error instead of a route change. | any non-empty value except `0`; default off |
+| `XLOG_DISABLE_RESIDENT_RECURSION` | Force the existing GPU route. Use this as the baseline for answer and timing comparisons with the resident path. | any non-empty value except `0`; default off |
 | `XLOG_WARMUP_PROFILE` | Diagnostic: collect per-module PTX load timing and compile-warmup profiling stats. | `1` to enable; default off |
 | `XLOG_DEBUG_POISON_ALLOC` | Debug probe: fill fresh legacy allocations with `0xDD` so reads of unwritten memory surface deterministically. Read once per process. | `1` to enable; default off |
 | `XLOG_DEBUG_POISON_FREE` | Debug probe: poison legacy allocations with `0xDD` at drop so live aliases of freed memory become visually distinct. Read once per process. | `1` to enable; default off |
@@ -186,12 +194,17 @@ validation, or one-off developer tools. None of them affects a normal `xlog` or
 Release validation and determinism tests: `XLOG_REQUIRE_CUDA=1` makes
 CUDA-initialization failures in the certification suite panic instead of skipping
 (exported by `scripts/validate_release_gpu.sh` so a CPU-only machine can never
-satisfy the release gate); `XLOG_DETERMINISTIC`, `XLOG_CNF_OUTPUT_PATH`,
+satisfy the release gate). The same script requires
+`XLOG_PINNED_CORPUS_ROOT` for its resident preparation, production, and scaling
+tests.
+`XLOG_DETERMINISTIC`, `XLOG_CNF_OUTPUT_PATH`,
 `XLOG_GPU_HASH_OUTPUT_PATH`, and the `XLOG_A3`/`XLOG_A3A4` family drive
 cross-process determinism and stress tests.
 
 | Variable | Read by | Effect | Values / Default |
 |---|---|---|---|
+| `XLOG_REQUIRE_CUDA` | CUDA test harnesses and `scripts/validate_release_gpu.sh` | Turn missing or unusable CUDA into a hard failure instead of a skipped test. | exactly `1` to require CUDA; unset by default |
+| `XLOG_PINNED_CORPUS_ROOT` | the resident prepare-only, production, and scaling acceptance tests | Path to a clean checkout of the pinned acceptance corpus. The tests require the exact recorded commit, a clean index and worktree, and initialized clean submodules. | path; required by the complete GPU release script |
 | `WCOJ_BENCH_FULL` | the WCOJ triangle Criterion benchmark | Run the full input-size sweep instead of the reduced default. | `1` or `true` (case-insensitive); default off |
 | `XLOG_SKEWED_MULTIWAY_ONLY_CELL` | the skewed-multiway Criterion benchmark | Run only the named benchmark cases instead of the whole sweep. | comma-separated cell names; unset runs every cell |
 | `CAVIAR_CONTINUOUS_DIR` | `python/tests/test_caviar_alignment_evidence.py` and `python/tests/test_caviar_xml_corpus.py` | Directory holding local `caviar-train.json` / `caviar-test.json`, neither of which is shipped in this repo. `test_caviar_alignment_evidence.py` skips its whole module unless both files are found there. `test_caviar_xml_corpus.py` uses it only to gate its dump cross-check test, and checks that the path names an existing directory rather than checking for the two files. | path. `test_caviar_alignment_evidence.py` falls back to `../caviar_data` resolved against the **current working directory** pytest is invoked from — not the repository root and not the test file's own directory. `test_caviar_xml_corpus.py` has no default: unset means skip |

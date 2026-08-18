@@ -366,6 +366,65 @@ pub(super) fn match_chain_join(body: &RirNode) -> Option<ChainRirMatch> {
     })
 }
 
+fn fallback_scan_filter_equivalents(node: &RirNode) -> (u64, u64) {
+    match node {
+        RirNode::Unit | RirNode::TensorMaskedJoin { .. } => (0, 0),
+        RirNode::Scan { .. } => (1, 0),
+        RirNode::Filter { input, .. } => {
+            let (scans, filters) = fallback_scan_filter_equivalents(input);
+            (scans, filters.saturating_add(1))
+        }
+        RirNode::Project { input, .. }
+        | RirNode::GroupBy { input, .. }
+        | RirNode::Distinct { input, .. } => fallback_scan_filter_equivalents(input),
+        RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+            let left = fallback_scan_filter_equivalents(left);
+            let right = fallback_scan_filter_equivalents(right);
+            (
+                left.0.saturating_add(right.0),
+                left.1.saturating_add(right.1),
+            )
+        }
+        RirNode::ChainJoin { fallback, .. } | RirNode::MultiWayJoin { fallback, .. } => {
+            fallback_scan_filter_equivalents(fallback)
+        }
+        RirNode::Union { inputs } => inputs.iter().fold((0u64, 0u64), |total, input| {
+            let current = fallback_scan_filter_equivalents(input);
+            (
+                total.0.saturating_add(current.0),
+                total.1.saturating_add(current.1),
+            )
+        }),
+        RirNode::Fixpoint {
+            base, recursive, ..
+        } => {
+            let base = fallback_scan_filter_equivalents(base);
+            let recursive = fallback_scan_filter_equivalents(recursive);
+            (
+                base.0.saturating_add(recursive.0),
+                base.1.saturating_add(recursive.1),
+            )
+        }
+    }
+}
+
+fn record_chain_fallback_equivalents(
+    body: &RirNode,
+    installed: bool,
+    scan_equivalents: &mut u64,
+    filter_equivalents: &mut u64,
+) {
+    if !installed {
+        return;
+    }
+    let RirNode::ChainJoin { fallback, .. } = body else {
+        return;
+    };
+    let (scans, filters) = fallback_scan_filter_equivalents(fallback);
+    *scan_equivalents = scan_equivalents.saturating_add(scans);
+    *filter_equivalents = filter_equivalents.saturating_add(filters);
+}
+
 /// Three rel IDs extracted from a matched triangle RIR. The
 /// names correspond to the WCOJ kernel's slot semantics.
 pub(super) struct TriangleRirMatch {
@@ -2775,17 +2834,33 @@ impl Executor {
         let joined = match joined {
             Ok(buf) => buf,
             Err(err) => {
-                return wcoj_decline_on_error(&mut self.wcoj_error_decline_count, "chain-join", err)
+                record_chain_fallback_equivalents(
+                    body,
+                    false,
+                    &mut self.chain_fallback_scan_equivalents,
+                    &mut self.chain_fallback_filter_equivalents,
+                );
+                return wcoj_decline_on_error(
+                    &mut self.wcoj_error_decline_count,
+                    "chain-join",
+                    err,
+                );
             }
         };
         let projected = match self.execute_project(&joined, &matched.output_columns) {
             Ok(buf) => buf,
             Err(err) => {
+                record_chain_fallback_equivalents(
+                    body,
+                    false,
+                    &mut self.chain_fallback_scan_equivalents,
+                    &mut self.chain_fallback_filter_equivalents,
+                );
                 return wcoj_decline_on_error(
                     &mut self.wcoj_error_decline_count,
                     "chain-join-project",
                     err,
-                )
+                );
             }
         };
         self.stats.record_join_result(
@@ -2799,6 +2874,12 @@ impl Executor {
         if used_nested_loop {
             self.nested_loop_dispatch_count += 1;
         }
+        record_chain_fallback_equivalents(
+            body,
+            true,
+            &mut self.chain_fallback_scan_equivalents,
+            &mut self.chain_fallback_filter_equivalents,
+        );
         self.chain_dispatch_count += 1;
         Ok(Some(projected))
     }
@@ -3977,8 +4058,9 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        chain_dispatch_enabled, match_chain_join, match_multiway_triangle, wcoj_adaptive_enabled,
-        wcoj_gate_enabled, ENV_USE_WCOJ_TRIANGLE_U32, ENV_WCOJ_CHAIN_ENABLE,
+        chain_dispatch_enabled, match_chain_join, match_multiway_triangle,
+        record_chain_fallback_equivalents, wcoj_adaptive_enabled, wcoj_gate_enabled,
+        ENV_USE_WCOJ_TRIANGLE_U32, ENV_WCOJ_CHAIN_ENABLE,
     };
     use xlog_core::RelId;
     use xlog_ir::rir::ProjectExpr;
@@ -4045,6 +4127,53 @@ mod tests {
     fn match_chain_rejects_multiway_triangle() {
         let node = canonical_multiway();
         assert!(match_chain_join(&node).is_none());
+    }
+
+    fn chain_with_scan_filter_fallback() -> RirNode {
+        let mut node = canonical_chain_join();
+        let RirNode::ChainJoin { fallback, .. } = &mut node else {
+            unreachable!("canonical chain shape")
+        };
+        **fallback = RirNode::Union {
+            inputs: vec![
+                RirNode::Filter {
+                    input: Box::new(RirNode::Scan { rel: RelId(1) }),
+                    predicate: xlog_ir::Expr::And(Vec::new()),
+                },
+                RirNode::Project {
+                    input: Box::new(RirNode::Filter {
+                        input: Box::new(RirNode::Scan { rel: RelId(2) }),
+                        predicate: xlog_ir::Expr::And(Vec::new()),
+                    }),
+                    columns: vec![ProjectExpr::Column(0)],
+                },
+            ],
+        };
+        node
+    }
+
+    #[test]
+    fn matched_chain_success_records_embedded_fallback_equivalents() {
+        let node = chain_with_scan_filter_fallback();
+        let mut scans = 7;
+        let mut filters = 11;
+
+        record_chain_fallback_equivalents(&node, true, &mut scans, &mut filters);
+
+        assert_eq!(scans, 9);
+        assert_eq!(filters, 13);
+    }
+
+    #[test]
+    fn matched_chain_decline_records_no_embedded_fallback_equivalents() {
+        let node = chain_with_scan_filter_fallback();
+        let mut scans = 7;
+        let mut filters = 11;
+
+        record_chain_fallback_equivalents(&node, false, &mut scans, &mut filters);
+
+        assert_eq!(scans, 7);
+        assert_eq!(filters, 11);
     }
 
     #[test]

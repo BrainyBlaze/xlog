@@ -1,10 +1,14 @@
 //! GPU-accelerated evaluation of compiled Datalog programs.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use xlog_core::{RelId, Result, ScalarType, Schema, XlogError};
-use xlog_cuda::{CudaBuffer, CudaKernelProvider};
+use xlog_cuda::device_runtime::{
+    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
+};
+use xlog_cuda::{CudaBuffer, CudaColumn, CudaKernelProvider};
 use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
 use xlog_logic::ast::{PredColumn, PredDecl, TypeRef};
 use xlog_logic::epistemic::{
@@ -22,10 +26,281 @@ use xlog_logic::{
     Program, Query, Rule, Term,
 };
 use xlog_runtime::executor::JoinIndexCacheStats;
+use xlog_runtime::resident_graph::{
+    ResidentGraphCertifiedPlan, ResidentGraphCoreTransferStats, ResidentGraphDeclineReason,
+    ResidentGraphDeferredProfile, ResidentGraphExecutionError, ResidentGraphExecutionStats,
+    ResidentGraphFinalObservationStats, ResidentGraphPrepareOptions, ResidentGraphSchemaCatalog,
+    ResidentGraphSelectionKind,
+};
 use xlog_runtime::{
     DeltaRecomputeStats, EpistemicGpuExecutionResult, EpistemicGpuWorkspaceCapacities,
-    ExecutionStats, Executor, RelationDelta, RelationStore,
+    ExecutionStats, Executor, OpStats, RelationDelta, RelationStore, StratumStats,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResidentSelectionMode {
+    Disabled,
+    Prefer,
+    Require,
+}
+
+impl ResidentSelectionMode {
+    fn from_env() -> Result<Self> {
+        let enabled = |name: &str| {
+            std::env::var(name)
+                .map(|value| !value.is_empty() && value != "0")
+                .unwrap_or(false)
+        };
+        let disabled = enabled("XLOG_DISABLE_RESIDENT_RECURSION");
+        let required = enabled("XLOG_REQUIRE_RESIDENT_RECURSION");
+        let preferred = enabled("XLOG_USE_RESIDENT_RECURSION");
+        if u8::from(disabled) + u8::from(required) + u8::from(preferred) > 1 {
+            return Err(XlogError::Execution(
+                "resident execution environment flags are mutually exclusive".to_string(),
+            ));
+        }
+        Ok(if disabled {
+            Self::Disabled
+        } else if required {
+            Self::Require
+        } else if preferred {
+            Self::Prefer
+        } else {
+            Self::Disabled
+        })
+    }
+
+    fn requested(self) -> bool {
+        self != Self::Disabled
+    }
+}
+
+struct ResidentCompletedProfile {
+    telemetry: ResidentGraphExecutionStats,
+    iterations: u32,
+}
+
+const RESIDENT_LATENCY_DIAGNOSTICS_ENV: &str = "XLOG_RESIDENT_LATENCY_DIAGNOSTICS";
+static RESIDENT_LATENCY_SAMPLE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Default)]
+struct ResidentLatencyDiagnostic {
+    sample: u64,
+    certificate_input_ns: u64,
+    certificate_cache_was_warm: bool,
+    certificate_initialized_here: bool,
+    certificate_initialization_ns: u64,
+    certificate_cache_access_ns: u64,
+    input_setup_ns: u64,
+    prepare_capture_allocation_ns: u64,
+    launch_submission_ns: u64,
+    sync_wall_ns: u64,
+    device_event_ns: u64,
+    receipt_d2h_ns: u64,
+    receipt_decode_schema_staging_ns: u64,
+    owner_teardown_residual_ns: u64,
+    commit_ns: u64,
+    result_stats_construction_ns: u64,
+    executor_store_teardown_ns: u64,
+    staged_outputs: u64,
+    relation_registrations: usize,
+    remaining_store_relations_before_drop: usize,
+    runtime_bytes: [usize; 8],
+    manager_bytes: [u64; 8],
+}
+
+#[cfg(test)]
+mod resident_latency_diagnostic_tests {
+    use super::{
+        finalized_resident_latency_diagnostic_lines, resident_latency_diagnostic_line,
+        ResidentLatencyDiagnostic,
+    };
+
+    #[test]
+    fn certificate_latency_distinguishes_cold_initialization_from_warm_access() {
+        let mut cold = ResidentLatencyDiagnostic::new();
+        cold.sample = 3;
+        cold.certificate_cache_was_warm = false;
+        cold.certificate_initialized_here = true;
+        cold.certificate_initialization_ns = 41;
+        let cold_line =
+            resident_latency_diagnostic_line(Some(&cold), 101).expect("cold diagnostic line");
+        assert!(cold_line.contains("sample=3"));
+        assert!(cold_line.contains("certificate_cache_was_warm=false"));
+        assert!(cold_line.contains("certificate_initialized_here=true"));
+        assert!(cold_line.contains("certificate_initialization_ns=41"));
+        assert!(cold_line.contains("certificate_cache_access_ns=0"));
+
+        let mut warm = ResidentLatencyDiagnostic::new();
+        warm.sample = 4;
+        warm.certificate_cache_was_warm = true;
+        warm.certificate_cache_access_ns = 7;
+        let warm_line =
+            resident_latency_diagnostic_line(Some(&warm), 102).expect("warm diagnostic line");
+        assert!(warm_line.contains("sample=4"));
+        assert!(warm_line.contains("certificate_cache_was_warm=true"));
+        assert!(warm_line.contains("certificate_initialized_here=false"));
+        assert!(warm_line.contains("certificate_initialization_ns=0"));
+        assert!(warm_line.contains("certificate_cache_access_ns=7"));
+        assert_eq!(resident_latency_diagnostic_line(None, 0), None);
+    }
+
+    #[test]
+    fn finalized_latency_diagnostics_derive_after_total_and_preserve_sample_order() {
+        let mut outer = ResidentLatencyDiagnostic::new();
+        outer.sample = 17;
+        let prepare_derived = std::cell::Cell::new(false);
+        let outer_derived = std::cell::Cell::new(false);
+
+        let lines = finalized_resident_latency_diagnostic_lines(
+            101,
+            Some(&outer),
+            Some(|| {
+                prepare_derived.set(true);
+                "resident prepare phases: sample=17 total_ns=53".to_string()
+            }),
+            |diagnostic, total_ns| {
+                outer_derived.set(true);
+                diagnostic.format_line(total_ns)
+            },
+        )
+        .expect("enabled diagnostics finalize one fixed pair");
+
+        assert!(prepare_derived.get());
+        assert!(outer_derived.get());
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0]
+            .as_deref()
+            .is_some_and(|line| line.starts_with("resident prepare phases: sample=17 ")));
+        assert!(lines[1].as_deref().is_some_and(|line| {
+            line.starts_with("resident latency phases: sample=17 total_ns=101 ")
+        }));
+
+        let disabled_prepare_called = std::cell::Cell::new(false);
+        let disabled_outer_called = std::cell::Cell::new(false);
+        let disabled = finalized_resident_latency_diagnostic_lines(
+            0,
+            None,
+            Some(|| {
+                disabled_prepare_called.set(true);
+                String::new()
+            }),
+            |diagnostic, total_ns| {
+                disabled_outer_called.set(true);
+                diagnostic.format_line(total_ns)
+            },
+        );
+        assert!(disabled.is_none());
+        assert!(!disabled_prepare_called.get());
+        assert!(!disabled_outer_called.get());
+    }
+}
+
+impl ResidentLatencyDiagnostic {
+    fn new() -> Self {
+        Self {
+            sample: RESIDENT_LATENCY_SAMPLE.fetch_add(1, Ordering::Relaxed),
+            ..Self::default()
+        }
+    }
+
+    fn format_line(&self, total_ns: u64) -> String {
+        let additive_phases = [
+            self.certificate_input_ns,
+            self.prepare_capture_allocation_ns,
+            self.launch_submission_ns,
+            self.sync_wall_ns,
+            self.receipt_d2h_ns,
+            self.receipt_decode_schema_staging_ns,
+            self.owner_teardown_residual_ns,
+            self.commit_ns,
+            self.result_stats_construction_ns,
+            self.executor_store_teardown_ns,
+        ];
+        let unattributed_host_ns = resident_latency_unattributed_ns(total_ns, &additive_phases);
+        let owner_runtime_bytes_released =
+            self.runtime_bytes[4].saturating_sub(self.runtime_bytes[5]);
+        let owner_manager_bytes_released =
+            self.manager_bytes[4].saturating_sub(self.manager_bytes[5]);
+        let executor_runtime_bytes_released =
+            self.runtime_bytes[6].saturating_sub(self.runtime_bytes[7]);
+        let executor_manager_bytes_released =
+            self.manager_bytes[6].saturating_sub(self.manager_bytes[7]);
+        format!(
+            "resident latency phases: sample={} total_ns={} certificate_input_ns={} certificate_cache_was_warm={} certificate_initialized_here={} certificate_initialization_ns={} certificate_cache_access_ns={} input_setup_ns={} certificate_input_unattributed_ns={} prepare_capture_allocation_ns={} launch_submission_ns={} sync_wall_ns={} device_event_ns_nonadditive={} receipt_d2h_ns={} receipt_decode_schema_staging_ns={} owner_teardown_residual_ns={} commit_ns={} result_stats_construction_ns={} executor_store_teardown_ns={} unattributed_host_ns={} staged_outputs={} relation_registrations={} remaining_store_relations_before_drop={} allocation_snapshot_order=runtime_ready|after_setup|after_prepare|after_launch|after_sync|after_observe|after_commit|after_executor_drop runtime_bytes={:?} manager_bytes={:?} owner_runtime_bytes_released={} owner_manager_bytes_released={} executor_runtime_bytes_released={} executor_manager_bytes_released={} deallocation_calls=unavailable",
+            self.sample,
+            total_ns,
+            self.certificate_input_ns,
+            self.certificate_cache_was_warm,
+            self.certificate_initialized_here,
+            self.certificate_initialization_ns,
+            self.certificate_cache_access_ns,
+            self.input_setup_ns,
+            self.certificate_input_ns
+                .saturating_sub(self.certificate_initialization_ns)
+                .saturating_sub(self.certificate_cache_access_ns)
+                .saturating_sub(self.input_setup_ns),
+            self.prepare_capture_allocation_ns,
+            self.launch_submission_ns,
+            self.sync_wall_ns,
+            self.device_event_ns,
+            self.receipt_d2h_ns,
+            self.receipt_decode_schema_staging_ns,
+            self.owner_teardown_residual_ns,
+            self.commit_ns,
+            self.result_stats_construction_ns,
+            self.executor_store_teardown_ns,
+            unattributed_host_ns,
+            self.staged_outputs,
+            self.relation_registrations,
+            self.remaining_store_relations_before_drop,
+            self.runtime_bytes,
+            self.manager_bytes,
+            owner_runtime_bytes_released,
+            owner_manager_bytes_released,
+            executor_runtime_bytes_released,
+            executor_manager_bytes_released,
+        )
+    }
+}
+
+fn resident_latency_diagnostic_line(
+    diagnostic: Option<&ResidentLatencyDiagnostic>,
+    total_ns: u64,
+) -> Option<String> {
+    diagnostic.map(|diagnostic| diagnostic.format_line(total_ns))
+}
+
+fn finalized_resident_latency_diagnostic_lines<F, G>(
+    total_ns: u64,
+    diagnostic: Option<&ResidentLatencyDiagnostic>,
+    prepare_line: Option<F>,
+    format_outer: G,
+) -> Option<[Option<String>; 2]>
+where
+    F: FnOnce() -> String,
+    G: FnOnce(&ResidentLatencyDiagnostic, u64) -> String,
+{
+    let diagnostic = diagnostic?;
+    Some([
+        prepare_line.map(|prepare_line| prepare_line()),
+        Some(format_outer(diagnostic, total_ns)),
+    ])
+}
+
+fn resident_latency_diagnostics_enabled() -> bool {
+    std::env::var(RESIDENT_LATENCY_DIAGNOSTICS_ENV).as_deref() == Ok("1")
+}
+
+fn resident_latency_elapsed_ns(started: Option<std::time::Instant>) -> u64 {
+    started
+        .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn resident_latency_unattributed_ns(total_ns: u64, phases: &[u64]) -> u64 {
+    phases.iter().copied().fold(total_ns, u64::saturating_sub)
+}
 
 /// Result of evaluating a single query in a Datalog program.
 pub struct LogicQueryResult {
@@ -50,8 +325,90 @@ pub struct LogicEvalResult {
 
 /// Runtime state retained by a persistent logic session.
 pub struct LogicSessionRuntime {
+    reusable_state_identity: Arc<LogicProgramIdentity>,
     executor: Executor,
     profiling: bool,
+}
+
+#[derive(Debug)]
+struct LogicProgramIdentity {
+    resident_certification:
+        OnceLock<std::result::Result<Arc<ResidentGraphCertifiedPlan>, Arc<str>>>,
+    #[cfg(test)]
+    resident_certification_initializations: AtomicU64,
+}
+
+impl LogicProgramIdentity {
+    fn new() -> Self {
+        Self {
+            resident_certification: OnceLock::new(),
+            #[cfg(test)]
+            resident_certification_initializations: AtomicU64::new(0),
+        }
+    }
+
+    fn get_or_init_resident_certification(
+        &self,
+        initialize: impl FnOnce() -> Result<ResidentGraphCertifiedPlan>,
+    ) -> Result<Arc<ResidentGraphCertifiedPlan>> {
+        let cached = self.resident_certification.get_or_init(|| {
+            #[cfg(test)]
+            self.resident_certification_initializations
+                .fetch_add(1, Ordering::Relaxed);
+            initialize()
+                .map(Arc::new)
+                .map_err(|error| Arc::<str>::from(error.to_string()))
+        });
+        cached.as_ref().map(Arc::clone).map_err(|message| {
+            XlogError::Execution(format!("resident route certification failed: {message}"))
+        })
+    }
+
+    fn get_or_init_resident_certification_with_outcome(
+        &self,
+        initialize: impl FnOnce() -> Result<ResidentGraphCertifiedPlan>,
+    ) -> Result<(Arc<ResidentGraphCertifiedPlan>, bool, bool)> {
+        let cache_was_warm = self.resident_certification.get().is_some();
+        let mut initialized_here = false;
+        let cached = self.resident_certification.get_or_init(|| {
+            initialized_here = true;
+            #[cfg(test)]
+            self.resident_certification_initializations
+                .fetch_add(1, Ordering::Relaxed);
+            initialize()
+                .map(Arc::new)
+                .map_err(|error| Arc::<str>::from(error.to_string()))
+        });
+        cached
+            .as_ref()
+            .map(|certified| (Arc::clone(certified), cache_was_warm, initialized_here))
+            .map_err(|message| {
+                XlogError::Execution(format!("resident route certification failed: {message}"))
+            })
+    }
+
+    #[cfg(test)]
+    fn resident_certification_initializations(&self) -> u64 {
+        self.resident_certification_initializations
+            .load(Ordering::Relaxed)
+    }
+}
+
+/// A materialized derived store produced by one compiled logic program.
+///
+/// The store's program identity is intentionally opaque. It can be inspected
+/// read-only, but only the originating [`LogicProgram`] (or one of its clones)
+/// can accept it as reusable execution state.
+pub struct LogicMaterializedStore {
+    reusable_state_identity: Arc<LogicProgramIdentity>,
+    store: RelationStore,
+}
+
+impl LogicMaterializedStore {
+    /// Borrow the materialized relations for read-only result inspection.
+    pub fn as_relation_store(&self) -> &RelationStore {
+        &self.store
+    }
 }
 
 impl LogicSessionRuntime {
@@ -305,7 +662,7 @@ impl PreparedRelationDeltaBatch {
 /// use xlog_core::Result;
 /// use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 /// use xlog_gpu::logic::{
-///     LogicProgram, LogicSessionRuntime, PreparedRelationDeltaBatch,
+///     LogicMaterializedStore, LogicProgram, LogicSessionRuntime, PreparedRelationDeltaBatch,
 /// };
 /// use xlog_runtime::RelationStore;
 ///
@@ -313,7 +670,7 @@ impl PreparedRelationDeltaBatch {
 ///     program: &LogicProgram,
 ///     provider: Arc<CudaKernelProvider>,
 ///     store: &mut RelationStore,
-///     cache: &mut Option<RelationStore>,
+///     cache: &mut Option<LogicMaterializedStore>,
 ///     runtime: &mut Option<LogicSessionRuntime>,
 ///     batch: PreparedRelationDeltaBatch,
 ///     replacement: CudaBuffer,
@@ -330,10 +687,10 @@ impl PreparedRelationDeltaBatch {
 pub struct PreparedRelationDeltaCommit<'a> {
     provider: Arc<CudaKernelProvider>,
     authoritative_relation_store: &'a mut RelationStore,
-    cached_store_slot: &'a mut Option<RelationStore>,
+    cached_store_slot: &'a mut Option<LogicMaterializedStore>,
     session_runtime_slot: &'a mut Option<LogicSessionRuntime>,
     staged_base_updates: Vec<(String, CudaBuffer)>,
-    prospective_cached_store: Option<RelationStore>,
+    prospective_cached_store: Option<LogicMaterializedStore>,
     prospective_session_runtime: Option<LogicSessionRuntime>,
     report: LogicDeltaReport,
 }
@@ -348,7 +705,7 @@ impl PreparedRelationDeltaCommit<'_> {
     /// authoritative store otherwise.
     pub fn prospective_derived_store(&self) -> &RelationStore {
         if let Some(store) = self.prospective_cached_store.as_ref() {
-            return store;
+            return &store.store;
         }
         if let Some(runtime) = self.prospective_session_runtime.as_ref() {
             return runtime.executor.store();
@@ -528,6 +885,7 @@ struct EpistemicProvenance {
 /// A compiled Datalog program ready for GPU evaluation.
 #[derive(Clone)]
 pub struct LogicProgram {
+    reusable_state_identity: Arc<LogicProgramIdentity>,
     /// Merged authored program retained for public diagnostics and result labels.
     source_program: Program,
     /// Normalized or reduced program used by compilation and execution.
@@ -597,36 +955,110 @@ impl LogicProgram {
     }
 
     fn compile_normalized_program(normalized: Program, source_program: Program) -> Result<Self> {
+        for query_index in 0..normalized.queries.len() {
+            let generated_head = format!("__xlog_query_{query_index}");
+            let authored_collision = source_program
+                .predicates
+                .iter()
+                .any(|declaration| declaration.name == generated_head)
+                || source_program
+                    .rules
+                    .iter()
+                    .any(|rule| rule.head.predicate == generated_head);
+            if authored_collision {
+                return Err(XlogError::Compilation(format!(
+                    "authored relation {generated_head} collides with generated query head"
+                )));
+            }
+        }
         // Function, meta-term, list, and shared-variable normalization preserve
         // constraint count and source order. Keep the authored snapshot only
         // while that one-to-one invariant remains observable.
         let authored_constraints = (source_program.constraints.len()
             == normalized.constraints.len())
         .then(|| source_program.constraints.clone());
-        if program_has_epistemic_literals(&normalized) {
-            return Self::compile_epistemic_program(
+        let reusable_state_identity = Arc::new(LogicProgramIdentity::new());
+        let compiled = if program_has_epistemic_literals(&normalized) {
+            Self::compile_epistemic_program(
                 normalized,
                 source_program,
                 authored_constraints,
-            );
+                reusable_state_identity,
+            )?
+        } else {
+            let mut compiler = Compiler::new();
+            let compiler_program = qualify_same_name_multi_arity_program(&normalized);
+            let plan = compiler.compile_prepared_program(&compiler_program)?;
+            let mut schemas = compiler.schemas().clone();
+            augment_same_name_multi_arity_schemas(&normalized, &mut schemas)?;
+            Self {
+                reusable_state_identity,
+                source_program,
+                program: normalized,
+                authored_constraints,
+                plan: LogicExecutionPlan::Ordinary(Box::new(plan)),
+                schemas,
+                rel_ids: compiler.rel_ids().clone(),
+                epistemic_provenance: None,
+            }
+        };
+        Ok(compiled.finalize_compilation())
+    }
+
+    fn finalize_compilation(self) -> Self {
+        if !self.program.queries.is_empty() {
+            if let LogicExecutionPlan::Ordinary(plan) = &self.plan {
+                let _ = self.resident_certified_plan_for_plan(plan);
+            }
         }
-        let mut compiler = Compiler::new();
-        let plan = compiler.compile_prepared_program(&normalized)?;
-        Ok(Self {
-            source_program,
-            program: normalized,
-            authored_constraints,
-            plan: LogicExecutionPlan::Ordinary(Box::new(plan)),
-            schemas: compiler.schemas().clone(),
-            rel_ids: compiler.rel_ids().clone(),
-            epistemic_provenance: None,
-        })
+        self
+    }
+
+    fn validate_reusable_state_identity(
+        &self,
+        state_identity: &Arc<LogicProgramIdentity>,
+        state_name: &str,
+    ) -> Result<()> {
+        if Arc::ptr_eq(&self.reusable_state_identity, state_identity) {
+            return Ok(());
+        }
+        Err(XlogError::Execution(format!(
+            "{state_name} belongs to a different compiled logic program"
+        )))
+    }
+
+    fn validate_reusable_state_slots(
+        &self,
+        cached_store: Option<&LogicMaterializedStore>,
+        session_runtime: Option<&LogicSessionRuntime>,
+    ) -> Result<()> {
+        if let Some(cached_store) = cached_store {
+            self.validate_reusable_state_identity(
+                &cached_store.reusable_state_identity,
+                "materialized cache",
+            )?;
+        }
+        if let Some(session_runtime) = session_runtime {
+            self.validate_reusable_state_identity(
+                &session_runtime.reusable_state_identity,
+                "session runtime",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn bind_materialized_store(&self, store: RelationStore) -> LogicMaterializedStore {
+        LogicMaterializedStore {
+            reusable_state_identity: self.reusable_state_identity.clone(),
+            store,
+        }
     }
 
     fn compile_epistemic_program(
         normalized: Program,
         source_program: Program,
         authored_constraints: Option<Vec<Constraint>>,
+        reusable_state_identity: Arc<LogicProgramIdentity>,
     ) -> Result<Self> {
         // Capture epistemic provenance up front: the source-EIR modal literals are
         // retained even when a Case-A recursive reduction lowers the program to an
@@ -646,6 +1078,7 @@ impl LogicProgram {
             let schemas = g91_plan_combined_schemas(&plan);
             let rel_ids = g91_plan_combined_rel_ids(&plan);
             return Ok(Self {
+                reusable_state_identity,
                 source_program,
                 program: reduction.refinement_program().clone(),
                 authored_constraints,
@@ -709,6 +1142,7 @@ impl LogicProgram {
             }));
             let rel_ids = epistemic_relation_ids(&plan)?;
             return Ok(Self {
+                reusable_state_identity,
                 source_program,
                 program: normalized,
                 authored_constraints,
@@ -736,6 +1170,7 @@ impl LogicProgram {
                 let schemas = wfs_plan_combined_schemas(&wfs_plan);
                 let rel_ids = wfs_plan_combined_rel_ids(&wfs_plan);
                 return Ok(Self {
+                    reusable_state_identity,
                     source_program,
                     program: recursive_reduced,
                     authored_constraints,
@@ -752,6 +1187,7 @@ impl LogicProgram {
             let mut compiler = Compiler::new();
             let plan = compiler.compile_prepared_program(&recursive_reduced)?;
             return Ok(Self {
+                reusable_state_identity,
                 source_program,
                 program: recursive_reduced,
                 authored_constraints,
@@ -791,6 +1227,7 @@ impl LogicProgram {
         };
         let rel_ids = epistemic_relation_ids(&plan)?;
         Ok(Self {
+            reusable_state_identity,
             source_program,
             program: normalized,
             authored_constraints,
@@ -1073,22 +1510,40 @@ impl LogicProgram {
         provider: Arc<CudaKernelProvider>,
         relation_store: &RelationStore,
         profiling: bool,
-    ) -> Result<(LogicEvalResult, RelationStore)> {
+    ) -> Result<(LogicEvalResult, LogicMaterializedStore)> {
+        self.reject_compiler_generated_query_relation_names(
+            relation_store.names(),
+            "persistent caller",
+        )?;
+        let resident_mode = ResidentSelectionMode::from_env()?;
         let mut executor =
-            self.executor_from_relation_store(provider.clone(), relation_store, profiling)?;
+            self.executor_from_materialized_store(provider.clone(), relation_store, profiling)?;
         executor.execute_plan(self.ordinary_plan("relation-store evaluation")?)?;
         self.enforce_constraints(&provider, &executor)?;
 
         let total_output_rows = self.total_query_rows(executor.store())?;
-        let stats = if profiling {
+        let mut stats = if profiling {
             Some(executor.execution_stats(total_output_rows))
         } else {
             None
         };
+        if resident_mode.requested() {
+            if resident_mode == ResidentSelectionMode::Require {
+                return Err(XlogError::Execution(
+                    "resident conditional-graph execution was required, but complete-store evaluation requires the existing GPU path"
+                        .to_string(),
+                ));
+            }
+            if let Some(stats) = stats.as_mut() {
+                stats.resident_graph = Some(ResidentGraphExecutionStats::declined(
+                    ResidentGraphDeclineReason::FullStoreRequested,
+                ));
+            }
+        }
 
         let cached_store = self.clone_relation_store(&provider, executor.store())?;
         let result = self.logic_result_from_store(provider.as_ref(), &cached_store, stats)?;
-        Ok((result, cached_store))
+        Ok((result, self.bind_materialized_store(cached_store)))
     }
 
     /// Create retained runtime state for a persistent relation session.
@@ -1098,9 +1553,38 @@ impl LogicProgram {
         relation_store: &RelationStore,
         profiling: bool,
     ) -> Result<LogicSessionRuntime> {
+        self.reject_compiler_generated_query_relation_names(
+            relation_store.names(),
+            "persistent caller",
+        )?;
         self.ordinary_plan("persistent relation session")?;
+        let executor =
+            self.executor_from_materialized_store(provider, relation_store, profiling)?;
         Ok(LogicSessionRuntime {
-            executor: self.executor_from_relation_store(provider, relation_store, profiling)?,
+            reusable_state_identity: self.reusable_state_identity.clone(),
+            executor,
+            profiling,
+        })
+    }
+
+    fn create_session_runtime_from_materialized_store(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &LogicMaterializedStore,
+        profiling: bool,
+    ) -> Result<LogicSessionRuntime> {
+        self.validate_reusable_state_identity(
+            &relation_store.reusable_state_identity,
+            "materialized cache",
+        )?;
+        self.ordinary_plan("materialized relation session")?;
+        Ok(LogicSessionRuntime {
+            reusable_state_identity: self.reusable_state_identity.clone(),
+            executor: self.executor_from_materialized_store(
+                provider,
+                &relation_store.store,
+                profiling,
+            )?,
             profiling,
         })
     }
@@ -1110,7 +1594,9 @@ impl LogicProgram {
         &self,
         provider: Arc<CudaKernelProvider>,
         runtime: &mut LogicSessionRuntime,
-    ) -> Result<(LogicEvalResult, RelationStore)> {
+    ) -> Result<(LogicEvalResult, LogicMaterializedStore)> {
+        self.validate_reusable_state_identity(&runtime.reusable_state_identity, "session runtime")?;
+        let resident_mode = ResidentSelectionMode::from_env()?;
         runtime.executor.set_profiling(runtime.profiling);
         runtime
             .executor
@@ -1118,38 +1604,76 @@ impl LogicProgram {
         self.enforce_constraints(&provider, &runtime.executor)?;
 
         let total_output_rows = self.total_query_rows(runtime.executor.store())?;
-        let stats = if runtime.profiling {
+        let mut stats = if runtime.profiling {
             Some(runtime.executor.execution_stats(total_output_rows))
         } else {
             None
         };
+        if resident_mode.requested() {
+            if resident_mode == ResidentSelectionMode::Require {
+                return Err(XlogError::Execution(
+                    "resident conditional-graph execution was required, but persistent session evaluation requires the existing GPU path"
+                        .to_string(),
+                ));
+            }
+            if let Some(stats) = stats.as_mut() {
+                stats.resident_graph = Some(ResidentGraphExecutionStats::declined(
+                    ResidentGraphDeclineReason::FullStoreRequested,
+                ));
+            }
+        }
 
         let cached_store = self.clone_relation_store(&provider, runtime.executor.store())?;
         let result = self.logic_result_from_store(provider.as_ref(), &cached_store, stats)?;
-        Ok((result, cached_store))
+        Ok((result, self.bind_materialized_store(cached_store)))
     }
 
     /// Build query results from an already materialized runtime store.
+    ///
+    /// A raw relation store cannot attest that it was materialized by this
+    /// compiled program:
+    ///
+    /// ```compile_fail
+    /// use std::sync::Arc;
+    /// use xlog_core::Result;
+    /// use xlog_cuda::CudaKernelProvider;
+    /// use xlog_gpu::logic::LogicProgram;
+    /// use xlog_runtime::RelationStore;
+    ///
+    /// fn evaluate_untrusted_store(
+    ///     program: &LogicProgram,
+    ///     provider: Arc<CudaKernelProvider>,
+    ///     raw_store: &RelationStore,
+    /// ) -> Result<()> {
+    ///     program.evaluate_cached_relation_store(provider, raw_store)?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn evaluate_cached_relation_store(
         &self,
         provider: Arc<CudaKernelProvider>,
-        relation_store: &RelationStore,
+        relation_store: &LogicMaterializedStore,
     ) -> Result<LogicEvalResult> {
-        self.logic_result_from_store(provider.as_ref(), relation_store, None)
+        self.validate_reusable_state_identity(
+            &relation_store.reusable_state_identity,
+            "materialized cache",
+        )?;
+        self.logic_result_from_store(provider.as_ref(), &relation_store.store, None)
     }
 
     /// Apply relation deltas to a persistent session store through the runtime delta path.
     ///
-    /// If preparation fails, the authoritative relation store is unchanged but
-    /// any prior derived cache consumed by preparation is discarded. The caller
-    /// must rebuild that cache on its next evaluation.
+    /// A cache from another compiled program is rejected without consuming it.
+    /// After identity validation, an operational preparation failure leaves the
+    /// authoritative relation store unchanged but discards the consumed cache.
     pub fn apply_relation_deltas(
         &self,
         provider: Arc<CudaKernelProvider>,
         relation_store: &mut RelationStore,
-        cached_store: &mut Option<RelationStore>,
+        cached_store: &mut Option<LogicMaterializedStore>,
         deltas: HashMap<String, RelationDelta>,
     ) -> Result<LogicDeltaReport> {
+        self.validate_reusable_state_slots(cached_store.as_ref(), None)?;
         let mut session_runtime = None;
         let prepared = self.prepare_relation_delta_commit(
             provider,
@@ -1164,17 +1688,18 @@ impl LogicProgram {
 
     /// Apply relation deltas while preserving retained session runtime state.
     ///
-    /// If preparation fails, the authoritative relation store is unchanged but
-    /// the derived cache and retained runtime slots are left empty. The caller
-    /// must rebuild them on its next evaluation.
+    /// State from another compiled program is rejected without consuming it.
+    /// After identity validation, an operational preparation failure leaves the
+    /// authoritative store unchanged and the derived-state slots empty.
     pub fn apply_relation_deltas_with_session_runtime(
         &self,
         provider: Arc<CudaKernelProvider>,
         relation_store: &mut RelationStore,
-        cached_store: &mut Option<RelationStore>,
+        cached_store: &mut Option<LogicMaterializedStore>,
         session_runtime: &mut Option<LogicSessionRuntime>,
         deltas: HashMap<String, RelationDelta>,
     ) -> Result<LogicDeltaReport> {
+        self.validate_reusable_state_slots(cached_store.as_ref(), session_runtime.as_ref())?;
         let prepared = self.prepare_relation_delta_commit(
             provider,
             relation_store,
@@ -1193,17 +1718,19 @@ impl LogicProgram {
     /// batch must use [`LogicProgram::prepare_relation_delta_batch`] exactly
     /// once and pass its result to
     /// [`LogicProgram::prepare_relation_delta_commit_with_session_runtime`].
-    /// The current derived cache and runtime are consumed during preparation;
-    /// on error their caller slots remain empty while the authoritative store
-    /// remains unchanged.
+    /// Foreign reusable state is rejected before it is consumed. Once identity
+    /// validation succeeds, the current cache and runtime are consumed during
+    /// preparation; on operational error their caller slots remain empty while
+    /// the authoritative store remains unchanged.
     pub fn prepare_relation_deltas_commit_with_session_runtime<'a>(
         &self,
         provider: Arc<CudaKernelProvider>,
         relation_store: &'a mut RelationStore,
-        cached_store: &'a mut Option<RelationStore>,
+        cached_store: &'a mut Option<LogicMaterializedStore>,
         session_runtime: &'a mut Option<LogicSessionRuntime>,
         deltas: HashMap<String, RelationDelta>,
     ) -> Result<PreparedRelationDeltaCommit<'a>> {
+        self.validate_reusable_state_slots(cached_store.as_ref(), session_runtime.as_ref())?;
         self.prepare_relation_delta_commit(
             provider,
             relation_store,
@@ -1222,6 +1749,10 @@ impl LogicProgram {
         delta_batch: Vec<(String, RelationDelta)>,
         cancellation_capture_relations: &BTreeSet<String>,
     ) -> Result<PreparedRelationDeltaBatch> {
+        self.reject_compiler_generated_query_relation_names(
+            delta_batch.iter().map(|(name, _)| name.as_str()),
+            "caller delta",
+        )?;
         coalesce_relation_delta_batch_with_cancellation_capture(
             provider,
             delta_batch,
@@ -1229,19 +1760,99 @@ impl LogicProgram {
         )
     }
 
+    /// Build the prospective authoritative base store for an independent
+    /// full-recompute diagnostic without consuming retained session state.
+    ///
+    /// This must run before preparing the retained-runtime commit. If cloning
+    /// or applying a base delta fails, the caller's cache and session runtime
+    /// remain available for subsequent evaluations.
+    pub fn clone_prospective_base_for_prepared_delta_batch(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        authoritative_relation_store: &RelationStore,
+        prepared_batch: &PreparedRelationDeltaBatch,
+    ) -> Result<RelationStore> {
+        self.reject_compiler_generated_query_relation_names(
+            authoritative_relation_store.names(),
+            "persistent caller",
+        )?;
+
+        let deltas = prepared_batch.net_deltas();
+        let mut unchanged_names = authoritative_relation_store
+            .names()
+            .filter(|name| !deltas.contains_key(*name))
+            .collect::<Vec<_>>();
+        unchanged_names.sort_unstable();
+
+        let mut changed_names = deltas.keys().map(String::as_str).collect::<Vec<_>>();
+        changed_names.sort_unstable();
+
+        let mut prospective = RelationStore::new(provider.clone());
+        prospective.try_reserve_relations(unchanged_names.len() + changed_names.len())?;
+
+        for name in unchanged_names {
+            let buffer = authoritative_relation_store.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Authoritative relation {name} disappeared while cloning prospective base state"
+                ))
+            })?;
+            let context = format!("cloning prospective base relation '{name}'");
+            let cloned = provider
+                .clone_buffer(buffer)
+                .map_err(|error| relation_clone_error(context, error))?;
+            prospective.put(name, cloned);
+        }
+
+        for name in changed_names {
+            let delta = deltas.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Prepared relation delta for {name} disappeared while cloning prospective base state"
+                ))
+            })?;
+            let existing = authoritative_relation_store.get(name);
+            let schema = existing
+                .map(|buffer| buffer.schema().clone())
+                .or_else(|| delta.insert.as_ref().map(|buffer| buffer.schema().clone()))
+                .or_else(|| delta.delete.as_ref().map(|buffer| buffer.schema().clone()))
+                .ok_or_else(|| {
+                    XlogError::Execution(format!(
+                        "Delta update for {name} has no existing relation and no schema"
+                    ))
+                })?;
+            let context = format!("cloning prospective base relation '{name}'");
+            let mut updated = match existing {
+                Some(buffer) => provider
+                    .clone_buffer(buffer)
+                    .map_err(|error| relation_clone_error(context, error))?,
+                None => provider.create_empty_buffer(schema)?,
+            };
+            if let Some(delete) = &delta.delete {
+                updated = provider.diff_gpu(&updated, delete)?;
+            }
+            if let Some(insert) = &delta.insert {
+                updated = provider.union_gpu(&updated, insert)?;
+            }
+            prospective.put(name, updated);
+        }
+
+        Ok(prospective)
+    }
+
     /// Prepare a fully staged retained-runtime commit from a coalesced batch.
     ///
-    /// The current derived runtime and cache are moved into the transaction. If
-    /// preparation fails, those partially updated values are discarded and the
-    /// caller slots remain empty; the authoritative base store is never changed.
+    /// Foreign reusable state is rejected before the coalesced batch is consumed.
+    /// Once identity validation succeeds, the current runtime and cache move into
+    /// the transaction. An operational preparation failure discards those values
+    /// and leaves the caller slots empty; the authoritative store is unchanged.
     pub fn prepare_relation_delta_commit_with_session_runtime<'a>(
         &self,
         provider: Arc<CudaKernelProvider>,
         relation_store: &'a mut RelationStore,
-        cached_store: &'a mut Option<RelationStore>,
+        cached_store: &'a mut Option<LogicMaterializedStore>,
         session_runtime: &'a mut Option<LogicSessionRuntime>,
         prepared_batch: PreparedRelationDeltaBatch,
     ) -> Result<PreparedRelationDeltaCommit<'a>> {
+        self.validate_reusable_state_slots(cached_store.as_ref(), session_runtime.as_ref())?;
         let (deltas, report_seed) = prepared_batch.into_application_parts();
         self.prepare_relation_delta_commit(
             provider,
@@ -1257,11 +1868,20 @@ impl LogicProgram {
         &self,
         provider: Arc<CudaKernelProvider>,
         relation_store: &'a mut RelationStore,
-        cached_store: &'a mut Option<RelationStore>,
+        cached_store: &'a mut Option<LogicMaterializedStore>,
         session_runtime: &'a mut Option<LogicSessionRuntime>,
         deltas: HashMap<String, RelationDelta>,
         report_seed: Option<PreparedRelationDeltaReportSeed>,
     ) -> Result<PreparedRelationDeltaCommit<'a>> {
+        self.validate_reusable_state_slots(cached_store.as_ref(), session_runtime.as_ref())?;
+        self.reject_compiler_generated_query_relation_names(
+            relation_store.names(),
+            "persistent caller",
+        )?;
+        self.reject_compiler_generated_query_relation_names(
+            deltas.keys().map(String::as_str),
+            "caller delta",
+        )?;
         let insert_rows = deltas
             .values()
             .filter_map(|delta| delta.insert.as_ref())
@@ -1303,8 +1923,15 @@ impl LogicProgram {
         let mut working_runtime = match prior_session_runtime {
             Some(runtime) => runtime,
             None => {
-                let seed_store = prior_cached_store.as_ref().unwrap_or(relation_store);
-                self.create_session_runtime(provider.clone(), seed_store, false)?
+                if let Some(materialized_store) = prior_cached_store.as_ref() {
+                    self.create_session_runtime_from_materialized_store(
+                        provider.clone(),
+                        materialized_store,
+                        false,
+                    )?
+                } else {
+                    self.create_session_runtime(provider.clone(), relation_store, false)?
+                }
             }
         };
 
@@ -1334,9 +1961,9 @@ impl LogicProgram {
                     .map_err(|error| relation_clone_error(context, error))?,
             ));
         }
-        let prospective_cached_store = Some(
+        let prospective_cached_store = Some(self.bind_materialized_store(
             self.clone_prepared_relation_snapshot(&provider, working_runtime.executor.store())?,
-        );
+        ));
 
         let mut report = logic_delta_report(delta_stats, insert_rows, delete_rows);
         report.changed_relation_names = changed_relation_names;
@@ -1370,15 +1997,21 @@ impl LogicProgram {
     ///
     /// A fully canceled batch returns a no-op report without changing the
     /// authoritative store or advancing derived runtime state. If preparation
-    /// fails, the authoritative store remains unchanged and any consumed
-    /// derived cache is discarded.
+    /// fails, the authoritative store remains unchanged. A foreign cache is
+    /// rejected before device coalescing and is not consumed; after successful
+    /// identity validation an operational failure may discard the cache.
     pub fn apply_relation_delta_batch(
         &self,
         provider: Arc<CudaKernelProvider>,
         relation_store: &mut RelationStore,
-        cached_store: &mut Option<RelationStore>,
+        cached_store: &mut Option<LogicMaterializedStore>,
         delta_batch: Vec<(String, RelationDelta)>,
     ) -> Result<LogicDeltaReport> {
+        self.validate_reusable_state_slots(cached_store.as_ref(), None)?;
+        self.reject_compiler_generated_query_relation_names(
+            relation_store.names(),
+            "persistent caller",
+        )?;
         let prepared_batch =
             self.prepare_relation_delta_batch(provider.as_ref(), delta_batch, &BTreeSet::new())?;
         let mut session_runtime = None;
@@ -1397,15 +2030,21 @@ impl LogicProgram {
     /// A fully canceled batch returns a no-op report without changing the
     /// authoritative store or advancing derived runtime state. If preparation
     /// fails, the authoritative store remains unchanged while the derived cache
-    /// and retained runtime slots are left empty.
+    /// and retained runtime slots are left empty. Foreign state is rejected
+    /// before device coalescing and remains in the caller slots.
     pub fn apply_relation_delta_batch_with_session_runtime(
         &self,
         provider: Arc<CudaKernelProvider>,
         relation_store: &mut RelationStore,
-        cached_store: &mut Option<RelationStore>,
+        cached_store: &mut Option<LogicMaterializedStore>,
         session_runtime: &mut Option<LogicSessionRuntime>,
         delta_batch: Vec<(String, RelationDelta)>,
     ) -> Result<LogicDeltaReport> {
+        self.validate_reusable_state_slots(cached_store.as_ref(), session_runtime.as_ref())?;
+        self.reject_compiler_generated_query_relation_names(
+            relation_store.names(),
+            "persistent caller",
+        )?;
         let prepared_batch =
             self.prepare_relation_delta_batch(provider.as_ref(), delta_batch, &BTreeSet::new())?;
         let prepared = self.prepare_relation_delta_commit_with_session_runtime(
@@ -1427,6 +2066,1106 @@ impl LogicProgram {
         self.evaluate_with_options(provider, inputs, false)
     }
 
+    fn finish_nonordinary_resident_selection(
+        &self,
+        mut result: LogicEvalResult,
+        mode: ResidentSelectionMode,
+    ) -> Result<LogicEvalResult> {
+        match mode {
+            ResidentSelectionMode::Disabled => Ok(result),
+            ResidentSelectionMode::Prefer => {
+                if let Some(stats) = result.stats.as_mut() {
+                    stats.resident_graph = Some(ResidentGraphExecutionStats::declined(
+                        ResidentGraphDeclineReason::NonOrdinaryPlan,
+                    ));
+                }
+                Ok(result)
+            }
+            ResidentSelectionMode::Require => Err(XlogError::Execution(
+                "resident conditional-graph execution was required for a non-ordinary program"
+                    .to_string(),
+            )),
+        }
+    }
+
+    fn compiler_generated_query_heads(&self) -> Result<BTreeSet<String>> {
+        match &self.plan {
+            LogicExecutionPlan::Ordinary(plan) => {
+                if plan.generated_query_rules.len() != self.program.queries.len() {
+                    return Err(XlogError::Execution(format!(
+                            "compiler-generated query provenance count {} does not match authored query count {}",
+                            plan.generated_query_rules.len(),
+                            self.program.queries.len()
+                        )));
+                }
+                let mut heads = BTreeSet::new();
+                let mut rule_positions = BTreeSet::new();
+                for (position, provenance) in plan.generated_query_rules.iter().enumerate() {
+                    if provenance.query_index != position {
+                        return Err(XlogError::Execution(format!(
+                                "compiler-generated query provenance position {position} carries query index {}",
+                                provenance.query_index
+                            )));
+                    }
+                    if !rule_positions.insert((provenance.scc_index, provenance.rule_index)) {
+                        return Err(XlogError::Execution(format!(
+                                "compiler-generated query provenance {} reuses compiled rule scc={} rule={}",
+                                provenance.query_index, provenance.scc_index, provenance.rule_index
+                            )));
+                    }
+                    let expected_head = format!("__xlog_query_{}", provenance.query_index);
+                    let rule = plan
+                            .rules_by_scc
+                            .get(provenance.scc_index)
+                            .and_then(|rules| rules.get(provenance.rule_index))
+                            .ok_or_else(|| {
+                                XlogError::Execution(format!(
+                                    "compiler-generated query provenance {} references missing compiled rule scc={} rule={}",
+                                    provenance.query_index,
+                                    provenance.scc_index,
+                                    provenance.rule_index
+                                ))
+                            })?;
+                    if rule.head != expected_head {
+                        return Err(XlogError::Execution(format!(
+                                "compiler-generated query provenance {} expects head {expected_head} but references authored head {}",
+                                provenance.query_index, rule.head
+                            )));
+                    }
+                    let occurrence_count = plan
+                        .rules_by_scc
+                        .iter()
+                        .flatten()
+                        .filter(|candidate| candidate.head == expected_head)
+                        .count();
+                    if occurrence_count != 1 {
+                        return Err(XlogError::Execution(format!(
+                                "compiler-generated query head {expected_head} must have exactly one compiled rule, found {occurrence_count}"
+                            )));
+                    }
+                    heads.insert(expected_head);
+                }
+                Ok(heads)
+            }
+            _ => Ok((0..self.program.queries.len())
+                .map(|index| format!("__xlog_query_{index}"))
+                .collect()),
+        }
+    }
+
+    fn reject_compiler_generated_query_relation_names<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+        relation_source: &str,
+    ) -> Result<()> {
+        let generated_query_heads = self.compiler_generated_query_heads()?;
+        if let Some(name) = names
+            .into_iter()
+            .find(|name| generated_query_heads.contains(*name))
+        {
+            return Err(XlogError::Execution(format!(
+                "{relation_source} relation {name} collides with generated query head"
+            )));
+        }
+        Ok(())
+    }
+
+    fn evaluate_ordinary_with_resident_mode(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        inputs: HashMap<String, CudaBuffer>,
+        profiling: bool,
+        mode: ResidentSelectionMode,
+    ) -> Result<LogicEvalResult> {
+        let mut latency_diagnostic =
+            resident_latency_diagnostics_enabled().then(ResidentLatencyDiagnostic::new);
+        let total_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let certificate_input_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let ordinary_plan = self.ordinary_plan("resident route certification")?;
+        if self.program.queries.is_empty() {
+            return self.evaluate_existing_gpu_after_resident_decline(
+                provider,
+                inputs,
+                profiling,
+                ordinary_plan,
+                mode,
+                ResidentGraphDeclineReason::FullStoreRequested,
+            );
+        }
+        let certificate_initialization_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let certification = if latency_diagnostic.is_some() {
+            self.resident_certified_plan_with_outcome_for_plan(ordinary_plan)
+        } else {
+            self.resident_certified_plan_for_plan(ordinary_plan)
+                .map(|certified| (certified, false, false))
+        };
+        let (certified_plan, certificate_cache_was_warm, certificate_initialized_here) =
+            match certification {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return self.evaluate_existing_gpu_after_resident_decline(
+                        provider,
+                        inputs,
+                        profiling,
+                        ordinary_plan,
+                        mode,
+                        ResidentGraphDeclineReason::WorkspaceUnbounded {
+                            detail: error.to_string(),
+                        },
+                    )
+                }
+            };
+        let certificate = certified_plan.certificate();
+        if !certificate.is_supported() {
+            let reason = certificate.declines().first().cloned().unwrap_or_else(|| {
+                ResidentGraphDeclineReason::WorkspaceUnbounded {
+                    detail: "route inspection did not produce a resident certificate".into(),
+                }
+            });
+            return self.evaluate_existing_gpu_after_resident_decline(
+                provider,
+                inputs,
+                profiling,
+                ordinary_plan,
+                mode,
+                reason,
+            );
+        }
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            let elapsed_ns = resident_latency_elapsed_ns(certificate_initialization_started);
+            diagnostic.certificate_cache_was_warm = certificate_cache_was_warm;
+            diagnostic.certificate_initialized_here = certificate_initialized_here;
+            if certificate_initialized_here {
+                diagnostic.certificate_initialization_ns = elapsed_ns;
+            } else {
+                diagnostic.certificate_cache_access_ns = elapsed_ns;
+            }
+        }
+        let input_setup_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+
+        for (name, buffer) in &inputs {
+            let expected_schema = self.schemas.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Input relation {name} not declared in program schemas"
+                ))
+            })?;
+            ensure_schema_type_compatible(expected_schema, buffer.schema()).map_err(|error| {
+                XlogError::Execution(format!("Input relation {name} schema mismatch: {error}"))
+            })?;
+        }
+
+        if let Some(relation) = inputs.iter().find_map(|(name, buffer)| {
+            (!Self::resident_input_is_local(&provider, buffer)).then(|| name.clone())
+        }) {
+            return self.evaluate_existing_gpu_after_resident_decline(
+                provider,
+                inputs,
+                profiling,
+                ordinary_plan,
+                mode,
+                ResidentGraphDeclineReason::ImportedInputUnsupported { relation },
+            );
+        }
+
+        for (name, buffer) in &inputs {
+            if !buffer.canonical_full_row_set_certified() {
+                provider
+                    .validated_logical_row_count(buffer)
+                    .map_err(|error| {
+                        XlogError::Execution(format!(
+                            "Input relation {name} has invalid logical row metadata: {error}"
+                        ))
+                    })?;
+            }
+        }
+
+        let caller_has_runtime = provider.memory().runtime().is_some();
+        let resident_provider = match Self::resident_provider_view(&provider) {
+            Ok(provider) => provider,
+            Err(reason) => {
+                return self.evaluate_existing_gpu_after_resident_decline(
+                    provider,
+                    inputs,
+                    profiling,
+                    ordinary_plan,
+                    mode,
+                    reason,
+                )
+            }
+        };
+        let runtime = Arc::clone(
+            resident_provider
+                .memory()
+                .runtime()
+                .expect("resident provider view was validated with a runtime"),
+        );
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.runtime_bytes[0] = runtime.bytes_outstanding();
+            diagnostic.manager_bytes[0] = resident_provider.memory().allocated_bytes();
+        }
+
+        let resident_inputs = if caller_has_runtime {
+            inputs
+        } else {
+            let mut migrated = HashMap::with_capacity(inputs.len());
+            let migration = inputs.iter().try_for_each(|(name, buffer)| {
+                resident_provider
+                    .clone_buffer(buffer)
+                    .map(|clone| migrated.insert(name.clone(), clone))
+                    .map(|_| ())
+            });
+            if let Err(error) = migration {
+                drop(migrated);
+                resident_provider.device().synchronize().map_err(|cleanup| {
+                        XlogError::Kernel(format!(
+                            "resident input migration failed ({error}); cleanup synchronization failed: {cleanup}"
+                        ))
+                    })?;
+                runtime.reap_pending().map_err(|cleanup| {
+                    XlogError::Kernel(format!(
+                        "resident input migration failed ({error}); cleanup reap failed: {cleanup}"
+                    ))
+                })?;
+                return self.evaluate_existing_gpu_after_resident_decline(
+                    provider,
+                    inputs,
+                    profiling,
+                    ordinary_plan,
+                    mode,
+                    ResidentGraphDeclineReason::WorkspaceUnbounded {
+                        detail: format!("input migration to the async runtime failed: {error}"),
+                    },
+                );
+            }
+            resident_provider.device().synchronize().map_err(|error| {
+                XlogError::Kernel(format!(
+                    "resident input migration synchronization failed: {error}"
+                ))
+            })?;
+            drop(inputs);
+            migrated
+        };
+
+        let mut canonical_replacements = HashMap::new();
+        let canonicalization = resident_inputs.iter().try_for_each(|(name, buffer)| {
+            let expected_schema = self.schemas.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Input relation {name} not declared in program schemas"
+                ))
+            })?;
+            ensure_schema_type_compatible(expected_schema, buffer.schema()).map_err(|error| {
+                XlogError::Execution(format!("Input relation {name} schema mismatch: {error}"))
+            })?;
+            if buffer.schema() == expected_schema && buffer.canonical_full_row_set_certified() {
+                return Ok(());
+            }
+            let mut normalized = None;
+            let canonical_source = if buffer.schema() == expected_schema {
+                buffer
+            } else {
+                let mut clone = resident_provider.clone_buffer(buffer)?;
+                clone.set_schema(expected_schema.clone());
+                normalized.insert(clone)
+            };
+            let canonical = resident_provider.union_many_gpu(&[canonical_source])?;
+            if !canonical.canonical_full_row_set_certified() {
+                return Err(XlogError::Execution(format!(
+                    "resident input {name} did not acquire a full-row set proof"
+                )));
+            }
+            canonical_replacements.insert(name.clone(), canonical);
+            Ok(())
+        });
+        if let Err(error) = canonicalization {
+            drop(canonical_replacements);
+            resident_provider.device().synchronize().map_err(|cleanup| {
+                    XlogError::Kernel(format!(
+                        "resident input canonicalization failed ({error}); cleanup synchronization failed: {cleanup}"
+                    ))
+                })?;
+            runtime.reap_pending().map_err(|cleanup| {
+                    XlogError::Kernel(format!(
+                        "resident input canonicalization failed ({error}); cleanup reap failed: {cleanup}"
+                    ))
+                })?;
+            return self.evaluate_existing_gpu_after_resident_decline(
+                resident_provider,
+                resident_inputs,
+                profiling,
+                ordinary_plan,
+                mode,
+                ResidentGraphDeclineReason::WorkspaceUnbounded {
+                    detail: format!("input full-row canonicalization failed: {error}"),
+                },
+            );
+        }
+        let resident_inputs = resident_inputs
+            .into_iter()
+            .map(|(name, buffer)| {
+                let canonical = canonical_replacements.remove(&name).unwrap_or(buffer);
+                (name, canonical)
+            })
+            .collect();
+
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.input_setup_ns = resident_latency_elapsed_ns(input_setup_started);
+            diagnostic.certificate_input_ns =
+                resident_latency_elapsed_ns(certificate_input_started);
+            diagnostic.runtime_bytes[1] = runtime.bytes_outstanding();
+            diagnostic.manager_bytes[1] = resident_provider.memory().allocated_bytes();
+        }
+        let prepare_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let mut executor = self.prepare_resident_executor(
+            &resident_provider,
+            resident_inputs,
+            profiling,
+            ordinary_plan,
+        )?;
+        let prepare_options = latency_diagnostic
+            .as_ref()
+            .map(|diagnostic| {
+                ResidentGraphPrepareOptions::default()
+                    .with_latency_diagnostic_sample(diagnostic.sample)
+            })
+            .unwrap_or_default();
+        let mut prepared = match executor
+            .prepare_certified_resident_graph(certified_plan.as_ref(), prepare_options)
+        {
+            Ok(prepared) => prepared,
+            Err(ResidentGraphExecutionError::Declined(reason)) => {
+                runtime
+                    .reap_pending()
+                    .map_err(|error| XlogError::Kernel(error.to_string()))?;
+                return match mode {
+                        ResidentSelectionMode::Prefer => {
+                            executor.execute_plan(ordinary_plan)?;
+                            let mut result = self.finish_ordinary_evaluation(
+                                &resident_provider,
+                                executor,
+                                profiling,
+                                None,
+                                None,
+                            )?;
+                            if let Some(stats) = result.stats.as_mut() {
+                                stats.resident_graph =
+                                    Some(ResidentGraphExecutionStats::declined(reason));
+                            }
+                            Ok(result)
+                        }
+                        ResidentSelectionMode::Require => Err(XlogError::Execution(format!(
+                            "resident conditional-graph execution was required but declined: {reason:?}"
+                        ))),
+                        ResidentSelectionMode::Disabled => unreachable!(
+                            "disabled resident selection does not call the resident evaluator"
+                        ),
+                    };
+            }
+            Err(error) => return Err(Self::resident_execution_error(error)),
+        };
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.prepare_capture_allocation_ns = resident_latency_elapsed_ns(prepare_started);
+            diagnostic.runtime_bytes[2] = runtime.bytes_outstanding();
+            diagnostic.manager_bytes[2] = resident_provider.memory().allocated_bytes();
+        }
+        let prepare_diagnostic = prepared.take_prepare_diagnostic();
+
+        let transfer_before = resident_provider.host_transfer_stats();
+        let provider_dtoh_before = resident_provider.d2h_transfer_count();
+        let untracked_dtoh_before = resident_provider.untracked_metadata_dtoh_count();
+        let deterministic_d2h_before = resident_provider.deterministic_d2h_violation_count();
+        let final_before = resident_provider.final_observation_transfer_stats();
+        let graph_before = runtime.conditional_graph_stats();
+
+        let launch_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let in_flight = prepared.launch().map_err(Self::resident_execution_error)?;
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.launch_submission_ns = resident_latency_elapsed_ns(launch_started);
+            diagnostic.runtime_bytes[3] = runtime.bytes_outstanding();
+            diagnostic.manager_bytes[3] = resident_provider.memory().allocated_bytes();
+        }
+        let sync_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let synchronized = in_flight
+            .synchronize_core()
+            .map_err(Self::resident_execution_error)?;
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.sync_wall_ns = resident_latency_elapsed_ns(sync_started);
+            diagnostic.runtime_bytes[4] = runtime.bytes_outstanding();
+            diagnostic.manager_bytes[4] = resident_provider.memory().allocated_bytes();
+        }
+
+        let transfer_after = resident_provider.host_transfer_stats();
+        let provider_dtoh_after = resident_provider.d2h_transfer_count();
+        let untracked_dtoh_after = resident_provider.untracked_metadata_dtoh_count();
+        let deterministic_d2h_after = resident_provider.deterministic_d2h_violation_count();
+        let final_before_observation = resident_provider.final_observation_transfer_stats();
+        let graph_after = runtime.conditional_graph_stats();
+        let core_transfers = ResidentGraphCoreTransferStats {
+            tracked_htod_calls: transfer_after
+                .htod_calls
+                .saturating_sub(transfer_before.htod_calls),
+            tracked_htod_bytes: transfer_after
+                .htod_bytes
+                .saturating_sub(transfer_before.htod_bytes),
+            tracked_dtoh_calls: transfer_after
+                .dtoh_calls
+                .saturating_sub(transfer_before.dtoh_calls),
+            tracked_dtoh_bytes: transfer_after
+                .dtoh_bytes
+                .saturating_sub(transfer_before.dtoh_bytes),
+            provider_dtoh_calls: provider_dtoh_after.saturating_sub(provider_dtoh_before),
+            untracked_metadata_dtoh_calls: untracked_dtoh_after
+                .saturating_sub(untracked_dtoh_before),
+        };
+        if core_transfers.tracked_htod_calls != 0
+            || core_transfers.tracked_htod_bytes != 0
+            || core_transfers.tracked_dtoh_calls != 0
+            || core_transfers.tracked_dtoh_bytes != 0
+            || core_transfers.provider_dtoh_calls != 0
+            || core_transfers.untracked_metadata_dtoh_calls != 0
+            || final_before_observation.dtoh_calls != final_before.dtoh_calls
+            || final_before_observation.dtoh_bytes != final_before.dtoh_bytes
+            || final_before_observation.pinned_receipts != final_before.pinned_receipts
+        {
+            return Err(XlogError::Execution(
+                "resident conditional-graph core performed a host transfer".into(),
+            ));
+        }
+        let graph_launches = graph_after.launches.saturating_sub(graph_before.launches);
+        let terminal_synchronizations = graph_after
+            .terminal_synchronizations
+            .saturating_sub(graph_before.terminal_synchronizations);
+        let host_iterations = graph_after
+            .host_iterations
+            .saturating_sub(graph_before.host_iterations);
+        let host_allocations = graph_after
+            .host_allocations
+            .saturating_sub(graph_before.host_allocations);
+        let host_status_injections = graph_after
+            .host_status_injections
+            .saturating_sub(graph_before.host_status_injections);
+        let deterministic_d2h_violations =
+            deterministic_d2h_after.saturating_sub(deterministic_d2h_before);
+        if graph_launches != 1
+            || terminal_synchronizations != 1
+            || host_iterations != 0
+            || host_allocations != 0
+            || host_status_injections != 0
+            || deterministic_d2h_violations != 0
+        {
+            return Err(XlogError::Execution(format!(
+                    "resident conditional-graph runtime invariant failed: launches={graph_launches}, terminal_synchronizations={terminal_synchronizations}, host_iterations={host_iterations}, host_allocations={host_allocations}, host_status_injections={host_status_injections}, deterministic_d2h_violations={deterministic_d2h_violations}"
+                )));
+        }
+
+        let observation_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let observed = synchronized
+            .observe_final_receipt()
+            .map_err(Self::resident_execution_error)?;
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            let observation_ns = resident_latency_elapsed_ns(observation_started);
+            let phase = observed.phase_timings().ok_or_else(|| {
+                XlogError::Execution(
+                    "resident latency diagnostics missing final-observation timings".into(),
+                )
+            })?;
+            diagnostic.receipt_d2h_ns = phase.receipt_d2h_ns;
+            diagnostic.receipt_decode_schema_staging_ns = phase.decode_schema_staging_ns;
+            diagnostic.owner_teardown_residual_ns = observation_ns
+                .saturating_sub(phase.receipt_d2h_ns)
+                .saturating_sub(phase.decode_schema_staging_ns);
+            diagnostic.staged_outputs = observed.staged_output_count();
+            diagnostic.relation_registrations = observed.relation_registration_count();
+            diagnostic.runtime_bytes[5] = runtime.bytes_outstanding();
+            diagnostic.manager_bytes[5] = resident_provider.memory().allocated_bytes();
+        }
+        let encoded_len = u64::try_from(observed.encoded_len())
+            .map_err(|_| XlogError::Execution("resident receipt byte length exceeds u64".into()))?;
+        let device_elapsed_ns = observed.device_elapsed_ns();
+        let device_scan_invocations = observed.device_scan_invocations();
+        let device_filter_invocations = observed.device_filter_invocations();
+        let semantic_scan_invocations = observed.semantic_scan_invocations();
+        let semantic_filter_invocations = observed.semantic_filter_invocations();
+        let staged_store_mutations = observed.staged_output_count();
+        let iterations = observed.iterations();
+        let final_after = resident_provider.final_observation_transfer_stats();
+        let final_observation = ResidentGraphFinalObservationStats {
+            dtoh_calls: final_after
+                .dtoh_calls
+                .saturating_sub(final_before_observation.dtoh_calls),
+            dtoh_bytes: final_after
+                .dtoh_bytes
+                .saturating_sub(final_before_observation.dtoh_bytes),
+            pinned_receipts: final_after
+                .pinned_receipts
+                .saturating_sub(final_before_observation.pinned_receipts),
+        };
+        if final_observation.dtoh_calls != 1
+            || final_observation.dtoh_bytes != encoded_len
+            || final_observation.pinned_receipts != 1
+        {
+            return Err(XlogError::Execution(format!(
+                    "resident final observation invariant failed: calls={}, bytes={}, pinned={} expected_bytes={encoded_len}",
+                    final_observation.dtoh_calls,
+                    final_observation.dtoh_bytes,
+                    final_observation.pinned_receipts,
+                )));
+        }
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.device_event_ns = device_elapsed_ns;
+        }
+        let commit_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        observed
+            .commit(&mut executor)
+            .map_err(Self::resident_execution_error)?;
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.commit_ns = resident_latency_elapsed_ns(commit_started);
+            diagnostic.runtime_bytes[6] = runtime.bytes_outstanding();
+            diagnostic.manager_bytes[6] = resident_provider.memory().allocated_bytes();
+        }
+
+        let telemetry_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let timed_scan_filter_invocations = device_scan_invocations
+            .checked_add(device_filter_invocations)
+            .ok_or_else(|| {
+                XlogError::Execution("resident device invocation count overflow".into())
+            })?;
+        let telemetry = ResidentGraphExecutionStats {
+            selection: ResidentGraphSelectionKind::ResidentConditionalGraph,
+            decline: None,
+            conditional_graph_launches: graph_launches,
+            terminal_synchronizations,
+            host_iterations,
+            host_allocations,
+            host_status_injections,
+            deterministic_d2h_violations,
+            host_dispatched_scan_ops: 0,
+            host_dispatched_filter_ops: 0,
+            device_scan_invocations,
+            device_filter_invocations,
+            semantic_scan_invocations,
+            semantic_filter_invocations,
+            staged_store_mutations,
+            deferred_profile: ResidentGraphDeferredProfile {
+                timed_scan_filter_invocations,
+                device_elapsed_ns,
+                final_sync_misattributed_ns: 0,
+            },
+            core_transfers,
+            final_observation,
+        };
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.result_stats_construction_ns =
+                resident_latency_elapsed_ns(telemetry_started);
+        }
+        let result = self.finish_ordinary_evaluation(
+            &resident_provider,
+            executor,
+            profiling,
+            Some(ResidentCompletedProfile {
+                telemetry,
+                iterations,
+            }),
+            latency_diagnostic.as_mut(),
+        )?;
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.runtime_bytes[7] = runtime.bytes_outstanding();
+            diagnostic.manager_bytes[7] = resident_provider.memory().allocated_bytes();
+        }
+        let diagnostic_lines = if latency_diagnostic.is_some() {
+            let total_ns = resident_latency_elapsed_ns(total_started);
+            finalized_resident_latency_diagnostic_lines(
+                total_ns,
+                latency_diagnostic.as_ref(),
+                prepare_diagnostic
+                    .map(|diagnostic| move || diagnostic.into_snapshot().format_line()),
+                ResidentLatencyDiagnostic::format_line,
+            )
+        } else {
+            None
+        };
+        if let Some(diagnostic_lines) = diagnostic_lines {
+            for line in diagnostic_lines.into_iter().flatten() {
+                eprintln!("{line}");
+            }
+        }
+        Ok(result)
+    }
+
+    fn evaluate_existing_gpu_after_resident_decline(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        inputs: HashMap<String, CudaBuffer>,
+        profiling: bool,
+        plan: &ExecutionPlan,
+        mode: ResidentSelectionMode,
+        reason: ResidentGraphDeclineReason,
+    ) -> Result<LogicEvalResult> {
+        match mode {
+            ResidentSelectionMode::Require => Err(XlogError::Execution(format!(
+                "resident conditional-graph execution was required but declined: {reason:?}"
+            ))),
+            ResidentSelectionMode::Prefer | ResidentSelectionMode::Disabled => {
+                let mut executor = self.prepare_executor(&provider, inputs, profiling)?;
+                executor.execute_plan(plan)?;
+                let mut result =
+                    self.finish_ordinary_evaluation(&provider, executor, profiling, None, None)?;
+                if let Some(stats) = result.stats.as_mut() {
+                    stats.resident_graph = Some(ResidentGraphExecutionStats::declined(reason));
+                }
+                Ok(result)
+            }
+        }
+    }
+
+    fn resident_input_is_local(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> bool {
+        let expected_manager = Arc::as_ptr(provider.memory()) as usize;
+        buffer.num_rows_device().memory_manager_ptr_value() == expected_manager
+            && buffer.columns().iter().all(|column| {
+                matches!(
+                    column,
+                    CudaColumn::Owned(slice)
+                        if slice.memory_manager_ptr_value() == expected_manager
+                )
+            })
+    }
+
+    fn resident_provider_view(
+        provider: &Arc<CudaKernelProvider>,
+    ) -> std::result::Result<Arc<CudaKernelProvider>, ResidentGraphDeclineReason> {
+        let decline =
+            |detail: String| ResidentGraphDeclineReason::ConditionalGraphUnavailable { detail };
+        if !Arc::ptr_eq(provider.device(), provider.memory().device()) {
+            return Err(decline(
+                "provider and memory manager do not share the same CUDA device handle".into(),
+            ));
+        }
+        if let Some(runtime) = provider.memory().runtime() {
+            if !Arc::ptr_eq(provider.device(), runtime.device())
+                || !runtime.supports_block_use_tracking()
+            {
+                return Err(decline(
+                    "the caller runtime cannot track resident cross-stream block uses".into(),
+                ));
+            }
+            return Ok(Arc::clone(provider));
+        }
+
+        let device = Arc::clone(provider.device());
+        let device_ordinal = u32::try_from(device.ordinal()).map_err(|_| {
+            decline(format!(
+                "CUDA device ordinal {} is not representable as u32",
+                device.ordinal()
+            ))
+        })?;
+        let budget_limit =
+            usize::try_from(provider.memory().budget_limit_bytes()).map_err(|_| {
+                decline("the caller memory budget is not representable as usize".into())
+            })?;
+        let stream_pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+        let asynchronous: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(AsyncCudaResource::new(
+                Arc::clone(&device),
+                device_ordinal,
+                Arc::clone(&stream_pool),
+            ));
+        let resource: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(GlobalDeviceBudget::new(asynchronous, budget_limit));
+        let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+            Arc::clone(&device),
+            device_ordinal,
+            stream_pool,
+            resource,
+        ));
+        let overlay = provider
+            .memory()
+            .with_runtime_overlay(runtime)
+            .map_err(|error| decline(error.to_string()))?;
+        provider
+            .with_runtime_memory_view(overlay)
+            .map(Arc::new)
+            .map_err(|error| decline(error.to_string()))
+    }
+
+    fn resident_execution_error(error: ResidentGraphExecutionError) -> XlogError {
+        XlogError::Execution(error.to_string())
+    }
+
+    fn finish_ordinary_evaluation(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        mut executor: Executor,
+        profiling: bool,
+        resident_profile: Option<ResidentCompletedProfile>,
+        mut latency_diagnostic: Option<&mut ResidentLatencyDiagnostic>,
+    ) -> Result<LogicEvalResult> {
+        let result_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        self.enforce_constraints(provider, &executor)?;
+
+        let mut queries = Vec::with_capacity(self.program.queries.len());
+        for (index, query) in self.program.queries.iter().enumerate() {
+            let internal_relation_name = format!("__xlog_query_{index}");
+            let buffer = executor
+                .store_mut()
+                .remove(&internal_relation_name)
+                .ok_or_else(|| {
+                    XlogError::Execution(format!(
+                        "Missing query result relation {internal_relation_name} (compiler bug?)"
+                    ))
+                })?;
+            queries.push(self.logic_query_result(
+                provider.as_ref(),
+                index,
+                query,
+                internal_relation_name,
+                buffer,
+            )?);
+        }
+
+        let total_output_rows = queries
+            .iter()
+            .map(|query| {
+                query
+                    .buffer
+                    .cached_row_count()
+                    .map(u64::from)
+                    .unwrap_or_else(|| query.buffer.num_rows())
+            })
+            .sum();
+        let mut stats = profiling.then(|| executor.execution_stats(total_output_rows));
+        if let (Some(stats), Some(profile)) = (stats.as_mut(), resident_profile) {
+            let scan_count =
+                usize::try_from(profile.telemetry.device_scan_invocations).map_err(|_| {
+                    XlogError::Execution("resident scan profile count exceeds usize".into())
+                })?;
+            let filter_count = usize::try_from(profile.telemetry.device_filter_invocations)
+                .map_err(|_| {
+                    XlogError::Execution("resident filter profile count exceeds usize".into())
+                })?;
+            let (num_rules, is_recursive) = match &self.plan {
+                LogicExecutionPlan::Ordinary(plan) => (
+                    plan.rules_by_scc.iter().map(Vec::len).sum(),
+                    plan.sccs.iter().any(|scc| scc.is_recursive),
+                ),
+                _ => (0, false),
+            };
+            let mut stratum = StratumStats::new(0, num_rules, is_recursive);
+            stratum.iterations = profile.iterations as usize;
+            stratum.duration_us = profile.telemetry.deferred_profile.device_elapsed_ns / 1_000;
+            stratum.ops.reserve(scan_count.saturating_add(filter_count));
+            stratum.ops.extend((0..scan_count).map(|_| OpStats {
+                op_name: "scan".to_string(),
+                ..OpStats::default()
+            }));
+            stratum.ops.extend((0..filter_count).map(|_| OpStats {
+                op_name: "filter".to_string(),
+                ..OpStats::default()
+            }));
+            stats.total_duration_us = stratum.duration_us;
+            stats.strata = vec![stratum];
+            stats.resident_graph = Some(profile.telemetry);
+        }
+
+        let result = LogicEvalResult { queries, stats };
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.result_stats_construction_ns = diagnostic
+                .result_stats_construction_ns
+                .saturating_add(resident_latency_elapsed_ns(result_started));
+            diagnostic.remaining_store_relations_before_drop = executor.store().len();
+        }
+        let executor_drop_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        drop(executor);
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.executor_store_teardown_ns =
+                resident_latency_elapsed_ns(executor_drop_started);
+        }
+        Ok(result)
+    }
+
+    fn prepare_resident_executor(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        inputs: HashMap<String, CudaBuffer>,
+        profiling: bool,
+        plan: &ExecutionPlan,
+    ) -> Result<Executor> {
+        let derived_relations = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .map(|rule| rule.head.clone())
+            .collect::<BTreeSet<_>>();
+        self.prepare_executor_excluding_derived_placeholders(
+            provider,
+            inputs,
+            profiling,
+            Some(&derived_relations),
+        )
+    }
+
+    fn prepare_executor_excluding_derived_placeholders(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        inputs: HashMap<String, CudaBuffer>,
+        profiling: bool,
+        derived_relations: Option<&BTreeSet<String>>,
+    ) -> Result<Executor> {
+        let mut executor = Executor::new(provider.clone());
+        executor.set_profiling(profiling);
+        for (name, rel_id) in &self.rel_ids {
+            executor.register_relation(*rel_id, name);
+        }
+
+        let arity_qualified_predicates = if self.epistemic_provenance.is_some() {
+            epistemic_extensional_multi_arity_predicates(&self.program)
+        } else {
+            predicate_arities(&self.program)
+                .into_iter()
+                .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
+                .collect()
+        };
+        let inline_fact_relations = self
+            .program
+            .facts()
+            .map(|fact| {
+                let predicate = fact.head.predicate.as_str();
+                if arity_qualified_predicates.contains(predicate) {
+                    arity_qualified_name(predicate, fact.head.terms.len())
+                } else {
+                    predicate.to_string()
+                }
+            })
+            .collect::<BTreeSet<_>>();
+
+        for (name, schema) in &self.schemas {
+            let is_derived_placeholder = derived_relations.is_some_and(|set| set.contains(name))
+                && !inline_fact_relations.contains(name);
+            if is_derived_placeholder {
+                continue;
+            }
+            executor
+                .store_mut()
+                .put(name, provider.create_empty_buffer(schema.clone())?);
+        }
+
+        for (name, buffer) in inputs {
+            let schema = self.schemas.get(&name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Input relation {} not declared in program schemas",
+                    name
+                ))
+            })?;
+            ensure_schema_type_compatible(schema, buffer.schema()).map_err(|e| {
+                XlogError::Execution(format!("Input relation {} schema mismatch: {}", name, e))
+            })?;
+            executor.store_mut().put(&name, buffer);
+        }
+
+        self.load_facts(provider, &mut executor)?;
+        Ok(executor)
+    }
+
+    fn executor_from_materialized_store(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &RelationStore,
+        profiling: bool,
+    ) -> Result<Executor> {
+        let mut executor = Executor::new(provider.clone());
+        executor.set_profiling(profiling);
+        for (name, rel_id) in &self.rel_ids {
+            executor.register_relation(*rel_id, name);
+        }
+
+        for (name, schema) in &self.schemas {
+            executor
+                .store_mut()
+                .put(name, provider.create_empty_buffer(schema.clone())?);
+        }
+
+        for name in relation_store.names() {
+            let buffer = relation_store.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Persistent relation {} disappeared during evaluation",
+                    name
+                ))
+            })?;
+            let schema = self.schemas.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Persistent relation {} not declared in program schemas",
+                    name
+                ))
+            })?;
+            ensure_schema_type_compatible(schema, buffer.schema()).map_err(|e| {
+                XlogError::Execution(format!(
+                    "Persistent relation {} schema mismatch: {}",
+                    name, e
+                ))
+            })?;
+            executor
+                .store_mut()
+                .put(name, provider.clone_buffer(buffer)?);
+        }
+
+        Ok(executor)
+    }
+
+    fn resident_certified_plan(&self) -> Result<Arc<ResidentGraphCertifiedPlan>> {
+        let plan = self.ordinary_plan("resident route certification")?;
+        self.resident_certified_plan_for_plan(plan)
+    }
+
+    fn resident_certified_plan_with_outcome(
+        &self,
+    ) -> Result<(Arc<ResidentGraphCertifiedPlan>, bool, bool)> {
+        let plan = self.ordinary_plan("resident route certification")?;
+        self.resident_certified_plan_with_outcome_for_plan(plan)
+    }
+
+    fn resident_certified_plan_with_outcome_for_plan(
+        &self,
+        plan: &ExecutionPlan,
+    ) -> Result<(Arc<ResidentGraphCertifiedPlan>, bool, bool)> {
+        self.reusable_state_identity
+            .get_or_init_resident_certification_with_outcome(|| self.inspect_resident_plan(plan))
+    }
+
+    fn resident_certified_plan_for_plan(
+        &self,
+        plan: &ExecutionPlan,
+    ) -> Result<Arc<ResidentGraphCertifiedPlan>> {
+        self.reusable_state_identity
+            .get_or_init_resident_certification(|| self.inspect_resident_plan(plan))
+    }
+
+    fn inspect_resident_plan(&self, plan: &ExecutionPlan) -> Result<ResidentGraphCertifiedPlan> {
+        let resident_plan = self.resident_dependency_closed_plan(plan);
+        let catalog = ResidentGraphSchemaCatalog::from_named_schemas(
+            self.rel_ids.iter().filter_map(|(name, relation)| {
+                self.schemas
+                    .get(name)
+                    .cloned()
+                    .map(|schema| (name.clone(), *relation, schema))
+            }),
+        );
+        ResidentGraphCertifiedPlan::inspect(Arc::new(resident_plan), &catalog)
+    }
+
+    fn resident_dependency_closed_plan(&self, plan: &ExecutionPlan) -> ExecutionPlan {
+        self.try_resident_dependency_closed_plan(plan)
+            .unwrap_or_else(|| plan.clone())
+    }
+
+    fn try_resident_dependency_closed_plan(&self, plan: &ExecutionPlan) -> Option<ExecutionPlan> {
+        if self.program.queries.is_empty()
+            || plan.generated_query_rules.len() != self.program.queries.len()
+        {
+            return None;
+        }
+
+        let mut roots =
+            Vec::with_capacity(plan.generated_query_rules.len() + self.program.constraints.len());
+        let mut root_heads = std::collections::HashSet::with_capacity(roots.capacity());
+        let mut seen_queries = vec![false; self.program.queries.len()];
+        for query in &plan.generated_query_rules {
+            let expected_head = format!("__xlog_query_{}", query.query_index);
+            let rule = plan
+                .rules_by_scc
+                .get(query.scc_index)?
+                .get(query.rule_index)?;
+            let seen = seen_queries.get_mut(query.query_index)?;
+            if *seen || rule.head != expected_head {
+                return None;
+            }
+            let occurrences = plan
+                .rules_by_scc
+                .iter()
+                .flatten()
+                .filter(|candidate| candidate.head == expected_head)
+                .count();
+            if occurrences != 1 {
+                return None;
+            }
+            *seen = true;
+            roots.push(query.scc_index);
+            if !root_heads.insert(expected_head) {
+                return None;
+            }
+        }
+        if seen_queries.iter().any(|seen| !seen) {
+            return None;
+        }
+
+        for constraint_index in 0..self.program.constraints.len() {
+            let expected_head = format!("__xlog_constraint_{constraint_index}");
+            let positions = plan
+                .rules_by_scc
+                .iter()
+                .enumerate()
+                .flat_map(|(scc_index, rules)| {
+                    rules
+                        .iter()
+                        .filter(|rule| rule.head == expected_head)
+                        .map(move |_| scc_index)
+                })
+                .collect::<Vec<_>>();
+            let [scc_index] = positions.as_slice() else {
+                return None;
+            };
+            roots.push(*scc_index);
+            if !root_heads.insert(expected_head) {
+                return None;
+            }
+        }
+
+        let mut defining_sccs = HashMap::new();
+        for (scc_index, rules) in plan.rules_by_scc.iter().enumerate() {
+            for rule in rules {
+                let Some(relation) = self.rel_ids.get(&rule.head).copied() else {
+                    if root_heads.contains(&rule.head) {
+                        continue;
+                    }
+                    return None;
+                };
+                match defining_sccs.insert(relation, scc_index) {
+                    Some(previous) if previous != scc_index => return None,
+                    _ => {}
+                }
+            }
+        }
+
+        plan.dependency_closed_subplan(&roots, &defining_sccs)
+    }
+
+    #[cfg(test)]
+    fn resident_certification_initializations(&self) -> u64 {
+        self.reusable_state_identity
+            .resident_certification_initializations()
+    }
+
     /// Evaluate the program with optional profiling
     ///
     /// # Arguments
@@ -1439,19 +3178,35 @@ impl LogicProgram {
         inputs: HashMap<String, CudaBuffer>,
         profiling: bool,
     ) -> Result<LogicEvalResult> {
+        self.reject_compiler_generated_query_relation_names(
+            inputs.keys().map(String::as_str),
+            "caller input",
+        )?;
+        let resident_mode = ResidentSelectionMode::from_env()?;
+        if matches!(&self.plan, LogicExecutionPlan::Ordinary(_)) && resident_mode.requested() {
+            return self.evaluate_ordinary_with_resident_mode(
+                provider,
+                inputs,
+                profiling,
+                resident_mode,
+            );
+        }
         let mut executor = self.prepare_executor(&provider, inputs, profiling)?;
 
         if let LogicExecutionPlan::EpistemicG91Compatibility(g91_plan) = &self.plan {
-            return self
-                .evaluate_g91_compatibility_gpu_program(provider, executor, g91_plan, profiling);
+            let result = self
+                .evaluate_g91_compatibility_gpu_program(provider, executor, g91_plan, profiling)?;
+            return self.finish_nonordinary_resident_selection(result, resident_mode);
         }
 
         if let LogicExecutionPlan::EpistemicWfsGpu(wfs_plan) = &self.plan {
-            return self.evaluate_wfs_gpu_program(provider, executor, wfs_plan, profiling);
+            let result = self.evaluate_wfs_gpu_program(provider, executor, wfs_plan, profiling)?;
+            return self.finish_nonordinary_resident_selection(result, resident_mode);
         }
 
         let LogicExecutionPlan::Ordinary(plan) = &self.plan else {
-            return self.evaluate_epistemic_with_executor(&provider, executor, profiling);
+            let result = self.evaluate_epistemic_with_executor(&provider, executor, profiling)?;
+            return self.finish_nonordinary_resident_selection(result, resident_mode);
         };
 
         executor.execute_plan(plan)?;
@@ -1501,33 +3256,7 @@ impl LogicProgram {
         inputs: HashMap<String, CudaBuffer>,
         profiling: bool,
     ) -> Result<Executor> {
-        let mut executor = Executor::new(provider.clone());
-        executor.set_profiling(profiling);
-        for (name, rel_id) in &self.rel_ids {
-            executor.register_relation(*rel_id, name);
-        }
-
-        for (name, schema) in &self.schemas {
-            executor
-                .store_mut()
-                .put(name, provider.create_empty_buffer(schema.clone())?);
-        }
-
-        for (name, buffer) in inputs {
-            let schema = self.schemas.get(&name).ok_or_else(|| {
-                XlogError::Execution(format!(
-                    "Input relation {} not declared in program schemas",
-                    name
-                ))
-            })?;
-            ensure_schema_type_compatible(schema, buffer.schema()).map_err(|e| {
-                XlogError::Execution(format!("Input relation {} schema mismatch: {}", name, e))
-            })?;
-            executor.store_mut().put(&name, buffer);
-        }
-
-        self.load_facts(provider, &mut executor)?;
-        Ok(executor)
+        self.prepare_executor_excluding_derived_placeholders(provider, inputs, profiling, None)
     }
 
     /// Execute an epistemic program and return its accepted GPU execution evidence.
@@ -1755,21 +3484,21 @@ impl LogicProgram {
             query
         };
         let columns = query_output_vars(presentation_query);
-        let (relation_name, buffer) = if surface_source_query {
-            let buffer = if columns.is_empty() {
-                let row_count = provider.device_row_count(&buffer)?;
-                let row_count = u32::try_from(row_count).map_err(|_| {
-                    XlogError::Execution(format!(
-                        "query result row count {row_count} exceeds the GPU row-count range"
-                    ))
-                })?;
-                provider.create_zero_arity_buffer(Schema::new(Vec::new()), row_count)?
-            } else {
-                buffer
-            };
-            (presentation_query.atom.predicate.clone(), buffer)
+        let buffer = if columns.is_empty() {
+            let row_count = provider.device_row_count(&buffer)?;
+            let row_count = u32::try_from(row_count).map_err(|_| {
+                XlogError::Execution(format!(
+                    "query result row count {row_count} exceeds the GPU row-count range"
+                ))
+            })?;
+            provider.create_zero_arity_buffer(Schema::new(Vec::new()), row_count)?
         } else {
-            (internal_relation_name, buffer)
+            buffer
+        };
+        let relation_name = if surface_source_query {
+            presentation_query.atom.predicate.clone()
+        } else {
+            internal_relation_name
         };
 
         Ok(LogicQueryResult {
@@ -3137,7 +4866,14 @@ fn augment_same_name_multi_arity_schemas(
     program: &Program,
     schemas: &mut HashMap<String, Schema>,
 ) -> Result<()> {
-    let predicates = epistemic_extensional_multi_arity_predicates(program);
+    let predicates = if program_has_epistemic_literals(program) {
+        epistemic_extensional_multi_arity_predicates(program)
+    } else {
+        predicate_arities(program)
+            .into_iter()
+            .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
+            .collect()
+    };
     let domains: HashMap<String, ScalarType> = program
         .domains
         .iter()
@@ -3186,6 +4922,54 @@ fn augment_same_name_multi_arity_schemas(
     Ok(())
 }
 
+fn qualify_same_name_multi_arity_program(program: &Program) -> Program {
+    let overloaded = predicate_arities(program)
+        .into_iter()
+        .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
+        .collect::<BTreeSet<_>>();
+    if overloaded.is_empty() {
+        return program.clone();
+    }
+
+    let mut qualified = program.clone();
+    for declaration in &mut qualified.predicates {
+        if overloaded.contains(&declaration.name) {
+            declaration.name = arity_qualified_name(&declaration.name, declaration.arity());
+        }
+    }
+    for rule in &mut qualified.rules {
+        qualify_atom_arity(&mut rule.head, &overloaded);
+        qualify_body_literal_arities(&mut rule.body, &overloaded);
+    }
+    for constraint in &mut qualified.constraints {
+        qualify_body_literal_arities(&mut constraint.body, &overloaded);
+    }
+    for query in &mut qualified.queries {
+        qualify_atom_arity(&mut query.atom, &overloaded);
+    }
+    qualified
+}
+
+fn qualify_body_literal_arities(literals: &mut [BodyLiteral], overloaded: &BTreeSet<String>) {
+    for literal in literals {
+        match literal {
+            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                qualify_atom_arity(atom, overloaded);
+            }
+            BodyLiteral::Epistemic(epistemic) => {
+                qualify_atom_arity(&mut epistemic.atom, overloaded);
+            }
+            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+        }
+    }
+}
+
+fn qualify_atom_arity(atom: &mut Atom, overloaded: &BTreeSet<String>) {
+    if overloaded.contains(&atom.predicate) {
+        atom.predicate = arity_qualified_name(&atom.predicate, atom.terms.len());
+    }
+}
+
 fn augment_atom_schema_if_needed(
     atom: &Atom,
     predicates: &BTreeSet<String>,
@@ -3225,6 +5009,23 @@ fn predicate_arities(program: &Program) -> HashMap<String, BTreeSet<usize>> {
     }
     for query in &program.queries {
         add_predicate_arity(&mut arities, &query.atom.predicate, query.atom.terms.len());
+    }
+    for constraint in &program.constraints {
+        for literal in &constraint.body {
+            match literal {
+                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                    add_predicate_arity(&mut arities, &atom.predicate, atom.terms.len());
+                }
+                BodyLiteral::Epistemic(epistemic) => {
+                    add_predicate_arity(
+                        &mut arities,
+                        &epistemic.atom.predicate,
+                        epistemic.atom.terms.len(),
+                    );
+                }
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+            }
+        }
     }
     arities
 }
@@ -4153,7 +5954,12 @@ mod tests {
     use std::sync::Arc;
 
     use xlog_core::{symbol, MemoryBudget, ScalarType};
-    use xlog_cuda::{CudaDevice, GpuMemoryManager};
+    use xlog_cuda::{cuda_graph::CudaGraphNodeKind, CudaDevice, GpuMemoryManager};
+    use xlog_ir::RirNode;
+    use xlog_runtime::resident_graph::{
+        ResidentGraphDeclineReason, ResidentGraphRouteCertificate, ResidentGraphSchemaCatalog,
+        ResidentGraphSelectionKind,
+    };
 
     fn ground_term_encoding_test_provider() -> Option<Arc<CudaKernelProvider>> {
         let provider = (|| -> Result<Arc<CudaKernelProvider>> {
@@ -4169,6 +5975,3063 @@ mod tests {
             provider,
             std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1"),
         )
+    }
+
+    fn pinned_corpus_test_provider() -> Option<Arc<CudaKernelProvider>> {
+        let provider = (|| -> Result<Arc<CudaKernelProvider>> {
+            let device = Arc::new(CudaDevice::new(0)?);
+            let memory = Arc::new(GpuMemoryManager::new(
+                device.clone(),
+                MemoryBudget::with_limit(2 * 1024 * 1024 * 1024),
+            ));
+            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+        })();
+        finish_test_provider_setup(
+            provider,
+            std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1"),
+        )
+    }
+
+    const PINNED_CORPUS_SHA: &str = "74f2895486737b4caa42229389d309994e7ad3ea";
+    const RESIDENT_ENV_NAMES: [&str; 4] = [
+        "XLOG_DISABLE_RESIDENT_RECURSION",
+        "XLOG_USE_RESIDENT_RECURSION",
+        "XLOG_REQUIRE_RESIDENT_RECURSION",
+        RESIDENT_LATENCY_DIAGNOSTICS_ENV,
+    ];
+
+    fn git_output(corpus: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(corpus)
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("git {args:?} failed to start: {error}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("git output must be UTF-8")
+    }
+
+    fn assert_exact_clean_corpus(corpus: &std::path::Path) {
+        assert_eq!(
+            git_output(corpus, &["rev-parse", "HEAD"]).trim(),
+            PINNED_CORPUS_SHA
+        );
+        assert!(
+            git_output(
+                corpus,
+                &["status", "--porcelain=v1", "--untracked-files=all"]
+            )
+            .is_empty(),
+            "pinned corpus must have no tracked or untracked modifications"
+        );
+        assert!(
+            git_output(corpus, &["diff", "--no-ext-diff", "--submodule=diff"]).is_empty(),
+            "pinned corpus working tree must match HEAD"
+        );
+        assert!(
+            git_output(
+                corpus,
+                &["diff", "--cached", "--no-ext-diff", "--submodule=diff"]
+            )
+            .is_empty(),
+            "pinned corpus index must match HEAD"
+        );
+        let submodules = git_output(corpus, &["submodule", "status", "--recursive"]);
+        assert!(
+            submodules.lines().all(|line| line.starts_with(' ')),
+            "every recursive submodule must be initialized at its recorded commit: {submodules}"
+        );
+        let clean_submodules = std::process::Command::new("git")
+            .arg("-C")
+            .arg(corpus)
+            .args([
+                "submodule",
+                "foreach",
+                "--quiet",
+                "--recursive",
+                "test -z \"$(git status --porcelain=v1 --untracked-files=all)\"",
+            ])
+            .status()
+            .expect("recursive submodule cleanliness command must start");
+        assert!(
+            clean_submodules.success(),
+            "recursive submodule checkout is dirty"
+        );
+    }
+
+    struct ResidentEnvGuard {
+        old: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl ResidentEnvGuard {
+        fn set(active: &[(&'static str, &'static str)]) -> Self {
+            let old = RESIDENT_ENV_NAMES
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect();
+            for name in RESIDENT_ENV_NAMES {
+                // SAFETY: every test using this helper holds `resident_env_lock`.
+                unsafe { std::env::remove_var(name) };
+            }
+            for (name, value) in active {
+                // SAFETY: every test using this helper holds `resident_env_lock`.
+                unsafe { std::env::set_var(name, value) };
+            }
+            Self { old }
+        }
+    }
+
+    impl Drop for ResidentEnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.old.drain(..) {
+                match value {
+                    Some(value) => {
+                        // SAFETY: every test using this helper holds `resident_env_lock`.
+                        unsafe { std::env::set_var(name, value) };
+                    }
+                    None => {
+                        // SAFETY: every test using this helper holds `resident_env_lock`.
+                        unsafe { std::env::remove_var(name) };
+                    }
+                }
+            }
+        }
+    }
+
+    fn resident_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn corpus_program(corpus: &std::path::Path) -> Result<LogicProgram> {
+        let entry = corpus.join("scenarios/acceptance/issue1/q01_blind.xlog");
+        let source = std::fs::read_to_string(&entry).map_err(|error| {
+            XlogError::Execution(format!("failed to read {}: {error}", entry.display()))
+        })?;
+        let resolver = xlog_logic::compile::load_modules(&entry, vec![corpus.join("programs")])
+            .map_err(|error| XlogError::Compilation(error.to_string()))?;
+        LogicProgram::compile_with_resolver(&source, &resolver)
+    }
+
+    fn schema_catalog(program: &LogicProgram) -> ResidentGraphSchemaCatalog {
+        ResidentGraphSchemaCatalog::from_named_schemas(program.rel_ids.iter().filter_map(
+            |(name, rel)| {
+                program
+                    .schemas
+                    .get(name)
+                    .cloned()
+                    .map(|schema| (name.clone(), *rel, schema))
+            },
+        ))
+    }
+
+    fn scan_schema_descriptor(program: &LogicProgram, rel: RelId) -> String {
+        let schemas = program
+            .rel_ids
+            .iter()
+            .filter(|(_, candidate)| **candidate == rel)
+            .filter_map(|(name, _)| {
+                program
+                    .schemas
+                    .get(name)
+                    .map(|schema| format!("{name}={schema:#?}"))
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !schemas.is_empty(),
+            "compiled Scan {rel:?} has no schema identity"
+        );
+        schemas.into_iter().collect::<Vec<_>>().join("|")
+    }
+
+    struct RouteWalk<'a> {
+        program: &'a LogicProgram,
+        scc_index: usize,
+        rule_index: usize,
+        recursive: bool,
+        descriptors: &'a mut BTreeSet<String>,
+    }
+
+    impl RouteWalk<'_> {
+        fn visit(&mut self, node: &RirNode, path: &str) {
+            let scan_schema = match node {
+                RirNode::Scan { rel } => scan_schema_descriptor(self.program, *rel),
+                _ => String::new(),
+            };
+            assert!(
+                self.descriptors.insert(format!(
+                    "scc={};rule={};recursive={};path={path};node={node:#?};scan_schema={scan_schema}",
+                    self.scc_index, self.rule_index, self.recursive
+                )),
+                "route occurrence paths must be unique"
+            );
+            match node {
+                RirNode::Unit | RirNode::Scan { .. } | RirNode::TensorMaskedJoin { .. } => {}
+                RirNode::Filter { input, .. }
+                | RirNode::Project { input, .. }
+                | RirNode::GroupBy { input, .. }
+                | RirNode::Distinct { input, .. } => self.visit(input, &format!("{path}/input")),
+                RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+                    self.visit(left, &format!("{path}/left"));
+                    self.visit(right, &format!("{path}/right"));
+                }
+                RirNode::ChainJoin {
+                    left,
+                    right,
+                    fallback,
+                    ..
+                } => {
+                    self.visit(left, &format!("{path}/primary/left"));
+                    self.visit(right, &format!("{path}/primary/right"));
+                    self.visit(fallback, &format!("{path}/alternative/captured_fallback"));
+                }
+                RirNode::Union { inputs } => {
+                    for (index, input) in inputs.iter().enumerate() {
+                        self.visit(input, &format!("{path}/input[{index}]"));
+                    }
+                }
+                RirNode::Fixpoint {
+                    base, recursive, ..
+                } => {
+                    self.visit(base, &format!("{path}/base"));
+                    self.visit(recursive, &format!("{path}/recursive"));
+                }
+                RirNode::MultiWayJoin {
+                    inputs, fallback, ..
+                } => {
+                    for (index, input) in inputs.iter().enumerate() {
+                        self.visit(input, &format!("{path}/primary/input[{index}]"));
+                    }
+                    self.visit(fallback, &format!("{path}/alternative/captured_fallback"));
+                }
+            }
+        }
+    }
+
+    fn independent_route_descriptors(
+        program: &LogicProgram,
+        plan: &ExecutionPlan,
+    ) -> BTreeSet<String> {
+        let mut descriptors = BTreeSet::new();
+        for (scc_index, scc) in plan.sccs.iter().enumerate() {
+            let rules = plan
+                .rules_by_scc
+                .get(scc_index)
+                .unwrap_or_else(|| panic!("missing rule vector for SCC {scc_index}"));
+            for (rule_index, rule) in rules.iter().enumerate() {
+                RouteWalk {
+                    program,
+                    scc_index,
+                    rule_index,
+                    recursive: scc.is_recursive,
+                    descriptors: &mut descriptors,
+                }
+                .visit(&rule.body, "primary/root");
+                let rule_identity = format!(
+                    "scc={scc_index};rule={rule_index};head={};schema={:#?}",
+                    rule.head, rule.meta.schema
+                );
+                descriptors.insert(format!("{rule_identity};implicit=rule_result_union"));
+                descriptors.insert(format!("{rule_identity};implicit=full_row_dedup"));
+                if scc.is_recursive {
+                    descriptors.insert(format!("{rule_identity};implicit=novel_tuple_difference"));
+                    descriptors.insert(format!("{rule_identity};implicit=device_convergence"));
+                }
+            }
+        }
+        descriptors
+    }
+
+    fn op_count(stats: &ExecutionStats, name: &str) -> usize {
+        stats
+            .strata
+            .iter()
+            .flat_map(|stratum| &stratum.ops)
+            .filter(|op| op.op_name == name)
+            .count()
+    }
+
+    fn strata_op_profile(stats: &ExecutionStats) -> BTreeMap<String, (usize, u64, u64)> {
+        let mut profile = BTreeMap::new();
+        for op in stats.strata.iter().flat_map(|stratum| &stratum.ops) {
+            let entry = profile.entry(op.op_name.clone()).or_insert((0, 0, 0));
+            entry.0 += 1;
+            entry.1 += op.input_rows;
+            entry.2 += op.output_rows;
+        }
+        profile
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct HostQuerySnapshot {
+        relation_name: String,
+        columns: Vec<String>,
+        sort_labels: Vec<String>,
+        schema: Schema,
+        rows: Vec<Vec<u64>>,
+    }
+
+    fn snapshot_query_results(
+        provider: &CudaKernelProvider,
+        result: &LogicEvalResult,
+    ) -> Result<Vec<HostQuerySnapshot>> {
+        result
+            .queries
+            .iter()
+            .map(|query| {
+                let row_count = usize::try_from(provider.device_row_count(&query.buffer)?)
+                    .map_err(|_| XlogError::Execution("query row count exceeds usize".into()))?;
+                let mut columns = Vec::with_capacity(query.buffer.schema().arity());
+                for index in 0..query.buffer.schema().arity() {
+                    let ty = query
+                        .buffer
+                        .schema()
+                        .column_type(index)
+                        .expect("schema arity checked");
+                    let values = match ty {
+                        ScalarType::U32 | ScalarType::Symbol => provider
+                            .download_column::<u32>(&query.buffer, index)?
+                            .into_iter()
+                            .map(u64::from)
+                            .collect(),
+                        ScalarType::U64 => provider.download_column::<u64>(&query.buffer, index)?,
+                        ScalarType::I32 => provider
+                            .download_column::<i32>(&query.buffer, index)?
+                            .into_iter()
+                            .map(|value| value as i64 as u64)
+                            .collect(),
+                        ScalarType::I64 => provider
+                            .download_column::<i64>(&query.buffer, index)?
+                            .into_iter()
+                            .map(|value| value as u64)
+                            .collect(),
+                        ScalarType::F32 => provider
+                            .download_column::<f32>(&query.buffer, index)?
+                            .into_iter()
+                            .map(|value| u64::from(value.to_bits()))
+                            .collect(),
+                        ScalarType::F64 => provider
+                            .download_column::<f64>(&query.buffer, index)?
+                            .into_iter()
+                            .map(f64::to_bits)
+                            .collect(),
+                        ScalarType::Bool => provider
+                            .download_column::<u8>(&query.buffer, index)?
+                            .into_iter()
+                            .map(u64::from)
+                            .collect(),
+                    };
+                    if values.len() != row_count {
+                        return Err(XlogError::Execution(format!(
+                            "query column {index} has {} rows but metadata reports {row_count}",
+                            values.len()
+                        )));
+                    }
+                    columns.push(values);
+                }
+                let mut rows = (0..row_count)
+                    .map(|row| columns.iter().map(|column| column[row]).collect::<Vec<_>>())
+                    .collect::<Vec<_>>();
+                rows.sort_unstable();
+                Ok(HostQuerySnapshot {
+                    relation_name: query.relation_name.clone(),
+                    columns: query.columns.clone(),
+                    sort_labels: query.sort_labels.clone(),
+                    schema: query.buffer.schema().clone(),
+                    rows,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "requires a serialized release-mode CUDA acceptance run"]
+    fn resident_semantic_profile_excludes_noop_recursive_variants() -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred seed(u32).
+                pred dead(u32).
+                pred a(u32).
+                pred b(u32).
+
+                seed(1).
+                a(X) :- seed(X).
+                b(X) :- dead(X).
+                a(X) :- b(X), X = 1.
+                b(X) :- a(X), X = 1.
+
+                ?- a(X).
+                ?- b(X).
+            "#,
+        )?;
+        let empty_recursive_inputs = || -> Result<HashMap<String, CudaBuffer>> {
+            Ok(HashMap::from([
+                (
+                    "a".to_string(),
+                    provider.create_empty_buffer(program.schema("a").expect("a schema").clone())?,
+                ),
+                (
+                    "b".to_string(),
+                    provider.create_empty_buffer(program.schema("b").expect("b schema").clone())?,
+                ),
+            ]))
+        };
+        let baseline = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(provider.clone(), empty_recursive_inputs()?, true)?
+        };
+        let expected = snapshot_query_results(provider.as_ref(), &baseline)?;
+        let baseline_stats = baseline.stats.as_ref().expect("baseline profile");
+        let baseline_scans = op_count(baseline_stats, "scan");
+        let baseline_filters = op_count(baseline_stats, "filter");
+        let expected_semantic_scans =
+            baseline_scans as u64 + baseline_stats.chain_fallback_scan_equivalents;
+        let expected_semantic_filters =
+            baseline_filters as u64 + baseline_stats.chain_fallback_filter_equivalents;
+        drop(baseline);
+
+        let resident = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(provider.clone(), empty_recursive_inputs()?, true)?
+        };
+        assert_eq!(
+            snapshot_query_results(provider.as_ref(), &resident)?,
+            expected
+        );
+        let resident_stats = resident.stats.as_ref().expect("resident profile");
+        let graph = resident_stats
+            .resident_graph
+            .as_ref()
+            .expect("resident telemetry");
+        assert_eq!(graph.semantic_scan_invocations, expected_semantic_scans);
+        assert_eq!(graph.semantic_filter_invocations, expected_semantic_filters);
+        assert_eq!(
+            op_count(resident_stats, "scan") as u64,
+            graph.device_scan_invocations
+        );
+        assert_eq!(
+            op_count(resident_stats, "filter") as u64,
+            graph.device_filter_invocations
+        );
+        assert!(graph.device_scan_invocations >= graph.semantic_scan_invocations);
+        assert!(graph.device_filter_invocations >= graph.semantic_filter_invocations);
+        assert!(
+            graph.device_scan_invocations > graph.semantic_scan_invocations
+                || graph.device_filter_invocations > graph.semantic_filter_invocations,
+            "the witness must schedule at least one empty-delta recursive variant"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resident_latency_phase_accounting_reports_only_unmeasured_host_work() {
+        assert_eq!(resident_latency_unattributed_ns(100, &[10, 20, 30]), 40);
+        assert_eq!(resident_latency_unattributed_ns(50, &[30, 30]), 0);
+    }
+
+    #[test]
+    fn resident_certification_cache_is_eager_clone_shared_thread_safe_and_compile_isolated(
+    ) -> Result<()> {
+        let source = r#"
+            pred input(u32).
+            pred output(u32).
+            output(X) :- input(X).
+            ?- output(X).
+        "#;
+        let program = LogicProgram::compile(source)?;
+        assert_eq!(program.resident_certification_initializations(), 1);
+
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let certified = std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|_| {
+                    let clone = program.clone();
+                    let barrier = Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        clone.resident_certified_plan()
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("resident certification worker"))
+                .collect::<Result<Vec<_>>>()
+        })?;
+        assert_eq!(program.resident_certification_initializations(), 1);
+        assert!(certified
+            .iter()
+            .all(|candidate| Arc::ptr_eq(&certified[0], candidate)));
+
+        let outcome_program = LogicProgram::compile(source)?;
+        assert_eq!(outcome_program.resident_certification_initializations(), 1);
+        let (seeded, cache_was_warm, initialized_here) =
+            outcome_program.resident_certified_plan_with_outcome()?;
+        assert!(cache_was_warm);
+        assert!(!initialized_here);
+        let (warm, cache_was_warm, initialized_here) =
+            outcome_program.resident_certified_plan_with_outcome()?;
+        assert!(cache_was_warm);
+        assert!(!initialized_here);
+        assert!(Arc::ptr_eq(&seeded, &warm));
+
+        let fresh = LogicProgram::compile(source)?;
+        assert_eq!(fresh.resident_certification_initializations(), 1);
+        let fresh_certified = fresh.resident_certified_plan()?;
+        assert_eq!(fresh.resident_certification_initializations(), 1);
+        assert!(!Arc::ptr_eq(&certified[0], &fresh_certified));
+        Ok(())
+    }
+
+    #[test]
+    fn resident_certification_retains_only_query_and_constraint_dependencies() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                pred base(u32).
+                pred edge(u32, u32).
+                pred reachable(u32).
+                pred audited(u32).
+                pred disconnected_seed(u32).
+                pred disconnected(u32).
+
+                base(1).
+                edge(1, 2).
+                reachable(X) :- base(X).
+                reachable(Y) :- reachable(X), edge(X, Y).
+                audited(X) :- base(X).
+                disconnected(X) :- disconnected_seed(X).
+
+                :- audited(99).
+                ?- reachable(X).
+            "#,
+        )?;
+
+        let full = program.ordinary_plan("resident reachability test")?;
+        let full_heads = full
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .map(|rule| rule.head.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(full_heads.contains("disconnected"));
+
+        let certified = program.resident_certified_plan()?;
+        let resident = certified.plan();
+        let resident_heads = resident
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .map(|rule| rule.head.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(resident_heads.contains("reachable"));
+        assert!(resident_heads.contains("audited"));
+        assert!(resident_heads.contains("__xlog_constraint_0"));
+        assert!(resident_heads.contains("__xlog_query_0"));
+        assert!(!resident_heads.contains("disconnected"));
+        assert!(resident.rules_by_scc.len() < full.rules_by_scc.len());
+        assert!(resident
+            .sccs
+            .iter()
+            .enumerate()
+            .all(|(index, scc)| scc.id == index as u32));
+        assert!(resident
+            .strata
+            .iter()
+            .flat_map(|stratum| &stratum.sccs)
+            .all(|scc| (*scc as usize) < resident.sccs.len()));
+        assert_eq!(resident.generated_query_rules.len(), 1);
+        let query = &resident.generated_query_rules[0];
+        assert_eq!(query.query_index, 0);
+        assert_eq!(
+            resident.rules_by_scc[query.scc_index][query.rule_index].head,
+            "__xlog_query_0"
+        );
+
+        let full_heads_after_certification = full
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .map(|rule| rule.head.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(full_heads_after_certification.contains("disconnected"));
+        Ok(())
+    }
+
+    #[test]
+    fn resident_dependency_closure_fails_closed_on_missing_duplicate_or_ambiguous_proof(
+    ) -> Result<()> {
+        fn plan_structure(
+            plan: &ExecutionPlan,
+        ) -> (
+            Vec<(u32, Vec<String>)>,
+            Vec<(u32, Vec<u32>)>,
+            Vec<Vec<String>>,
+            Vec<(usize, usize, usize)>,
+        ) {
+            (
+                plan.sccs
+                    .iter()
+                    .map(|scc| (scc.id, scc.predicates.clone()))
+                    .collect(),
+                plan.strata
+                    .iter()
+                    .map(|stratum| (stratum.id, stratum.sccs.clone()))
+                    .collect(),
+                plan.rules_by_scc
+                    .iter()
+                    .map(|rules| rules.iter().map(|rule| rule.head.clone()).collect())
+                    .collect(),
+                plan.generated_query_rules
+                    .iter()
+                    .map(|query| (query.query_index, query.scc_index, query.rule_index))
+                    .collect(),
+            )
+        }
+
+        let program = LogicProgram::compile(
+            r#"
+                pred input(u32).
+                pred output(u32).
+                input(1).
+                output(X) :- input(X).
+                ?- output(X).
+            "#,
+        )?;
+        let full = program.ordinary_plan("resident fail-closed test")?;
+
+        let mut missing = full.clone();
+        missing.generated_query_rules.clear();
+        assert_eq!(
+            plan_structure(&program.resident_dependency_closed_plan(&missing)),
+            plan_structure(&missing)
+        );
+
+        let mut duplicate = full.clone();
+        duplicate
+            .generated_query_rules
+            .push(duplicate.generated_query_rules[0].clone());
+        assert_eq!(
+            plan_structure(&program.resident_dependency_closed_plan(&duplicate)),
+            plan_structure(&duplicate)
+        );
+
+        let mut ambiguous = full.clone();
+        let duplicated_rule = ambiguous
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .find(|rule| rule.head == "output")
+            .expect("output rule")
+            .clone();
+        let duplicate_scc = ambiguous.sccs.len() as u32;
+        ambiguous.sccs.push(xlog_ir::Scc {
+            id: duplicate_scc,
+            predicates: vec!["output".into()],
+            is_recursive: false,
+        });
+        ambiguous.rules_by_scc.push(vec![duplicated_rule]);
+        ambiguous.strata.push(xlog_ir::Stratum {
+            id: ambiguous.strata.len() as u32,
+            sccs: vec![duplicate_scc],
+        });
+        assert_eq!(
+            plan_structure(&program.resident_dependency_closed_plan(&ambiguous)),
+            plan_structure(&ambiguous)
+        );
+
+        let mut missing_nonroot_rel_id = full.clone();
+        missing_nonroot_rel_id
+            .rules_by_scc
+            .iter_mut()
+            .flatten()
+            .find(|rule| rule.head == "output")
+            .expect("output rule")
+            .head = "missing_nonroot_rel_id".into();
+        assert!(program
+            .try_resident_dependency_closed_plan(&missing_nonroot_rel_id)
+            .is_none());
+        assert_eq!(
+            plan_structure(&program.resident_dependency_closed_plan(&missing_nonroot_rel_id)),
+            plan_structure(&missing_nonroot_rel_id)
+        );
+
+        let no_query = LogicProgram::compile(
+            r#"
+                pred input(u32).
+                pred output(u32).
+                input(1).
+                output(X) :- input(X).
+            "#,
+        )?;
+        let no_query_full = no_query.ordinary_plan("resident no-query test")?;
+        assert_eq!(
+            plan_structure(&no_query.resident_dependency_closed_plan(no_query_full)),
+            plan_structure(no_query_full)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_finalizer_preserves_and_replays_deterministic_certification_errors() -> Result<()> {
+        let mut program = LogicProgram::compile(
+            r#"
+                pred output(u32).
+                output(7).
+                ?- output(X).
+            "#,
+        )?;
+        program.reusable_state_identity = Arc::new(LogicProgramIdentity::new());
+        let first = program
+            .reusable_state_identity
+            .get_or_init_resident_certification(|| -> Result<ResidentGraphCertifiedPlan> {
+                Err(XlogError::Execution(
+                    "deterministic certification failure".into(),
+                ))
+            })
+            .expect_err("injected certification must fail");
+        let program = program.finalize_compilation();
+        let second = program
+            .resident_certified_plan()
+            .expect_err("cached certification must fail identically");
+
+        assert_eq!(first.to_string(), second.to_string());
+        assert_eq!(program.resident_certification_initializations(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn resident_certification_cache_is_ordinary_only_and_caches_declines_without_policy(
+    ) -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        for (name, value) in [
+            ("XLOG_DISABLE_RESIDENT_RECURSION", "1"),
+            ("XLOG_USE_RESIDENT_RECURSION", "1"),
+            ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+        ] {
+            let program = {
+                let _env = ResidentEnvGuard::set(&[(name, value)]);
+                LogicProgram::compile(
+                    r#"
+                        pred input(u32).
+                        pred output(u32).
+                        output(X) :- input(X).
+                        ?- output(X).
+                    "#,
+                )?
+            };
+            assert_eq!(program.resident_certification_initializations(), 1);
+        }
+
+        let epistemic = LogicProgram::compile(
+            r#"
+                pred p(u32). pred q(u32).
+                p(1). q(X) :- p(X), know p(X). ?- q(X).
+            "#,
+        )?;
+        assert!(!matches!(epistemic.plan, LogicExecutionPlan::Ordinary(_)));
+        assert!(epistemic.resident_certified_plan().is_err());
+        assert_eq!(epistemic.resident_certification_initializations(), 0);
+
+        let reduced_ordinary = LogicProgram::compile(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred node(u32).
+                pred seed(u32, u32).
+                pred trust(u32, u32).
+                pred reach(u32, u32).
+                node(1). node(2). node(3).
+                seed(1, 2).
+                reach(X, Y) :- seed(X, Y).
+                reach(X, Z) :- reach(X, Y), trust(Y, Z).
+                trust(2, 3) :- know reach(1, 2).
+                trust(3, 1) :- know reach(3, 3).
+                ?- reach(X, Y).
+            "#,
+        )?;
+        assert!(matches!(
+            reduced_ordinary.plan,
+            LogicExecutionPlan::Ordinary(_)
+        ));
+        assert_eq!(reduced_ordinary.resident_certification_initializations(), 1);
+
+        let unsupported = LogicProgram::compile(
+            r#"
+                pred unsupported(f64).
+                unsupported(7.5).
+                ?- unsupported(X).
+            "#,
+        )?;
+        let first = unsupported.resident_certified_plan()?;
+        let second = unsupported.resident_certified_plan()?;
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!first.certificate().is_supported());
+        assert_eq!(unsupported.resident_certification_initializations(), 1);
+        Ok(())
+    }
+
+    fn median_seconds(samples: &mut [f64]) -> f64 {
+        assert!(!samples.is_empty());
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    }
+
+    #[test]
+    #[ignore = "requires the exact external issue corpus checkout and CUDA"]
+    fn pinned_corpus_prepares_resident_graph_without_launching_it() -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let corpus = std::path::PathBuf::from(
+            std::env::var("XLOG_PINNED_CORPUS_ROOT")
+                .expect("XLOG_PINNED_CORPUS_ROOT must name the pinned corpus checkout"),
+        );
+        assert_exact_clean_corpus(&corpus);
+        let program = corpus_program(&corpus)?;
+        let plan = program.ordinary_plan("resident graph preflight")?;
+        let certificate = ResidentGraphRouteCertificate::inspect(plan, &schema_catalog(&program))?;
+        assert!(certificate.is_supported(), "{:#?}", certificate.declines());
+
+        let Some(provider) = pinned_corpus_test_provider() else {
+            return Ok(());
+        };
+        let resident_provider =
+            LogicProgram::resident_provider_view(&provider).map_err(|reason| {
+                XlogError::Execution(format!("resident provider preflight declined: {reason:?}"))
+            })?;
+        let executor =
+            program.prepare_resident_executor(&resident_provider, HashMap::new(), false, plan)?;
+        let runtime = resident_provider
+            .memory()
+            .runtime()
+            .expect("resident provider view must own an async runtime");
+        let graph_before = runtime.conditional_graph_stats();
+        let allocated_before = resident_provider.memory().allocated_bytes();
+
+        let prepared = executor
+            .prepare_resident_graph(plan, &certificate, ResidentGraphPrepareOptions::default())
+            .map_err(LogicProgram::resident_execution_error)?;
+        let report = prepared.preflight_report();
+        let graph_after = runtime.conditional_graph_stats();
+        assert_eq!(graph_after.launches, graph_before.launches);
+        assert_eq!(
+            graph_after.terminal_synchronizations,
+            graph_before.terminal_synchronizations
+        );
+        assert_eq!(
+            resident_provider
+                .memory()
+                .allocated_bytes()
+                .saturating_sub(allocated_before),
+            report.tracked_device_allocation_bytes
+        );
+        assert!(report.relation_capacity > 0);
+        assert_eq!(report.parent_graph_nodes, 5);
+        assert_eq!(report.conditional_while_nodes, 2);
+        assert_eq!(
+            report.parent_graph_node_kinds,
+            vec![
+                CudaGraphNodeKind::Kernel,
+                CudaGraphNodeKind::Conditional,
+                CudaGraphNodeKind::Kernel,
+                CudaGraphNodeKind::Conditional,
+                CudaGraphNodeKind::Kernel,
+            ]
+        );
+        assert_eq!(
+            report.conditional_body_node_kinds,
+            vec![
+                vec![CudaGraphNodeKind::Kernel],
+                vec![CudaGraphNodeKind::Kernel],
+            ]
+        );
+        assert_eq!(report.conditional_body_kernel_counts, vec![1, 1]);
+        assert_eq!(report.hierarchical_graph_nodes, 7);
+        eprintln!(
+            "resident corpus preflight: capacity={} estimated_bytes={} available_bytes={} tracked_allocated_bytes={} parent_nodes={} conditional_while_nodes={}",
+            report.relation_capacity,
+            report.estimated_required_bytes,
+            report.available_bytes_at_admission,
+            report.tracked_device_allocation_bytes,
+            report.parent_graph_nodes,
+            report.conditional_while_nodes,
+        );
+        drop(prepared);
+        assert_eq!(
+            runtime.conditional_graph_stats().launches,
+            graph_before.launches
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the exact external issue corpus checkout and CUDA"]
+    fn pinned_corpus_certifies_and_runs_through_the_resident_production_path() -> Result<()> {
+        fn fallback_scan_filter_counts(node: &RirNode) -> (usize, usize) {
+            match node {
+                RirNode::Unit | RirNode::TensorMaskedJoin { .. } => (0, 0),
+                RirNode::Scan { .. } => (1, 0),
+                RirNode::Filter { input, .. } => {
+                    let (scans, filters) = fallback_scan_filter_counts(input);
+                    (scans, filters + 1)
+                }
+                RirNode::Project { input, .. }
+                | RirNode::GroupBy { input, .. }
+                | RirNode::Distinct { input, .. } => fallback_scan_filter_counts(input),
+                RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+                    let (left_scans, left_filters) = fallback_scan_filter_counts(left);
+                    let (right_scans, right_filters) = fallback_scan_filter_counts(right);
+                    (left_scans + right_scans, left_filters + right_filters)
+                }
+                RirNode::ChainJoin { fallback, .. } | RirNode::MultiWayJoin { fallback, .. } => {
+                    fallback_scan_filter_counts(fallback)
+                }
+                RirNode::Union { inputs } => inputs.iter().fold((0, 0), |total, input| {
+                    let current = fallback_scan_filter_counts(input);
+                    (total.0 + current.0, total.1 + current.1)
+                }),
+                RirNode::Fixpoint {
+                    base, recursive, ..
+                } => {
+                    let (base_scans, base_filters) = fallback_scan_filter_counts(base);
+                    let (recursive_scans, recursive_filters) =
+                        fallback_scan_filter_counts(recursive);
+                    (
+                        base_scans + recursive_scans,
+                        base_filters + recursive_filters,
+                    )
+                }
+            }
+        }
+
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let corpus = std::path::PathBuf::from(
+            std::env::var("XLOG_PINNED_CORPUS_ROOT")
+                .expect("XLOG_PINNED_CORPUS_ROOT must name the pinned corpus checkout"),
+        );
+        assert_exact_clean_corpus(&corpus);
+        let compile_and_certification_started = std::time::Instant::now();
+        let program = corpus_program(&corpus)?;
+        let compile_and_certification_seconds =
+            compile_and_certification_started.elapsed().as_secs_f64();
+        assert_eq!(
+            program.resident_certification_initializations(),
+            1,
+            "ordinary compilation must eagerly seed one resident certification"
+        );
+        let plan = program.ordinary_plan("resident graph capability certificate")?;
+        assert_eq!(plan.sccs.iter().filter(|scc| scc.is_recursive).count(), 2);
+        assert_eq!(
+            plan.sccs.iter().filter(|scc| !scc.is_recursive).count(),
+            1_751
+        );
+        assert_eq!(plan.rules_by_scc.iter().map(Vec::len).sum::<usize>(), 4_559);
+        let projected_reference_plan = program.resident_certified_plan()?.plan().clone();
+        assert!(projected_reference_plan.sccs.len() < plan.sccs.len());
+        assert!(
+            projected_reference_plan
+                .rules_by_scc
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>()
+                < plan.rules_by_scc.iter().map(Vec::len).sum::<usize>()
+        );
+        let chain_fallbacks = plan
+            .rules_by_scc
+            .iter()
+            .enumerate()
+            .flat_map(|(scc_index, rules)| {
+                rules.iter().filter_map(move |rule| {
+                    let RirNode::ChainJoin { fallback, .. } = &rule.body else {
+                        return None;
+                    };
+                    let (scans, filters) = fallback_scan_filter_counts(fallback);
+                    Some((
+                        scc_index,
+                        plan.sccs[scc_index].is_recursive,
+                        rule.head.clone(),
+                        scans,
+                        filters,
+                    ))
+                })
+            })
+            .collect::<Vec<_>>();
+        let projected_chain_fallbacks = projected_reference_plan
+            .rules_by_scc
+            .iter()
+            .enumerate()
+            .flat_map(|(scc_index, rules)| {
+                let is_recursive = projected_reference_plan.sccs[scc_index].is_recursive;
+                rules.iter().filter_map(move |rule| {
+                    let RirNode::ChainJoin { fallback, .. } = &rule.body else {
+                        return None;
+                    };
+                    let (scans, filters) = fallback_scan_filter_counts(fallback);
+                    Some((scc_index, is_recursive, rule.head.clone(), scans, filters))
+                })
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "chain fallback inventory: routes={} scans={} filters={} details={chain_fallbacks:?}",
+            chain_fallbacks.len(),
+            chain_fallbacks.iter().map(|route| route.3).sum::<usize>(),
+            chain_fallbacks.iter().map(|route| route.4).sum::<usize>()
+        );
+
+        let expected_routes = independent_route_descriptors(&program, plan);
+        let certificate = ResidentGraphRouteCertificate::inspect(plan, &schema_catalog(&program))?;
+        assert!(certificate.is_supported(), "{:#?}", certificate.declines());
+        assert!(certificate.matches_plan(plan)?);
+        let mut covered_structural_bindings = BTreeSet::new();
+        let mut covered_physical_routes = BTreeSet::new();
+        for descriptor in certificate.covered_route_descriptors() {
+            if descriptor.starts_with("plan;") {
+                covered_structural_bindings.insert(descriptor.clone());
+            } else if descriptor.starts_with("scc=") {
+                covered_physical_routes.insert(descriptor.clone());
+            } else {
+                panic!("unknown resident certificate descriptor class: {descriptor}");
+            }
+        }
+        assert!(!covered_structural_bindings.is_empty());
+        assert!(!covered_physical_routes.is_empty());
+        assert_eq!(covered_physical_routes, expected_routes);
+
+        let Some(provider) = pinned_corpus_test_provider() else {
+            return Ok(());
+        };
+        let baseline = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        };
+        let baseline_snapshot = snapshot_query_results(provider.as_ref(), &baseline)?;
+        let baseline_stats = baseline.stats.as_ref().expect("baseline profile");
+        let baseline_scans = op_count(baseline_stats, "scan");
+        let baseline_filters = op_count(baseline_stats, "filter");
+        let chain_fallback_scan_equivalents = baseline_stats.chain_fallback_scan_equivalents;
+        let chain_fallback_filter_equivalents = baseline_stats.chain_fallback_filter_equivalents;
+        let full_semantic_scans = baseline_scans as u64 + chain_fallback_scan_equivalents;
+        let full_semantic_filters = baseline_filters as u64 + chain_fallback_filter_equivalents;
+        assert_eq!(
+            chain_fallback_scan_equivalents,
+            chain_fallbacks
+                .iter()
+                .map(|route| route.3 as u64)
+                .sum::<u64>()
+        );
+        assert_eq!(
+            chain_fallback_filter_equivalents,
+            chain_fallbacks
+                .iter()
+                .map(|route| route.4 as u64)
+                .sum::<u64>()
+        );
+        eprintln!(
+            "full-plan baseline operation profile: physical_scans={baseline_scans} physical_filters={baseline_filters} chain_fallback_scan_equivalents={chain_fallback_scan_equivalents} chain_fallback_filter_equivalents={chain_fallback_filter_equivalents} semantic_scans={full_semantic_scans} semantic_filters={full_semantic_filters} triangle={} four_cycle={} free_join={} factorized_delta={}",
+            baseline_stats.wcoj_triangle_dispatch_count,
+            baseline_stats.wcoj_4cycle_dispatch_count,
+            baseline_stats.free_join_dispatch_count,
+            baseline_stats.factorized_delta_dispatch_count
+        );
+        let mut projected_program = program.clone();
+        projected_program.plan =
+            LogicExecutionPlan::Ordinary(Box::new(projected_reference_plan.clone()));
+        let projected_baseline = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+            projected_program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        };
+        assert_eq!(
+            snapshot_query_results(provider.as_ref(), &projected_baseline)?,
+            baseline_snapshot,
+            "dependency-closed ordinary reference changed full-plan query semantics"
+        );
+        let projected_stats = projected_baseline
+            .stats
+            .as_ref()
+            .expect("dependency-closed ordinary reference profile");
+        let projected_scans = op_count(projected_stats, "scan");
+        let projected_filters = op_count(projected_stats, "filter");
+        assert_eq!(
+            projected_stats.chain_fallback_scan_equivalents,
+            projected_chain_fallbacks
+                .iter()
+                .map(|route| route.3 as u64)
+                .sum::<u64>()
+        );
+        assert_eq!(
+            projected_stats.chain_fallback_filter_equivalents,
+            projected_chain_fallbacks
+                .iter()
+                .map(|route| route.4 as u64)
+                .sum::<u64>()
+        );
+        let expected_semantic_scans =
+            projected_scans as u64 + projected_stats.chain_fallback_scan_equivalents;
+        let expected_semantic_filters =
+            projected_filters as u64 + projected_stats.chain_fallback_filter_equivalents;
+        eprintln!(
+            "dependency-closed ordinary reference: physical_scans={projected_scans} physical_filters={projected_filters} chain_fallback_scan_equivalents={} chain_fallback_filter_equivalents={} semantic_scans={expected_semantic_scans} semantic_filters={expected_semantic_filters}",
+            projected_stats.chain_fallback_scan_equivalents,
+            projected_stats.chain_fallback_filter_equivalents,
+        );
+        drop(projected_baseline);
+        assert!(
+            baseline_scans >= 9_000,
+            "unexpected baseline scan count: {baseline_scans}"
+        );
+        assert!(
+            baseline_filters >= 7_000,
+            "unexpected baseline filter count: {baseline_filters}"
+        );
+        drop(baseline);
+        assert_eq!(
+            program.resident_certification_initializations(),
+            1,
+            "external certificate audits and the disabled-resident baseline must reuse the compile-time certification"
+        );
+
+        let mut resident_seconds = Vec::with_capacity(5);
+        let mut device_seconds = Vec::with_capacity(5);
+        for run in 0..5 {
+            let started = std::time::Instant::now();
+            let resident = {
+                let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+            };
+            assert_eq!(
+                program.resident_certification_initializations(),
+                1,
+                "resident corpus run {run} must reuse the single cached certification"
+            );
+            resident_seconds.push(started.elapsed().as_secs_f64());
+            assert_eq!(
+                snapshot_query_results(provider.as_ref(), &resident)?,
+                baseline_snapshot,
+                "resident corpus run {run} changed query semantics"
+            );
+
+            let resident_stats = resident.stats.as_ref().expect("resident profile");
+            let resident_physical_scans = op_count(resident_stats, "scan");
+            let resident_physical_filters = op_count(resident_stats, "filter");
+            let graph = resident_stats
+                .resident_graph
+                .as_ref()
+                .expect("resident selection telemetry");
+            eprintln!(
+                "resident operation profile run {run}: semantic_scans={} semantic_filters={} physical_scans={resident_physical_scans} physical_filters={resident_physical_filters}",
+                graph.semantic_scan_invocations, graph.semantic_filter_invocations
+            );
+            assert_eq!(graph.semantic_scan_invocations, expected_semantic_scans);
+            assert_eq!(graph.semantic_filter_invocations, expected_semantic_filters);
+            assert_eq!(
+                resident_physical_scans as u64,
+                graph.device_scan_invocations
+            );
+            assert_eq!(
+                resident_physical_filters as u64,
+                graph.device_filter_invocations
+            );
+            assert_eq!(
+                graph.selection,
+                ResidentGraphSelectionKind::ResidentConditionalGraph
+            );
+            assert_eq!(graph.conditional_graph_launches, 1);
+            assert_eq!(graph.terminal_synchronizations, 1);
+            assert_eq!(graph.host_iterations, 0);
+            assert_eq!(graph.host_allocations, 0);
+            assert_eq!(graph.host_status_injections, 0);
+            assert_eq!(graph.deterministic_d2h_violations, 0);
+            assert_eq!(graph.host_dispatched_scan_ops, 0);
+            assert_eq!(graph.host_dispatched_filter_ops, 0);
+            assert!(graph.device_scan_invocations >= graph.semantic_scan_invocations);
+            assert!(graph.device_filter_invocations >= graph.semantic_filter_invocations);
+            assert_eq!(
+                graph.deferred_profile.timed_scan_filter_invocations,
+                graph.device_scan_invocations + graph.device_filter_invocations
+            );
+            assert!(graph.deferred_profile.device_elapsed_ns > 0);
+            assert_eq!(graph.deferred_profile.final_sync_misattributed_ns, 0);
+            device_seconds.push(graph.deferred_profile.device_elapsed_ns as f64 / 1_000_000_000.0);
+            assert_eq!(graph.core_transfers.tracked_htod_calls, 0);
+            assert_eq!(graph.core_transfers.tracked_htod_bytes, 0);
+            assert_eq!(graph.core_transfers.tracked_dtoh_calls, 0);
+            assert_eq!(graph.core_transfers.tracked_dtoh_bytes, 0);
+            assert_eq!(graph.core_transfers.provider_dtoh_calls, 0);
+            assert_eq!(graph.core_transfers.untracked_metadata_dtoh_calls, 0);
+            assert_eq!(graph.final_observation.dtoh_calls, 1);
+            assert_eq!(
+                graph.final_observation.dtoh_bytes,
+                60 + 8 * graph.staged_store_mutations
+            );
+            assert_eq!(graph.final_observation.pinned_receipts, 1);
+            let json = resident_stats.format_json();
+            assert!(json.contains("\"resident_graph\""), "{json}");
+            assert!(
+                json.contains("\"selection\":\"resident_conditional_graph\""),
+                "{json}"
+            );
+            assert!(
+                json.contains(&format!(
+                    "\"semantic_scan_invocations\":{expected_semantic_scans}"
+                )),
+                "{json}"
+            );
+            assert!(
+                json.contains(&format!(
+                    "\"semantic_filter_invocations\":{expected_semantic_filters}"
+                )),
+                "{json}"
+            );
+            drop(resident);
+        }
+        assert_eq!(program.resident_certification_initializations(), 1);
+        let compile_plus_first_resident_seconds =
+            compile_and_certification_seconds + resident_seconds[0];
+        let max_seconds = resident_seconds.iter().copied().fold(0.0_f64, f64::max);
+        let mut sorted_resident_seconds = resident_seconds.clone();
+        let median_seconds = median_seconds(&mut sorted_resident_seconds);
+        eprintln!(
+            "resident corpus latency: compile_and_certification_seconds={compile_and_certification_seconds:.6} compile_plus_first_resident_seconds={compile_plus_first_resident_seconds:.6} end_to_end_seconds={resident_seconds:?} device_event_seconds={device_seconds:?} median_end_to_end_seconds={median_seconds:.6} max_end_to_end_seconds={max_seconds:.6}"
+        );
+        assert!(
+            median_seconds <= 1.25,
+            "five-run resident corpus median {median_seconds:.6}s exceeds 1.25s: {resident_seconds:?}"
+        );
+        assert!(
+            max_seconds <= 1.75,
+            "five-run resident corpus max {max_seconds:.6}s exceeds 1.75s: {resident_seconds:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the exact external issue corpus checkout and serialized CUDA"]
+    fn pinned_corpus_resident_latency_phase_diagnostic() -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let corpus = std::path::PathBuf::from(
+            std::env::var("XLOG_PINNED_CORPUS_ROOT")
+                .expect("XLOG_PINNED_CORPUS_ROOT must name the pinned corpus checkout"),
+        );
+        assert_exact_clean_corpus(&corpus);
+        let compile_started = std::time::Instant::now();
+        let program = corpus_program(&corpus)?;
+        eprintln!(
+            "resident latency setup: compile_ns={}",
+            u64::try_from(compile_started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        );
+        let Some(provider) = pinned_corpus_test_provider() else {
+            return Ok(());
+        };
+        let baseline = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        };
+        let expected = snapshot_query_results(provider.as_ref(), &baseline)?;
+        drop(baseline);
+
+        RESIDENT_LATENCY_SAMPLE.store(0, Ordering::Relaxed);
+        for run in 0..5 {
+            let evaluate_started = std::time::Instant::now();
+            let resident = {
+                let _env = ResidentEnvGuard::set(&[
+                    ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+                    (RESIDENT_LATENCY_DIAGNOSTICS_ENV, "1"),
+                ]);
+                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+            };
+            let evaluate_return_ns =
+                u64::try_from(evaluate_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            assert_eq!(
+                snapshot_query_results(provider.as_ref(), &resident)?,
+                expected,
+                "resident latency diagnostic run {run} changed query semantics"
+            );
+            let graph = resident
+                .stats
+                .as_ref()
+                .and_then(|stats| stats.resident_graph.as_ref())
+                .expect("resident latency diagnostic telemetry");
+            assert_eq!(
+                graph.selection,
+                ResidentGraphSelectionKind::ResidentConditionalGraph
+            );
+            let query_buffers = resident.queries.len();
+            let manager_bytes_before_result_drop = provider.memory().allocated_bytes();
+            let result_drop_started = std::time::Instant::now();
+            drop(resident);
+            let result_drop_ns =
+                u64::try_from(result_drop_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let manager_bytes_after_result_drop = provider.memory().allocated_bytes();
+            let result_manager_bytes_released =
+                manager_bytes_before_result_drop.saturating_sub(manager_bytes_after_result_drop);
+            eprintln!(
+                "resident latency result teardown: sample={run} evaluate_return_ns={evaluate_return_ns} result_drop_ns={result_drop_ns} query_buffers={query_buffers} manager_bytes_before={manager_bytes_before_result_drop} manager_bytes_after={manager_bytes_after_result_drop} manager_bytes_released={result_manager_bytes_released} deallocation_calls=unavailable"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a serialized release-mode CUDA acceptance run"]
+    fn resident_disconnected_four_thousand_rule_scaling_acceptance() -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let corpus = std::path::PathBuf::from(
+            std::env::var("XLOG_PINNED_CORPUS_ROOT")
+                .expect("XLOG_PINNED_CORPUS_ROOT must name the pinned corpus checkout"),
+        );
+        assert_exact_clean_corpus(&corpus);
+        let base_program = corpus_program(&corpus)?;
+        let entry = corpus.join("scenarios/acceptance/issue1/q01_blind.xlog");
+        let mut augmented_source = std::fs::read_to_string(&entry).map_err(|error| {
+            XlogError::Execution(format!("failed to read {}: {error}", entry.display()))
+        })?;
+        augmented_source.push_str("\npred disconnected_seed(u32).\n");
+        for family in 0..4_000 {
+            augmented_source.push_str(&format!("pred disconnected_family_{family}(u32).\n"));
+            augmented_source.push_str(&format!(
+                "disconnected_family_{family}(X) :- disconnected_seed(X).\n"
+            ));
+        }
+        let resolver = xlog_logic::compile::load_modules(&entry, vec![corpus.join("programs")])
+            .map_err(|error| XlogError::Compilation(error.to_string()))?;
+        let augmented_program = LogicProgram::compile_with_resolver(&augmented_source, &resolver)?;
+        let Some(provider) = pinned_corpus_test_provider() else {
+            return Ok(());
+        };
+
+        let mut base_seconds = Vec::with_capacity(5);
+        let mut expected_snapshot = None;
+        let mut expected_profile = None;
+        for run in 0..5 {
+            let started = std::time::Instant::now();
+            let result = {
+                let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+                base_program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+            };
+            base_seconds.push(started.elapsed().as_secs_f64());
+            let snapshot = snapshot_query_results(provider.as_ref(), &result)?;
+            if let Some(expected) = &expected_snapshot {
+                assert_eq!(&snapshot, expected, "base resident run {run} drifted");
+            } else {
+                expected_snapshot = Some(snapshot);
+            }
+            let stats = result.stats.as_ref().expect("base resident profile");
+            let graph = stats
+                .resident_graph
+                .as_ref()
+                .expect("base resident graph telemetry");
+            assert_eq!(
+                graph.selection,
+                ResidentGraphSelectionKind::ResidentConditionalGraph
+            );
+            assert_eq!(graph.conditional_graph_launches, 1);
+            assert_eq!(
+                op_count(stats, "scan") as u64,
+                graph.device_scan_invocations
+            );
+            assert_eq!(
+                op_count(stats, "filter") as u64,
+                graph.device_filter_invocations
+            );
+            let profile = (
+                strata_op_profile(stats),
+                graph.device_scan_invocations,
+                graph.device_filter_invocations,
+                graph.semantic_scan_invocations,
+                graph.semantic_filter_invocations,
+                graph.deferred_profile.timed_scan_filter_invocations,
+            );
+            if let Some(expected) = &expected_profile {
+                assert_eq!(&profile, expected, "base resident run {run} op drift");
+            } else {
+                expected_profile = Some(profile);
+            }
+            drop(result);
+        }
+
+        let expected_snapshot = expected_snapshot.expect("base resident snapshot");
+        let expected_profile = expected_profile.expect("base resident operation profile");
+        let mut augmented_seconds = Vec::with_capacity(5);
+        for run in 0..5 {
+            let started = std::time::Instant::now();
+            let result = {
+                let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+                augmented_program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+            };
+            augmented_seconds.push(started.elapsed().as_secs_f64());
+            assert_eq!(
+                snapshot_query_results(provider.as_ref(), &result)?,
+                expected_snapshot,
+                "disconnected family changed query output on run {run}"
+            );
+            let stats = result.stats.as_ref().expect("augmented resident profile");
+            let graph = stats
+                .resident_graph
+                .as_ref()
+                .expect("augmented resident graph telemetry");
+            assert_eq!(
+                graph.selection,
+                ResidentGraphSelectionKind::ResidentConditionalGraph
+            );
+            assert_eq!(graph.conditional_graph_launches, 1);
+            assert_eq!(
+                op_count(stats, "scan") as u64,
+                graph.device_scan_invocations
+            );
+            assert_eq!(
+                op_count(stats, "filter") as u64,
+                graph.device_filter_invocations
+            );
+            assert_eq!(
+                (
+                    strata_op_profile(stats),
+                    graph.device_scan_invocations,
+                    graph.device_filter_invocations,
+                    graph.semantic_scan_invocations,
+                    graph.semantic_filter_invocations,
+                    graph.deferred_profile.timed_scan_filter_invocations,
+                ),
+                expected_profile,
+                "disconnected family changed semantic or device op counts on run {run}"
+            );
+            drop(result);
+        }
+
+        let base_median = median_seconds(&mut base_seconds);
+        let augmented_median = median_seconds(&mut augmented_seconds);
+        let allowed_delta = (base_median * 0.10).max(0.100);
+        assert!(
+            augmented_median - base_median <= allowed_delta,
+            "disconnected 4,000-rule resident median delta {:.6}s exceeds {:.6}s: base={base_seconds:?} augmented={augmented_seconds:?}",
+            augmented_median - base_median,
+            allowed_delta,
+        );
+        Ok(())
+    }
+
+    fn assert_required_resident_semantics(
+        source: &str,
+        case: &str,
+        expected_query_schema: Option<&Schema>,
+        expected_query_types: Option<&[ScalarType]>,
+        expected_query_rows: Option<usize>,
+    ) -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let program = LogicProgram::compile(source)?;
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let baseline = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        };
+        let expected = snapshot_query_results(provider.as_ref(), &baseline)?;
+        if let Some(expected_query_schema) = expected_query_schema {
+            assert_eq!(expected.len(), 1, "schema witness must have one query");
+            assert_eq!(
+                &expected[0].schema, expected_query_schema,
+                "pre-change legacy query schema witness changed for {case}"
+            );
+        }
+        if let Some(expected_query_types) = expected_query_types {
+            assert_eq!(expected.len(), 1, "type witness must have one query");
+            assert_eq!(
+                expected[0]
+                    .schema
+                    .columns
+                    .iter()
+                    .map(|(_, scalar)| *scalar)
+                    .collect::<Vec<_>>(),
+                expected_query_types,
+                "pre-change legacy query types changed for {case}"
+            );
+        }
+        if let Some(expected_query_rows) = expected_query_rows {
+            assert_eq!(expected.len(), 1, "row witness must have one query");
+            assert_eq!(
+                expected[0].rows.len(),
+                expected_query_rows,
+                "pre-change legacy query row count changed for {case}"
+            );
+        }
+        drop(baseline);
+        let resident = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        };
+        assert_eq!(
+            snapshot_query_results(provider.as_ref(), &resident)?,
+            expected,
+            "resident semantic case {case} diverged"
+        );
+        let graph = resident
+            .stats
+            .as_ref()
+            .and_then(|stats| stats.resident_graph.as_ref())
+            .expect("resident semantic telemetry");
+        assert_eq!(
+            graph.selection,
+            ResidentGraphSelectionKind::ResidentConditionalGraph,
+            "resident semantic case {case} did not use the production graph"
+        );
+        assert_eq!(graph.conditional_graph_launches, 1);
+        assert_eq!(graph.core_transfers.tracked_htod_calls, 0);
+        assert_eq!(graph.core_transfers.tracked_htod_bytes, 0);
+        assert_eq!(graph.core_transfers.tracked_dtoh_calls, 0);
+        assert_eq!(graph.core_transfers.tracked_dtoh_bytes, 0);
+        assert_eq!(graph.core_transfers.provider_dtoh_calls, 0);
+        assert_eq!(graph.core_transfers.untracked_metadata_dtoh_calls, 0);
+        assert_eq!(graph.deterministic_d2h_violations, 0);
+        assert_eq!(graph.final_observation.dtoh_calls, 1);
+        assert_eq!(graph.final_observation.pinned_receipts, 1);
+        Ok(())
+    }
+
+    fn program_with_authored_query_prefix(
+        source: &str,
+        original_head: &str,
+        authored_head: &str,
+    ) -> Result<Program> {
+        let mut program = xlog_logic::parse_program(source)?;
+        let mut renamed_declarations = 0usize;
+        for declaration in &mut program.predicates {
+            if declaration.name == original_head {
+                declaration.name = authored_head.to_string();
+                renamed_declarations += 1;
+            }
+        }
+        let mut renamed_rules = 0usize;
+        for rule in &mut program.rules {
+            if rule.head.predicate == original_head {
+                rule.head.predicate = authored_head.to_string();
+                renamed_rules += 1;
+            }
+        }
+        let mut renamed_queries = 0usize;
+        for query in &mut program.queries {
+            if query.atom.predicate == original_head {
+                query.atom.predicate = authored_head.to_string();
+                renamed_queries += 1;
+            }
+        }
+        assert_eq!(renamed_declarations, 1);
+        assert!(renamed_rules >= 1);
+        assert_eq!(renamed_queries, 1);
+        Ok(program)
+    }
+
+    fn compile_program_with_authored_query_prefix(
+        source: &str,
+        original_head: &str,
+        authored_head: &str,
+    ) -> Result<LogicProgram> {
+        LogicProgram::compile_program(program_with_authored_query_prefix(
+            source,
+            original_head,
+            authored_head,
+        )?)
+    }
+
+    fn assert_required_resident_authored_prefix_semantics(source: &str, case: &str) -> Result<()> {
+        const AUTHORED_HEAD: &str = "__xlog_query_authored";
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let program = compile_program_with_authored_query_prefix(source, "answer", AUTHORED_HEAD)?;
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let explicit_schema = Schema::new(vec![("external_value".to_string(), ScalarType::Symbol)]);
+        let baseline = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(
+                provider.clone(),
+                HashMap::from([(
+                    AUTHORED_HEAD.to_string(),
+                    provider.create_empty_buffer(explicit_schema.clone())?,
+                )]),
+                true,
+            )?
+        };
+        let expected = snapshot_query_results(provider.as_ref(), &baseline)?;
+        assert_eq!(expected.len(), 1);
+        drop(baseline);
+        let resident = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(
+                provider.clone(),
+                HashMap::from([(
+                    AUTHORED_HEAD.to_string(),
+                    provider.create_empty_buffer(explicit_schema)?,
+                )]),
+                true,
+            )?
+        };
+        assert_eq!(
+            snapshot_query_results(provider.as_ref(), &resident)?,
+            expected,
+            "resident authored-prefix case {case} diverged"
+        );
+        let graph = resident
+            .stats
+            .as_ref()
+            .and_then(|stats| stats.resident_graph.as_ref())
+            .expect("resident authored-prefix telemetry");
+        assert_eq!(
+            graph.selection,
+            ResidentGraphSelectionKind::ResidentConditionalGraph,
+            "resident authored-prefix case {case} declined"
+        );
+        assert_eq!(graph.conditional_graph_launches, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn required_resident_preserves_programmatic_authored_query_prefix_empty_input() -> Result<()> {
+        assert_required_resident_authored_prefix_semantics(
+            r#"
+                pred source(symbol).
+                pred answer(symbol).
+                answer(X) :- source(X).
+                ?- answer(X).
+            "#,
+            "one authored rule",
+        )
+    }
+
+    #[test]
+    fn required_resident_does_not_treat_programmatic_authored_prefix_rules_as_generated(
+    ) -> Result<()> {
+        assert_required_resident_authored_prefix_semantics(
+            r#"
+                pred left_source(symbol).
+                pred right_source(symbol).
+                pred answer(symbol).
+                answer(X) :- left_source(X).
+                answer(X) :- right_source(X).
+                ?- answer(X).
+            "#,
+            "two authored rules",
+        )
+    }
+
+    #[test]
+    fn compile_program_rejects_exact_generated_query_head_collision() -> Result<()> {
+        let program = program_with_authored_query_prefix(
+            r#"
+                pred source(symbol).
+                pred answer(symbol).
+                answer(X) :- source(X).
+                ?- answer(X).
+            "#,
+            "answer",
+            "__xlog_query_0",
+        )?;
+        let error = match LogicProgram::compile_program(program) {
+            Ok(_) => panic!("exact compiler-generated query head collision must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("authored relation __xlog_query_0 collides with generated query head"),
+            "unexpected collision error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compiler_generated_query_relation_validation_is_exact_and_host_only() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                pred source(symbol).
+                ?- source(X).
+            "#,
+        )?;
+
+        let error = program
+            .reject_compiler_generated_query_relation_names(["__xlog_query_0"], "persistent caller")
+            .expect_err("an exact compiler-generated query head must be rejected");
+        match error {
+            XlogError::Execution(message) => assert_eq!(
+                message,
+                "persistent caller relation __xlog_query_0 collides with generated query head"
+            ),
+            other => panic!("expected typed execution rejection, got {other:?}"),
+        }
+
+        program.reject_compiler_generated_query_relation_names(
+            ["__xlog_query_authored"],
+            "persistent caller",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn compiler_generated_query_relation_validation_rejects_provenance_mutation() -> Result<()> {
+        let source = r#"
+            pred source(symbol).
+            ?- source(X).
+        "#;
+
+        let mut omitted = LogicProgram::compile(source)?;
+        let LogicExecutionPlan::Ordinary(plan) = &mut omitted.plan else {
+            panic!("ordinary program must compile to an ordinary plan");
+        };
+        plan.generated_query_rules.clear();
+        let error = omitted
+            .reject_compiler_generated_query_relation_names(std::iter::empty(), "caller input")
+            .expect_err("omitted compiler provenance must be rejected");
+        assert!(error.to_string().contains(
+            "compiler-generated query provenance count 0 does not match authored query count 1"
+        ));
+
+        let mut repositioned = LogicProgram::compile(source)?;
+        let LogicExecutionPlan::Ordinary(plan) = &mut repositioned.plan else {
+            panic!("ordinary program must compile to an ordinary plan");
+        };
+        plan.generated_query_rules[0].query_index = 1;
+        let error = repositioned
+            .reject_compiler_generated_query_relation_names(std::iter::empty(), "caller input")
+            .expect_err("repositioned compiler provenance must be rejected");
+        assert!(error
+            .to_string()
+            .contains("compiler-generated query provenance position 0 carries query index 1"));
+
+        let mut renamed = LogicProgram::compile(source)?;
+        let LogicExecutionPlan::Ordinary(plan) = &mut renamed.plan else {
+            panic!("ordinary program must compile to an ordinary plan");
+        };
+        let provenance = &plan.generated_query_rules[0];
+        plan.rules_by_scc[provenance.scc_index][provenance.rule_index].head =
+            "__xlog_query_spoof".to_string();
+        let error = renamed
+            .reject_compiler_generated_query_relation_names(std::iter::empty(), "caller input")
+            .expect_err("renamed compiler-generated query head must be rejected");
+        assert!(error.to_string().contains(
+            "compiler-generated query provenance 0 expects head __xlog_query_0 but references authored head __xlog_query_spoof"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn cloned_program_shares_reusable_state_identity_but_recompile_does_not() -> Result<()> {
+        let source = r#"
+            pred source(symbol).
+            ?- source(X).
+        "#;
+        let original = LogicProgram::compile(source)?;
+        let cloned = original.clone();
+        let recompiled = LogicProgram::compile(source)?;
+
+        cloned.validate_reusable_state_identity(
+            &original.reusable_state_identity,
+            "materialized cache",
+        )?;
+        let error = recompiled
+            .validate_reusable_state_identity(
+                &original.reusable_state_identity,
+                "materialized cache",
+            )
+            .expect_err("independent compilation must have a distinct reusable-state identity");
+        assert!(matches!(error, XlogError::Execution(_)));
+        assert_eq!(
+            error.to_string(),
+            "Execution error: materialized cache belongs to a different compiled logic program"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn foreign_cache_and_runtime_are_rejected_before_evaluation_work() -> Result<()> {
+        let source = r#"
+            pred source(u32).
+            pred out(u32).
+            out(X) :- source(X).
+            ?- out(X).
+        "#;
+        let program = LogicProgram::compile(source)?;
+        let foreign_program = LogicProgram::compile(source)?;
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let base_store = program.create_relation_store(provider.clone())?;
+        let (_, cache) =
+            program.evaluate_with_relation_store_and_cache(provider.clone(), &base_store, false)?;
+        let allocations_before_cache = provider.memory().alloc_count();
+
+        let error = match foreign_program.evaluate_cached_relation_store(provider.clone(), &cache) {
+            Ok(_) => panic!("independently compiled program must reject a foreign cache"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Execution error: materialized cache belongs to a different compiled logic program"
+        );
+        assert_eq!(provider.memory().alloc_count(), allocations_before_cache);
+
+        let mut runtime = program.create_session_runtime(provider.clone(), &base_store, false)?;
+        let runtime_store_before = std::ptr::from_ref(runtime.executor.store());
+        let source_version_before = runtime.executor.store().version("source");
+        let allocations_before_runtime = provider.memory().alloc_count();
+        let error =
+            match foreign_program.evaluate_with_session_runtime(provider.clone(), &mut runtime) {
+                Ok(_) => panic!("independently compiled program must reject a foreign runtime"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            error.to_string(),
+            "Execution error: session runtime belongs to a different compiled logic program"
+        );
+        assert_eq!(provider.memory().alloc_count(), allocations_before_runtime);
+        assert_eq!(
+            std::ptr::from_ref(runtime.executor.store()),
+            runtime_store_before
+        );
+        assert_eq!(
+            runtime.executor.store().version("source"),
+            source_version_before
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn foreign_reusable_state_is_rejected_before_delta_take_or_device_work() -> Result<()> {
+        let source = r#"
+            pred source(u32).
+            pred out(u32).
+            source(1).
+            out(X) :- source(X).
+            ?- out(X).
+        "#;
+        let program = LogicProgram::compile(source)?;
+        let foreign_program = LogicProgram::compile(source)?;
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let mut base_store = program.create_relation_store(provider.clone())?;
+        let (_, initial_cache) =
+            program.evaluate_with_relation_store_and_cache(provider.clone(), &base_store, false)?;
+        let mut cache = Some(initial_cache);
+        let mut runtime = None;
+        let cache_before = cache.as_ref().map(std::ptr::from_ref);
+        let source_version_before = base_store.version("source");
+        let mut raw_delta_store = program.create_relation_store(provider.clone())?;
+        let raw_insert = raw_delta_store
+            .remove("source")
+            .expect("inline source fact must materialize a nonempty raw delta");
+        let raw_deltas = HashMap::from([(
+            "source".to_string(),
+            RelationDelta::new(Some(raw_insert), None),
+        )]);
+        let allocations_before_raw = provider.memory().alloc_count();
+
+        let error = match foreign_program.prepare_relation_deltas_commit_with_session_runtime(
+            provider.clone(),
+            &mut base_store,
+            &mut cache,
+            &mut runtime,
+            raw_deltas,
+        ) {
+            Ok(_) => panic!("raw delta preparation must reject a foreign cache"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Execution error: materialized cache belongs to a different compiled logic program"
+        );
+        assert_eq!(provider.memory().alloc_count(), allocations_before_raw);
+        assert_eq!(cache.as_ref().map(std::ptr::from_ref), cache_before);
+        assert!(runtime.is_none());
+        assert_eq!(base_store.version("source"), source_version_before);
+
+        let mut no_cache = None;
+        let mut foreign_runtime =
+            Some(program.create_session_runtime(provider.clone(), &base_store, false)?);
+        let runtime_before = foreign_runtime.as_ref().map(std::ptr::from_ref);
+        let mut prepared_delta_store = program.create_relation_store(provider.clone())?;
+        let prepared_insert = prepared_delta_store
+            .remove("source")
+            .expect("inline source fact must materialize a nonempty prepared delta");
+        let prepared_batch = program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            vec![(
+                "source".to_string(),
+                RelationDelta::new(Some(prepared_insert), None),
+            )],
+            &BTreeSet::new(),
+        )?;
+        let allocations_before_prepared = provider.memory().alloc_count();
+        let error = match foreign_program.prepare_relation_delta_commit_with_session_runtime(
+            provider.clone(),
+            &mut base_store,
+            &mut no_cache,
+            &mut foreign_runtime,
+            prepared_batch,
+        ) {
+            Ok(_) => panic!("prepared delta commit must reject a foreign runtime"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Execution error: session runtime belongs to a different compiled logic program"
+        );
+        assert_eq!(provider.memory().alloc_count(), allocations_before_prepared);
+        assert!(no_cache.is_none());
+        assert_eq!(
+            foreign_runtime.as_ref().map(std::ptr::from_ref),
+            runtime_before
+        );
+        assert_eq!(base_store.version("source"), source_version_before);
+
+        let mut ordered_delta_store = program.create_relation_store(provider.clone())?;
+        let ordered_insert = ordered_delta_store
+            .remove("source")
+            .expect("inline source fact must materialize a nonempty ordered delta");
+        let allocations_before_ordered = provider.memory().alloc_count();
+        let error = match foreign_program.apply_relation_delta_batch(
+            provider.clone(),
+            &mut base_store,
+            &mut cache,
+            vec![(
+                "source".to_string(),
+                RelationDelta::new(Some(ordered_insert), None),
+            )],
+        ) {
+            Ok(_) => panic!("ordered delta application must reject a foreign cache"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Execution error: materialized cache belongs to a different compiled logic program"
+        );
+        assert_eq!(
+            provider.memory().alloc_count(),
+            allocations_before_ordered,
+            "identity validation must run before ordered device coalescing"
+        );
+        assert_eq!(cache.as_ref().map(std::ptr::from_ref), cache_before);
+        assert_eq!(base_store.version("source"), source_version_before);
+        Ok(())
+    }
+
+    #[test]
+    fn persistent_relation_store_rejects_generated_query_head_before_setup() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                pred source(symbol).
+                ?- source(X).
+            "#,
+        )?;
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let mut store = program.create_relation_store(provider.clone())?;
+        let query_schema = program
+            .schemas
+            .get("__xlog_query_0")
+            .expect("compiler-generated query schema")
+            .clone();
+        store.put(
+            "__xlog_query_0",
+            provider.create_empty_buffer(query_schema)?,
+        );
+        let mut store_before = store
+            .names()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    store.get(name).expect("named relation").num_rows(),
+                )
+            })
+            .collect::<Vec<_>>();
+        store_before.sort_unstable();
+        let allocations_before = provider.memory().alloc_count();
+
+        let error = match program.evaluate_with_relation_store(provider.clone(), &store, false) {
+            Ok(_) => panic!("persistent caller must not seed a generated query head"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, XlogError::Execution(_)));
+        assert!(error.to_string().contains(
+            "persistent caller relation __xlog_query_0 collides with generated query head"
+        ));
+        assert_eq!(provider.memory().alloc_count(), allocations_before);
+        let mut store_after = store
+            .names()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    store.get(name).expect("named relation").num_rows(),
+                )
+            })
+            .collect::<Vec<_>>();
+        store_after.sort_unstable();
+        assert_eq!(store_after, store_before);
+        Ok(())
+    }
+
+    #[test]
+    fn persistent_session_rejects_generated_query_head_before_setup() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                pred source(symbol).
+                ?- source(X).
+            "#,
+        )?;
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let mut store = program.create_relation_store(provider.clone())?;
+        let query_schema = program
+            .schemas
+            .get("__xlog_query_0")
+            .expect("compiler-generated query schema")
+            .clone();
+        store.put(
+            "__xlog_query_0",
+            provider.create_empty_buffer(query_schema)?,
+        );
+        let mut store_before = store
+            .names()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    store.get(name).expect("named relation").num_rows(),
+                )
+            })
+            .collect::<Vec<_>>();
+        store_before.sort_unstable();
+        let allocations_before = provider.memory().alloc_count();
+
+        let error = match program.create_session_runtime(provider.clone(), &store, false) {
+            Ok(_) => panic!("persistent session must not seed a generated query head"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, XlogError::Execution(_)));
+        assert!(error.to_string().contains(
+            "persistent caller relation __xlog_query_0 collides with generated query head"
+        ));
+        assert_eq!(provider.memory().alloc_count(), allocations_before);
+        let mut store_after = store
+            .names()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    store.get(name).expect("named relation").num_rows(),
+                )
+            })
+            .collect::<Vec<_>>();
+        store_after.sort_unstable();
+        assert_eq!(store_after, store_before);
+        Ok(())
+    }
+
+    #[test]
+    fn raw_delta_preparation_rejects_generated_query_head_without_consuming_state() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                pred source(symbol).
+                ?- source(X).
+            "#,
+        )?;
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let mut store = program.create_relation_store(provider.clone())?;
+        let (_, cached_store) =
+            program.evaluate_with_relation_store_and_cache(provider.clone(), &store, false)?;
+        let mut cached_store = Some(cached_store);
+        let cached_store_before = cached_store.as_ref().map(std::ptr::from_ref);
+        let mut session_runtime = None;
+        let mut store_before = store
+            .names()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    store.get(name).expect("named relation").num_rows(),
+                )
+            })
+            .collect::<Vec<_>>();
+        store_before.sort_unstable();
+        let allocations_before = provider.memory().alloc_count();
+        let deltas =
+            HashMap::from([("__xlog_query_0".to_string(), RelationDelta::new(None, None))]);
+
+        let error = match program.prepare_relation_deltas_commit_with_session_runtime(
+            provider.clone(),
+            &mut store,
+            &mut cached_store,
+            &mut session_runtime,
+            deltas,
+        ) {
+            Ok(_) => panic!("delta preparation must reject a generated query head"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, XlogError::Execution(_)));
+        assert!(error
+            .to_string()
+            .contains("caller delta relation __xlog_query_0 collides with generated query head"));
+        assert_eq!(provider.memory().alloc_count(), allocations_before);
+        assert_eq!(
+            cached_store.as_ref().map(std::ptr::from_ref),
+            cached_store_before
+        );
+        assert!(session_runtime.is_none());
+        let mut store_after = store
+            .names()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    store.get(name).expect("named relation").num_rows(),
+                )
+            })
+            .collect::<Vec<_>>();
+        store_after.sort_unstable();
+        assert_eq!(store_after, store_before);
+        Ok(())
+    }
+
+    #[test]
+    fn ordered_delta_preparation_rejects_generated_query_head_before_device_work() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                pred source(symbol).
+                source("payload").
+                ?- source(X).
+            "#,
+        )?;
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let mut insert_store = program.create_relation_store(provider.clone())?;
+        let insert = insert_store
+            .remove("source")
+            .expect("inline source fact must materialize a nonempty insert");
+        let mut delete_store = program.create_relation_store(provider.clone())?;
+        let delete = delete_store
+            .remove("source")
+            .expect("inline source fact must materialize a nonempty delete");
+        let allocations_before = provider.memory().alloc_count();
+
+        let error = match program.prepare_relation_delta_batch(
+            provider.as_ref(),
+            vec![
+                (
+                    "__xlog_query_0".to_string(),
+                    RelationDelta::new(Some(insert), None),
+                ),
+                (
+                    "__xlog_query_0".to_string(),
+                    RelationDelta::new(None, Some(delete)),
+                ),
+            ],
+            &BTreeSet::from(["__xlog_query_0".to_string()]),
+        ) {
+            Ok(_) => panic!("ordered delta preparation must reject a generated query head"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, XlogError::Execution(_)));
+        assert!(error
+            .to_string()
+            .contains("caller delta relation __xlog_query_0 collides with generated query head"));
+        assert_eq!(provider.memory().alloc_count(), allocations_before);
+        Ok(())
+    }
+
+    #[test]
+    fn resident_rejects_caller_input_for_exact_generated_query_head_before_setup() -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let program = LogicProgram::compile(
+            r#"
+                pred source(symbol).
+                ?- source(X).
+            "#,
+        )?;
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let generated_schema = program
+            .schemas
+            .get("__xlog_query_0")
+            .expect("generated query schema")
+            .clone();
+        for (name, value) in [
+            ("XLOG_DISABLE_RESIDENT_RECURSION", "1"),
+            ("XLOG_USE_RESIDENT_RECURSION", "1"),
+            ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+        ] {
+            let input = provider.create_empty_buffer(generated_schema.clone())?;
+            let allocations_before = provider.memory().alloc_count();
+            let _env = ResidentEnvGuard::set(&[(name, value)]);
+            let error = match program.evaluate_with_options(
+                provider.clone(),
+                HashMap::from([("__xlog_query_0".to_string(), input)]),
+                true,
+            ) {
+                Ok(_) => panic!("caller input must not occupy a generated query head"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(
+                    "caller input relation __xlog_query_0 collides with generated query head"
+                ),
+                "unexpected caller-input collision error: {error}"
+            );
+            assert_eq!(
+                provider.memory().alloc_count(),
+                allocations_before,
+                "generated-head collision must fail before resident setup"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resident_executor_distinguishes_derived_placeholders_from_explicit_empty_inputs(
+    ) -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                pred source(symbol).
+                pred answer(symbol, symbol).
+                pred seeded_derived(symbol).
+                seeded_derived("seed").
+                seeded_derived(X) :- source(X).
+                answer("yes", X) :- source(X).
+                ?- answer(Outcome, Claim).
+            "#,
+        )?;
+        let LogicExecutionPlan::Ordinary(plan) = &program.plan else {
+            panic!("ordinary test program must compile to an ordinary plan");
+        };
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+
+        let compiler_seeded =
+            program.prepare_resident_executor(&provider, HashMap::new(), false, plan)?;
+        assert!(compiler_seeded.store().get("source").is_some());
+        assert!(compiler_seeded.store().get("answer").is_none());
+        assert_eq!(
+            compiler_seeded
+                .store()
+                .get("seeded_derived")
+                .expect("derived relation with inline facts must be seeded")
+                .cached_row_count(),
+            Some(1),
+        );
+
+        let explicit_schema = Schema::new(vec![
+            ("external_outcome".into(), ScalarType::Symbol),
+            ("external_claim".into(), ScalarType::Symbol),
+        ]);
+        let explicit_empty = provider.create_empty_buffer(explicit_schema.clone())?;
+        let explicitly_seeded = program.prepare_resident_executor(
+            &provider,
+            HashMap::from([("answer".to_string(), explicit_empty)]),
+            false,
+            plan,
+        )?;
+        assert_eq!(
+            explicitly_seeded
+                .store()
+                .get("answer")
+                .expect("explicit empty input must be retained")
+                .schema(),
+            &explicit_schema,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn required_resident_query_schema_matches_legacy_for_nonempty_result() -> Result<()> {
+        let expected_schema = Schema::new(vec![
+            ("computed_0".into(), ScalarType::Symbol),
+            ("c0".into(), ScalarType::Symbol),
+        ]);
+        assert_required_resident_semantics(
+            r#"
+                pred source(symbol).
+                pred answer(symbol, symbol).
+                source("claim").
+                answer("yes", X) :- source(X).
+                ?- answer(Outcome, Claim).
+            "#,
+            "nonempty synthetic query schema",
+            Some(&expected_schema),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn required_resident_query_schema_matches_legacy_for_empty_result() -> Result<()> {
+        let expected_schema = Schema::new(vec![
+            ("computed_0".into(), ScalarType::Symbol),
+            ("c0".into(), ScalarType::Symbol),
+        ]);
+        assert_required_resident_semantics(
+            r#"
+                pred source(symbol).
+                pred answer(symbol, symbol).
+                answer("yes", X) :- source(X).
+                ?- answer(Outcome, Claim).
+            "#,
+            "empty synthetic query schema",
+            Some(&expected_schema),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn required_resident_recursive_query_schema_matches_legacy() -> Result<()> {
+        let expected_schema = Schema::new(vec![("c0".into(), ScalarType::U32)]);
+        assert_required_resident_semantics(
+            r#"
+                pred seed(u32).
+                pred edge(u32, u32).
+                pred reach(u32).
+                seed(1).
+                edge(1, 2).
+                reach(X) :- seed(X).
+                reach(X) :- reach(X), edge(X, Y).
+                ?- reach(X).
+            "#,
+            "recursive synthetic query schema",
+            Some(&expected_schema),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn required_resident_recursive_constant_projection_schema_matches_legacy() -> Result<()> {
+        let expected_schema = Schema::new(vec![
+            ("item".into(), ScalarType::U32),
+            ("computed_1".into(), ScalarType::U32),
+        ]);
+        assert_required_resident_semantics(
+            r#"
+                pred seed(item: u32).
+                pred path(item: u32, category: u32).
+                seed(7).
+                path(X, 1) :- seed(X).
+                path(X, 2) :- path(X, 1).
+                ?- path(Item, Category).
+            "#,
+            "recursive constant-projection schema",
+            Some(&expected_schema),
+            Some(&[ScalarType::U32, ScalarType::U32]),
+            Some(2),
+        )
+    }
+
+    #[test]
+    #[ignore = "requires a serialized release-mode CUDA acceptance run"]
+    fn resident_semantic_acceptance_matrix() -> Result<()> {
+        let ordinary_cases = [
+            (
+                "recursion",
+                r#"
+                    pred edge(u32, u32).
+                    pred reach(u32, u32).
+                    edge(1, 2). edge(2, 3).
+                    reach(X, Y) :- edge(X, Y).
+                    reach(X, Z) :- reach(X, Y), edge(Y, Z).
+                    ?- reach(X, Y).
+                "#,
+            ),
+            (
+                "negation",
+                r#"
+                    pred item(u32). pred blocked(u32). pred visible(u32).
+                    item(1). item(2). blocked(2).
+                    visible(X) :- item(X), not blocked(X).
+                    ?- visible(X).
+                "#,
+            ),
+            (
+                "constraint",
+                r#"
+                    pred safe(u32).
+                    safe(1).
+                    :- safe(2).
+                    ?- safe(X).
+                "#,
+            ),
+            (
+                "multiple queries",
+                r#"
+                    pred seed(u32). pred left(u32). pred right(u32).
+                    seed(7).
+                    left(X) :- seed(X).
+                    right(X) :- seed(X).
+                    ?- left(X).
+                    ?- right(X).
+                "#,
+            ),
+            (
+                "nullary set",
+                r#"
+                    pred ready(). pred answer().
+                    ready().
+                    answer() :- ready().
+                    ?- answer().
+                "#,
+            ),
+            (
+                "same name with multiple arities",
+                r#"
+                    pred item(u32). pred item(u32, u32).
+                    pred unary(u32). pred binary(u32, u32).
+                    item(1). item(1, 2).
+                    unary(X) :- item(X).
+                    binary(X, Y) :- item(X, Y).
+                    ?- unary(X).
+                    ?- binary(X, Y).
+                "#,
+            ),
+        ];
+        for (case, source) in ordinary_cases {
+            assert_required_resident_semantics(source, case, None, None, None)?;
+        }
+
+        let output_cases: [(&str, &str, &[ScalarType], usize); 7] = [
+            (
+                "zero-row output",
+                r#"
+                    pred empty(u32).
+                    ?- empty(X).
+                "#,
+                &[ScalarType::U32],
+                0,
+            ),
+            (
+                "identity output",
+                r#"
+                    pred source(u32). pred copied(u32).
+                    source(2). source(1).
+                    copied(X) :- source(X).
+                    ?- copied(X).
+                "#,
+                &[ScalarType::U32],
+                2,
+            ),
+            (
+                "u64 output",
+                r#"
+                    pred wide(u64).
+                    wide(5000000000).
+                    ?- wide(X).
+                "#,
+                &[ScalarType::U64],
+                1,
+            ),
+            (
+                "symbol output",
+                r#"
+                    pred labeled(symbol).
+                    labeled("claim").
+                    ?- labeled(X).
+                "#,
+                &[ScalarType::Symbol],
+                1,
+            ),
+            (
+                "mixed output",
+                r#"
+                    pred mixed(u32, u64, symbol).
+                    mixed(7, 5000000000, "claim").
+                    ?- mixed(Small, Wide, Label).
+                "#,
+                &[ScalarType::U32, ScalarType::U64, ScalarType::Symbol],
+                1,
+            ),
+            (
+                "nullary output",
+                r#"
+                    pred ready(). pred answer().
+                    ready().
+                    answer() :- ready().
+                    ?- answer().
+                "#,
+                &[],
+                1,
+            ),
+            (
+                "arity-seventeen output",
+                r#"
+                    pred wide(u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32).
+                    wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17).
+                    ?- wide(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q).
+                "#,
+                &[ScalarType::U32; 17],
+                1,
+            ),
+        ];
+        for (case, source, expected_types, expected_rows) in output_cases {
+            assert_required_resident_semantics(
+                source,
+                case,
+                None,
+                Some(expected_types),
+                Some(expected_rows),
+            )?;
+        }
+
+        assert!(
+            LogicProgram::compile(
+                r#"
+                    pred seed(u32). pred invalid(u32).
+                    seed(1).
+                    invalid(X) :- seed(X), X = "wrong type".
+                    ?- seed(X).
+                "#,
+            )
+            .is_err(),
+            "invalid unreachable rules must still be validated"
+        );
+
+        required_resident_evaluation_canonicalizes_a_caller_input_only_relation()?;
+        complete_store_evaluation_declines_resident_partial_execution_and_materializes_all_heads()?;
+
+        {
+            let _env_lock = resident_env_lock().lock().expect("resident env lock");
+            let Some(provider) = ground_term_encoding_test_provider() else {
+                return Ok(());
+            };
+            let program = LogicProgram::compile(
+                r#"
+                    pred seed(u32). pred out(u32).
+                    seed(1). out(X) :- seed(X). ?- out(X).
+                "#,
+            )?;
+            let store = program.create_relation_store(provider.clone())?;
+            let mut session = program.create_session_runtime(provider.clone(), &store, true)?;
+            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
+            let (result, _) = program.evaluate_with_session_runtime(provider, &mut session)?;
+            let graph = result
+                .stats
+                .as_ref()
+                .and_then(|stats| stats.resident_graph.as_ref())
+                .expect("session resident decline telemetry");
+            assert_eq!(graph.selection, ResidentGraphSelectionKind::ExistingGpu);
+            assert_eq!(
+                graph.decline,
+                Some(ResidentGraphDeclineReason::FullStoreRequested)
+            );
+            assert_eq!(graph.conditional_graph_launches, 0);
+        }
+
+        {
+            let _env_lock = resident_env_lock().lock().expect("resident env lock");
+            let Some(provider) = ground_term_encoding_test_provider() else {
+                return Ok(());
+            };
+            let program = LogicProgram::compile(
+                r#"
+                    pred p(u32). pred q(u32).
+                    p(1). q(X) :- p(X), know p(X). ?- q(X).
+                "#,
+            )?;
+            let baseline = {
+                let _env = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+            };
+            let expected = snapshot_query_results(provider.as_ref(), &baseline)?;
+            drop(baseline);
+            let preferred = {
+                let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
+                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+            };
+            assert_eq!(
+                snapshot_query_results(provider.as_ref(), &preferred)?,
+                expected
+            );
+            let graph = preferred
+                .stats
+                .as_ref()
+                .and_then(|stats| stats.resident_graph.as_ref())
+                .expect("nonordinary resident decline telemetry");
+            assert_eq!(graph.selection, ResidentGraphSelectionKind::ExistingGpu);
+            assert_eq!(
+                graph.decline,
+                Some(ResidentGraphDeclineReason::NonOrdinaryPlan)
+            );
+            assert_eq!(graph.conditional_graph_launches, 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn complete_store_evaluation_declines_resident_partial_execution_and_materializes_all_heads(
+    ) -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred base(u32).
+                pred edge(u32, u32).
+                pred queried(u32).
+                pred disconnected(u32).
+                base(7).
+                edge(7, 8).
+                queried(X) :- base(X).
+                queried(Y) :- queried(X), edge(X, Y).
+                disconnected(X) :- base(X).
+                ?- queried(X).
+            "#,
+        )?;
+        let seed = program.create_relation_store(provider.clone())?;
+        let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
+        let (result, store) =
+            program.evaluate_with_relation_store_and_cache(provider.clone(), &seed, true)?;
+
+        assert_eq!(
+            provider.download_column::<u32>(&result.queries[0].buffer, 0)?,
+            vec![7, 8]
+        );
+        assert_eq!(
+            provider.download_column::<u32>(
+                store
+                    .as_relation_store()
+                    .get("disconnected")
+                    .expect("complete disconnected head"),
+                0,
+            )?,
+            vec![7]
+        );
+        let graph = result
+            .stats
+            .as_ref()
+            .and_then(|stats| stats.resident_graph.as_ref())
+            .expect("resident decline telemetry");
+        assert_eq!(graph.selection, ResidentGraphSelectionKind::ExistingGpu);
+        assert_eq!(
+            graph.decline,
+            Some(ResidentGraphDeclineReason::FullStoreRequested)
+        );
+        assert_eq!(graph.conditional_graph_launches, 0);
+        assert_eq!(graph.staged_store_mutations, 0);
+        assert!(result
+            .stats
+            .as_ref()
+            .expect("profile")
+            .format_json()
+            .contains("resident_graph_declined"));
+        Ok(())
+    }
+
+    #[test]
+    fn no_query_program_bypasses_resident_certification_and_executes_the_full_plan() -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let program = LogicProgram::compile(
+            r#"
+                pred seed(u32).
+                pred disconnected(u32).
+                seed(1).
+                disconnected(X) :- seed(X).
+            "#,
+        )?;
+        assert_eq!(program.resident_certification_initializations(), 0);
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+
+        let baseline = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        };
+        assert!(baseline.queries.is_empty());
+        let baseline_profile =
+            strata_op_profile(baseline.stats.as_ref().expect("baseline profile"));
+        assert_eq!(op_count(baseline.stats.as_ref().unwrap(), "scan"), 1);
+        assert_eq!(program.resident_certification_initializations(), 0);
+        drop(baseline);
+
+        let preferred = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        };
+        assert!(preferred.queries.is_empty());
+        assert_eq!(
+            strata_op_profile(preferred.stats.as_ref().expect("preferred profile")),
+            baseline_profile
+        );
+        let graph = preferred
+            .stats
+            .as_ref()
+            .and_then(|stats| stats.resident_graph.as_ref())
+            .expect("resident decline telemetry");
+        assert_eq!(graph.selection, ResidentGraphSelectionKind::ExistingGpu);
+        assert_eq!(
+            graph.decline,
+            Some(ResidentGraphDeclineReason::FullStoreRequested)
+        );
+        assert_eq!(graph.conditional_graph_launches, 0);
+        assert_eq!(program.resident_certification_initializations(), 0);
+        drop(preferred);
+
+        let required = match {
+            let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(provider, HashMap::new(), true)
+        } {
+            Ok(_) => panic!("no-query evaluation cannot use the resident partial-result route"),
+            Err(error) => error,
+        };
+        assert!(required
+            .to_string()
+            .contains("resident conditional-graph execution was required but declined"));
+        assert!(required.to_string().contains("FullStoreRequested"));
+        assert_eq!(program.resident_certification_initializations(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn preferred_resident_decline_executes_the_untouched_full_plan() -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred unsupported(f64).
+                pred seed(u32).
+                pred disconnected(u32).
+                unsupported(7.5).
+                seed(1).
+                disconnected(X) :- seed(X).
+                ?- unsupported(X).
+            "#,
+        )?;
+        let baseline = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        };
+        let baseline_snapshot = snapshot_query_results(provider.as_ref(), &baseline)?;
+        let baseline_profile =
+            strata_op_profile(baseline.stats.as_ref().expect("baseline profile"));
+        assert_eq!(op_count(baseline.stats.as_ref().unwrap(), "scan"), 2);
+        drop(baseline);
+
+        let preferred = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
+            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        };
+        assert_eq!(
+            snapshot_query_results(provider.as_ref(), &preferred)?,
+            baseline_snapshot
+        );
+        assert_eq!(
+            strata_op_profile(preferred.stats.as_ref().expect("preferred profile")),
+            baseline_profile
+        );
+        let graph = preferred
+            .stats
+            .as_ref()
+            .and_then(|stats| stats.resident_graph.as_ref())
+            .expect("resident decline telemetry");
+        assert_eq!(graph.selection, ResidentGraphSelectionKind::ExistingGpu);
+        assert!(graph.decline.is_some());
+        assert_eq!(graph.conditional_graph_launches, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_unsupported_scalar_types_decline_before_launch() -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let programs = [
+            r#"
+                pred unsupported(i64).
+                unsupported(7).
+                ?- unsupported(X).
+            "#,
+            r#"
+                pred unsupported(f64).
+                unsupported(7.5).
+                ?- unsupported(X).
+            "#,
+            r#"
+                pred unsupported(u32, f64).
+                unsupported(7, 8.5).
+                ?- unsupported(X, Y).
+            "#,
+        ];
+        for source in programs {
+            let program = LogicProgram::compile(source)?;
+            let preferred = {
+                let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
+                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+            };
+            assert_eq!(preferred.queries[0].buffer.cached_row_count(), Some(1));
+            let graph = preferred
+                .stats
+                .as_ref()
+                .and_then(|stats| stats.resident_graph.as_ref())
+                .expect("resident decline telemetry");
+            assert_eq!(graph.selection, ResidentGraphSelectionKind::ExistingGpu);
+            assert!(graph.decline.is_some());
+            assert_eq!(graph.conditional_graph_launches, 0);
+            drop(preferred);
+
+            let error = {
+                let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+                match program.evaluate_with_options(provider.clone(), HashMap::new(), true) {
+                    Ok(_) => {
+                        panic!("required resident execution must reject a prelaunch decline")
+                    }
+                    Err(error) => error,
+                }
+            };
+            assert!(error
+                .to_string()
+                .contains("resident conditional-graph execution was required but declined"));
+            assert_eq!(program.resident_certification_initializations(), 1);
+        }
+
+        let mut cached_failure = LogicProgram::compile(
+            r#"
+                pred output(u32).
+                output(7).
+                ?- output(X).
+            "#,
+        )?;
+        assert_eq!(cached_failure.resident_certification_initializations(), 1);
+        cached_failure.reusable_state_identity = Arc::new(LogicProgramIdentity::new());
+        cached_failure
+            .reusable_state_identity
+            .get_or_init_resident_certification(|| -> Result<ResidentGraphCertifiedPlan> {
+                Err(XlogError::Execution(
+                    "deterministic certification failure".into(),
+                ))
+            })
+            .expect_err("injected certification must fail");
+        let preferred = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
+            cached_failure.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        };
+        assert_eq!(preferred.queries[0].buffer.cached_row_count(), Some(1));
+        let decline = preferred
+            .stats
+            .as_ref()
+            .and_then(|stats| stats.resident_graph.as_ref())
+            .and_then(|stats| stats.decline.as_ref())
+            .expect("preferred certification failure must report its decline");
+        assert!(format!("{decline:?}").contains("deterministic certification failure"));
+        drop(preferred);
+
+        let required = {
+            let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+            match cached_failure.evaluate_with_options(provider, HashMap::new(), true) {
+                Ok(_) => panic!("required resident execution must reject cached certification"),
+                Err(error) => error,
+            }
+        };
+        assert!(required
+            .to_string()
+            .contains("resident conditional-graph execution was required but declined"));
+        assert!(required
+            .to_string()
+            .contains("deterministic certification failure"));
+        assert_eq!(cached_failure.resident_certification_initializations(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_evaluation_uses_the_required_resident_graph_on_the_callers_cuda_context(
+    ) -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        assert!(provider.memory().runtime().is_none());
+        let program = LogicProgram::compile(
+            r#"
+                pred seed(u32).
+                pred edge(u32, u32).
+                pred reach(u32).
+                seed(1).
+                edge(1, 2).
+                edge(2, 3).
+                reach(X) :- seed(X).
+                reach(Y) :- reach(X), edge(X, Y), Y >= 2.
+                ?- reach(X).
+            "#,
+        )?;
+        let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+        let result = program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
+        assert_eq!(
+            provider.download_column::<u32>(&result.queries[0].buffer, 0)?,
+            vec![1, 2, 3]
+        );
+        let graph = result
+            .stats
+            .as_ref()
+            .and_then(|stats| stats.resident_graph.as_ref())
+            .expect("resident selection telemetry");
+        assert_eq!(
+            graph.selection,
+            ResidentGraphSelectionKind::ResidentConditionalGraph
+        );
+        assert_eq!(graph.conditional_graph_launches, 1);
+        assert!(graph.device_scan_invocations > 0);
+        assert!(graph.device_filter_invocations > 0);
+        assert_eq!(graph.core_transfers.tracked_htod_calls, 0);
+        assert_eq!(graph.core_transfers.tracked_dtoh_calls, 0);
+        assert_eq!(graph.core_transfers.provider_dtoh_calls, 0);
+        assert_eq!(graph.core_transfers.untracked_metadata_dtoh_calls, 0);
+        assert_eq!(graph.final_observation.dtoh_calls, 1);
+        assert_eq!(graph.final_observation.pinned_receipts, 1);
+        assert!(graph.deferred_profile.device_elapsed_ns > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn required_resident_evaluation_canonicalizes_a_caller_input_only_relation() -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred input(u32).
+                pred output(u32).
+                output(X) :- input(X).
+                ?- output(X).
+            "#,
+        )?;
+        let input = provider.create_buffer_from_slice::<u32>(
+            &[2, 1, 2],
+            Schema::new(vec![("x".into(), ScalarType::U32)]),
+        )?;
+        assert!(!input.canonical_full_row_set_certified());
+        let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+        let result = program.evaluate_with_options(
+            provider.clone(),
+            HashMap::from([("input".to_string(), input)]),
+            true,
+        )?;
+        assert_eq!(
+            provider.download_column::<u32>(&result.queries[0].buffer, 0)?,
+            vec![1, 2]
+        );
+        let graph = result
+            .stats
+            .as_ref()
+            .and_then(|stats| stats.resident_graph.as_ref())
+            .expect("resident selection telemetry");
+        assert_eq!(
+            graph.selection,
+            ResidentGraphSelectionKind::ResidentConditionalGraph
+        );
+        assert_eq!(graph.conditional_graph_launches, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn incompatible_caller_input_type_fails_before_resident_allocation_or_launch() -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred input(u32).
+                pred output(u32).
+                output(X) :- input(X).
+                ?- output(X).
+            "#,
+        )?;
+        let input = provider.create_buffer_from_slice::<u64>(
+            &[1],
+            Schema::new(vec![("x".into(), ScalarType::U64)]),
+        )?;
+        provider.memory().reset_alloc_count();
+        let allocated_before = provider.memory().allocated_bytes();
+        let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+        let error = match program.evaluate_with_options(
+            provider.clone(),
+            HashMap::from([("input".to_string(), input)]),
+            false,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("incompatible input type unexpectedly reached resident setup"),
+        };
+        assert!(error.to_string().contains("schema mismatch"));
+        assert!(provider.memory().allocated_bytes() <= allocated_before);
+        assert_eq!(provider.memory().alloc_count(), 0);
+        assert!(provider.memory().runtime().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_caller_device_count_fails_before_resident_allocation_or_launch() -> Result<()> {
+        let _env_lock = resident_env_lock().lock().expect("resident env lock");
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred input(u32).
+                pred output(u32).
+                output(X) :- input(X).
+                ?- output(X).
+            "#,
+        )?;
+        for selection_env in [
+            "XLOG_USE_RESIDENT_RECURSION",
+            "XLOG_REQUIRE_RESIDENT_RECURSION",
+        ] {
+            let mut column = provider.memory().alloc::<u8>(4)?;
+            provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&7u32.to_ne_bytes(), &mut column)
+                .map_err(|error| XlogError::Kernel(error.to_string()))?;
+            let mut device_count = provider.memory().alloc::<u32>(1)?;
+            provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&[2], &mut device_count)
+                .map_err(|error| XlogError::Kernel(error.to_string()))?;
+            let input = CudaBuffer::from_columns(
+                vec![column.into()],
+                1,
+                device_count,
+                Schema::new(vec![("x".into(), ScalarType::U32)]),
+            );
+            provider.memory().reset_alloc_count();
+            let allocated_before = provider.memory().allocated_bytes();
+            let _env = ResidentEnvGuard::set(&[(selection_env, "1")]);
+            let error = match program.evaluate_with_options(
+                provider.clone(),
+                HashMap::from([("input".to_string(), input)]),
+                false,
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("malformed input count unexpectedly reached resident setup"),
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("Logical row count 2 exceeds row capacity 1"),
+                "unexpected error for {selection_env}: {error}"
+            );
+            assert!(provider.memory().allocated_bytes() <= allocated_before);
+            assert_eq!(provider.memory().alloc_count(), 0);
+            assert!(provider.memory().runtime().is_none());
+        }
+        Ok(())
     }
 
     #[test]
@@ -4407,6 +9270,50 @@ mod tests {
             vec![symbol::intern("key")],
             "the epistemic evidence path must execute the binary modal source facts"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_compile_qualifies_same_name_multi_arity_relations() -> Result<()> {
+        let program = LogicProgram::compile(
+            r#"
+                pred item(u32). pred item(u32, u32).
+                pred unary(u32). pred binary(u32, u32).
+                item(1). item(1, 2).
+                unary(X) :- item(X).
+                binary(X, Y) :- item(X, Y).
+                ?- unary(X).
+                ?- binary(X, Y).
+            "#,
+        )?;
+
+        let unary_item = *program
+            .rel_ids
+            .get("item/1")
+            .expect("ordinary compiler registers item/1");
+        let binary_item = *program
+            .rel_ids
+            .get("item/2")
+            .expect("ordinary compiler registers item/2");
+        assert_ne!(unary_item, binary_item);
+
+        let LogicExecutionPlan::Ordinary(plan) = &program.plan else {
+            panic!("ordinary source must compile to an ordinary execution plan");
+        };
+        let unary_rule = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .find(|rule| rule.head == "unary")
+            .expect("compiled unary rule");
+        let binary_rule = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .find(|rule| rule.head == "binary")
+            .expect("compiled binary rule");
+        assert_eq!(unary_rule.body.referenced_relations(), vec![unary_item]);
+        assert_eq!(binary_rule.body.referenced_relations(), vec![binary_item]);
         Ok(())
     }
 
@@ -6025,7 +10932,7 @@ mod relation_delta_preparation_tests {
         )?;
         let mut cache = Some(initial_cache);
         let authoritative_store_pointer = &mut base_store as *mut RelationStore;
-        let cache_slot_pointer = &mut cache as *mut Option<RelationStore>;
+        let cache_slot_pointer = &mut cache as *mut Option<LogicMaterializedStore>;
         let runtime_slot_pointer = &mut runtime as *mut Option<LogicSessionRuntime>;
         let prepared = program.prepare_relation_delta_batch(
             provider.as_ref(),
@@ -6238,7 +11145,7 @@ mod relation_delta_preparation_tests {
         )?;
         assert!(program.relation_stores_query_equivalent(
             provider.as_ref(),
-            &independently_recomputed,
+            independently_recomputed.as_relation_store(),
             prospective_derived,
         )?);
 
@@ -6253,6 +11160,7 @@ mod relation_delta_preparation_tests {
             sorted_u32(
                 &provider,
                 stale_seed_recompute
+                    .as_relation_store()
                     .get("__xlog_query_0")
                     .expect("stale-seeded query")
             ),

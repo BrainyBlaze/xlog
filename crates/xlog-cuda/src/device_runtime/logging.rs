@@ -51,8 +51,8 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::resource::{
-    Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, Generation, ResourceError,
-    ResourceResult, StreamId,
+    Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, Generation,
+    ResourceBudgetSnapshot, ResourceError, ResourceResult, StreamId,
 };
 
 /// Action recorded in a [`LogRecord`]. Distinct variants for the
@@ -392,6 +392,10 @@ impl DeviceMemoryResource for LoggingResource {
 
     fn bytes_outstanding(&self) -> usize {
         self.inner.bytes_outstanding()
+    }
+
+    fn budget_snapshot(&self) -> Option<ResourceBudgetSnapshot> {
+        self.inner.budget_snapshot()
     }
 
     fn reap_pending(&self) -> ResourceResult<()> {

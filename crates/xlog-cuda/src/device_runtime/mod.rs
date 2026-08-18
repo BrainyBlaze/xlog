@@ -60,7 +60,11 @@ pub use logging::{
 };
 pub use resource::{
     Access, AllocTag, BlockId, BlockState, DeviceBlock, DeviceMemoryResource, Generation,
-    ResourceError, ResourceResult, StreamId,
+    ResourceBudgetSnapshot, ResourceError, ResourceResult, StreamId,
 };
-pub use runtime::{XlogDeviceRuntime, MAX_DEVICE_ORDINALS};
+pub(crate) use runtime::RuntimeMemoryReservation;
+pub use runtime::{
+    ConditionalGraphStats, EventLifecycleStats, ResidentCompletionEvent,
+    ResidentGraphHandleLifecycleStats, XlogDeviceRuntime, MAX_DEVICE_ORDINALS,
+};
 pub use stream_pool::{StreamPool, StreamPoolError, DEFAULT_MAX_STREAMS};

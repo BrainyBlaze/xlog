@@ -45,8 +45,8 @@ use std::sync::{Arc, Mutex};
 use cudarc::driver::CudaSlice;
 
 use super::resource::{
-    AllocTag, BlockState, DeviceBlock, DeviceMemoryResource, Generation, ResourceError,
-    ResourceResult, StreamId,
+    AllocTag, BlockState, DeviceBlock, DeviceMemoryResource, Generation, ResourceBudgetSnapshot,
+    ResourceError, ResourceResult, StreamId,
 };
 use crate::CudaDevice;
 
@@ -201,6 +201,10 @@ impl DeviceMemoryResource for DirectCudaResource {
 
     fn bytes_outstanding(&self) -> usize {
         self.bytes_outstanding.load(Ordering::Relaxed)
+    }
+
+    fn budget_snapshot(&self) -> Option<ResourceBudgetSnapshot> {
+        None
     }
 }
 

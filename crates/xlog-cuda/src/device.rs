@@ -72,13 +72,22 @@ impl CudaFunction {
         cfg: LaunchConfig,
         params: &mut [*mut c_void],
     ) -> std::result::Result<(), DriverError> {
+        self.launch_raw_cooperative_on_stream(&self.stream, cfg, params)
+    }
+
+    pub(crate) unsafe fn launch_raw_cooperative_on_stream(
+        &self,
+        stream: &CudaStream,
+        cfg: LaunchConfig,
+        params: &mut [*mut c_void],
+    ) -> std::result::Result<(), DriverError> {
         self.context.bind_to_thread()?;
         result::launch_cooperative_kernel(
             self.cu_function,
             cfg.grid_dim,
             cfg.block_dim,
             cfg.shared_mem_bytes,
-            self.stream.cu_stream(),
+            stream.cu_stream(),
             params,
         )
     }

@@ -19,7 +19,7 @@ use xlog_cuda::device_runtime::{
 };
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_ir::ExecutionPlan;
+use xlog_ir::{ExecutionPlan, ProjectExpr, RirNode};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
@@ -272,6 +272,39 @@ fn env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn invalidate_specialized_chain_projection(plan: &mut ExecutionPlan) {
+    let mut matches = 0;
+    for rule in plan.rules_by_scc.iter_mut().flatten() {
+        if let RirNode::ChainJoin { output_columns, .. } = &mut rule.body {
+            matches += 1;
+            output_columns[0] = ProjectExpr::Column(usize::MAX);
+        }
+    }
+    assert_eq!(
+        matches, 1,
+        "fixture must contain exactly one promoted ChainJoin"
+    );
+}
+
+fn profile_op_count(executor: &Executor, op_name: &str, output_rows: u64) -> usize {
+    executor
+        .execution_stats(output_rows)
+        .strata
+        .iter()
+        .flat_map(|stratum| &stratum.ops)
+        .filter(|op| op.op_name == op_name)
+        .count()
+}
+
+fn restore_env(name: &str, value: Option<String>) {
+    unsafe {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+}
+
 #[test]
 fn chain_dispatch_default_on_matches_env_disabled_fallback() {
     let _guard = env_lock().lock().expect("chain env lock poisoned");
@@ -295,6 +328,9 @@ fn chain_dispatch_default_on_matches_env_disabled_fallback() {
     .into_iter()
     .collect();
     assert_eq!(fallback.chain_dispatch_count(), 0);
+    let fallback_profile = fallback.execution_stats(fallback_rows.len() as u64);
+    assert_eq!(fallback_profile.chain_fallback_scan_equivalents, 0);
+    assert_eq!(fallback_profile.chain_fallback_filter_equivalents, 0);
 
     unsafe {
         std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE");
@@ -317,8 +353,88 @@ fn chain_dispatch_default_on_matches_env_disabled_fallback() {
     }
 
     assert_eq!(dispatched.chain_dispatch_count(), 1);
+    let dispatched_profile = dispatched.execution_stats(dispatched_rows.len() as u64);
+    assert_eq!(dispatched_profile.chain_fallback_scan_equivalents, 2);
+    assert_eq!(dispatched_profile.chain_fallback_filter_equivalents, 0);
     assert_eq!(dispatched_rows.len(), 128);
     assert_eq!(dispatched_rows, fallback_rows);
+}
+
+#[test]
+fn matched_chain_projection_error_declines_to_physical_fallback_without_equivalents() {
+    let _guard = env_lock().lock().expect("chain env lock poisoned");
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let old_chain = std::env::var("XLOG_WCOJ_CHAIN_ENABLE").ok();
+    let old_strict = std::env::var("XLOG_WCOJ_STRICT").ok();
+    unsafe {
+        std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE");
+        std::env::remove_var("XLOG_WCOJ_STRICT");
+    }
+
+    let inputs = chain_fixture();
+    let (mut plan, mut executor) =
+        prepare_chain_executor(Arc::clone(&fix.provider), &fix.memory, &inputs);
+    invalidate_specialized_chain_projection(&mut plan);
+    executor.set_profiling(true);
+    let result = executor.execute_plan(&plan);
+
+    restore_env("XLOG_WCOJ_CHAIN_ENABLE", old_chain);
+    restore_env("XLOG_WCOJ_STRICT", old_strict);
+    result.expect("non-strict specialization error must execute embedded fallback");
+
+    let rows: BTreeSet<(u32, u32)> = download_pairs(
+        executor
+            .store()
+            .get("out")
+            .expect("fallback out relation must exist"),
+    )
+    .into_iter()
+    .collect();
+    let expected: BTreeSet<(u32, u32)> = (0..128u32).map(|i| (10_000 + i, 20_000 + i)).collect();
+    assert_eq!(rows, expected);
+    assert_eq!(executor.chain_dispatch_count(), 0);
+    assert_eq!(executor.wcoj_error_decline_count(), 1);
+    let profile = executor.execution_stats(rows.len() as u64);
+    assert_eq!(profile.chain_fallback_scan_equivalents, 0);
+    assert_eq!(profile.chain_fallback_filter_equivalents, 0);
+    assert_eq!(profile_op_count(&executor, "scan", rows.len() as u64), 2);
+    assert_eq!(profile_op_count(&executor, "join", rows.len() as u64), 1);
+}
+
+#[test]
+fn matched_chain_projection_error_propagates_in_strict_mode_without_equivalents() {
+    let _guard = env_lock().lock().expect("chain env lock poisoned");
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let old_chain = std::env::var("XLOG_WCOJ_CHAIN_ENABLE").ok();
+    let old_strict = std::env::var("XLOG_WCOJ_STRICT").ok();
+    unsafe {
+        std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE");
+        std::env::set_var("XLOG_WCOJ_STRICT", "1");
+    }
+
+    let inputs = chain_fixture();
+    let (mut plan, mut executor) =
+        prepare_chain_executor(Arc::clone(&fix.provider), &fix.memory, &inputs);
+    invalidate_specialized_chain_projection(&mut plan);
+    let result = executor.execute_plan(&plan);
+
+    restore_env("XLOG_WCOJ_CHAIN_ENABLE", old_chain);
+    restore_env("XLOG_WCOJ_STRICT", old_strict);
+    assert!(
+        result.is_err(),
+        "strict specialization error must propagate"
+    );
+    assert_eq!(executor.chain_dispatch_count(), 0);
+    assert_eq!(executor.wcoj_error_decline_count(), 1);
+    let profile = executor.execution_stats(0);
+    assert_eq!(profile.chain_fallback_scan_equivalents, 0);
+    assert_eq!(profile.chain_fallback_filter_equivalents, 0);
 }
 
 fn timed_loaded_chain_runs(

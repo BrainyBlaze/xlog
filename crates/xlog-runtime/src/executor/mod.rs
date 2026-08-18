@@ -26,6 +26,9 @@ mod expression;
 mod join_cache;
 mod node_dispatch;
 mod recursive;
+mod resident;
+#[cfg(all(test, feature = "resident-graph-tests"))]
+mod resident_graph_tests;
 mod rewrite;
 mod wcoj_cost_model;
 mod wcoj_dispatch;
@@ -241,6 +244,9 @@ enum CommonSubexpressionKey {
 /// let result = executor.execute_plan(&plan)?;
 /// ```
 pub struct Executor {
+    /// Stable identity for optimistic resident transactions. Unlike the
+    /// address of `self`, this token survives moves of the executor value.
+    transaction_identity: Arc<()>,
     /// CUDA kernel provider for GPU operations
     provider: Arc<CudaKernelProvider>,
     /// Storage for named relations
@@ -281,6 +287,14 @@ pub struct Executor {
     /// Count of times the chain dispatcher produced a result and the
     /// executor installed it.
     pub(super) chain_dispatch_count: u64,
+    /// Scan operations in embedded binary fallbacks whose ChainJoin
+    /// specialization completed successfully. These are logical
+    /// equivalents, not physically executed profiler operations.
+    pub(super) chain_fallback_scan_equivalents: u64,
+    /// Filter operations in embedded binary fallbacks whose ChainJoin
+    /// specialization completed successfully. These are logical
+    /// equivalents, not physically executed profiler operations.
+    pub(super) chain_fallback_filter_equivalents: u64,
     /// Count of times `try_dispatch_wcoj_clique5` produced
     /// a result and the executor installed it. Public accessor:
     /// `Executor::wcoj_clique5_dispatch_count(&self) -> u64`.
@@ -343,6 +357,10 @@ pub struct Executor {
     /// acquire and reuse this single stream. Renamed from
     /// `wcoj_triangle_stream` when 4-cycle dispatch landed.
     wcoj_dispatch_stream: OnceLock<xlog_cuda::device_runtime::StreamId>,
+    /// Stable non-default stream used to instantiate and replay resident
+    /// conditional graphs. The runtime stream pool is grow-only, so acquiring
+    /// once per executor prevents long-lived evaluations from draining it.
+    resident_graph_stream: OnceLock<xlog_cuda::device_runtime::StreamId>,
     /// Diagnostic-only: per-dispatch WCOJ triangle phase
     /// timings, populated by `try_dispatch_wcoj_triangle` when
     /// the `wcoj-phase-timing` Cargo feature is on. Read by the
@@ -437,6 +455,7 @@ impl Executor {
         let max_index_cache_bytes =
             (provider.memory().budget().device_bytes / 4).min(DEFAULT_JOIN_INDEX_CACHE_BYTES);
         Self {
+            transaction_identity: Arc::new(()),
             provider: provider.clone(),
             store: RelationStore::new(provider.clone()),
             rel_names: HashMap::new(),
@@ -454,6 +473,8 @@ impl Executor {
             wcoj_triangle_dispatch_count: 0,
             wcoj_4cycle_dispatch_count: 0,
             chain_dispatch_count: 0,
+            chain_fallback_scan_equivalents: 0,
+            chain_fallback_filter_equivalents: 0,
             wcoj_clique5_dispatch_count: 0,
             wcoj_clique6_dispatch_count: 0,
             wcoj_clique7_dispatch_count: 0,
@@ -466,6 +487,7 @@ impl Executor {
             free_join_dispatch_count: 0,
             factorized_delta_dispatch_count: 0,
             wcoj_dispatch_stream: OnceLock::new(),
+            resident_graph_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),
             #[cfg(feature = "recursive-stats-trace")]
@@ -531,6 +553,8 @@ impl Executor {
         stats.free_join_dispatch_count = self.free_join_dispatch_count();
         stats.factorized_delta_dispatch_count = self.factorized_delta_dispatch_count();
         stats.wcoj_error_decline_count = self.wcoj_error_decline_count();
+        stats.chain_fallback_scan_equivalents = self.chain_fallback_scan_equivalents;
+        stats.chain_fallback_filter_equivalents = self.chain_fallback_filter_equivalents;
         stats
     }
 
@@ -3214,6 +3238,7 @@ mod tests {
             sccs: vec![scc],
             strata: vec![stratum],
             rules_by_scc: vec![vec![rule]],
+            generated_query_rules: vec![],
             est_memory_peak: 0,
             rel_arities: std::collections::HashMap::new(),
         };
@@ -3282,6 +3307,7 @@ mod tests {
             sccs: vec![scc0, scc1],
             strata: vec![stratum],
             rules_by_scc: vec![vec![input_rule], vec![output_rule]],
+            generated_query_rules: vec![],
             est_memory_peak: 0,
             rel_arities: std::collections::HashMap::new(),
         };
@@ -3380,6 +3406,7 @@ mod tests {
             sccs: vec![scc0, scc1, scc2],
             strata: vec![stratum],
             rules_by_scc: vec![vec![lhs_rule], vec![blocked_rule], vec![out_rule]],
+            generated_query_rules: vec![],
             est_memory_peak: 0,
             rel_arities: std::collections::HashMap::new(),
         };
@@ -3777,6 +3804,7 @@ mod tests {
             sccs: vec![adaptive_scc()],
             strata: vec![adaptive_stratum()],
             rules_by_scc: vec![vec![adaptive_rule(body)]],
+            generated_query_rules: vec![],
             est_memory_peak: 0,
             rel_arities: std::collections::HashMap::new(),
         }

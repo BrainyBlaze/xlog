@@ -83,9 +83,11 @@ consumers run GPU code without recompiling kernels the first time.
 
 GitHub-hosted CI cannot prove the GPU path works because those runners have no
 CUDA hardware. A targeted workflow runs native Python relation tests and focused
-Rust GPU suites on the self-hosted CUDA runner after pushes to `main`, or when a
+Rust GPU suites on the self-hosted CUDA runner after pushes to `main`, when a
 maintainer dispatches the workflow from `main` for an explicitly reviewed full
-commit SHA. It never runs pull-request head code automatically, and it is not the
+commit SHA, or for a pull request whose head branch belongs to this repository.
+Its job condition skips external forks before assigning the CUDA runner, and the
+workflow never uses `pull_request_target`. This targeted workflow is not the
 release gate. Before publication a maintainer runs the validation script on a
 real GPU host:
 
@@ -93,14 +95,18 @@ real GPU host:
 scripts/validate_release_gpu.sh --mode release
 ```
 
-This script requires CUDA hardware. It sets `XLOG_REQUIRE_CUDA=1`, builds the
-release artifacts, creates a fresh virtual environment with the host's site
-packages visible, and force-installs the exact wheel without resolving
-dependencies. It verifies the imported native module, runs the native relation
-provenance, contract, public-API, and callback suites, runs the host-readable
-probabilistic CLI and accepted epistemic GPU evidence adapter suites, runs CUDA
-certification, and checks the packaged kernel layout. A green GitHub-hosted CI
-run does not satisfy this gate — only a passing complete GPU run does.
+This script requires CUDA hardware and
+`XLOG_PINNED_CORPUS_ROOT` pointing to the exact clean corpus checkout described
+in [CUDA Certification](/architecture/certification). It sets
+`XLOG_REQUIRE_CUDA=1`, builds the release artifacts, creates a fresh virtual
+environment with the host's site packages visible, and force-installs the exact
+wheel without resolving dependencies. It verifies the imported native module,
+runs the native relation-provenance and API suites, and runs the resident runtime
+feature plus exact preparation, production, scaling, and semantic acceptance
+filters. It rejects missing, ignored, skipped, or count-mismatched test output.
+The remaining gates cover probabilistic GPU behavior, CUDA certification, and
+packaged-kernel layout. A green GitHub-hosted CI run does not satisfy this gate —
+only a passing complete GPU run does.
 
 ## Docs Deployment
 

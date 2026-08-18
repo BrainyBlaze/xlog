@@ -709,6 +709,109 @@ fn test_union_many_gpu_partial_key_dedup_is_not_a_canonical_set_certificate() {
 }
 
 #[test]
+fn dedup_sorted_does_not_certify_an_unchecked_sorted_precondition() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let bag = provider
+        .create_buffer_from_slice::<u32>(&[2, 1, 2], schema)
+        .unwrap();
+    let adjacency_only = provider.dedup_sorted(&bag, &[0]).unwrap();
+    assert!(!adjacency_only.canonical_full_row_set_certified());
+
+    let canonical = provider.union_many_gpu(&[&adjacency_only]).unwrap();
+    assert_eq!(
+        provider.download_column::<u32>(&canonical, 0).unwrap(),
+        vec![1, 2]
+    );
+    assert!(canonical.canonical_full_row_set_certified());
+}
+
+#[test]
+fn full_row_canonicalization_rejects_device_count_above_capacity() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let mut column = provider.memory().alloc::<u8>(4).expect("column");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&7u32.to_ne_bytes(), &mut column)
+        .expect("column upload");
+    let count = device_row_count(&provider, 2);
+    let malformed = CudaBuffer::from_columns(vec![column.into()], 1, count, schema);
+    assert!(!malformed.canonical_full_row_set_certified());
+
+    let error = match provider.dedup(&malformed, &[0]) {
+        Err(error) => error,
+        Ok(_) => panic!("count above capacity was accepted by dedup"),
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("Logical row count 2 exceeds row capacity 1"),
+        "unexpected error: {error}"
+    );
+    assert!(!malformed.canonical_full_row_set_certified());
+
+    let error = match provider.union_many_gpu(&[&malformed]) {
+        Err(error) => error,
+        Ok(_) => panic!("count above capacity was accepted by union"),
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("Logical row count 2 exceeds row capacity 1"),
+        "unexpected error: {error}"
+    );
+    assert!(!malformed.canonical_full_row_set_certified());
+
+    let multi_schema = Schema::new(vec![
+        ("left".to_string(), ScalarType::U32),
+        ("right".to_string(), ScalarType::U32),
+    ]);
+    let mut left = provider.memory().alloc::<u8>(4).expect("left column");
+    let mut right = provider.memory().alloc::<u8>(4).expect("right column");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&1u32.to_ne_bytes(), &mut left)
+        .expect("left upload");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&2u32.to_ne_bytes(), &mut right)
+        .expect("right upload");
+    let count = device_row_count(&provider, 2);
+    let malformed_multi = CudaBuffer::from_columns(
+        vec![left.into(), right.into()],
+        1,
+        count,
+        multi_schema.clone(),
+    );
+    let empty = provider
+        .create_empty_buffer(multi_schema)
+        .expect("empty subtractor");
+    let error = match provider.diff_gpu(&malformed_multi, &empty) {
+        Err(error) => error,
+        Ok(_) => panic!("count above capacity was accepted by full-row diff"),
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("Logical row count 2 exceeds row capacity 1"),
+        "unexpected error: {error}"
+    );
+    assert!(!malformed_multi.canonical_full_row_set_certified());
+}
+
+#[test]
 fn test_union_many_gpu_public_mutation_invalidates_count_and_set_metadata() {
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
@@ -795,8 +898,17 @@ fn test_union_many_gpu_zero_arity() {
         return;
     };
 
-    let empty = zero_arity_buffer(&provider, 0);
-    let unit = zero_arity_buffer(&provider, 1);
+    let schema = Schema::new(vec![]);
+    let empty = provider
+        .create_zero_arity_buffer(schema.clone(), 0)
+        .unwrap();
+    let unit = provider
+        .create_zero_arity_buffer(schema.clone(), 1)
+        .unwrap();
+    let multiplicity = provider.create_zero_arity_buffer(schema, 2).unwrap();
+    assert!(empty.canonical_full_row_set_certified());
+    assert!(unit.canonical_full_row_set_certified());
+    assert!(!multiplicity.canonical_full_row_set_certified());
 
     let u1 = provider.union_many_gpu(&[&empty, &unit, &empty]).unwrap();
     assert_eq!(host_row_count(&provider, &u1), 1);

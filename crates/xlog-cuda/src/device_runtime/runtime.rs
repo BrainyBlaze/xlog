@@ -25,15 +25,18 @@
 //! mutex is held only across the build, so subsequent reads are still
 //! lock-free.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
+use cudarc::driver::{CudaEvent, CudaStream};
 use xlog_core::{Result, XlogError};
 
 use super::direct::DirectCudaResource;
 use super::resource::{
-    Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, ResourceResult, StreamId,
+    Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, ResourceError, ResourceResult,
+    StreamId,
 };
 use super::stream_pool::StreamPool;
 use crate::CudaDevice;
@@ -56,6 +59,146 @@ static RUNTIMES: [OnceLock<&'static XlogDeviceRuntime>; MAX_DEVICE_ORDINALS] =
 static INIT_LOCKS: [Mutex<()>; MAX_DEVICE_ORDINALS] =
     [const { Mutex::new(()) }; MAX_DEVICE_ORDINALS];
 
+/// Execution counters for the device-controlled conditional-graph route.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConditionalGraphStats {
+    /// Successfully enqueued parent-graph launches.
+    pub launches: u64,
+    /// Terminal event synchronizations performed by the host.
+    pub terminal_synchronizations: u64,
+    /// Host-side fixpoint iterations (required to remain zero).
+    pub host_iterations: u64,
+    /// Allocations performed after a graph launch (required to remain zero).
+    pub host_allocations: u64,
+    /// Device status-writer kernels included in launches.
+    pub device_status_writer_launches: u64,
+    /// Terminal statuses written directly by the host (required to remain zero).
+    pub host_status_injections: u64,
+}
+
+/// Lifetime counters for CUDA events owned by resident graph launches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventLifecycleStats {
+    /// Events that currently own a real CUDA event handle.
+    pub live_events: u64,
+    /// Events successfully created and recorded.
+    pub created_events: u64,
+    /// Event handles destroyed after completion.
+    pub destroyed_events: u64,
+    /// In-flight drops that had to wait for completion.
+    pub drop_waits: u64,
+}
+
+/// Lifetime counters for resident CUDA graph and executable handles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResidentGraphHandleLifecycleStats {
+    /// Parent graph handles currently retained by a prepared or in-flight run.
+    pub live_graphs: u64,
+    /// Instantiated graph executable handles currently retained.
+    pub live_graph_execs: u64,
+    /// Parent graph handles successfully created.
+    pub created_graphs: u64,
+    /// Parent graph handles destroyed.
+    pub destroyed_graphs: u64,
+    /// Graph executable handles successfully instantiated.
+    pub created_graph_execs: u64,
+    /// Graph executable handles destroyed.
+    pub destroyed_graph_execs: u64,
+}
+
+#[derive(Default)]
+struct ResidentRuntimeTelemetry {
+    launches: AtomicU64,
+    terminal_synchronizations: AtomicU64,
+    host_iterations: AtomicU64,
+    host_allocations: AtomicU64,
+    device_status_writer_launches: AtomicU64,
+    host_status_injections: AtomicU64,
+    live_events: AtomicU64,
+    created_events: AtomicU64,
+    destroyed_events: AtomicU64,
+    drop_waits: AtomicU64,
+    live_graphs: AtomicU64,
+    live_graph_execs: AtomicU64,
+    created_graphs: AtomicU64,
+    destroyed_graphs: AtomicU64,
+    created_graph_execs: AtomicU64,
+    destroyed_graph_execs: AtomicU64,
+}
+
+/// RAII proof that one live graph and executable pair is retained.
+///
+/// Construct this only after both CUDA handles have been created successfully,
+/// and retain it beside the owning graph object so its counters follow the
+/// actual handle lifetime.
+pub(crate) struct ResidentGraphHandleLease {
+    telemetry: Arc<ResidentRuntimeTelemetry>,
+}
+
+impl Drop for ResidentGraphHandleLease {
+    fn drop(&mut self) {
+        self.telemetry
+            .live_graph_execs
+            .fetch_sub(1, Ordering::AcqRel);
+        self.telemetry
+            .destroyed_graph_execs
+            .fetch_add(1, Ordering::Relaxed);
+        self.telemetry.live_graphs.fetch_sub(1, Ordering::AcqRel);
+        self.telemetry
+            .destroyed_graphs
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Completion event whose accounting is tied to a real cudarc event handle.
+pub struct ResidentCompletionEvent {
+    event: Option<CudaEvent>,
+    telemetry: Arc<ResidentRuntimeTelemetry>,
+    synchronized: bool,
+}
+
+impl ResidentCompletionEvent {
+    /// Wait for the single terminal event. Repeated calls are no-ops.
+    pub fn synchronize(&mut self) -> Result<()> {
+        if self.synchronized {
+            return Ok(());
+        }
+        self.event
+            .as_ref()
+            .expect("resident completion event missing before drop")
+            .synchronize()
+            .map_err(|error| {
+                XlogError::Kernel(format!(
+                    "resident conditional graph terminal event synchronization failed: {error}"
+                ))
+            })?;
+        self.synchronized = true;
+        self.telemetry
+            .terminal_synchronizations
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+impl Drop for ResidentCompletionEvent {
+    fn drop(&mut self) {
+        if !self.synchronized {
+            self.telemetry.drop_waits.fetch_add(1, Ordering::Relaxed);
+            if let Some(event) = &self.event {
+                // Buffer and module lifetimes cannot end while the graph is in
+                // flight. Drop cannot return an error, so this is best effort.
+                let _ = event.synchronize();
+            }
+        }
+        if self.event.take().is_some() {
+            self.telemetry.live_events.fetch_sub(1, Ordering::AcqRel);
+            self.telemetry
+                .destroyed_events
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Per-CUDA-ordinal device-runtime singleton.
 ///
 /// Owns the device handle, stream pool, and resource stack. Allocate
@@ -68,6 +211,81 @@ pub struct XlogDeviceRuntime {
     device: Arc<CudaDevice>,
     stream_pool: Arc<StreamPool>,
     resource: Mutex<Box<dyn DeviceMemoryResource + Send + Sync>>,
+    /// Complete-request bytes promised but not yet materialized through the
+    /// resource stack. Always inspected while `resource` is locked when an
+    /// allocation or new reservation competes for budget.
+    reservation_bytes: Mutex<usize>,
+    resident_telemetry: Arc<ResidentRuntimeTelemetry>,
+}
+
+/// One complete byte claim against a runtime resource stack's global budget.
+pub(crate) struct RuntimeMemoryReservation {
+    runtime: Arc<XlogDeviceRuntime>,
+    total_bytes: usize,
+    remaining_bytes: usize,
+}
+
+impl RuntimeMemoryReservation {
+    pub(crate) fn allocate(
+        &mut self,
+        bytes: usize,
+        stream: StreamId,
+        tag: AllocTag,
+    ) -> ResourceResult<DeviceBlock> {
+        if bytes > self.remaining_bytes {
+            return Err(ResourceError::OutOfBudget {
+                requested: bytes,
+                current: self.total_bytes - self.remaining_bytes,
+                remaining: self.remaining_bytes,
+                limit: self.total_bytes,
+            });
+        }
+
+        let resource = self
+            .runtime
+            .resource
+            .lock()
+            .expect("device-runtime resource poisoned");
+        let mut reserved = self
+            .runtime
+            .reservation_bytes
+            .lock()
+            .expect("device-runtime reservation accounting poisoned");
+        *reserved = reserved.checked_sub(bytes).ok_or_else(|| {
+            ResourceError::Driver("device-runtime reservation accounting underflow".to_string())
+        })?;
+        self.remaining_bytes -= bytes;
+
+        match resource.allocate(bytes, stream, tag) {
+            Ok(block) => Ok(block),
+            Err(error) => {
+                *reserved = reserved.checked_add(bytes).ok_or_else(|| {
+                    ResourceError::Driver(
+                        "device-runtime reservation rollback overflow".to_string(),
+                    )
+                })?;
+                self.remaining_bytes =
+                    self.remaining_bytes.checked_add(bytes).ok_or_else(|| {
+                        ResourceError::Driver("device-runtime token rollback overflow".to_string())
+                    })?;
+                Err(error)
+            }
+        }
+    }
+}
+
+impl Drop for RuntimeMemoryReservation {
+    fn drop(&mut self) {
+        let mut reserved = self
+            .runtime
+            .reservation_bytes
+            .lock()
+            .expect("device-runtime reservation accounting poisoned");
+        *reserved = reserved
+            .checked_sub(self.remaining_bytes)
+            .expect("device-runtime reservation accounting underflow");
+        self.remaining_bytes = 0;
+    }
 }
 
 impl XlogDeviceRuntime {
@@ -108,7 +326,51 @@ impl XlogDeviceRuntime {
             device,
             stream_pool,
             resource: Mutex::new(resource),
+            reservation_bytes: Mutex::new(0),
+            resident_telemetry: Arc::new(ResidentRuntimeTelemetry::default()),
         }
+    }
+
+    /// Atomically promise `bytes` against the complete resource-stack budget.
+    /// The stack must expose a finite reservable budget; otherwise complete
+    /// multi-allocation admission cannot be guaranteed and is refused.
+    pub(crate) fn reserve_memory(
+        self: &Arc<Self>,
+        bytes: usize,
+    ) -> ResourceResult<RuntimeMemoryReservation> {
+        let resource = self
+            .resource
+            .lock()
+            .expect("device-runtime resource poisoned");
+        let snapshot = resource.budget_snapshot().ok_or_else(|| {
+            ResourceError::Driver(
+                "device-runtime resource stack has no reservable global budget".to_string(),
+            )
+        })?;
+        let mut reserved = self
+            .reservation_bytes
+            .lock()
+            .expect("device-runtime reservation accounting poisoned");
+        let current = snapshot.reserved.checked_add(*reserved).ok_or_else(|| {
+            ResourceError::Driver("device-runtime reservation accounting overflow".to_string())
+        })?;
+        let remaining = snapshot.limit.saturating_sub(current);
+        if bytes > remaining {
+            return Err(ResourceError::OutOfBudget {
+                requested: bytes,
+                current,
+                remaining,
+                limit: snapshot.limit,
+            });
+        }
+        *reserved = reserved.checked_add(bytes).ok_or_else(|| {
+            ResourceError::Driver("device-runtime reservation accounting overflow".to_string())
+        })?;
+        Ok(RuntimeMemoryReservation {
+            runtime: Arc::clone(self),
+            total_bytes: bytes,
+            remaining_bytes: bytes,
+        })
     }
 
     /// Get the singleton for `ordinal`, initializing it on first
@@ -167,6 +429,8 @@ impl XlogDeviceRuntime {
             device,
             stream_pool,
             resource: Mutex::new(resource),
+            reservation_bytes: Mutex::new(0),
+            resident_telemetry: Arc::new(ResidentRuntimeTelemetry::default()),
         });
         let leaked: &'static XlogDeviceRuntime = Box::leak(runtime);
 
@@ -196,6 +460,109 @@ impl XlogDeviceRuntime {
         &self.stream_pool
     }
 
+    /// Snapshot conditional-graph execution counters.
+    pub fn conditional_graph_stats(&self) -> ConditionalGraphStats {
+        let telemetry = &self.resident_telemetry;
+        ConditionalGraphStats {
+            launches: telemetry.launches.load(Ordering::Relaxed),
+            terminal_synchronizations: telemetry.terminal_synchronizations.load(Ordering::Relaxed),
+            host_iterations: telemetry.host_iterations.load(Ordering::Relaxed),
+            host_allocations: telemetry.host_allocations.load(Ordering::Relaxed),
+            device_status_writer_launches: telemetry
+                .device_status_writer_launches
+                .load(Ordering::Relaxed),
+            host_status_injections: telemetry.host_status_injections.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Reset per-execution conditional-graph counters.
+    ///
+    /// Handle and event lifetime counters are intentionally cumulative and are
+    /// not reset because callers compare snapshots around an execution.
+    pub fn reset_conditional_graph_stats(&self) {
+        let telemetry = &self.resident_telemetry;
+        telemetry.launches.store(0, Ordering::Relaxed);
+        telemetry
+            .terminal_synchronizations
+            .store(0, Ordering::Relaxed);
+        telemetry.host_iterations.store(0, Ordering::Relaxed);
+        telemetry.host_allocations.store(0, Ordering::Relaxed);
+        telemetry
+            .device_status_writer_launches
+            .store(0, Ordering::Relaxed);
+        telemetry.host_status_injections.store(0, Ordering::Relaxed);
+    }
+
+    /// Snapshot resident completion-event lifetime counters.
+    pub fn event_lifecycle_stats(&self) -> EventLifecycleStats {
+        let telemetry = &self.resident_telemetry;
+        EventLifecycleStats {
+            live_events: telemetry.live_events.load(Ordering::Acquire),
+            created_events: telemetry.created_events.load(Ordering::Relaxed),
+            destroyed_events: telemetry.destroyed_events.load(Ordering::Relaxed),
+            drop_waits: telemetry.drop_waits.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Snapshot resident graph-handle lifetime counters.
+    pub fn resident_graph_handle_lifecycle_stats(&self) -> ResidentGraphHandleLifecycleStats {
+        let telemetry = &self.resident_telemetry;
+        ResidentGraphHandleLifecycleStats {
+            live_graphs: telemetry.live_graphs.load(Ordering::Acquire),
+            live_graph_execs: telemetry.live_graph_execs.load(Ordering::Acquire),
+            created_graphs: telemetry.created_graphs.load(Ordering::Relaxed),
+            destroyed_graphs: telemetry.destroyed_graphs.load(Ordering::Relaxed),
+            created_graph_execs: telemetry.created_graph_execs.load(Ordering::Relaxed),
+            destroyed_graph_execs: telemetry.destroyed_graph_execs.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Tie lifecycle accounting to a successfully created graph/exec pair.
+    pub(crate) fn resident_graph_handle_lease(&self) -> ResidentGraphHandleLease {
+        let telemetry = Arc::clone(&self.resident_telemetry);
+        telemetry.live_graphs.fetch_add(1, Ordering::AcqRel);
+        telemetry.created_graphs.fetch_add(1, Ordering::Relaxed);
+        telemetry.live_graph_execs.fetch_add(1, Ordering::AcqRel);
+        telemetry
+            .created_graph_execs
+            .fetch_add(1, Ordering::Relaxed);
+        ResidentGraphHandleLease { telemetry }
+    }
+
+    /// Record that one prepared parent graph was successfully enqueued.
+    #[doc(hidden)]
+    pub fn record_conditional_graph_launch(&self, has_device_status_writer: bool) {
+        self.resident_telemetry
+            .launches
+            .fetch_add(1, Ordering::Relaxed);
+        if has_device_status_writer {
+            self.resident_telemetry
+                .device_status_writer_launches
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a real completion event immediately after a graph launch.
+    #[doc(hidden)]
+    pub fn record_resident_completion_event(
+        &self,
+        stream: &CudaStream,
+    ) -> Result<ResidentCompletionEvent> {
+        let event = stream.record_event(None).map_err(|error| {
+            XlogError::Kernel(format!(
+                "resident conditional graph completion event record failed: {error}"
+            ))
+        })?;
+        let telemetry = Arc::clone(&self.resident_telemetry);
+        telemetry.live_events.fetch_add(1, Ordering::AcqRel);
+        telemetry.created_events.fetch_add(1, Ordering::Relaxed);
+        Ok(ResidentCompletionEvent {
+            event: Some(event),
+            telemetry,
+            synchronized: false,
+        })
+    }
+
     /// Allocate via the underlying resource. Stream-ordered: the
     /// returned [`DeviceBlock`] is bound to `stream`.
     pub fn allocate(
@@ -204,10 +571,29 @@ impl XlogDeviceRuntime {
         stream: StreamId,
         tag: AllocTag,
     ) -> ResourceResult<DeviceBlock> {
-        self.resource
+        let resource = self
+            .resource
             .lock()
-            .expect("device-runtime resource poisoned")
-            .allocate(bytes, stream, tag)
+            .expect("device-runtime resource poisoned");
+        if let Some(snapshot) = resource.budget_snapshot() {
+            let reserved = self
+                .reservation_bytes
+                .lock()
+                .expect("device-runtime reservation accounting poisoned");
+            let current = snapshot.reserved.checked_add(*reserved).ok_or_else(|| {
+                ResourceError::Driver("device-runtime reservation accounting overflow".to_string())
+            })?;
+            let remaining = snapshot.limit.saturating_sub(current);
+            if bytes > remaining {
+                return Err(ResourceError::OutOfBudget {
+                    requested: bytes,
+                    current,
+                    remaining,
+                    limit: snapshot.limit,
+                });
+            }
+        }
+        resource.allocate(bytes, stream, tag)
     }
 
     /// Deallocate via the underlying resource.
@@ -448,6 +834,56 @@ mod tests {
         assert!(
             !std::ptr::eq(&owned, singleton),
             "with_resource must not aliase the singleton slot"
+        );
+    }
+
+    #[test]
+    fn resident_completion_event_accounts_a_real_recorded_event() {
+        let Some(runtime) = try_runtime() else {
+            return;
+        };
+        let stream = runtime
+            .stream_pool()
+            .resolve(StreamId::DEFAULT)
+            .expect("default stream");
+        let before = runtime.event_lifecycle_stats();
+        let mut completion = runtime
+            .record_resident_completion_event(&stream)
+            .expect("record completion event");
+        let live = runtime.event_lifecycle_stats();
+        assert_eq!(live.live_events, before.live_events + 1);
+        assert_eq!(live.created_events, before.created_events + 1);
+        completion
+            .synchronize()
+            .expect("synchronize completion event");
+        drop(completion);
+        let after = runtime.event_lifecycle_stats();
+        assert_eq!(after.live_events, before.live_events);
+        assert_eq!(after.destroyed_events, before.destroyed_events + 1);
+        assert_eq!(after.drop_waits, before.drop_waits);
+    }
+
+    #[test]
+    fn resident_graph_handle_lease_balances_one_owner_slot() {
+        let Some(runtime) = try_runtime() else {
+            return;
+        };
+        let before = runtime.resident_graph_handle_lifecycle_stats();
+        let lease = runtime.resident_graph_handle_lease();
+        let live = runtime.resident_graph_handle_lifecycle_stats();
+        assert_eq!(live.live_graphs, before.live_graphs + 1);
+        assert_eq!(live.live_graph_execs, before.live_graph_execs + 1);
+        drop(lease);
+        let after = runtime.resident_graph_handle_lifecycle_stats();
+        assert_eq!(after.live_graphs, before.live_graphs);
+        assert_eq!(after.live_graph_execs, before.live_graph_execs);
+        assert_eq!(
+            after.created_graphs - before.created_graphs,
+            after.destroyed_graphs - before.destroyed_graphs
+        );
+        assert_eq!(
+            after.created_graph_execs - before.created_graph_execs,
+            after.destroyed_graph_execs - before.destroyed_graph_execs
         );
     }
 

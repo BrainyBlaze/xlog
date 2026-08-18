@@ -1624,7 +1624,7 @@ def test_late_full_recompute_budget_failure_rolls_back_all_session_state():
         r"estimated (?P<estimated>\d+) bytes, budget (?P<display_budget>\d+) bytes",
         str(pressure_error.value),
     )
-    assert pressure is not None
+    assert pressure is not None, str(pressure_error.value)
     fields = {
         name: int(value)
         for name, value in pressure.groupdict().items()

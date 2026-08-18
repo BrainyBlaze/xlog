@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use xlog_core::{Result, XlogError};
-use xlog_ir::ExecutionPlan;
+use xlog_ir::{ExecutionPlan, GeneratedQueryRuleProvenance};
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::compiler_config::CompilerConfig;
@@ -250,6 +250,7 @@ impl Compiler {
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
         program.validate_prepared_authored_constraint_identity()?;
+        let generated_query_heads = generated_query_heads_for_program(program)?;
         let program = desugar_queries_and_constraints(program)?;
         let program = normalize_meta_builtins(&program)?;
         let program = normalize_list_builtins(&program)?;
@@ -469,6 +470,37 @@ impl Compiler {
             |schema| self.lowerer.create_helper_relation(schema),
         );
 
+        plan.generated_query_rules = generated_query_heads
+            .iter()
+            .enumerate()
+            .map(|(query_index, head)| {
+                let positions = plan
+                    .rules_by_scc
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(scc_index, rules)| {
+                        rules
+                            .iter()
+                            .enumerate()
+                            .filter_map(move |(rule_index, rule)| {
+                                (rule.head == *head).then_some((scc_index, rule_index))
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                let [(scc_index, rule_index)] = positions.as_slice() else {
+                    return Err(XlogError::Compilation(format!(
+                        "generated query head {head} must have exactly one compiled rule, found {}",
+                        positions.len()
+                    )));
+                };
+                Ok(GeneratedQueryRuleProvenance {
+                    query_index,
+                    scc_index: *scc_index,
+                    rule_index: *rule_index,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(plan)
     }
 
@@ -494,6 +526,32 @@ impl Compiler {
     pub fn schemas(&self) -> &HashMap<String, Schema> {
         self.lowerer.schemas()
     }
+}
+
+fn generated_query_heads_for_program(program: &Program) -> Result<Vec<String>> {
+    (0..program.queries.len())
+        .map(|query_index| {
+            let generated_head = format!("__xlog_query_{query_index}");
+            let authored_collision = program
+                .predicates
+                .iter()
+                .any(|declaration| declaration.name == generated_head)
+                || program
+                    .rules
+                    .iter()
+                    .any(|rule| rule.head.predicate == generated_head)
+                || program
+                    .learnable_rules
+                    .iter()
+                    .any(|rule| rule.head.predicate == generated_head);
+            if authored_collision {
+                return Err(XlogError::Compilation(format!(
+                    "authored relation {generated_head} collides with generated query head"
+                )));
+            }
+            Ok(generated_head)
+        })
+        .collect()
 }
 
 fn desugar_queries_and_constraints(program: &Program) -> Result<Program> {
@@ -689,6 +747,145 @@ mod tests {
 
         let plan = result.unwrap();
         assert!(!plan.sccs.is_empty(), "Expected at least one SCC");
+    }
+
+    #[test]
+    fn compiler_records_each_program_query_at_its_compiled_rule_position() {
+        let plan = Compiler::new()
+            .compile(
+                r#"
+                    source(a).
+                    ?- source(X).
+                    ?- source(a).
+                "#,
+            )
+            .expect("queries should compile");
+
+        assert_eq!(plan.generated_query_rules.len(), 2);
+        for (query_index, provenance) in plan.generated_query_rules.iter().enumerate() {
+            assert_eq!(provenance.query_index, query_index);
+            let rule = &plan.rules_by_scc[provenance.scc_index][provenance.rule_index];
+            assert_eq!(rule.head, format!("__xlog_query_{query_index}"));
+        }
+    }
+
+    #[test]
+    fn compiler_does_not_infer_query_provenance_from_an_authored_prefix() {
+        let mut program = parse_program(
+            r#"
+                source(a).
+                authored(X) :- source(X).
+            "#,
+        )
+        .expect("authored program should parse");
+        program
+            .rules
+            .iter_mut()
+            .find(|rule| rule.head.predicate == "authored")
+            .expect("authored rule should exist")
+            .head
+            .predicate = "__xlog_query_authored".to_string();
+
+        let plan = Compiler::new()
+            .compile_program(&program)
+            .expect("authored prefix should remain an ordinary rule");
+        assert!(plan.generated_query_rules.is_empty());
+    }
+
+    #[test]
+    fn compiler_rejects_an_authored_exact_generated_query_head_collision() {
+        let mut program = parse_program(
+            r#"
+                source(a).
+                authored(X) :- source(X).
+                ?- source(X).
+            "#,
+        )
+        .expect("collision witness should parse");
+        program
+            .rules
+            .iter_mut()
+            .find(|rule| rule.head.predicate == "authored")
+            .expect("authored rule should exist")
+            .head
+            .predicate = "__xlog_query_0".to_string();
+
+        let error = Compiler::new()
+            .compile_program(&program)
+            .expect_err("authored exact query-head collisions must fail compilation");
+        assert!(
+            error
+                .to_string()
+                .contains("authored relation __xlog_query_0 collides with generated query head"),
+            "unexpected collision error: {error}"
+        );
+    }
+
+    #[test]
+    fn compiler_reports_bound_is_target_before_arithmetic_type_mismatch() {
+        let error = Compiler::new()
+            .compile(
+                r#"
+                val(10).
+                bad(Z) :- val(Z), Z is Z + 1.
+                ?- bad(Z).
+                "#,
+            )
+            .expect_err("an already-bound is-expression target must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "Compilation error: Variable Z already bound; 'is' requires fresh variable"
+        );
+    }
+
+    #[test]
+    fn compiler_rejects_is_target_bound_by_an_earlier_is_expression() {
+        let error = Compiler::new()
+            .compile(
+                r#"
+                val(10).
+                bad(Z) :- val(X), Z is X + X, Z is X + X.
+                ?- bad(Z).
+                "#,
+            )
+            .expect_err("a prior is-expression target must stay bound");
+
+        assert_eq!(
+            error.to_string(),
+            "Compilation error: Variable Z already bound; 'is' requires fresh variable"
+        );
+    }
+
+    #[test]
+    fn compiler_accepts_fresh_chained_is_targets() {
+        Compiler::new()
+            .compile(
+                r#"
+                val(10).
+                good(Z) :- val(X), Y is X + X, Z is Y + Y.
+                ?- good(Z).
+                "#,
+            )
+            .expect("distinct source-ordered is-expression targets must remain valid");
+    }
+
+    #[test]
+    fn compiler_reports_unbound_is_input_before_a_later_duplicate_target() {
+        let error = Compiler::new()
+            .compile(
+                r#"
+                seed(1).
+                bad(Z) :- seed(X), Z is U + 1, Z is 1 + 1.
+                ?- bad(Z).
+                "#,
+            )
+            .expect_err("an unreachable later binding must not preempt the first is error");
+
+        assert_eq!(
+            error.to_string(),
+            "Compilation error: Variable U used in arithmetic but not bound"
+        );
     }
 
     #[test]

@@ -519,6 +519,41 @@ impl LogicRelationSession {
             metadata_updates,
             &prepared_batch,
         )?;
+        let delta_prepare_micros = delta_start.elapsed().as_micros() as u64;
+        let full_recompute = if check_equivalence {
+            let full_start = Instant::now();
+            let full_store = match (|| {
+                let prospective_base = self
+                    .program
+                    .clone_prospective_base_for_prepared_delta_batch(
+                        &self.provider,
+                        &self.relation_store,
+                        &prepared_batch,
+                    )?;
+                let (_, full_store) = self.program.evaluate_with_relation_store_and_cache(
+                    self.provider.clone(),
+                    &prospective_base,
+                    false,
+                )?;
+                Ok::<_, xlog_core::XlogError>(full_store)
+            })() {
+                Ok(full_store) => full_store,
+                Err(error) => {
+                    if let Err(reap_error) = self.provider.memory().reap_pending_deallocations() {
+                        return Err(types::xlog_err(xlog_core::XlogError::Execution(
+                            format!(
+                                "full-recompute diagnostic failed: {error}; releasing its temporary GPU buffers also failed: {reap_error}"
+                            ),
+                        )));
+                    }
+                    return Err(types::xlog_err(error));
+                }
+            };
+            Some((full_store, full_start.elapsed().as_micros() as u64))
+        } else {
+            None
+        };
+        let delta_commit_start = Instant::now();
         let data_commit = self
             .program
             .prepare_relation_delta_commit_with_session_runtime(
@@ -529,30 +564,19 @@ impl LogicRelationSession {
                 prepared_batch,
             )
             .map_err(types::xlog_err)?;
-        let delta_micros = delta_start.elapsed().as_micros().max(1) as u64;
+        let delta_micros = delta_prepare_micros
+            .saturating_add(delta_commit_start.elapsed().as_micros() as u64)
+            .max(1);
         let mut equivalent_to_full_recompute = None;
         let mut measured_full_micros = None;
-        if check_equivalence {
-            let full_start = Instant::now();
-            let prospective_base = data_commit
-                .clone_prospective_base_store()
-                .map_err(types::xlog_err)?;
-            let (_, full_store) = self
-                .program
-                .evaluate_with_relation_store_and_cache(
-                    self.provider.clone(),
-                    &prospective_base,
-                    false,
-                )
-                .map_err(types::xlog_err)?;
-            let full_micros = full_start.elapsed().as_micros() as u64;
+        if let Some((full_store, full_micros)) = full_recompute {
             let equivalent = if coalesced_no_op && !had_derived_state {
                 true
             } else {
                 self.program
                     .relation_stores_query_equivalent(
                         self.provider.as_ref(),
-                        &full_store,
+                        full_store.as_relation_store(),
                         data_commit.prospective_derived_store(),
                     )
                     .map_err(types::xlog_err)?
