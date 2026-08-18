@@ -445,3 +445,20 @@ def test_cv_stream_flags_refused_without_online_column(tmp_path):
     with pytest.raises(SystemExit) as exc:
         run_maritime_cv.main(base + ["--stream-window", "500"])
     assert exc.value.code == 2
+
+
+def test_cv_online_column_refuses_the_duration_vocabulary(tmp_path):
+    # PREREG_ONLINE.md section 5: the online column runs ONLY on the base
+    # vocabulary — `sustained_240` uses the FUTURE duration of its interval
+    # (a leak that a stream must not see), so `--column online --vocab
+    # duration` is a protocol violation and must be refused up front, like
+    # the stream flags without the online column.
+    import run_maritime_cv
+
+    tar_p, zip_p = _cv_archives(tmp_path)
+    base = ["--tar", tar_p, "--zip", zip_p, "--out", str(tmp_path / "x.json")] + CV_ARGS
+    with pytest.raises(SystemExit) as exc:
+        run_maritime_cv.main(base + ["--column", "online", "--vocab", "duration"])
+    assert exc.value.code == 2
+    # the batch soft column keeps the duration vocabulary (PREREG_SOFT (c))
+    assert run_maritime_cv.parse_args(base + ["--column", "soft", "--vocab", "duration"]).vocab == "duration"

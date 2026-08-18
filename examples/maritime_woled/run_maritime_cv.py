@@ -652,7 +652,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--vocab", choices=("base", "duration"), default="base",
                         help="'duration' adds sustained_240 to the converter's "
                              "vocabulary (PREREG_SOFT.md section (c)); "
-                             "'base' (default) is the baseline's 11 relations")
+                             "'base' (default) is the baseline's 11 relations. "
+                             "Refused with --column online (PREREG_ONLINE.md "
+                             "section 5: future leak)")
     parser.add_argument("--smoke", action="store_true",
                         help=f"first {SMOKE_N_POS}+{SMOKE_N_NEG} pairs only (tests)")
     parser.add_argument("--skip-verify", action="store_true", dest="skip_verify",
@@ -662,6 +664,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.stream_order is not None or args.stream_window is not None:
             parser.error("--stream-order/--stream-window apply to --column online only")
     else:
+        if args.vocab != "base":
+            parser.error(
+                "--column online is pre-registered on the base vocabulary only "
+                "(PREREG_ONLINE.md section 5: sustained_240 uses the FUTURE duration "
+                "of its interval — a leak a stream must not see); drop --vocab duration"
+            )
         if args.stream_order is None:
             args.stream_order = "chrono"
         if args.stream_window is None:
