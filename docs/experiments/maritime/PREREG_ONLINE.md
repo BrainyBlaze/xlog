@@ -124,7 +124,10 @@ substantially between the three regimes (fold 0's top body carries
 sigma(w) = 0.6476 in batch, 0.5880 in the chrono pass, 0.8398 in the
 reverse pass), the online fold records carry the stream provenance
 (`stream_order`, `stream_windows`, `prequential_curve`, `wall_s_pass`),
-and the pass wall-times are recorded (155.9 s across all five folds).
+and the pass wall-times are recorded (`wall_s_pass`, `time.monotonic`
+wall-clock, NOT CPU time: ~156 s across the five chrono passes on a
+noisy host — per-fold 2–51 s for the same amount of work, so the number
+is a record, not a cost estimate; the reverse passes took ~47 s).
 Three different trainings landed in the same 0.5-threshold decision
 region over the same gated pool. The mechanism is simpler than
 "robustness to the training regime", and it is visible in the shipped
