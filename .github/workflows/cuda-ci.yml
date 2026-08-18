@@ -301,6 +301,7 @@ jobs:
               exit 1
             fi
           done <<< "$submodule_status"
+          # shellcheck disable=SC2016
           git -C "$corpus_root" submodule foreach --quiet --recursive \
             'test -z "$(git status --porcelain=v1 --untracked-files=all)"'
 
