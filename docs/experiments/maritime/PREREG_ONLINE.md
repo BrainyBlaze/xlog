@@ -126,10 +126,30 @@ reverse pass), the online fold records carry the stream provenance
 (`stream_order`, `stream_windows`, `prequential_curve`, `wall_s_pass`),
 and the pass wall-times are recorded (155.9 s across all five folds).
 Three different trainings landed in the same 0.5-threshold decision
-region over the same gated pool — the thresholded predictor is robust
-to the training regime on this corpus. The honest scope of the claim:
-prediction-identity holds for THIS pool, corpus and threshold; it is
-not a general theorem.
+region over the same gated pool. The mechanism is simpler than
+"robustness to the training regime", and it is visible in the shipped
+`weights_top10` (sigmoid of the logit, sorted): in all 15 (fold x
+regime) cases EXACTLY ONE body has sigma greater than 0.5 — always
+`became_proximate&both_open_sea&both_stopped_far` (batch 0.65–0.85,
+chrono 0.58–0.66, reverse 0.75–0.88) — and the second body stays at
+0.15–0.46, so the noisy-OR of all the other bodies never reaches 0.5 on
+any held-out row. All three regimes therefore reduce to the SAME crisp
+rule (`rendezVous :- became_proximate, both_open_sea, both_stopped_far`;
+"the top body covers the row" gives the identical tp/fp/fn on every
+fold), and the identity of predictions is the identity of that rule,
+not closeness of the weight vectors (L-infinity distance of the logits:
+batch vs chrono 1.06–1.92, batch vs reverse 1.92–2.16, chrono vs reverse
+2.08–2.95). It is also fragile: re-scoring the held-out folds with the
+shipped weights (independent reproduction, PR #270 review — every
+artifact reproduced bitwise, 0 differing rows out of 454,858) puts the
+highest score of a row NOT covered by the top body at 0.493 in fold 1
+under batch weights — 0.007 below the threshold, with 1,270 rows of that
+fold in the 0.3–0.5 band; a small change of lr, steps or init could
+push the second body over 0.5 and move tp/fp by hundreds of rows in
+either direction. The honest scope of the claim: prediction-identity
+holds for THIS pool, corpus and threshold, and hangs on the discrete
+structure of the thresholded decision; it is not a general theorem and
+not "robustness to the training regime".
 
 With this column, the setting parity with the published systems is
 complete on this corpus: enumerated rule search, weighted clauses, and
