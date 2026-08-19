@@ -17,7 +17,16 @@ const TERM_ID_TYPE: ScalarType = ScalarType::U64;
 /// dynamic database mutation, unrestricted calls, and non-finite collection are
 /// rejected before lowering.
 pub fn normalize_meta_builtins(program: &Program) -> Result<Program> {
-    let mut normalizer = MetaNormalizer::new(program)?;
+    normalize_meta_builtins_owned(program.clone())
+}
+
+/// [`normalize_meta_builtins`] taking the program by value.
+///
+/// Avoids cloning the whole AST: facts whose predicate has no term-valued
+/// columns are moved through untouched (the pass is the identity on them, see
+/// `MetaNormalizer::fact_is_identity`), everything else is rebuilt as before.
+pub fn normalize_meta_builtins_owned(program: Program) -> Result<Program> {
+    let mut normalizer = MetaNormalizer::new(&program)?;
     normalizer.normalize_program(program)
 }
 
@@ -47,7 +56,14 @@ struct TermRecord {
 
 struct MetaNormalizer {
     domains: HashMap<String, ScalarType>,
-    pred_columns: HashMap<(String, usize), TypeRef>,
+    /// Declared column types per predicate (index = column position).
+    pred_columns: HashMap<String, Vec<TypeRef>>,
+    /// Predicates with at least one term-valued (`term`/`compound`/`predref`)
+    /// or `list<T>` column: only their atoms can change under value
+    /// normalization.
+    term_valued_preds: HashSet<String>,
+    /// Source facts by predicate — consulted by `findall`/`maplist`
+    /// expansion only, so it is built only when a meta predicate occurs.
     source_facts: HashMap<String, Vec<Atom>>,
     derived_predicates: HashSet<String>,
     term_ids: HashMap<String, u64>,
@@ -68,21 +84,36 @@ impl MetaNormalizer {
             .map(|DomainDecl { name, typ }| (name.clone(), *typ))
             .collect();
 
-        let mut pred_columns = HashMap::new();
+        let mut pred_columns: HashMap<String, Vec<TypeRef>> = HashMap::new();
+        let mut term_valued_preds = HashSet::new();
         for pred in &program.predicates {
-            for (idx, col) in pred.schema_columns().into_iter().enumerate() {
-                pred_columns.insert((pred.name.clone(), idx), col.typ);
+            let columns: Vec<TypeRef> = pred
+                .schema_columns()
+                .into_iter()
+                .map(|col| col.typ)
+                .collect();
+            if columns.iter().any(|typ| {
+                matches!(
+                    typ,
+                    TypeRef::Term | TypeRef::Compound | TypeRef::PredRef | TypeRef::List(_)
+                )
+            }) {
+                term_valued_preds.insert(pred.name.clone());
             }
+            pred_columns.insert(pred.name.clone(), columns);
         }
 
+        let needs_source_facts = program_uses_meta_predicates(program);
         let mut source_facts: HashMap<String, Vec<Atom>> = HashMap::new();
         let mut derived_predicates = HashSet::new();
         for rule in &program.rules {
             if rule.is_fact() {
-                source_facts
-                    .entry(rule.head.predicate.clone())
-                    .or_default()
-                    .push(rule.head.clone());
+                if needs_source_facts {
+                    source_facts
+                        .entry(rule.head.predicate.clone())
+                        .or_default()
+                        .push(rule.head.clone());
+                }
             } else {
                 derived_predicates.insert(rule.head.predicate.clone());
             }
@@ -91,6 +122,7 @@ impl MetaNormalizer {
         Ok(Self {
             domains,
             pred_columns,
+            term_valued_preds,
             source_facts,
             derived_predicates,
             term_ids: HashMap::new(),
@@ -104,16 +136,33 @@ impl MetaNormalizer {
         })
     }
 
-    fn normalize_program(&mut self, program: &Program) -> Result<Program> {
-        let mut out = program.clone();
-        out.rules = program
-            .rules
-            .iter()
-            .map(|rule| self.normalize_rule(rule))
+    /// Declared column type of `pred` at position `idx`, if any.
+    fn column_type(&self, pred: &str, idx: usize) -> Option<&TypeRef> {
+        self.pred_columns.get(pred).and_then(|cols| cols.get(idx))
+    }
+
+    /// True when value normalization is the identity on this fact: its
+    /// predicate has no term-valued/list column, so every term goes through
+    /// `normalize_untyped_value`, which rebuilds the term unchanged. Such facts
+    /// are moved through without being rebuilt (they dominate ILP/EDB inputs).
+    fn fact_is_identity(&self, rule: &Rule) -> bool {
+        rule.body.is_empty() && !self.term_valued_preds.contains(&rule.head.predicate)
+    }
+
+    fn normalize_program(&mut self, program: Program) -> Result<Program> {
+        let mut out = program;
+        out.rules = std::mem::take(&mut out.rules)
+            .into_iter()
+            .map(|rule| {
+                if self.fact_is_identity(&rule) {
+                    Ok(rule)
+                } else {
+                    self.normalize_rule(&rule)
+                }
+            })
             .collect::<Result<Vec<_>>>()?;
-        out.constraints = program
-            .constraints
-            .iter()
+        out.constraints = std::mem::take(&mut out.constraints)
+            .into_iter()
             .map(|constraint| {
                 let mut bound = HashMap::new();
                 Ok(Constraint {
@@ -122,9 +171,8 @@ impl MetaNormalizer {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        out.queries = program
-            .queries
-            .iter()
+        out.queries = std::mem::take(&mut out.queries)
+            .into_iter()
             .map(|query| {
                 Ok(Query {
                     atom: self.normalize_atom_values(&query.atom)?,
@@ -132,58 +180,46 @@ impl MetaNormalizer {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        out.prob_facts = program
-            .prob_facts
-            .iter()
-            .map(|pf| {
-                let mut pf = pf.clone();
+        out.prob_facts = std::mem::take(&mut out.prob_facts)
+            .into_iter()
+            .map(|mut pf| {
                 pf.atom = self.normalize_atom_values(&pf.atom)?;
                 Ok(pf)
             })
             .collect::<Result<Vec<_>>>()?;
-        out.annotated_disjunctions = program
-            .annotated_disjunctions
-            .iter()
-            .map(|ad| {
-                let mut ad = ad.clone();
+        out.annotated_disjunctions = std::mem::take(&mut out.annotated_disjunctions)
+            .into_iter()
+            .map(|mut ad| {
                 for choice in &mut ad.choices {
                     choice.atom = self.normalize_atom_values(&choice.atom)?;
                 }
                 Ok(ad)
             })
             .collect::<Result<Vec<_>>>()?;
-        out.evidence = program
-            .evidence
-            .iter()
-            .map(|evidence| {
-                let mut evidence = evidence.clone();
+        out.evidence = std::mem::take(&mut out.evidence)
+            .into_iter()
+            .map(|mut evidence| {
                 evidence.atom = self.normalize_atom_values(&evidence.atom)?;
                 Ok(evidence)
             })
             .collect::<Result<Vec<_>>>()?;
-        out.prob_queries = program
-            .prob_queries
-            .iter()
-            .map(|query| {
-                let mut query = query.clone();
+        out.prob_queries = std::mem::take(&mut out.prob_queries)
+            .into_iter()
+            .map(|mut query| {
                 query.atom = self.normalize_atom_values(&query.atom)?;
                 Ok(query)
             })
             .collect::<Result<Vec<_>>>()?;
-        out.neural_predicates = program
-            .neural_predicates
-            .iter()
-            .map(|neural| {
-                let mut neural = neural.clone();
+        out.neural_predicates = std::mem::take(&mut out.neural_predicates)
+            .into_iter()
+            .map(|mut neural| {
                 neural.predicate = self.normalize_atom_values(&neural.predicate)?;
                 Ok(neural)
             })
             .collect::<Result<Vec<_>>>()?;
-        out.learnable_rules = program
-            .learnable_rules
-            .iter()
-            .map(|learnable| {
-                let mut learnable = learnable.clone();
+        out.learnable_rules = std::mem::take(&mut out.learnable_rules)
+            .into_iter()
+            .map(|mut learnable| {
                 let mut bound = HashMap::new();
                 learnable.head = self.normalize_atom_values(&learnable.head)?;
                 learnable.body = self.normalize_body(&learnable.body, &mut bound)?;
@@ -270,10 +306,7 @@ impl MetaNormalizer {
     fn normalize_atom_values(&mut self, atom: &Atom) -> Result<Atom> {
         let mut terms = Vec::with_capacity(atom.terms.len());
         for (idx, term) in atom.terms.iter().enumerate() {
-            let expected = self
-                .pred_columns
-                .get(&(atom.predicate.clone(), idx))
-                .cloned();
+            let expected = self.column_type(&atom.predicate, idx).cloned();
             terms.push(self.normalize_value_term(term, expected.as_ref())?);
         }
         Ok(Atom {
@@ -445,8 +478,7 @@ impl MetaNormalizer {
             columns.push(PredColumn {
                 name: Some(name.to_ascii_lowercase()),
                 typ: self
-                    .pred_columns
-                    .get(&(goal.predicate.clone(), *idx))
+                    .column_type(&goal.predicate, *idx)
                     .cloned()
                     .unwrap_or(TypeRef::Scalar(
                         bound.get(name).copied().unwrap_or(ScalarType::U64),
@@ -525,8 +557,7 @@ impl MetaNormalizer {
         }
         let input_items = finite_list_items(&atom.terms[1], "maplist input")?;
         let input_type = self
-            .pred_columns
-            .get(&(pred.clone(), 0))
+            .column_type(&pred, 0)
             .cloned()
             .unwrap_or_else(|| infer_type_ref_from_terms(input_items));
         let input_list = Term::List(
@@ -556,8 +587,7 @@ impl MetaNormalizer {
         }
 
         let output_type = self
-            .pred_columns
-            .get(&(pred.clone(), 1))
+            .column_type(&pred, 1)
             .cloned()
             .unwrap_or(TypeRef::Scalar(ScalarType::U64));
         self.register_helper_decl(
@@ -693,8 +723,7 @@ impl MetaNormalizer {
                 for (idx, term) in goal.terms.iter().enumerate() {
                     if matches!(term, Term::Variable(var) if var == name) {
                         return Ok(self
-                            .pred_columns
-                            .get(&(goal.predicate.clone(), idx))
+                            .column_type(&goal.predicate, idx)
                             .cloned()
                             .unwrap_or(TypeRef::Scalar(ScalarType::U64)));
                     }
@@ -811,8 +840,7 @@ impl MetaNormalizer {
         for (idx, term) in atom.terms.iter().enumerate() {
             if let Term::Variable(name) = term {
                 let typ = self
-                    .pred_columns
-                    .get(&(atom.predicate.clone(), idx))
+                    .column_type(&atom.predicate, idx)
                     .and_then(|typ| self.storage_type_for_type_ref(typ).ok())
                     .unwrap_or(ScalarType::U64);
                 bound.insert(name.clone(), typ);
@@ -928,7 +956,7 @@ impl MetaNormalizer {
                 is_private: true,
             });
         }
-        program.rules.extend(self.helper_facts.clone());
+        program.rules.extend(std::mem::take(&mut self.helper_facts));
     }
 
     fn append_term_helper_facts(&mut self) {
@@ -1210,6 +1238,28 @@ fn lower_meta_type_ref(typ: &TypeRef) -> TypeRef {
 
 fn join_ids(ids: &[u64]) -> String {
     ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+}
+
+/// Does any body literal name a meta predicate? Only then can `findall`/
+/// `maplist` expansion consult the source facts.
+fn program_uses_meta_predicates(program: &Program) -> bool {
+    let body_uses = |body: &[BodyLiteral]| {
+        body.iter().any(|lit| match lit {
+            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                is_meta_predicate(&atom.predicate)
+            }
+            _ => false,
+        })
+    };
+    program.rules.iter().any(|rule| body_uses(&rule.body))
+        || program
+            .constraints
+            .iter()
+            .any(|constraint| body_uses(&constraint.body))
+        || program
+            .learnable_rules
+            .iter()
+            .any(|learnable| body_uses(&learnable.body))
 }
 
 fn is_meta_predicate(name: &str) -> bool {

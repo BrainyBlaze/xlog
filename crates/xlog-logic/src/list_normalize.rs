@@ -22,7 +22,16 @@ const LIST_ID_TYPE: ScalarType = ScalarType::U64;
 ///
 /// This keeps accepted list programs on the existing relational lowering/runtime path.
 pub fn normalize_list_builtins(program: &Program) -> Result<Program> {
-    let mut normalizer = ListNormalizer::new(program)?;
+    normalize_list_builtins_owned(program.clone())
+}
+
+/// [`normalize_list_builtins`] taking the program by value.
+///
+/// Avoids cloning the whole AST: facts without list literals are moved through
+/// untouched (the pass is the identity on them, see
+/// `ListNormalizer::fact_is_identity`), everything else is rebuilt as before.
+pub fn normalize_list_builtins_owned(program: Program) -> Result<Program> {
+    let mut normalizer = ListNormalizer::new(&program)?;
     normalizer.normalize_program(program)
 }
 
@@ -68,7 +77,8 @@ struct ListColumn {
 }
 
 struct ListNormalizer {
-    list_columns: HashMap<(String, usize), ListColumn>,
+    /// Declared `list<T>` columns per predicate: `(column index, column)`.
+    list_columns: HashMap<String, Vec<(usize, ListColumn)>>,
     lists_by_key: HashMap<(ScalarType, Vec<LiteralKey>), u64>,
     lists: Vec<ListDef>,
     next_list_id: u64,
@@ -85,12 +95,15 @@ impl ListNormalizer {
             .map(|DomainDecl { name, typ }| (name.clone(), *typ))
             .collect();
 
-        let mut list_columns = HashMap::new();
+        let mut list_columns: HashMap<String, Vec<(usize, ListColumn)>> = HashMap::new();
         for pred in &program.predicates {
             for (idx, col) in pred.schema_columns().iter().enumerate() {
                 if let TypeRef::List(inner) = &col.typ {
                     let elem_type = Self::storage_type_for_type_ref(inner, &domains)?;
-                    list_columns.insert((pred.name.clone(), idx), ListColumn { elem_type });
+                    list_columns
+                        .entry(pred.name.clone())
+                        .or_default()
+                        .push((idx, ListColumn { elem_type }));
                 }
             }
         }
@@ -106,19 +119,32 @@ impl ListNormalizer {
         })
     }
 
-    fn normalize_program(&mut self, program: &Program) -> Result<Program> {
-        let mut out = program.clone();
-        out.rules = program
-            .rules
-            .iter()
-            .map(|rule| self.normalize_rule(rule))
-            .collect::<Result<Vec<_>>>()?
+    /// True when list normalization is the identity on this fact: with an
+    /// empty body only the head is rewritten, and `normalize_value_term` only
+    /// touches `Term::List`/`Term::Cons` (everything else is cloned as is).
+    /// Such facts are moved through without being rebuilt.
+    fn fact_is_identity(rule: &Rule) -> bool {
+        rule.body.is_empty()
+            && !rule
+                .head
+                .terms
+                .iter()
+                .any(|term| matches!(term, Term::List(_) | Term::Cons { .. }))
+    }
+
+    fn normalize_program(&mut self, program: Program) -> Result<Program> {
+        let mut out = program;
+        let mut rules = Vec::with_capacity(out.rules.len());
+        for rule in std::mem::take(&mut out.rules) {
+            if Self::fact_is_identity(&rule) {
+                rules.push(rule);
+            } else {
+                rules.extend(self.normalize_rule(&rule)?);
+            }
+        }
+        out.rules = rules;
+        out.constraints = std::mem::take(&mut out.constraints)
             .into_iter()
-            .flatten()
-            .collect();
-        out.constraints = program
-            .constraints
-            .iter()
             .map(|constraint| {
                 let body = self.normalize_body(&constraint.body)?;
                 Ok(crate::ast::Constraint {
@@ -127,10 +153,9 @@ impl ListNormalizer {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        out.queries = program
-            .queries
-            .iter()
-            .map(|query| self.normalize_query(query))
+        out.queries = std::mem::take(&mut out.queries)
+            .into_iter()
+            .map(|query| self.normalize_query(&query))
             .collect::<Result<Vec<_>>>()?;
 
         self.append_helper_declarations_and_facts(&mut out)?;
@@ -200,13 +225,18 @@ impl ListNormalizer {
         Ok(out)
     }
 
+    /// Element type of the declared `list<T>` column `idx` of `pred`, if any.
+    fn list_column_elem(&self, pred: &str, idx: usize) -> Option<ScalarType> {
+        self.list_columns
+            .get(pred)
+            .and_then(|cols| cols.iter().find(|(i, _)| *i == idx))
+            .map(|(_, col)| col.elem_type)
+    }
+
     fn normalize_head_atom(&mut self, atom: &Atom) -> Result<Atom> {
         let mut terms = Vec::with_capacity(atom.terms.len());
         for (idx, term) in atom.terms.iter().enumerate() {
-            let expected = self
-                .list_columns
-                .get(&(atom.predicate.clone(), idx))
-                .map(|col| col.elem_type);
+            let expected = self.list_column_elem(&atom.predicate, idx);
             terms.push(self.normalize_value_term(term, expected)?);
         }
         Ok(Atom {
@@ -233,10 +263,7 @@ impl ListNormalizer {
         let mut terms = Vec::with_capacity(atom.terms.len());
         let mut extra_atoms = Vec::new();
         for (idx, term) in atom.terms.iter().enumerate() {
-            let expected = self
-                .list_columns
-                .get(&(atom.predicate.clone(), idx))
-                .map(|col| col.elem_type);
+            let expected = self.list_column_elem(&atom.predicate, idx);
             match term {
                 Term::Variable(name) => {
                     if let Some(elem_type) = expected {
@@ -724,7 +751,15 @@ impl ListNormalizer {
             }
         }
 
-        for (op, elem_type, ids) in self.operation_rows.clone() {
+        // Deterministic emission order: `operation_rows` is a HashSet, so
+        // iterating it directly would make helper-fact order (and with it
+        // relation numbering in the plan) vary between processes.
+        let mut operation_rows: Vec<(ListOp, ScalarType, Vec<u64>)> =
+            self.operation_rows.iter().cloned().collect();
+        operation_rows.sort_unstable_by(|a, b| {
+            (a.0 as u8, a.1 as u8, &a.2).cmp(&(b.0 as u8, b.1 as u8, &b.2))
+        });
+        for (op, elem_type, ids) in operation_rows {
             let pred = match op {
                 ListOp::Append => append_pred(elem_type),
                 ListOp::Sort => sort_pred(elem_type),
@@ -780,7 +815,11 @@ impl ListNormalizer {
             .map(|pred| pred.name.clone())
             .collect();
 
-        for pred in &self.helper_preds {
+        // Sorted for a process-independent declaration order (see
+        // `append_helper_declarations_and_facts`).
+        let mut helper_preds: Vec<&String> = self.helper_preds.iter().collect();
+        helper_preds.sort();
+        for pred in helper_preds {
             if existing.contains(pred) {
                 continue;
             }

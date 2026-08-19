@@ -56,8 +56,23 @@ struct Seed {
 pub fn rewrite_magic_sets(program: &Program) -> Result<MagicSetRewrite> {
     let mode = program.directives.magic_sets;
     if mode.is_none() || mode == Some(MagicSetsMode::Off) {
+        return Ok(with_status(program.clone(), MagicSetStatus::Disabled));
+    }
+    rewrite_enabled(program)
+}
+
+/// [`rewrite_magic_sets`] taking the program by value: when magic sets are
+/// off (the default) the program is returned as is, without a clone.
+pub fn rewrite_magic_sets_owned(program: Program) -> Result<MagicSetRewrite> {
+    let mode = program.directives.magic_sets;
+    if mode.is_none() || mode == Some(MagicSetsMode::Off) {
         return Ok(with_status(program, MagicSetStatus::Disabled));
     }
+    rewrite_enabled(&program)
+}
+
+fn rewrite_enabled(program: &Program) -> Result<MagicSetRewrite> {
+    let mode = program.directives.magic_sets;
     let mode = mode.expect("checked above");
 
     let recursive = recursive_predicates(program);
@@ -112,9 +127,9 @@ pub fn rewrite_magic_sets(program: &Program) -> Result<MagicSetRewrite> {
     })
 }
 
-fn with_status(program: &Program, status: MagicSetStatus) -> MagicSetRewrite {
+fn with_status(program: Program, status: MagicSetStatus) -> MagicSetRewrite {
     MagicSetRewrite {
-        program: program.clone(),
+        program,
         report: MagicSetReport {
             status,
             generated_predicates: Vec::new(),

@@ -20,10 +20,10 @@ use xlog_ir::{ExecutionPlan, GeneratedQueryRuleProvenance};
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::compiler_config::CompilerConfig;
-use crate::list_normalize::normalize_list_builtins;
+use crate::list_normalize::normalize_list_builtins_owned;
 use crate::lower::Lowerer;
-use crate::magic_sets::rewrite_magic_sets;
-use crate::meta_normalize::normalize_meta_builtins;
+use crate::magic_sets::rewrite_magic_sets_owned;
+use crate::meta_normalize::normalize_meta_builtins_owned;
 use crate::module::ModuleError;
 use crate::optimizer::Optimizer;
 use crate::parser::parse_program;
@@ -151,7 +151,7 @@ impl Compiler {
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
         let program = parse_program(source)?;
-        self.compile_program_with_config_and_stats_snapshot(&program, config, stats_snapshot)
+        self.compile_owned_program_with_config_and_stats_snapshot(program, config, stats_snapshot)
     }
 
     /// Compile a parsed XLOG program into an execution plan.
@@ -210,11 +210,7 @@ impl Compiler {
         program: &Program,
     ) -> Result<()> {
         program.validate_prepared_authored_constraint_identity()?;
-        let program = desugar_queries_and_constraints(program)?;
-        let program = normalize_meta_builtins(&program)?;
-        let program = normalize_list_builtins(&program)?;
-        let program = rewrite_magic_sets(&program)?.program;
-        validate_negation_safety(&program)?;
+        let program = run_frontend_passes(program.clone())?;
         self.lowerer.validate_program_without_plan(&program)
     }
 
@@ -229,14 +225,28 @@ impl Compiler {
         config: &CompilerConfig,
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
-        let mut prepared = program.clone();
-        if prepared.authored_constraint_source_bound.is_some() {
-            prepared.validate_prepared_authored_constraint_identity()?;
+        self.compile_owned_program_with_config_and_stats_snapshot(
+            program.clone(),
+            config,
+            stats_snapshot,
+        )
+    }
+
+    /// [`Self::compile_program_with_config_and_stats_snapshot`] for a program
+    /// the caller hands over by value (no clone of the AST).
+    pub fn compile_owned_program_with_config_and_stats_snapshot(
+        &mut self,
+        mut program: Program,
+        config: &CompilerConfig,
+        stats_snapshot: Option<&StatsSnapshot>,
+    ) -> Result<ExecutionPlan> {
+        if program.authored_constraint_source_bound.is_some() {
+            program.validate_prepared_authored_constraint_identity()?;
         } else {
-            prepared.prepare_authored_constraint_identity_at_root()?;
+            program.prepare_authored_constraint_identity_at_root()?;
         }
-        self.compile_prepared_program_with_config_and_stats_snapshot(
-            &prepared,
+        self.compile_prepared_owned_program_with_config_and_stats_snapshot(
+            program,
             config,
             stats_snapshot,
         )
@@ -249,13 +259,28 @@ impl Compiler {
         config: &CompilerConfig,
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
+        self.compile_prepared_owned_program_with_config_and_stats_snapshot(
+            program.clone(),
+            config,
+            stats_snapshot,
+        )
+    }
+
+    /// [`Self::compile_prepared_program_with_config_and_stats_snapshot`] for a
+    /// program handed over by value.
+    ///
+    /// The frontend passes (desugar → meta → list → magic sets) each take and
+    /// return the `Program` by value, so a fact-heavy AST is never cloned
+    /// between passes; the `&Program` entry points clone exactly once.
+    pub fn compile_prepared_owned_program_with_config_and_stats_snapshot(
+        &mut self,
+        program: Program,
+        config: &CompilerConfig,
+        stats_snapshot: Option<&StatsSnapshot>,
+    ) -> Result<ExecutionPlan> {
         program.validate_prepared_authored_constraint_identity()?;
-        let generated_query_heads = generated_query_heads_for_program(program)?;
-        let program = desugar_queries_and_constraints(program)?;
-        let program = normalize_meta_builtins(&program)?;
-        let program = normalize_list_builtins(&program)?;
-        let program = rewrite_magic_sets(&program)?.program;
-        validate_negation_safety(&program)?;
+        let generated_query_heads = generated_query_heads_for_program(&program)?;
+        let program = run_frontend_passes(program)?;
 
         // Phase 2: Stratify (analyze dependencies, detect cycles)
         let strata = stratify(&program).map_err(map_stratification_to_naf_error)?;
@@ -554,11 +579,23 @@ fn generated_query_heads_for_program(program: &Program) -> Result<Vec<String>> {
         .collect()
 }
 
-fn desugar_queries_and_constraints(program: &Program) -> Result<Program> {
-    let mut out = program.clone();
+/// The source-level frontend passes shared by compilation and validation:
+/// desugar queries/constraints → meta normalization → list normalization →
+/// magic sets → negation-safety check. All by value, no AST clones.
+fn run_frontend_passes(program: Program) -> Result<Program> {
+    let program = desugar_queries_and_constraints(program)?;
+    let program = normalize_meta_builtins_owned(program)?;
+    let program = normalize_list_builtins_owned(program)?;
+    let program = rewrite_magic_sets_owned(program)?.program;
+    validate_negation_safety(&program)?;
+    Ok(program)
+}
+
+fn desugar_queries_and_constraints(program: Program) -> Result<Program> {
+    let mut out = program;
 
     // Constraints: `:- body.` becomes `__xlog_constraint_i(1) :- body.`
-    for constraint in &program.constraints {
+    for constraint in &out.constraints {
         let authored_index = constraint.require_authored_index()?;
         let pred = format!("__xlog_constraint_{authored_index}");
         out.rules.push(AstRule {
@@ -571,7 +608,7 @@ fn desugar_queries_and_constraints(program: &Program) -> Result<Program> {
     }
 
     // Queries: `?- atom.` becomes `__xlog_query_i(Vars...) :- atom.`
-    for (i, Query { atom }) in program.queries.iter().enumerate() {
+    for (i, Query { atom }) in out.queries.iter().enumerate() {
         let pred = format!("__xlog_query_{}", i);
 
         let mut head_terms: Vec<Term> = Vec::new();
