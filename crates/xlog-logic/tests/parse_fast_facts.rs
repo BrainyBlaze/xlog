@@ -154,8 +154,77 @@ fn adversarial_snippets_match_reference() {
         "x(1) :- y(1.5). z(2).",
         "x(X) :- X > 1. z(2).",
         "x(X) :- X = 1.5 . z(2).",
+        // univ `=..`: its dots are not statement terminators; the right-hand
+        // side must never be mistaken for a fact (found in review)
+        "r(X) :- X =.. f(1).
+q(g(1)).",
+        "r(X) :- X =.. f(A).
+evidence(q(1), true).",
+        "r(X) :- X =.. f(1).
+query(r(Y)).",
+        "r(X) :- X =..
+  f(1).
+  q(f(2)).",
+        "r(X) :- X =.. f(1).
+s(2).",
+        "r(X) :- X =.. [F|A].
+s(2).",
+        "r(X) :- f(1) =.. X. s(2).",
+        "r(X) :- X = .. f(1). s(2).",
+        "p(1). r(X) :- X =.. f(1). s(2). t(3).",
+        // a removed fact must not let its neighbours fuse (found in review)
+        "u(X) :- X > 1.nn(1).0.5::c(1).",
+        "u(X) :- X > 1.nn(1).0.5::c(1); 0.5::c(2). q(2).",
+        "p(1).q(2).0.5::c(1).",
+        "a(1).
+0.5::c(1).
+b(2).",
     ];
     for case in cases {
         assert_same(case, &format!("{case:?}"));
     }
+}
+
+/// Valid programs with simple facts must take the fast path without falling
+/// back to the reference parser (a fallback is correct but parses the program
+/// three times, so it would hide a performance regression).
+#[test]
+fn valid_programs_take_the_fast_path_without_fallback() {
+    let cases: &[&str] = &[
+        "p(1). q(X) :- p(X).",
+        "r(X) :- X =.. f(1).
+q(2).",
+        "r(X) :- X =.. [F|A].
+q(2).",
+        "u(X) :- X > 1.nn(1).0.5::c(1).",
+        "pred p(u32).
+p(1).
+#pragma magic_sets = on
+q(X) :- p(X).",
+        "// header
+a(1, \"s\", sym).
+b(2.5, -3, X, _).
+c(X) :- a(X, _, _), b(_, _, X, _).",
+    ];
+    for case in cases {
+        let (_, stats) = parse_program_with_stats(case).expect("valid program");
+        assert!(!stats.fell_back, "fell back on {case:?}");
+        assert!(stats.fast_facts > 0, "no fast facts on {case:?}");
+    }
+}
+
+/// With facts blanked out of the residual, pest reports errors at the original
+/// positions; the reference and fast paths must agree on the message verbatim
+/// (covered implicitly by `assert_same`, spelled out here for a multi-line
+/// program with facts before the error).
+#[test]
+fn residual_errors_carry_the_original_positions() {
+    let src = "p(1).
+q(2).
+r(X) :- s(X) t(X).
+";
+    let fast = parse_program(src).expect_err("syntax error");
+    let reference = parse_program_reference(src).expect_err("syntax error");
+    assert_eq!(fast.to_string(), reference.to_string());
+    assert!(fast.to_string().contains("3:"), "{fast}");
 }

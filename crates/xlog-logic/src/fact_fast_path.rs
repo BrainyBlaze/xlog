@@ -20,22 +20,37 @@
 //! as a "residual" source. The caller parses the residual with pest and merges
 //! the two statement streams back in source order.
 //!
-//! Soundness argument (why the residual split cannot change what pest sees):
+//! Soundness argument (why the residual cannot change what pest sees):
 //!
+//! * The residual is the original source with every recognised fact **blanked
+//!   out** — replaced byte for byte by spaces (newlines kept). It has the same
+//!   length, so byte offsets in the residual are byte offsets in the original
+//!   (no remapping), pest's error positions are the original ones, and the
+//!   tokens around a removed fact can never fuse (`X > 1.` `nn(1).` `0.5::c(1).`
+//!   stays `X > 1.` `      ` `0.5::c(1).` rather than becoming `1.0.5`).
+//!   Blanks are grammar WHITESPACE, which is implicit between statements.
 //! * A statement boundary is a `.` outside string literals and comments that is
-//!   not between two ASCII digits. In the grammar `.` occurs only as a
-//!   statement terminator, inside `float_num`/`prob_num` (digits on both sides,
-//!   atomic rules, no whitespace), inside `string_lit` (`"..."`, no escapes) and
-//!   inside `//` comments — so the rule is exact, not a heuristic.
+//!   not between two ASCII digits and is not part of the univ operator `=..`.
+//!   In the grammar `.` occurs only as a statement terminator, inside
+//!   `float_num`/`prob_num` (digits on both sides, atomic rules, no
+//!   whitespace), inside `string_lit` (`"..."`, no escapes), inside `//`
+//!   comments and in `=..` — the scanner handles each of these explicitly.
 //! * The fast path only accepts a *complete* fact at a statement start. Every
 //!   grammar alternative tried before `fact` either starts with a keyword that
 //!   cannot be followed by `(...)` `.` in a way that parses (`pred`, `domain`,
 //!   `use`, `func`, `nn`, `learnable` — all need more tokens), or is
 //!   `evidence(...)`/`query(...)`, which are excluded by name here. For the
 //!   remaining text pest itself would pick `fact`.
+//! * Symbols are interned when a fact is merged into the program, i.e. in
+//!   source order interleaved with pest's statements, so symbol ids are the
+//!   ones the reference parser would assign.
 //! * If the residual fails to parse or build for any reason, the caller re-runs
 //!   the pure-pest parser on the original source, so error messages (and their
 //!   positions) are exactly the reference ones.
+//!
+//! `crates/xlog-logic/tests/parse_fast_facts*.rs` check all of this against the
+//! reference parser on the in-repo corpus, adversarial snippets and randomised
+//! statement sequences.
 
 use xlog_core::symbol;
 
@@ -44,32 +59,37 @@ use crate::ast::{Atom, Rule as AstRule, Term};
 /// One fact recognised by the fast path, with its byte offset in the original
 /// source (used to merge with pest's statements in source order).
 #[derive(Debug)]
-pub(crate) struct FastFact {
+pub(crate) struct FastFact<'a> {
+    /// Byte offset of the fact's first byte in the original source.
     pub offset: usize,
-    pub rule: AstRule,
+    /// The fact; symbol terms are placeholders until [`FastFact::into_rule`].
+    rule: AstRule,
+    /// `(term index, symbol text)` for every symbol term of the head, interned
+    /// only when the fact is merged so that interning order is source order.
+    symbols: Vec<(usize, &'a str)>,
+}
+
+impl FastFact<'_> {
+    /// Finish the fact: intern its symbols (now, in merge order) and return it.
+    pub(crate) fn into_rule(self) -> AstRule {
+        let mut rule = self.rule;
+        for (index, text) in self.symbols {
+            rule.head.terms[index] = Term::Symbol(symbol::intern(text));
+        }
+        rule
+    }
 }
 
 /// Result of scanning a source text.
 #[derive(Debug, Default)]
-pub(crate) struct FactScan {
+pub(crate) struct FactScan<'a> {
     /// Facts handled here, in source order.
-    pub facts: Vec<FastFact>,
-    /// The source with those facts cut out, for pest.
+    pub facts: Vec<FastFact<'a>>,
+    /// The source with those facts blanked out, for pest. Same length as the
+    /// source, so offsets coincide. Empty when no fact was recognised.
     pub residual: String,
-    /// `(residual_offset, original_offset)` for every copied segment, in order,
-    /// so a pest span start inside `residual` maps back to the original.
-    pub segments: Vec<(usize, usize)>,
-}
-
-impl FactScan {
-    /// Map a byte offset inside `residual` back to the original source.
-    pub(crate) fn original_offset(&self, residual_offset: usize) -> usize {
-        let idx = self
-            .segments
-            .partition_point(|(res_start, _)| *res_start <= residual_offset);
-        let (res_start, orig_start) = self.segments[idx.saturating_sub(1)];
-        orig_start + (residual_offset - res_start)
-    }
+    /// Bytes occupied by the recognised facts (what pest does not re-parse).
+    pub fact_bytes: usize,
 }
 
 /// Statement-start predicates the grammar treats specially (they come before
@@ -135,6 +155,12 @@ fn skip_statement(src: &[u8], mut pos: usize) -> usize {
         }
         match b {
             b'"' => in_string = true,
+            // The univ operator `=..` is the one token besides float/prob
+            // literals that contains `.`: neither dot is a terminator.
+            b'=' if pos + 2 < src.len() && src[pos + 1] == b'.' && src[pos + 2] == b'.' => {
+                pos += 3;
+                continue;
+            }
             b'/' if pos + 1 < src.len() && src[pos + 1] == b'/' => {
                 while pos < src.len() && src[pos] != b'\n' {
                     pos += 1;
@@ -158,8 +184,8 @@ fn skip_statement(src: &[u8], mut pos: usize) -> usize {
 }
 
 /// Try to recognise a simple ground fact starting exactly at `start`.
-/// Returns the rule and the offset just past its terminating `.`.
-fn try_fact(source: &str, start: usize) -> Option<(AstRule, usize)> {
+/// Returns the fact and the offset just past its terminating `.`.
+fn try_fact(source: &str, start: usize) -> Option<(FastFact<'_>, usize)> {
     let src = source.as_bytes();
     let mut pos = start;
     if pos >= src.len() || !is_ident_start(src[pos]) {
@@ -178,13 +204,20 @@ fn try_fact(source: &str, start: usize) -> Option<(AstRule, usize)> {
     }
     pos += 1;
     let mut terms = Vec::new();
+    let mut symbols = Vec::new();
     pos = skip_ws(src, pos);
     if pos < src.len() && src[pos] == b')' {
         pos += 1;
     } else {
         loop {
             let (term, next) = try_term(source, pos)?;
-            terms.push(term);
+            match term {
+                FastTerm::Term(term) => terms.push(term),
+                FastTerm::Symbol(text) => {
+                    symbols.push((terms.len(), text));
+                    terms.push(Term::Symbol(0));
+                }
+            }
             pos = skip_ws(src, next);
             match src.get(pos) {
                 Some(b',') => {
@@ -202,33 +235,46 @@ fn try_fact(source: &str, start: usize) -> Option<(AstRule, usize)> {
     if pos >= src.len() || src[pos] != b'.' {
         return None;
     }
-    let rule = AstRule {
-        head: Atom {
-            predicate: predicate.to_string(),
-            terms,
+    let fact = FastFact {
+        offset: start,
+        rule: AstRule {
+            head: Atom {
+                predicate: predicate.to_string(),
+                terms,
+            },
+            body: vec![],
         },
-        body: vec![],
+        symbols,
     };
-    Some((rule, pos + 1))
+    Some((fact, pos + 1))
+}
+
+/// A recognised term: either final, or a symbol whose interning is deferred.
+enum FastTerm<'a> {
+    Term(Term),
+    Symbol(&'a str),
 }
 
 /// Recognise one simple term at `pos`: variable, `_`, integer, float, string
 /// literal or symbol. Returns the term and the offset just past it. Anything
 /// else (compound, list, cons, comment, ...) returns `None`.
-fn try_term(source: &str, pos: usize) -> Option<(Term, usize)> {
+fn try_term(source: &str, pos: usize) -> Option<(FastTerm<'_>, usize)> {
     let src = source.as_bytes();
     let b = *src.get(pos)?;
     if b == b'_' {
         // `anonymous` is exactly "_"; the caller then requires `,` or `)`,
         // which rejects `_foo` just like the grammar does.
-        return Some((Term::Anonymous, pos + 1));
+        return Some((FastTerm::Term(Term::Anonymous), pos + 1));
     }
     if b.is_ascii_uppercase() {
         let mut end = pos + 1;
         while end < src.len() && is_ident_continue(src[end]) {
             end += 1;
         }
-        return Some((Term::Variable(source[pos..end].to_string()), end));
+        return Some((
+            FastTerm::Term(Term::Variable(source[pos..end].to_string())),
+            end,
+        ));
     }
     if b == b'-' || b.is_ascii_digit() {
         let mut end = pos;
@@ -249,15 +295,18 @@ fn try_term(source: &str, pos: usize) -> Option<(Term, usize)> {
                 end += 1;
             }
             let val: f64 = source[pos..end].parse().ok()?;
-            return Some((Term::Float(val), end));
+            return Some((FastTerm::Term(Term::Float(val)), end));
         }
         let val: i64 = source[pos..end].parse().ok()?;
-        return Some((Term::Integer(val), end));
+        return Some((FastTerm::Term(Term::Integer(val)), end));
     }
     if b == b'"' {
         let rel = src[pos + 1..].iter().position(|&c| c == b'"')?;
         let end = pos + 1 + rel;
-        return Some((Term::String(source[pos + 1..end].to_string()), end + 1));
+        return Some((
+            FastTerm::Term(Term::String(source[pos + 1..end].to_string())),
+            end + 1,
+        ));
     }
     if is_ident_start(b) {
         let mut end = pos + 1;
@@ -269,40 +318,63 @@ fn try_term(source: &str, pos: usize) -> Option<(Term, usize)> {
         if after < src.len() && src[after] == b'(' {
             return None;
         }
-        return Some((Term::Symbol(symbol::intern(&source[pos..end])), end));
+        return Some((FastTerm::Symbol(&source[pos..end]), end));
     }
     None
 }
 
+/// Append `source[start..end]` to the residual with every byte blanked to a
+/// space, newlines kept (line numbers in pest diagnostics stay intact).
+fn push_blanked(residual: &mut String, source: &str, start: usize, end: usize) {
+    const SPACES: &str = "                                                                ";
+    for line in source[start..end].split_inclusive('\n') {
+        let (body, newline) = match line.strip_suffix('\n') {
+            Some(body) => (body, true),
+            None => (line, false),
+        };
+        let mut remaining = body.len();
+        while remaining > 0 {
+            let chunk = remaining.min(SPACES.len());
+            residual.push_str(&SPACES[..chunk]);
+            remaining -= chunk;
+        }
+        if newline {
+            residual.push('\n');
+        }
+    }
+}
+
 /// Scan `source`, extracting simple ground facts and producing the residual.
-pub(crate) fn scan(source: &str) -> FactScan {
+pub(crate) fn scan(source: &str) -> FactScan<'_> {
     let src = source.as_bytes();
     let mut out = FactScan::default();
     let mut pos = 0usize;
-    let mut seg_start = 0usize;
+    // Start of the source run not yet copied into the residual. The residual
+    // is only materialised once the first fact is found, so programs without
+    // simple facts pay for the scan but not for a copy of their source.
+    let mut copied_to = 0usize;
     while pos < src.len() {
         let stmt_start = skip_ws_and_comments(src, pos);
         if stmt_start >= src.len() {
             break;
         }
-        if let Some((rule, end)) = try_fact(source, stmt_start) {
-            if stmt_start > seg_start {
-                out.segments.push((out.residual.len(), seg_start));
-                out.residual.push_str(&source[seg_start..stmt_start]);
+        if let Some((fact, end)) = try_fact(source, stmt_start) {
+            if out.facts.is_empty() {
+                out.residual.reserve(source.len());
             }
-            out.facts.push(FastFact {
-                offset: stmt_start,
-                rule,
-            });
-            seg_start = end;
+            out.residual.push_str(&source[copied_to..stmt_start]);
+            push_blanked(&mut out.residual, source, stmt_start, end);
+            out.fact_bytes += end - stmt_start;
+            out.facts.push(fact);
+            copied_to = end;
             pos = end;
         } else {
             pos = skip_statement(src, stmt_start);
         }
     }
-    if seg_start < src.len() {
-        out.segments.push((out.residual.len(), seg_start));
-        out.residual.push_str(&source[seg_start..]);
+    if !out.facts.is_empty() {
+        out.residual.push_str(&source[copied_to..]);
+        debug_assert_eq!(out.residual.len(), source.len());
     }
     out
 }
@@ -316,9 +388,10 @@ mod tests {
         let src = "p(1, -2, 3.5, \"s\", sym, X, _).\nq(X) :- p(X, _, _, _, _, _, _).\nr().\n";
         let scan = scan(src);
         assert_eq!(scan.facts.len(), 2);
-        assert_eq!(scan.facts[0].rule.head.predicate, "p");
+        let facts: Vec<AstRule> = scan.facts.into_iter().map(FastFact::into_rule).collect();
+        assert_eq!(facts[0].head.predicate, "p");
         assert_eq!(
-            scan.facts[0].rule.head.terms,
+            facts[0].head.terms,
             vec![
                 Term::Integer(1),
                 Term::Integer(-2),
@@ -329,7 +402,8 @@ mod tests {
                 Term::Anonymous,
             ]
         );
-        assert_eq!(scan.facts[1].rule.head.predicate, "r");
+        assert_eq!(facts[1].head.predicate, "r");
+        assert_eq!(scan.residual.len(), src.len());
         assert_eq!(scan.residual.trim(), "q(X) :- p(X, _, _, _, _, _, _).");
     }
 
@@ -348,25 +422,34 @@ mod tests {
         ] {
             let scan = scan(src);
             assert!(scan.facts.is_empty(), "{src:?} should not be fast-pathed");
-            assert_eq!(scan.residual, src);
+            assert!(
+                scan.residual.is_empty(),
+                "no residual is built without facts"
+            );
         }
     }
 
     #[test]
-    fn statement_skipping_respects_strings_comments_and_decimals() {
+    fn statement_skipping_respects_strings_comments_decimals_and_univ() {
         let src = "x(X) :- X > 1.5, y(\"a.b\"). // c.\np(1).";
-        let scan = scan(src);
-        assert_eq!(scan.facts.len(), 1);
-        assert_eq!(scan.facts[0].offset, src.find("p(1)").unwrap());
+        let first = scan(src);
+        assert_eq!(first.facts.len(), 1);
+        assert_eq!(first.facts[0].offset, src.find("p(1)").unwrap());
+
+        // `=..` is one token: its dots are not terminators, so `f(1)` below is
+        // the univ's right-hand side, not a fact.
+        let src = "r(X) :- X =.. f(1).\nq(g(1)).";
+        let second = scan(src);
+        assert!(second.facts.is_empty(), "{:?}", second.facts);
     }
 
     #[test]
-    fn offsets_map_back_to_the_original() {
-        let src = "a(1). q(X) :- a(X). b(2). r(Y) :- b(Y).";
+    fn blanking_keeps_offsets_and_never_fuses_neighbours() {
+        let src = "u(X) :- X > 1.nn(1).0.5::c(1).";
         let scan = scan(src);
-        let q = scan.residual.find("q(X)").unwrap();
-        let r = scan.residual.find("r(Y)").unwrap();
-        assert_eq!(scan.original_offset(q), src.find("q(X)").unwrap());
-        assert_eq!(scan.original_offset(r), src.find("r(Y)").unwrap());
+        assert_eq!(scan.facts.len(), 1);
+        assert_eq!(scan.residual.len(), src.len());
+        assert_eq!(scan.residual, "u(X) :- X > 1.      0.5::c(1).");
+        assert_eq!(scan.fact_bytes, "nn(1).".len());
     }
 }

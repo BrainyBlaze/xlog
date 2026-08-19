@@ -48,7 +48,7 @@ pub fn parse_program_reference(input: &str) -> Result<Program> {
 pub struct FastParseStats {
     /// Facts built without pest.
     pub fast_facts: usize,
-    /// Bytes of source handed to pest (the residual).
+    /// Bytes of source pest still had to parse (everything but the facts).
     pub residual_bytes: usize,
     /// The residual failed to parse/build, so the whole source was re-parsed by
     /// the reference parser (its result is what was returned).
@@ -68,13 +68,13 @@ pub fn parse_program_with_stats(input: &str) -> Result<(Program, FastParseStats)
     }
     let mut stats = FastParseStats {
         fast_facts: scan.facts.len(),
-        residual_bytes: scan.residual.len(),
+        residual_bytes: input.len() - scan.fact_bytes,
         fell_back: false,
     };
     let facts = std::mem::take(&mut scan.facts);
     let merged = XlogParser::parse(Rule::program, &scan.residual)
         .map_err(|e| XlogError::Parse(e.to_string()))
-        .and_then(|pairs| build_program_merged(pairs, facts, &scan));
+        .and_then(|pairs| build_program_merged(pairs, facts));
     match merged {
         Ok(program) => Ok((program, stats)),
         Err(_) => {
@@ -102,11 +102,13 @@ pub fn parse_atom(input: &str) -> Result<ParseResult<'_>> {
 
 /// Build a Program AST from the pest pairs of the residual source plus the
 /// fast-path facts, interleaved in original source order (statement order is
-/// semantically relevant: it fixes rule order and therefore the plan).
+/// semantically relevant: it fixes rule order and therefore the plan). The
+/// residual has the facts blanked out, so pest's span offsets are original
+/// offsets. Facts intern their symbols here, in merge order, so interning
+/// order is source order exactly as in the reference parser.
 fn build_program_merged(
     pairs: ParseResult<'_>,
-    facts: Vec<crate::fact_fast_path::FastFact>,
-    scan: &crate::fact_fast_path::FactScan,
+    facts: Vec<crate::fact_fast_path::FastFact<'_>>,
 ) -> Result<Program> {
     let mut program = Program::new();
     let mut facts = facts.into_iter().peekable();
@@ -118,15 +120,15 @@ fn build_program_merged(
             if inner.as_rule() != Rule::statement {
                 continue;
             }
-            let stmt_offset = scan.original_offset(inner.as_span().start());
+            let stmt_offset = inner.as_span().start();
             while let Some(fact) = facts.next_if(|fact| fact.offset < stmt_offset) {
-                program.rules.push(fact.rule);
+                program.rules.push(fact.into_rule());
             }
             build_statement(inner, &mut program)?;
         }
     }
     for fact in facts {
-        program.rules.push(fact.rule);
+        program.rules.push(fact.into_rule());
     }
     Ok(program)
 }
