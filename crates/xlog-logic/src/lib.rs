@@ -36,6 +36,7 @@ pub mod diagnostics;
 pub mod eir;
 pub mod epistemic;
 pub mod expand;
+mod fact_fast_path;
 pub mod function;
 pub mod ground_term_encoding;
 pub mod hypergraph;
