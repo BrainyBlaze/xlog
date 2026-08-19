@@ -751,7 +751,14 @@ impl ListNormalizer {
             }
         }
 
-        for (op, elem_type, ids) in self.operation_rows.clone() {
+        // Deterministic emission order: `operation_rows` is a HashSet, so
+        // iterating it directly would make helper-fact order (and with it
+        // relation numbering in the plan) vary between processes.
+        let mut operation_rows: Vec<(ListOp, ScalarType, Vec<u64>)> =
+            self.operation_rows.iter().cloned().collect();
+        operation_rows
+            .sort_by_key(|(op, elem_type, ids)| (*op as u8, *elem_type as u8, ids.clone()));
+        for (op, elem_type, ids) in operation_rows {
             let pred = match op {
                 ListOp::Append => append_pred(elem_type),
                 ListOp::Sort => sort_pred(elem_type),
@@ -807,7 +814,11 @@ impl ListNormalizer {
             .map(|pred| pred.name.clone())
             .collect();
 
-        for pred in &self.helper_preds {
+        // Sorted for a process-independent declaration order (see
+        // `append_helper_declarations_and_facts`).
+        let mut helper_preds: Vec<&String> = self.helper_preds.iter().collect();
+        helper_preds.sort();
+        for pred in helper_preds {
             if existing.contains(pred) {
                 continue;
             }

@@ -85,3 +85,36 @@ fn stratify_output_is_deterministic_within_process() {
     assert_eq!(first, second, "stratify output differs between runs");
     assert_eq!(second, third, "stratify output differs between runs");
 }
+
+/// List programs add helper relations (`__xlog_list_*`) in the list
+/// normalizer; their declaration and helper-fact order used to follow HashSet
+/// iteration, so relation numbering varied per compile.
+fn list_program() -> String {
+    let mut s = String::new();
+    s.push_str("pred bag(id: u32, xs: list<u32>).\n");
+    for i in 0..12 {
+        s.push_str(&format!("bag({i}, [{}, {}, {}]).\n", i, i + 1, i + 2));
+    }
+    s.push_str("head_tail(Id, H, T) :- bag(Id, [H | T]).\n");
+    s.push_str("sorted(L) :- sort([30, 10, 20, 10], L).\n");
+    s.push_str("joined(L) :- append([1], [2, 3], L).\n");
+    s.push_str("as_set(L) :- list_to_set([3, 1, 3], L).\n");
+    s.push_str("ms(L) :- msort([3, 1, 2], L).\n");
+    s
+}
+
+#[test]
+fn list_program_compile_output_is_deterministic_within_process() {
+    let src = list_program();
+    let first = concrete_plan_rendering(&src);
+    let second = concrete_plan_rendering(&src);
+    let third = concrete_plan_rendering(&src);
+    assert_eq!(
+        first, second,
+        "list program compile output differs between runs"
+    );
+    assert_eq!(
+        second, third,
+        "list program compile output differs between runs"
+    );
+}
