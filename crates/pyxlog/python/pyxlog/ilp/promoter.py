@@ -389,10 +389,13 @@ def _scan_ambiguity(
 
         trial_source = _commit_rule(source, mask_name, rule_str)
         try:
-            trial = pyxlog.IlpProgramFactory.compile(
-                trial_source, device=config.device, memory_mb=config.memory_mb,
-            )
-            trial.evaluate()
+            # Variant of `prog`: compiled on the program's existing CUDA
+            # provider instead of standing up a new one. The budget is shared,
+            # so release the previous candidate's program first.
+            trial = None
+            trial = prog.compile_variant(trial_source)
+            # No evaluate(): compile already executed the plan; evaluate() on a
+            # fresh program only reloads the same facts and re-runs the same plan.
 
             all_pos = all(trial.fact_exists(r, v) for r, v in positives)
             no_neg = not any(trial.fact_exists(r, v) for r, v in negatives)

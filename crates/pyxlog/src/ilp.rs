@@ -5,6 +5,7 @@
 use std::collections::HashMap as StdHashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -476,73 +477,117 @@ impl IlpProgramFactory {
             }
         }
 
-        let ast = xlog_logic::parse_program(source).map_err(types::val_err)?;
-
-        let base_source = strip_learnable_declarations(source);
-        let learnable_source = extract_learnable_declarations(source);
-
-        let mut compiler = xlog_logic::Compiler::new();
-        if let Some(max) = max_active_rules {
-            compiler.set_max_active_rules(max);
-        }
-        let plan = compiler.compile_program(&ast).map_err(types::xlog_err)?;
-
-        let mut rel_index: Vec<(RelId, String)> = compiler
-            .rel_ids()
-            .iter()
-            .map(|(name, id)| (*id, name.clone()))
-            .collect();
-        rel_index.sort_by_key(|(id, _)| id.0);
-        let schemas = compiler.schemas().clone();
-
-        let mut config = GpuConfig::default();
-        config.device_ordinal = device;
-        config.memory_bytes = memory_mb * 1024 * 1024;
-        let provider = Arc::new(provider_from_config(config).map_err(types::xlog_err)?);
-
-        let mut executor = Executor::new(provider.clone());
-
-        for (name, rel_id) in compiler.rel_ids() {
-            executor.register_relation(*rel_id, name);
-        }
-
-        for (name, schema) in &schemas {
-            let empty = provider
-                .create_empty_buffer(schema.clone())
-                .map_err(types::xlog_err)?;
-            executor.store_mut().put(name, empty);
-        }
-
-        load_facts_into_store(&ast, &provider, &mut executor, &schemas).map_err(types::xlog_err)?;
-
-        executor.execute_plan(&plan).map_err(types::xlog_err)?;
-
-        let tmj = extract_tmj_meta(&plan);
-
-        let active_rules = max_active_rules.unwrap_or(32);
-
-        Ok(CompiledIlpProgram {
-            base_source,
-            _learnable_source: learnable_source,
-            ast,
-            executor,
-            provider,
-            plan,
-            rel_index,
-            schemas,
-            left_keys: tmj.left_keys,
-            right_keys: tmj.right_keys,
-            head_projection: tmj.head_projection,
-            compiled_schema_size: tmj.schema_size,
-            head_rel_name: tmj.head_rel_name,
-            max_active_rules: active_rules,
-            candidate_map: None,
-            candidate_order: None,
-            relation_overrides: HashMap::new(),
-            coo_chunk_budget: 16 * 1024 * 1024,
-            strict_zero_dtoh: false,
-        })
+        // The frontend runs before the provider is built, so an unparsable
+        // source still fails with a ValueError without initialising CUDA.
+        build_ilp_program(
+            source,
+            max_active_rules,
+            ProviderFor::New { device, memory_mb },
+        )
     }
+}
+
+/// Where a program being built gets its CUDA provider from.
+enum ProviderFor {
+    /// Build a new provider (and pay for a fresh CUDA context).
+    New { device: usize, memory_mb: u64 },
+    /// Share an existing program's provider.
+    Shared(Arc<CudaKernelProvider>),
+}
+
+fn ms_since(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1000.0
+}
+
+/// Shared body of [`IlpProgramFactory::compile`] and
+/// [`CompiledIlpProgram::compile_variant`].
+fn build_ilp_program(
+    source: &str,
+    max_active_rules: Option<usize>,
+    provider_for: ProviderFor,
+) -> PyResult<CompiledIlpProgram> {
+    let mut timing: Vec<(&'static str, f64)> = Vec::new();
+    let t = Instant::now();
+    let ast = xlog_logic::parse_program(source).map_err(types::val_err)?;
+
+    let base_source = strip_learnable_declarations(source);
+    let learnable_source = extract_learnable_declarations(source);
+
+    let mut compiler = xlog_logic::Compiler::new();
+    if let Some(max) = max_active_rules {
+        compiler.set_max_active_rules(max);
+    }
+    let plan = compiler.compile_program(&ast).map_err(types::xlog_err)?;
+
+    let mut rel_index: Vec<(RelId, String)> = compiler
+        .rel_ids()
+        .iter()
+        .map(|(name, id)| (*id, name.clone()))
+        .collect();
+    rel_index.sort_by_key(|(id, _)| id.0);
+    let schemas = compiler.schemas().clone();
+    timing.push(("frontend", ms_since(t)));
+
+    let t = Instant::now();
+    let provider = match provider_for {
+        ProviderFor::New { device, memory_mb } => {
+            let mut config = GpuConfig::default();
+            config.device_ordinal = device;
+            config.memory_bytes = memory_mb * 1024 * 1024;
+            let provider = Arc::new(provider_from_config(config).map_err(types::xlog_err)?);
+            timing.push(("provider", ms_since(t)));
+            provider
+        }
+        ProviderFor::Shared(provider) => provider,
+    };
+
+    let t = Instant::now();
+    let mut executor = Executor::new(provider.clone());
+
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+
+    for (name, schema) in &schemas {
+        let empty = provider
+            .create_empty_buffer(schema.clone())
+            .map_err(types::xlog_err)?;
+        executor.store_mut().put(name, empty);
+    }
+
+    load_facts_into_store(&ast, &provider, &mut executor, &schemas).map_err(types::xlog_err)?;
+    timing.push(("facts", ms_since(t)));
+
+    let t = Instant::now();
+    executor.execute_plan(&plan).map_err(types::xlog_err)?;
+    timing.push(("execute", ms_since(t)));
+
+    let tmj = extract_tmj_meta(&plan);
+
+    let active_rules = max_active_rules.unwrap_or(32);
+
+    Ok(CompiledIlpProgram {
+        base_source,
+        _learnable_source: learnable_source,
+        ast,
+        executor,
+        provider,
+        plan,
+        rel_index,
+        schemas,
+        left_keys: tmj.left_keys,
+        right_keys: tmj.right_keys,
+        head_projection: tmj.head_projection,
+        compiled_schema_size: tmj.schema_size,
+        head_rel_name: tmj.head_rel_name,
+        max_active_rules: active_rules,
+        candidate_map: None,
+        candidate_order: None,
+        relation_overrides: HashMap::new(),
+        coo_chunk_budget: 16 * 1024 * 1024,
+        strict_zero_dtoh: false,
+        compile_timing: timing,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +596,45 @@ impl IlpProgramFactory {
 
 #[pymethods]
 impl CompiledIlpProgram {
+    /// Compile `source` on this program's CUDA provider instead of a new one.
+    ///
+    /// The result is a separate program with its own relation store, in the
+    /// state `IlpProgramFactory.compile(source, ...)` would produce — the
+    /// frontend runs again, the facts are loaded again and the plan is
+    /// executed once. What is skipped is only the per-compile CUDA provider
+    /// setup (a fresh context, allocator and memory pool). Intended for ILP
+    /// loops that compile many one-rule variants of one program (hold-out
+    /// folds, candidate scans).
+    ///
+    /// Because the provider is shared, so are its device-memory budget
+    /// (`memory_mb` given to the base compile covers this program and every
+    /// variant alive at the same time), its streams and its host-transfer
+    /// counters — `variant.fact_exists()` bumps the counter
+    /// `base.d2h_transfer_count()` reads. Relation overrides uploaded to the
+    /// base with `put_relation` are NOT carried over: the variant sees only
+    /// the facts in `source`. The variant is compiled with the same
+    /// `max_active_rules` as this program.
+    pub fn compile_variant(&self, py: Python<'_>, source: &str) -> PyResult<CompiledIlpProgram> {
+        py.detach(|| {
+            build_ilp_program(
+                source,
+                Some(self.max_active_rules),
+                ProviderFor::Shared(Arc::clone(&self.provider)),
+            )
+        })
+    }
+
+    /// Wall-clock breakdown of the compile that produced this program, in
+    /// milliseconds per phase (`provider`, `frontend`, `facts`, `execute`).
+    /// A variant has no `provider` entry. Phase names are diagnostic and may
+    /// change; do not build on the exact set.
+    pub fn compile_timing_ms(&self) -> StdHashMap<String, f64> {
+        self.compile_timing
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), *v))
+            .collect()
+    }
+
     /// Upload candidate (i,j,k) -> index mapping. Called once per attempt.
     pub fn set_candidate_map(&mut self, candidates: Vec<(u32, u32, u32)>) -> PyResult<()> {
         let mut map = HashMap::with_capacity(candidates.len());

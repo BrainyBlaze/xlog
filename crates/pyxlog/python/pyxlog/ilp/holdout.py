@@ -72,6 +72,10 @@ def loo_holdout_f1(
     fold_f1s: list[float] = []
     pos_set = {(r, tuple(v)) for r, v in positives}
     neg_set = {(r, tuple(v)) for r, v in negatives}
+    # One base compile serves every fold: each trial differs from `source` by
+    # a single committed rule, so it is compiled as a variant that reuses the
+    # base program's CUDA provider and uploaded facts.
+    base: pyxlog.CompiledIlpProgram | None = None
 
     for i in range(len(positives)):
         train_pos = positives[:i] + positives[i + 1:]
@@ -84,10 +88,16 @@ def loo_holdout_f1(
 
         trial_source = _commit_rule(source, mask_name, result.discovered_rule)
         try:
-            trial = pyxlog.IlpProgramFactory.compile(
-                trial_source, device=config.device, memory_mb=config.memory_mb,
-            )
-            trial.evaluate()
+            if base is None:
+                base = pyxlog.IlpProgramFactory.compile(
+                    source, device=config.device, memory_mb=config.memory_mb,
+                )
+            # Variants share the base program's device-memory budget, so free
+            # the previous fold's program before allocating the next one.
+            trial = None
+            trial = base.compile_variant(trial_source)
+            # No evaluate(): compile already executed the plan; evaluate() on a
+            # fresh program only reloads the same facts and re-runs the same plan.
         except Exception:
             fold_f1s.append(0.0)
             continue
@@ -136,6 +146,8 @@ def k_fold_holdout_f1_and_variance(
     folds = [shuffled_idx[i::k] for i in range(k)]
 
     fold_f1s: list[float] = []
+    # See loo_holdout_f1: one base compile, per-fold trials as variants.
+    base: pyxlog.CompiledIlpProgram | None = None
     for fold in folds:
         if not fold:
             continue
@@ -155,10 +167,16 @@ def k_fold_holdout_f1_and_variance(
 
         try:
             trial_source = _commit_rule(source, mask_name, result.discovered_rule)
-            trial = pyxlog.IlpProgramFactory.compile(
-                trial_source, device=config.device, memory_mb=config.memory_mb,
-            )
-            trial.evaluate()
+            if base is None:
+                base = pyxlog.IlpProgramFactory.compile(
+                    source, device=config.device, memory_mb=config.memory_mb,
+                )
+            # Variants share the base program's device-memory budget, so free
+            # the previous fold's program before allocating the next one.
+            trial = None
+            trial = base.compile_variant(trial_source)
+            # No evaluate(): compile already executed the plan; evaluate() on a
+            # fresh program only reloads the same facts and re-runs the same plan.
         except Exception:
             fold_f1s.append(0.0)
             continue

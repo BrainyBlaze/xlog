@@ -1230,6 +1230,34 @@ class CompiledIlpProgram:
     """A compiled GPU-resident ILP program."""
 
     # ------------------------------------------------------------------
+    # Variants / diagnostics
+    # ------------------------------------------------------------------
+
+    def compile_variant(self, source: str) -> CompiledIlpProgram:
+        """Compile ``source`` on this program's CUDA provider instead of a new one.
+
+        The result is a separate program with its own relation store, in the
+        state ``IlpProgramFactory.compile(source, ...)`` would produce; only
+        the per-compile CUDA provider setup is skipped.
+
+        Because the provider is shared, so are its device-memory budget, its
+        streams and its host-transfer counters (a variant's ``fact_exists``
+        bumps the counter this program's ``d2h_transfer_count`` reads).
+        Relation overrides uploaded with ``put_relation`` are NOT carried over.
+        The variant uses this program's ``max_active_rules``.
+        """
+        ...
+
+    def compile_timing_ms(self) -> dict[str, float]:
+        """Wall-clock breakdown of the compile that produced this program.
+
+        Keys: ``provider`` (absent for variants), ``frontend``, ``facts``,
+        ``execute``; values in milliseconds. Diagnostic only — the set of
+        phase names may change.
+        """
+        ...
+
+    # ------------------------------------------------------------------
     # Candidate management
     # ------------------------------------------------------------------
 

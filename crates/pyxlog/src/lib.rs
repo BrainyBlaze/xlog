@@ -853,6 +853,8 @@ pub struct CompiledIlpProgram {
     /// When true, raise instead of falling back to chunked COO path.
     /// Use in zero-D2H benchmarks and CI gates. Default: false.
     pub(crate) strict_zero_dtoh: bool,
+    /// Per-phase wall-clock of the compile that built this program (ms).
+    pub(crate) compile_timing: Vec<(&'static str, f64)>,
 }
 
 #[pymodule]
