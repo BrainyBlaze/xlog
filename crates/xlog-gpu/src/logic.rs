@@ -987,8 +987,10 @@ impl LogicProgram {
             )?
         } else {
             let mut compiler = Compiler::new();
-            let compiler_program = qualify_same_name_multi_arity_program(&normalized);
-            let plan = compiler.compile_prepared_program(&compiler_program)?;
+            let plan = match qualify_same_name_multi_arity_program(&normalized) {
+                Some(qualified) => compiler.compile_prepared_program(&qualified)?,
+                None => compiler.compile_prepared_program(&normalized)?,
+            };
             let mut schemas = compiler.schemas().clone();
             augment_same_name_multi_arity_schemas(&normalized, &mut schemas)?;
             Self {
@@ -4275,10 +4277,10 @@ pub fn normalize_program_for_execution(mut program: Program) -> Result<Program> 
         program.prepare_authored_constraint_identity_at_root()?;
     }
     let max_recursion = program.directives.max_recursion_depth_or_default();
-    let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
+    let expanded = xlog_logic::expand_program_functions_owned(program, max_recursion)
         .map_err(|e| XlogError::Compilation(e.to_string()))?;
-    let normalized = xlog_logic::normalize_meta_builtins(&expanded)?;
-    let listed = xlog_logic::normalize_list_builtins(&normalized)?;
+    let normalized = xlog_logic::normalize_meta_builtins_owned(expanded)?;
+    let listed = xlog_logic::normalize_list_builtins_owned(normalized)?;
     Ok(desugar_shared_variable_epistemic_constraints(listed))
 }
 
@@ -4922,13 +4924,15 @@ fn augment_same_name_multi_arity_schemas(
     Ok(())
 }
 
-fn qualify_same_name_multi_arity_program(program: &Program) -> Program {
+/// Arity-qualify same-name multi-arity predicates; `None` when the program has
+/// no such overloads (the caller then compiles `program` itself, unchanged).
+fn qualify_same_name_multi_arity_program(program: &Program) -> Option<Program> {
     let overloaded = predicate_arities(program)
         .into_iter()
         .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
         .collect::<BTreeSet<_>>();
     if overloaded.is_empty() {
-        return program.clone();
+        return None;
     }
 
     let mut qualified = program.clone();
@@ -4947,7 +4951,7 @@ fn qualify_same_name_multi_arity_program(program: &Program) -> Program {
     for query in &mut qualified.queries {
         qualify_atom_arity(&mut query.atom, &overloaded);
     }
-    qualified
+    Some(qualified)
 }
 
 fn qualify_body_literal_arities(literals: &mut [BodyLiteral], overloaded: &BTreeSet<String>) {
