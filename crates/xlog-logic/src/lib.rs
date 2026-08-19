@@ -72,14 +72,16 @@ pub use diagnostics::{
     RuleSourceKind,
 };
 pub use eir::build_eir;
-pub use expand::expand_program_functions;
+pub use expand::{expand_program_functions, expand_program_functions_owned};
 pub use incremental_parse::{
     IncrementalParseResult, ParseCacheStats, ParserSession, StatementSpan, StatementUnit,
 };
-pub use list_normalize::normalize_list_builtins;
+pub use list_normalize::{normalize_list_builtins, normalize_list_builtins_owned};
 pub use lower::Lowerer;
-pub use magic_sets::{rewrite_magic_sets, MagicSetReport, MagicSetRewrite, MagicSetStatus};
-pub use meta_normalize::normalize_meta_builtins;
+pub use magic_sets::{
+    rewrite_magic_sets, rewrite_magic_sets_owned, MagicSetReport, MagicSetRewrite, MagicSetStatus,
+};
+pub use meta_normalize::{normalize_meta_builtins, normalize_meta_builtins_owned};
 pub use module_diagnostics::{
     diagnose_module_boundaries, CandidateSourceKind, ModuleBoundaryInput, ModuleBoundaryReport,
     ModuleDeclaration, ModuleDeclarationKind, ModuleManifest, ModuleRole, ModuleViolation,

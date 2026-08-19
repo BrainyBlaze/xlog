@@ -967,7 +967,26 @@ pub fn expand_program_functions(
     if program.functions.is_empty() {
         return Ok(program.clone());
     }
+    expand_program_functions_impl(program, max_depth)
+}
 
+/// [`expand_program_functions`] taking the program by value: without function
+/// definitions (the common, fact-heavy case) the program is returned as is,
+/// without a clone.
+pub fn expand_program_functions_owned(
+    program: Program,
+    max_depth: u32,
+) -> Result<Program, FunctionError> {
+    if program.functions.is_empty() {
+        return Ok(program);
+    }
+    expand_program_functions_impl(&program, max_depth)
+}
+
+fn expand_program_functions_impl(
+    program: &Program,
+    max_depth: u32,
+) -> Result<Program, FunctionError> {
     let mut registry = FunctionRegistry::new();
     for function in &program.functions {
         registry.register(function.clone())?;
