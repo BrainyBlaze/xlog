@@ -210,11 +210,7 @@ impl Compiler {
         program: &Program,
     ) -> Result<()> {
         program.validate_prepared_authored_constraint_identity()?;
-        let program = desugar_queries_and_constraints(program.clone())?;
-        let program = normalize_meta_builtins_owned(program)?;
-        let program = normalize_list_builtins_owned(program)?;
-        let program = rewrite_magic_sets_owned(program)?.program;
-        validate_negation_safety(&program)?;
+        let program = run_frontend_passes(program.clone())?;
         self.lowerer.validate_program_without_plan(&program)
     }
 
@@ -284,11 +280,7 @@ impl Compiler {
     ) -> Result<ExecutionPlan> {
         program.validate_prepared_authored_constraint_identity()?;
         let generated_query_heads = generated_query_heads_for_program(&program)?;
-        let program = desugar_queries_and_constraints(program)?;
-        let program = normalize_meta_builtins_owned(program)?;
-        let program = normalize_list_builtins_owned(program)?;
-        let program = rewrite_magic_sets_owned(program)?.program;
-        validate_negation_safety(&program)?;
+        let program = run_frontend_passes(program)?;
 
         // Phase 2: Stratify (analyze dependencies, detect cycles)
         let strata = stratify(&program).map_err(map_stratification_to_naf_error)?;
@@ -585,6 +577,18 @@ fn generated_query_heads_for_program(program: &Program) -> Result<Vec<String>> {
             Ok(generated_head)
         })
         .collect()
+}
+
+/// The source-level frontend passes shared by compilation and validation:
+/// desugar queries/constraints → meta normalization → list normalization →
+/// magic sets → negation-safety check. All by value, no AST clones.
+fn run_frontend_passes(program: Program) -> Result<Program> {
+    let program = desugar_queries_and_constraints(program)?;
+    let program = normalize_meta_builtins_owned(program)?;
+    let program = normalize_list_builtins_owned(program)?;
+    let program = rewrite_magic_sets_owned(program)?.program;
+    validate_negation_safety(&program)?;
+    Ok(program)
 }
 
 fn desugar_queries_and_constraints(program: Program) -> Result<Program> {

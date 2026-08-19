@@ -956,7 +956,7 @@ impl MetaNormalizer {
                 is_private: true,
             });
         }
-        program.rules.extend(self.helper_facts.clone());
+        program.rules.extend(std::mem::take(&mut self.helper_facts));
     }
 
     fn append_term_helper_facts(&mut self) {

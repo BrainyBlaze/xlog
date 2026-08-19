@@ -756,8 +756,9 @@ impl ListNormalizer {
         // relation numbering in the plan) vary between processes.
         let mut operation_rows: Vec<(ListOp, ScalarType, Vec<u64>)> =
             self.operation_rows.iter().cloned().collect();
-        operation_rows
-            .sort_by_key(|(op, elem_type, ids)| (*op as u8, *elem_type as u8, ids.clone()));
+        operation_rows.sort_unstable_by(|a, b| {
+            (a.0 as u8, a.1 as u8, &a.2).cmp(&(b.0 as u8, b.1 as u8, &b.2))
+        });
         for (op, elem_type, ids) in operation_rows {
             let pred = match op {
                 ListOp::Append => append_pred(elem_type),
