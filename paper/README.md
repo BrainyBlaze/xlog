@@ -30,7 +30,7 @@ make figures
 | `main.tex` | Preamble + `\input{sections/*}` |
 | `arxiv.sty` | Vendored arXiv-style preamble |
 | `refs.bib` | Bibliography (biblatex) |
-| `sections/*.tex` | One file per whitepaper section (abstract, intro, architecture, language, Datalog evaluation, probabilistic, neural-symbolic, epistemic, evaluation, related work, limitations) |
+| `sections/*.tex` | One file per whitepaper section (abstract, intro, architecture, language, Datalog evaluation, probabilistic, neural-symbolic, Event-Calculus induction on CAVIAR, maritime rule induction at scale, epistemic, evaluation, related work, limitations) |
 | `figures/make_results.py` | Renders `figures/results.pdf` from benchmark values encoded in the script |
 | `artifacts/head-to-head/` | Benchmark measurement JSONs + runner scripts backing the evaluation section |
 | `latexmkrc` / `Makefile` | Build automation |
