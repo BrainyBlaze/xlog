@@ -102,6 +102,15 @@ fn validate_all_ptx_files_load_and_resolve_all_entry_points() {
             target
         );
 
+        for declared_kernel in spec.kernels {
+            assert!(
+                entries.iter().any(|entry| entry == declared_kernel),
+                "{}: manifest declares missing PTX entry {}",
+                filename,
+                declared_kernel
+            );
+        }
+
         let mut seen = HashSet::new();
         for e in &entries {
             assert!(

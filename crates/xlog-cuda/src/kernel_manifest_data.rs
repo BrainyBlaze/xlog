@@ -598,8 +598,13 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
         kernels: &[
             "joint_label_feasibility",
             "joint_label_top2",
+            "joint_component_plan_init",
+            "joint_component_entity_owners",
+            "joint_component_union",
+            "joint_component_compress",
             "joint_component_enumerate",
-            "joint_label_memoized",
+            "joint_component_chain_dp",
+            "joint_component_branch_and_bound",
         ],
     },
     KernelModuleSpec {

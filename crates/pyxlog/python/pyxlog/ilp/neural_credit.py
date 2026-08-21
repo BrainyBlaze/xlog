@@ -26,17 +26,16 @@ from pyxlog.ilp.join_bodies import (
 class NeuralRelationSpec:
     """Registration metadata for one neural relation (typed registry).
 
-    ``num_rows`` is the feature-tensor row count -- the witness domain size the
-    dense-identity law checks against. ``arity`` is the DECLARED relation arity:
-    the engine-mode credit scores the chain template's binary ``R(Z, Y)`` only,
-    so anything but 2 is refused at enumeration -- the pool is validated against
-    this registry, never trusted by name convention. ``arg_sorts`` optionally
-    names the argument domains (length must equal ``arity``); IN THIS PHASE
-    nothing here reads the sorts -- like ``artifact_hash`` they are carried for
-    consumer-side validation only, and slot sort-matching at enumeration is
-    future surface, not a check you can rely on today. ``artifact_hash`` is an
-    opaque content hash of the detector artifact, carried for consumer-side
-    validation and never interpreted here.
+    ``num_rows`` is the feature-tensor row count. The legacy chain/star modes
+    retain their dense binary identity contract. A generic ``RuleTemplateSpec``
+    instead requires ``groundings``: one relation tuple per feature row, making
+    arbitrary arity explicit rather than guessing a constant-to-row mapping.
+    ``output_column`` fixes the scorer column used by that relation. Both fields
+    must be supplied together and are ignored nowhere.
+
+    ``arg_sorts`` optionally names the argument domains (length must equal
+    ``arity``). ``artifact_hash`` is an opaque content hash of the detector
+    artifact, carried for consumer-side validation and never interpreted here.
 
     A plain ``int`` in ``neural_relations`` remains valid shorthand for
     ``NeuralRelationSpec(num_rows=that_int)``.
@@ -46,27 +45,197 @@ class NeuralRelationSpec:
     arity: int = 2
     arg_sorts: tuple | None = None
     artifact_hash: str | None = None
+    groundings: tuple[tuple[int, ...], ...] | None = None
+    output_column: int | None = None
+    decision_threshold: float = 0.5
 
     def __post_init__(self) -> None:
-        if self.num_rows <= 0:
+        if (
+            isinstance(self.num_rows, bool)
+            or not isinstance(self.num_rows, int)
+            or self.num_rows <= 0
+        ):
             raise ValueError(
                 f"num_rows={self.num_rows}: a neural relation needs at least "
-                "one feature row."
+                "one feature row expressed as a positive integer."
             )
+        if (
+            isinstance(self.arity, bool)
+            or not isinstance(self.arity, int)
+            or self.arity <= 0
+        ):
+            raise ValueError(
+                f"arity={self.arity}: a neural relation needs a positive "
+                "integer argument count."
+            )
+        if self.arg_sorts is not None and not isinstance(self.arg_sorts, tuple):
+            raise ValueError("arg_sorts must be an immutable tuple when supplied.")
         if self.arg_sorts is not None and len(self.arg_sorts) != self.arity:
             raise ValueError(
                 f"arg_sorts has {len(self.arg_sorts)} entries for declared "
                 f"arity {self.arity}; the sorts name the arguments, so the "
                 "lengths must match."
             )
+        if self.artifact_hash is not None and (
+            not isinstance(self.artifact_hash, str)
+            or not self.artifact_hash.strip()
+        ):
+            raise ValueError(
+                "artifact_hash must be a non-empty string when supplied."
+            )
+        if (self.groundings is None) != (self.output_column is None):
+            raise ValueError(
+                "groundings and output_column must be supplied together: the "
+                "first maps tuples to feature rows and the second selects the "
+                "scorer column for those rows."
+            )
+        if self.groundings is not None:
+            if not isinstance(self.groundings, tuple) or any(
+                not isinstance(grounding, tuple)
+                for grounding in self.groundings
+            ):
+                raise ValueError(
+                    "groundings must be an immutable tuple of grounding tuples."
+                )
+            if len(self.groundings) != self.num_rows:
+                raise ValueError(
+                    f"groundings has {len(self.groundings)} tuple(s) for "
+                    f"num_rows={self.num_rows}; generic neural relations require "
+                    "exactly one grounding tuple per feature row."
+                )
+            malformed = [
+                (row, grounding)
+                for row, grounding in enumerate(self.groundings)
+                if len(grounding) != self.arity
+            ]
+            if malformed:
+                row, grounding = malformed[0]
+                raise ValueError(
+                    f"groundings row {row} has arity {len(grounding)} for "
+                    f"declared relation arity {self.arity}: {grounding!r}."
+                )
+            invalid_constant = next(
+                (
+                    (row, column, value)
+                    for row, grounding in enumerate(self.groundings)
+                    for column, value in enumerate(grounding)
+                    if isinstance(value, bool) or not isinstance(value, int)
+                ),
+                None,
+            )
+            if invalid_constant is not None:
+                row, column, value = invalid_constant
+                raise ValueError(
+                    f"groundings[{row}][{column}]={value!r}: integer constants "
+                    "are required and are never coerced during joining."
+                )
+            if len(set(self.groundings)) != len(self.groundings):
+                raise ValueError(
+                    "groundings contains duplicate relation tuples; one tuple "
+                    "cannot name multiple scorer rows without an ambiguous "
+                    "probability mapping."
+                )
+            if (
+                isinstance(self.output_column, bool)
+                or not isinstance(self.output_column, int)
+                or self.output_column < 0
+            ):
+                raise ValueError(
+                    f"output_column={self.output_column!r} must be a "
+                    "non-negative integer."
+                )
+        if (
+            isinstance(self.decision_threshold, bool)
+            or not isinstance(self.decision_threshold, (int, float))
+            or not 0.0 < float(self.decision_threshold) < 1.0
+        ):
+            raise ValueError(
+                "decision_threshold must be a finite probability strictly "
+                "between zero and one."
+            )
 
 
-def _registry(neural_relations):
+@dataclass(frozen=True)
+class RuleTemplateSpec:
+    """A two-atom rule shape whose variables define every join explicitly."""
+
+    head_variables: tuple[int, ...]
+    body_variables: tuple[tuple[int, ...], tuple[int, ...]]
+    catalog_hash: str
+    structural_rule_signature: str
+    context_signature: int | str
+    candidate_manifest_hash: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.head_variables, tuple):
+            raise ValueError("head_variables must be an immutable tuple.")
+        if (
+            not isinstance(self.body_variables, tuple)
+            or len(self.body_variables) != 2
+            or any(
+                not isinstance(variables, tuple)
+                for variables in self.body_variables
+            )
+        ):
+            raise ValueError(
+                "body_variables must be an immutable pair of variable tuples."
+            )
+        invalid_variables = [
+            variable
+            for variables in (self.head_variables, *self.body_variables)
+            for variable in variables
+            if isinstance(variable, bool) or not isinstance(variable, int)
+        ]
+        if invalid_variables:
+            raise ValueError(
+                f"rule variable {invalid_variables[0]!r} must be an integer "
+                "identity."
+            )
+        if not self.head_variables:
+            raise ValueError("head_variables must contain at least one variable.")
+        if any(not variables for variables in self.body_variables):
+            raise ValueError(
+                "body_variables must describe exactly two non-empty body atoms."
+            )
+        body_set = set(self.body_variables[0]) | set(self.body_variables[1])
+        missing = sorted(set(self.head_variables) - body_set)
+        if missing:
+            raise ValueError(
+                f"head variable(s) {missing} do not occur in either body atom; "
+                "their values cannot be derived by this rule."
+            )
+        metadata = {
+            "catalog_hash": self.catalog_hash,
+            "structural_rule_signature": self.structural_rule_signature,
+            "candidate_manifest_hash": self.candidate_manifest_hash,
+        }
+        empty = [name for name, value in metadata.items()
+                 if not isinstance(value, str) or not value.strip()]
+        if empty:
+            raise ValueError(
+                f"rule-template provenance field(s) {empty} must be non-empty "
+                "strings."
+            )
+        if (
+            isinstance(self.context_signature, bool)
+            or not isinstance(self.context_signature, (int, str))
+            or (
+                isinstance(self.context_signature, str)
+                and not self.context_signature.strip()
+            )
+        ):
+            raise ValueError(
+                "context_signature must be a non-empty string or an integer "
+                "for replay identity."
+            )
+
+
+def _registry(neural_relations, *, require_explicit_groundings=False):
     """Normalize ``{name: int | NeuralRelationSpec}`` to specs and validate.
 
     The int shorthand stays byte-compatible with the pre-registry surface.
-    A declared arity other than 2 is refused HERE, for every entry -- a typed
-    registry the candidate pool is checked against, not a name convention."""
+    Legacy mode accepts only its binary implicit row identity. Generic rule
+    templates require an explicit tuple-to-row mapping for every relation."""
     reg = {}
     for name, value in neural_relations.items():
         if isinstance(value, bool) or not isinstance(
@@ -81,11 +250,22 @@ def _registry(neural_relations):
             )
         spec = (NeuralRelationSpec(num_rows=value)
                 if isinstance(value, int) else value)
-        if spec.arity != 2:
+        if require_explicit_groundings and spec.groundings is None:
+            raise ValueError(
+                f"neural relation '{name}' has no explicit groundings/output "
+                "column; a generic rule template cannot infer tuple-to-row "
+                "identity from relation names or constants."
+            )
+        if not require_explicit_groundings and spec.arity != 2:
             raise ValueError(
                 f"neural relation '{name}' declares arity {spec.arity}; the "
                 "engine-mode credit scores the chain template's binary R(Z, Y) "
                 "only, so a non-binary declaration is refused at the registry."
+            )
+        if not require_explicit_groundings and spec.groundings is not None:
+            raise ValueError(
+                f"neural relation '{name}' supplies explicit groundings, but "
+                "no RuleTemplateSpec was supplied to interpret them."
             )
         reg[name] = spec
     return reg
@@ -107,6 +287,17 @@ class CandidateSpec:
     witness_index: JoinExtensionIndex | None
     binary_cover: Any | None
     masked_any: Any | None = None
+    decision_threshold: float = 0.5
+    neural_slot: int | None = None
+    candidate_ordinal: int | None = None
+    catalog_hash: str | None = None
+    structural_rule_signature: str | None = None
+    context_signature: int | str | None = None
+    candidate_manifest_hash: str | None = None
+    support_binding_ids: Any | None = None
+    support_left_row_ids: Any | None = None
+    support_right_row_ids: Any | None = None
+    body_groundings: tuple[tuple[tuple[int, ...], ...], ...] = ()
 
     def __post_init__(self) -> None:
         if self.is_neural != (self.witness_index is not None) or (
@@ -116,6 +307,93 @@ class CandidateSpec:
                 f"candidate {self.cid} ({self.left},{self.right}): a neural candidate "
                 "carries witness_index and no binary_cover; a relational one the "
                 "opposite. Mixed or missing is a construction bug, refused."
+            )
+        if self.neural_slot not in (None, 0, 1):
+            raise ValueError(
+                f"candidate {self.cid}: neural_slot must be 0, 1, or None."
+            )
+        if not self.is_neural and self.neural_slot is not None:
+            raise ValueError(
+                f"candidate {self.cid}: a relational candidate cannot name a "
+                "neural body slot."
+            )
+        if (
+            isinstance(self.decision_threshold, bool)
+            or not isinstance(self.decision_threshold, (int, float))
+            or not 0.0 < float(self.decision_threshold) < 1.0
+        ):
+            raise ValueError(
+                f"candidate {self.cid}: decision_threshold must be strictly "
+                "between zero and one."
+            )
+        provenance = (
+            self.candidate_ordinal,
+            self.catalog_hash,
+            self.structural_rule_signature,
+            self.context_signature,
+            self.candidate_manifest_hash,
+        )
+        if any(value is not None for value in provenance) and any(
+            value is None for value in provenance
+        ):
+            raise ValueError(
+                f"candidate {self.cid}: generic rule provenance is incomplete; "
+                "ordinal, catalog, structural, context, and manifest identities "
+                "must travel together."
+            )
+        if self.candidate_ordinal is not None and (
+            isinstance(self.candidate_ordinal, bool)
+            or not isinstance(self.candidate_ordinal, int)
+            or self.candidate_ordinal < 0
+        ):
+            raise ValueError(
+                f"candidate {self.cid}: candidate_ordinal must be a "
+                "non-negative integer."
+            )
+        if self.candidate_ordinal is not None:
+            string_fields = {
+                "catalog_hash": self.catalog_hash,
+                "structural_rule_signature": self.structural_rule_signature,
+                "candidate_manifest_hash": self.candidate_manifest_hash,
+            }
+            empty = [
+                name
+                for name, value in string_fields.items()
+                if not isinstance(value, str) or not value.strip()
+            ]
+            if empty:
+                raise ValueError(
+                    f"candidate {self.cid}: provenance field(s) {empty} must "
+                    "be non-empty strings."
+                )
+            if (
+                isinstance(self.context_signature, bool)
+                or not isinstance(self.context_signature, (int, str))
+                or (
+                    isinstance(self.context_signature, str)
+                    and not self.context_signature.strip()
+                )
+            ):
+                raise ValueError(
+                    f"candidate {self.cid}: context_signature must be a "
+                    "non-empty string or an integer."
+                )
+            if self.is_neural and self.neural_slot is None:
+                raise ValueError(
+                    f"candidate {self.cid}: a generic neural candidate must "
+                    "identify its neural body slot."
+                )
+        support_tensors = (
+            self.support_binding_ids,
+            self.support_left_row_ids,
+            self.support_right_row_ids,
+        )
+        if any(value is not None for value in support_tensors) and any(
+            value is None for value in support_tensors
+        ):
+            raise ValueError(
+                f"candidate {self.cid}: two-body support row tensors must "
+                "travel together"
             )
 
 
@@ -152,8 +430,242 @@ def credit_nll(cand_probs, specs, p_event, is_positive, gamma: float = 1.0):
     return loss.mean()
 
 
+def _enumerate_rule_template_specs(
+    prog,
+    mask_name,
+    facts,
+    neural_relations,
+    device,
+    n_labels,
+    witness_mask,
+    rule_template,
+):
+    """Enumerate one explicit arbitrary-arity, two-body rule template."""
+    import torch
+
+    registry = _registry(
+        neural_relations, require_explicit_groundings=True
+    )
+    if not isinstance(n_labels, int) or isinstance(n_labels, bool) or n_labels <= 0:
+        raise ValueError(f"n_labels={n_labels!r} must be a positive integer.")
+    if witness_mask is not None:
+        if witness_mask.dtype != torch.bool:
+            raise ValueError(
+                "witness_mask must have bool dtype so MASKED cannot be "
+                "confused with a numeric probability or cover."
+            )
+        rows_by_relation = {
+            name: spec.num_rows for name, spec in registry.items()
+        }
+        if len(set(rows_by_relation.values())) > 1:
+            detail = ", ".join(
+                f"'{name}'={rows}" for name, rows in sorted(rows_by_relation.items())
+            )
+            raise ValueError(
+                "witness_mask was supplied, but generic neural relations use "
+                f"different row spaces ({detail}); one tensor cannot identify "
+                "both spaces."
+            )
+        for name, spec in registry.items():
+            expected = (spec.num_rows, n_labels)
+            if tuple(witness_mask.shape) != expected:
+                raise ValueError(
+                    f"witness_mask has shape {tuple(witness_mask.shape)}, but "
+                    f"neural relation '{name}' expects {expected}."
+                )
+    for name, spec in registry.items():
+        if not 0 <= spec.output_column < n_labels:
+            raise ValueError(
+                f"neural relation '{name}' selects output_column="
+                f"{spec.output_column}, but the scorer has {n_labels} column(s)."
+            )
+
+    head_arity = len(rule_template.head_variables)
+    malformed_fact = next(
+        (fact for fact in facts if len(fact) != head_arity), None
+    )
+    if malformed_fact is not None:
+        raise ValueError(
+            f"head fact {malformed_fact!r} has arity {len(malformed_fact)}; "
+            f"the rule template declares head arity {head_arity}."
+        )
+
+    def _unify(assignment, variables, row):
+        merged = dict(assignment)
+        for variable, raw_value in zip(variables, row):
+            value = int(raw_value)
+            if variable in merged and merged[variable] != value:
+                return None
+            merged[variable] = value
+        return merged
+
+    def _seed(fact):
+        return _unify({}, rule_template.head_variables, fact)
+
+    facts_cache: dict[str, Any] = {}
+
+    def _read(name):
+        if name not in facts_cache:
+            try:
+                facts_cache[name] = prog.relation_facts(name)
+            except ValueError:
+                facts_cache[name] = None
+        return facts_cache[name]
+
+    def _complete_rows(fact, rows_by_slot):
+        initial = _seed(fact)
+        states = [] if initial is None else [(initial, ())]
+        for slot, variables in enumerate(rule_template.body_variables):
+            extended = []
+            for assignment, support_rows in states:
+                for row_index, row in rows_by_slot[slot]:
+                    merged = _unify(assignment, variables, row)
+                    if merged is not None:
+                        extended.append((merged, support_rows + (row_index,)))
+            states = extended
+            if not states:
+                break
+        return sorted({support_rows for _, support_rows in states})
+
+    def _support_tensors(complete_supports):
+        binding_ids = []
+        left_rows = []
+        right_rows = []
+        for binding_id, supports in enumerate(complete_supports):
+            for left_row, right_row in supports:
+                binding_ids.append(binding_id)
+                left_rows.append(left_row)
+                right_rows.append(right_row)
+        return (
+            torch.tensor(binding_ids, device=device, dtype=torch.long),
+            torch.tensor(left_rows, device=device, dtype=torch.long),
+            torch.tensor(right_rows, device=device, dtype=torch.long),
+        )
+
+    specs: list[CandidateSpec] = []
+    n_total = n_meta = n_unreadable = n_arity = n_two_neural = 0
+    for ordinal, candidate in enumerate(prog.valid_candidates(mask_name)):
+        n_total += 1
+        names = (candidate["left_name"], candidate["right_name"])
+        if any(name.startswith("__xlog_") for name in names):
+            n_meta += 1
+            continue
+        neural_slots = [slot for slot, name in enumerate(names) if name in registry]
+        if len(neural_slots) > 1:
+            n_two_neural += 1
+            continue
+        neural_slot = neural_slots[0] if neural_slots else None
+        rows_by_slot = []
+        candidate_valid = True
+        for slot, (name, variables) in enumerate(
+            zip(names, rule_template.body_variables)
+        ):
+            if slot == neural_slot:
+                relation = registry[name]
+                if relation.arity != len(variables):
+                    n_arity += 1
+                    candidate_valid = False
+                    break
+                rows_by_slot.append(list(enumerate(relation.groundings)))
+            else:
+                rows = _read(name)
+                if rows is None:
+                    n_unreadable += 1
+                    candidate_valid = False
+                    break
+                if any(len(row) != len(variables) for row in rows):
+                    n_arity += 1
+                    candidate_valid = False
+                    break
+                rows_by_slot.append(list(enumerate(rows)))
+        if not candidate_valid:
+            continue
+
+        provenance = dict(
+            candidate_ordinal=ordinal,
+            catalog_hash=rule_template.catalog_hash,
+            structural_rule_signature=rule_template.structural_rule_signature,
+            context_signature=rule_template.context_signature,
+            candidate_manifest_hash=rule_template.candidate_manifest_hash,
+        )
+        complete_supports = [
+            _complete_rows(fact, rows_by_slot) for fact in facts
+        ]
+        support_binding_ids, support_left_row_ids, support_right_row_ids = (
+            _support_tensors(complete_supports)
+        )
+        support = dict(
+            support_binding_ids=support_binding_ids,
+            support_left_row_ids=support_left_row_ids,
+            support_right_row_ids=support_right_row_ids,
+            body_groundings=tuple(
+                tuple(tuple(int(value) for value in row) for _, row in rows)
+                for rows in rows_by_slot
+            ),
+        )
+        if neural_slot is None:
+            cover = torch.tensor(
+                [
+                    1.0 if supports else 0.0
+                    for supports in complete_supports
+                ],
+                device=device,
+            )
+            specs.append(CandidateSpec(
+                cid=candidate["id"], left=names[0], right=names[1],
+                is_neural=False, witness_index=None, binary_cover=cover,
+                **provenance, **support,
+            ))
+            continue
+
+        relation = registry[names[neural_slot]]
+        witnesses = []
+        masked_flags = []
+        for supports in complete_supports:
+            row_indexes = sorted({rows[neural_slot] for rows in supports})
+            active = []
+            masked = False
+            for row_index in row_indexes:
+                is_masked = (
+                    witness_mask is not None
+                    and bool(witness_mask[row_index, relation.output_column])
+                )
+                if is_masked:
+                    masked = True
+                else:
+                    active.append(
+                        row_index * n_labels + relation.output_column
+                    )
+            witnesses.append(active)
+            masked_flags.append(masked)
+        index = prepare_extension(
+            witnesses, device, num_rows=relation.num_rows * n_labels
+        )
+        masked_any = (
+            None if witness_mask is None
+            else torch.tensor(masked_flags, device=device, dtype=torch.bool)
+        )
+        specs.append(CandidateSpec(
+            cid=candidate["id"], left=names[0], right=names[1],
+            is_neural=True, witness_index=index, binary_cover=None,
+            masked_any=masked_any, neural_slot=neural_slot,
+            decision_threshold=relation.decision_threshold,
+            **provenance, **support,
+        ))
+
+    if not specs:
+        raise ValueError(
+            f"generic rule-template filtering left zero scoreable candidates "
+            f"out of {n_total}: {n_meta} meta, {n_unreadable} unreadable, "
+            f"{n_arity} arity-incompatible, and {n_two_neural} with two neural "
+            "body atoms. Exactly one neural body atom is supported per "
+            "candidate; either slot is allowed."
+        )
+    return specs
+
+
 def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
-                    witness_mask=None, topology="chain"):
+                    witness_mask=None, topology="chain", rule_template=None):
     """One CandidateSpec per engine triple over the program's binary EDB relations.
 
     ``topology`` selects which dILP TEMPLATE the pool is being scored for --
@@ -277,6 +789,22 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
     front, not lazily per-candidate."""
     import torch
 
+    if rule_template is not None:
+        if not isinstance(rule_template, RuleTemplateSpec):
+            raise ValueError(
+                "rule_template must be a RuleTemplateSpec so head/body variables "
+                "and provenance are validated before enumeration."
+            )
+        if topology != "chain":
+            raise ValueError(
+                "rule_template defines its own joins and cannot be combined with "
+                f"legacy topology={topology!r}; leave topology at its default."
+            )
+        return _enumerate_rule_template_specs(
+            prog, mask_name, facts, neural_relations, device, n_labels,
+            witness_mask, rule_template,
+        )
+
     if topology not in ("chain", "star"):
         raise ValueError(
             f"topology={topology!r} is not supported: enumerate_specs "
@@ -285,6 +813,11 @@ def enumerate_specs(prog, mask_name, facts, neural_relations, device, n_labels,
         )
     neural_relations = _registry(neural_relations)
     if witness_mask is not None:
+        if witness_mask.dtype != torch.bool:
+            raise ValueError(
+                "witness_mask must have bool dtype so MASKED cannot be "
+                "confused with a numeric probability or cover."
+            )
         rows_by_relation = {rn: spec.num_rows for rn, spec in neural_relations.items()}
         distinct_rows = set(rows_by_relation.values())
         if len(distinct_rows) > 1:
@@ -550,7 +1083,7 @@ class EngineModeResult:
 def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
                       neural_relations, steps=400, lr=0.05, gamma=1.0,
                       entropy_start=0.0, entropy_end=0.1, seed=0,
-                      witness_mask=None, topology="chain"):
+                      witness_mask=None, topology="chain", rule_template=None):
     """Train candidate logits + the network against the real-valued credit.
 
     ``topology`` (default ``"chain"``, byte-identical to omitting it) is
@@ -596,6 +1129,7 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
     specs = enumerate_specs(
         prog, mask_name, facts, neural_relations, device, n_labels,
         witness_mask=witness_mask, topology=topology,
+        rule_template=rule_template,
     )
     C = max(s.cid for s in specs) + 1
     # Skipped candidates must not hold probability mass — the mixture is over
@@ -637,6 +1171,37 @@ def train_engine_mode(prog, mask_name, facts, is_positive, network, features,
 
 
 @dataclass(frozen=True)
+class FrozenCandidateEvidence:
+    """Exact engine evaluation retained for the uniquely selected candidate."""
+
+    candidate_id: int
+    candidate_key: tuple[str, str]
+    is_neural: bool
+    decision_threshold: float
+    neural_slot: int | None
+    candidate_ordinal: int | None
+    catalog_hash: str | None
+    structural_rule_signature: str | None
+    context_signature: int | str | None
+    candidate_manifest_hash: str | None
+    score: float
+    coverage: float
+    fact_bindings: tuple[tuple[int, ...], ...]
+    expected_positive: Any
+    fact_probabilities: Any
+    predicted_true: Any
+    certain: Any
+    witness_event_ids: Any | None
+    witness_row_ids: Any | None
+    witness_binding_ids: Any | None
+    witness_probabilities: Any | None
+    support_binding_ids: Any | None
+    support_left_row_ids: Any | None
+    support_right_row_ids: Any | None
+    body_groundings: tuple[tuple[tuple[int, ...], ...], ...]
+
+
+@dataclass(frozen=True)
 class HoldoutSelection:
     """What the holdout arbiter is entitled to claim. Mirrors discovery.Selection's five
     fields, but ``rule``/``tied`` hold (left, right) TUPLES -- our candidates are keyed
@@ -657,6 +1222,7 @@ class HoldoutSelection:
     top_weight: float
     reason: str
     coverage: dict = field(default_factory=dict)
+    selected_candidate: FrozenCandidateEvidence | None = None
 
     @property
     def decided(self) -> bool:
@@ -737,7 +1303,10 @@ def _select_from_holdout(scores, neural_rights, min_fit, tie_tolerance=0.01,
                                 top_weight=sel.top_weight, reason=sel.reason,
                                 coverage=coverage)
     tied = [tuple(t.split("|")) for t in sel.tied]
-    relational = [t for t in tied if t[1] not in neural_rights]
+    relational = [
+        t for t in tied
+        if t[0] not in neural_rights and t[1] not in neural_rights
+    ]
     if relational and len(relational) < len(tied):
         best_fit = max(fit[t] for t in relational)
         rel_tied = sorted(t for t in relational
@@ -763,7 +1332,7 @@ def _select_from_holdout(scores, neural_rights, min_fit, tie_tolerance=0.01,
 
 def frozen_select(prog, mask_name, facts, is_positive, network, features,
                   neural_relations, min_fit=0.75, witness_mask=None,
-                  min_coverage=0.5, topology="chain"):
+                  min_coverage=0.5, topology="chain", rule_template=None):
     """Score every engine-enumerated candidate against a FROZEN detector.
 
     ``topology`` (default ``"chain"``, byte-identical to omitting it) is
@@ -826,6 +1395,7 @@ def frozen_select(prog, mask_name, facts, is_positive, network, features,
     specs = enumerate_specs(
         prog, mask_name, facts, neural_relations, features.device, out.shape[1],
         witness_mask=witness_mask, topology=topology,
+        rule_template=rule_template,
     )
     with torch.no_grad():
         p_event = out.reshape(-1)
@@ -833,11 +1403,12 @@ def frozen_select(prog, mask_name, facts, is_positive, network, features,
                          device=features.device, dtype=torch.float32)
         scores = {}
         coverage = {}
+        evaluated = {}
         for spec in specs:
             key = (spec.left, spec.right)
             s = (noisy_or_from_index(p_event, spec.witness_index)
                  if spec.is_neural else spec.binary_cover)
-            pred = (s >= 0.5).float()
+            pred = (s >= spec.decision_threshold).float()
             if spec.masked_any is not None:
                 # OR>=0.5 is a CERTAIN true regardless of the masked witnesses
                 # (monotonicity); the remaining facts are uncertain, not false.
@@ -852,11 +1423,94 @@ def frozen_select(prog, mask_name, facts, is_positive, network, features,
             )
             if witness_mask is not None:
                 coverage[key] = (n_certain / n_total) if n_total else 0.0
+            evaluated[key] = (spec, s, pred.bool(), certain)
     # Same derivation as kfold_select: one fact is the smallest evidence step.
     tie_tolerance = max(0.01, 1.0 / len(facts))
-    return _select_from_holdout(scores, set(neural_relations), min_fit,
-                                tie_tolerance=tie_tolerance,
-                                coverage=coverage, min_coverage=min_coverage)
+    selection = _select_from_holdout(
+        scores,
+        set(neural_relations),
+        min_fit,
+        tie_tolerance=tie_tolerance,
+        coverage=coverage,
+        min_coverage=min_coverage,
+    )
+    if not selection.decided:
+        return selection
+
+    selected_spec, fact_probabilities, predicted_true, certain = evaluated[
+        selection.rule
+    ]
+    witness_index = selected_spec.witness_index
+    selected_evidence = FrozenCandidateEvidence(
+        candidate_id=selected_spec.cid,
+        candidate_key=selection.rule,
+        is_neural=selected_spec.is_neural,
+        decision_threshold=float(selected_spec.decision_threshold),
+        neural_slot=selected_spec.neural_slot,
+        candidate_ordinal=selected_spec.candidate_ordinal,
+        catalog_hash=selected_spec.catalog_hash,
+        structural_rule_signature=selected_spec.structural_rule_signature,
+        context_signature=selected_spec.context_signature,
+        candidate_manifest_hash=selected_spec.candidate_manifest_hash,
+        score=float(scores[selection.rule]),
+        coverage=float(coverage.get(selection.rule, 1.0)),
+        fact_bindings=tuple(
+            tuple(int(value) for value in fact) for fact in facts
+        ),
+        expected_positive=y.bool().detach().clone(),
+        fact_probabilities=fact_probabilities.detach().clone(),
+        predicted_true=predicted_true.detach().clone(),
+        certain=certain.detach().clone(),
+        witness_event_ids=(
+            None
+            if witness_index is None
+            else witness_index.event_ids.detach().clone()
+        ),
+        witness_row_ids=(
+            None
+            if witness_index is None
+            else torch.div(
+                witness_index.event_ids,
+                out.shape[1],
+                rounding_mode="floor",
+            ).detach().clone()
+        ),
+        witness_binding_ids=(
+            None
+            if witness_index is None
+            else witness_index.binding_ids.detach().clone()
+        ),
+        witness_probabilities=(
+            None
+            if witness_index is None
+            else p_event[witness_index.event_ids].detach().clone()
+        ),
+        support_binding_ids=(
+            None
+            if selected_spec.support_binding_ids is None
+            else selected_spec.support_binding_ids.detach().clone()
+        ),
+        support_left_row_ids=(
+            None
+            if selected_spec.support_left_row_ids is None
+            else selected_spec.support_left_row_ids.detach().clone()
+        ),
+        support_right_row_ids=(
+            None
+            if selected_spec.support_right_row_ids is None
+            else selected_spec.support_right_row_ids.detach().clone()
+        ),
+        body_groundings=selected_spec.body_groundings,
+    )
+    return HoldoutSelection(
+        rule=selection.rule,
+        tied=selection.tied,
+        margin=selection.margin,
+        top_weight=selection.top_weight,
+        reason=selection.reason,
+        coverage=selection.coverage,
+        selected_candidate=selected_evidence,
+    )
 
 
 def holdout_fold_assignment(n_facts, folds, seed):
@@ -906,7 +1560,8 @@ def _f1(tp: int, fp: int, fn: int) -> float:
 def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
                  features, neural_relations, folds=4, min_fit=0.75, seed=0,
                  witness_mask=None, min_coverage=0.5, topology="chain",
-                 tie_tolerance=None, holdout_score="accuracy", **train_kw):
+                 tie_tolerance=None, holdout_score="accuracy",
+                 rule_template=None, **train_kw):
     """Select a rule by K-FOLD HOLDOUT, not by training weight: per fold, train on
     the rest and score every engine-enumerated candidate on the held-out facts by
     its own witness/cover semantics (``s_c(f) >= 0.5``); average across folds, apply
@@ -1048,13 +1703,15 @@ def kfold_select(prog_factory, mask_name, facts, is_positive, make_network,
             [facts[i] for i in train_ids],
             [is_positive[i] for i in train_ids],
             make_network(), features, neural_relations, seed=seed,
-            witness_mask=witness_mask, topology=topology, **train_kw)
+            witness_mask=witness_mask, topology=topology,
+            rule_template=rule_template, **train_kw)
         with torch.no_grad():
             out = res.network(features)
             held_specs = enumerate_specs(
                 prog, mask_name, [facts[i] for i in held_ids],
                 neural_relations, features.device, out.shape[1],
-                witness_mask=witness_mask, topology=topology)
+                witness_mask=witness_mask, topology=topology,
+                rule_template=rule_template)
             p_event = out.reshape(-1)
             y = torch.tensor([is_positive[i] for i in held_ids],
                              device=features.device, dtype=torch.float32)

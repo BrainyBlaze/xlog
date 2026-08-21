@@ -14,7 +14,7 @@
 /// within device fuel, typed exhaustion beyond it. Carrier schemas
 /// and calibration artifacts bind to this identity; it changes
 /// whenever the ABI or objective changes.
-pub const SOLVER_ABI_IDENTITY: &str = "joint-solver/decompose-dp-bb/1";
+pub const SOLVER_ABI_IDENTITY: &str = "joint-solver/nary-device-components-dp-bb/5";
 
 /// Typed solver errors. Beyond fuel the solve refuses with the
 /// exact spent/limit literals — no partial emission, no
@@ -211,14 +211,11 @@ fn elimination_width_bound(variables: &[u32], edges: &[(u32, u32)]) -> u32 {
     width
 }
 
-/// Group candidate rows into connectivity components: two candidates
-/// share a component when their entity pairs intersect. Returns CSR
-/// form `(offsets, indices)`, components ordered by minimum candidate
-/// index, members ascending — deterministic regardless of pair input
-/// order. This is host-side setup over the producer's OWN host-side
-/// pair list (the producer constructs the pairs before writing them
-/// to the device), never a device readback.
-pub fn candidate_components(num_entities: u32, pairs: &[(u32, u32)]) -> (Vec<u32>, Vec<u32>) {
+/// Test-only oracle for device component discovery. Production
+/// component membership is derived from carrier-owned arguments on
+/// the device and never accepts this host CSR representation.
+#[cfg(test)]
+fn candidate_components(num_entities: u32, pairs: &[(u32, u32)]) -> (Vec<u32>, Vec<u32>) {
     let n = pairs.len();
     let mut parent: Vec<u32> = (0..n as u32).collect();
 
@@ -324,6 +321,14 @@ impl FuelMeter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solver_abi_identity_names_nary_device_component_contract() {
+        assert_eq!(
+            SOLVER_ABI_IDENTITY,
+            "joint-solver/nary-device-components-dp-bb/5"
+        );
+    }
 
     #[test]
     fn decomposition_is_deterministic_under_edge_order() {

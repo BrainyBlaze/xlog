@@ -413,6 +413,487 @@ def test_registry_refuses_arg_sorts_that_do_not_match_the_arity() -> None:
         NeuralRelationSpec(num_rows=3, arg_sorts=("event",))   # declared arity 2
 
 
+class _FakeNaryTemplateProg:
+    """Two-body candidate pool with arbitrary relation arities, no native module."""
+
+    def __init__(self, *, left_name: str, right_name: str, facts: dict[str, list[list[int]]]):
+        self.left_name = left_name
+        self.right_name = right_name
+        self._facts = facts
+
+    def valid_candidates(self, mask_name):
+        assert mask_name == "W"
+        return [{
+            "id": 7,
+            "left_name": self.left_name,
+            "right_name": self.right_name,
+            "head_name": "target",
+        }]
+
+    def relation_facts(self, name):
+        if name not in self._facts:
+            raise ValueError(f"Relation {name!r} not found")
+        return self._facts[name]
+
+
+def _nary_template():
+    from pyxlog.ilp.neural_credit import RuleTemplateSpec
+
+    return RuleTemplateSpec(
+        head_variables=(0, 1, 2),
+        body_variables=((0, 3, 1), (3, 2)),
+        catalog_hash="catalog-sha256",
+        structural_rule_signature="target(X,Y,W):-left(X,Z,Y),right(Z,W)",
+        context_signature=17,
+        candidate_manifest_hash="candidate-manifest-sha256",
+    )
+
+
+def test_nary_template_scores_ternary_neural_relation_in_left_slot() -> None:
+    """A neural relation is a body atom, not a post-hoc guard.
+
+    The ternary left atom binds (X,Z,Y); the binary symbolic right atom joins
+    (Z,W).  The explicit grounding table maps each ternary tuple to one scorer
+    row and the fixed relation-label column.  A masked grounding is removed
+    from credit and reported as uncertain, never converted to false.
+    """
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, enumerate_specs
+
+    program = _FakeNaryTemplateProg(
+        left_name="neural_left",
+        right_name="symbolic_right",
+        facts={"symbolic_right": [[7, 30], [8, 31], [9, 32]]},
+    )
+    relation = NeuralRelationSpec(
+        num_rows=3,
+        arity=3,
+        arg_sorts=(1, 2, 3),
+        artifact_hash="detector-sha256",
+        groundings=((10, 7, 20), (10, 8, 20), (11, 9, 21)),
+        output_column=1,
+        decision_threshold=0.73,
+    )
+    mask = torch.zeros(3, 2, dtype=torch.bool)
+    mask[1, 1] = True
+
+    specs = enumerate_specs(
+        program,
+        "W",
+        [(10, 20, 30), (10, 20, 31), (11, 21, 32)],
+        neural_relations={"neural_left": relation},
+        device="cpu",
+        n_labels=2,
+        witness_mask=mask,
+        rule_template=_nary_template(),
+    )
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.is_neural
+    assert spec.neural_slot == 0
+    assert spec.decision_threshold == 0.73
+    assert spec.witness_index.event_ids.tolist() == [1, 5]
+    assert spec.masked_any.tolist() == [False, True, False]
+    assert spec.catalog_hash == "catalog-sha256"
+    assert spec.structural_rule_signature.startswith("target(X,Y,W)")
+    assert spec.context_signature == 17
+    assert spec.candidate_manifest_hash == "candidate-manifest-sha256"
+
+
+def test_nary_template_scores_neural_relation_in_right_slot() -> None:
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, enumerate_specs
+
+    program = _FakeNaryTemplateProg(
+        left_name="symbolic_left",
+        right_name="neural_right",
+        facts={
+            "symbolic_left": [
+                [10, 7, 20],
+                [10, 8, 20],
+                [11, 9, 21],
+            ]
+        },
+    )
+    relation = NeuralRelationSpec(
+        num_rows=3,
+        arity=2,
+        arg_sorts=(2, 4),
+        artifact_hash="detector-sha256",
+        groundings=((7, 30), (8, 31), (9, 32)),
+        output_column=0,
+    )
+
+    specs = enumerate_specs(
+        program,
+        "W",
+        [(10, 20, 30), (10, 20, 31), (11, 21, 32)],
+        neural_relations={"neural_right": relation},
+        device="cpu",
+        n_labels=2,
+        rule_template=_nary_template(),
+    )
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.is_neural
+    assert spec.neural_slot == 1
+    assert spec.witness_index.event_ids.tolist() == [0, 2, 4]
+    assert spec.masked_any is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"num_rows": True}, "num_rows"),
+        ({"num_rows": 1, "arity": True}, "arity"),
+        (
+            {
+                "num_rows": 1,
+                "arity": 2,
+                "groundings": ([1, 2],),
+                "output_column": 0,
+            },
+            "groundings",
+        ),
+        (
+            {
+                "num_rows": 1,
+                "arity": 2,
+                "groundings": ((1, True),),
+                "output_column": 0,
+            },
+            "integer constants",
+        ),
+        (
+            {
+                "num_rows": 1,
+                "arity": 2,
+                "groundings": ((1, 2),),
+                "output_column": 0.5,
+            },
+            "output_column",
+        ),
+    ],
+)
+def test_nary_relation_spec_refuses_ambiguous_shape_metadata(
+    kwargs, message
+) -> None:
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec
+
+    with pytest.raises(ValueError, match=message):
+        NeuralRelationSpec(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ({"head_variables": (0, "entity")}, "integer identity"),
+        ({"body_variables": ((0, 3, 1), [3, 2])}, "body_variables"),
+        ({"context_signature": ""}, "context_signature"),
+        ({"context_signature": None}, "context_signature"),
+    ],
+)
+def test_nary_rule_template_refuses_noncanonical_identity(
+    replacement, message
+) -> None:
+    from pyxlog.ilp.neural_credit import RuleTemplateSpec
+
+    values = {
+        "head_variables": (0, 1, 2),
+        "body_variables": ((0, 3, 1), (3, 2)),
+        "catalog_hash": "catalog-sha256",
+        "structural_rule_signature": "target(X,Y,W):-left(X,Z,Y),right(Z,W)",
+        "context_signature": 17,
+        "candidate_manifest_hash": "candidate-manifest-sha256",
+    }
+    values.update(replacement)
+    with pytest.raises(ValueError, match=message):
+        RuleTemplateSpec(**values)
+
+
+def test_nary_template_refuses_non_boolean_abstention_mask() -> None:
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, enumerate_specs
+
+    program = _FakeNaryTemplateProg(
+        left_name="neural_left",
+        right_name="symbolic_right",
+        facts={"symbolic_right": [[7, 30]]},
+    )
+    relation = NeuralRelationSpec(
+        num_rows=1,
+        arity=3,
+        groundings=((10, 7, 20),),
+        output_column=0,
+    )
+
+    with pytest.raises(ValueError, match="bool"):
+        enumerate_specs(
+            program,
+            "W",
+            [(10, 20, 30)],
+            neural_relations={"neural_left": relation},
+            device="cpu",
+            n_labels=1,
+            witness_mask=torch.zeros(1, 1, dtype=torch.float32),
+            rule_template=_nary_template(),
+        )
+
+
+def test_generic_neural_candidate_requires_replay_identity_and_body_slot() -> None:
+    from dataclasses import replace
+
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, enumerate_specs
+
+    program = _FakeNaryTemplateProg(
+        left_name="neural_left",
+        right_name="symbolic_right",
+        facts={"symbolic_right": [[7, 30]]},
+    )
+    relation = NeuralRelationSpec(
+        num_rows=1,
+        arity=3,
+        groundings=((10, 7, 20),),
+        output_column=0,
+    )
+    spec = enumerate_specs(
+        program,
+        "W",
+        [(10, 20, 30)],
+        neural_relations={"neural_left": relation},
+        device="cpu",
+        n_labels=1,
+        rule_template=_nary_template(),
+    )[0]
+
+    with pytest.raises(ValueError, match="candidate_ordinal"):
+        replace(spec, candidate_ordinal=-1)
+    with pytest.raises(ValueError, match="neural body slot"):
+        replace(spec, neural_slot=None)
+
+
+def test_nary_template_threads_through_training_frozen_and_kfold_selection() -> None:
+    from pyxlog.ilp.neural_credit import (
+        NeuralRelationSpec,
+        frozen_select,
+        kfold_select,
+        train_engine_mode,
+    )
+
+    def program():
+        return _FakeNaryTemplateProg(
+            left_name="neural_left",
+            right_name="symbolic_right",
+            facts={"symbolic_right": [[7, 30], [8, 31], [9, 32]]},
+        )
+
+    relation = NeuralRelationSpec(
+        num_rows=3,
+        arity=3,
+        arg_sorts=(1, 2, 3),
+        artifact_hash="detector-sha256",
+        groundings=((10, 7, 20), (10, 8, 20), (11, 9, 21)),
+        output_column=1,
+    )
+    facts = [(10, 20, 30), (10, 20, 31), (11, 21, 32)]
+    labels = [True, False, True]
+    features = torch.tensor([[0.9], [0.1], [0.9]])
+
+    trained = train_engine_mode(
+        program(), "W", facts, labels,
+        torch.nn.Sequential(torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1)),
+        features,
+        neural_relations={"neural_left": relation},
+        steps=1,
+        rule_template=_nary_template(),
+    )
+    assert trained.specs[0].neural_slot == 0
+    assert len(trained.losses) == 1
+
+    frozen = frozen_select(
+        program(), "W", facts, labels,
+        _frozen_detector_module(), features,
+        neural_relations={"neural_left": relation},
+        rule_template=_nary_template(),
+    )
+    assert frozen.rule == ("neural_left", "symbolic_right")
+    assert frozen.selected_candidate is not None
+    assert frozen.selected_candidate.candidate_id == 7
+    assert frozen.selected_candidate.candidate_key == (
+        "neural_left",
+        "symbolic_right",
+    )
+    assert frozen.selected_candidate.neural_slot == 0
+    assert frozen.selected_candidate.candidate_ordinal == 0
+    assert frozen.selected_candidate.structural_rule_signature == (
+        "target(X,Y,W):-left(X,Z,Y),right(Z,W)"
+    )
+    assert frozen.selected_candidate.context_signature == 17
+    assert frozen.selected_candidate.candidate_manifest_hash == (
+        "candidate-manifest-sha256"
+    )
+    assert frozen.selected_candidate.fact_bindings == tuple(facts)
+    assert torch.equal(
+        frozen.selected_candidate.expected_positive,
+        torch.tensor([True, False, True]),
+    )
+    assert torch.allclose(
+        frozen.selected_candidate.fact_probabilities,
+        torch.tensor([1.0, 0.0, 1.0]),
+        rtol=0.0,
+        atol=1e-6,
+    )
+    assert torch.equal(
+        frozen.selected_candidate.predicted_true,
+        torch.tensor([True, False, True]),
+    )
+    assert torch.equal(
+        frozen.selected_candidate.certain,
+        torch.tensor([True, True, True]),
+    )
+    assert torch.equal(
+        frozen.selected_candidate.witness_event_ids,
+        torch.tensor([1, 3, 5]),
+    )
+    assert torch.equal(
+        frozen.selected_candidate.witness_row_ids,
+        torch.tensor([0, 1, 2]),
+    )
+    assert torch.equal(
+        frozen.selected_candidate.witness_binding_ids,
+        torch.tensor([0, 1, 2]),
+    )
+    assert torch.allclose(
+        frozen.selected_candidate.witness_probabilities,
+        torch.tensor([1.0, 0.0, 1.0]),
+        rtol=0.0,
+        atol=1e-6,
+    )
+    assert torch.equal(
+        frozen.selected_candidate.support_binding_ids,
+        torch.tensor([0, 1, 2]),
+    )
+    assert torch.equal(
+        frozen.selected_candidate.support_left_row_ids,
+        torch.tensor([0, 1, 2]),
+    )
+    assert torch.equal(
+        frozen.selected_candidate.support_right_row_ids,
+        torch.tensor([0, 1, 2]),
+    )
+    assert frozen.selected_candidate.body_groundings == (
+        ((10, 7, 20), (10, 8, 20), (11, 9, 21)),
+        ((7, 30), (8, 31), (9, 32)),
+    )
+
+    cross_validated = kfold_select(
+        program, "W", facts, labels,
+        lambda: torch.nn.Sequential(
+            torch.nn.Linear(1, 2), torch.nn.Softmax(dim=-1)
+        ),
+        features,
+        neural_relations={"neural_left": relation},
+        folds=3,
+        steps=1,
+        min_fit=0.0,
+        rule_template=_nary_template(),
+    )
+    assert cross_validated.rule == ("neural_left", "symbolic_right")
+
+
+def test_holdout_occam_recognizes_a_neural_relation_in_either_body_slot() -> None:
+    from pyxlog.ilp.neural_credit import _select_from_holdout
+
+    selection = _select_from_holdout(
+        {
+            ("neural_left", "symbolic_right"): 0.9,
+            ("symbolic_left", "symbolic_right"): 0.9,
+        },
+        neural_rights={"neural_left"},
+        min_fit=0.75,
+    )
+
+    assert selection.rule == ("symbolic_left", "symbolic_right")
+    assert "Occam" in selection.reason
+
+
+def test_nary_template_refuses_implicit_or_ambiguous_neural_row_identity() -> None:
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, enumerate_specs
+
+    program = _FakeNaryTemplateProg(
+        left_name="neural_left",
+        right_name="symbolic_right",
+        facts={"symbolic_right": [[7, 30]]},
+    )
+    with pytest.raises(ValueError, match="explicit groundings"):
+        enumerate_specs(
+            program, "W", [(10, 20, 30)],
+            neural_relations={
+                "neural_left": NeuralRelationSpec(num_rows=1, arity=3)
+            },
+            device="cpu", n_labels=2, rule_template=_nary_template(),
+        )
+
+    with pytest.raises(ValueError, match="duplicate relation tuples"):
+        NeuralRelationSpec(
+            num_rows=2,
+            arity=3,
+            groundings=((10, 7, 20), (10, 7, 20)),
+            output_column=1,
+        )
+
+
+def test_nary_template_refuses_an_output_column_outside_the_scorer() -> None:
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, enumerate_specs
+
+    program = _FakeNaryTemplateProg(
+        left_name="neural_left",
+        right_name="symbolic_right",
+        facts={"symbolic_right": [[7, 30]]},
+    )
+    relation = NeuralRelationSpec(
+        num_rows=1,
+        arity=3,
+        groundings=((10, 7, 20),),
+        output_column=2,
+    )
+    with pytest.raises(ValueError, match="scorer has 2 column"):
+        enumerate_specs(
+            program, "W", [(10, 20, 30)],
+            neural_relations={"neural_left": relation},
+            device="cpu", n_labels=2, rule_template=_nary_template(),
+        )
+
+
+def test_nary_template_refuses_two_neural_body_atoms_with_an_explicit_count() -> None:
+    from pyxlog.ilp.neural_credit import NeuralRelationSpec, enumerate_specs
+
+    program = _FakeNaryTemplateProg(
+        left_name="neural_left",
+        right_name="neural_right",
+        facts={},
+    )
+    relations = {
+        "neural_left": NeuralRelationSpec(
+            num_rows=1,
+            arity=3,
+            groundings=((10, 7, 20),),
+            output_column=1,
+        ),
+        "neural_right": NeuralRelationSpec(
+            num_rows=1,
+            arity=2,
+            groundings=((7, 30),),
+            output_column=0,
+        ),
+    }
+    with pytest.raises(ValueError, match="1 with two neural body atoms"):
+        enumerate_specs(
+            program, "W", [(10, 20, 30)],
+            neural_relations=relations,
+            device="cpu", n_labels=2, rule_template=_nary_template(),
+        )
+
+
 def _frozen_detector_module():
     """A PARAMETERLESS detector: P(label 1) = [feature > 0.5]. Parameterless is
     load-bearing -- the training path cannot even build an optimizer over it,

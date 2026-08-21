@@ -64,6 +64,7 @@ pub struct JointConstraintCarrier {
 #[pymethods]
 impl JointConstraintCarrier {
     #[new]
+    #[pyo3(signature = (device, entities, domain_lanes, candidates, labels, fuel_limit, max_arity=2))]
     fn new(
         device: usize,
         entities: usize,
@@ -71,16 +72,23 @@ impl JointConstraintCarrier {
         candidates: usize,
         labels: usize,
         fuel_limit: u64,
+        max_arity: usize,
     ) -> PyResult<Self> {
         let cuda = CudaDevice::new(device)
             .map_err(|e| PyRuntimeError::new_err(format!("CUDA device {device}: {e}")))?;
-        let carrier = NativeCarrier::allocate(
-            std::sync::Arc::new(cuda),
-            entities,
-            domain_lanes,
-            candidates,
-            labels,
-        )
+        let cuda_device = std::sync::Arc::new(cuda);
+        let carrier = if max_arity == 2 {
+            NativeCarrier::allocate(cuda_device, entities, domain_lanes, candidates, labels)
+        } else {
+            NativeCarrier::allocate_with_max_arity(
+                cuda_device,
+                entities,
+                domain_lanes,
+                candidates,
+                labels,
+                max_arity,
+            )
+        }
         .map_err(carrier_err)?;
         Ok(Self {
             state: Mutex::new(CarrierState {
@@ -104,6 +112,14 @@ impl JointConstraintCarrier {
         state
             .carrier
             .bind_signatures(&head_masks, &tail_masks)
+            .map_err(carrier_err)
+    }
+
+    fn bind_role_signatures(&self, role_masks: Vec<u64>) -> PyResult<()> {
+        let mut state = self.state.lock().expect("carrier state lock");
+        state
+            .carrier
+            .bind_role_signatures(&role_masks)
             .map_err(carrier_err)
     }
 
@@ -136,6 +152,14 @@ impl JointConstraintCarrier {
             ),
             "constraints" => (
                 CarrierBufferId::Constraints,
+                DLDataType {
+                    code: K_DLUINT,
+                    bits: 32,
+                    lanes: 1,
+                },
+            ),
+            "argument_arities" => (
+                CarrierBufferId::ArgumentArities,
                 DLDataType {
                     code: K_DLUINT,
                     bits: 32,
@@ -185,7 +209,7 @@ impl JointConstraintCarrier {
             other => {
                 return Err(PyValueError::new_err(format!(
                     "unknown carrier buffer {other:?}; valid names: domains, \
-                     scores, constraints, outputs, feasible_sets, \
+                     scores, constraints, argument_arities, outputs, feasible_sets, \
                      logical_counts, map_results, solve_status"
                 )))
             }
@@ -234,23 +258,19 @@ impl JointConstraintCarrier {
             .map_err(carrier_err)
     }
 
-    /// Solve every listed multi-candidate component exactly by
-    /// complete enumeration. The plan (offsets + candidate indices)
-    /// comes from the caller's own pair list; malformed plans refuse
-    /// typed. Per-row authority afterwards is `solve_status`:
-    /// 2 = component-exact, 3 = refused (stage capacity/fuel — the
-    /// memoized stage is the named open cell), 0xFFFFFFFF = poisoned;
+    /// Discover components from the carrier-owned argument matrix and
+    /// solve every multi-candidate component exactly on the device.
+    /// Per-row authority afterwards is `solve_status`:
+    /// 2 = exact enumeration, 4 = exact device-discovered chain DP,
+    /// 5 = exact general branch-and-bound, 3 = refused on measured
+    /// fuel exhaustion, 0xFFFFFFFF = poisoned;
     /// untouched rows keep top-two authority.
-    fn solve_components_exact(
-        &self,
-        comp_offsets: Vec<u32>,
-        comp_indices: Vec<u32>,
-    ) -> PyResult<()> {
+    fn solve_components_exact(&self) -> PyResult<()> {
         let mut state = self.state.lock().expect("carrier state lock");
         let state = &mut *state;
         state
             .carrier
-            .solve_components_exact(&comp_offsets, &comp_indices, &mut state.fuel)
+            .solve_components_exact(&mut state.fuel)
             .map_err(carrier_err)
     }
 

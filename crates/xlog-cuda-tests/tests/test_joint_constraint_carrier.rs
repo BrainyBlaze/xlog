@@ -1,4 +1,4 @@
-//! Joint constraint carrier — slice 1: buffer ownership + registration.
+//! Joint constraint carrier: device-owned buffers and schema registration.
 //!
 //! RED-first against the frozen carrier law: every solver buffer is
 //! allocated by the xlog device runtime and exported outward, never
@@ -9,13 +9,10 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use xlog_cuda::{CarrierError, CudaDevice, JointConstraintCarrier};
+use xlog_cuda::{CarrierBufferId, CarrierError, CudaDevice, JointConstraintCarrier};
 
-/// Serializes the tests in this binary. `mem_get_info` is device-wide:
-/// a sibling test's first-touch module load (context-lifetime driver
-/// memory) or transient carrier buffers landing inside the drop-leak
-/// test's measured window read as leaks, so that measurement is only
-/// sound without concurrent GPU work in this process.
+/// Serializes tests because device-wide memory accounting is only
+/// meaningful when sibling tests cannot allocate concurrently.
 fn carrier_test_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -57,6 +54,34 @@ fn carrier_buffers_are_runtime_backed_and_recordable() {
             "carrier columns must never be externally-managed memory"
         );
     }
+}
+
+#[test]
+fn nary_carrier_exports_argument_matrix_and_declared_arities() {
+    let _carrier_test_guard = carrier_test_lock();
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let mut carrier =
+        JointConstraintCarrier::allocate_with_max_arity(Arc::clone(&device), 8, 2, 3, 5, 4)
+            .expect("n-ary runtime-backed allocation must succeed");
+
+    let arguments = carrier.export_buffer(CarrierBufferId::Constraints);
+    assert_eq!(
+        (arguments.rows, arguments.cols, arguments.elem_bytes),
+        (3, 4, 4)
+    );
+    let arities = carrier.export_buffer(CarrierBufferId::ArgumentArities);
+    assert_eq!((arities.rows, arities.cols, arities.elem_bytes), (3, 1, 4));
+
+    carrier
+        .register_schema("00", xlog_cuda::SOLVER_ABI_IDENTITY)
+        .expect("registration");
+    carrier
+        .bind_role_signatures(&vec![0; 4 * 5 * 2])
+        .expect("one role signature row per configured role and label");
 }
 
 /// Registration is once-per-session: registering the same schema a
@@ -180,12 +205,10 @@ fn dropping_carrier_releases_all_device_memory() {
     };
 
     let allocate_near_budget = |device: &Arc<CudaDevice>| {
-        // domains 1024 x 64 lanes = 512 KB; scores 1.1M x 4 = 17.6 MB;
-        // constraints 1.1M x 2 = 8.8 MB; outputs 1.1M = 4.4 MB;
-        // feasible sets 1.1M x 1 word = 8.8 MB; map results
-        // 1.1M x 4 = 17.6 MB; ~57.7 MB total, inside the 64 MiB
-        // budget.
-        JointConstraintCarrier::allocate(Arc::clone(device), 1024, 64, 1_100_000, 4)
+        // The complete carrier now includes component planning and
+        // general-search scratch. At 800k candidates the aggregate is
+        // about 64.5 decimal MB, inside the 64 MiB runtime budget.
+        JointConstraintCarrier::allocate(Arc::clone(device), 1024, 64, 800_000, 4)
             .expect("near-budget allocation must succeed")
     };
 
@@ -292,8 +315,8 @@ fn solve_label_feasibility_is_existential_on_device() {
     let (domains_ptr, constraints_ptr, outputs_ptr, sets_ptr) = (
         *columns[0].device_ptr(),
         *columns[2].device_ptr(),
-        *columns[3].device_ptr(),
         *columns[4].device_ptr(),
+        *columns[5].device_ptr(),
     );
     unsafe {
         cudarc::driver::result::memcpy_htod_sync(domains_ptr, &[0b0110u64, 0b1000u64])
@@ -413,7 +436,7 @@ fn solve_beyond_fuel_refuses_without_partial_emission() {
     // Pin the output cells to a known sentinel so "untouched" is
     // provable (fresh device memory has no guaranteed contents).
     let columns: Vec<&xlog_cuda::CudaColumn> = carrier.columns().collect();
-    let (outputs_ptr, sets_ptr) = (*columns[3].device_ptr(), *columns[4].device_ptr());
+    let (outputs_ptr, sets_ptr) = (*columns[4].device_ptr(), *columns[5].device_ptr());
     unsafe {
         cudarc::driver::result::memcpy_htod_sync(outputs_ptr, &[0xDEAD_BEEFu32])
             .expect("sentinel upload");
@@ -486,7 +509,7 @@ fn top2_consumes_feasibility_across_streams_exactly() {
             *columns[0].device_ptr(),
             *columns[1].device_ptr(),
             *columns[2].device_ptr(),
-            *columns[5].device_ptr(),
+            *columns[6].device_ptr(),
         )
     };
     unsafe {
@@ -558,7 +581,7 @@ fn tied_maximum_flags_ambiguity_never_unique() {
             *columns[0].device_ptr(),
             *columns[1].device_ptr(),
             *columns[2].device_ptr(),
-            *columns[5].device_ptr(),
+            *columns[6].device_ptr(),
         )
     };
     unsafe {
@@ -609,9 +632,9 @@ fn fresh_session_buffers_read_back_zero() {
 
     let columns: Vec<&xlog_cuda::CudaColumn> = carrier.columns().collect();
     let (outputs_ptr, map_ptr, status_ptr) = (
-        *columns[3].device_ptr(),
-        *columns[5].device_ptr(),
+        *columns[4].device_ptr(),
         *columns[6].device_ptr(),
+        *columns[7].device_ptr(),
     );
     let mut outputs = [0xAAu32; 2];
     let mut maps = [0xAAu32; 8];
@@ -643,7 +666,7 @@ fn fresh_session_buffers_read_back_zero() {
 #[test]
 fn component_solve_rejects_jointly_infeasible_greedy_maximum() {
     let _carrier_test_guard = carrier_test_lock();
-    use xlog_cuda::{candidate_components, FuelMeter, SOLVER_ABI_IDENTITY};
+    use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
         eprintln!("Skipping: CUDA runtime unavailable");
@@ -669,11 +692,10 @@ fn component_solve_rejects_jointly_infeasible_greedy_maximum() {
             *columns[0].device_ptr(),
             *columns[1].device_ptr(),
             *columns[2].device_ptr(),
-            *columns[5].device_ptr(),
             *columns[6].device_ptr(),
+            *columns[7].device_ptr(),
         )
     };
-    let pairs = [(0u32, 1u32), (1u32, 2u32)];
     unsafe {
         cudarc::driver::result::memcpy_htod_sync(domains_ptr, &[0b0010u64, 0b1100u64, 0b0001u64])
             .expect("domain upload");
@@ -693,10 +715,8 @@ fn component_solve_rejects_jointly_infeasible_greedy_maximum() {
     carrier
         .solve_label_map_top2(&mut fuel)
         .expect("top-two stage");
-    let (offsets, indices) = candidate_components(3, &pairs);
-    assert_eq!(offsets, vec![0, 2], "both candidates share one component");
     carrier
-        .solve_components_exact(&offsets, &indices, &mut fuel)
+        .solve_components_exact(&mut fuel)
         .expect("component stage");
     device.inner().synchronize().expect("post-solve sync");
 
@@ -731,6 +751,102 @@ fn component_solve_rejects_jointly_infeasible_greedy_maximum() {
         fuel.spent(),
         16,
         "meter reconciles to device-measured expansions"
+    );
+}
+
+/// Component discovery consumes every active argument role from the
+/// carrier-owned device matrix. Candidate 0 and candidate 2 share only
+/// entity 2 through candidate 0's THIRD role; treating rows as pairs
+/// would miss the component and incorrectly keep candidate 2's greedy
+/// label.
+#[test]
+fn component_discovery_connects_candidates_through_nary_roles_on_device() {
+    let _carrier_test_guard = carrier_test_lock();
+    use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let mut carrier =
+        JointConstraintCarrier::allocate_with_max_arity(Arc::clone(&device), 7, 1, 3, 3, 3)
+            .expect("allocation");
+    carrier
+        .register_schema("00", SOLVER_ABI_IDENTITY)
+        .expect("registration");
+    carrier
+        .bind_role_signatures(&[
+            0, 0b1111, 0b1111, // role 0: unconstrained
+            0, 0b1111, 0b0100, // role 1: label 2 pins sort 2
+            0, 0b0010, 0b1111, // role 2: label 1 pins sort 1
+        ])
+        .expect("binding");
+
+    let (domains_ptr, scores_ptr, arguments_ptr, arities_ptr, map_ptr, status_ptr) = {
+        let columns: Vec<&xlog_cuda::CudaColumn> = carrier.columns().collect();
+        (
+            *columns[0].device_ptr(),
+            *columns[1].device_ptr(),
+            *columns[2].device_ptr(),
+            *columns[3].device_ptr(),
+            *columns[6].device_ptr(),
+            *columns[7].device_ptr(),
+        )
+    };
+    unsafe {
+        cudarc::driver::result::memcpy_htod_sync(domains_ptr, &[0b1111u64; 7])
+            .expect("domain upload");
+        cudarc::driver::result::memcpy_htod_sync(
+            arguments_ptr,
+            &[
+                0u32, 1, 2, // candidate 0, arity 3
+                3, 4, 0, // candidate 1, arity 2
+                5, 2, 0, // candidate 2, arity 2; shares only c0 role 2
+            ],
+        )
+        .expect("argument upload");
+        cudarc::driver::result::memcpy_htod_sync(arities_ptr, &[3u32, 2, 2]).expect("arity upload");
+        cudarc::driver::result::memcpy_htod_sync(
+            scores_ptr,
+            &[
+                0.1f32, 5.0, 0.0, // c0 greedily chooses label 1
+                0.1, 0.0, 3.0, // independent singleton c1
+                0.1, 0.0, 4.0, // c2's greedy label 2 conflicts on e2
+            ],
+        )
+        .expect("score upload");
+    }
+    device.inner().synchronize().expect("scaffold sync");
+
+    let mut fuel = FuelMeter::new(1 << 22);
+    carrier
+        .solve_label_feasibility(0, &mut fuel)
+        .expect("feasibility stage");
+    carrier
+        .solve_label_map_top2(&mut fuel)
+        .expect("top-two stage");
+    carrier
+        .solve_components_exact(&mut fuel)
+        .expect("component stage");
+    device.inner().synchronize().expect("post-solve sync");
+
+    let mut maps = [0u32; 12];
+    let mut status = [0u32; 3];
+    unsafe {
+        cudarc::driver::result::memcpy_dtoh_sync(&mut maps, map_ptr).expect("map readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut status, status_ptr).expect("status readback");
+    }
+
+    assert_eq!(maps[0], 1, "candidate 0 keeps the joint optimum label");
+    assert_eq!(
+        maps[8], 0,
+        "candidate 2 must abstain because its greedy label conflicts through c0 role 2"
+    );
+    assert_eq!(
+        status,
+        [2, 2, 2],
+        "every device-discovered component is exact"
     );
 }
 
@@ -772,7 +888,7 @@ fn noted_producer_stream_orders_async_writes_before_solve() {
             *columns[0].device_ptr(),
             *columns[1].device_ptr(),
             *columns[2].device_ptr(),
-            *columns[5].device_ptr(),
+            *columns[6].device_ptr(),
         )
     };
 
@@ -960,8 +1076,8 @@ fn corrupt_pair_index_poisons_its_row_only() {
             *columns[0].device_ptr(),
             *columns[1].device_ptr(),
             *columns[2].device_ptr(),
-            *columns[3].device_ptr(),
-            *columns[5].device_ptr(),
+            *columns[4].device_ptr(),
+            *columns[6].device_ptr(),
         )
     };
     unsafe {
@@ -1051,15 +1167,16 @@ fn export_shares_allocation_identity_and_stays_recorder_acceptable() {
     let carrier =
         JointConstraintCarrier::allocate(Arc::clone(&device), 2, 1, 1, 3).expect("allocation");
 
-    use cudarc::driver::DevicePtr;
     let columns: Vec<&CudaColumn> = carrier.columns().collect();
     for (id, column_index) in [
         (CarrierBufferId::Domains, 0),
         (CarrierBufferId::Scores, 1),
         (CarrierBufferId::Constraints, 2),
-        (CarrierBufferId::Outputs, 3),
-        (CarrierBufferId::FeasibleSets, 4),
-        (CarrierBufferId::MapResults, 5),
+        (CarrierBufferId::ArgumentArities, 3),
+        (CarrierBufferId::Outputs, 4),
+        (CarrierBufferId::FeasibleSets, 5),
+        (CarrierBufferId::MapResults, 6),
+        (CarrierBufferId::SolveStatus, 7),
     ] {
         let export = carrier.export_buffer(id);
         assert_eq!(
@@ -1122,7 +1239,7 @@ fn external_column_shows_inverse_ownership_signature() {
     );
 }
 
-/// Memoized-DP stage (red-first): a chain component larger than the
+/// Unified exact-route contract: a chain component larger than the
 /// complete-enumeration capacity must still solve EXACTLY — reached-
 /// domain-bitset DP per the ratified design — never refuse where the
 /// pinned width admits DP, and never approximate margins (У1: margins
@@ -1131,9 +1248,9 @@ fn external_column_shows_inverse_ownership_signature() {
 /// argmax is jointly infeasible mid-chain, so any shortcut that skips
 /// joint reasoning produces the wrong optimum and fails the oracle.
 #[test]
-fn memoized_solve_matches_oracle_beyond_enumeration_capacity() {
+fn exact_route_memoizes_device_discovered_large_chain() {
     let _carrier_test_guard = carrier_test_lock();
-    use xlog_cuda::{candidate_components, FuelMeter, SOLVER_ABI_IDENTITY};
+    use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
         eprintln!("Skipping: CUDA runtime unavailable");
@@ -1161,8 +1278,8 @@ fn memoized_solve_matches_oracle_beyond_enumeration_capacity() {
             *columns[0].device_ptr(),
             *columns[1].device_ptr(),
             *columns[2].device_ptr(),
-            *columns[5].device_ptr(),
             *columns[6].device_ptr(),
+            *columns[7].device_ptr(),
         )
     };
     // Every entity admits label 1 INDIVIDUALLY (head needs 0b0010,
@@ -1208,15 +1325,13 @@ fn memoized_solve_matches_oracle_beyond_enumeration_capacity() {
     carrier
         .solve_label_map_top2(&mut fuel)
         .expect("top-two stage");
-    let (offsets, indices) = candidate_components(11, &pairs);
-    assert_eq!(offsets, vec![0, CANDS as u32], "one chain component");
-
-    // Beyond the enumeration cap the exact stage refuses (status 3);
-    // the memoized stage must solve the SAME component exactly.
+    // The one exact route discovers the component from carrier-owned
+    // arguments and escalates beyond enumeration capacity entirely on
+    // the device. No component plan crosses the host boundary.
     let authorized_before = fuel.spent();
     carrier
-        .solve_components_memoized(&offsets, &indices, 12, &mut fuel)
-        .expect("memoized stage");
+        .solve_components_exact(&mut fuel)
+        .expect("device-discovered exact route");
     device.inner().synchronize().expect("post-solve sync");
 
     let mut maps = [0u32; CANDS * 4];
@@ -1248,8 +1363,9 @@ fn memoized_solve_matches_oracle_beyond_enumeration_capacity() {
         assert_eq!(status[i], 4, "memoized-exact status code");
     }
     // Fuel is device-measured DP state insertions: charged, nonzero,
-    // and reconciled below the authorization (exact literal pinned at
-    // GREEN per literals-by-execution).
+    // and reconciled below the authorization. The exact literal is a
+    // retained regression target and needs fresh RunPod execution
+    // before promotion of this ABI.
     assert!(fuel.spent() > authorized_before, "DP work must be metered");
     // Device-measured literal, snapped by execution: feasibility 30
     // (10 candidates x 3 labels) + top-two 30 + exactly 545 memoized
@@ -1260,6 +1376,123 @@ fn memoized_solve_matches_oracle_beyond_enumeration_capacity() {
         605,
         "meter reconciles to device-measured transitions"
     );
+}
+
+/// A component outside both specialized envelopes must still receive an
+/// exact device result. Nine ternary candidates share one center entity,
+/// so complete enumeration refuses on component size and chain DP refuses
+/// on both arity and topology. The general search must preserve global
+/// max-marginals without a host-provided component plan.
+#[test]
+fn exact_route_solves_large_ternary_star_with_multilane_domains() {
+    let _carrier_test_guard = carrier_test_lock();
+    use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    const CANDS: usize = 9;
+    const ENTITIES: usize = 1 + CANDS * 2;
+    const LABELS: usize = 3;
+    const LANES: usize = 2;
+    const ARITY: usize = 3;
+    let mut carrier = JointConstraintCarrier::allocate_with_max_arity(
+        Arc::clone(&device),
+        ENTITIES,
+        LANES,
+        CANDS,
+        LABELS,
+        ARITY,
+    )
+    .expect("ternary carrier allocation");
+    carrier
+        .register_schema("00", SOLVER_ABI_IDENTITY)
+        .expect("registration");
+
+    // Role-major, then label-major, then lane-major. Labels 1 and 2
+    // select disjoint sorts on the shared center; the two private roles
+    // accept either sort. All live bits are in lane 1 so the test cannot
+    // accidentally pass through the single-lane chain specialization.
+    let role_masks = [
+        0, 0, 0, 0b01, 0, 0b10, // center role
+        0, 0, 0, 0b11, 0, 0b11, // first private role
+        0, 0, 0, 0b11, 0, 0b11, // second private role
+    ];
+    carrier
+        .bind_role_signatures(&role_masks)
+        .expect("role signature binding");
+
+    let (domains_ptr, scores_ptr, arguments_ptr, arities_ptr, map_ptr, status_ptr) = {
+        let columns: Vec<&xlog_cuda::CudaColumn> = carrier.columns().collect();
+        (
+            *columns[0].device_ptr(),
+            *columns[1].device_ptr(),
+            *columns[2].device_ptr(),
+            *columns[3].device_ptr(),
+            *columns[6].device_ptr(),
+            *columns[7].device_ptr(),
+        )
+    };
+    let mut domains = [0u64; ENTITIES * LANES];
+    for entity in 0..ENTITIES {
+        domains[entity * LANES + 1] = 0b11;
+    }
+    let mut arguments = [0u32; CANDS * ARITY];
+    for candidate in 0..CANDS {
+        arguments[candidate * ARITY] = 0;
+        arguments[candidate * ARITY + 1] = (1 + candidate * 2) as u32;
+        arguments[candidate * ARITY + 2] = (2 + candidate * 2) as u32;
+    }
+    let arities = [ARITY as u32; CANDS];
+    let mut scores = [0f32; CANDS * LABELS];
+    for candidate in 0..CANDS {
+        scores[candidate * LABELS] = 0.0;
+        scores[candidate * LABELS + 1] = if candidate < 5 { 5.0 } else { 1.0 };
+        scores[candidate * LABELS + 2] = if candidate < 5 { 1.0 } else { 5.5 };
+    }
+    unsafe {
+        cudarc::driver::result::memcpy_htod_sync(domains_ptr, &domains).expect("domain upload");
+        cudarc::driver::result::memcpy_htod_sync(arguments_ptr, &arguments)
+            .expect("argument upload");
+        cudarc::driver::result::memcpy_htod_sync(arities_ptr, &arities).expect("arity upload");
+        cudarc::driver::result::memcpy_htod_sync(scores_ptr, &scores).expect("score upload");
+    }
+    device.inner().synchronize().expect("scaffold sync");
+
+    let mut fuel = FuelMeter::new(1 << 24);
+    carrier
+        .solve_label_feasibility(0, &mut fuel)
+        .expect("feasibility stage");
+    carrier
+        .solve_label_map_top2(&mut fuel)
+        .expect("top-two stage");
+    carrier
+        .solve_components_exact(&mut fuel)
+        .expect("general exact component solve");
+    device.inner().synchronize().expect("post-solve sync");
+
+    let mut maps = [0u32; CANDS * 4];
+    let mut status = [0u32; CANDS];
+    unsafe {
+        cudarc::driver::result::memcpy_dtoh_sync(&mut maps, map_ptr).expect("map readback");
+        cudarc::driver::result::memcpy_dtoh_sync(&mut status, status_ptr).expect("status readback");
+    }
+    for candidate in 0..CANDS {
+        assert_eq!(maps[candidate * 4], 1, "global MAP label");
+        assert_eq!(
+            f32::from_bits(maps[candidate * 4 + 2]),
+            29.0,
+            "global MAP total"
+        );
+        assert_eq!(
+            f32::from_bits(maps[candidate * 4 + 3]),
+            if candidate < 5 { 2.0 } else { 1.0 },
+            "exact per-candidate global margin"
+        );
+        assert_eq!(status[candidate], 5, "general exact-search authority");
+    }
 }
 
 /// Test-side exhaustive oracle for chain components: enumerates every
@@ -1378,12 +1611,12 @@ fn brute_force_chain_oracle(domains: &[u64], pairs: &[(u32, u32)], scores: &[f32
     }
 }
 
-/// Consumer-event seam for the memoized stage: a registration
-/// attached to a failed memoized solve clears without handing off,
-/// and a successful memoized solve publishes its completion event to
+/// Consumer-event seam for the unified exact route: a registration
+/// attached to a failed solve clears without handing off, and a
+/// successful solve publishes its completion event to
 /// the registered consumer stream, consuming the registration.
 #[test]
-fn memoized_stage_clears_and_hands_off_consumer_registrations() {
+fn exact_route_clears_and_hands_off_consumer_registrations() {
     let _carrier_test_guard = carrier_test_lock();
     use xlog_cuda::{FuelMeter, SOLVER_ABI_IDENTITY};
 
@@ -1401,7 +1634,7 @@ fn memoized_stage_clears_and_hands_off_consumer_registrations() {
         .bind_signatures(&[0, 0b0100, 0b0001], &[0, 0b1000, 0b1000])
         .expect("binding");
 
-    // A registration attached to a memoized solve that refuses before
+    // A registration attached to an exact solve that refuses before
     // touching the device must be cleared. Drop its stream so a
     // retained stale handle would poison the later successful handoff.
     let failed_pool = Arc::new(xlog_cuda::device_runtime::StreamPool::with_defaults(
@@ -1418,7 +1651,7 @@ fn memoized_stage_clears_and_hands_off_consumer_registrations() {
         .expect("register failed-attempt consumer");
     let mut fuel = FuelMeter::new(1 << 22);
     assert!(matches!(
-        carrier.solve_components_memoized(&[0, 1], &[0], 1, &mut fuel),
+        carrier.solve_components_exact(&mut fuel),
         Err(CarrierError::FeasibilityNotSolved)
     ));
     drop(failed_stream);
@@ -1428,7 +1661,7 @@ fn memoized_stage_clears_and_hands_off_consumer_registrations() {
         .solve_label_feasibility(0, &mut fuel)
         .expect("feasibility prerequisite");
 
-    // The consumer stream must observe the memoized solve completion
+    // The consumer stream must observe the exact-route completion
     // event; the wait completing proves the handoff was published.
     let consumer_pool = Arc::new(xlog_cuda::device_runtime::StreamPool::with_defaults(
         Arc::clone(&device),
@@ -1441,8 +1674,8 @@ fn memoized_stage_clears_and_hands_off_consumer_registrations() {
         .note_consumer_stream(consumer.cu_stream() as u64)
         .expect("register consumer");
     carrier
-        .solve_components_memoized(&[0, 1], &[0], 1, &mut fuel)
-        .expect("memoized solve with consumer handoff");
+        .solve_components_exact(&mut fuel)
+        .expect("exact solve with consumer handoff");
     unsafe {
         cudarc::driver::result::stream::synchronize(consumer.cu_stream())
             .expect("consumer completion");

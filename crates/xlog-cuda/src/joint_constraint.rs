@@ -32,21 +32,32 @@ use crate::{CudaDevice, LaunchAsync, LaunchConfig};
 const FEASIBILITY_KERNEL: &str = "joint_label_feasibility";
 /// Kernel entry point for the per-candidate exact top-two stage.
 const TOP2_KERNEL: &str = "joint_label_top2";
+/// Kernel entry points for device-resident candidate-component discovery.
+const COMPONENT_PLAN_INIT_KERNEL: &str = "joint_component_plan_init";
+const COMPONENT_ENTITY_OWNERS_KERNEL: &str = "joint_component_entity_owners";
+const COMPONENT_UNION_KERNEL: &str = "joint_component_union";
+const COMPONENT_COMPRESS_KERNEL: &str = "joint_component_compress";
 /// Kernel entry point for the exact component-enumeration stage.
 const COMPONENT_KERNEL: &str = "joint_component_enumerate";
-/// All joint-solve module entry points, in manifest order.
-const MEMOIZED_KERNEL: &str = "joint_label_memoized";
+/// Exact specialized and general component-search entry points.
+const CHAIN_DP_KERNEL: &str = "joint_component_chain_dp";
+const BRANCH_AND_BOUND_KERNEL: &str = "joint_component_branch_and_bound";
 
 const JOINT_SOLVE_KERNELS: &[&str] = &[
     FEASIBILITY_KERNEL,
     TOP2_KERNEL,
+    COMPONENT_PLAN_INIT_KERNEL,
+    COMPONENT_ENTITY_OWNERS_KERNEL,
+    COMPONENT_UNION_KERNEL,
+    COMPONENT_COMPRESS_KERNEL,
     COMPONENT_KERNEL,
-    MEMOIZED_KERNEL,
+    CHAIN_DP_KERNEL,
+    BRANCH_AND_BOUND_KERNEL,
 ];
 
-/// Fixed carrier budget: slice-1 buffers are capacity-bounded and
-/// small; the production capacity envelope arrives with the solver
-/// slice and is validated against the consensus thresholds.
+/// Fixed carrier budget: device-owned working buffers are capacity-bounded
+/// and small; the production capacity envelope is validated against the
+/// solver's consensus thresholds.
 const CARRIER_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Typed carrier errors. Refusals are concrete variants — callers
@@ -92,13 +103,6 @@ pub enum CarrierError {
     /// The top-two stage was attempted before the feasibility stage
     /// populated the feasible sets it consumes.
     FeasibilityNotSolved,
-    /// The component plan handed to the exact enumeration stage is
-    /// malformed (non-monotone offsets, out-of-range or duplicate
-    /// candidate indices, wrong totals).
-    InvalidComponentPlan {
-        /// What was malformed.
-        detail: String,
-    },
     /// The abstain label index is outside the label universe.
     AbstainOutOfRange {
         /// The offending index.
@@ -162,9 +166,6 @@ impl std::fmt::Display for CarrierError {
                 "top-two stage refused: the feasibility stage has not \
                  populated the feasible sets this session"
             ),
-            CarrierError::InvalidComponentPlan { detail } => {
-                write!(f, "invalid component plan: {detail}")
-            }
             CarrierError::AbstainOutOfRange {
                 abstain_label,
                 labels,
@@ -202,8 +203,10 @@ pub enum CarrierBufferId {
     Domains,
     /// Relation candidate scores, `candidates x labels` f32.
     Scores,
-    /// Candidate entity pairs, `candidates x 2` u32.
+    /// Padded candidate entity arguments, `candidates x max_arity` u32.
     Constraints,
+    /// Declared active argument count for each candidate, `candidates` u32.
+    ArgumentArities,
     /// Per-candidate feasible label counts, `candidates` u32.
     Outputs,
     /// Per-candidate feasible label bitmasks,
@@ -220,12 +223,12 @@ pub enum CarrierBufferId {
     /// max-marginal ONLY for single-candidate components; a set
     /// ambiguity flag must never emit as a unique MAP label.
     MapResults,
-    /// Per-candidate solve authority, `candidates` u32: 2 =
-    /// component-exact (complete enumeration), 3 = refused (fuel or
-    /// stage capacity — the memoized-DP stage is the named open
-    /// cell), 0xFFFFFFFF = poisoned. Rows the component stage never
-    /// touched keep their prior value; the caller's plan says which
-    /// rows are singleton (top-two authoritative).
+    /// Per-candidate solve authority, `candidates` u32: 2 = exact by
+    /// complete enumeration, 4 = exact by device-discovered chain DP,
+    /// 5 = exact by general branch-and-bound, 3 = refused on fuel,
+    /// 0xFFFFFFFF = poisoned. Rows no component stage touched keep
+    /// their prior top-two authority; status 6 is internal escalation
+    /// and must be consumed before this method returns.
     SolveStatus,
 }
 
@@ -253,9 +256,12 @@ pub struct CarrierExport {
 /// the outward export surface, so both sides observe one allocation
 /// identity.
 pub struct JointConstraintCarrier {
-    buffers: [Arc<crate::memory::TrackedCudaSlice<u8>>; 8],
-    columns: [CudaColumn; 7],
-    signatures: Option<[CudaColumn; 2]>,
+    buffers: [Arc<crate::memory::TrackedCudaSlice<u8>>; 9],
+    columns: [CudaColumn; 8],
+    component_buffers: [Arc<crate::memory::TrackedCudaSlice<u8>>; 4],
+    component_columns: [CudaColumn; 4],
+    search_columns: [CudaColumn; 4],
+    signatures: Option<CudaColumn>,
     registered_schema: Option<(String, String)>,
     feasibility_solved: bool,
     /// Producer-completion events recorded on EXTERNAL streams via
@@ -272,6 +278,7 @@ pub struct JointConstraintCarrier {
     domain_lanes: usize,
     candidates: usize,
     labels: usize,
+    max_arity: usize,
     device: Arc<CudaDevice>,
     pool: Arc<StreamPool>,
     memory: Arc<GpuMemoryManager>,
@@ -373,11 +380,40 @@ impl JointConstraintCarrier {
         candidates: usize,
         labels: usize,
     ) -> Result<Self, CarrierError> {
+        let carrier =
+            Self::allocate_with_max_arity(device, entities, domain_lanes, candidates, labels, 2)?;
+        let binary_arities = vec![2u32; candidates];
+        unsafe {
+            cudarc::driver::result::memcpy_htod_sync(
+                *carrier.buffers[3].device_ptr(),
+                &binary_arities,
+            )
+            .map_err(|error| {
+                CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                    "legacy binary arity initialization failed: {error}"
+                )))
+            })?;
+        }
+        Ok(carrier)
+    }
+
+    /// Allocate an arbitrary-arity carrier. Candidate rows are padded to
+    /// `max_arity`; the active width of every row lives in its owned arity
+    /// buffer and is consumed by the solver kernels.
+    pub fn allocate_with_max_arity(
+        device: Arc<CudaDevice>,
+        entities: usize,
+        domain_lanes: usize,
+        candidates: usize,
+        labels: usize,
+        max_arity: usize,
+    ) -> Result<Self, CarrierError> {
         for (dimension, value) in [
             ("entities", entities),
             ("domain_lanes", domain_lanes),
             ("candidates", candidates),
             ("labels", labels),
+            ("max_arity", max_arity),
         ] {
             if value == 0 {
                 return Err(CarrierError::ZeroCapacity { dimension });
@@ -416,7 +452,10 @@ impl JointConstraintCarrier {
             .alloc::<f32>(candidates * labels)
             .map_err(CarrierError::Allocation)?;
         let constraints = memory
-            .alloc::<u32>(candidates * 2)
+            .alloc::<u32>(candidates * max_arity)
+            .map_err(CarrierError::Allocation)?;
+        let argument_arities = memory
+            .alloc::<u32>(candidates)
             .map_err(CarrierError::Allocation)?;
         let outputs = memory
             .alloc::<u32>(candidates)
@@ -431,26 +470,63 @@ impl JointConstraintCarrier {
         let solve_status = memory
             .alloc::<u32>(candidates)
             .map_err(CarrierError::Allocation)?;
+        let component_parents = memory
+            .alloc::<u32>(candidates)
+            .map_err(CarrierError::Allocation)?;
+        let component_entity_owners = memory
+            .alloc::<u32>(entities)
+            .map_err(CarrierError::Allocation)?;
+        let component_count = memory.alloc::<u32>(1).map_err(CarrierError::Allocation)?;
+        let component_fuel = memory.alloc::<u64>(1).map_err(CarrierError::Allocation)?;
+        let search_assignment = memory
+            .alloc::<u32>(candidates)
+            .map_err(CarrierError::Allocation)?;
+        let search_best_label = memory
+            .alloc::<u32>(candidates)
+            .map_err(CarrierError::Allocation)?;
+        let search_best_total = memory
+            .alloc::<f32>(candidates)
+            .map_err(CarrierError::Allocation)?;
+        let search_alt_total = memory
+            .alloc::<f32>(candidates)
+            .map_err(CarrierError::Allocation)?;
 
         // Every buffer is held as a shared Arc so the outward export
         // surface and the carrier's working columns observe one
         // allocation identity.
-        let buffers: [Arc<crate::memory::TrackedCudaSlice<u8>>; 8] = [
+        let buffers: [Arc<crate::memory::TrackedCudaSlice<u8>>; 9] = [
             Arc::new(domains.into_bytes()),
             Arc::new(scores.into_bytes()),
             Arc::new(constraints.into_bytes()),
+            Arc::new(argument_arities.into_bytes()),
             Arc::new(outputs.into_bytes()),
             Arc::new(feasible_sets.into_bytes()),
             Arc::new(logical_counts.into_bytes()),
             Arc::new(map_results.into_bytes()),
             Arc::new(solve_status.into_bytes()),
         ];
+        let component_buffers: [Arc<crate::memory::TrackedCudaSlice<u8>>; 4] = [
+            Arc::new(component_parents.into_bytes()),
+            Arc::new(component_entity_owners.into_bytes()),
+            Arc::new(component_count.into_bytes()),
+            Arc::new(component_fuel.into_bytes()),
+        ];
+        let search_buffers: [Arc<crate::memory::TrackedCudaSlice<u8>>; 4] = [
+            Arc::new(search_assignment.into_bytes()),
+            Arc::new(search_best_label.into_bytes()),
+            Arc::new(search_best_total.into_bytes()),
+            Arc::new(search_alt_total.into_bytes()),
+        ];
         // Deterministic empty session: every buffer is zeroed so a
         // fresh carrier can never read reused device memory — in
         // particular, garbage in the solve-status column could
         // otherwise accidentally read as a claimed authority.
         let stream = device.inner().stream().clone();
-        for buffer in &buffers {
+        for buffer in buffers
+            .iter()
+            .chain(component_buffers.iter())
+            .chain(search_buffers.iter())
+        {
             // SAFETY: each pointer is a live runtime-backed
             // allocation of exactly `len()` bytes on this device.
             unsafe {
@@ -479,13 +555,29 @@ impl JointConstraintCarrier {
             shared_column(&buffers[2], &stream),
             shared_column(&buffers[3], &stream),
             shared_column(&buffers[4], &stream),
-            shared_column(&buffers[6], &stream),
+            shared_column(&buffers[5], &stream),
             shared_column(&buffers[7], &stream),
+            shared_column(&buffers[8], &stream),
+        ];
+        let component_columns = [
+            shared_column(&component_buffers[0], &stream),
+            shared_column(&component_buffers[1], &stream),
+            shared_column(&component_buffers[2], &stream),
+            shared_column(&component_buffers[3], &stream),
+        ];
+        let search_columns = [
+            shared_column(&search_buffers[0], &stream),
+            shared_column(&search_buffers[1], &stream),
+            shared_column(&search_buffers[2], &stream),
+            shared_column(&search_buffers[3], &stream),
         ];
 
         Ok(Self {
             buffers,
             columns,
+            component_buffers,
+            component_columns,
+            search_columns,
             signatures: None,
             registered_schema: None,
             feasibility_solved: false,
@@ -495,6 +587,7 @@ impl JointConstraintCarrier {
             domain_lanes,
             candidates,
             labels,
+            max_arity,
             device,
             pool,
             memory,
@@ -643,12 +736,13 @@ impl JointConstraintCarrier {
         let (index, elem_bytes, rows, cols) = match id {
             CarrierBufferId::Domains => (0, 8, self.entities, self.domain_lanes),
             CarrierBufferId::Scores => (1, 4, self.candidates, self.labels),
-            CarrierBufferId::Constraints => (2, 4, self.candidates, 2),
-            CarrierBufferId::Outputs => (3, 4, self.candidates, 1),
-            CarrierBufferId::FeasibleSets => (4, 8, self.candidates, label_words(self.labels)),
-            CarrierBufferId::LogicalCounts => (5, 4, 1, 4),
-            CarrierBufferId::MapResults => (6, 4, self.candidates, 4),
-            CarrierBufferId::SolveStatus => (7, 4, self.candidates, 1),
+            CarrierBufferId::Constraints => (2, 4, self.candidates, self.max_arity),
+            CarrierBufferId::ArgumentArities => (3, 4, self.candidates, 1),
+            CarrierBufferId::Outputs => (4, 4, self.candidates, 1),
+            CarrierBufferId::FeasibleSets => (5, 8, self.candidates, label_words(self.labels)),
+            CarrierBufferId::LogicalCounts => (6, 4, 1, 4),
+            CarrierBufferId::MapResults => (7, 4, self.candidates, 4),
+            CarrierBufferId::SolveStatus => (8, 4, self.candidates, 1),
         };
         CarrierExport {
             slice: Arc::clone(&self.buffers[index]),
@@ -683,10 +777,38 @@ impl JointConstraintCarrier {
                 });
             }
         }
+        if self.max_arity != 2 {
+            return Err(CarrierError::SignatureShapeMismatch {
+                side: "roles",
+                expected_words: self.max_arity * expected_words,
+                got_words: 2 * expected_words,
+            });
+        }
+        let mut role_masks = Vec::with_capacity(2 * expected_words);
+        role_masks.extend_from_slice(head_masks);
+        role_masks.extend_from_slice(tail_masks);
+        self.signatures = Some(self.upload_mask(&role_masks)?);
+        Ok(())
+    }
 
-        let head = self.upload_mask(head_masks)?;
-        let tail = self.upload_mask(tail_masks)?;
-        self.signatures = Some([head, tail]);
+    /// Bind role-indexed catalog signatures in role-major order:
+    /// `max_arity x labels x domain_lanes` u64 words.
+    pub fn bind_role_signatures(&mut self, role_masks: &[u64]) -> Result<(), CarrierError> {
+        if self.registered_schema.is_none() {
+            return Err(CarrierError::SchemaNotRegistered);
+        }
+        if self.signatures.is_some() {
+            return Err(CarrierError::SignaturesAlreadyBound);
+        }
+        let expected_words = self.max_arity * self.labels * self.domain_lanes;
+        if role_masks.len() != expected_words {
+            return Err(CarrierError::SignatureShapeMismatch {
+                side: "roles",
+                expected_words,
+                got_words: role_masks.len(),
+            });
+        }
+        self.signatures = Some(self.upload_mask(role_masks)?);
         Ok(())
     }
 
@@ -762,15 +884,15 @@ impl JointConstraintCarrier {
         let Some(signatures) = &self.signatures else {
             return Err(CarrierError::SignaturesUnbound);
         };
-        let [domains, _scores, constraints, outputs, feasible_sets, _map_results, _solve_status] =
+        let [domains, _scores, arguments, argument_arities, outputs, feasible_sets, _map_results, _solve_status] =
             &self.columns;
-        let [head_masks, tail_masks] = signatures;
+        let role_masks = signatures;
 
         let mut rec = LaunchRecorder::new_strict(stream_id);
         rec.read_column(domains);
-        rec.read_column(constraints);
-        rec.read_column(head_masks);
-        rec.read_column(tail_masks);
+        rec.read_column(arguments);
+        rec.read_column(argument_arities);
+        rec.read_column(role_masks);
         rec.write_column(outputs);
         rec.write_column(feasible_sets);
         rec.preflight(&self.runtime).map_err(|e| {
@@ -788,12 +910,12 @@ impl JointConstraintCarrier {
             })?;
         let block = 256u32;
         let grid = (self.candidates as u32).div_ceil(block);
-        // SAFETY: joint_label_feasibility(domains, pairs, head_masks,
-        // tail_masks, num_entities, num_candidates, num_labels, lanes,
-        // abstain, feasible_counts, feasible_sets); every pointer is a
+        // SAFETY: joint_label_feasibility(domains, arguments, arities,
+        // role_masks, max_arity, num_entities, num_candidates, num_labels,
+        // lanes, abstain, feasible_counts, feasible_sets); every pointer is a
         // live runtime-backed carrier column recorded above, and the
         // capacity metadata matches the allocation shapes. Corrupt
-        // pair indices poison their row inside the kernel.
+        // invalid arities or entity indices poison their row inside the kernel.
         unsafe {
             kernel
                 .launch_on_stream(
@@ -805,9 +927,10 @@ impl JointConstraintCarrier {
                     },
                     (
                         *domains.device_ptr(),
-                        *constraints.device_ptr(),
-                        *head_masks.device_ptr(),
-                        *tail_masks.device_ptr(),
+                        *arguments.device_ptr(),
+                        *argument_arities.device_ptr(),
+                        *role_masks.device_ptr(),
+                        self.max_arity as u32,
                         self.entities as u32,
                         self.candidates as u32,
                         self.labels as u32,
@@ -876,7 +999,7 @@ impl JointConstraintCarrier {
 
         self.drain_producer_waits(&cu_stream)?;
 
-        let [_domains, scores, _constraints, _outputs, feasible_sets, map_results, _solve_status] =
+        let [_domains, scores, _arguments, _argument_arities, _outputs, feasible_sets, map_results, _solve_status] =
             &self.columns;
 
         let mut rec = LaunchRecorder::new_strict(stream_id);
@@ -933,81 +1056,34 @@ impl JointConstraintCarrier {
         Ok(())
     }
 
-    /// Solve every planned multi-candidate component EXACTLY by
-    /// complete enumeration of feasible label combinations, writing
-    /// joint-exact per-edge results (global max-marginals — complete
-    /// enumeration is exact by construction) into the map-results
-    /// column and per-row authority into the solve-status column.
-    ///
-    /// The caller supplies the component plan in CSR form, computed
-    /// host-side from its OWN pair list ([`candidate_components`] in
-    /// `joint_solver`) — the plan never comes from a device readback.
-    /// Components whose enumeration exceeds the per-component fuel
-    /// share are REFUSED (status 3), never approximated; the
-    /// memoized-DP stage is their named open cell. The whole
-    /// remaining fuel budget is authorized (charged) up front; the
-    /// device spends at most that.
-    pub fn solve_components_exact(
-        &mut self,
-        comp_offsets: &[u32],
-        comp_indices: &[u32],
-        fuel: &mut FuelMeter,
-    ) -> Result<(), CarrierError> {
-        let result = self.solve_components_exact_inner(comp_offsets, comp_indices, fuel);
+    /// Discover candidate components from the carrier-owned argument
+    /// matrix and solve every component exactly on the device. No
+    /// component membership crosses the host boundary. Components
+    /// beyond complete-enumeration capacity continue through the
+    /// device-discovered exact chain DP and then general device
+    /// branch-and-bound. Topology and arity never select a refusal;
+    /// only measured fuel exhaustion may refuse (status 3).
+    pub fn solve_components_exact(&mut self, fuel: &mut FuelMeter) -> Result<(), CarrierError> {
+        let result = self.solve_components_exact_inner(fuel);
         if result.is_err() {
             self.pending_consumer_streams.clear();
         }
         result
     }
 
-    fn solve_components_exact_inner(
-        &mut self,
-        comp_offsets: &[u32],
-        comp_indices: &[u32],
-        fuel: &mut FuelMeter,
-    ) -> Result<(), CarrierError> {
+    fn solve_components_exact_inner(&mut self, fuel: &mut FuelMeter) -> Result<(), CarrierError> {
         if self.registered_schema.is_none() {
             return Err(CarrierError::SchemaNotRegistered);
         }
         if !self.feasibility_solved {
             return Err(CarrierError::FeasibilityNotSolved);
         }
-        let invalid = |detail: String| CarrierError::InvalidComponentPlan { detail };
-        if comp_offsets.first() != Some(&0)
-            || comp_offsets.last().copied() != Some(comp_indices.len() as u32)
-        {
-            return Err(invalid(format!(
-                "offsets must run 0..={}, got first {:?} last {:?}",
-                comp_indices.len(),
-                comp_offsets.first(),
-                comp_offsets.last()
-            )));
-        }
-        if comp_offsets.windows(2).any(|w| w[0] > w[1]) {
-            return Err(invalid("offsets are not monotone".to_string()));
-        }
-        let mut seen = vec![false; self.candidates];
-        for &cand in comp_indices {
-            let slot = seen
-                .get_mut(cand as usize)
-                .ok_or_else(|| invalid(format!("candidate {cand} outside capacity")))?;
-            if *slot {
-                return Err(invalid(format!("candidate {cand} listed twice")));
-            }
-            *slot = true;
-        }
-        let num_components = comp_offsets.len() - 1;
-        if num_components == 0 {
-            return Ok(());
-        }
 
-        // Authorize the whole remaining budget up front, split evenly
-        // per component; the kernel refuses any component whose
-        // enumeration would exceed its share. The device counts the
-        // ACTUAL expansions, and the unspent authorization is
-        // refunded after the bounded post-solve readback below.
-        let fuel_per_component = fuel.remaining() / num_components as u64;
-        let authorized = fuel_per_component * num_components as u64;
+        // Component count stays device-resident. Authorize the whole
+        // remaining budget up front; the exact kernel divides it by
+        // the device-computed count, and the device reports only the
+        // actual expansions through one bounded metadata counter.
+        let authorized = fuel.remaining();
         fuel.charge(authorized).map_err(CarrierError::Solver)?;
 
         let stream_id = self.pool.acquire().map_err(|e| {
@@ -1022,101 +1098,308 @@ impl JointConstraintCarrier {
         })?;
         self.drain_producer_waits(&cu_stream)?;
 
-        // The plan uploads cold-path as recorder-tracked columns so
-        // the dealloc-ordering machinery keeps them alive past the
-        // asynchronous launch. The zeroed fuel counter rides the same
-        // path; the device accumulates actual expansions into it.
-        let offsets_col = self.upload_plan(comp_offsets)?;
-        let indices_col = self.upload_plan(comp_indices)?;
-        let fuel_words = [0u32, 0u32];
-        let fuel_col = self.upload_plan(&fuel_words)?;
-
         let Some(signatures) = &self.signatures else {
             return Err(CarrierError::SignaturesUnbound);
         };
-        let [domains, scores, constraints, _outputs, feasible_sets, map_results, solve_status] =
+        let [domains, scores, arguments, argument_arities, _outputs, feasible_sets, map_results, solve_status] =
             &self.columns;
-        let [head_masks, tail_masks] = signatures;
+        let [component_parents, component_entity_owners, component_count, component_fuel] =
+            &self.component_columns;
+        let [search_assignment, search_best_label, search_best_total, search_alt_total] =
+            &self.search_columns;
+        let role_masks = signatures;
 
         let mut rec = LaunchRecorder::new_strict(stream_id);
         rec.read_column(scores);
         rec.read_column(feasible_sets);
-        rec.read_column(constraints);
+        rec.read_column(arguments);
+        rec.read_column(argument_arities);
         rec.read_column(domains);
-        rec.read_column(head_masks);
-        rec.read_column(tail_masks);
-        rec.read_column(&offsets_col);
-        rec.read_column(&indices_col);
+        rec.read_column(role_masks);
+        rec.read_column(component_parents);
+        rec.write_column(component_parents);
+        rec.read_column(component_entity_owners);
+        rec.write_column(component_entity_owners);
+        rec.read_column(component_count);
+        rec.write_column(component_count);
+        rec.write_column(component_fuel);
+        for search_column in [
+            search_assignment,
+            search_best_label,
+            search_best_total,
+            search_alt_total,
+        ] {
+            rec.read_column(search_column);
+            rec.write_column(search_column);
+        }
         rec.write_column(map_results);
         rec.write_column(solve_status);
-        rec.write_column(&fuel_col);
         rec.preflight(&self.runtime).map_err(|e| {
             CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
                 "component solve preflight failed: {e}"
             )))
         })?;
 
-        let kernel = self
+        let plan_init_kernel = self
+            .device
+            .inner()
+            .get_func(JOINT_SOLVE_MODULE, COMPONENT_PLAN_INIT_KERNEL)
+            .ok_or_else(|| CarrierError::KernelUnavailable {
+                detail: format!("{COMPONENT_PLAN_INIT_KERNEL} not resolvable after module load"),
+            })?;
+        let entity_owners_kernel = self
+            .device
+            .inner()
+            .get_func(JOINT_SOLVE_MODULE, COMPONENT_ENTITY_OWNERS_KERNEL)
+            .ok_or_else(|| CarrierError::KernelUnavailable {
+                detail: format!(
+                    "{COMPONENT_ENTITY_OWNERS_KERNEL} not resolvable after module load"
+                ),
+            })?;
+        let union_kernel = self
+            .device
+            .inner()
+            .get_func(JOINT_SOLVE_MODULE, COMPONENT_UNION_KERNEL)
+            .ok_or_else(|| CarrierError::KernelUnavailable {
+                detail: format!("{COMPONENT_UNION_KERNEL} not resolvable after module load"),
+            })?;
+        let compress_kernel = self
+            .device
+            .inner()
+            .get_func(JOINT_SOLVE_MODULE, COMPONENT_COMPRESS_KERNEL)
+            .ok_or_else(|| CarrierError::KernelUnavailable {
+                detail: format!("{COMPONENT_COMPRESS_KERNEL} not resolvable after module load"),
+            })?;
+        let exact_kernel = self
             .device
             .inner()
             .get_func(JOINT_SOLVE_MODULE, COMPONENT_KERNEL)
             .ok_or_else(|| CarrierError::KernelUnavailable {
                 detail: format!("{COMPONENT_KERNEL} not resolvable after module load"),
             })?;
-        // SAFETY: the raw parameter array matches the kernel ABI
-        // joint_component_enumerate(scores, feasible_sets, pairs,
-        // domains, head_masks, tail_masks, comp_cand_offsets,
-        // comp_cand_indices, num_components, num_labels, lanes,
-        // fuel_per_component, map_results, solve_status) exactly, in
-        // order; every device pointer is a live runtime-backed
-        // column recorded above, the plan was validated against
-        // capacity, and the locals stay alive past the enqueue.
+        let chain_dp_kernel = self
+            .device
+            .inner()
+            .get_func(JOINT_SOLVE_MODULE, CHAIN_DP_KERNEL)
+            .ok_or_else(|| CarrierError::KernelUnavailable {
+                detail: format!("{CHAIN_DP_KERNEL} not resolvable after module load"),
+            })?;
+        let branch_and_bound_kernel = self
+            .device
+            .inner()
+            .get_func(JOINT_SOLVE_MODULE, BRANCH_AND_BOUND_KERNEL)
+            .ok_or_else(|| CarrierError::KernelUnavailable {
+                detail: format!("{BRANCH_AND_BOUND_KERNEL} not resolvable after module load"),
+            })?;
+        // SAFETY: each raw parameter array below matches its CUDA
+        // kernel ABI exactly. Every pointer is a live runtime-backed
+        // column recorded above, every launch uses the same stream,
+        // and the scalar locals live through all enqueues.
         unsafe {
             use std::ffi::c_void;
             let scores_p = *scores.device_ptr();
             let feasible_p = *feasible_sets.device_ptr();
-            let pairs_p = *constraints.device_ptr();
+            let arguments_p = *arguments.device_ptr();
+            let arities_p = *argument_arities.device_ptr();
             let domains_p = *domains.device_ptr();
-            let head_p = *head_masks.device_ptr();
-            let tail_p = *tail_masks.device_ptr();
-            let offsets_p = *offsets_col.device_ptr();
-            let indices_p = *indices_col.device_ptr();
-            let num_components_v = num_components as u32;
+            let role_masks_p = *role_masks.device_ptr();
+            let parents_p = *component_parents.device_ptr();
+            let entity_owners_p = *component_entity_owners.device_ptr();
+            let component_count_p = *component_count.device_ptr();
+            let component_fuel_p = *component_fuel.device_ptr();
+            let search_assignment_p = *search_assignment.device_ptr();
+            let search_best_label_p = *search_best_label.device_ptr();
+            let search_best_total_p = *search_best_total.device_ptr();
+            let search_alt_total_p = *search_alt_total.device_ptr();
+            let num_candidates_v = self.candidates as u32;
+            let num_entities_v = self.entities as u32;
             let num_labels_v = self.labels as u32;
             let lanes_v = self.domain_lanes as u32;
+            let max_arity_v = self.max_arity as u32;
             let map_p = *map_results.device_ptr();
             let status_p = *solve_status.device_ptr();
-            let fuel_p = *fuel_col.device_ptr();
-            let mut params: [*mut c_void; 15] = [
-                &scores_p as *const _ as *mut c_void,
-                &feasible_p as *const _ as *mut c_void,
-                &pairs_p as *const _ as *mut c_void,
-                &domains_p as *const _ as *mut c_void,
-                &head_p as *const _ as *mut c_void,
-                &tail_p as *const _ as *mut c_void,
-                &offsets_p as *const _ as *mut c_void,
-                &indices_p as *const _ as *mut c_void,
-                &num_components_v as *const _ as *mut c_void,
-                &num_labels_v as *const _ as *mut c_void,
-                &lanes_v as *const _ as *mut c_void,
-                &fuel_per_component as *const _ as *mut c_void,
-                &map_p as *const _ as *mut c_void,
-                &status_p as *const _ as *mut c_void,
-                &fuel_p as *const _ as *mut c_void,
+            let planner_threads = 256u32;
+            let planner_rows = num_candidates_v.max(num_entities_v);
+            let planner_grid = planner_rows.div_ceil(planner_threads);
+            let candidate_grid = num_candidates_v.div_ceil(planner_threads);
+
+            let mut init_params: [*mut c_void; 6] = [
+                &parents_p as *const _ as *mut c_void,
+                &num_candidates_v as *const _ as *mut c_void,
+                &entity_owners_p as *const _ as *mut c_void,
+                &num_entities_v as *const _ as *mut c_void,
+                &component_count_p as *const _ as *mut c_void,
+                &component_fuel_p as *const _ as *mut c_void,
             ];
-            kernel
+            plan_init_kernel
                 .launch_on_stream(
                     &cu_stream,
                     LaunchConfig {
-                        grid_dim: (num_components as u32, 1, 1),
+                        grid_dim: (planner_grid, 1, 1),
+                        block_dim: (planner_threads, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut init_params[..],
+                )
+                .map_err(|e| {
+                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                        "component plan initialization failed: {e}"
+                    )))
+                })?;
+
+            let mut owner_params: [*mut c_void; 6] = [
+                &arguments_p as *const _ as *mut c_void,
+                &arities_p as *const _ as *mut c_void,
+                &num_candidates_v as *const _ as *mut c_void,
+                &max_arity_v as *const _ as *mut c_void,
+                &num_entities_v as *const _ as *mut c_void,
+                &entity_owners_p as *const _ as *mut c_void,
+            ];
+            entity_owners_kernel
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (candidate_grid, 1, 1),
+                        block_dim: (planner_threads, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut owner_params[..],
+                )
+                .map_err(|e| {
+                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                        "component entity ownership failed: {e}"
+                    )))
+                })?;
+
+            let mut union_params: [*mut c_void; 7] = [
+                &arguments_p as *const _ as *mut c_void,
+                &arities_p as *const _ as *mut c_void,
+                &num_candidates_v as *const _ as *mut c_void,
+                &max_arity_v as *const _ as *mut c_void,
+                &num_entities_v as *const _ as *mut c_void,
+                &entity_owners_p as *const _ as *mut c_void,
+                &parents_p as *const _ as *mut c_void,
+            ];
+            union_kernel
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (candidate_grid, 1, 1),
+                        block_dim: (planner_threads, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut union_params[..],
+                )
+                .map_err(|e| {
+                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                        "component union failed: {e}"
+                    )))
+                })?;
+
+            let mut compress_params: [*mut c_void; 3] = [
+                &parents_p as *const _ as *mut c_void,
+                &num_candidates_v as *const _ as *mut c_void,
+                &component_count_p as *const _ as *mut c_void,
+            ];
+            compress_kernel
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (candidate_grid, 1, 1),
+                        block_dim: (planner_threads, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut compress_params[..],
+                )
+                .map_err(|e| {
+                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                        "component compression failed: {e}"
+                    )))
+                })?;
+
+            let mut exact_params: [*mut c_void; 16] = [
+                &scores_p as *const _ as *mut c_void,
+                &feasible_p as *const _ as *mut c_void,
+                &arguments_p as *const _ as *mut c_void,
+                &arities_p as *const _ as *mut c_void,
+                &domains_p as *const _ as *mut c_void,
+                &role_masks_p as *const _ as *mut c_void,
+                &parents_p as *const _ as *mut c_void,
+                &component_count_p as *const _ as *mut c_void,
+                &num_candidates_v as *const _ as *mut c_void,
+                &num_labels_v as *const _ as *mut c_void,
+                &lanes_v as *const _ as *mut c_void,
+                &max_arity_v as *const _ as *mut c_void,
+                &authorized as *const _ as *mut c_void,
+                &map_p as *const _ as *mut c_void,
+                &status_p as *const _ as *mut c_void,
+                &component_fuel_p as *const _ as *mut c_void,
+            ];
+            exact_kernel
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (num_candidates_v, 1, 1),
                         block_dim: (32, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    &mut params[..],
+                    &mut exact_params[..],
                 )
                 .map_err(|e| {
                     CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
                         "component solve launch failed: {e}"
+                    )))
+                })?;
+            chain_dp_kernel
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (num_candidates_v, 1, 1),
+                        block_dim: (32, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut exact_params[..],
+                )
+                .map_err(|e| {
+                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                        "device-discovered chain DP launch failed: {e}"
+                    )))
+                })?;
+            let mut branch_params: [*mut c_void; 20] = [
+                &scores_p as *const _ as *mut c_void,
+                &feasible_p as *const _ as *mut c_void,
+                &arguments_p as *const _ as *mut c_void,
+                &arities_p as *const _ as *mut c_void,
+                &domains_p as *const _ as *mut c_void,
+                &role_masks_p as *const _ as *mut c_void,
+                &parents_p as *const _ as *mut c_void,
+                &component_count_p as *const _ as *mut c_void,
+                &num_candidates_v as *const _ as *mut c_void,
+                &num_labels_v as *const _ as *mut c_void,
+                &lanes_v as *const _ as *mut c_void,
+                &max_arity_v as *const _ as *mut c_void,
+                &authorized as *const _ as *mut c_void,
+                &map_p as *const _ as *mut c_void,
+                &status_p as *const _ as *mut c_void,
+                &component_fuel_p as *const _ as *mut c_void,
+                &search_assignment_p as *const _ as *mut c_void,
+                &search_best_label_p as *const _ as *mut c_void,
+                &search_best_total_p as *const _ as *mut c_void,
+                &search_alt_total_p as *const _ as *mut c_void,
+            ];
+            branch_and_bound_kernel
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (num_candidates_v, 1, 1),
+                        block_dim: (32, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut branch_params[..],
+                )
+                .map_err(|e| {
+                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
+                        "general exact branch-and-bound launch failed: {e}"
                     )))
                 })?;
         }
@@ -1136,236 +1419,19 @@ impl JointConstraintCarrier {
                     "component solve completion wait failed: {e}"
                 )))
             })?;
-            cudarc::driver::result::memcpy_dtoh_sync(&mut measured, *fuel_col.device_ptr())
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "fuel counter readback failed: {e}"
-                    )))
-                })?;
-        }
-        fuel.refund(authorized.saturating_sub(measured[0]));
-        self.handoff_consumers(&cu_stream)?;
-        Ok(())
-    }
-
-    /// Exact memoized-DP stage for components beyond the enumeration
-    /// capacity: chain-order path components solve by reached-domain
-    /// bitset DP (restricted forward passes, so every emitted total is
-    /// a linearly accumulated f32 — margins only from exact passes,
-    /// never bounds). Wider frontiers refuse typed on the device
-    /// (status 3); the pinned width gates eligibility, the fuel meter
-    /// reconciles to the device-measured DP transitions.
-    pub fn solve_components_memoized(
-        &mut self,
-        comp_offsets: &[u32],
-        comp_indices: &[u32],
-        pinned_width: u32,
-        fuel: &mut FuelMeter,
-    ) -> Result<(), CarrierError> {
-        let result =
-            self.solve_components_memoized_inner(comp_offsets, comp_indices, pinned_width, fuel);
-        if result.is_err() {
-            self.pending_consumer_streams.clear();
-        }
-        result
-    }
-
-    fn solve_components_memoized_inner(
-        &mut self,
-        comp_offsets: &[u32],
-        comp_indices: &[u32],
-        pinned_width: u32,
-        fuel: &mut FuelMeter,
-    ) -> Result<(), CarrierError> {
-        if self.registered_schema.is_none() {
-            return Err(CarrierError::SchemaNotRegistered);
-        }
-        if !self.feasibility_solved {
-            return Err(CarrierError::FeasibilityNotSolved);
-        }
-        let invalid = |detail: String| CarrierError::InvalidComponentPlan { detail };
-        if comp_offsets.first() != Some(&0)
-            || comp_offsets.last().copied() != Some(comp_indices.len() as u32)
-        {
-            return Err(invalid(format!(
-                "offsets must run 0..={}, got first {:?} last {:?}",
-                comp_indices.len(),
-                comp_offsets.first(),
-                comp_offsets.last()
-            )));
-        }
-        if comp_offsets.windows(2).any(|w| w[0] > w[1]) {
-            return Err(invalid("offsets are not monotone".to_string()));
-        }
-        let mut seen = vec![false; self.candidates];
-        for &cand in comp_indices {
-            let slot = seen
-                .get_mut(cand as usize)
-                .ok_or_else(|| invalid(format!("candidate {cand} outside capacity")))?;
-            if *slot {
-                return Err(invalid(format!("candidate {cand} listed twice")));
-            }
-            *slot = true;
-        }
-        let num_components = comp_offsets.len() - 1;
-        if num_components == 0 {
-            return Ok(());
-        }
-
-        let fuel_per_component = fuel.remaining() / num_components as u64;
-        let authorized = fuel_per_component * num_components as u64;
-        fuel.charge(authorized).map_err(CarrierError::Solver)?;
-
-        let stream_id = self.pool.acquire().map_err(|e| {
-            CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                "no launch stream available: {e:?}"
-            )))
-        })?;
-        let cu_stream = self.pool.resolve(stream_id).ok_or_else(|| {
-            CarrierError::Launch(xlog_core::XlogError::Kernel(
-                "launch stream did not resolve".to_string(),
-            ))
-        })?;
-        self.drain_producer_waits(&cu_stream)?;
-
-        let offsets_col = self.upload_plan(comp_offsets)?;
-        let indices_col = self.upload_plan(comp_indices)?;
-        let fuel_words = [0u32, 0u32];
-        let fuel_col = self.upload_plan(&fuel_words)?;
-
-        let Some(signatures) = &self.signatures else {
-            return Err(CarrierError::SignaturesUnbound);
-        };
-        let [domains, scores, constraints, _outputs, feasible_sets, map_results, solve_status] =
-            &self.columns;
-        let [head_masks, tail_masks] = signatures;
-
-        let mut rec = LaunchRecorder::new_strict(stream_id);
-        rec.read_column(scores);
-        rec.read_column(feasible_sets);
-        rec.read_column(constraints);
-        rec.read_column(domains);
-        rec.read_column(head_masks);
-        rec.read_column(tail_masks);
-        rec.read_column(&offsets_col);
-        rec.read_column(&indices_col);
-        rec.write_column(map_results);
-        rec.write_column(solve_status);
-        rec.write_column(&fuel_col);
-        rec.preflight(&self.runtime).map_err(|e| {
-            CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                "memoized solve preflight failed: {e}"
-            )))
-        })?;
-
-        let kernel = self
-            .device
-            .inner()
-            .get_func(JOINT_SOLVE_MODULE, MEMOIZED_KERNEL)
-            .ok_or_else(|| CarrierError::KernelUnavailable {
-                detail: format!("{MEMOIZED_KERNEL} not resolvable after module load"),
-            })?;
-        // SAFETY: the raw parameter array matches the kernel ABI
-        // joint_label_memoized(scores, feasible_sets, pairs, domains,
-        // head_masks, tail_masks, comp_cand_offsets,
-        // comp_cand_indices, num_components, num_labels, lanes,
-        // pinned_width, fuel_per_component, map_results,
-        // solve_status, fuel_spent) exactly, in order; every device
-        // pointer is a live runtime-backed column recorded above and
-        // the locals stay alive past the enqueue.
-        unsafe {
-            use std::ffi::c_void;
-            let scores_p = *scores.device_ptr();
-            let feasible_p = *feasible_sets.device_ptr();
-            let pairs_p = *constraints.device_ptr();
-            let domains_p = *domains.device_ptr();
-            let head_p = *head_masks.device_ptr();
-            let tail_p = *tail_masks.device_ptr();
-            let offsets_p = *offsets_col.device_ptr();
-            let indices_p = *indices_col.device_ptr();
-            let num_components_v = num_components as u32;
-            let num_labels_v = self.labels as u32;
-            let lanes_v = self.domain_lanes as u32;
-            let map_p = *map_results.device_ptr();
-            let status_p = *solve_status.device_ptr();
-            let fuel_p = *fuel_col.device_ptr();
-            let mut params: [*mut c_void; 16] = [
-                &scores_p as *const _ as *mut c_void,
-                &feasible_p as *const _ as *mut c_void,
-                &pairs_p as *const _ as *mut c_void,
-                &domains_p as *const _ as *mut c_void,
-                &head_p as *const _ as *mut c_void,
-                &tail_p as *const _ as *mut c_void,
-                &offsets_p as *const _ as *mut c_void,
-                &indices_p as *const _ as *mut c_void,
-                &num_components_v as *const _ as *mut c_void,
-                &num_labels_v as *const _ as *mut c_void,
-                &lanes_v as *const _ as *mut c_void,
-                &pinned_width as *const _ as *mut c_void,
-                &fuel_per_component as *const _ as *mut c_void,
-                &map_p as *const _ as *mut c_void,
-                &status_p as *const _ as *mut c_void,
-                &fuel_p as *const _ as *mut c_void,
-            ];
-            kernel
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (num_components as u32, 1, 1),
-                        block_dim: (32, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut params[..],
-                )
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "memoized solve launch failed: {e}"
-                    )))
-                })?;
-        }
-        rec.commit(&self.runtime).map_err(|e| {
-            CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                "memoized solve commit failed: {e}"
-            )))
-        })?;
-        // Bounded post-solve metadata read (num_rows class): one
-        // 8-byte counter after a stream-scoped completion wait,
-        // reconciling the meter to the DEVICE-measured transitions.
-        let mut measured = [0u64; 1];
-        unsafe {
-            cudarc::driver::result::stream::synchronize(cu_stream.cu_stream()).map_err(|e| {
-                CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                    "memoized solve completion wait failed: {e}"
-                )))
-            })?;
-            cudarc::driver::result::memcpy_dtoh_sync(&mut measured, *fuel_col.device_ptr())
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "fuel counter readback failed: {e}"
-                    )))
-                })?;
-        }
-        fuel.refund(authorized.saturating_sub(measured[0]));
-        self.handoff_consumers(&cu_stream)?;
-        Ok(())
-    }
-
-    /// Cold-path upload of one plan slice into a runtime-backed
-    /// column.
-    fn upload_plan(&self, words: &[u32]) -> Result<CudaColumn, CarrierError> {
-        let mut slice = self
-            .memory
-            .alloc::<u32>(words.len())
-            .map_err(CarrierError::Allocation)?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(words, &mut slice)
+            cudarc::driver::result::memcpy_dtoh_sync(
+                &mut measured,
+                *self.component_buffers[3].device_ptr(),
+            )
             .map_err(|e| {
                 CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                    "component plan upload failed: {e}"
+                    "fuel counter readback failed: {e}"
                 )))
             })?;
-        Ok(CudaColumn::owned(slice.into_bytes()))
+        }
+        fuel.refund(authorized.saturating_sub(measured[0]));
+        self.handoff_consumers(&cu_stream)?;
+        Ok(())
     }
 
     /// All device columns the carrier owns, in a stable order:
