@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RelationDeltaDirection"],"fn":["normalize_program_for_execution"],"struct":["DeltaPlannerTelemetry","LogicArgumentSchema","LogicDeltaReport","LogicEvalResult","LogicMaterializedStore","LogicProgram","LogicQueryResult","LogicSessionRuntime","PreparedRelationDeltaBatch","PreparedRelationDeltaCommit","RelationDeltaCancellation","WcojDispatchStats"]};

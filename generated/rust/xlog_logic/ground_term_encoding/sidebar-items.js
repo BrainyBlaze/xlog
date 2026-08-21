@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["GroundTermEncodingError"],"fn":["append_ground_term_bytes"]};

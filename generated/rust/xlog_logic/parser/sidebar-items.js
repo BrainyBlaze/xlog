@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Rule"],"fn":["parse_atom","parse_program","parse_program_reference","parse_program_with_stats","parse_statement"],"struct":["FastParseStats","XlogParser"],"type":["ParseResult"]};

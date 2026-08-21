@@ -1,0 +1,33 @@
+# XLOG Documentation
+
+A GPU-native logic programming language for unified symbolic reasoning
+
+XLOG is a full typed logic programming language with one compiler and one CUDA runtime spanning
+four reasoning paradigms: deterministic Datalog, exact and approximate probabilistic inference,
+epistemic reasoning, and differentiable neural-symbolic training. SAT/MaxSAT verification is
+available to all four through a shared GPU-resident solver service, not as a paradigm of its own.
+
+Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs
+on the GPU, and every training iteration pays a PCIe round-trip that dominates wall-clock time
+at scale. XLOG closes that gap: symbolic evaluation is GPU-resident with zero tracked
+host–device transfers in production data planes. Compiled circuits are cached across training
+iterations. GPU-resident results are exposed zero-copy through DLPack and the Arrow C Device
+interface to PyTorch, JAX, and cuDF (Arrow IPC covers host-side interchange). On the
+MNIST-addition neural-symbolic benchmark, circuit caching yields a measured **2.74× end-to-end
+training speedup** (95% CI `[2.29, 3.18]`) in a cached-vs-uncached ablation of XLOG's own
+pipeline, and steady epochs run **2.80× faster than Scallop** at matched accuracy.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/get-started/quickstart">
+    Install XLOG, write your first program, and run it on the GPU in five minutes.
+  </Card>
+  <Card title="Language Reference" icon="book" href="/reference/language">
+    The full language surface: types, predicates, rules, modules, aggregation, and pragmas.
+  </Card>
+  <Card title="Probabilistic Programming" icon="dice" href="/probabilistic/engines">
+    Exact inference via GPU knowledge compilation, plus Monte Carlo sampling with confidence intervals.
+  </Card>
+  <Card title="Architecture" icon="microchip" href="/architecture/overview">
+    How the compiler, IR stack, and CUDA runtime fit together.
+  </Card>
+</CardGroup>

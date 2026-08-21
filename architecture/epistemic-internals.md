@@ -1,0 +1,294 @@
+# Epistemic Execution Internals
+
+How XLOG keeps epistemic literals explicit through EIR, validates GPU execution contracts, and lowers accepted programs through the normal runtime.
+
+<Note>
+For contributors — how epistemic execution works internally. This page assumes
+you work on the xlog runtime itself. It is dense on purpose; it is not the
+user-facing explanation of the epistemic feature.
+</Note>
+
+## What this page covers
+
+XLOG can reason about what a program *knows* and what it holds *possible*, not
+just what is plainly true. These are called epistemic (knowledge-level) literals.
+This page explains how the runtime carries those literals through compilation
+and GPU execution without losing their meaning.
+
+The key design choice: epistemic literals travel through their own explicit
+intermediate representation, called **EIR** (the Epistemic Intermediate
+Representation), before anything else touches them. That way `know` and
+`possible` literals do not quietly collapse into ordinary predicate rewrites
+before their semantic mode has been validated.
+
+## The accepted paths
+
+Every accepted epistemic program first passes through the same semantic boundary:
+
+1. parse and normalize source into the frontend AST (abstract syntax tree);
+2. build EIR from that AST so modal operators and their source spans remain explicit;
+3. classify ordinary and modal dependencies, validate relation identity and tuple
+   shape, and select an execution route.
+
+The route then depends on the classified program:
+
+- An acyclic modal program builds a single-pass GPU plan and runs
+  Generate-Propagate-Test workspace phases.
+- A positive modal dependency cycle uses whichever fixpoint the program's semantic
+  mode selects, set by `#pragma epistemic_mode`.
+  - **`faeel`** (the mode's internal name is FAEEL) is the default and is
+    *founded*: a fact counts as known only when some rule actually derives it, so
+    a tuple that supports only itself does not survive. Before compilation the
+    reducer drops that unfounded exact-tuple self-support, then computes the
+    least fixpoint — the smallest set of facts every rule supports.
+  - **`g91`** (Gelfond's 1991 epistemic-specification semantics) instead admits a
+    self-supporting tuple. For a supported exact-tuple `possible` cycle it
+    computes the *greatest* set of tuples that stay mutually compatible,
+    descending from a GPU-computed over-approximation.
+- A supported cycle through negation reduces to a non-monotone ordinary program
+  and runs through the GPU-backed **well-founded semantics** (WFS) alternating
+  fixpoint — the standard three-valued treatment of a rule that negates something
+  it depends on, where a fact can be true, false, or undefined.
+
+Determined-head stratification may combine these routes in order: a lower stratum
+is materialized first, then a higher stratum reads that relation through its local
+execution plan.
+
+After every modal stratum is materialized, XLOG runs one ordinary closure stage
+over the completed relations and then checks ordinary integrity constraints. This
+extra replay makes cross-stratum constraints authoritative: a program that an
+older route silently accepted can now be rejected when its authored constraint is
+violated. The plan JSON exposes this work as the `ordinary_post` unit; its cost is
+one additional ordinary fixpoint pass per stratified evaluation. The compiler's
+query rules run in that post stage over the final gated relations, so authored
+queries keep source order, constants, repeated-variable filters, projection order,
+and logical zero-column shape.
+
+## Source surface
+
+The frontend represents epistemic constructs explicitly, so the programmer's
+intent survives parsing:
+
+- `#pragma epistemic_mode = faeel`
+- `#pragma epistemic_mode = g91`
+
+Pragmas, including `epistemic_mode`, apply only when declared in the entry file; a
+declaration in an imported module is ignored with `warning[W0510]` (see the
+[pragmas guide](/language-guide/pragmas#pragmas-apply-only-in-the-entry-file)).
+
+- `know atom(...)`
+- `possible atom(...)`
+- `not know atom(...)`
+- `not possible atom(...)`
+
+`faeel` is the default semantic mode for evaluating these literals. `g91`
+selects a compatibility mode matching Gelfond's 1991 epistemic-specification
+semantics.
+
+## The EIR boundary
+
+`xlog_logic::build_eir` converts the parsed AST into the EIR structures defined
+in `xlog-ir`:
+
+- `EirProgram`
+- `EirRule`
+- `EirBodyLiteral`
+- `EirEpistemicLiteral`
+- `EirEpistemicMode`
+- `EirEpistemicOp`
+
+The runtime's ordinary intermediate representation is called RIR (used for
+deterministic, non-epistemic programs). Lowering an epistemic body literal
+directly into RIR is rejected. That rejection is intentional: an accepted
+epistemic program must first pass through EIR planning.
+
+## The single-pass GPU plan contract
+
+`plan_epistemic_gpu_execution` builds the semantic contract that runtime
+execution must satisfy for an acyclic modal program. Recursive dependency classes
+are intercepted by the high-level dispatcher before this planner. The single-pass
+plan does four things:
+
+- it preserves the epistemic literals rather than discarding them;
+- it records, for each accepted rule, how that rule is reduced;
+- it binds each modal literal (a `know` or `possible` literal) to the reduced
+  stable-model tuple source it draws from — where stable models are the answer
+  sets a logic program admits;
+- it declares the typed structural policy `execution_backend=gpu` and
+  `fallback_policy=reject_unsupported`.
+
+The runtime rejects a single-pass plan whose required bindings, workspace sizes,
+or execution policy do not satisfy this contract. The same policy is serialized
+on the reduced-ordinary, stratified, WFS, and Gelfond-1991 compatibility plan
+summaries, including plan families with no single-pass candidate units.
+
+<Note>
+  The plan and evidence JSON intentionally no longer publish synthetic zero
+  measurements. The removed keys include `cpu_fallbacks`,
+  `cpu_fallbacks_zero`, `cpu_fallback_is_zero`, and
+  `cpu_fallback_total_zero`, along with the former semantic and split-batch
+  `cpu_candidate_enumerations`, `cpu_world_view_validations`,
+  `cpu_recomposition_steps`, `cpu_solver_search_fallbacks`, and
+  `cpu_probability_recomputations` fields. Production solver/probability traces
+  and their CLI/PyXLOG exports also dropped `cpu_assignment_enumerations`,
+  `cpu_maxsat_enumerations`, `cpu_learned_clause_transfers`,
+  `cpu_only_probability_recomputations`, and `fixture_circuit_evaluations`;
+  those values were default-only zeros rather than observations. Hardcoded
+  solver/probability no-fallback booleans were removed for the same reason.
+  WFS summaries likewise omit `host_wfs_fallback_allowed`; the typed fallback
+  policy is the structural contract. Specialized CLI evidence also omits
+  `cpu_threshold_only_promotions`, the Python/host score-materialization flags,
+  `cpu_template_expansions`, and `host_materialized_explanation_fallback`
+  because those values were constants rather than observed runtime events.
+  Consumers should gate acceptance on the typed policy plus observed dispatch,
+  kernel timing, device-buffer, candidate-accounting, solver/probability event,
+  and scoped-transfer evidence. The separately selected CPU solver oracle keeps
+  its real, incremented search counters, remains labeled as fixture-only, and is
+  not eligible as production GPU evidence.
+</Note>
+
+## Reduced runtime plans
+
+`compile_epistemic_gpu_execution` and
+`compile_epistemic_gpu_execution_with_stats_snapshot` strip out the epistemic
+literals for the single-pass route, but only after the GPU plan contract already
+exists. Positive recursive routes use their recursive reducer instead. FAEEL
+produces one ordinary least-fixpoint program. The Gelfond-1991 compatibility
+route produces an upper-bound program and a frozen-snapshot refinement program.
+All resulting ordinary programs go through the same compiler that deterministic
+programs use. A non-monotone pass outside the compatibility component is compiled
+into the GPU-backed WFS plan rather than the ordinary semi-naive plan.
+
+That reuse is load-bearing:
+
+- statistics snapshots still feed the compiler;
+- *helper splitting* — breaking a complex rule into smaller helper rules — stays
+  owned by the ordinary optimizer path;
+- WCOJ promotion and route gates are shared with deterministic execution. A
+  *WCOJ* (worst-case-optimal join) computes a multiway pattern directly instead
+  of chaining two-way joins; a *route gate* is the runtime check that decides
+  whether such a specialized route actually fires.
+- reduced positive plans do not get a private epistemic join planner.
+
+## Gelfond-1991 tuple compatibility
+
+The compatibility route is selected for a positive, non-invariant `possible`
+literal when its tuple key exactly matches its rule head and the head and target
+belong to one recursive dependency component. Predicate recursion alone is not
+treated as tuple support: body filters on different rules may describe disjoint
+tuple domains even when the predicates form a strongly connected component.
+
+The route compiles two GPU evaluation passes:
+
+1. The **upper-bound pass** relaxes only the selected compatibility gates. Its
+   result contains every tuple that could survive those gates.
+2. The **refinement pass** replaces each selected gate with a read from a
+   collision-free snapshot relation containing the preceding iteration's tuples.
+   It starts again from the original extensional inputs on every iteration.
+
+The runtime starts from the upper-bound store, repeatedly runs refinement, and
+compares all intensional relations with GPU set operations. The descending
+sequence stops at the greatest compatible tuple fixpoint. This preserves direct
+self-support and mutually compatible tuples while removing rows whose modal
+support exists only at another tuple key or in a disjoint rule domain. Ordinary
+integrity constraints are checked after convergence. When a pass uses WFS, a
+positive constraint atom is true only in the lower extension, while a negated
+atom is true only when its tuple is absent from the upper extension; an undefined
+atom satisfies neither polarity. Modal integrity constraints in a recursive
+epistemic program remain outside this route.
+
+The host launches the passes and observes convergence metadata; relation
+evaluation, frozen snapshots, and set comparison remain GPU-backed. If an
+unrelated non-monotone component is present, an upper-bound or refinement pass
+may reuse the GPU-backed WFS evaluator. Recursive negation or aggregation inside
+the same compatibility component is rejected because either would make the
+descending operator non-monotone. `#pragma max_recursion_depth` bounds refinement
+iterations.
+
+## Single-pass candidate bounds
+
+The Generate-Propagate-Test route must enumerate the candidate knowledge states
+it will test. A bounded fixture (a test harness that generates candidates,
+propagates constraints, then tests them) accepts an explicit `max_candidates`
+configuration.
+
+Production single-pass planning derives the candidate space from the EIR program
+itself. It computes the full candidate lattice (the ordered space of candidate
+knowledge states) from the number of epistemic literals. It is not a fixed
+literal count or a large hardcoded bound. Models per Generate-Propagate-Test
+reduction are capped by the configurable `max_models_per_reduction` field,
+which defaults to `DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION = 1024`. FAEEL
+founded positive-cycle, Gelfond-1991 tuple-compatibility, and WFS routes do not
+enumerate this lattice.
+
+## Single-pass workspace phases
+
+The Generate-Propagate-Test workspace uses device (GPU) buffers for:
+
+- candidate assumptions;
+- world views (a world view is the set of models the program considers possible
+  at once);
+- model membership;
+- rejection reasons;
+- final flags and materialized output tuples where applicable.
+
+The executor initializes these buffers, then launches a sequence of kernels for
+accepted finite shapes: candidate generation, propagation, validation,
+model-membership staging, world-view validation, and materialization.
+
+Some inputs are not supported. Unsupported tuple-key shapes and unbounded arities
+fail closed with an explicit typed diagnostic rather than guessing a result.
+Modal dependency cycles are classified before single-pass workspace construction.
+FAEEL positive cycles run through the ordinary founded least-fixpoint reduction,
+so an unseeded cycle has an empty extension while a founded predecessor can
+propagate through the cycle. Supported exact-tuple Gelfond-1991 positive
+`possible` cycles run through the descending tuple-compatibility fixpoint.
+Supported cycles through negation use the GPU-backed well-founded plan.
+
+## Split execution
+
+Epistemic splitting groups rules by their modal dependencies and their ordinary
+derived dependencies. Independent components may be solved separately, but only
+when splitting preserves the semantics of the unsplit program. Modal predicates
+that are coupled stay in one component and are solved jointly.
+
+For acyclic components, split execution reuses
+`compile_epistemic_gpu_execution_with_stats_snapshot` for each executable
+component. There is no separate split-only runtime. Recursive programs are
+classified before the single-pass split planner.
+
+## Boundaries added with the recursive rewrite
+
+The 0.12.0 rewrite that preserved predicate unions and recursive epistemic
+semantics also closed five shapes that previously compiled. Each now fails closed
+at compile time with a typed `UnsupportedEpistemicConstruct`:
+
+| Construct | Trigger | Source |
+| --- | --- | --- |
+| `epistemic rule-union materialization` | A predicate has more than one defining clause, at least one clause is epistemic, and the modal filters are not provably redundant across clauses. Single-pass materialization keeps no per-clause modal provenance, so it cannot safely filter the clause union. | `epistemic.rs:3258` |
+| `epistemic derived predicate schema` | The same derived epistemic predicate name is defined at two arities. A derived epistemic relation gets one runtime identity per name, so it needs one source signature. | `epistemic.rs:3136` |
+| `epistemic augmented predicate schema` | Clauses for one head signature lower to different internal arities, because a modal-local (body-only) variable adds hidden output columns in some clauses but not others. | `epistemic.rs:3200` |
+| `epistemic augmented head query` | A query against an augmented epistemic head whose arguments are not all distinct named variables — a constant, `_`, a repeated variable, or a compound term. | `epistemic.rs:3228` |
+| `epistemic modal tuple key` | A modal literal's tuple key flattens to a binding arity that does not match the target's declared arity. Use one scalar key term per target column. | `epistemic.rs:2310` |
+
+The first is the one a program author is most likely to hit: writing two rule
+clauses for one epistemic head is ordinary Datalog style, and it is now rejected
+rather than silently mis-filtered.
+
+## Invariants and diagnostics
+
+Contributors verifying epistemic behavior can rely on these facts:
+
+- EIR is built from the AST, not from RIR.
+- Dependency classification occurs before single-pass plan construction.
+- Positive FAEEL cycles execute through an ordinary founded least-fixpoint
+  reduction, supported exact-tuple Gelfond-1991 possibility cycles use a
+  descending greatest compatibility fixpoint, and supported negative cycles
+  execute through GPU-backed WFS.
+- The bounded fixture evaluators (with `max_candidates`) are distinct from the
+  production GPU execution path.
+- Unsupported shapes surface as typed, fail-closed boundaries.
+- Preflight metadata (information collected before execution runs) alone is not
+  proof that a WCOJ or solver route fired.
+- Runtime claims should be paired with counters, transfer telemetry, or
+  validation evidence.

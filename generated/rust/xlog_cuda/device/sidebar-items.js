@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["CudaDevice","CudaDeviceInner","CudaFunction"]};

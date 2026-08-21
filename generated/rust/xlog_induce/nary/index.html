@@ -1,0 +1,47 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Ordered n-ary rule-pattern layer for exact induction."><title>xlog_induce::nary - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="xlog_induce" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.0 (88d9e12ae 2026-08-18)" data-channel="1.98.0" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module nary</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../xlog_induce/index.html">xlog_<wbr>induce</a><span class="version">0.12.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module nary</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate xlog_<wbr>induce</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">xlog_induce</a></div><h1>Module <span>nary</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/xlog_induce/nary.rs.html#1-661">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Ordered n-ary rule-pattern layer for exact induction.</p>
+<p>Generalizes the four fixed 2-body binary topologies to rule patterns over
+heads of arity <code>&gt;= 1</code> with bodies of up to <code>max_body_atoms</code> atoms, where
+every body-atom position binds either a head argument position or a
+bounded, canonically-numbered existential join variable. The shipped
+binary engine’s templates are exactly four members of this space at
+<code>head_arity = 2</code>, two body atoms and one join variable — see
+<a href="fn.canonical_binary_pattern.html" title="fn xlog_induce::nary::canonical_binary_pattern"><code>canonical_binary_pattern</code></a>, which is the parity surface the general
+enumeration is tested against.</p>
+<p>This module is deliberately pure host-side: pattern types, canonical-form
+validation and deterministic enumeration. Scoring the patterns on device
+is a separate stage that consumes <a href="struct.NaryRulePattern.html" title="struct xlog_induce::nary::NaryRulePattern"><code>NaryRulePattern</code></a> values as its rule
+templates.</p>
+<p>Three laws are enforced here rather than documented elsewhere:</p>
+<ul>
+<li>
+<p><strong>Canonical form (join-variable naming).</strong> Join variables are numbered
+densely in first-appearance order across the body read left to right,
+so the ENUMERATOR never emits two patterns differing only by
+join-variable renaming — it does not need to filter them.</p>
+<p>Note the exact scope: canonicality is a property of what
+<a href="fn.enumerate_patterns.html" title="fn xlog_induce::nary::enumerate_patterns"><code>enumerate_patterns</code></a> EMITS, not of the type. <a href="struct.NaryRulePattern.html" title="struct xlog_induce::nary::NaryRulePattern"><code>NaryRulePattern</code></a> has
+public fields, so a caller can hand-build a non-canonical alpha-twin,
+and the public flatten/score path will score it identically to its
+canonical form. That is safe (the score is the same), but it means
+alpha-duplicates are avoided by construction of the generator and
+REJECTED by <a href="struct.NaryRulePattern.html#method.validate" title="method xlog_induce::nary::NaryRulePattern::validate"><code>NaryRulePattern::validate</code></a> — not made unrepresentable
+by the type. Callers assembling patterns by hand own that obligation.</p>
+</li>
+<li>
+<p><strong>Canonical form does NOT quotient atom order or multiplicity.</strong>
+<code>H :- A(x),B(x)</code> and <code>H :- B(x),A(x)</code> are distinct members, as are
+<code>H :- A(x)</code> and <code>H :- A(x),A(x)</code>. Semantically identical bodies score
+identically, tie perfectly in the reduction, can co-occupy top-K, and
+inflate <code>total_scored</code>. This matches the shipped binary engine, whose
+ordered <code>(topology, L, R)</code> grid likewise scores both orderings; a
+sorted-body canonical form would be a behavior change, not a bug fix.</p>
+</li>
+<li>
+<p><strong>No silent truncation.</strong> The enumeration refuses with a typed error
+when the pattern space exceeds <code>max_patterns</code>, and when the SEARCH
+exceeds <code>max_traversal_nodes</code>; it never quietly caps. The two bounds
+are separate because the first bounds output and the second bounds
+work — a search that keeps nothing can still be enormous.</p>
+</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.BodyAtomPattern.html" title="struct xlog_induce::nary::BodyAtomPattern">Body<wbr>Atom<wbr>Pattern</a></dt><dd>One body atom: a candidate-relation slot plus its ordered bindings.</dd><dt><a class="struct" href="struct.NaryEnumerationConfig.html" title="struct xlog_induce::nary::NaryEnumerationConfig">Nary<wbr>Enumeration<wbr>Config</a></dt><dd>Enumeration bounds for one n-ary induction request.</dd><dt><a class="struct" href="struct.NaryRulePattern.html" title="struct xlog_induce::nary::NaryRulePattern">Nary<wbr>Rule<wbr>Pattern</a></dt><dd>A canonical n-ary rule pattern: <code>H(h0..h{a-1}) :- body...</code>.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.PatternVar.html" title="enum xlog_induce::nary::PatternVar">Pattern<wbr>Var</a></dt><dd>A variable slot inside a body-atom binding pattern.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.canonical_binary_pattern.html" title="fn xlog_induce::nary::canonical_binary_pattern">canonical_<wbr>binary_<wbr>pattern</a></dt><dd>The four shipped binary topologies expressed as n-ary patterns.</dd><dt><a class="fn" href="fn.enumerate_patterns.html" title="fn xlog_induce::nary::enumerate_patterns">enumerate_<wbr>patterns</a></dt><dd>Deterministically enumerate every well-formed canonical pattern.</dd></dl></section></div></main></body></html>

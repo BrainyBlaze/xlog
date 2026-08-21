@@ -1,0 +1,170 @@
+# Language Completeness Contract
+
+How the XLOG frontend keeps richer language features finite, typed, and routed through the normal compiler and runtime pipeline.
+
+<Note>
+For contributors — how the frontend handles richer language constructs
+internally. This is an architecture page, not a user guide.
+</Note>
+
+The language-completeness contract is the set of rules that decides which
+high-level language constructs the frontend accepts. It also defines how each
+accepted construct is reduced to a finite, typed execution path. It is not a
+separate runtime, and it is not a Prolog interpreter.
+
+Two ideas drive the whole contract:
+
+- The frontend only accepts a richer construct if that construct has a **finite**
+  representation the compiler can build or reject at compile time.
+- Each accepted construct is normalized or lowered by its supported execution
+  engine; none runs through a hidden source-language interpreter.
+
+## Pipeline Position
+
+The deterministic frontend used by `xlog run` and inspected by `xlog explain`
+begins with this common normalization sequence:
+
+1. parse source into the frontend AST (the parsed syntax tree) and merge imports;
+2. expand user-defined function calls in ordinary rule and integrity constraint
+   bodies after imports are merged, using the entry program's configured recursion
+   limit;
+3. normalize safe meta builtins (see [Safe Meta Subset](#safe-meta-subset));
+4. normalize finite list builtins (turn finite lists into ordinary relations);
+5. desugar supported shared-variable epistemic constraints before choosing an
+   execution route.
+
+Ordinary deterministic programs, including epistemic programs reduced to ordinary
+deterministic form, then enter the deterministic compiler in this order:
+
+6. desugar queries and constraints;
+7. reapply meta normalization inside the compiler; this pass is idempotent;
+8. reapply list normalization inside the compiler; this pass is also idempotent;
+9. apply eligible magic-set rewrites (see [Magic Sets](#magic-sets));
+10. validate deterministic negation safety (see [Deterministic Negation](#deterministic-negation));
+11. stratify dependencies — sort the rules into layers so that negation is
+   evaluated only after the relations it reads are fully computed;
+12. lower to RIR — xlog's internal typed intermediate representation — and continue
+   through the optimizer and runtime.
+
+Programs routed to dedicated epistemic GPU, well-founded semantics (WFS), or G91
+plans do not universally enter steps 6–12. The probabilistic engines have separate
+compilation pipelines and do not enter this deterministic normalization sequence.
+
+This ordering matters. Meta constructs and list constructs must first become
+finite helper relations, or finite typed scalar values, before the stratification
+and lowering steps run.
+
+## Finite Terms
+
+The frontend accepts a richer term only when that term has a finite
+representation. The table below lists each accepted surface form and the role it
+plays.
+
+| Surface | Accepted role |
+| --- | --- |
+| Named predicate columns | Schema and diagnostics metadata over ordinary relation columns. |
+| Domain aliases | Source-level type names, resolved before runtime layout. |
+| Lists | Finite list literals and safe list builtins, normalized to helper relations. |
+| Compound terms | Finite functor/argument shapes that can be represented or rejected statically. |
+| Predicate references | Static predicate references used by safe meta expansion. |
+
+Four kinds of construct are outside the contract and are not accepted:
+open-ended generation, cyclic terms, runtime-variable predicate dispatch (choosing
+which predicate to call from a value only known at runtime), and dynamic database
+mutation.
+
+## Safe Meta Subset
+
+The meta layer — constructs that talk *about* predicates rather than call them
+directly — is intentionally finite. Accepted meta predicates are rewritten into
+ordinary relations by the `meta_normalize` pass, which runs before list
+normalization and before lowering.
+
+Unsupported dynamic meta forms do not run. They fail at compile time with a
+diagnostic, rather than being handed to a CPU-side meta engine and interpreted at
+runtime.
+
+Keeping the meta subset finite means accepted programs stay on the normal typed
+path: the same AST, RIR, statistics, optimizer, and runtime as any other program.
+
+## Magic Sets
+
+Magic-set rewriting is a query-optimization technique. It pushes the bound
+arguments of a recursive query into the recursion, so the program computes only
+the facts relevant to that query instead of the whole relation. The
+`#pragma magic_sets = auto|on|off` pragma controls this rewrite for the supported
+deterministic subset. Like all pragmas it applies only when declared in the entry
+file; a declaration in an imported module is ignored with `warning[W0510]` (see
+the [pragmas guide](/language-guide/pragmas#pragmas-apply-only-in-the-entry-file)):
+
+- `auto` rewrites only when the compiler can prove the query has a supported shape.
+- `on` fails closed: if the requested rewrite is unsafe or unsupported, compilation
+  stops with an error rather than falling back silently.
+- `off` leaves the program on the ordinary recursive path, with no rewrite.
+
+The rewrite declines (is not applied) in these cases: unsafe negation, aggregates
+inside recursive rules, helper relations outside the supported subset, unsupported
+mutual recursion, and unsupported sideways-information-passing shapes — the last
+being patterns of how bound values would need to flow between subgoals that the
+rewrite does not yet handle.
+
+## Deterministic Negation
+
+Deterministic `not atom` is stratified closed-world negation: `not atom` succeeds
+when `atom` cannot be derived, and it is evaluated only after `atom`'s relation is
+complete (that is the "stratified" part).
+
+The compiler checks this in two steps. It validates source-order safety — that
+every variable is bound before a negated goal uses it — after normalization and
+before stratification. It then maps any unsafe cycles or binding errors to
+deterministic-negation diagnostics.
+
+This path is separate from probabilistic or epistemic semantics.
+
+## Probabilistic Aggregates
+
+Finite probabilistic aggregate support is routed through the `xlog-prob` component.
+There are two evaluation paths:
+
+- **Exact paths** enumerate every finite aggregate outcome and record it into the
+  provenance structures the runtime carries (internally, PIR).
+- **Monte Carlo paths** approximate the result by sampling. They reuse the same
+  aggregate operator semantics as ordinary deterministic aggregate execution.
+
+Each exact path has an accepted cap on the size of the finite domain it will
+enumerate. When an exact domain exceeds that cap, the program reports a typed
+probabilistic-aggregate diagnostic. The diagnostic names a remediation path, such
+as switching to Monte Carlo or reducing the domain.
+
+## Incremental Parsing And Explain
+
+`ParserSession` and the incremental parser retain per-statement spans, parse-cache
+statistics, and cache-invalidation data. These support developer workflows such as
+re-parsing only the statements that changed.
+
+The CLI explain path reuses the same parser and compiler surfaces. It reports:
+
+- parse-cache and AST counts;
+- stratification, relational compilation, optimizer, and WCOJ reporting status;
+- magic-set rewrite and epistemic lowering status;
+- aggregate lifting summaries, provenance, proof traces, and generated-row diagnostics;
+- ignored-pragma warnings (`W0510`) on stderr when imported modules declare
+  pragmas, since pragmas apply only when declared in the entry file.
+
+Explain output is an observability surface: for each supported execution route, it
+reports that route's normalization and compiler or plan analysis, not a separate
+documentation-only model. Probabilistic execution remains a separate pipeline;
+probability metadata in deterministic explain output does not replace that engine's
+own compilation path.
+
+## Construct Classification
+
+The contract sorts every language construct by three properties:
+
+1. the source syntax the parser accepts;
+2. the finite normalization or lowering path it takes;
+3. the typed failure mode used when the shape is unsupported.
+
+A construct can have parser support but no lowering path. When that happens it is a
+parsed surface with a compile-time rejection — the parser recognizes it, but the
+compiler refuses to lower it — not an executable feature.
