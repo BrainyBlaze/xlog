@@ -68,6 +68,35 @@ def test_exported_views_alias_one_allocation() -> None:
     assert counts.shape == (1, 4)
 
 
+def test_nary_role_signatures_use_declared_arity() -> None:
+    carrier = pyxlog.JointConstraintCarrier(
+        0, ENTITIES, LANES, CANDIDATES, LABELS, 64, 3
+    )
+    carrier.register_schema(CATALOG_SHA, pyxlog.SOLVER_ABI_IDENTITY)
+    carrier.bind_role_signatures(
+        [
+            0b001, 0b001, 0, 0,
+            0b010, 0b010, 0, 0,
+            0b100, 0b001, 0, 0,
+        ]
+    )
+
+    domains = from_dlpack(carrier.export_buffer("domains"))
+    arguments = from_dlpack(carrier.export_buffer("constraints"))
+    arities = from_dlpack(carrier.export_buffer("argument_arities"))
+    domains.copy_(torch.tensor([[0b001], [0b010], [0b100]], dtype=torch.int64, device="cuda"))
+    arguments.copy_(torch.tensor([[0, 1, 2], [0, 1, 2]], dtype=torch.int32, device="cuda"))
+    arities.copy_(torch.tensor([[3], [2]], dtype=torch.int32, device="cuda"))
+    torch.cuda.synchronize()
+
+    carrier.solve_label_feasibility(ABSTAIN)
+    torch.cuda.synchronize()
+
+    feasible = from_dlpack(carrier.export_buffer("feasible_sets"))[:, 0].cpu()
+    assert feasible[0].item() == 0b1001
+    assert feasible[1].item() == 0b1011
+
+
 def test_session_lifecycle_refuses_typed() -> None:
     carrier = _carrier()
     with pytest.raises(pyxlog.CarrierRefused, match="not registered"):
@@ -285,10 +314,7 @@ def test_component_exact_rejects_greedy_infeasible_joint() -> None:
     carrier.solve_label_feasibility(ABSTAIN)
     carrier.solve_label_map_top2()
 
-    with pytest.raises(pyxlog.CarrierRefused, match="offsets"):
-        carrier.solve_components_exact([1, 2], [0, 1])
-
-    carrier.solve_components_exact([0, 2], [0, 1])
+    carrier.solve_components_exact()
     torch.cuda.synchronize()
 
     status = from_dlpack(carrier.export_buffer("solve_status")).cpu()

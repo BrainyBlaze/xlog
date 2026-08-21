@@ -34,8 +34,8 @@ pub use device_pool::GpuDevicePool;
 pub use dlpack::{DLManagedTensor, DlpackManagedTensor, DlpackTable};
 pub use joint_constraint::{CarrierBufferId, CarrierError, CarrierExport, JointConstraintCarrier};
 pub use joint_solver::{
-    candidate_components, Component, ConstraintGraph, Feasibility, FuelMeter, SolveStrategy,
-    SolverError, SOLVER_ABI_IDENTITY,
+    Component, ConstraintGraph, Feasibility, FuelMeter, SolveStrategy, SolverError,
+    SOLVER_ABI_IDENTITY,
 };
 pub use memory::{CudaBuffer, CudaColumn, GpuMemoryManager, RuntimeAllocBlock};
 pub use multi_gpu_memory::MultiGpuMemoryManager;

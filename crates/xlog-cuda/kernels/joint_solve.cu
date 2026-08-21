@@ -11,6 +11,95 @@
 
 #include <cstdint>
 
+__device__ __forceinline__ uint32_t joint_component_root(
+    uint32_t* __restrict__ parents,
+    uint32_t candidate
+) {
+    uint32_t root = candidate;
+    while (parents[root] != root) root = parents[root];
+    return root;
+}
+
+/** Initialize carrier-owned component scratch for one solve. */
+extern "C" __global__ void joint_component_plan_init(
+    uint32_t* __restrict__ parents,
+    uint32_t num_candidates,
+    uint32_t* __restrict__ entity_owners,
+    uint32_t num_entities,
+    uint32_t* __restrict__ component_count,
+    unsigned long long* __restrict__ fuel_spent
+) {
+    uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < num_candidates) parents[index] = index;
+    if (index < num_entities) entity_owners[index] = 0xFFFFFFFFu;
+    if (index == 0u) {
+        component_count[0] = 0u;
+        fuel_spent[0] = 0ull;
+    }
+}
+
+/** Pick one deterministic candidate owner for every referenced entity. */
+extern "C" __global__ void joint_component_entity_owners(
+    const uint32_t* __restrict__ arguments,
+    const uint32_t* __restrict__ argument_arities,
+    uint32_t num_candidates,
+    uint32_t max_arity,
+    uint32_t num_entities,
+    uint32_t* __restrict__ entity_owners
+) {
+    uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
+    if (candidate >= num_candidates) return;
+    uint32_t arity = argument_arities[candidate];
+    if (arity < 2u || arity > max_arity) return;
+    for (uint32_t role = 0; role < arity; ++role) {
+        uint32_t entity = arguments[(uint64_t)candidate * max_arity + role];
+        if (entity < num_entities) atomicMin(entity_owners + entity, candidate);
+    }
+}
+
+/** Union candidates sharing any active argument entity. */
+extern "C" __global__ void joint_component_union(
+    const uint32_t* __restrict__ arguments,
+    const uint32_t* __restrict__ argument_arities,
+    uint32_t num_candidates,
+    uint32_t max_arity,
+    uint32_t num_entities,
+    const uint32_t* __restrict__ entity_owners,
+    uint32_t* __restrict__ parents
+) {
+    uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
+    if (candidate >= num_candidates) return;
+    uint32_t arity = argument_arities[candidate];
+    if (arity < 2u || arity > max_arity) return;
+    for (uint32_t role = 0; role < arity; ++role) {
+        uint32_t entity = arguments[(uint64_t)candidate * max_arity + role];
+        if (entity >= num_entities) continue;
+        uint32_t owner = entity_owners[entity];
+        if (owner == 0xFFFFFFFFu) continue;
+        while (true) {
+            uint32_t candidate_root = joint_component_root(parents, candidate);
+            uint32_t owner_root = joint_component_root(parents, owner);
+            if (candidate_root == owner_root) break;
+            uint32_t lower = candidate_root < owner_root ? candidate_root : owner_root;
+            uint32_t upper = candidate_root < owner_root ? owner_root : candidate_root;
+            if (atomicCAS(parents + upper, upper, lower) == upper) break;
+        }
+    }
+}
+
+/** Compress the completed union forest and count component roots. */
+extern "C" __global__ void joint_component_compress(
+    uint32_t* __restrict__ parents,
+    uint32_t num_candidates,
+    uint32_t* __restrict__ component_count
+) {
+    uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
+    if (candidate >= num_candidates) return;
+    uint32_t root = joint_component_root(parents, candidate);
+    parents[candidate] = root;
+    if (root == candidate) atomicAdd(component_count, 1u);
+}
+
 /**
  * Per-candidate exact top-two over FEASIBLE labels.
  *
@@ -112,11 +201,11 @@ extern "C" __global__ void joint_label_top2(
  * memory.
  *
  * @param domains         entity sort domains, entities x lanes u64
- * @param pairs           candidate entity pairs, candidates x 2 u32
- *                        (head entity index, tail entity index)
- * @param head_masks      label head signatures, labels x lanes u64
- * @param tail_masks      label tail signatures, labels x lanes u64
- * @param num_entities    entity capacity; pair indices must be below
+ * @param arguments       padded entity arguments, candidates x max_arity u32
+ * @param argument_arities active argument count for each candidate
+ * @param role_masks      role-major signatures, max_arity x labels x lanes u64
+ * @param max_arity       padded argument width and role capacity
+ * @param num_entities    entity capacity; active indices must be below
  * @param num_candidates  candidate row count
  * @param num_labels      label universe width (including abstention)
  * @param lanes           u64 lanes per domain / signature row
@@ -128,9 +217,10 @@ extern "C" __global__ void joint_label_top2(
  */
 extern "C" __global__ void joint_label_feasibility(
     const uint64_t* __restrict__ domains,
-    const uint32_t* __restrict__ pairs,
-    const uint64_t* __restrict__ head_masks,
-    const uint64_t* __restrict__ tail_masks,
+    const uint32_t* __restrict__ arguments,
+    const uint32_t* __restrict__ argument_arities,
+    const uint64_t* __restrict__ role_masks,
+    uint32_t max_arity,
     uint32_t num_entities,
     uint32_t num_candidates,
     uint32_t num_labels,
@@ -143,9 +233,12 @@ extern "C" __global__ void joint_label_feasibility(
     if (cand >= num_candidates) return;
 
     uint32_t label_words = (num_labels + 63u) / 64u;
-    uint32_t head_entity = pairs[cand * 2u];
-    uint32_t tail_entity = pairs[cand * 2u + 1u];
-    if (head_entity >= num_entities || tail_entity >= num_entities) {
+    uint32_t arity = argument_arities[cand];
+    bool corrupt = arity == 0u || arity > max_arity;
+    for (uint32_t role = 0; role < arity && !corrupt; ++role) {
+        corrupt = arguments[(uint64_t)cand * max_arity + role] >= num_entities;
+    }
+    if (corrupt) {
         // Corrupt producer record: poison, never read out of bounds.
         for (uint32_t word = 0; word < label_words; ++word) {
             feasible_sets[(uint64_t)cand * label_words + word] = 0ull;
@@ -153,9 +246,6 @@ extern "C" __global__ void joint_label_feasibility(
         feasible_counts[cand] = 0xFFFFFFFFu;
         return;
     }
-    const uint64_t* head_domain = domains + (uint64_t)head_entity * lanes;
-    const uint64_t* tail_domain = domains + (uint64_t)tail_entity * lanes;
-
     uint32_t count = 0;
     for (uint32_t word = 0; word < label_words; ++word) {
         uint64_t set = 0;
@@ -167,18 +257,18 @@ extern "C" __global__ void joint_label_feasibility(
             if (label == abstain_label) {
                 feasible = true;
             } else {
-                const uint64_t* head_mask = head_masks + (uint64_t)label * lanes;
-                const uint64_t* tail_mask = tail_masks + (uint64_t)label * lanes;
-                bool head_hit = false;
-                for (uint32_t lane = 0; lane < lanes && !head_hit; ++lane) {
-                    head_hit = (head_domain[lane] & head_mask[lane]) != 0ull;
+                feasible = true;
+                for (uint32_t role = 0; role < arity && feasible; ++role) {
+                    uint32_t entity = arguments[(uint64_t)cand * max_arity + role];
+                    const uint64_t* domain = domains + (uint64_t)entity * lanes;
+                    const uint64_t* mask = role_masks
+                        + ((uint64_t)role * num_labels + label) * lanes;
+                    bool hit = false;
+                    for (uint32_t lane = 0; lane < lanes && !hit; ++lane) {
+                        hit = (domain[lane] & mask[lane]) != 0ull;
+                    }
+                    feasible = hit;
                 }
-                bool tail_hit = false;
-                for (uint32_t lane = 0; lane < lanes && head_hit && !tail_hit;
-                     ++lane) {
-                    tail_hit = (tail_domain[lane] & tail_mask[lane]) != 0ull;
-                }
-                feasible = head_hit && tail_hit;
             }
             if (feasible) {
                 set |= 1ull << bit;
@@ -210,23 +300,24 @@ extern "C" __global__ void joint_label_feasibility(
  * @param scores          candidate label scores, candidates x labels f32
  * @param feasible_sets   per-candidate feasible bitmasks,
  *                        candidates x label_words u64
- * @param pairs           candidate entity pairs, candidates x 2 u32
+ * @param arguments       padded entity arguments, candidates x max_arity u32
+ * @param argument_arities active role count for each candidate
  * @param domains         entity sort domains, entities x lanes u64
- * @param head_masks      label head signatures, labels x lanes u64
- * @param tail_masks      label tail signatures, labels x lanes u64
- * @param comp_cand_offsets per-component start offset into
- *                        comp_cand_indices, components+1 u32
- * @param comp_cand_indices candidate indices grouped by component
- * @param num_components  component count in this launch
+ * @param role_masks      role-major signatures, max_arity x labels x lanes u64
+ * @param component_parents compressed candidate-to-root mapping
+ * @param component_count carrier-owned number of component roots
+ * @param num_candidates  candidate row count in this launch
  * @param num_labels      label universe width
  * @param lanes           u64 lanes per domain / signature row
- * @param fuel_per_component node-expansion budget per component;
+ * @param fuel_authorized whole node-expansion budget; each root
+ *                        receives an equal deterministic share;
  *                        a component whose enumeration would exceed
  *                        it is left untouched with status refused
  * @param map_results     candidates x 4 u32 (overwritten for solved
  *                        components with joint-exact values)
  * @param solve_status    candidates u32: 2 = component-exact,
- *                        3 = refused (fuel), 0xFFFFFFFF = poisoned
+ *                        6 = escalate to another exact strategy,
+ *                        0xFFFFFFFF = poisoned
  * @param fuel_spent      global device counter of ACTUAL node
  *                        expansions (enumerated combinations); each
  *                        solved component adds its exact count
@@ -234,40 +325,55 @@ extern "C" __global__ void joint_label_feasibility(
 extern "C" __global__ void joint_component_enumerate(
     const float* __restrict__ scores,
     const uint64_t* __restrict__ feasible_sets,
-    const uint32_t* __restrict__ pairs,
+    const uint32_t* __restrict__ arguments,
+    const uint32_t* __restrict__ argument_arities,
     const uint64_t* __restrict__ domains,
-    const uint64_t* __restrict__ head_masks,
-    const uint64_t* __restrict__ tail_masks,
-    const uint32_t* __restrict__ comp_cand_offsets,
-    const uint32_t* __restrict__ comp_cand_indices,
-    uint32_t num_components,
+    const uint64_t* __restrict__ role_masks,
+    const uint32_t* __restrict__ component_parents,
+    const uint32_t* __restrict__ component_count,
+    uint32_t num_candidates,
     uint32_t num_labels,
     uint32_t lanes,
-    uint64_t fuel_per_component,
+    uint32_t max_arity,
+    uint64_t fuel_authorized,
     uint32_t* __restrict__ map_results,
     uint32_t* __restrict__ solve_status,
     unsigned long long* __restrict__ fuel_spent
 ) {
-    uint32_t comp = blockIdx.x;
-    if (comp >= num_components || threadIdx.x != 0) return;
+    uint32_t root = blockIdx.x;
+    if (root >= num_candidates || threadIdx.x != 0) return;
+    if (component_parents[root] != root) return;
 
     const uint32_t MAX_COMP_CANDS = 8;
     const uint32_t MAX_LANES = 8;
-    uint32_t begin = comp_cand_offsets[comp];
-    uint32_t end = comp_cand_offsets[comp + 1];
-    uint32_t n = end - begin;
     uint32_t label_words = (num_labels + 63u) / 64u;
-
-    // Stage-eligibility guards: capacity of the local arrays and the
-    // component fuel budget. Oversized components are REFUSED, never
-    // approximated.
-    bool refuse = (n > MAX_COMP_CANDS) || (lanes > MAX_LANES);
     uint32_t cand_ids[MAX_COMP_CANDS];
+    uint32_t n = 0u;
+    for (uint32_t candidate = 0; candidate < num_candidates; ++candidate) {
+        if (component_parents[candidate] != root) continue;
+        if (n < MAX_COMP_CANDS) cand_ids[n] = candidate;
+        ++n;
+    }
+    if (n == 0u) return;
+
+    // Stage-eligibility guards for this specialization. Components
+    // outside its local arrays or enumeration budget escalate to the
+    // next exact strategy; they are never approximated.
+    bool refuse = (n > MAX_COMP_CANDS) || (lanes > MAX_LANES);
+    if (n > MAX_COMP_CANDS) {
+        for (uint32_t candidate = 0; candidate < num_candidates; ++candidate) {
+                if (component_parents[candidate] == root) solve_status[candidate] = 6u;
+        }
+        return;
+    }
+    uint32_t num_components = component_count[0];
+    uint64_t fuel_per_component = num_components == 0u
+        ? 0ull
+        : fuel_authorized / (uint64_t)num_components;
     uint32_t feas_labels[MAX_COMP_CANDS];
     uint64_t combos = 1;
     for (uint32_t i = 0; i < n && !refuse; ++i) {
-        uint32_t cand = comp_cand_indices[begin + i];
-        cand_ids[i] = cand;
+        uint32_t cand = cand_ids[i];
         uint32_t fcount = 0;
         for (uint32_t w = 0; w < label_words; ++w) {
             uint64_t bits = feasible_sets[(uint64_t)cand * label_words + w];
@@ -281,7 +387,7 @@ extern "C" __global__ void joint_component_enumerate(
             // Poisoned or empty row poisons the whole component:
             // no consistent joint assignment can exist through it.
             for (uint32_t j = 0; j < n; ++j) {
-                uint32_t cj = comp_cand_indices[begin + j];
+                uint32_t cj = cand_ids[j];
                 uint32_t* out = map_results + (uint64_t)cj * 4u;
                 out[0] = 0xFFFFFFFFu; out[1] = 1u; out[2] = 0u; out[3] = 0u;
                 solve_status[cj] = 0xFFFFFFFFu;
@@ -289,13 +395,14 @@ extern "C" __global__ void joint_component_enumerate(
             return;
         }
         feas_labels[i] = fcount;
-        combos *= fcount;
-        if (combos > fuel_per_component) refuse = true;
+        if (combos > fuel_per_component / (uint64_t)fcount) {
+            refuse = true;
+        } else {
+            combos *= fcount;
+        }
     }
     if (refuse) {
-        for (uint32_t j = begin; j < end; ++j) {
-            solve_status[comp_cand_indices[j]] = 3u;
-        }
+        for (uint32_t j = 0; j < n; ++j) solve_status[cand_ids[j]] = 6u;
         return;
     }
 
@@ -341,17 +448,19 @@ extern "C" __global__ void joint_component_enumerate(
         // domain under the intersection of its role masks.
         bool consistent = true;
         for (uint32_t i = 0; i < n && consistent; ++i) {
-            for (uint32_t side = 0; side < 2 && consistent; ++side) {
-                uint32_t entity = pairs[cand_ids[i] * 2u + side];
+            uint32_t arity = argument_arities[cand_ids[i]];
+            for (uint32_t role = 0; role < arity && consistent; ++role) {
+                uint32_t entity = arguments[(uint64_t)cand_ids[i] * max_arity + role];
                 bool nonempty = false;
                 for (uint32_t lane = 0; lane < lanes && !nonempty; ++lane) {
                     uint64_t acc = domains[(uint64_t)entity * lanes + lane];
                     for (uint32_t j = 0; j < n; ++j) {
-                        for (uint32_t sj = 0; sj < 2; ++sj) {
-                            if (pairs[cand_ids[j] * 2u + sj] != entity) continue;
-                            const uint64_t* mask =
-                                (sj == 0 ? head_masks : tail_masks)
-                                + (uint64_t)label_of[j] * lanes;
+                        uint32_t other_arity = argument_arities[cand_ids[j]];
+                        for (uint32_t other_role = 0; other_role < other_arity; ++other_role) {
+                            if (arguments[(uint64_t)cand_ids[j] * max_arity + other_role]
+                                != entity) continue;
+                            const uint64_t* mask = role_masks
+                                + ((uint64_t)other_role * num_labels + label_of[j]) * lanes;
                             // An all-zero mask row asserts nothing
                             // (abstention): it imposes no constraint.
                             // A real label with a zero mask can never
@@ -428,58 +537,68 @@ extern "C" __global__ void joint_component_enumerate(
     }
 }
 
-// Memoized chain DP (slice 1): exact joint MAP + exact per-candidate
-// GLOBAL max-marginals for PATH components whose candidates arrive in
-// chain order (tail of i == head of i+1). Wider frontiers and multi-
-// lane domains REFUSE typed (status 3) — staged capability, never an
-// approximation. Totals are assembled by restricted forward passes,
-// each accumulating scores in candidate-index order, so every emitted
-// f32 is bit-identical to a linear left-associated sum: margins come
-// only from exact passes (never from bound propagation), a tie or a
-// zero margin is typed ambiguity, and fuel counts every DP state
-// transition the device actually performs.
-extern "C" __global__ void joint_label_memoized(
+// Device-discovered memoized chain DP: exact joint MAP + exact
+// per-candidate GLOBAL max-marginals for PATH components whose
+// candidates arrive in chain order (tail of i == head of i+1). It
+// consumes only roots produced by the carrier-owned component planner
+// and only rows refused by complete enumeration. Wider frontiers and
+// multi-lane domains REFUSE typed (status 3), never approximated.
+extern "C" __global__ void joint_component_chain_dp(
     const float* __restrict__ scores,
     const uint64_t* __restrict__ feasible_sets,
-    const uint32_t* __restrict__ pairs,
+    const uint32_t* __restrict__ arguments,
+    const uint32_t* __restrict__ argument_arities,
     const uint64_t* __restrict__ domains,
-    const uint64_t* __restrict__ head_masks,
-    const uint64_t* __restrict__ tail_masks,
-    const uint32_t* __restrict__ comp_cand_offsets,
-    const uint32_t* __restrict__ comp_cand_indices,
-    uint32_t num_components,
+    const uint64_t* __restrict__ role_masks,
+    const uint32_t* __restrict__ component_parents,
+    const uint32_t* __restrict__ component_count,
+    uint32_t num_candidates,
     uint32_t num_labels,
     uint32_t lanes,
-    uint32_t pinned_width,
-    uint64_t fuel_per_component,
+    uint32_t max_arity,
+    uint64_t fuel_authorized,
     uint32_t* __restrict__ map_results,
     uint32_t* __restrict__ solve_status,
     unsigned long long* __restrict__ fuel_spent
 ) {
-    uint32_t comp = blockIdx.x;
-    if (comp >= num_components || threadIdx.x != 0) return;
+    uint32_t root = blockIdx.x;
+    if (root >= num_candidates || threadIdx.x != 0) return;
+    if (component_parents[root] != root || solve_status[root] != 6u) return;
 
     const uint32_t MAX_CHAIN = 32;
     const uint32_t MAX_LABELS = 32;
     const uint32_t MAX_STATES = 33;
-    uint32_t begin = comp_cand_offsets[comp];
-    uint32_t end = comp_cand_offsets[comp + 1];
-    uint32_t n = end - begin;
+    uint32_t cand_ids[MAX_CHAIN];
+    uint32_t n = 0u;
+    for (uint32_t candidate = 0; candidate < num_candidates; ++candidate) {
+        if (component_parents[candidate] != root) continue;
+        if (n < MAX_CHAIN) cand_ids[n] = candidate;
+        ++n;
+    }
+    if (n == 0u) return;
+
+    uint32_t num_components = component_count[0];
+    uint64_t fuel_per_component = num_components == 0u
+        ? 0ull
+        : fuel_authorized / (uint64_t)num_components;
     uint32_t label_words = (num_labels + 63u) / 64u;
     const float NEG_INF = -__int_as_float(0x7f800000);
 
-    // Slice-1 eligibility: single-lane domains, bounded chain, chain
-    // order, and a pinned width that admits the path frontier.
+    // Eligibility is proven from the device-resident component itself:
+    // single-lane domains, bounded binary chain, and chain order.
     bool refuse = (n > MAX_CHAIN) || (lanes != 1u)
-        || (num_labels > MAX_LABELS) || (pinned_width < 1u);
+        || (num_labels > MAX_LABELS);
+    for (uint32_t i = 0; i < n && !refuse; ++i) {
+        refuse = argument_arities[cand_ids[i]] != 2u;
+    }
     for (uint32_t i = 0; i + 1 < n && !refuse; ++i) {
-        uint32_t t = pairs[comp_cand_indices[begin + i] * 2u + 1u];
-        uint32_t h = pairs[comp_cand_indices[begin + i + 1u] * 2u];
+        uint32_t t = arguments[(uint64_t)cand_ids[i] * max_arity + 1u];
+        uint32_t h = arguments[(uint64_t)cand_ids[i + 1u] * max_arity];
         refuse = t != h;
     }
     if (refuse) {
-        for (uint32_t j = begin; j < end; ++j) {
-            solve_status[comp_cand_indices[j]] = 3u;
+        for (uint32_t candidate = 0; candidate < num_candidates; ++candidate) {
+            if (component_parents[candidate] == root) solve_status[candidate] = 6u;
         }
         return;
     }
@@ -493,12 +612,13 @@ extern "C" __global__ void joint_label_memoized(
     // `pin_label` (pin == 0xFFFFFFFF: unrestricted). Returns the best
     // full-assignment total, accumulated left-to-right.
     // States: reachable bitsets of the link entity after each step.
+    bool fuel_exhausted = false;
     auto head_eff = [&](uint32_t lab) {
-        uint64_t m = head_masks[lab];
+        uint64_t m = role_masks[lab];
         return m == 0ull ? full : m;
     };
     auto tail_eff = [&](uint32_t lab) {
-        uint64_t m = tail_masks[lab];
+        uint64_t m = role_masks[num_labels + lab];
         return m == 0ull ? full : m;
     };
     auto feasible = [&](uint32_t cand, uint32_t lab) {
@@ -509,11 +629,11 @@ extern "C" __global__ void joint_label_memoized(
         uint64_t state_bits[MAX_STATES];
         float state_best[MAX_STATES];
         uint32_t states = 1;
-        state_bits[0] = domains[pairs[comp_cand_indices[begin] * 2u]];
+        state_bits[0] = domains[arguments[(uint64_t)cand_ids[0] * max_arity]];
         state_best[0] = 0.0f;
         for (uint32_t i = 0; i < n; ++i) {
-            uint32_t cand = comp_cand_indices[begin + i];
-            uint64_t tail_dom = domains[pairs[cand * 2u + 1u]];
+            uint32_t cand = cand_ids[i];
+            uint64_t tail_dom = domains[arguments[(uint64_t)cand * max_arity + 1u]];
             uint64_t next_bits[MAX_STATES];
             float next_best[MAX_STATES];
             uint32_t next_states = 0;
@@ -525,6 +645,10 @@ extern "C" __global__ void joint_label_memoized(
                     if ((state_bits[s] & head_eff(l)) == 0ull) continue;
                     uint64_t out = tail_dom & tail_eff(l);
                     if (out == 0ull) continue;
+                    if (transitions == fuel_per_component) {
+                        fuel_exhausted = true;
+                        return NEG_INF;
+                    }
                     ++transitions;
                     float total = state_best[s]
                         + scores[(uint64_t)cand * num_labels + l];
@@ -557,10 +681,15 @@ extern "C" __global__ void joint_label_memoized(
     };
 
     float joint_best = run_pass(0xFFFFFFFFu, 0u);
+    if (fuel_exhausted) {
+        for (uint32_t i = 0; i < n; ++i) solve_status[cand_ids[i]] = 3u;
+        atomicAdd(fuel_spent, transitions);
+        return;
+    }
     if (joint_best == NEG_INF) {
         // No consistent assignment exists: typed existence failure.
-        for (uint32_t j = begin; j < end; ++j) {
-            uint32_t cand = comp_cand_indices[j];
+        for (uint32_t i = 0; i < n; ++i) {
+            uint32_t cand = cand_ids[i];
             uint32_t* out = map_results + (uint64_t)cand * 4u;
             out[0] = 0xFFFFFFFFu; out[1] = 1u; out[2] = 0u; out[3] = 0u;
             solve_status[cand] = 0xFFFFFFFFu;
@@ -578,7 +707,7 @@ extern "C" __global__ void joint_label_memoized(
     float row_total[MAX_CHAIN];
     float row_margin[MAX_CHAIN];
     for (uint32_t i = 0; i < n; ++i) {
-        uint32_t cand = comp_cand_indices[begin + i];
+        uint32_t cand = cand_ids[i];
         uint32_t best_lab = 0xFFFFFFFFu;
         float best_total = NEG_INF;
         float alt_total = NEG_INF;
@@ -586,6 +715,7 @@ extern "C" __global__ void joint_label_memoized(
         for (uint32_t l = 0; l < num_labels; ++l) {
             if (!feasible(cand, l)) continue;
             float t = run_pass(i, l);
+            if (fuel_exhausted) break;
             if (t == NEG_INF) continue;
             if (t > best_total) {
                 if (best_lab != 0xFFFFFFFFu) {
@@ -607,16 +737,15 @@ extern "C" __global__ void joint_label_memoized(
             ? __int_as_float(0x7f800000)
             : best_total - alt_total;
         row_amb[i] = (tied != 0u || row_margin[i] == 0.0f) ? 1u : 0u;
+        if (fuel_exhausted) break;
     }
-    if (fuel_per_component != 0ull && transitions > fuel_per_component) {
-        for (uint32_t j = begin; j < end; ++j) {
-            solve_status[comp_cand_indices[j]] = 3u;
-        }
+    if (fuel_exhausted) {
+        for (uint32_t i = 0; i < n; ++i) solve_status[cand_ids[i]] = 3u;
         atomicAdd(fuel_spent, transitions);
         return;
     }
     for (uint32_t i = 0; i < n; ++i) {
-        uint32_t cand = comp_cand_indices[begin + i];
+        uint32_t cand = cand_ids[i];
         uint32_t* out = map_results + (uint64_t)cand * 4u;
         out[0] = row_lab[i];
         out[1] = row_amb[i];
@@ -625,4 +754,232 @@ extern "C" __global__ void joint_label_memoized(
         solve_status[cand] = 4u;
     }
     atomicAdd(fuel_spent, transitions);
+}
+
+// General exact fallback for every component topology and candidate
+// arity. One device thread owns one component and performs a bounded
+// depth-first branch-and-bound over feasible labels. Search state lives
+// in carrier-owned global scratch, so component size is not limited by
+// fixed local arrays and no host-side component plan is required.
+extern "C" __global__ void joint_component_branch_and_bound(
+    const float* __restrict__ scores,
+    const uint64_t* __restrict__ feasible_sets,
+    const uint32_t* __restrict__ arguments,
+    const uint32_t* __restrict__ argument_arities,
+    const uint64_t* __restrict__ domains,
+    const uint64_t* __restrict__ role_masks,
+    const uint32_t* __restrict__ component_parents,
+    const uint32_t* __restrict__ component_count,
+    uint32_t num_candidates,
+    uint32_t num_labels,
+    uint32_t lanes,
+    uint32_t max_arity,
+    uint64_t fuel_authorized,
+    uint32_t* __restrict__ map_results,
+    uint32_t* __restrict__ solve_status,
+    unsigned long long* __restrict__ fuel_spent,
+    uint32_t* __restrict__ assignment,
+    uint32_t* __restrict__ best_label,
+    float* __restrict__ best_total,
+    float* __restrict__ alt_total
+) {
+    uint32_t root = blockIdx.x;
+    if (root >= num_candidates || threadIdx.x != 0) return;
+    if (component_parents[root] != root || solve_status[root] != 6u) return;
+
+    const uint32_t UNASSIGNED = 0xFFFFFFFFu;
+    const float NEG_INF = -__int_as_float(0x7f800000);
+    uint32_t label_words = (num_labels + 63u) / 64u;
+    uint32_t num_components = component_count[0];
+    uint64_t fuel_per_component = num_components == 0u
+        ? 0ull
+        : fuel_authorized / (uint64_t)num_components;
+
+    uint32_t first = UNASSIGNED;
+    for (uint32_t candidate = 0; candidate < num_candidates; ++candidate) {
+        if (component_parents[candidate] != root) continue;
+        if (first == UNASSIGNED) first = candidate;
+        assignment[candidate] = UNASSIGNED;
+        best_label[candidate] = UNASSIGNED;
+        best_total[candidate] = NEG_INF;
+        alt_total[candidate] = NEG_INF;
+    }
+    if (first == UNASSIGNED) return;
+
+    auto next_candidate = [&](uint32_t current) {
+        for (uint32_t candidate = current + 1u; candidate < num_candidates; ++candidate) {
+            if (component_parents[candidate] == root) return candidate;
+        }
+        return UNASSIGNED;
+    };
+    auto previous_candidate = [&](uint32_t current) {
+        for (uint32_t candidate = current; candidate-- > 0u;) {
+            if (component_parents[candidate] == root) return candidate;
+        }
+        return UNASSIGNED;
+    };
+    auto feasible = [&](uint32_t candidate, uint32_t label) {
+        return ((feasible_sets[(uint64_t)candidate * label_words + (label >> 6)]
+                 >> (label & 63u)) & 1ull) != 0ull;
+    };
+    auto mask_is_empty = [&](const uint64_t* mask) {
+        for (uint32_t lane = 0; lane < lanes; ++lane) {
+            if (mask[lane] != 0ull) return false;
+        }
+        return true;
+    };
+    auto partial_consistent = [&](uint32_t changed_candidate) {
+        uint32_t changed_arity = argument_arities[changed_candidate];
+        for (uint32_t changed_role = 0; changed_role < changed_arity; ++changed_role) {
+            uint32_t entity = arguments[
+                (uint64_t)changed_candidate * max_arity + changed_role
+            ];
+            bool any_lane = false;
+            for (uint32_t lane = 0; lane < lanes && !any_lane; ++lane) {
+                uint64_t intersection = domains[(uint64_t)entity * lanes + lane];
+                for (uint32_t candidate = 0;
+                     candidate < num_candidates && intersection != 0ull;
+                     ++candidate) {
+                    if (component_parents[candidate] != root
+                        || assignment[candidate] == UNASSIGNED) continue;
+                    uint32_t arity = argument_arities[candidate];
+                    for (uint32_t role = 0; role < arity; ++role) {
+                        if (arguments[(uint64_t)candidate * max_arity + role] != entity) {
+                            continue;
+                        }
+                        const uint64_t* mask = role_masks
+                            + ((uint64_t)role * num_labels + assignment[candidate]) * lanes;
+                        if (!mask_is_empty(mask)) intersection &= mask[lane];
+                    }
+                }
+                any_lane = intersection != 0ull;
+            }
+            if (!any_lane) return false;
+        }
+        return true;
+    };
+    auto branch_cannot_improve = [&]() {
+        float upper = 0.0f;
+        for (uint32_t candidate = 0; candidate < num_candidates; ++candidate) {
+            if (component_parents[candidate] != root) continue;
+            if (assignment[candidate] != UNASSIGNED) {
+                upper += scores[(uint64_t)candidate * num_labels + assignment[candidate]];
+                continue;
+            }
+            float row_max = NEG_INF;
+            for (uint32_t label = 0; label < num_labels; ++label) {
+                if (feasible(candidate, label)) {
+                    float score = scores[(uint64_t)candidate * num_labels + label];
+                    if (score > row_max) row_max = score;
+                }
+            }
+            upper += row_max;
+        }
+        for (uint32_t candidate = 0; candidate < num_candidates; ++candidate) {
+            if (component_parents[candidate] != root || best_label[candidate] == UNASSIGNED) {
+                return false;
+            }
+            if (assignment[candidate] == UNASSIGNED) {
+                if (!(upper < best_total[candidate] && upper < alt_total[candidate])) {
+                    return false;
+                }
+            } else if (assignment[candidate] == best_label[candidate]) {
+                if (!(upper < best_total[candidate])) return false;
+            } else if (!(upper < alt_total[candidate])) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    unsigned long long expansions = 0ull;
+    bool fuel_exhausted = false;
+    bool found = false;
+    uint32_t current = first;
+    while (true) {
+        bool descended = false;
+        uint32_t first_label = assignment[current] == UNASSIGNED
+            ? 0u : assignment[current] + 1u;
+        assignment[current] = UNASSIGNED;
+        for (uint32_t label = first_label; label < num_labels; ++label) {
+            if (!feasible(current, label)) continue;
+            if (expansions >= fuel_per_component) {
+                fuel_exhausted = true;
+                break;
+            }
+            ++expansions;
+            assignment[current] = label;
+            if (!partial_consistent(current) || branch_cannot_improve()) {
+                assignment[current] = UNASSIGNED;
+                continue;
+            }
+
+            uint32_t next = next_candidate(current);
+            if (next != UNASSIGNED) {
+                assignment[next] = UNASSIGNED;
+                current = next;
+                descended = true;
+                break;
+            }
+
+            found = true;
+            float total = 0.0f;
+            for (uint32_t candidate = 0; candidate < num_candidates; ++candidate) {
+                if (component_parents[candidate] == root) {
+                    total += scores[
+                        (uint64_t)candidate * num_labels + assignment[candidate]
+                    ];
+                }
+            }
+            for (uint32_t candidate = 0; candidate < num_candidates; ++candidate) {
+                if (component_parents[candidate] != root) continue;
+                uint32_t label_here = assignment[candidate];
+                if (total > best_total[candidate]) {
+                    if (label_here != best_label[candidate]) {
+                        alt_total[candidate] = best_total[candidate] > alt_total[candidate]
+                            ? best_total[candidate] : alt_total[candidate];
+                    }
+                    best_total[candidate] = total;
+                    best_label[candidate] = label_here;
+                } else if (total == best_total[candidate]
+                           && label_here != best_label[candidate]) {
+                    alt_total[candidate] = total;
+                } else if (label_here != best_label[candidate]
+                           && total > alt_total[candidate]) {
+                    alt_total[candidate] = total;
+                }
+            }
+            assignment[current] = UNASSIGNED;
+        }
+        if (fuel_exhausted) break;
+        if (descended) continue;
+        assignment[current] = UNASSIGNED;
+        if (current == first) break;
+        current = previous_candidate(current);
+    }
+
+    atomicAdd(fuel_spent, expansions);
+    if (fuel_exhausted) {
+        for (uint32_t candidate = 0; candidate < num_candidates; ++candidate) {
+            if (component_parents[candidate] == root) solve_status[candidate] = 3u;
+        }
+        return;
+    }
+    for (uint32_t candidate = 0; candidate < num_candidates; ++candidate) {
+        if (component_parents[candidate] != root) continue;
+        uint32_t* out = map_results + (uint64_t)candidate * 4u;
+        if (!found || best_label[candidate] == UNASSIGNED) {
+            out[0] = UNASSIGNED; out[1] = 1u; out[2] = 0u; out[3] = 0u;
+            solve_status[candidate] = UNASSIGNED;
+            continue;
+        }
+        float margin = alt_total[candidate] == NEG_INF
+            ? __int_as_float(0x7f800000)
+            : best_total[candidate] - alt_total[candidate];
+        out[0] = best_label[candidate];
+        out[1] = margin == 0.0f ? 1u : 0u;
+        out[2] = __float_as_uint(best_total[candidate]);
+        out[3] = __float_as_uint(margin);
+        solve_status[candidate] = 5u;
+    }
 }
