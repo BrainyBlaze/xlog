@@ -16,7 +16,7 @@ Structurally this is the trainable rule bodies of \Cref{subsec:trainable-bodies}
 
 \subsection{Protocol}
 
-Three guards define the protocol, and each was fixed before the run it governs. Each also governs a stated part of the evidence rather than all of it, as noted below.
+Three guards define the protocol, and each was fixed before the run it governs. Each covers the run it names rather than the history behind it: the corpus was already in hand while the gates themselves were being designed.
 
 \textbf{Leak-free scene-family splitting.} The distributed CAVIAR corpus used by the published Event-Calculus learners is a dump of 26 video segments, and it is not clean. A frame-level audit of every \texttt{meeting} transition event in the dump against the original ground-truth XML classifies 21 of 25 events as real, 3 as duplicates and 1 as a splice artifact. Two source videos appear in both the dump's train and its test file, and one video alone contributes 855 duplicated gold pair-frames. Cross-validating over segments therefore still permits same-scene transfer. The clean protocol folds over \emph{scene families} recovered from the source XML instead, so no scene appears on both sides of a split.
 
