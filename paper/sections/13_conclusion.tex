@@ -1,0 +1,29 @@
+\section{Conclusion}\label{sec:conclusion}
+
+xlog is a logic programming engine that keeps the whole symbolic side of a
+neurosymbolic program on the GPU. A neural network is an ordinary predicate:
+its outputs flow into deterministic, probabilistic and epistemic reasoning
+through one interface, and gradients flow back across the same boundary
+without leaving the device. The knowledge compilation that makes this
+differentiable is itself device-resident, and every circuit it produces is
+proven equivalent to the formula it came from before any probability is read
+off it.
+
+The measurements describe a system that pays off where the symbolic workload
+is large and repeated---reusing a verified circuit across training iterations,
+and avoiding the intermediate blowup of binary-join plans on skewed cyclic
+queries. Against external engines the picture is deliberately mixed: clear
+gains in bounded-memory join evaluation and in per-epoch neurosymbolic
+training, and a clear loss to a mature CPU compiler on small exact-inference
+programs.
+
+What they do not give is a general ranking of xlog against other systems. Each
+comparison covers one engine per reasoning mode on one class of program, the
+rule-induction results rest on two public corpora, and the epistemic and
+rule-learning surfaces are young. The evidence supports the architecture, not
+a claim of universal superiority.
+
+The direction is the one the architecture already implies: out-of-core and
+multi-GPU execution to lift the memory ceiling, deeper residency for the
+epistemic routes, and structure learning that runs on the stream rather than
+over it.

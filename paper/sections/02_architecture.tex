@@ -76,11 +76,9 @@ The payoff is bandwidth asymmetry. PCIe~4.0 $\times16$ delivers roughly 32\,GB/s
     \node[flabel,anchor=north east] at (172,-84)
       {host-side foundation: shared types \& traits};
   \end{tikzpicture}
-  \caption{xlog crate hierarchy, with the workspace's production crates in
-  place. Each tier depends only on lower tiers; the shaded device plane marks
-  the tiers whose runtime semantic state is GPU-resident, while the host
-  provides orchestration, I/O, and compilation. Test-only crates
-  (\texttt{xlog-cuda-tests}, \texttt{xlog-integration}) are omitted.}
+  \caption{xlog crate hierarchy. Each tier depends only on lower tiers; the
+  shaded device plane marks the tiers whose runtime semantic state is
+  GPU-resident, while the host provides orchestration, I/O, and compilation.}
   \label{fig:arch}
 \end{figure*}
 
