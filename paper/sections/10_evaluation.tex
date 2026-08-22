@@ -153,7 +153,7 @@ Two of the runtime optimizations of \Cref{sec:datalog} target repeated-session w
 
 Both target the same waste---work repeated across calls that the previous call already did---and both are transparent to the program: the index manager serves a rebuilt index only when the relation generation says the cached one is stale, and the chain scorer falls back to the baseline path below its candidate-row threshold. Common-subexpression elimination and adaptive re-optimization are held to output equivalence with the unoptimized plan.
 
-Both were measured against the path they replace. On a build-heavy repeated-session semi-join---eight left rows probing eight million right rows, so that building the index dominates the join---reusing the index cuts the median evaluation from $0.255$\,s to $0.0794$\,s, a $3.21\times$ gain over the median of $9$ timed runs after $12$ warm-up runs, with no tracked host transfer on either path. The chain scorer was measured on a chain-hot fixture of $768$ candidate rows, against a gate threshold of $256$. It cuts the median from $27.5$\,ms to $4.9$\,ms, a $5.58\times$ gain over $12$ timed runs after $3$ warm-up runs, and the two arms do not overlap ($27.3$--$28.3$\,ms against $4.9$--$5.4$\,ms). On a small input below the threshold, where the baseline path runs instead, the two medians differ by $1.3\%$ and the arms' ranges overlap. Both are point medians on single synthetic fixtures, and the scorer's coverage output is identical to the baseline's on both.
+Both were measured against the path they replace. On a build-heavy repeated-session semi-join---eight left rows probing eight million right rows, so that building the index dominates the join---reusing the index cuts the median evaluation from $0.255$\,s to $0.0794$\,s, a $3.21\times$ gain over the median of $9$ timed runs after $12$ warm-up runs, with no tracked host transfer on either path. The chain scorer was measured on a chain-hot fixture of $768$ candidate rows, against a gate threshold of $256$. It cuts the median from $27.51$\,ms to $4.93$\,ms, a $5.58\times$ gain over $12$ timed runs after $3$ warm-up runs, and the two arms do not overlap ($27.3$--$28.3$\,ms against $4.9$--$5.4$\,ms). On a small input below the threshold, where the baseline path runs instead, the two medians differ by $1.3\%$ and the arms' ranges overlap. Both are point medians on single synthetic fixtures, and the scorer's coverage output is identical to the baseline's on both.
 
 \subsection{Capability Comparison}
 
@@ -170,7 +170,7 @@ The rule-induction row covers two paths of different maturity. The trainable-rul
     \toprule
     \textbf{Dimension} & \textbf{DeepProbLog} & \textbf{Scallop} & \textbf{Lobster} & \textbf{GPUlog} & \textbf{xlog} \\
     \midrule
-    Symbolic execution      & CPU (Prolog) & CPU (Datalog)    & GPU (Datalog)      & GPU (HISA) & GPU (semi-naive) \\
+    Symbolic execution      & CPU (Prolog) & CPU (Datalog)    & GPU (Datalog)      & GPU (Datalog) & GPU (semi-naive) \\
     Probabilistic inference & Exact (CPU)  & Provenance (CPU) & Provenance (GPU)   & None       & Exact d-DNNF + MC (GPU) \\
     Circuit verification    & None         & None             & None               & ---        & On-GPU CDCL \\
     Neural integration      & Prolog bridge & Differentiable  & Differentiable (GPU) & None     & Zero-copy, fused \\
