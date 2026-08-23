@@ -86,7 +86,17 @@ The workspace is organized into five tiers with strict layering: no crate depend
 
 \subsection{Compilation Pipeline}
 
-A program is compiled to a GPU-executable plan in five stages. \textbf{Parsing} (a PEG parser built with pest) produces an AST covering the full surface, including probabilistic facts, annotated disjunctions, epistemic literals, and neural-predicate declarations. \textbf{Dependency analysis} builds a graph with positive, negative, aggregate, probabilistic, and modal edges and computes its strongly connected components (SCCs) with Tarjan's algorithm. The analysis establishes a deterministic stratum order for the ordinary monotone core and classifies supported nonmonotone components for their dedicated plans. \textbf{Lowering} fans out from the normalized AST into three reasoning IRs: deterministic and reduced ordinary rules become relational-IR trees, probabilistic provenance becomes PIR, and modal programs retain their semantics in EIR. Neural predicates compose with the applicable route. SAT/MaxSAT and verification use a separate shared service: callers supply a device-resident \texttt{GpuCnf} to the CDCL solver rather than creating another reasoning representation or lowering to XGCF. \textbf{Optimization} applies cost-based predicate pushdown and join ordering, promotes eligible multiway rules to the WCOJ subsystem, and rewrites bound recursive queries via magic sets (\Cref{sec:datalog}). \textbf{Plan assembly} emits the route-specific execution plan, whose relational work is dispatched to CUDA kernels; supported negated recursion uses GPU-backed well-founded semantics rather than the ordinary semi-naive schedule.
+A program is compiled to a GPU-executable plan in five stages.
+
+\textbf{Parsing.} A PEG parser built with pest produces an AST covering the full surface, including probabilistic facts, annotated disjunctions, epistemic literals, and neural-predicate declarations.
+
+\textbf{Dependency analysis} builds a graph with positive, negative, aggregate, probabilistic, and modal edges and computes its strongly connected components (SCCs) with Tarjan's algorithm. It establishes a deterministic stratum order for the ordinary monotone core and classifies supported nonmonotone components for their dedicated plans.
+
+\textbf{Lowering} fans out from the normalized AST into three reasoning IRs: deterministic and reduced ordinary rules become relational-IR trees, probabilistic provenance becomes PIR, and modal programs retain their semantics in EIR. Neural predicates compose with the applicable route. SAT/MaxSAT and verification use a separate shared service, so callers supply a device-resident \texttt{GpuCnf} to the CDCL solver instead of creating another reasoning representation or lowering to XGCF.
+
+\textbf{Optimization} applies cost-based predicate pushdown and join ordering, promotes eligible multiway rules to the WCOJ subsystem, and rewrites bound recursive queries via magic sets (\Cref{sec:datalog}).
+
+\textbf{Plan assembly} emits the route-specific execution plan, whose relational work is dispatched to CUDA kernels. Supported negated recursion uses GPU-backed well-founded semantics instead of the ordinary semi-naive schedule.
 
 \subsection{Reasoning IRs and Circuit Format}
 
