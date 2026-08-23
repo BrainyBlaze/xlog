@@ -8,7 +8,27 @@ Two of the three answers came out better than we expected. No run of ours is pla
 
 \subsection{Corpus and labels}
 
-The inputs are two public exports of RTEC~\cite{rtec}, a hand-written Event-Calculus rule engine, over the Brest AIS stream: the composite events it recognised (Zenodo record 2557290) and its own input, the \emph{critical points} of the compressed trajectories~\cite{maritimecer}, the timestamps at which a vessel stops, turns, changes speed or loses signal. Those points are the only temporal grid the corpus carries. A deterministic converter reduces the two into a \emph{pair-time corpus}: one row per (vessel pair, timestamp), eleven relations that hold or do not for that pair then, and the gold label. It has \textbf{454{,}858} rows over \textbf{806} vessel pairs, \textbf{302} of them carrying a \texttt{rendezVous} interval and \textbf{504} negatives drawn by fixed stride from the 2{,}014 pairs that come within proximity but carry none, with \textbf{3{,}548} gold intervals and \textbf{3{,}579} positive rows, $0.79\%$ of the total. The conversion uses no randomness: the corpus is a pure function of the archives.
+The inputs are two public exports of RTEC~\cite{rtec}, a hand-written Event-Calculus rule engine, over the Brest AIS stream: the composite events it recognised (Zenodo record 2557290) and its own input, the \emph{critical points} of the compressed trajectories~\cite{maritimecer}, the timestamps at which a vessel stops, turns, changes speed or loses signal. Those points are the only temporal grid the corpus carries. A deterministic converter reduces the two into a \emph{pair-time corpus}: one row per (vessel pair, timestamp), eleven relations that hold or do not for that pair then, and the gold label. \Cref{tab:maritime-corpus} sizes it. The conversion uses no randomness: the corpus is a pure function of the archives.
+
+\begin{table}[htbp]
+  \centering
+  \caption{The pair-time corpus, as the converter leaves it.}
+  \label{tab:maritime-corpus}
+  \small
+  \begin{tabularx}{\columnwidth}{@{}Lr@{}}
+    \toprule
+    \textbf{Quantity} & \textbf{Value} \\
+    \midrule
+    Rows (vessel pair $\times$ timestamp)                        & $454{,}858$ \\
+    Vessel pairs                                                 & $806$ \\
+    \quad carrying a \texttt{rendezVous} interval                & $302$ \\
+    \quad negatives, by fixed stride from the $2{,}014$ pairs that come within proximity but carry none & $504$ \\
+    Gold intervals                                               & $3{,}548$ \\
+    Positive rows                                                & $3{,}579$ \\
+    \quad as a share of all rows                                 & $0.79\%$ \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
 Three properties bound what a number measured on it can mean. The supervision is synthetic: the gold labels are a hand-crafted RTEC rule's output over the same interval streams the vocabulary comes from, so their perfect alignment with those streams says the conversion is faithful, not that the labels are right. The published learners share this regime; the WOLED paper notes that the maritime ground truth is synthetic and its learning curves consequently alike~\cite{woled}. What every system here measures is the \emph{reconstruction of a known rule} under a vocabulary that does not contain all of it.
 
@@ -40,7 +60,7 @@ The learned operator is not literally the definitional body, its precision being
 
 \textbf{Weighted clauses on the same pool.} The second run changes one thing: the pool's clauses are weighted, not selected. We expected it to stay within $[0.66, 0.70]$, the ceiling being a property of the vocabulary.
 
-The hypothesis was rejected in the favourable direction. Micro F1 is $\mathbf{0.7398}$, $+0.0652$ over the crisp run on the same vocabulary, folds and gate, at markedly higher precision and lower recall.
+The hypothesis was rejected in the favourable direction. Micro F1 is $\mathbf{0.7398}$, $+0.0652$ over the crisp run on the same vocabulary, folds and gate, at markedly higher precision and lower recall; the abstract and \Cref{sec:intro} round that gain to $0.065$.
 
 The expectation was wrong for an instructive reason: the $0.66$ ceiling is the F1 of the definitional body's operating point, crisp reconstruction at recall near one, and weights are not confined to it. Training moved the operating point to high precision at lower recall, which carries more F1.
 
@@ -50,7 +70,7 @@ Fold by fold the picture is mixed. The weighted run wins the micro figure and th
 
 The ceiling probe was re-run on the widened vocabulary before any cross-validated run, against an expectation of ${\approx}0.907$ on the assumption that duration removes only the short-run false positives. The ceiling came out higher, at F1 $0.9969$, again with no false negative.
 
-Duration also eliminates at least $711$ of the $733$ negative-pair false positives, the excluded pairs' body-condition episodes being almost always shorter than $240$\,s. Two consequences were predicted from that: the pair exclusion is largely redundant with duration here, and the duration vocabulary saturates, so the informative weighted-against-crisp comparison is the base-vocabulary one.
+Duration also eliminates at least $711$ of the $733$ negative-pair false positives, the excluded pairs' body-condition episodes being almost always shorter than $240$\,s. The bound is a lower one because the $22$ false positives the widened probe still makes are not decomposed by class. Two consequences were predicted from that: the pair exclusion is largely redundant with duration here, and the duration vocabulary saturates, so the informative weighted-against-crisp comparison is the base-vocabulary one.
 
 Both held. Crisp search on the widened vocabulary lands exactly on the derived ceiling and the weighted run equals it on every fold, so the directional hypothesis, weighted no worse than crisp on the median, holds trivially, with no headroom for weights.
 

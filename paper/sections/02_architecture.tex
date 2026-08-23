@@ -6,7 +6,7 @@ In xlog a neural network \emph{is} a predicate. A declaration binds a network to
 
 \subsection{GPU residency model}
 
-xlog enforces a hard guarantee: all runtime semantic state resides in GPU device memory, or the system returns a deterministic error. There is no silent out-of-core spilling and no implicit CPU fallback; a workload that exceeds the memory budget raises \texttt{RESOURCE\_EXHAUSTED} with diagnostics rather than degrading transparently. The contract extends to production query paths, which target zero device-to-host (D2H) transfers: the kernel provider accounts for transfers at byte granularity through atomic counters, so a performance-critical section can be bracketed and asserted to download nothing, the check the training path relies on to prove its gradient path stays on-device.
+xlog enforces a hard guarantee: all runtime semantic state resides in GPU device memory, or the system returns a deterministic error. There is no silent out-of-core spilling and no implicit CPU fallback; a workload that exceeds the memory budget raises \texttt{RESOURCE\_EXHAUSTED} with diagnostics rather than degrading transparently. The contract extends to production query paths, which target zero device-to-host (D2H) transfers: the kernel provider accounts for transfers at byte granularity through atomic counters, so a performance-critical section can be bracketed and asserted to download nothing. The training path relies on this check to show that its gradient path stays on-device.
 
 The payoff is bandwidth asymmetry. PCIe~4.0 $\times16$ delivers roughly 32\,GB/s, while GPU HBM provides 1--3\,TB/s. A single unnecessary D2H round-trip for a moderate relation (10M tuples at 16 bytes, ${\approx}160$\,MB) costs about 5\,ms, enough to dominate a semi-naive iteration that completes in microseconds on-device. Keeping fact stores, deltas, circuit values, solver state, and gradient buffers exclusively on the GPU eliminates this class of bottleneck; host involvement is restricted to orchestration, I/O, and compilation.
 
@@ -84,7 +84,7 @@ The payoff is bandwidth asymmetry. PCIe~4.0 $\times16$ delivers roughly 32\,GB/s
 
 The workspace is organized into five tiers with strict layering: no crate depends on a peer or a higher tier (\Cref{fig:arch}). A leaf \emph{core} crate defines the shared scalar types, the kernel-provider trait, error and memory-budget types, and a bidirectional symbol table for dictionary-encoded strings. Above it, a tier of intermediate representations and device services wraps CUDA via cudarc~\cite{cudarc}, stages kernel modules (cubin-first with portable PTX fallback), and exposes Arrow and DLPack interoperability. The three core subsystems (the typed language frontend of \Cref{sec:lang}, the GPU runtime executor, and the GPU CDCL/local-search solver) compose into integrated pipelines for deterministic, probabilistic, and neural-symbolic execution, which a PyO3~\cite{pyo3} extension module (\texttt{pyxlog}) and a command-line binary surface to users.
 
-\subsection{Compilation pipeline}
+\subsection{From program to GPU plan}
 
 A program is compiled to a GPU-executable plan in five stages.
 

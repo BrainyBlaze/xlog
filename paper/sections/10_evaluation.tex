@@ -211,7 +211,7 @@ The micro figure falls for a selection-level reason instead. On the fold carryin
 
 These two isolations ask what xlog's design costs, separated from ordinary GPU acceleration: what the equivalence proof buys with cold-compile time, and what device residency saves in transfers. Both run on an RTX 3090, and \Cref{tab:overhead} carries their measurements.
 
-\textbf{Verification cost.} The cold epoch's compilation time is dominated by the on-GPU CDCL equivalence check, not the D4 compile. Split on probabilistic reachability chains, CDCL verification accounts for $96$--$100\%$ of the cold-compile time and grows with circuit size, while D4 compilation stays under $17$\,ms. The ``expensive'' cold epoch is thus almost entirely the price of the machine-checked correctness certificate (\Cref{sec:prob}), a cost the other systems in \Cref{tab:comparison} do not pay because they do not verify.
+\textbf{Verification cost.} The cold epoch's compilation time is dominated by the on-GPU CDCL equivalence check, not the D4 compile. Split on probabilistic reachability chains, CDCL verification accounts for $96$--$100\%$ of the cold-compile time and grows with circuit size, while D4 compilation stays under $17$\,ms. The ``expensive'' cold epoch is thus almost entirely the price of the machine-checked correctness certificate (\Cref{sec:prob}), a cost the CPU-symbolic and GPU-Datalog systems surveyed in \Cref{sec:related} do not pay, because they do not verify.
 
 \begin{table}[htbp]
   \centering
