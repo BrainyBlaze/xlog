@@ -171,11 +171,7 @@ One asymmetry runs in the published rows' favour: our gates, seeds and folds wer
   \par}
 \end{table*}
 
-\textbf{A learned detector against precomputed geometry.} The result that depends on no published figure is the windowed-fold comparison with a direct per-timestep target, analysed in \Cref{sec:ecinduction} and listed in \Cref{tab:ecinduction}. The search returns the same two-clause theory on every fold whether the proximity predicate is the precomputed geometric one (mean held-out F1 $0.7905$) or the learned \texttt{close\_nn} ($0.8276$). A perceptual predicate that was never shown a distance label therefore stands in for hand-set geometry on this protocol without costing accuracy.
-
-\textbf{The same detector under Event-Calculus cross-validation: a negative result.} Substituting \texttt{close\_nn} for the precomputed predicate \emph{inside} the Event-Calculus initiation search does not survive the ten-fold protocol; its scores collapse (\Cref{tab:ec-runs}). Nine of the ten folds reject the candidate for insufficient new coverage; \Cref{sec:ecinduction} gives the diagnosis, which is a scale mismatch in the selection rule and not a failure of the network.
-
-\textbf{Committed clauses that score zero: the clean protocol.} Re-run on the deduplicated, scene-family-grouped corpus, the \texttt{meeting} fluent scores F1 $0.0$ on both routes (\Cref{tab:ec-runs}). Those zeros are for the most part \emph{scored predictions}, not empty theories: the direct route commits a clause on nine of the ten folds and the Event-Calculus route on one, and a theory that was empty on every fold could not produce a false positive. On \texttt{moving} the Event-Calculus route \emph{is} empty where it matters, with no initiation clause on any fold, so inertia never starts, though termination clauses are committed on seven of the ten. The direct route selects a clause on nine of the ten folds, fold 6 abstaining. The gate abstains where its candidate's held-out score has collapsed, which is the behaviour it was pre-registered to have. Where it does commit, the committed clause simply does not transfer across scene families, and \Cref{sec:ecinduction} gives the census behind that failure.
+The runs themselves, their protocol and their diagnoses are in \Cref{sec:ecinduction}; \Cref{tab:ec-runs} collects their frame-level scores. One of its rows needs a disclosure that section does not carry.
 
 \textbf{The \texttt{moving} threshold, disclosed.} The two fluents carry different canonical proximity thresholds in the published CAVIAR rule set (\texttt{meeting} over \texttt{close\_25}, \texttt{moving} over \texttt{close\_34}), and the \texttt{moving} figure above is measured under the canonical \texttt{close\_34}. An earlier run over the same folds measured \texttt{moving} under the \texttt{meeting} threshold of 25 and scored \emph{higher} (\Cref{tab:ec-runs}). The canonical threshold remains the right headline, and the higher number is not evidence against it: where the clause is selected, widening \texttt{close} from 25 to 34 behaves exactly as threshold semantics predict, recall up and precision down.
 
@@ -185,7 +181,7 @@ The micro figure falls for a selection-level reason instead. On the fold carryin
 
 \begin{table*}[htbp]
   \centering
-  \caption{Frame-level \texttt{holdsAt} scores for every rule-induction run discussed in this subsection, micro-averaged over pooled per-fold counts. The distributed corpus is the dump shipped with the published Event-Calculus learners and carries the duplication defect measured in \Cref{sec:ecinduction}; the clean corpus is its deduplicated, scene-family-grouped form. Dashes are quantities the run does not report separately.}
+  \caption{Frame-level \texttt{holdsAt} scores for every rule-induction run of \Cref{sec:ecinduction}, micro F1 over pooled per-fold counts. The distributed corpus is the dump shipped with the published Event-Calculus learners and carries the duplication defect measured in \Cref{sec:ecinduction}; the clean corpus is its deduplicated, scene-family-grouped form. Dashes are quantities the run does not report separately.}
   \label{tab:ec-runs}
   \small
   \begin{tabularx}{\linewidth}{@{}L l c c c l@{}}
@@ -204,8 +200,6 @@ The micro figure falls for a selection-level reason instead. On the fold carryin
     \bottomrule
   \end{tabularx}
 \end{table*}
-
-\textbf{Why the two corpora differ.} The distributed corpus carries the duplication defect measured in \Cref{sec:ecinduction}. That defect is the reason the distributed-corpus rows carry a caveat, and also the reason the comparison in \Cref{tab:ec-published} is drawn there and not on the clean corpus: the distributed dump is the regime the published figures share.
 
 \subsection{Verification cost and residency benefit}\label{sec:overhead}
 
