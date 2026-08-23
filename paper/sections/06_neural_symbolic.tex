@@ -2,7 +2,7 @@
 
 This section is where the three pillars meet. The device-resident substrate (\Cref{sec:datalog}) keeps the symbolic state on the GPU; verified knowledge compilation (\Cref{sec:prob}) turns a network's outputs into a sound differentiable circuit; and zero-copy coupling carries gradients back into the neural optimizer without leaving the device. Together they let neural perception and logical reasoning train jointly, end to end, with no host--device transfers in the loop.
 
-\subsection{Neural Predicates}\label{subsec:neural-pred}
+\subsection{Neural predicates}\label{subsec:neural-pred}
 
 In xlog a neural network \emph{is} a predicate. The \texttt{nn/4} declaration embeds a network directly into the program:
 
@@ -25,7 +25,7 @@ Registration is typed, not by name. A caller may state the arity of the network'
 
 The dataflow runs in two directions. \textbf{Forward:} when evaluation reaches an \texttt{nn/4}-backed predicate, the registered module runs, and its softmax vector is decomposed into weighted probabilistic facts, one per label, and fed into the PIR/CNF/D4/XGCF pipeline. Because circuit structure depends on the program, not the weights, the compiled circuit is cached and only the leaf weights are updated on later iterations. \textbf{Backward:} after the circuit computes the forward log-probability and backward gradients via level-parallel kernels, the per-leaf gradient buffers are exported as DLPack tensors and injected into PyTorch's autograd graph, and the optimizer updates the network as usual. The GIL is released during GPU work, so CUDA execution does not block the interpreter. A neural predicate is not confined to a query head, moreover: it may also appear inside rule bodies, so that whole rules, not just a single perceptual predicate, become the trainable object (\Cref{subsec:trainable-bodies}).
 
-\subsection{End-to-End Training}
+\subsection{End-to-end training}
 
 The canonical example is MNIST addition (the DeepProbLog benchmark): given two digit images, predict their sum, with supervision only on sums: the network never sees individual digit labels. The entire reasoning structure is two rules:
 
@@ -115,7 +115,7 @@ history = pyxlog.train_model_tensor(
 
 The decisive performance property (\Cref{fig:training}) is that compilation and verification happen once, on the first forward pass. Every later iteration reuses the cached circuit, executing only the weight update and the level-parallel forward/backward kernels. This is the mechanism behind the $2.74\times$ training speedup; the loss reduction across seeds confirms that gradients flow from circuit evaluation through the logic program back to the CNN, and the full timing breakdown is reported in \Cref{sec:eval}.
 
-\subsection{Zero-Copy Interoperability}\label{subsec:interop}
+\subsection{Zero-copy interoperability}\label{subsec:interop}
 
 A GPU-native engine is only useful if results reach the frameworks researchers already use, without copies that would reintroduce the transfer wall. xlog exposes its device-resident state through four standard interfaces.
 
@@ -127,7 +127,7 @@ A GPU-native engine is only useful if results reach the frameworks researchers a
 
 \textbf{PyTorch autograd.} The circuit behaves as a differentiable function inside PyTorch: the network's grad-enabled forward feeds the circuit, the scalar loss is exported via DLPack and re-imported, and a batched path stacks inputs into one forward pass and runs a single backward, so gradients flow from the logic layer back to \texttt{nn.Module} parameters with no custom autograd \texttt{Function}.
 
-\subsection{Trainable Rule Bodies}\label{subsec:trainable-bodies}
+\subsection{Trainable rule bodies}\label{subsec:trainable-bodies}
 
 Placing a neural predicate in a rule body lifts xlog from learning a single perceptual predicate to learning whole rules, while the pipeline stays device-resident with no host round-trips.
 
@@ -141,7 +141,7 @@ Placing a neural predicate in a rule body lifts xlog from learning a single perc
 
 These trainable-rule paths share the verified circuit and the zero-copy substrate of the simpler predicate case, and extend to recursive programs now that provenance converges on two-sided recursive strongly-connected components. \Cref{sec:ecinduction} carries the surface onto a public benchmark, not a demonstration: the perceptual predicate inside an induced Event-Calculus rule body is trained through symbolic credit alone, cross-validated under pre-registered gates. That section draws no ranking against a dedicated rule learner, because the protocol differences are real and unquantified. The surface is a beta capability (\Cref{sec:limits}).
 
-\subsection{Engine-Mode Credit and Candidate Selection}\label{subsec:engine-mode}
+\subsection{Engine-mode credit and candidate selection}\label{subsec:engine-mode}
 
 Learning a rule body is not only a gradient problem: it is also a decision about which candidate to keep, and the two need different evidence. Engine-mode training separates them. The engine already enumerates the candidate space (the well-formed pairs of body relations over the program's own binary relations) and already holds the join extensions those candidates read, so training scores that space directly instead of a reconstruction of it.
 
@@ -159,7 +159,7 @@ Everything else is uncertain: excluded from the candidate's held-out score, beca
 
 \textbf{Acceptance without retraining.} The same machinery also runs as an acceptance instrument instead of a trainer. Given an externally trained detector, a frozen entry point scores every enumerated candidate against it with no optimizer, no gradient and no folds (nothing trains, so every fact is already held out with respect to this system) and applies exactly the arbiter's gates: coverage, fit, tie semantics, Occam narrowing, abstention. The detector must be in evaluation mode, and a training-mode module is refused, not quietly switched, since batch-norm statistics mutate and dropout de-determinizes the scores even under a no-gradient scope, both breaking the bit-identical scoring the entry point exists to provide. Where the cross-validated path asks whether a detector can be trained for a rule, this one asks whether a rule is right given the detector one already has.
 
-\subsection{Term Embeddings and Differentiable ILP}
+\subsection{Term embeddings and differentiable ILP}
 
 \textbf{Term embeddings} attach dense, optionally trainable vectors to logical symbols. Where \texttt{nn/4} maps perception to discrete facts, embeddings give logical entities a continuous representation that participates in neural computation, with gradients flowing through the embedding lookup: knowledge-graph entity representations, for instance, trained jointly with neural perception.
 

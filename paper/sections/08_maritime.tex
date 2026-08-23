@@ -6,7 +6,7 @@ It is large enough to separate three questions CAVIAR could not. Does a \emph{cr
 
 Two of the three answers came out better than we expected. No run of ours is placed beside the published maritime figure; \Cref{subsec:maritime-comparison} says why.
 
-\subsection{Corpus and Labels}
+\subsection{Corpus and labels}
 
 The inputs are two public exports of RTEC~\cite{rtec}, a hand-written Event-Calculus rule engine, over the Brest AIS stream: the composite events it recognised (Zenodo record 2557290) and its own input, the \emph{critical points} of the compressed trajectories~\cite{maritimecer}, the timestamps at which a vessel stops, turns, changes speed or loses signal. Those points are the only temporal grid the corpus carries. A deterministic converter reduces the two into a \emph{pair-time corpus}: one row per (vessel pair, timestamp), eleven relations that hold or do not for that pair then, and the gold label. It has \textbf{454{,}858} rows over \textbf{806} vessel pairs, \textbf{302} of them carrying a \texttt{rendezVous} interval and \textbf{504} negatives drawn by fixed stride from the 2{,}014 pairs that come within proximity but carry none, with \textbf{3{,}548} gold intervals and \textbf{3{,}579} positive rows, $0.79\%$ of the total. The conversion uses no randomness: the corpus is a pure function of the archives.
 

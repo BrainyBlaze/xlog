@@ -2,7 +2,7 @@
 
 xlog draws on five lines of research (neurosymbolic programming, GPU-accelerated Datalog, probabilistic logic programming, GPU SAT, and differentiable ILP) and is, to our knowledge, the first to make the full symbolic spectrum GPU-resident and uniformly differentiable.
 
-\subsection{Neurosymbolic Programming}
+\subsection{Neurosymbolic programming}
 
 DeepProbLog~\cite{deepproblog} replaces selected probabilistic facts with neural-network outputs, enabling end-to-end gradient training of neural predicates inside a probabilistic-logic framework. NeurASP~\cite{neurasp} integrates network outputs as probability annotations on answer-set programs. Both perform symbolic inference on the CPU and shuttle gradients across the bus. Scallop~\cite{scallop} provides a differentiable Datalog with provenance-semiring reasoning~\cite{green2007provenance} and a relational symbolic representation, and is the closest language-level analogue to xlog. Its reasoning core, however, is CPU-based.
 
@@ -10,13 +10,13 @@ Lobster~\cite{lobster} is the most directly comparable system: it GPU-accelerate
 
 Differentiable-SAT and logic-as-loss methods (SATNet~\cite{satnet}, semantic loss~\cite{semanticloss}, and Logic Tensor Networks~\cite{ltn}) instead couple neural models to constraints through relaxed or fuzzy surrogates. By contrast, xlog couples through \emph{exact} weighted model counting, trading their broader applicability for exact gradients and the on-device verifiability of \Cref{sec:prob}.
 
-\subsection{GPU-Accelerated Datalog and Joins}
+\subsection{GPU-accelerated Datalog and joins}
 
 GPUlog~\cite{gpulog} ported bottom-up fixed-point computation to CUDA using HISA indexing, and reported up to $45\times$ speedups over CPU Datalog engines. VFLog~\cite{vflog} advanced this with a vertically-fused, column-oriented kernel design that avoids intermediate materialization, reporting up to $200\times$ over CPU column engines; mnmgDatalog~\cite{mnmgdatalog} extends GPU Datalog to multi-node, multi-GPU clusters. Most relevant to xlog's join path, Sun et al.~\cite{sungpuwcoj} scale worst-case-optimal joins to GPUs.
 
 All of them target deterministic Datalog only: none supports probabilistic semantics, weighted model counting, or gradient computation over derived facts. Like them, xlog uses a columnar, kernel-fused execution model, and it additionally promotes eligible cyclic and multiway rules to a worst-case-optimal join path~\cite{ngo2018wcoj,veldhuizen2014leapfrog,wang2023freejoin}. But that engine is one component of a substrate that extends through circuit-based inference to neural-symbolic gradient propagation in a single address space.
 
-\subsection{Probabilistic Logic Programming}
+\subsection{Probabilistic logic programming}
 
 ProbLog2~\cite{problog2} established the modern pipeline for exact probabilistic inference: ground the program, encode provenance as a propositional formula, compile to a tractable target (d-DNNF~\cite{darwiche2001dnnf} or SDD~\cite{sdd}), and evaluate weighted model counts~\cite{chaviraDarwiche2008}. The compilers (D4~\cite{d4compiler}, c2d~\cite{c2d}) run as host-side subprocesses, and recent work makes such compilation \emph{certified}~\cite{capelli2019}. In xlog the same compile-once/evaluate-many model is adopted, but the entire pipeline moves onto the GPU: provenance, Tseitin encoding, D4 compilation, equivalence verification, and forward/backward evaluation. Probabilistic inference thus shares one address space with the neural and deterministic layers.
 
@@ -28,6 +28,6 @@ ParaFROST~\cite{parafrost} parallelizes CDCL clause-database simplification on t
 
 Differentiable ILP~\cite{dilp} casts first-order rule induction as differentiable optimization, scoring candidate rules by soft forward-chaining. Dense materialization over the rule space scales cubically in the number of constants, and implementations remain CPU-based. The dILP subsystem of xlog (\Cref{sec:nesy}) replaces dense materialization with sparse GPU bitmasks and on-device scatter--gather credit assignment, avoiding the cubic blowup while preserving differentiability.
 
-\subsection{Logic Programming Languages}
+\subsection{Logic programming languages}
 
 xlog inherits ideas from a long line of logic languages, but is the first to target GPU execution of the full surface. Prolog~\cite{swiprolog} offers unification and metaprogramming on a CPU interpreter; Mercury~\cite{mercury} introduced strong typing and modes, compiling to native code. Souffl{\'e}~\cite{souffle} is a typed Datalog compiling to C++ for program analysis, and clingo~\cite{clingo} provides answer-set semantics on CPU grounders and solvers. From these xlog adopts the typed-predicate discipline, but targets device kernels, and it unifies typed Datalog, probabilistic facts, neural predicates, and epistemic operators in one language compiled entirely to the GPU.

@@ -1,6 +1,6 @@
 \section{Limitations and Future Work}\label{sec:limits}
 
-\subsection{Current Limitations}
+\subsection{Current limitations}
 
 \textbf{NVIDIA GPU required.} The entire execution stack is written in CUDA C; there is no OpenCL, Metal, or ROCm backend. This is a direct consequence of the GPU-native design: the persistent-index manager, the recorded-launch discipline, and the in-kernel hash-consing of the compilation pipeline all depend on CUDA-specific primitives (cooperative groups, warp-level operations, unified virtual addressing), and a lowest-common-denominator portability layer would erode the zero-transfer performance model that is the system's reason for existing. Users without an NVIDIA GPU cannot run xlog.
 
@@ -28,7 +28,7 @@
 
 \textbf{Single-pass weight learning.} The single-pass runs are online in the weights only: their body pool and permutation-null gate are computed on the training side. They therefore demonstrate single-pass weight learning and not online structure revision, which remains future work. And the zero degradation they measure rests on a single body sitting above the decision threshold in every regime, with a margin of $0.007$ on one fold; it is a property of this pool, corpus and threshold, not a robustness result.
 
-\subsection{Future Work}
+\subsection{Future work}
 
 \textbf{Out-of-core execution.} A streaming mode would partition relations across host and device, paging tiles through GPU memory in fixpoint-iteration order, removing the single-GPU-memory ceiling at the cost of added transfers.
 
