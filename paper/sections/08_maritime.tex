@@ -12,20 +12,20 @@ The inputs are two public exports of RTEC~\cite{rtec}, a hand-written Event-Calc
 
 \begin{table}[htbp]
   \centering
-  \caption{The pair-time corpus, as the converter leaves it.}
+  \caption{The pair-time corpus, as the converter leaves it. The negative pairs are drawn by fixed stride from the $2{,}014$ pairs that come within proximity but carry no interval.}
   \label{tab:maritime-corpus}
   \small
   \begin{tabularx}{\columnwidth}{@{}Lr@{}}
     \toprule
     \textbf{Quantity} & \textbf{Value} \\
     \midrule
-    Rows (vessel pair $\times$ timestamp)                        & $454{,}858$ \\
-    Vessel pairs                                                 & $806$ \\
-    \quad carrying a \texttt{rendezVous} interval                & $302$ \\
-    \quad negatives, by fixed stride from the $2{,}014$ pairs that come within proximity but carry none & $504$ \\
-    Gold intervals                                               & $3{,}548$ \\
-    Positive rows                                                & $3{,}579$ \\
-    \quad as a share of all rows                                 & $0.79\%$ \\
+    Rows (vessel pair $\times$ timestamp)          & $454{,}858$ \\
+    Vessel pairs                                   & $806$ \\
+    \quad carrying a \texttt{rendezVous} interval  & $302$ \\
+    \quad negatives, by fixed stride               & $504$ \\
+    Gold intervals                                 & $3{,}548$ \\
+    Positive rows                                  & $3{,}579$ \\
+    \quad as a share of all rows                   & $0.79\%$ \\
     \bottomrule
   \end{tabularx}
 \end{table}

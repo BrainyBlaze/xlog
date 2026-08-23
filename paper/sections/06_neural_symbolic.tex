@@ -171,29 +171,21 @@ The benchmark runs of \Cref{sec:ecinduction} exercise the last row only. Its per
 
 \begin{table}[htbp]
   \centering
-  \caption{What judges what, on which path. Convergence and supplied held-out examples are preconditions, not gates: without them the pipeline returns for manual review before any row runs.}
+  \caption{What judges what, on which path: the promotion pipeline of differentiable ILP or the holdout arbiter of \Cref{subsec:engine-mode}. Convergence and supplied held-out examples are preconditions, not gates: without them the pipeline returns for manual review before any row below runs.}
   \label{tab:gates}
-  \small
+  \footnotesize
   \setlength{\tabcolsep}{3pt}
-  \begin{tabularx}{\columnwidth}{@{}LLl@{}}
+  \begin{tabularx}{\columnwidth}{@{}>{\raggedright\arraybackslash}p{0.25\columnwidth}Ll@{}}
     \toprule
-    \textbf{Judgement} & \textbf{What it judges} & \textbf{Path} \
+    \textbf{Judgement} & \textbf{What it judges} & \textbf{Path} \\
     \midrule
-    Six always-run gates
-      & the discovered rule derives every training positive and no training negative, passes a novel-fact audit against a bound on unexplained derivations, loses no fact of a protected relation, meets a held-out F1 threshold, and has typed schemas for the relations it names
-      & dILP \
+    Six always-run gates & the rule derives every training positive and no training negative, passes the novel-fact audit, loses no protected fact, meets a held-out F1 threshold, and names only relations with typed schemas & dILP \\
     \addlinespace
-    Two held-out gates
-      & the same rule on the supplied held-out positives and negatives
-      & dILP \
+    Two held-out gates & the same rule on the supplied held-out positives and negatives & dILP \\
     \addlinespace
-    Ambiguity scan
-      & which alternative candidates also explain the data; reported beside the gates, never decisive
-      & dILP \
+    Ambiguity scan & which other candidates also explain the data; reported, never decisive & dILP \\
     \addlinespace
-    Permutation-null fit threshold
-      & whether a candidate generalizes better than shuffled labels do on its own fold
-      & arbiter (\Cref{subsec:engine-mode}) \
+    Permutation-null fit threshold & whether a candidate generalizes better than shuffled labels do on its own fold & arbiter \\
     \bottomrule
   \end{tabularx}
 \end{table}
