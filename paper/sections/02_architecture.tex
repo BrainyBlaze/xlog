@@ -102,7 +102,7 @@ A program is compiled to a GPU-executable plan in five stages.
 
 Three reasoning IRs keep the backends decoupled; probabilistic knowledge compilation also emits a downstream circuit format. Each form has one role.
 
-\textbf{RIR (Relational IR)} is the algebraic tree---\texttt{Scan}, \texttt{Filter}, \texttt{Project}, \texttt{Join}, \texttt{GroupBy}, \texttt{Union}, \texttt{Distinct}, \texttt{Diff}, \texttt{Fixpoint}, and the worst-case-optimal \texttt{MultiWayJoin}/\texttt{ChainJoin}, carrying cardinality, skew, and delta-vs-full metadata. Deterministic execution and reduced ordinary subprograms consume RIR; the other backends preserve additional semantics in their own IRs.
+\textbf{RIR (Relational IR)} is the algebraic tree (\texttt{Scan}, \texttt{Filter}, \texttt{Project}, \texttt{Join}, \texttt{GroupBy}, \texttt{Union}, \texttt{Distinct}, \texttt{Diff}, \texttt{Fixpoint}, and the worst-case-optimal \texttt{MultiWayJoin}/\texttt{ChainJoin}) carrying cardinality, skew, and delta-vs-full metadata. Deterministic execution and reduced ordinary subprograms consume RIR; the other backends preserve additional semantics in their own IRs.
 
 \textbf{PIR (Provenance IR)} is the weighted Boolean formula (\texttt{Lit}, \texttt{NegLit}, \texttt{And}, \texttt{Or}, \texttt{Decision}) derived from provenance tracking over a probabilistic program, capturing its structure without execution order.
 
