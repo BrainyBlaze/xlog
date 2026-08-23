@@ -2,6 +2,11 @@
 
 \usepackage{arxiv}
 \usepackage[htt]{hyphenat}
+% Break long \texttt identifiers at their underscores, and never with a
+% hyphen: both\_low\_or\_stopped must not read as both\_-low\_or\_stopped.
+\makeatletter
+\renewcommand{\_}{\textunderscore\hspace{0pt}}
+\makeatother
 \usepackage{amsmath,amssymb}
 \usepackage{algorithm}
 \usepackage[noend]{algpseudocode}
