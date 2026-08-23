@@ -12,6 +12,8 @@ This is the trainable rule bodies of \Cref{subsec:trainable-bodies} on a real be
 
 \subsection{Protocol}
 
+Two targets are searched throughout this section. The \emph{direct} target asks, per timestep, whether the fluent holds; the \emph{Event-Calculus} target asks when it is initiated and terminated, and infers holding through inertia. They carry different class balances, and the guarantees below are stated per target. Except where a table says otherwise, F1 is micro-averaged over pooled per-fold counts, as the published evaluations compute it.
+
 Each guarantee below was fixed before the run it governs and covers that run, not the history behind it: the corpus was already in hand while the gates were being designed.
 
 \textbf{Leak-free scene-family splitting.} The distributed CAVIAR corpus used by the published Event-Calculus learners is a dump of 26 video segments, and it is not clean. A frame-level audit of every \texttt{meeting} transition event in the dump against the original ground-truth XML classifies 21 of 25 events as real, 3 as duplicates and 1 as a splice artifact. Two source videos appear in both the dump's train and its test file, and one video alone contributes 855 duplicated gold pair-frames. Cross-validating over segments therefore permits same-scene transfer. The clean protocol folds over \emph{scene families} recovered from the source XML instead, so no scene appears on both sides of a split.
@@ -19,6 +21,8 @@ Each guarantee below was fixed before the run it governs and covers that run, no
 \textbf{Recall-aware holdout.} Scoring candidates by held-out accuracy is useless at this class balance (roughly ten positive transitions against tens of thousands of rows), because every candidate sits on the all-false base-rate plateau, and the ranking provably inverts: the best real detector scores below the empty theory. Candidate selection in the Event-Calculus searches uses per-fold held-out F1 instead. The direct per-timestep target does not have this problem, since it carries thousands of positives per fold and not a handful of transition events, so its searches are left at their defaults, held-out accuracy with a fixed $0.75$ fit gate. This guard and the next therefore govern the Event-Calculus route only.
 
 \textbf{Permutation-null fit gate.} A candidate must beat what label shuffling alone achieves on its own fold. Each fold derives its own threshold from 1000 label permutations (seed 7) as the 95th percentile of the pool-maximum mean per-fold F1, computed per target and on the training side only. A theory whose clauses do not clear that bar is not returned: the search abstains and reports an empty theory. Abstention is a first-class outcome of this protocol, not a failure mode of it.
+
+\textbf{Two fold structures.} The direct per-timestep runs reuse the three folds the distributed dataset file ships, whose datapoints are fixed-length windows of consecutive frames for one person pair (the \emph{windowed folds}); the Event-Calculus runs fold over whole video segments, or over scene families under the clean protocol.
 
 \subsection{Results}
 
