@@ -22,9 +22,12 @@ Each guarantee below was fixed before the run it governs and covers that run, no
 
 \subsection{Results}
 
-\textbf{Perception learned through logic credit.} On the windowed-fold protocol with a direct per-timestep target, the search finds the same two-clause theory on every fold in both the relational and the neural mode:
+\textbf{Perception learned through logic credit.} On the windowed-fold protocol with a direct per-timestep target, the search finds the same two-clause theory on every fold in both modes (\Cref{lst:ec-theory}):
 
-\begin{lstlisting}
+\begin{lstlisting}[style=xlogstyle, basicstyle=\ttfamily\scriptsize,
+                   caption={The two-clause theory the search returns on every
+                            fold, in both the relational and the neural mode.},
+                   label={lst:ec-theory}]
 holdsAt_meeting(PP,T) :- both_inactive(PP,T), close*(PP,T).
 holdsAt_meeting(PP,T) :- both_active(PP,T),   close*(PP,T).
 \end{lstlisting}
@@ -61,7 +64,7 @@ The machinery is not broken under this protocol. On \texttt{moving} the direct r
     \addlinespace
     \multicolumn{4}{l}{\emph{Distributed corpus, 10-fold CV, EC + inertia}}\\
     \quad pre-registered & 0.6580 & 0.8271 & \textbf{0.7329}\\
-    \quad + termination vocab.\ (2nd iter.) & 0.7357 & 0.8260 & 0.7782\\
+    \quad + termination relations & 0.7357 & 0.8260 & 0.7782\\
     \quad learned \texttt{close\_nn} & 0.1250 & 0.0005 & 0.0011\\
     \addlinespace
     \multicolumn{4}{l}{\emph{Clean protocol (scene-family folds)}}\\
@@ -71,7 +74,7 @@ The machinery is not broken under this protocol. On \texttt{moving} the direct r
     \quad \texttt{moving}, direct route & 0.5334 & 0.3817 & 0.4450\\
     \bottomrule
   \end{tabularx}
-  \caption{Runs reported in this section. Micro-averages over pooled per-fold counts, except the windowed rows, which are fold means. The clean-protocol \texttt{meeting} zeros are scored predictions, not empty theories: the direct route commits a clause on nine of the ten folds and the Event-Calculus route on one, and those clauses score no true positive outside the one scene family that carries three quarters of the positive frames. The \texttt{moving} Event-Calculus zero is the one empty case: its initiation theory is empty on every fold, so inertia never starts, although termination clauses are committed on seven of the ten. Published figures for the same benchmark are tabulated separately in \Cref{sec:eval}.}
+  \caption{Runs reported in this section. Micro F1 over pooled per-fold counts, except the windowed rows, which are fold means. The \emph{+ termination relations} row is the second, adaptive vocabulary iteration. The clean-protocol zeros are scored predictions, not empty theories, except the \texttt{moving} Event-Calculus row, whose initiation theory is empty on every fold; the census behind them is in the text. Published figures for the same benchmark are tabulated separately in \Cref{sec:eval}.}
   \label{tab:ecinduction}
 \end{table}
 
