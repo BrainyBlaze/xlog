@@ -15,6 +15,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+import pyxlog.ilp.neurosymbolic as neurosymbolic_module
+
 from pyxlog.ilp.neurosymbolic import (  # noqa: E402
     NeuralBodySpec,
     NeuroSymbolicTrainingConfig,
@@ -460,6 +462,58 @@ def _train_fragility(steps: int = 500):
         config=NeuroSymbolicTrainingConfig(steps=steps, learning_rate=0.1),
         neural_bodies={"cand_neural": NeuralBodySpec(features=phi)},
     )
+
+
+@requires_cuda
+def test_neural_body_training_recovers_from_an_all_off_initial_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hard-off initial gate must retain a gradient into its neural head."""
+
+    original_make_head = neurosymbolic_module._make_neural_body_head
+
+    def make_all_off_head(width: int, head_depth: int, hidden_dim: int):
+        head = original_make_head(width, head_depth, hidden_dim)
+        with torch.no_grad():
+            for parameter in head.parameters():
+                parameter.zero_()
+            head[-1].bias.fill_(-1.0)
+        return head
+
+    monkeypatch.setattr(
+        neurosymbolic_module,
+        "_make_neural_body_head",
+        make_all_off_head,
+    )
+    source = """
+        dropped(0). dropped(1). dropped(2). inert(3).
+        pred dropped(u64). pred inert(u64). pred breaks(u64).
+        trainable_rule(cand_inert, weight=0.0) :: breaks(C) :- inert(C).
+        trainable_rule(cand_neural, weight=0.0) :: breaks(C) :- dropped(C).
+        train(breaks, binary_cross_entropy).
+    """
+    features = torch.tensor(
+        [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+        dtype=torch.float32,
+    )
+    targets = torch.tensor([1.0, 1.0, 0.0], dtype=torch.float32)
+
+    result = train_neurosymbolic_program(
+        source,
+        networks={},
+        examples=[{
+            "inputs": torch.zeros((3, 1), dtype=torch.float32),
+            "targets": targets,
+        }],
+        config=NeuroSymbolicTrainingConfig(steps=100, learning_rate=0.1),
+        neural_bodies={"cand_neural": NeuralBodySpec(features=features)},
+    )
+
+    assert result.losses[-1] < result.losses[0]
+    assert min(result.query_probabilities[:2]) > 0.5
+    assert result.query_probabilities[2] < 0.5
+    assert result.training_host_transfer_stats["dtoh_calls"] == 0
+    assert result.training_host_transfer_stats["htod_calls"] == 0
 
 
 @requires_cuda

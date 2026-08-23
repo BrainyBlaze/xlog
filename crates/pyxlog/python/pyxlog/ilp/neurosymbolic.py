@@ -920,7 +920,10 @@ def _train_joint_mixture(
         program.zero_grad()
         for opt in neural_optims.values():
             opt.zero_grad()
-        p_or = head_prob(training=True).clamp(eps, 1.0 - eps)
+        raw_p_or = head_prob(training=True)
+        bounded_p_or = raw_p_or.clamp(eps, 1.0 - eps)
+        # Keep BCE finite without making an exact 0/1 noisy-OR a dead gradient.
+        p_or = raw_p_or + (bounded_p_or - raw_p_or).detach()
         loss = -(
             targets_t * torch.log(p_or) + (1.0 - targets_t) * torch.log(1.0 - p_or)
         ).mean()
