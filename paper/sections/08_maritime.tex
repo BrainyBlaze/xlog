@@ -50,7 +50,7 @@ Fold by fold the picture is mixed. The weighted run wins the micro figure and th
 
 The ceiling probe was re-run on the widened vocabulary before any cross-validated run, against an expectation of ${\approx}0.907$ on the assumption that duration removes only the short-run false positives. The ceiling came out higher, at F1 $0.9969$, again with no false negative.
 
-Duration also eliminates at least $711$ of the $733$ negative-pair false positives, the excluded pairs' body-condition episodes being almost always shorter than $240$\,s. Two consequences were predicted from that: the pair exclusion is largely redundant with duration here, a finding and not an assumption, and the duration vocabulary saturates, so the informative weighted-against-crisp comparison is the base-vocabulary one.
+Duration also eliminates at least $711$ of the $733$ negative-pair false positives, the excluded pairs' body-condition episodes being almost always shorter than $240$\,s. Two consequences were predicted from that: the pair exclusion is largely redundant with duration here, and the duration vocabulary saturates, so the informative weighted-against-crisp comparison is the base-vocabulary one.
 
 Both held. Crisp search on the widened vocabulary lands exactly on the derived ceiling and the weighted run equals it on every fold, so the directional hypothesis, weighted no worse than crisp on the median, holds trivially, with no headroom for weights.
 
@@ -114,7 +114,7 @@ That fold has $1{,}270$ rows between $0.3$ and $0.5$: a small change of learning
 
 \subsection{Discussion}\label{subsec:maritime-comparison}
 
-The published figure for \texttt{rendezVous} on this corpus is $0.98$ for OLED and both variants of WOLED, MLN- and ASP-based alike, with theories of eighteen literals, measured on a train/test split of halves~\cite{woled}. A second published experiment, on a six-sequence fragment, compares WOLED-ASP with batch learners and reports figures from $0.91$ to $0.97$ in a bar chart. We fixed in advance that none of these would stand beside the rows of \Cref{tab:maritime}. The reason is not modesty: the two sets of numbers are not on one axis.
+The published figure for \texttt{rendezVous} on this corpus is $0.98$ for OLED and both variants of WOLED, MLN- and ASP-based alike, with theories of eighteen literals, measured on a train/test split of halves~\cite{woled}. A second published experiment, on a six-sequence fragment, compares WOLED-ASP with batch learners and reports figures from $0.91$ to $0.97$ in a bar chart. None of them stands beside the rows of \Cref{tab:maritime}, because the two sets of numbers are not on one axis.
 
 Theirs live on a dense grid, the critical points of every vessel with inertia filling each interval's interior. Ours live on a per-pair grid with ${\approx}1.009$ positive rows per interval, and we do not reproduce the published per-timepoint reading on it. A split of halves is not a pair-level five-fold cross-validation either, and for the same reason we do not compare pass times with published training times.
 
