@@ -143,9 +143,11 @@ These trainable-rule paths share the verified circuit and the zero-copy substrat
 
 \subsection{Engine-mode credit and candidate selection}\label{subsec:engine-mode}
 
-Learning a rule body is not only a gradient problem: it is also a decision about which candidate to keep, and the two need different evidence. Engine-mode training separates them. The engine already enumerates the candidate space (the well-formed pairs of body relations over the program's own binary relations) and already holds the join extensions those candidates read, so training scores that space directly instead of a reconstruction of it.
+Which of the candidate bodies the engine enumerates should the learner keep, and on what evidence? Learning a rule body is not only a gradient problem: it is also a decision about which candidate to keep, and the two need different evidence. Engine-mode training separates them. The engine already enumerates the candidate space (the well-formed pairs of body relations over the program's own binary relations) and already holds the join extensions those candidates read, so training scores that space directly instead of a reconstruction of it.
 
 A candidate's score on a fact is a noisy-OR over the witnesses the engine reports for that fact: a neural body relation contributes a probability per witness, read at the fact's own label, while a purely relational one contributes a fixed $\{0,1\}$ cover. Candidates combine as a softmax over their logits, and the resulting negative log-likelihood is a single autograd graph, so one backward pass updates the candidate logits and the network behind the probabilities together.
+
+\textbf{A worked instance.} Take one head fact and two candidates for its body, one relational and one neural. The relational candidate covers the fact or does not, so its score there is $1$ or $0$. The neural candidate's score is the noisy-OR over the witnesses the engine reports for that fact, each read at the fact's own label: two witnesses at probability $0.5$ give $1-0.5\cdot0.5=0.75$, above a relational candidate that does not cover the fact and below one that does. Those are training scores, and the arbiter never reads them. It rescores both on the held-out facts by the same witness semantics, drops either whose held-out score falls below the fit gate, and keeps the relational one when the two land within the score quantum; if that narrowing leaves two relational candidates the data cannot separate, it abstains rather than pick one.
 
 The candidate pool is validated against the typed registry of \Cref{subsec:neural-pred} instead of being trusted by name: a neural relation whose declared arity the credit has no witness semantics for is refused at registration, and a pool that filtering empties reports its per-filter counts instead of silently shrinking. And because raw engine constants index the caller's feature rows directly, that identity is accepted only when the witness domain is exactly the dense row range; a misalignment that would stay in bounds while gathering another event's probability is refused, not guessed at.
 
@@ -153,11 +155,9 @@ The candidate pool is validated against the typed registry of \Cref{subsec:neura
 
 Ties within the score quantum break toward the relational candidate on Occam grounds, but only when that narrowing leaves exactly one: preferring a relational explanation over a neural one is licensed, choosing among relational duplicates the data cannot separate is not. When neither step is decisive the arbiter returns no rule and says why; abstention is an outcome of the selector, not a failure of it. The held-out score may be accuracy or F1, and the choice matters: at a rare positive class accuracy sits on the all-negative base-rate plateau, where a candidate that predicts nothing outranks the best real detector, which is why the benchmark protocol of \Cref{sec:ecinduction} selects on held-out F1 instead.
 
-\textbf{Masked witnesses and withheld evidence.} A per-witness mask lets evidence be withheld rather than denied. Any (entity, label) row of the witness space may be marked masked, and a masked witness is removed from the candidate's index when it is built: it contributes exactly zero credit and zero gradient, never a coerced false. Masked is not false, and selection honors the difference. A fact whose score already clears the decision threshold is certain regardless, the noisy-OR being monotone in its witness probabilities, so no completion of the masked ones can pull it back down; so is any fact that had no masked witness at all.
+\textbf{Masked witnesses and withheld evidence.} A per-witness mask lets evidence be withheld rather than denied: a masked witness leaves the candidate's index entirely, contributing zero credit and zero gradient instead of a coerced false, and the facts it thereby leaves uncertain are excluded from the held-out score and counted against a coverage gate that runs before the fit gate, so no candidate is killed by facts it was never allowed to see. The channel rides the accuracy axis only and is refused up front beside the F1 holdout, whose measurability derives from raw labels a mask can hide.
 
-Everything else is uncertain: excluded from the candidate's held-out score, because it neither confirms nor refutes, and counted against a coverage fraction. A candidate left with too little certain evidence is dropped by a coverage gate before the fit gate ever runs, and the abstention names it, so no candidate is killed by facts it was never allowed to see. The channel currently rides the accuracy axis; combined with the F1 holdout it is refused up front, since that score derives a fold's measurability from raw labels a mask can hide.
-
-\textbf{Acceptance without retraining.} The same machinery also runs as an acceptance instrument instead of a trainer. Given an externally trained detector, a frozen entry point scores every enumerated candidate against it with no optimizer, no gradient and no folds (nothing trains, so every fact is already held out with respect to this system) and applies exactly the arbiter's gates: coverage, fit, tie semantics, Occam narrowing, abstention. The detector must be in evaluation mode, and a training-mode module is refused, not quietly switched, since batch-norm statistics mutate and dropout de-determinizes the scores even under a no-gradient scope, both breaking the bit-identical scoring the entry point exists to provide. Where the cross-validated path asks whether a detector can be trained for a rule, this one asks whether a rule is right given the detector one already has.
+\textbf{Acceptance without retraining.} The same machinery also runs as an acceptance instrument: given an externally trained detector, a frozen entry point scores every enumerated candidate against it with no optimizer, no gradient and no folds and applies exactly the arbiter's gates, so where the cross-validated path asks whether a detector can be trained for a rule, this one asks whether a rule is right given the detector one already has. A training-mode module is refused rather than quietly switched, since batch-norm statistics and dropout would de-determinize the bit-identical scores the entry point exists to provide.
 
 \subsection{Term embeddings and differentiable ILP}
 
@@ -165,8 +165,37 @@ Everything else is uncertain: excluded from the candidate's held-out score, beca
 
 \textbf{Differentiable ILP} learns first-order rules instead of network weights. Candidate rules are represented as sparse bitmasks over the ground-atom space, credit assignment runs entirely on-device via scatter--gather, and a promotion pipeline decides which rules enter the program.
 
-Six gates always run once training has converged: the discovered rule must derive every training positive and no training negative, pass a novel-fact audit against a bound on unexplained derivations, lose no fact of any protected relation, meet a held-out F1 threshold, and have typed schemas available for the relations it names. Two further gates run when explicit held-out examples are supplied, on those positives and negatives. Those examples are a precondition and not an optional extra: when neither held-out positives nor held-out negatives are supplied, the pipeline returns for manual review before any gate is evaluated, so the six always-run gates cannot promote on their own. Convergence is likewise a precondition checked before any gate, not one of them, and the ambiguity scan (which alternative candidates also explain the data) is reported beside the gates but never decides: promotion requires held-out examples and every gate to pass, and anything else returns for manual review.
+Four kinds of judgement sit on these two paths, and \Cref{tab:gates} separates them. Convergence and the supply of explicit held-out examples are preconditions checked before any gate runs, not gates: with neither held-out positives nor held-out negatives supplied, the pipeline returns for manual review before a gate is evaluated, so the always-run gates cannot promote on their own.
 
-The permutation-null fit gate that \Cref{sec:ecinduction} relies on is none of these. It belongs to the holdout arbiter of \Cref{subsec:engine-mode}, and it is not an extra gate there either: it supplies that arbiter's fit threshold, deriving it per fold from label permutations instead of fixing it at a constant, so a candidate must beat what shuffled labels alone achieve on its own fold. The two mechanisms judge different objects (one whether a candidate generalizes better than chance, the other whether an already-selected rule may enter the program) and they sit on different paths; the benchmark runs of \Cref{sec:ecinduction} exercise the arbiter, not the promotion pipeline.
+The benchmark runs of \Cref{sec:ecinduction} exercise the last row only. Its permutation-null threshold is not an extra gate but the holdout arbiter's own fit threshold, derived per fold from label permutations instead of fixed at a constant; the promotion gates above it belong to the differentiable-ILP path and are not on that route.
+
+\begin{table}[htbp]
+  \centering
+  \caption{What judges what, on which path. Convergence and supplied held-out examples are preconditions, not gates: without them the pipeline returns for manual review before any row runs.}
+  \label{tab:gates}
+  \small
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabularx}{\columnwidth}{@{}LLl@{}}
+    \toprule
+    \textbf{Judgement} & \textbf{What it judges} & \textbf{Path} \
+    \midrule
+    Six always-run gates
+      & the discovered rule derives every training positive and no training negative, passes a novel-fact audit against a bound on unexplained derivations, loses no fact of a protected relation, meets a held-out F1 threshold, and has typed schemas for the relations it names
+      & dILP \
+    \addlinespace
+    Two held-out gates
+      & the same rule on the supplied held-out positives and negatives
+      & dILP \
+    \addlinespace
+    Ambiguity scan
+      & which alternative candidates also explain the data; reported beside the gates, never decisive
+      & dILP \
+    \addlinespace
+    Permutation-null fit threshold
+      & whether a candidate generalizes better than shuffled labels do on its own fold
+      & arbiter (\Cref{subsec:engine-mode}) \
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
 Both paths ride the device-resident bridge of \Cref{subsec:interop}. Where the trainable rule bodies of \Cref{subsec:trainable-bodies} learn rule \emph{weights} and per-binding confidences, differentiable ILP learns rule \emph{structure}; the two are complementary. This sparse, GPU-resident formulation avoids the cubic blowup of dense rule materialization. Unlike the trainable-body surface, this path is not exercised on the benchmark of \Cref{sec:ecinduction}, and it is a beta subsystem (\Cref{sec:limits}).
