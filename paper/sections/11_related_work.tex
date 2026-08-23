@@ -1,14 +1,14 @@
 \section{Related Work}\label{sec:related}
 
-xlog draws on five lines of research---neurosymbolic programming, GPU-accelerated Datalog, probabilistic logic programming, GPU SAT, and differentiable ILP---and is, to our knowledge, the first to make the full symbolic spectrum GPU-resident and uniformly differentiable.
+xlog draws on five lines of research---neurosymbolic programming, GPU-accelerated Datalog, probabilistic logic programming, GPU SAT, and differentiable ILP, and is, to our knowledge, the first to make the full symbolic spectrum GPU-resident and uniformly differentiable.
 
 \subsection{Neurosymbolic Programming}
 
 DeepProbLog~\cite{deepproblog} replaces selected probabilistic facts with neural-network outputs, enabling end-to-end gradient training of neural predicates inside a probabilistic-logic framework. NeurASP~\cite{neurasp} integrates network outputs as probability annotations on answer-set programs. Both perform symbolic inference on the CPU and shuttle gradients across the bus. Scallop~\cite{scallop} provides a differentiable Datalog with provenance-semiring reasoning~\cite{green2007provenance} and a relational symbolic representation, and is the closest language-level analogue to xlog. Its reasoning core, however, is CPU-based.
 
-Lobster~\cite{lobster} is the most directly comparable system: it GPU-accelerates neurosymbolic programs in the Scallop style, and shares xlog's premise that the symbolic side belongs on the GPU. Against it, xlog is complementary along three axes. It covers a broader symbolic spectrum---exact knowledge compilation and epistemic reasoning, not only provenance-based differentiable Datalog. It \emph{verifies} each compiled circuit's logical equivalence to its source formula on-device via CDCL. And it enforces a strict residency contract with byte-level transfer accounting. No head-to-head performance comparison with Lobster is drawn here (\Cref{sec:limits}).
+Lobster~\cite{lobster} is the most directly comparable system: it GPU-accelerates neurosymbolic programs in the Scallop style, and shares xlog's premise that the symbolic side belongs on the GPU. Against it, xlog is complementary along three axes. It covers a broader symbolic spectrum: exact knowledge compilation and epistemic reasoning, not only provenance-based differentiable Datalog. It \emph{verifies} each compiled circuit's logical equivalence to its source formula on-device via CDCL. And it enforces a strict residency contract with byte-level transfer accounting. No head-to-head performance comparison with Lobster is drawn here (\Cref{sec:limits}).
 
-Differentiable-SAT and logic-as-loss methods---SATNet~\cite{satnet}, semantic loss~\cite{semanticloss}, and Logic Tensor Networks~\cite{ltn}---instead couple neural models to constraints through relaxed or fuzzy surrogates. By contrast, xlog couples through \emph{exact} weighted model counting, trading their broader applicability for exact gradients and the on-device verifiability of \Cref{sec:prob}.
+Differentiable-SAT and logic-as-loss methods (SATNet~\cite{satnet}, semantic loss~\cite{semanticloss}, and Logic Tensor Networks~\cite{ltn}) instead couple neural models to constraints through relaxed or fuzzy surrogates. By contrast, xlog couples through \emph{exact} weighted model counting, trading their broader applicability for exact gradients and the on-device verifiability of \Cref{sec:prob}.
 
 \subsection{GPU-Accelerated Datalog and Joins}
 
