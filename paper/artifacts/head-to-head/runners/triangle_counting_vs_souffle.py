@@ -290,6 +290,13 @@ def error_record(result: CommandResult) -> dict[str, Any]:
     }
 
 
+def dispatch_matches_arm(wcoj: Mapping[str, Any], enumerate_then_count: bool) -> bool:
+    fusion_dispatches = wcoj.get("groupby_fusion_dispatch", 0)
+    if enumerate_then_count:
+        return fusion_dispatches == 0
+    return fusion_dispatches > 0
+
+
 def xlog_run(
     xlog_bin: Path,
     source: Path,
@@ -345,14 +352,7 @@ def xlog_run(
     try:
         stats = parse_stats(result.stderr)
         wcoj = stats.get("wcoj", {})
-        if enumerate_then_count:
-            dispatch_valid = (
-                wcoj.get("groupby_fusion_dispatch") == 0
-                and wcoj.get("triangle_dispatch", 0) > 0
-            )
-        else:
-            dispatch_valid = wcoj.get("groupby_fusion_dispatch", 0) > 0
-        if not dispatch_valid:
+        if not dispatch_matches_arm(wcoj, enumerate_then_count):
             raise RuntimeError(f"unexpected WCOJ dispatch counters: {wcoj}")
         record.update(
             {
@@ -577,6 +577,24 @@ def self_test() -> None:
         ],
         9.0,
     ) == (1.25, 2048)
+    assert dispatch_matches_arm({"groupby_fusion_dispatch": 1}, False)
+    assert not dispatch_matches_arm({"groupby_fusion_dispatch": 0}, False)
+    assert dispatch_matches_arm(
+        {"groupby_fusion_dispatch": 0, "triangle_dispatch": 0}, True
+    )
+    assert not dispatch_matches_arm({"groupby_fusion_dispatch": 1}, True)
+    for kind in ("CapacityExceeded", "ResourceExhausted"):
+        parsed_error = error_record(
+            CommandResult(
+                argv=("xlog",),
+                returncode=1,
+                wall_s=0.1,
+                max_rss_kb=1,
+                stdout="",
+                stderr=f"Error: {kind} {{ diagnostic: test }}",
+            )
+        )
+        assert parsed_error["kind"] == kind
     for invalid_rows in ([(1, 2), (1, 3)], [(1, 0)]):
         try:
             triangle_count_summary(invalid_rows)
