@@ -50,8 +50,10 @@ def test_python_mc_evaluation_inherits_directives_and_explicit_args_override():
 #pragma prob_method = evidence_clamping
 #pragma prob_max_nonmonotone_iterations = 7
 
-1.0::base().
-query(base()).
+0.7::rain().
+0.2::sprinkler().
+evidence(sprinkler(), true).
+query(rain()).
 """
 
     program = pyxlog.Program.compile(source)
