@@ -663,6 +663,7 @@ def main() -> int:
     if args.repetitions <= 0 or args.memory_mb <= 0 or args.timeout_s <= 0:
         raise ValueError("repetitions, memory-mb, and timeout-s must be positive")
     repo = args.repo.resolve()
+    resolve_executable("GNU time", TIME_BIN)
     xlog_bin = resolve_executable("XLOG", args.xlog_bin)
     souffle_bin = resolve_executable("Souffle", args.souffle_bin)
     nvcc_bin = resolve_executable("nvcc", args.nvcc_bin)
