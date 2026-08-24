@@ -3,9 +3,9 @@
 
 The runner generates each graph deterministically, writes the same edge relation
 to Arrow IPC and Souffle facts, executes fused and enumerate-then-count XLOG
-paths plus compiled, auto-parallel Souffle, validates dispatch and result counts,
-and writes one self-contained JSON artifact. Command failures are recorded; they
-are never replaced by another execution path.
+paths plus a precompiled Souffle executable at explicit parallelism, validates
+dispatch and result counts, and writes one self-contained JSON artifact. Command
+failures are recorded; they are never replaced by another execution path.
 """
 
 from __future__ import annotations
@@ -374,33 +374,80 @@ def xlog_run(
     return record
 
 
-def souffle_command(
-    souffle_bin: Path, source: Path, case_dir: Path, output_dir: Path
+def souffle_compile_command(
+    souffle_bin: Path, source: Path, executable: Path, jobs: int
 ) -> tuple[str, ...]:
     return (
         str(souffle_bin),
-        "--compile",
-        "--jobs=auto",
-        "-F",
-        str(case_dir),
-        "-D",
-        str(output_dir),
+        f"--jobs={jobs}",
+        f"--dl-program={executable}",
         str(source),
     )
 
 
-def souffle_run(
+def souffle_execution_command(
+    executable: Path, case_dir: Path, output_dir: Path, jobs: int
+) -> tuple[str, ...]:
+    return (
+        str(executable),
+        f"--jobs={jobs}",
+        "-F",
+        str(case_dir),
+        "-D",
+        str(output_dir),
+    )
+
+
+def compile_souffle(
     souffle_bin: Path,
     source: Path,
     case_dir: Path,
+    jobs: int,
+    repo: Path,
+    work_dir: Path,
+    timeout_s: int,
+) -> tuple[dict[str, Any], Path | None]:
+    executable = case_dir / "triangle_count_souffle"
+    argv = souffle_compile_command(souffle_bin, source, executable, jobs)
+    result = run_timed(
+        argv,
+        repo,
+        os.environ,
+        timeout_s,
+        case_dir / "souffle-compile-time.txt",
+    )
+    record: dict[str, Any] = {
+        "command": normalized_command(argv, repo, work_dir),
+        "returncode": result.returncode,
+        "wall_s": round(result.wall_s, 6),
+        "process_max_rss_kb": result.max_rss_kb,
+    }
+    if result.returncode != 0:
+        record["error"] = error_record(result)
+        return record, None
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        record["returncode"] = 125
+        record["error"] = {
+            "kind": "protocol_violation",
+            "diagnostic": f"Souffle did not create executable: {executable}",
+        }
+        return record, None
+    record["executable_sha256"] = sha256_file(executable)
+    return record, executable
+
+
+def souffle_run(
+    executable: Path,
+    case_dir: Path,
     repetition: int,
+    jobs: int,
     repo: Path,
     work_dir: Path,
     timeout_s: int,
 ) -> dict[str, Any]:
     output_dir = case_dir / f"souffle-{repetition}"
     output_dir.mkdir(parents=True)
-    argv = souffle_command(souffle_bin, source, case_dir, output_dir)
+    argv = souffle_execution_command(executable, case_dir, output_dir, jobs)
     result = run_timed(
         argv,
         repo,
@@ -503,6 +550,35 @@ def cpu_model_name(cpuinfo: str) -> str:
     raise RuntimeError("/proc/cpuinfo does not identify the CPU model")
 
 
+def parse_cpu_quota_cores(quota: str, period: str) -> float | None:
+    if quota in {"max", "-1"}:
+        return None
+    quota_value = int(quota)
+    period_value = int(period)
+    if quota_value <= 0 or period_value <= 0:
+        raise RuntimeError(
+            f"invalid cgroup CPU quota: quota={quota_value} period={period_value}"
+        )
+    return round(quota_value / period_value, 6)
+
+
+def cgroup_cpu_quota_cores() -> float | None:
+    cpu_max = Path("/sys/fs/cgroup/cpu.max")
+    if cpu_max.is_file():
+        parts = cpu_max.read_text(encoding="utf-8").split()
+        if len(parts) != 2:
+            raise RuntimeError(f"invalid cgroup v2 cpu.max: {parts}")
+        return parse_cpu_quota_cores(parts[0], parts[1])
+    quota_path = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+    period_path = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+    if quota_path.is_file() and period_path.is_file():
+        return parse_cpu_quota_cores(
+            quota_path.read_text(encoding="utf-8").strip(),
+            period_path.read_text(encoding="utf-8").strip(),
+        )
+    return None
+
+
 def hardware_state(repo: Path) -> dict[str, Any]:
     gpu = run_text(
         (
@@ -518,6 +594,7 @@ def hardware_state(repo: Path) -> dict[str, Any]:
         "gpu": gpu,
         "cpu": cpu_model_name(Path("/proc/cpuinfo").read_text(encoding="utf-8")),
         "logical_cpu_count": os.cpu_count(),
+        "cpu_quota_cores": cgroup_cpu_quota_cores(),
         "host_memory_bytes": page_size * physical_pages,
         "platform": platform.platform(),
     }
@@ -533,6 +610,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--souffle-bin", type=Path, default=Path("souffle"))
     parser.add_argument("--nvcc-bin", type=Path, default=Path("nvcc"))
+    parser.add_argument("--souffle-jobs", type=int, default=1)
     parser.add_argument(
         "--output",
         type=Path,
@@ -608,21 +686,30 @@ def self_test() -> None:
         pass
     else:
         raise AssertionError("missing CPU model was accepted")
-    assert souffle_command(
+    assert souffle_compile_command(
         Path("/souffle"),
         Path("/case/triangle.dl"),
-        Path("/case"),
-        Path("/case/output"),
+        Path("/case/triangle"),
+        8,
     ) == (
         "/souffle",
-        "--compile",
-        "--jobs=auto",
+        "--jobs=8",
+        "--dl-program=/case/triangle",
+        "/case/triangle.dl",
+    )
+    assert souffle_execution_command(
+        Path("/case/triangle"), Path("/case"), Path("/case/output"), 8
+    ) == (
+        "/case/triangle",
+        "--jobs=8",
         "-F",
         "/case",
         "-D",
         "/case/output",
-        "/case/triangle.dl",
     )
+    assert parse_cpu_quota_cores("765000", "100000") == 7.65
+    assert parse_cpu_quota_cores("max", "100000") is None
+    assert parse_cpu_quota_cores("-1", "100000") is None
     for kind in ("CapacityExceeded", "ResourceExhausted"):
         parsed_error = error_record(
             CommandResult(
@@ -660,8 +747,15 @@ def main() -> int:
     if args.self_test:
         self_test()
         return 0
-    if args.repetitions <= 0 or args.memory_mb <= 0 or args.timeout_s <= 0:
-        raise ValueError("repetitions, memory-mb, and timeout-s must be positive")
+    if (
+        args.repetitions <= 0
+        or args.memory_mb <= 0
+        or args.timeout_s <= 0
+        or args.souffle_jobs <= 0
+    ):
+        raise ValueError(
+            "repetitions, memory-mb, timeout-s, and souffle-jobs must be positive"
+        )
     repo = args.repo.resolve()
     resolve_executable("GNU time", TIME_BIN)
     xlog_bin = resolve_executable("XLOG", args.xlog_bin)
@@ -710,6 +804,19 @@ def main() -> int:
             case_seed = args.seed + hubs * 1_000_003 + edge_count
             edges = generate_hub_skewed_edges(hubs, edge_count, case_seed)
             arrow_input, facts_input = write_inputs(case_dir, edges)
+            souffle_compile, souffle_executable = compile_souffle(
+                souffle_bin,
+                souffle_source,
+                case_dir,
+                args.souffle_jobs,
+                repo,
+                work_dir,
+                args.timeout_s,
+            )
+            print(
+                f"COMPILED {case_name} success={souffle_executable is not None}",
+                flush=True,
+            )
 
             fused_runs = []
             enum_runs = []
@@ -743,17 +850,31 @@ def main() -> int:
                         args.timeout_s,
                     )
                 )
-                souffle_runs.append(
-                    souffle_run(
-                        souffle_bin,
-                        souffle_source,
-                        case_dir,
-                        repetition,
-                        repo,
-                        work_dir,
-                        args.timeout_s,
+                if souffle_executable is None:
+                    souffle_runs.append(
+                        {
+                            "repetition": repetition,
+                            "returncode": 126,
+                            "error": {
+                                "kind": "prerequisite_failure",
+                                "diagnostic": (
+                                    "Souffle compilation failed; see souffle_compile"
+                                ),
+                            },
+                        }
                     )
-                )
+                else:
+                    souffle_runs.append(
+                        souffle_run(
+                            souffle_executable,
+                            case_dir,
+                            repetition,
+                            args.souffle_jobs,
+                            repo,
+                            work_dir,
+                            args.timeout_s,
+                        )
+                    )
 
             fused = summarize_runs(fused_runs, include_engine=True)
             enumerated = summarize_runs(enum_runs, include_engine=True)
@@ -773,6 +894,7 @@ def main() -> int:
                 },
                 "fused_wcoj": fused,
                 "enum_then_count": enumerated,
+                "souffle_compile": souffle_compile,
                 "souffle": souffle,
                 "fused_vs_souffle_counts_match": bool(fused_match),
                 "enum_vs_souffle_counts_match": bool(enum_match),
@@ -794,7 +916,7 @@ def main() -> int:
             )
 
         artifact = {
-            "schema_version": 2,
+            "schema_version": 3,
             "benchmark": "per_root_triangle_counting",
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "repository": repo_info,
@@ -812,11 +934,15 @@ def main() -> int:
                 ),
                 "node_count": "101 * hubs",
                 "repetitions": args.repetitions,
-                "reported_time": "median full-process wall time from GNU time",
-                "souffle_mode": (
-                    "compiled C++ via --compile with --jobs=auto; code generation, "
-                    "host compilation, and execution are included in wall time"
+                "reported_time": (
+                    "median per-execution full-process wall time from GNU time; "
+                    "one-time native engine builds are excluded"
                 ),
+                "souffle_mode": (
+                    "standalone C++ executable generated once per case with "
+                    "--dl-program; compilation is recorded separately"
+                ),
+                "souffle_jobs": args.souffle_jobs,
                 "process_memory": "maximum resident set size from GNU time",
                 "xlog_memory": "provider allocation high-water from --stats-format json",
                 "xlog_memory_budget_mb": args.memory_mb,
