@@ -3,9 +3,9 @@
 
 The runner generates each graph deterministically, writes the same edge relation
 to Arrow IPC and Souffle facts, executes fused and enumerate-then-count XLOG
-paths plus Souffle, validates dispatch and result counts, and writes one
-self-contained JSON artifact. Command failures are recorded; they are never
-replaced by another execution path.
+paths plus compiled, auto-parallel Souffle, validates dispatch and result counts,
+and writes one self-contained JSON artifact. Command failures are recorded; they
+are never replaced by another execution path.
 """
 
 from __future__ import annotations
@@ -374,6 +374,21 @@ def xlog_run(
     return record
 
 
+def souffle_command(
+    souffle_bin: Path, source: Path, case_dir: Path, output_dir: Path
+) -> tuple[str, ...]:
+    return (
+        str(souffle_bin),
+        "--compile",
+        "--jobs=auto",
+        "-F",
+        str(case_dir),
+        "-D",
+        str(output_dir),
+        str(source),
+    )
+
+
 def souffle_run(
     souffle_bin: Path,
     source: Path,
@@ -385,14 +400,7 @@ def souffle_run(
 ) -> dict[str, Any]:
     output_dir = case_dir / f"souffle-{repetition}"
     output_dir.mkdir(parents=True)
-    argv = (
-        str(souffle_bin),
-        "-F",
-        str(case_dir),
-        "-D",
-        str(output_dir),
-        str(source),
-    )
+    argv = souffle_command(souffle_bin, source, case_dir, output_dir)
     result = run_timed(
         argv,
         repo,
@@ -485,6 +493,16 @@ def repository_state(repo: Path, allow_dirty: bool) -> dict[str, Any]:
     }
 
 
+def cpu_model_name(cpuinfo: str) -> str:
+    for line in cpuinfo.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() in {"model name", "Hardware", "Processor"}:
+            model = value.strip()
+            if model:
+                return model
+    raise RuntimeError("/proc/cpuinfo does not identify the CPU model")
+
+
 def hardware_state(repo: Path) -> dict[str, Any]:
     gpu = run_text(
         (
@@ -498,7 +516,7 @@ def hardware_state(repo: Path) -> dict[str, Any]:
     physical_pages = os.sysconf("SC_PHYS_PAGES")
     return {
         "gpu": gpu,
-        "cpu": platform.processor() or platform.machine(),
+        "cpu": cpu_model_name(Path("/proc/cpuinfo").read_text(encoding="utf-8")),
         "logical_cpu_count": os.cpu_count(),
         "host_memory_bytes": page_size * physical_pages,
         "platform": platform.platform(),
@@ -583,6 +601,28 @@ def self_test() -> None:
         {"groupby_fusion_dispatch": 0, "triangle_dispatch": 0}, True
     )
     assert not dispatch_matches_arm({"groupby_fusion_dispatch": 1}, True)
+    assert cpu_model_name("processor: 0\nmodel name: Example CPU\n") == "Example CPU"
+    try:
+        cpu_model_name("processor: 0\n")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("missing CPU model was accepted")
+    assert souffle_command(
+        Path("/souffle"),
+        Path("/case/triangle.dl"),
+        Path("/case"),
+        Path("/case/output"),
+    ) == (
+        "/souffle",
+        "--compile",
+        "--jobs=auto",
+        "-F",
+        "/case",
+        "-D",
+        "/case/output",
+        "/case/triangle.dl",
+    )
     for kind in ("CapacityExceeded", "ResourceExhausted"):
         parsed_error = error_record(
             CommandResult(
@@ -626,6 +666,7 @@ def main() -> int:
     xlog_bin = resolve_executable("XLOG", args.xlog_bin)
     souffle_bin = resolve_executable("Souffle", args.souffle_bin)
     nvcc_bin = resolve_executable("nvcc", args.nvcc_bin)
+    cxx_bin = resolve_executable("C++ compiler", Path("c++"))
 
     selected = set(args.case or (case[0] for case in DEFAULT_CASES))
     cases = [case for case in DEFAULT_CASES if case[0] in selected]
@@ -654,6 +695,7 @@ def main() -> int:
                 "version": command_version((str(souffle_bin), "--version"), repo),
             },
             "nvcc": command_version((str(nvcc_bin), "--version"), repo),
+            "host_cxx": command_version((str(cxx_bin), "--version"), repo),
         }
         results = []
         for case_name, hubs, edge_count in cases:
@@ -770,6 +812,10 @@ def main() -> int:
                 "node_count": "101 * hubs",
                 "repetitions": args.repetitions,
                 "reported_time": "median full-process wall time from GNU time",
+                "souffle_mode": (
+                    "compiled C++ via --compile with --jobs=auto; code generation, "
+                    "host compilation, and execution are included in wall time"
+                ),
                 "process_memory": "maximum resident set size from GNU time",
                 "xlog_memory": "provider allocation high-water from --stats-format json",
                 "xlog_memory_budget_mb": args.memory_mb,
