@@ -11,7 +11,7 @@ mixed within a comparison.
 |------|-----------|----------|--------------------------|
 | `mnist_addition_vs_scallop.json` | Neural: MNIST addition, xlog vs Scallop | RTX 3090 | **true** |
 | `exact_inference_vs_problog2.json` | Probabilistic: exact inference, xlog vs ProbLog2 | RTX 4090 | **true** |
-| `triangle_counting_vs_souffle.json` | Deterministic: fused WCOJ triangle counting vs Soufflé (skewed) | RTX 4090 | **false** — see note |
+| `triangle_counting_vs_souffle.json` | Deterministic: fused WCOJ triangle counting vs Soufflé (skewed) | A40 pod; 7.65-core CPU quota | **false** — see note |
 | `triangle_counting_moderate_skew_vs_souffle.json` | Deterministic: WCOJ vs binary vs Soufflé, moderate skew | RTX 4090 | **true** |
 | `residency_ablation.json` | xlog-only: forced host round-trip, single query | RTX 3090 | n/a (single-system) |
 | `residency_scale_ablation.json` | xlog-only: forced host round-trip vs handoff count, batched | RTX 3090 | n/a (single-system) |
@@ -28,12 +28,16 @@ mixed within a comparison.
   error). Timing is full inference (compile + evaluate), median of 3.
 - **Triangle counting vs Soufflé** — fused-WCOJ count (A), enumerate-then-count
   (B), and Soufflé count (C) on hub-skewed graphs. **`comparison_acceptable` is
-  `false` on purpose**: the enumerate arm (B) exhausts the GPU memory budget at
-  the 80-hub / 500k-edge case (3.2 GB alloc), so that one cell is incomplete.
-  This OOM is itself the intended demonstration of the memory bound. The
-  fused-vs-Soufflé (A vs C) correctness gate passes at *every* size (triangle
-  counts match Soufflé exactly) and the fused wall-clock speedups (12.6–42.5x)
-  are valid.
+  `false`** because the enumerate arm (B) is incomplete at the 80-hub / 500k-edge
+  case. It requests 3,914,290,728 additional bytes while 15,703,762,340 bytes
+  are live, requiring 19,618,053,068 bytes against a 19,327,352,832-byte budget;
+  the typed result is `ResourceExhausted`, not a tuple-capacity failure. The
+  enumerate arm succeeds at the two smaller cases with 3,287 MB and 8,403 MB
+  provider-allocation peaks, while fused counting uses 85--359 MB. The separate
+  `core_comparison_acceptable` gate is `true`: fused XLOG and Soufflé produce
+  identical per-root counts at every size. Soufflé-to-XLOG execution-time ratios
+  are 0.95x, 2.63x and 4.69x, so compiled Soufflé is 5% faster at the smallest
+  case and XLOG is faster at the two larger cases.
 - **Residency ablation** — same pipeline with vs without
   `XLOG_FORCE_HOST_ROUNDTRIP`; the on-minus-off per-iteration delta is the
   transfer cost residency eliminates. The single-query file measures 2 handoffs
@@ -79,14 +83,19 @@ scripts. The deterministic comparison now has a committed runner:
   python -u paper/artifacts/head-to-head/runners/triangle_counting_vs_souffle.py \
     --xlog-bin target/release/xlog \
     --souffle-bin souffle \
+    --nvcc-bin /usr/local/cuda/bin/nvcc \
+    --souffle-jobs 8 \
     --output paper/artifacts/head-to-head/triangle_counting_vs_souffle.json
   ```
 
   The runner refuses a dirty checkout by default. It generates the skewed graph
   once per case, writes the identical relation to Arrow IPC and Soufflé facts,
-  runs fused WCOJ, enumerate-then-count, and Soufflé three times, and records
-  the median full-process wall time. The artifact also records the exact commit,
-  runner and input hashes, normalized commands, software and hardware versions,
-  process RSS, XLOG's provider allocation high-water, WCOJ dispatch counters,
+  compiles one standalone Soufflé executable per case, and then runs fused WCOJ,
+  enumerate-then-count, and that executable three times. One-time native builds
+  are excluded from execution medians; each Soufflé compile is recorded
+  separately. The published run used eight Soufflé jobs on a pod whose cgroup
+  quota was 7.65 CPU cores. The artifact also records the exact commit, runner
+  and input hashes, normalized commands, software and hardware versions, process
+  RSS, XLOG's provider allocation high-water, WCOJ dispatch counters,
   per-repetition failures, and separate fused/Soufflé and all-arm correctness
   gates. No failed arm is replaced with a different execution path.
