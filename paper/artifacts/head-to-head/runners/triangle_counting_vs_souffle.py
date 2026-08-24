@@ -464,6 +464,13 @@ def command_version(argv: Sequence[str], cwd: Path) -> dict[str, Any]:
         ) from error
 
 
+def resolve_executable(label: str, requested: Path) -> Path:
+    resolved = Path(shutil.which(str(requested)) or requested).resolve()
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise RuntimeError(f"{label} binary is not executable: {resolved}")
+    return resolved
+
+
 def repository_state(repo: Path, allow_dirty: bool) -> dict[str, Any]:
     commit = run_text(("git", "rev-parse", "HEAD"), repo)
     dirty_lines = run_text(("git", "status", "--porcelain"), repo).splitlines()
@@ -507,6 +514,7 @@ def parse_args() -> argparse.Namespace:
         "--xlog-bin", type=Path, default=default_repo / "target/release/xlog"
     )
     parser.add_argument("--souffle-bin", type=Path, default=Path("souffle"))
+    parser.add_argument("--nvcc-bin", type=Path, default=Path("nvcc"))
     parser.add_argument(
         "--output",
         type=Path,
@@ -576,6 +584,16 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError(f"invalid relation was accepted: {invalid_rows}")
+    assert (
+        resolve_executable("Python", Path(sys.executable))
+        == Path(sys.executable).resolve()
+    )
+    try:
+        resolve_executable("missing test", Path("/xlog-self-test-missing-executable"))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("missing executable was accepted")
     print("triangle benchmark runner self-test passed")
 
 
@@ -587,14 +605,9 @@ def main() -> int:
     if args.repetitions <= 0 or args.memory_mb <= 0 or args.timeout_s <= 0:
         raise ValueError("repetitions, memory-mb, and timeout-s must be positive")
     repo = args.repo.resolve()
-    xlog_bin = args.xlog_bin.resolve()
-    souffle_bin = Path(
-        shutil.which(str(args.souffle_bin)) or args.souffle_bin
-    ).resolve()
-    if not xlog_bin.is_file() or not os.access(xlog_bin, os.X_OK):
-        raise RuntimeError(f"XLOG binary is not executable: {xlog_bin}")
-    if not souffle_bin.is_file() or not os.access(souffle_bin, os.X_OK):
-        raise RuntimeError(f"Souffle binary is not executable: {souffle_bin}")
+    xlog_bin = resolve_executable("XLOG", args.xlog_bin)
+    souffle_bin = resolve_executable("Souffle", args.souffle_bin)
+    nvcc_bin = resolve_executable("nvcc", args.nvcc_bin)
 
     selected = set(args.case or (case[0] for case in DEFAULT_CASES))
     cases = [case for case in DEFAULT_CASES if case[0] in selected]
@@ -608,6 +621,22 @@ def main() -> int:
     try:
         repo_info = repository_state(repo, args.allow_dirty)
         runner_path = Path(__file__).resolve()
+        hardware_info = hardware_state(repo)
+        software_info = {
+            "python": platform.python_version(),
+            "pyarrow": pa.__version__,
+            "xlog": {
+                "path": normalized_command((str(xlog_bin),), repo, work_dir),
+                "sha256": sha256_file(xlog_bin),
+                "version": command_version((str(xlog_bin), "--version"), repo),
+            },
+            "souffle": {
+                "path": str(souffle_bin),
+                "sha256": sha256_file(souffle_bin),
+                "version": command_version((str(souffle_bin), "--version"), repo),
+            },
+            "nvcc": command_version((str(nvcc_bin), "--version"), repo),
+        }
         results = []
         for case_name, hubs, edge_count in cases:
             print(f"BEGIN {case_name}", flush=True)
@@ -713,22 +742,8 @@ def main() -> int:
                 "sha256": sha256_file(runner_path),
                 "argv": sys.argv,
             },
-            "hardware": hardware_state(repo),
-            "software": {
-                "python": platform.python_version(),
-                "pyarrow": pa.__version__,
-                "xlog": {
-                    "path": normalized_command((str(xlog_bin),), repo, work_dir),
-                    "sha256": sha256_file(xlog_bin),
-                    "version": command_version((str(xlog_bin), "--version"), repo),
-                },
-                "souffle": {
-                    "path": str(souffle_bin),
-                    "sha256": sha256_file(souffle_bin),
-                    "version": command_version((str(souffle_bin), "--version"), repo),
-                },
-                "nvcc": command_version(("nvcc", "--version"), repo),
-            },
+            "hardware": hardware_info,
+            "software": software_info,
             "protocol": {
                 "graph_generator": (
                     "seeded unique directed edges; each proposal has at least one hub "
