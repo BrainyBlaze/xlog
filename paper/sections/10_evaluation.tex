@@ -1,10 +1,10 @@
 \section{Evaluation}\label{sec:eval}
 
-This section reports measurements for xlog's deterministic, probabilistic, and neural-symbolic subsystems. The subsystem measurements in \Cref{sec:wcoj-eval,sec:cache-eval,sec:runtime-eval} are \emph{single-system ablations of xlog against its own baselines} on development hardware. \Cref{sec:h2h} then adds controlled head-to-head comparisons against external engines (Scallop, ProbLog2, Soufflé), \Cref{sec:ec-eval} tabulates the Event-Calculus rule-induction runs of \Cref{sec:ecinduction} beside the figures published for the same benchmark and states why the maritime runs of \Cref{sec:maritime} are not tabulated beside theirs, and \Cref{sec:overhead} isolates xlog's two design costs---verification and residency---from ordinary GPU acceleration. \Cref{sec:noquant} describes three further runtime capabilities for which no timing is claimed.
+This section reports measurements for xlog's deterministic, probabilistic, and neural-symbolic subsystems. The subsystem measurements in \Cref{sec:wcoj-eval,sec:cache-eval,sec:runtime-eval} are \emph{single-system ablations of xlog against its own baselines} on development hardware. \Cref{sec:h2h} then adds controlled head-to-head comparisons against external engines (Scallop, ProbLog2, Soufflé), \Cref{sec:ec-eval} tabulates the Event-Calculus rule-induction runs of \Cref{sec:ecinduction} beside the figures published for the same benchmark and states why the maritime runs of \Cref{sec:maritime} are not tabulated beside theirs, and \Cref{sec:overhead} isolates xlog's two design costs, verification and residency, from ordinary GPU acceleration. \Cref{sec:noquant} describes three further runtime capabilities for which no timing is claimed.
 
 \subsection{Methodology}
 
-The single-system ablations of \Cref{sec:wcoj-eval,sec:cache-eval,sec:runtime-eval} were collected on an NVIDIA RTX PRO 3000 (Blackwell, 12\,GB VRAM, compute capability 12.0). The head-to-head comparisons of \Cref{sec:h2h} and the overhead isolations of \Cref{sec:overhead} ran on cloud GPUs, as stated with each, and the neural Event-Calculus runs of \Cref{sec:ec-eval} on an NVIDIA A40. The relational searches of \Cref{sec:ec-eval} and \Cref{sec:maritime} are deterministic CPU procedures whose results do not depend on the host; the weight trainings beside them run on CPU as well. Rust crates are built in release mode; CUDA modules are staged cubin-first with PTX fallback and explicit JIT warm-up; Python components use \texttt{pyxlog} with CUDA-enabled PyTorch. The benchmark harness uses Criterion.rs with the settings in \Cref{tab:stat-protocol}, and GPU measurements include warm-up to amortize kernel-module loading and CUDA context setup.
+The subsystem ablations were collected on an NVIDIA RTX PRO 3000 (Blackwell, 12\,GB VRAM, compute capability 12.0). The head-to-head comparisons of \Cref{sec:h2h} and the overhead isolations of \Cref{sec:overhead} ran on cloud GPUs, as stated with each, and the neural Event-Calculus runs of \Cref{sec:ec-eval} on an NVIDIA A40. The relational searches of \Cref{sec:ec-eval} and \Cref{sec:maritime} are deterministic CPU procedures whose results do not depend on the host; the weight trainings beside them run on CPU as well. Rust crates are built in release mode; CUDA modules are staged cubin-first with PTX fallback and explicit JIT warm-up; Python components use \texttt{pyxlog} with CUDA-enabled PyTorch. The benchmark harness uses Criterion.rs with the settings in \Cref{tab:stat-protocol}, and GPU measurements include warm-up to amortize kernel-module loading and CUDA context setup.
 
 Per-run measurement data is distributed with the paper for the head-to-head comparisons and overhead isolations, the circuit-cache ablation, the runtime-optimization ablations of \Cref{sec:runtime-eval}, and every rule-induction run of \Cref{sec:ecinduction,sec:maritime}. Each other figure below is stated together with the fixture, protocol and aggregation that produced it.
 
@@ -13,7 +13,7 @@ Per-run measurement data is distributed with the paper for the head-to-head comp
   \caption{Benchmark harness settings.}
   \label{tab:stat-protocol}
   \small
-  \begin{tabular}{@{}ll@{}}
+  \begin{tabularx}{\linewidth}{@{}lL@{}}
     \toprule
     \textbf{Setting} & \textbf{Value} \\
     \midrule
@@ -23,31 +23,58 @@ Per-run measurement data is distributed with the paper for the head-to-head comp
     Noise threshold   & 0.05 (ignore ${<}5\%$ variance) \\
     Seeding           & Deterministic LCG \\
     \bottomrule
-  \end{tabular}
+  \end{tabularx}
 \end{table}
 
-\subsection{Worst-Case Optimal Joins}\label{sec:wcoj-eval}
+\subsection{WCOJ vs.\ the binary-join plan}\label{sec:wcoj-eval}
 
-The WCOJ subsystem (\Cref{sec:datalog}) is exercised against the binary-join baseline by a harness that runs a single three-way triangle join---the classic worst-case-optimal pathology---over three relations of $65{,}536$ rows each, producing ${\approx}4.19$M output triples. The keys are generated by four fixture variants named for the workloads they stand in for---call-graph edges, Andersen points-to~\cite{andersen1994}, \texttt{ddisasm}-style disassembly~\cite{ddisasm}, and a neural-symbolic mining analog---whose size parameters coincide at this scale, so the four cells are repeats of one workload rather than four distinct ones. What the fixture does establish is skew: every join variable has a small hot domain, so the binary-join plan materializes an intermediate far larger than the final result, which is the regime WCOJ exists to address. WCOJ speedups depend strongly on input size and skew, and synthetic fixtures systematically overstate them---this one included---so the ratio below is the gain on the shape the subsystem targets, at this scale, and not a general Datalog speedup. Both paths must produce identical row sets before any timing is taken; each reported time is the mean of 10 timing windows (each window itself averaging 20 WCOJ or 40 binary-join inner iterations, after 20 warm-up windows), and the harness computes and reports a coefficient of variation alongside it rather than gating on it.
+This ablation asks how much the worst-case-optimal join path of \Cref{sec:datalog} saves over xlog's own binary-join plan on the skewed cyclic query the subsystem exists for. The query is a single three-way triangle join, the classic worst-case-optimal pathology; \Cref{tab:wcoj-protocol} gives the fixture and the timing protocol.
 
-\Cref{fig:wcoj} reports the speedups: a $27.96\times$ geometric mean, with the four cells spanning $26.6\times$ to $29.6\times$---a spread that, the variants coinciding at this scale, measures run-to-run variation rather than robustness across distinct workloads. This is an ablation against xlog's \emph{own} binary-join baseline; \Cref{sec:h2h} reports the external counterpart, a fused-counting comparison against Soufflé at millions of tuples.
+The keys are generated by four fixture variants named for the workloads they stand in for (call-graph edges, Andersen points-to~\cite{andersen1994}, \texttt{ddisasm}-style disassembly~\cite{ddisasm}, and a neural-symbolic mining analog) whose size parameters coincide at this scale, so the four cells are repeats of one workload and not four distinct ones. What the fixture does establish is skew: every join variable has a small hot domain, so the binary-join plan materializes an intermediate far larger than the final result, which is the regime WCOJ exists to address. WCOJ speedups depend strongly on input size and skew, and synthetic fixtures systematically overstate them, this one included, so the ratio below is the gain on the shape the subsystem targets, at this scale.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Triangle-join fixture and timing protocol for the WCOJ ablation.}
+  \label{tab:wcoj-protocol}
+  \small
+  \begin{tabularx}{\linewidth}{@{}l L@{}}
+    \toprule
+    \textbf{Item} & \textbf{Value} \\
+    \midrule
+    Query              & three-way triangle join, one multiway join \\
+    Key generation     & four fixture variants, coinciding size parameters \\
+    Input              & three relations of $65{,}536$ rows each \\
+    Output             & ${\approx}4.19$M triples \\
+    Warm-up            & $20$ windows \\
+    Reported time      & mean of $10$ timing windows \\
+    Inner iterations   & $20$ per window (WCOJ), $40$ per window (binary join) \\
+    Dispersion         & coefficient of variation reported, not gated on \\
+    Correctness gate   & identical row sets on both paths before any timing \\
+    Peak allocation    & about $2.3$\,GB, within the device's 12\,GB budget \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\Cref{fig:wcoj} reports the speedups: a $27.96\times$ geometric mean, with the four cells spanning $26.6\times$ to $29.6\times$. Since the variants coincide at this scale, that spread measures run-to-run variation and not robustness across distinct workloads. \Cref{sec:h2h} reports the external counterpart, a fused-counting comparison against Soufflé at millions of tuples.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics{results.pdf}
-  \caption{WCOJ vs.\ binary-join speedup on the four key-generation variants of the triangle fixture ($3\times65{,}536$ input rows, ${\approx}4.19$M output triples). Single-system ablation; the dashed line is the geometric mean.}
+  \caption{WCOJ vs.\ binary-join speedup on the four key-generation variants of the triangle fixture (\Cref{tab:wcoj-protocol}). Single-system ablation; the dashed line is the geometric mean.}
   \label{fig:wcoj}
 \end{figure}
 
-On uniform or empty inputs the adaptive classifier falls back to the binary-join chain. Peak observed allocation was about $2.3$\,GB, within the device's 12\,GB budget.
+On uniform or empty inputs the adaptive classifier falls back to the binary-join chain.
 
-\subsection{Circuit Caching and Training}\label{sec:cache-eval}
+\subsection{Circuit caching and training}\label{sec:cache-eval}
 
-Neural-symbolic training is measured on MNIST single-digit addition (512 training images, 5 epochs, batch size 64). Circuit caching (\Cref{sec:prob}) amortizes D4 compilation across epochs: a cache ablation over 3 seeds and 3 epochs reduced mean training time from $242.9$\,s (uncached) to $88.9$\,s (cached), a $2.74\times$ speedup (95\% CI $[2.29, 3.18]$). \Cref{tab:training-summary} summarizes the full-run timing: the first epoch pays cold-start compilation and verification, while warm epochs run only the cached forward/backward kernels. The ablation is a separate experiment from this full run---its uncached arm recompiles the circuit every epoch while its cached arm compiles once, so it isolates compilation amortization; the apparent speedup therefore grows with epoch count toward the cold/warm ratio rather than being a fixed property. This 512-image protocol isolates cold/warm compilation timing and is deliberately under-trained (near-chance accuracy); held-out accuracy is measured at scale in the Scallop head-to-head (\Cref{sec:h2h}), where the same pipeline reaches ${\approx}95\%$.
+This ablation asks how much of neural-symbolic training time circuit caching (\Cref{sec:prob}) removes by amortizing D4 compilation across epochs. Training is measured on MNIST single-digit addition; \Cref{tab:training-summary} carries both the full-run timing, in which the first epoch pays cold-start compilation and verification while warm epochs run only the cached forward/backward kernels, and the cache ablation beside it.
+
+The ablation is a separate experiment from the full run: its uncached arm recompiles the circuit every epoch while its cached arm compiles once, so it isolates compilation amortization, and the apparent speedup therefore grows with epoch count toward the cold/warm ratio instead of being a fixed property. The 512-image protocol isolates cold/warm compilation timing and is deliberately under-trained (near-chance accuracy); held-out accuracy is measured at scale in the Scallop head-to-head (\Cref{sec:h2h}), where the same pipeline reaches ${\approx}95\%$.
 
 \begin{table}[htbp]
   \centering
-  \caption{MNIST-addition training summary. The timing rows come from the 512-image, 5-epoch training run; the circuit-cache speedup comes from a separate ablation (512 images, 3 epochs, 3 seeds) and is the mean of its three per-seed ratios, not the ratio of its means.}
+  \caption{MNIST-addition training summary. The timing rows come from a 512-image, 5-epoch training run at batch size 64; the ablation rows come from a separate experiment (512 images, 3 epochs, 3 seeds), whose speedup is the mean of its three per-seed ratios, not the ratio of its means.}
   \label{tab:training-summary}
   \small
   \begin{tabularx}{\linewidth}{@{}l l L@{}}
@@ -58,46 +85,61 @@ Neural-symbolic training is measured on MNIST single-digit addition (512 trainin
     Steady-state epoch (warm)  & $0.25$\,s  & cached forward/backward path \\
     Total training (5 epochs)  & $72.6$\,s  & \\
     Per-query cost (steady state) & $0.97$\,ms & forward + backward; steady epoch over 256 pairs, cold epoch excluded \\
+    \addlinespace
+    Ablation, uncached arm     & $242.9$\,s & mean training time, recompiling every epoch \\
+    Ablation, cached arm       & $88.9$\,s  & mean training time, compiling once \\
     Circuit-cache speedup      & $2.74\times$ & 95\% CI $[2.29, 3.18]$ \\
     \bottomrule
   \end{tabularx}
 \end{table}
 
-\subsection{Head-to-Head Comparisons}\label{sec:h2h}
+\subsection{Head-to-head comparisons}\label{sec:h2h}
 
-The measurements above compare xlog against its own baselines. We additionally ran controlled head-to-head comparisons against external engines---one per reasoning mode---on cloud GPUs (RTX 3090/4090), with matched programs, data, and metrics. The picture is deliberately honest: xlog wins clearly where its GPU-resident, bounded-memory design is the point, and does not where a mature CPU compiler is already fast enough on small inputs. \Cref{tab:h2h} summarizes; the paragraphs below give the detail.
+The measurements above compare xlog against its own baselines. \Cref{tab:h2h} adds controlled comparisons against external engines, one per reasoning mode, on cloud GPUs (RTX 3090/4090), with matched programs, data and metrics. xlog wins where its GPU-resident, bounded-memory design is the point, and does not where a mature CPU compiler is already fast enough on small inputs.
 
 \begin{table*}[htbp]
   \centering
-  \caption{Head-to-head summary: one external engine per reasoning mode, matched programs, data, and metrics, on cloud GPUs. The correctness gate passes in all three; timing is the honest comparative picture.}
+  \caption{Head-to-head comparisons: one external engine per reasoning mode, matched programs, data, metrics and seeds, on cloud GPUs. The correctness gate passes in all three.}
   \label{tab:h2h}
   \small
-  \begin{tabularx}{\linewidth}{@{}l l l L@{}}
+  \begin{tabularx}{\linewidth}{@{}L l L L l@{}}
     \toprule
-    \textbf{Mode / task} & \textbf{Baseline} & \textbf{Correctness} & \textbf{Timing (xlog vs.\ baseline)} \\
+    \textbf{Mode / task} & \textbf{Baseline} & \textbf{xlog} & \textbf{Baseline} & \textbf{Ratio} \\
     \midrule
-    Neural: MNIST addition           & Scallop  & acc $0.955$ vs.\ $0.950$ & steady epoch $8.71$\,s vs.\ $24.35$\,s ($\mathbf{2.80\times}$ faster); faster end-to-end \\
-    Probabilistic: exact inference   & ProbLog2 & $0$ error (both) & per query ${\approx}0.25$\,s vs.\ $0.014$--$0.028$\,s ($9$--$19\times$ \emph{slower} on small programs) \\
-    Deterministic: triangle counting & Soufflé  & counts match exactly & $0.24$--$0.33$\,s vs.\ $3.0$--$13.6$\,s ($\mathbf{12.6}$--$\mathbf{42.5\times}$ faster), peak memory flat $4$--$15$\,MB \\
+    Neural: MNIST addition; 20\,000 training images, 5 epochs, 3 seeds, held-out on the 10k test set
+      & Scallop
+      & acc $0.955 \pm 0.003$; steady epoch $8.71 \pm 0.09$\,s; $108.5$\,s over 5 epochs
+      & acc $0.950 \pm 0.006$; steady epoch $24.35 \pm 0.51$\,s; $122.7$\,s over 5 epochs
+      & $\mathbf{2.80\times}$ faster per epoch \\
+    \addlinespace
+    Probabilistic: exact inference on five small programs
+      & ProbLog2
+      & $0$ error; per query flat at ${\approx}0.25$\,s
+      & $0$ error; per query $0.014$--$0.028$\,s
+      & $9$--$19\times$ \emph{slower} \\
+    \addlinespace
+    Deterministic: triangle counting on hub-skewed graphs of $5.4$M, $13.1$M and $23.1$M triangles
+      & Soufflé
+      & counts match at every size; $0.24$--$0.33$\,s; peak device memory flat at $4$--$15$\,MB
+      & $3.0$--$13.6$\,s; materializing the join intermediate needs $3$--$7$\,GB and exhausts the budget (OOM) at $23$M triangles
+      & $\mathbf{12.6}$--$\mathbf{42.5\times}$ faster \\
     \bottomrule
   \end{tabularx}
 \end{table*}
 
-\textbf{Neural-symbolic: MNIST addition vs.\ Scallop.} With identical MNISTNet, data, metric, and seeds, and held-out addition accuracy on the 10k-image test set, at 20\,000 training images over 5 epochs (3 seeds), xlog and Scallop reach comparable accuracy ($0.955 \pm 0.003$ vs.\ $0.950 \pm 0.006$). But xlog runs a steady epoch in $8.71 \pm 0.09$\,s against Scallop's $24.35 \pm 0.51$\,s---a $2.80\times$ per-epoch speedup---and is faster end-to-end ($108.5$\,s vs.\ $122.7$\,s over 5 epochs) once the one-time D4 compilation amortizes. The two systems reach that accuracy by different routes: Scallop scores each fact through a bounded set of proof clauses, while xlog evaluates the exact weighted model count of the compiled circuit on every step. The advantage is time and residency, not accuracy.
+\textbf{Neural-symbolic: MNIST addition vs.\ Scallop.} With identical MNISTNet, data, metric and seeds, xlog and Scallop reach comparable held-out accuracy, and xlog runs a steady epoch $2.80\times$ faster and finishes ahead end to end once the one-time D4 compilation amortizes. The two systems reach that accuracy by different routes: Scallop scores each fact through a bounded set of proof clauses, while xlog evaluates the exact weighted model count of the compiled circuit on every step. The advantage is time and residency, not accuracy.
 
-\textbf{Probabilistic: exact inference vs.\ ProbLog2.} On five programs (a conditioned Bayesian fragment and probabilistic reach chains) xlog's exact query probabilities match the analytic answers to zero error, identical to ProbLog2 (correctness gate $|\Delta| < 10^{-4}$). On timing, however, xlog is \emph{not} competitive on these small programs: its per-query time is flat at ${\approx}0.25$\,s (fixed GPU launch plus per-call D4 compile and CDCL verify) while ProbLog2's mature CPU compiler runs each in $0.014$--$0.028$\,s ($9$--$19\times$ faster). We therefore make no exact-inference \emph{speed} claim; the probabilistic contribution is correctness-equivalent inference that is machine-verified on-device and GPU-resident, which amortizes only at scale or under repeated evaluation.
+\textbf{Probabilistic: exact inference vs.\ ProbLog2.} On five programs (a conditioned Bayesian fragment and probabilistic reach chains) xlog's exact query probabilities match the analytic answers to zero error, identical to ProbLog2 (correctness gate $|\Delta| < 10^{-4}$). On timing, however, xlog is \emph{not} competitive on these small programs. Its per-query time is flat, a fixed GPU launch plus a per-call D4 compile and CDCL verify, while ProbLog2's mature CPU compiler runs each query $9$--$19\times$ faster. We therefore make no exact-inference \emph{speed} claim; the probabilistic contribution is correctness-equivalent inference that is machine-verified on-device and GPU-resident, which amortizes only at scale or under repeated evaluation.
 
-\textbf{Deterministic: WCOJ triangle counting vs.\ Soufflé.} On hub-skewed graphs, xlog's fused worst-case-optimal triangle counting produces the same triangle totals as Soufflé at every size ($5.4$M, $13.1$M, $23.1$M triangles) while running $12.6\times$, $23.9\times$, and $42.5\times$ faster on wall-clock ($0.24$--$0.33$\,s vs.\ $3.0$--$13.6$\,s), the gap widening with graph size. Crucially, fused counting never materializes the triangles: peak device memory stays flat at $4$--$15$\,MB across all sizes, whereas materializing the join intermediate needs $3$--$7$\,GB and exhausts the budget (OOM) at $23$M triangles. This is the worst-case-optimal thesis demonstrated externally---the win is bounded intermediate memory on skewed, large-intermediate workloads, not a universal Datalog speedup (on moderate skew the advantage over xlog's own binary join is only $1.1$--$1.5\times$).
+\textbf{Deterministic: WCOJ triangle counting vs.\ Soufflé.} On hub-skewed graphs, xlog's fused worst-case-optimal triangle counting produces the same triangle totals as Soufflé at every size while running $12.6\times$, $23.9\times$ and $42.5\times$ faster on wall-clock, the gap widening with graph size. Crucially, fused counting never materializes the triangles: peak device memory stays flat across all sizes, whereas materializing the join intermediate exhausts the budget at the largest. This is the worst-case-optimal thesis demonstrated externally. The win is bounded intermediate memory on skewed, large-intermediate workloads, not a universal Datalog speedup: on moderate skew the advantage over xlog's own binary join is only $1.1$--$1.5\times$.
 
-\subsection{Event-Calculus Rule Induction}\label{sec:ec-eval}
+\subsection{Event-Calculus rule induction}\label{sec:ec-eval}
 
-\Cref{sec:ecinduction} states the induction protocol and analyses its runs, and \Cref{tab:ecinduction} there lists them. This subsection adds two things: the figures other authors have published for the same benchmark, tabulated beside our pre-registered row, and the runs that do not favour the system.
+This subsection asks how the induced theories score against the figures other authors have published for the same benchmark, and what the runs that do not favour the system look like. \Cref{sec:ecinduction} states the induction protocol and analyses its runs, and \Cref{tab:ecinduction} there lists them; \Cref{tab:ec-runs} collects their frame-level scores.
 
-\textbf{Published figures for the same benchmark.} \Cref{tab:ec-published} places that ten-fold row beside the four published frame-level \texttt{holdsAt} F1 figures for \texttt{meeting} on the whole distributed CAVIAR corpus. Ours is $0.7329$ (precision $0.6580$, recall $0.8271$; 1516 true positives, 788 false positives, 317 false negatives), micro-averaged over pooled per-fold counts as the published evaluations are. The published figures span $0.735$ to $0.887$. Our figure is \emph{below the floor of that span}, by $0.0021$: a fully pre-registered run lands just under the lowest published figure, which is the hand-crafted rule set. The second-iteration run of \Cref{sec:ecinduction} reaches $0.7782$, which is inside the span, but its Event-Calculus vocabulary was chosen after the first run's test-side failure mode was known on the same folds; it is reported only with that label attached and is not the row in the table.
+\textbf{Published figures for the same benchmark.} \Cref{tab:ec-published} places our pre-registered ten-fold row beside the four published frame-level \texttt{holdsAt} F1 figures for \texttt{meeting} on the whole distributed CAVIAR corpus. Our figure is \emph{below the floor of the published span}, by $0.0021$: a fully pre-registered run lands just under the lowest published figure, which is the hand-crafted rule set. The second-iteration run reaches $0.7782$, which is inside the span, but it is one disclosed adaptive iteration (\Cref{sec:ecinduction}); it is not the row in this table.
 
-One asymmetry runs in the published rows' favour: our gates, seeds and folds were fixed before the run that produced our row, and that run was executed once, whereas the published settings are described by their authors as the best among several parameter settings they tried. We make no adjustment to any number on that basis.
-
-\textbf{The direct-protocol reference on the same folds.} The run that produced that row also scores a direct per-timestep reference theory on the same ten folds, under the direct protocol's own pre-registered defaults: held-out accuracy, a fixed $0.75$ fit gate, the default tie floor. It lands far below the Event-Calculus row beside it, at precision $0.6864$, recall $0.1266$, F1 $0.2137$ (232 true positives, 106 false positives, 1{,}601 false negatives). The same reference theory comes out of all three ten-fold runs---the pre-registered one, the second iteration and the neural negative---so the second iteration's added vocabulary never reaches the direct search. The recall is dominated by one fold on which the direct search abstains outright, leaving 855 gold frames undetected. The figure is what those defaults produce on this corpus, not a ceiling for the direct protocol, whose studied settings produce the windowed-fold results below.
+\textbf{The direct-protocol reference on the same folds.} The run that produced that row also scores a direct per-timestep reference theory on the same ten folds, under the direct protocol's own pre-registered defaults: held-out accuracy, a fixed $0.75$ fit gate, the default tie floor. It lands far below the Event-Calculus row beside it (\Cref{tab:ec-runs}). The same reference theory comes out of all three ten-fold runs (the pre-registered one, the second iteration and the neural negative), so the second iteration's added vocabulary never reaches the direct search. Its recall is dominated by one fold on which the direct search abstains outright, leaving 855 gold frames undetected. The figure is what those defaults produce on this corpus, not a ceiling for the direct protocol, whose studied settings produce the windowed-fold results of \Cref{sec:ecinduction}.
 
 \begin{table*}[htbp]
   \centering
@@ -111,7 +153,7 @@ One asymmetry runs in the published rows' favour: our gates, seeds and folds wer
     Hand-crafted rules                      & $0.644$  & $0.855$  & $0.735$  & OLED~\cite{oled} Tab.~1(b), \texttt{EC\_crisp}; the same value appears in WOLED~\cite{woled} Tab.~2 \\
     OLED                                    & $0.678$  & $0.953$  & $0.792$  & OLED~\cite{oled} Tab.~1(b), whole dataset \\
     OLED, as re-run by other authors        & ---      & ---      & $0.782$  & WOLED~\cite{woled} Tab.~2 \\
-    This work, EC${}+{}$inertia, pre-registered & $0.6580$ & $0.8271$ & $0.7329$ & 10-fold CV by video segment, all gates re-derived per fold (\Cref{sec:ecinduction}); the row is produced by a deterministic CPU relational body search, not by the GPU engine, which this benchmark exercises only in the neural runs \\
+    This work, EC${}+{}$inertia, pre-registered & $0.6580$ & $0.8271$ & $0.7329$ & 10-fold CV by video segment, all gates re-derived per fold (\Cref{sec:ecinduction}) \\
     WOLED-ASP                               & ---      & ---      & $0.887$  & WOLED~\cite{woled} Tab.~2 \\
     \bottomrule
   \end{tabularx}
@@ -119,47 +161,107 @@ One asymmetry runs in the published rows' favour: our gates, seeds and folds wer
   \vspace{0.5em}
   {\footnotesize\raggedright
   \emph{Protocol deltas, which must travel with this table.}
-  (i)~The published runs cross-validate over windowed interpretations with subsampled negatives; ours folds over whole video segments.
+  (i)~The published runs cross-validate over their own windowed interpretations with subsampled negatives; ours folds over whole video segments.
   (ii)~They learn full initiation \emph{and} termination programs; our row commits a two-literal initiation clause and an empty termination theory. Out of its 2{,}304 predicted-positive frames, 781 of the 788 false positives fall on the folds with detected interior terminations; the other 7 are initiation-side errors persisted by inertia on a fold whose test side detects none.
   (iii)~Their rule language admits longer bodies---bottom clauses averaging some fifteen literals against our three-literal cap.
-  (iv)~Their settings are reported as the best among several tried; ours were pre-registered.
-  (v)~All rows compute F1 on \texttt{holdsAt} inferred through inertia, on the same corpus, with the same micro-aggregation---the one axis on which the protocols do match, and the reason the rows are placed side by side at all.
+  (iv)~Their settings are reported as the best among several tried; ours were pre-registered. No number of ours is adjusted on that basis.
+  (v)~All rows compute F1 on \texttt{holdsAt} inferred through inertia, on the same corpus, the one axis on which the protocols do match, and the reason the rows are placed side by side at all.
   \par}
 \end{table*}
 
-\textbf{A learned detector against precomputed geometry.} The result that depends on no published figure is the windowed-fold comparison with a direct per-timestep target, analysed in \Cref{sec:ecinduction} and listed in \Cref{tab:ecinduction}. The search returns the same two-clause theory on every fold whether the proximity predicate is the precomputed geometric one (mean held-out F1 $0.7905$) or the learned \texttt{close\_nn} ($0.8276$). A perceptual predicate that was never shown a distance label therefore stands in for hand-set geometry on this protocol without costing accuracy.
+The remaining runs of \Cref{sec:ecinduction}, including the two that do not favour the system, are scored in \Cref{tab:ec-runs} and diagnosed there. One of those rows needs a disclosure that section does not carry.
 
-\textbf{The same detector under Event-Calculus cross-validation: a negative result.} Substituting \texttt{close\_nn} for the precomputed predicate \emph{inside} the Event-Calculus initiation search does not survive the ten-fold protocol: precision $0.1250$, recall $0.0005$, F1 $0.0011$ (1 true positive, 7 false positives, 1{,}832 false negatives). Nine of the ten folds reject the candidate for insufficient new coverage; \Cref{sec:ecinduction} gives the diagnosis, which is a scale mismatch in the selection rule rather than a failure of the network.
+\textbf{The \texttt{moving} threshold, disclosed.} The two fluents carry different canonical proximity thresholds in the published CAVIAR rule set (\texttt{meeting} over \texttt{close\_25}, \texttt{moving} over \texttt{close\_34}), and the \texttt{moving} figure above is measured under the canonical \texttt{close\_34}. An earlier run over the same folds measured \texttt{moving} under the \texttt{meeting} threshold of 25 and scored \emph{higher} (\Cref{tab:ec-runs}). The canonical threshold remains the right headline, and the higher number is not evidence against it: where the clause is selected, widening \texttt{close} from 25 to 34 behaves exactly as threshold semantics predict, recall up and precision down.
 
-\textbf{Committed clauses that score zero: the clean protocol.} Re-run on the deduplicated, scene-family-grouped corpus, the \texttt{meeting} fluent scores F1 $0.0$ on both routes---0/120/1812 tp/fp/fn on the Event-Calculus route, 0/106/1812 on the direct one. Those zeros are for the most part \emph{scored predictions}, not empty theories: the direct route commits a clause on nine of the ten folds and the Event-Calculus route on one, and a theory that was empty on every fold could not produce a false positive. On \texttt{moving} the Event-Calculus route \emph{is} empty where it matters: no initiation clause on any fold (0/0/3136), so inertia never starts, though termination clauses are committed on seven of the ten. The direct route selects a clause on nine of the ten folds---fold 6 abstains---for micro precision $0.5334$, recall $0.3817$, F1 $0.4450$ (1197/1047/1939). The gate abstains where its candidate's held-out score has collapsed, which is the behaviour it was pre-registered to have. Where it does commit, the committed clause simply does not transfer across scene families, and \Cref{sec:ecinduction} gives the census behind that failure.
+The micro figure falls for a selection-level reason instead. On the fold carrying 1{,}546 of the 3{,}136 gold \texttt{moving} frames, the wider candidate pool puts the top two candidates inside the selection tie band, at a margin of $0.0093$ against the $0.01$ tie floor, and the search abstains there where the threshold-25 run had committed. That figure therefore leaned on a fold whose selection was tie-fragile, which is a reason to report the lower canonical number and the disagreement together rather than either alone.
 
-\textbf{The \texttt{moving} threshold, disclosed.} The two fluents carry different canonical proximity thresholds in the published CAVIAR rule set---\texttt{meeting} over \texttt{close\_25}, \texttt{moving} over \texttt{close\_34}---and the $0.4450$ above is measured under the canonical \texttt{close\_34}. An earlier run over the same folds measured \texttt{moving} under the \texttt{meeting} threshold of 25 and scored \emph{higher}, micro F1 $0.4868$ (1295/890/1841). The canonical threshold remains the right headline, and the higher number is not evidence against it: where the clause is selected, widening \texttt{close} from 25 to 34 behaves exactly as threshold semantics predict, recall up and precision down. The micro figure falls for a selection-level reason instead. On the fold carrying 1{,}546 of the 3{,}136 gold \texttt{moving} frames the wider candidate pool puts the top two candidates inside the selection tie band---margin $0.0093$ against the $0.01$ tie floor---and the search abstains there, where the threshold-25 run had committed. The threshold-25 figure therefore leaned on a fold whose selection was tie-fragile, which is a reason to report the lower canonical number and the disagreement together rather than either alone.
+\textbf{The maritime figures are not tabulated beside the published ones.} The maritime runs of \Cref{sec:maritime} are not placed beside the published figure for that fluent; \Cref{subsec:maritime-comparison} says why.
 
-\textbf{The maritime figures are not tabulated beside the published ones.} \Cref{sec:maritime} reports six runs on the Brest AIS \texttt{rendezVous} corpus (\Cref{tab:maritime}); the published figure for that fluent is $0.98$ for OLED, WOLED-MLN and WOLED-ASP alike~\cite{woled}. The two are computed on different temporal grids under different splits, so neither table carries the other's numbers (\Cref{subsec:maritime-comparison}).
+\begin{table*}[htbp]
+  \centering
+  \caption{Frame-level \texttt{holdsAt} scores for every rule-induction run of \Cref{sec:ecinduction}, micro F1 over pooled per-fold counts. The distributed corpus is the dump shipped with the published Event-Calculus learners and carries the duplication defect measured in \Cref{sec:ecinduction}; the clean corpus is its deduplicated, scene-family-grouped form. Dashes are quantities the run does not report separately.}
+  \label{tab:ec-runs}
+  \small
+  \begin{tabularx}{\linewidth}{@{}L l c c c l@{}}
+    \toprule
+    \textbf{Run} & \textbf{Corpus} & \textbf{P} & \textbf{R} & \textbf{F1} & \textbf{tp\,/\,fp\,/\,fn} \\
+    \midrule
+    \texttt{meeting}, Event-Calculus route, pre-registered      & distributed & $0.6580$ & $0.8271$ & $0.7329$ & $1516$\,/\,$788$\,/\,$317$ \\
+    \texttt{meeting}, direct-protocol reference, same folds     & distributed & $0.6864$ & $0.1266$ & $0.2137$ & $232$\,/\,$106$\,/\,$1{,}601$ \\
+    \texttt{meeting}, Event-Calculus route with learned \texttt{close\_nn} & distributed & $0.1250$ & $0.0005$ & $0.0011$ & $1$\,/\,$7$\,/\,$1{,}832$ \\
+    \addlinespace
+    \texttt{meeting}, Event-Calculus route                      & clean & --- & --- & $0.0$ & $0$\,/\,$120$\,/\,$1812$ \\
+    \texttt{meeting}, direct route                              & clean & --- & --- & $0.0$ & $0$\,/\,$106$\,/\,$1812$ \\
+    \texttt{moving}, Event-Calculus route, no initiation clause on any fold & clean & --- & --- & --- & $0$\,/\,$0$\,/\,$3136$ \\
+    \texttt{moving}, direct route, canonical \texttt{close\_34} & clean & $0.5334$ & $0.3817$ & $0.4450$ & $1197$\,/\,$1047$\,/\,$1939$ \\
+    \texttt{moving}, direct route, earlier run under \texttt{close\_25} & clean & --- & --- & $0.4868$ & $1295$\,/\,$890$\,/\,$1841$ \\
+    \bottomrule
+  \end{tabularx}
+\end{table*}
 
-\textbf{Why the two corpora differ.} The distributed corpus carries the duplication defect measured in \Cref{sec:ecinduction}. That defect is the reason the distributed-corpus rows carry a caveat---and also the reason the comparison in \Cref{tab:ec-published} is drawn there rather than on the clean corpus: the distributed dump is the regime the published figures share.
+\subsection{Verification cost and residency benefit}\label{sec:overhead}
 
-\subsection{Isolating Verification and Residency Overhead}\label{sec:overhead}
+These two isolations ask what xlog's design costs, separated from ordinary GPU acceleration: what the equivalence proof buys with cold-compile time, and what device residency saves in transfers. Both run on an RTX 3090, and \Cref{tab:overhead} carries their measurements.
 
-Two isolations separate xlog's two design costs from ordinary GPU acceleration; both run on an RTX 3090.
+\textbf{Verification cost.} The cold epoch's compilation time is dominated by the on-GPU CDCL equivalence check, not the D4 compile. Split on probabilistic reachability chains, CDCL verification accounts for $96$--$100\%$ of the cold-compile time and grows with circuit size, while D4 compilation stays under $17$\,ms. The ``expensive'' cold epoch is thus almost entirely the price of the machine-checked correctness certificate (\Cref{sec:prob}), a cost the CPU-symbolic and GPU-Datalog systems surveyed in \Cref{sec:related} do not pay, because they do not verify.
 
-\textbf{Verification cost.} The cold epoch's compilation time is dominated by the on-GPU CDCL equivalence check, not the D4 compile. Splitting the cold compile on probabilistic reachability chains, CDCL verification accounts for $96$--$100\%$ of the cold-compile time and grows with circuit size ($251$\,ms at $n{=}5$ to $508$\,ms at $n{=}40$), while D4 compilation stays under $17$\,ms. The ``expensive'' cold epoch is thus almost entirely the price of the machine-checked correctness certificate (\Cref{sec:prob})---a cost the other systems in \Cref{tab:comparison} do not pay because they do not verify.
+\begin{table}[htbp]
+  \centering
+  \caption{Design-cost isolations. Verification splits the cold compile on probabilistic reachability chains of length $n$. Residency forces a device$\to$host$\to$device round-trip at the neural--symbolic boundary, swept over $2$ to $512$ handoffs per step on the batched addition path.}
+  \label{tab:overhead}
+  \small
+  \begin{tabularx}{\linewidth}{@{}l L@{}}
+    \toprule
+    \textbf{Setting} & \textbf{Measured} \\
+    \midrule
+    \multicolumn{2}{@{}l}{\emph{Verification cost}} \\
+    chain $n{=}5$        & CDCL verify $251$\,ms \\
+    chain $n{=}40$       & CDCL verify $508$\,ms \\
+    \addlinespace
+    \multicolumn{2}{@{}l}{\emph{Residency benefit}} \\
+    per handoff          & round-trip of roughly $40$--$56\,{\mu}$s \\
+    $32$ handoffs/step   & $4\%$ of the step \\
+    $128$ handoffs/step  & ${\approx}10\%$ of the step; this is the standard batch-$64$ MNIST-addition step, $7.2$\,ms of $72$\,ms \\
+    $512$ handoffs/step  & holds near $9\%$ of the step \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
-\textbf{Residency benefit.} To isolate the transfer-free advantage from ordinary GPU acceleration we run the same neural--symbolic pipeline with and without a forced device$\to$host$\to$device round-trip at the neural--symbolic boundary---the transfer a CPU-reasoning hybrid pays every step---sweeping the number of neural$\to$symbolic handoffs per step (the batched addition path, $2$ to $512$ handoffs). Each handoff costs a round-trip of roughly $40$--$56\,{\mu}$s. Below a handful of handoffs per step that cost is lost in run-to-run variation. From a few dozen upward it is a visible share of the step, because the batched circuit compute grows sublinearly with the batch while the transfer grows linearly with the handoff count: $4\%$ at $32$ handoffs and ${\approx}10\%$ at $128$---the standard batch-$64$ MNIST-addition step ($7.2$\,ms of $72$\,ms)---holding near $9\%$ at $512$. On a single query the transfer is negligible; at a realistic training batch it is a ${\approx}10\%$ tax that xlog does not pay, distinct from and additive to the GPU-compute and circuit-caching advantages. The forced per-buffer copy is an upper bound, since a hybrid could coalesce transfers. The larger transfer-dominated regime---large-state Datalog fixpoints, where whole relations would cross the bus every iteration (\Cref{sec:intro})---lies outside what this isolation measures (\Cref{sec:limits}).
+\textbf{Residency benefit.} To isolate the transfer-free advantage from ordinary GPU acceleration we run the same neural--symbolic pipeline with and without a forced device$\to$host$\to$device round-trip at the neural--symbolic boundary, the transfer a CPU-reasoning hybrid pays every step, sweeping the number of neural$\to$symbolic handoffs per step. Below a handful of handoffs the round-trip cost is lost in run-to-run variation. From a few dozen upward it is a visible share of the step, because the batched circuit compute grows sublinearly with the batch while the transfer grows linearly with the handoff count.
 
-\subsection{Runtime Optimization}\label{sec:runtime-eval}
+On a single query the transfer is therefore negligible; at a realistic training batch it is a ${\approx}10\%$ tax that xlog does not pay, distinct from and additive to the GPU-compute and circuit-caching advantages. The forced per-buffer copy is an upper bound, since a hybrid could coalesce transfers. The larger transfer-dominated regime, large-state Datalog fixpoints where whole relations would cross the bus every iteration (\Cref{sec:intro}), lies outside what this isolation measures (\Cref{sec:limits}).
 
-Two of the runtime optimizations of \Cref{sec:datalog} target repeated-session workloads. The persistent hash-index manager retains built join indices across evaluations, keyed on relation generation, schema signature and device ordinal, under a byte-budgeted LRU policy: a session whose relations change little between calls reuses an index instead of rebuilding it, and a generation change invalidates the entry rather than serving a stale one. The profile-gated shared-memory chain scorer tiles the left relation through shared memory when scoring chain-shaped candidate bodies during exact rule induction, and is gated on a candidate-row threshold below which the baseline scorer runs unchanged.
+\subsection{Index reuse and the chain scorer}\label{sec:runtime-eval}
 
-Both target the same waste---work repeated across calls that the previous call already did---and both are transparent to the program: the index manager serves a rebuilt index only when the relation generation says the cached one is stale, and the chain scorer falls back to the baseline path below its candidate-row threshold. Common-subexpression elimination and adaptive re-optimization are held to output equivalence with the unoptimized plan.
+This pair of ablations asks what two of the runtime optimizations of \Cref{sec:datalog} save on the repeated-session workloads they target, each against the path it replaces. The persistent hash-index manager retains built join indices across evaluations, keyed on relation generation, schema signature and device ordinal, under a byte-budgeted LRU policy: a session whose relations change little between calls reuses an index instead of rebuilding it, and a generation change invalidates the entry instead of serving a stale one. The profile-gated shared-memory chain scorer tiles the left relation through shared memory when scoring chain-shaped candidate bodies during exact rule induction, and is gated on a candidate-row threshold below which the baseline scorer runs unchanged.
 
-Both were measured against the path they replace. On a build-heavy repeated-session semi-join---eight left rows probing eight million right rows, so that building the index dominates the join---reusing the index cuts the median evaluation from $0.255$\,s to $0.0794$\,s, a $3.21\times$ gain over the median of $9$ timed runs after $12$ warm-up runs, with no tracked host transfer on either path. The chain scorer was measured on a chain-hot fixture of $768$ candidate rows, against a gate threshold of $256$. It cuts the median from $27.51$\,ms to $4.93$\,ms, a $5.58\times$ gain over $12$ timed runs after $3$ warm-up runs, and the two arms do not overlap ($27.3$--$28.3$\,ms against $4.9$--$5.4$\,ms). On a small input below the threshold, where the baseline path runs instead, the two medians differ by $1.3\%$ and the arms' ranges overlap. Both are point medians on single synthetic fixtures, and the scorer's coverage output is identical to the baseline's on both.
+Both target the same waste, work repeated across calls that the previous call already did, and both are transparent to the program: the index manager serves a rebuilt index only when the relation generation says the cached one is stale, and the chain scorer falls back to the baseline path below its candidate-row threshold. Common-subexpression elimination and adaptive re-optimization are held to output equivalence with the unoptimized plan.
 
-\subsection{Capability Comparison}
+\Cref{tab:runtime-opt} gives the medians. The index fixture is build-heavy by construction, so that building the index dominates the join, and neither arm records a host transfer. The chain scorer's two arms do not overlap on the chain-hot fixture; on a small input below its gate threshold, where the baseline path runs instead, the two medians differ by $1.3\%$ and the arms' ranges overlap. Both are point medians on single synthetic fixtures, and the scorer's coverage output is identical to the baseline's on both.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Runtime-optimization ablations, each a median over the timed runs of one synthetic fixture.}
+  \label{tab:runtime-opt}
+  \small
+  \begin{tabularx}{\linewidth}{@{}L L@{}}
+    \toprule
+    \textbf{Fixture} & \textbf{Baseline median $\to$ optimized median} \\
+    \midrule
+    Persistent index reuse: repeated-session semi-join, eight left rows probing eight million right rows
+      & $0.255$\,s $\to$ $0.0794$\,s, a $3.21\times$ gain over $9$ timed runs after $12$ warm-up runs \\
+    \addlinespace
+    Shared-memory chain scorer: chain-hot body search, $768$ candidate rows against a gate threshold of $256$
+      & $27.51$\,ms ($27.3$--$28.3$) $\to$ $4.93$\,ms ($4.9$--$5.4$), a $5.58\times$ gain over $12$ timed runs after $3$ warm-up runs \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Capability coverage across systems}
 
 \Cref{tab:comparison} positions xlog qualitatively against representative systems; each addresses a subset of the design space, and xlog's contribution is unifying them in one GPU-resident runtime. This table is capability coverage, not performance: the quantitative head-to-head results against Scallop, ProbLog2 and Soufflé are in \Cref{sec:h2h}.
 
-The rule-induction row covers two paths of different maturity. The trainable-rule-body path is carried onto an external benchmark in \Cref{sec:ecinduction} and tabulated in \Cref{sec:ec-eval}, under pre-registered gates and cross-validation, though it supplies no ordering against a dedicated rule learner (\Cref{tab:ec-published}). The differentiable-ILP path is not exercised there at all (\Cref{sec:nesy}). Both are beta surfaces (\Cref{sec:limits}), and the table's ``yes'' claims capability, not maturity.
+The rule-induction row covers two paths of different maturity: the trainable-rule-body path is carried onto an external benchmark in \Cref{sec:ecinduction} and tabulated in \Cref{sec:ec-eval}, while the differentiable-ILP path is not exercised there at all (\Cref{sec:nesy}). The table's ``yes'' claims capability, not maturity (\Cref{sec:limits}).
 
 \begin{table*}[htbp]
   \centering
@@ -181,12 +283,12 @@ The rule-induction row covers two paths of different maturity. The trainable-rul
   \end{tabularx}
 \end{table*}
 
-\subsection{Further Runtime Capabilities}\label{sec:noquant}
+\subsection{Log-evidence, rule unions, and exact constraint solving}\label{sec:noquant}
 
-Three further capabilities round out the runtime surface. Each is described here for what it does; no timing is claimed for any of them.
+The capabilities below round out the runtime surface. Each is described for what it does; no timing is claimed for any of them.
 
-\textbf{Exact log-evidence and the CNF-variable-to-fact map.} An exact evaluation now returns the log partition function of the weighted formula, $\log Z$, alongside the per-query probabilities, so a program's evidence mass is read off directly instead of being reconstructed from marginals; it surfaces as \texttt{log\_z\_e} on the Python result. Paired with it, \texttt{prob\_var\_map()} reports which probabilistic fact each CNF variable stands for---an ordinary fact, one Bernoulli decision of an annotated disjunction's chain, or padding---so the per-variable gradient buffers can be attributed back to program facts rather than to opaque indices. Its length is the encoder's variable \emph{capacity} rather than a variable count, and it is refused with a typed error where there is no CNF encoding to report---Monte Carlo programs, and exact programs taking the GPU fast path that skips the encoding.
+\textbf{Exact log-evidence and the CNF-variable-to-fact map.} An exact evaluation now returns the log partition function of the weighted formula, $\log Z$, alongside the per-query probabilities, so a program's evidence mass is read off directly instead of being reconstructed from marginals; it surfaces as \texttt{log\_z\_e} on the Python result. Paired with it, \texttt{prob\_var\_map()} reports which probabilistic fact each CNF variable stands for (an ordinary fact, one Bernoulli decision of an annotated disjunction's chain, or padding) so the per-variable gradient buffers can be attributed back to program facts and not to opaque indices. Its length is the encoder's variable \emph{capacity}, not a variable count, and it is refused with a typed error where there is no CNF encoding to report: Monte Carlo programs, and exact programs taking the GPU fast path that skips the encoding.
 
-\textbf{Same-head rule unions in one multiway pass.} A predicate head defined by many rules used to fold its per-rule contributions into the head relation one union at a time, re-sorting the growing accumulator once per rule and going quadratic in the rule count---a real cost at corpus scale, where one head can carry thousands of rules. Contributions are now merged with a single multiway union per head per iteration. The union count therefore no longer scales with the same-head rule count---eight same-head rules record one union, not eight---while the derived rows stay byte-identical to the unbatched result.
+\textbf{Same-head rule unions in one multiway pass.} A predicate head defined by many rules used to fold its per-rule contributions into the head relation one union at a time, re-sorting the growing accumulator once per rule and going quadratic in the rule count, a real cost at corpus scale where one head can carry thousands of rules. Contributions are now merged with a single multiway union per head per iteration. The union count therefore no longer scales with the same-head rule count (eight same-head rules record one union, not eight) while the derived rows stay byte-identical to the unbatched result.
 
-\textbf{An exact stage beyond enumeration capacity.} Constraint solving over several interacting constraints enumerates a component completely where it is small enough. Long chain-shaped components that exceed that capacity take a memoized dynamic-programming stage on the GPU instead, which computes the same totals exactly rather than approximating them. A component wider than the configured limit is refused with a typed error rather than served by an approximation, and the solver's buffers reach Python through the same zero-copy DLPack~\cite{dlpack} views as the rest of the runtime (\Cref{subsec:interop}).
+\textbf{An exact stage beyond enumeration capacity.} Constraint solving over several interacting constraints enumerates a component completely where it is small enough. Long chain-shaped components that exceed that capacity take a memoized dynamic-programming stage on the GPU instead, which computes the same totals exactly instead of approximating them. A component wider than the configured limit is refused with a typed error instead of served by an approximation, and the solver's buffers reach Python through the same zero-copy DLPack~\cite{dlpack} views as the rest of the runtime (\Cref{subsec:interop}).
