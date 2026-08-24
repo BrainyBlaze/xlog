@@ -95,7 +95,7 @@ The ablation is a separate experiment from the full run: its uncached arm recomp
 
 \subsection{Head-to-head comparisons}\label{sec:h2h}
 
-The measurements above compare xlog against its own baselines. \Cref{tab:h2h} adds controlled comparisons against external engines, one per reasoning mode, on cloud GPUs (RTX 3090/4090), with matched programs, data and metrics. xlog wins where its GPU-resident, bounded-memory design is the point, and does not where a mature CPU compiler is already fast enough on small inputs.
+\Cref{tab:h2h} reports controlled comparisons against external engines, one per reasoning mode, on cloud GPUs (RTX 3090/4090), with matched programs, data and metrics. xlog wins where its GPU-resident, bounded-memory design is the point, and does not where a mature CPU compiler is already fast enough on small inputs.
 
 \begin{table*}[htbp]
   \centering
