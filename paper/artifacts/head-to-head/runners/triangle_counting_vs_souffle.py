@@ -94,6 +94,19 @@ def run_text(argv: Sequence[str], cwd: Path) -> str:
     return (completed.stdout or completed.stderr).strip()
 
 
+def parse_time_metrics(
+    lines: Iterable[str], observed_wall_s: float
+) -> tuple[float, int]:
+    metrics: dict[str, str] = {}
+    for line in lines:
+        key, separator, value = line.strip().partition("=")
+        if separator and key in {"xlog_wall_s", "xlog_max_rss_kb"}:
+            metrics[key] = value
+    wall_s = float(metrics.get("xlog_wall_s", observed_wall_s))
+    max_rss_kb = int(metrics.get("xlog_max_rss_kb", "0"))
+    return wall_s, max_rss_kb
+
+
 def run_timed(
     argv: Sequence[str],
     cwd: Path,
@@ -106,7 +119,7 @@ def run_timed(
     timed_argv = (
         str(TIME_BIN),
         "-f",
-        "%e\n%M\n%x",
+        "xlog_wall_s=%e\nxlog_max_rss_kb=%M\nxlog_exit_status=%x",
         "-o",
         str(metrics_path),
         *argv,
@@ -130,13 +143,12 @@ def run_timed(
         returncode = 124
         stderr += f"\nbenchmark command timed out after {timeout_s} seconds"
     observed_wall_s = time.perf_counter() - started
-    metrics = (
+    metric_lines = (
         metrics_path.read_text(encoding="utf-8").splitlines()
         if metrics_path.exists()
         else []
     )
-    wall_s = float(metrics[0]) if len(metrics) >= 1 else observed_wall_s
-    max_rss_kb = int(metrics[1]) if len(metrics) >= 2 else 0
+    wall_s, max_rss_kb = parse_time_metrics(metric_lines, observed_wall_s)
     return CommandResult(tuple(argv), returncode, wall_s, max_rss_kb, stdout, stderr)
 
 
@@ -548,6 +560,15 @@ def self_test() -> None:
         {"complete": True, **expected},
         {"complete": True, **triangle_count_summary([(1, 3), (2, 4)])},
     )
+    assert parse_time_metrics(
+        [
+            "Command exited with non-zero status 1",
+            "xlog_wall_s=1.25",
+            "xlog_max_rss_kb=2048",
+            "xlog_exit_status=1",
+        ],
+        9.0,
+    ) == (1.25, 2048)
     for invalid_rows in ([(1, 2), (1, 3)], [(1, 0)]):
         try:
             triangle_count_summary(invalid_rows)
