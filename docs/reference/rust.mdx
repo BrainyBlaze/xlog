@@ -38,6 +38,46 @@ Every crate in the xlog source tree, with a link to its generated API docs and a
 | `xlog-cuda-tests` | [rustdoc](https://xlog.md/generated/rust/xlog_cuda_tests/index.html) | CUDA-facing workspace test crate. It is not a published crates.io package. |
 | `xlog-integration` | [rustdoc](https://xlog.md/generated/rust/xlog_integration/index.html) | Integration test crate. It is not a published crates.io package. |
 
+## Accepted world-view evidence
+
+`xlog_prob::epistemic::AcceptedWorldViewEvidence` is the canonical boundary
+between an epistemic GPU execution and probabilistic conditioning. Construct it
+with `AcceptedWorldViewEvidence::from_gpu_execution_result`; construction
+validates provider identity, GPU dispatch certification, kernel evidence,
+transfer bounds, constraint results, and a non-empty accepted output. Invalid or
+empty execution results return a typed error and never reach probabilistic
+evaluation.
+
+Pass the validated value to an adapter method whose name ends in
+`_with_accepted_world_view`. Direct evaluation and reusable preparation share
+the same evidence contract:
+
+```rust
+let accepted = AcceptedWorldViewEvidence::from_gpu_execution_result(
+    &provider,
+    &epistemic_result,
+    Vec::new(), // derive accepted assumptions from the GPU result
+)?;
+
+let exact = adapter.compile_and_evaluate_conditioned_source_with_accepted_world_view(
+    probabilistic_source,
+    &accepted,
+)?;
+
+let prepared = adapter.prepare_conditioned_source_with_accepted_world_view(
+    probabilistic_source,
+    &accepted,
+)?;
+let (updated, trace) = prepared.evaluate()?;
+```
+
+An empty assumptions vector requests GPU-derived assumptions. Conditioned
+source, parsed-program, gradient, and reusable-preparation methods retain only
+derived assumptions that have a matching provenance formula in the target
+program. Caller-supplied assumptions are explicit and are not silently discarded.
+Both FAEEL and acyclic G91 evidence use this boundary; no
+unconditioned or CPU fallback is substituted when validation fails.
+
 ## Breaking changes
 
 Changes on this list stop downstream Rust code from compiling. Each entry names

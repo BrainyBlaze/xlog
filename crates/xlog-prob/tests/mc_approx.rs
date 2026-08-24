@@ -1,7 +1,7 @@
 #![cfg(feature = "host-io")]
 
 use xlog_logic::{parse_program, ProbMethod};
-use xlog_prob::mc::{McEvalConfig, McProgram, McSamplingMethod};
+use xlog_prob::mc::{McEvalConfig, McEvalOverrides, McProgram, McSamplingMethod};
 
 fn prob_of(result: &xlog_prob::mc::McResult, predicate: &str) -> f64 {
     result
@@ -46,6 +46,36 @@ fn mc_eval_config_maps_evidence_clamping_method() {
         cfg.sampling_method,
         Some(McSamplingMethod::EvidenceClamping)
     );
+}
+
+#[test]
+fn mc_eval_config_overrides_only_explicit_values() {
+    let program = parse_program(
+        r#"
+#pragma prob_samples = 256
+#pragma prob_seed = 42
+#pragma prob_confidence = 0.90
+#pragma prob_method = evidence_clamping
+#pragma prob_max_nonmonotone_iterations = 32
+"#,
+    )
+    .expect("parse MC pragmas");
+    let mut cfg =
+        McEvalConfig::from_directives(&program.directives).expect("config from directives");
+
+    cfg.apply_overrides(McEvalOverrides {
+        samples: Some(512),
+        confidence: Some(0.95),
+        sampling_method: Some(McSamplingMethod::Rejection),
+        ..McEvalOverrides::default()
+    })
+    .expect("valid overrides");
+
+    assert_eq!(cfg.samples, 512);
+    assert_eq!(cfg.seed, 42);
+    assert_eq!(cfg.confidence, 0.95);
+    assert_eq!(cfg.sampling_method, Some(McSamplingMethod::Rejection));
+    assert_eq!(cfg.max_nonmonotone_iterations, 32);
 }
 
 #[test]

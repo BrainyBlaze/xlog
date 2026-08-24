@@ -15,7 +15,7 @@
 // the per-pass derivation a pure function of the previous state, so the
 // iteration count is deterministic and equals the derivation depth + 1 (the
 // final no-change confirmation pass) — required for the device-side fixpoint
-// trace (K4). Convergence is detected with a shared change flag; no host read.
+// trace. Convergence is detected with a shared change flag; no host read.
 //
 // Argument packing (to stay within launch-arg limits):
 //   cfg[]  : packed scalars + offsets (see indices below)
@@ -184,6 +184,25 @@ __device__ __forceinline__ void mc_res_decode_slot_for_atom(
     }
 }
 
+__device__ __forceinline__ bool mc_res_reserve_sparse_row(
+    uint32_t* sparse_count,
+    uint32_t* sparse_overflow,
+    uint32_t sparse_cap,
+    uint32_t* position)
+{
+    while (true) {
+        uint32_t current = atomicAdd(sparse_count, 0u);
+        if (current >= sparse_cap) {
+            atomicExch(sparse_overflow, 1u);
+            return false;
+        }
+        if (atomicCAS(sparse_count, current, current + 1u) == current) {
+            *position = current;
+            return true;
+        }
+    }
+}
+
 __device__ __forceinline__ void mc_res_append_sparse(
     const uint32_t* atom,
     uint32_t slot,
@@ -196,14 +215,11 @@ __device__ __forceinline__ void mc_res_append_sparse(
     uint32_t sparse_cap,
     uint32_t domain)
 {
-    uint32_t pos = atomicAdd(sparse_count, 1u);
-    if (pos < sparse_cap) {
-        sparse_slots[pos] = slot;
-        mc_res_decode_slot_for_atom(atom, slot, domain, &sparse_arg0[pos],
-                                    &sparse_arg1[pos], &sparse_arg2[pos]);
-    } else {
-        atomicExch(sparse_overflow, 1u);
-    }
+    uint32_t pos = 0u;
+    if (!mc_res_reserve_sparse_row(sparse_count, sparse_overflow, sparse_cap, &pos)) return;
+    sparse_slots[pos] = slot;
+    mc_res_decode_slot_for_atom(atom, slot, domain, &sparse_arg0[pos],
+                                &sparse_arg1[pos], &sparse_arg2[pos]);
 }
 
 __device__ __forceinline__ void mc_res_append_slot_only(
@@ -216,15 +232,12 @@ __device__ __forceinline__ void mc_res_append_slot_only(
     uint32_t* sparse_overflow,
     uint32_t sparse_cap)
 {
-    uint32_t pos = atomicAdd(sparse_count, 1u);
-    if (pos < sparse_cap) {
-        sparse_slots[pos] = slot;
-        sparse_arg0[pos] = 0u;
-        sparse_arg1[pos] = 0u;
-        sparse_arg2[pos] = 0u;
-    } else {
-        atomicExch(sparse_overflow, 1u);
-    }
+    uint32_t pos = 0u;
+    if (!mc_res_reserve_sparse_row(sparse_count, sparse_overflow, sparse_cap, &pos)) return;
+    sparse_slots[pos] = slot;
+    sparse_arg0[pos] = 0u;
+    sparse_arg1[pos] = 0u;
+    sparse_arg2[pos] = 0u;
 }
 
 // Apply all rules once, reading bodies from `cur` and writing heads into `next`
@@ -372,11 +385,12 @@ extern "C" __global__ void mc_resident_engine(
     uint32_t* B_arg2 = sparse_arg2 + (size_t)buf1 * sparse_cap;
     uint32_t* A_count = sparse_counts + buf0;
     uint32_t* B_count = sparse_counts + buf1;
-    uint32_t* converged_flags = resident_status_flags;
-    uint32_t* sparse_overflow_flags = resident_status_flags + num_worlds;
-    uint32_t* block_participation = resident_status_flags + 2u * num_worlds;
-    uint32_t* changed_flags = resident_status_flags + 3u * num_worlds;
-    uint32_t* global_continue = resident_status_flags + 4u * num_worlds;
+    uint32_t* postflight_summary = resident_status_flags;
+    uint32_t* converged_flags = resident_status_flags + 3u;
+    uint32_t* sparse_overflow_flags = converged_flags + num_worlds;
+    uint32_t* block_participation = sparse_overflow_flags + num_worlds;
+    uint32_t* changed_flags = block_participation + num_worlds;
+    uint32_t* global_continue = changed_flags + num_worlds;
     uint32_t* world_overflow = sparse_overflow_flags + w;
     uint32_t* world_changed = changed_flags + w;
     bool world_leader = (block_in_world == 0u && threadIdx.x == 0u);
@@ -539,11 +553,19 @@ extern "C" __global__ void mc_resident_engine(
         iter_trace[w] = iters;
         sparse_final_counts[w] = *cur_count;
         converged_flags[w] = converged;
+        if (converged == 0u) atomicAdd(&postflight_summary[0], 1u);
+        if (*world_overflow != 0u) {
+            atomicAdd(&postflight_summary[1], 1u);
+            uint32_t minimum_required = sparse_cap == 0xffffffffu
+                ? sparse_cap
+                : sparse_cap + 1u;
+            atomicMax(&postflight_summary[2], minimum_required);
+        }
     }
     mc_res_world_sync(blocks_per_world);
 
     // --- On-device query/evidence counting (reads the final `cur` state). ---
-    if (world_leader) {
+    if (world_leader && converged != 0u && *world_overflow == 0u) {
         uint8_t ok = 1u;
         for (uint32_t i = 0; i < ev_cnt; i++) {
             uint8_t holds = cur[ev_slot[i]] ? 1u : 0u;

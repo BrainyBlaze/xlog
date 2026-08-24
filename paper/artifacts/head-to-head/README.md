@@ -13,9 +13,9 @@ mixed within a comparison.
 | `exact_inference_vs_problog2.json` | Probabilistic: exact inference, xlog vs ProbLog2 | RTX 4090 | **true** |
 | `triangle_counting_vs_souffle.json` | Deterministic: fused WCOJ triangle counting vs Soufflé (skewed) | RTX 4090 | **false** — see note |
 | `triangle_counting_moderate_skew_vs_souffle.json` | Deterministic: WCOJ vs binary vs Soufflé, moderate skew | RTX 4090 | **true** |
-| `residency_ablation.json` | xlog-only: forced host round-trip, single query (CRIT-2) | RTX 3090 | n/a (single-system) |
-| `residency_scale_ablation.json` | xlog-only: forced host round-trip vs handoff count, batched (CRIT-2) | RTX 3090 | n/a (single-system) |
-| `verify_overhead_isolation.json` | xlog-only: CDCL-verify vs D4-compile split (EIC W5) | RTX 3090 | n/a (single-system) |
+| `residency_ablation.json` | xlog-only: forced host round-trip, single query | RTX 3090 | n/a (single-system) |
+| `residency_scale_ablation.json` | xlog-only: forced host round-trip vs handoff count, batched | RTX 3090 | n/a (single-system) |
+| `verify_overhead_isolation.json` | xlog-only: CDCL-verify vs D4-compile split | RTX 3090 | n/a (single-system) |
 
 ## Protocol notes
 
@@ -57,10 +57,10 @@ mixed within a comparison.
 
 `runners/residency_sweep.py` and `runners/verify_sweep.py` are the exact
 scripts for the two xlog-only isolations (run with `python -u` on a
-CUDA-enabled `pyxlog` build; the residency script needs `torch`). The
-neural / probabilistic / deterministic head-to-head runs were orchestrated by
-ephemeral on-pod scripts that are not committed; the programs and commands are
-small enough to restate:
+CUDA-enabled `pyxlog` build; the residency script needs `torch`). The neural
+and probabilistic head-to-head runs were orchestrated by ephemeral on-pod
+scripts. The deterministic comparison now has a committed runner:
+`runners/triangle_counting_vs_souffle.py`.
 
 - **Exact vs ProbLog2** — `pyxlog.Program.compile(src)` on the five programs
   (a conditioned wet/sprinkler net and `reach_chain_{5,10,15,20}`), timed
@@ -71,7 +71,22 @@ small enough to restate:
   `addition(A,B,S):-digit(A,X),digit(B,Y),S is X+Y` vs Scallop
   `difftopbottomkclauses` (k=3); held-out addition accuracy on the 10k MNIST
   test. See `scripts/track_a_runner.py` for the closest committed harness.
-- **Triangle counting vs Soufflé** — edges bulk-loaded as an Arrow-IPC EDB
-  (`xlog run tri.xlog --input edge=edges.arrow --wcoj --stats`), rule
-  `triangle(A,B,C):-edge(A,B),edge(B,C),edge(A,C)`, vs the same graph in
-  Soufflé; gate: triangle count matches Soufflé exactly.
+- **Triangle counting vs Soufflé** — build the release CLI, install PyArrow
+  and Soufflé, then run:
+
+  ```bash
+  cargo build --release --locked -p xlog-cli
+  python -u paper/artifacts/head-to-head/runners/triangle_counting_vs_souffle.py \
+    --xlog-bin target/release/xlog \
+    --souffle-bin souffle \
+    --output paper/artifacts/head-to-head/triangle_counting_vs_souffle.json
+  ```
+
+  The runner refuses a dirty checkout by default. It generates the skewed graph
+  once per case, writes the identical relation to Arrow IPC and Soufflé facts,
+  runs fused WCOJ, enumerate-then-count, and Soufflé three times, and records
+  the median full-process wall time. The artifact also records the exact commit,
+  runner and input hashes, normalized commands, software and hardware versions,
+  process RSS, XLOG's provider allocation high-water, WCOJ dispatch counters,
+  per-repetition failures, and separate fused/Soufflé and all-arm correctness
+  gates. No failed arm is replaced with a different execution path.

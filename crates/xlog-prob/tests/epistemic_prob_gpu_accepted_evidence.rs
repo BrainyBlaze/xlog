@@ -20,8 +20,8 @@ use xlog_logic::epistemic::{
 use xlog_logic::parse_program;
 #[cfg(feature = "host-io")]
 use xlog_prob::epistemic::{
-    CircuitUpdateMode, EpistemicAssumption, EpistemicCircuit, EpistemicEvidenceTerm,
-    KnowledgeCompilerAdapter,
+    AcceptedWorldViewEvidence, CircuitUpdateMode, EpistemicAssumption, EpistemicCircuit,
+    EpistemicEvidenceTerm, KnowledgeCompilerAdapter,
 };
 #[cfg(feature = "host-io")]
 use xlog_prob::epistemic_production::EpistemicProbGpuBatchExecutionEvidence;
@@ -170,25 +170,10 @@ fn public_prob_adapter_rejects_real_runtime_without_accepted_final_output_before
     };
 
     let result = execute_runtime_without_accepted_final_output(&provider);
-    let mut adapter = EpistemicProbProductionAdapter::new(GpuConfig::default());
-    let source = r#"
-0.6::base(7).
-query(base(7)).
-"#;
+    let adapter = EpistemicProbProductionAdapter::new(GpuConfig::default());
 
-    let err = match adapter.encode_source_pir_cnf_with_gpu_execution_result(
-        source,
-        &provider,
-        &result,
-        Vec::new(),
-    ) {
-        Ok(_) => {
-            panic!(
-                "runtime evidence with no accepted final rows must not gate GPU PIR/CNF encoding"
-            )
-        }
-        Err(err) => err,
-    };
+    let err = AcceptedWorldViewEvidence::from_gpu_execution_result(&provider, &result, Vec::new())
+        .expect_err("runtime evidence with no accepted final rows must fail validation");
 
     assert!(format!("{err}").contains("non-empty accepted GPU final output"));
     let trace = adapter.trace();
@@ -307,6 +292,9 @@ fn public_prob_adapter_conditions_gpu_exact_query_on_real_runtime_evidence() {
     };
 
     let result = execute_accepted_ground_literal(&provider);
+    let accepted =
+        AcceptedWorldViewEvidence::from_gpu_execution_result(&provider, &result, Vec::new())
+            .expect("validate FAEEL accepted world-view evidence");
     let mut adapter = EpistemicProbProductionAdapter::new(GpuConfig::default());
     let src = r#"
 0.6::base(7).
@@ -314,12 +302,7 @@ query(base(7)).
 "#;
 
     let exact = adapter
-        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
-            src,
-            &provider,
-            &result,
-            Vec::new(),
-        )
+        .compile_and_evaluate_conditioned_source_with_accepted_world_view(src, &accepted)
         .expect("accepted runtime evidence should condition GPU exact evaluation");
 
     assert!((prob_of(&exact, "base", &[Value::I64(7)]) - 1.0).abs() < 1e-9);
@@ -741,6 +724,9 @@ fn public_prob_adapter_conditions_gpu_exact_query_on_g91_runtime_evidence() {
     };
 
     let result = execute_accepted_g91_possible_literal(&provider);
+    let accepted =
+        AcceptedWorldViewEvidence::from_gpu_execution_result(&provider, &result, Vec::new())
+            .expect("validate G91 accepted world-view evidence");
     let mut adapter = EpistemicProbProductionAdapter::new(GpuConfig::default());
     let src = r#"
 0.3::p(7).
@@ -748,12 +734,7 @@ query(p(7)).
 "#;
 
     let exact = adapter
-        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
-            src,
-            &provider,
-            &result,
-            Vec::new(),
-        )
+        .compile_and_evaluate_conditioned_source_with_accepted_world_view(src, &accepted)
         .expect("G91 accepted runtime evidence should condition GPU exact evaluation");
 
     assert!((prob_of(&exact, "p", &[Value::I64(7)]) - 1.0).abs() < 1e-9);
@@ -1938,6 +1919,45 @@ query(dry_when_known()).
     trace
         .require_conditioned_evidence_metric_eligibility()
         .expect("parsed all-operator gradient evidence should satisfy the stricter prob gate");
+}
+
+#[test]
+#[cfg(feature = "host-io")]
+fn accepted_world_view_program_api_filters_auto_derived_evidence_by_provenance() {
+    let Some(provider) = try_provider() else {
+        return;
+    };
+
+    let result = execute_parsed_all_operator_variable_bound_evidence(&provider);
+    let accepted =
+        AcceptedWorldViewEvidence::from_gpu_execution_result(&provider, &result, Vec::new())
+            .expect("validate accepted GPU world-view evidence");
+    assert_eq!(accepted.assumption_count(), 4);
+
+    let program = parse_program(
+        r#"
+0.6::known_gate(7).
+0.5::rain().
+dry_when_known() :- known_gate(7), not rain().
+query(dry_when_known()).
+"#,
+    )
+    .expect("parse probability program");
+    let mut adapter = EpistemicProbProductionAdapter::new(GpuConfig::default());
+    let exact = adapter
+        .compile_and_evaluate_conditioned_program_with_grads_with_accepted_world_view(
+            &program, &accepted,
+        )
+        .expect("accepted-world-view API should retain only provenance-backed evidence");
+
+    let dry = grad_of(&exact, "dry_when_known", &[]);
+    assert!((dry.prob - 0.5).abs() < 1e-9);
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 1);
+    assert_eq!(trace.gpu_program_conditioned_evidence_facts, 1);
+    assert_eq!(trace.gpu_exact_program_compiles, 1);
+    assert_eq!(trace.gpu_program_conditioned_gradient_evaluations, 1);
 }
 
 #[test]

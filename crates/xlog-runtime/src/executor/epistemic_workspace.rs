@@ -689,11 +689,12 @@ impl EpistemicGpuCandidateGenerationTrace {
             });
         }
         if candidate_count > (1usize << literal_count) {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU candidate count".to_string(),
-                estimated_bytes: candidate_count as u64,
-                budget_bytes: (1usize << literal_count) as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU candidate count",
+                candidate_count as u64,
+                (1usize << literal_count) as u64,
+                "candidates",
+            ));
         }
 
         let candidate_assumption_bytes = checked_product(literal_count, candidate_count)?;
@@ -864,11 +865,12 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
         models_per_reduction: usize,
     ) -> Result<Self> {
         if output_column_count > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final-tuple output columns".to_string(),
-                estimated_bytes: output_column_count as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU final-tuple output columns",
+                output_column_count as u64,
+                u32::MAX as u64,
+                "columns",
+            ));
         }
         require_u32_launch_bound(output_row_capacity, "epistemic GPU final-tuple output rows")?;
         require_positive(literal_count, "epistemic GPU final-tuple literals")?;
@@ -889,11 +891,12 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
         let output_row_count_device_reads = checked_sum(output_column_count, 1)?;
         let kernel_launches = checked_sum(output_row_count_device_reads, 1)?;
         if kernel_launches > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final-tuple kernel launches".to_string(),
-                estimated_bytes: kernel_launches as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU final-tuple kernel launches",
+                kernel_launches as u64,
+                u32::MAX as u64,
+                "launches",
+            ));
         }
 
         Ok(Self {
@@ -931,11 +934,12 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
         negated_row_filter_count: usize,
     ) -> Result<Self> {
         if negated_row_filter_count > row_filter_count {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final-tuple negated row filters".to_string(),
-                estimated_bytes: negated_row_filter_count as u64,
-                budget_bytes: row_filter_count as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU final-tuple negated row filters",
+                negated_row_filter_count as u64,
+                row_filter_count as u64,
+                "row filters",
+            ));
         }
         self.row_filter_count = row_filter_count;
         self.negated_row_filter_count = negated_row_filter_count;
@@ -1438,11 +1442,12 @@ impl EpistemicGpuSemanticTrace {
         let candidate_count = candidate_generation.generated_candidates;
         require_positive(candidate_count, "epistemic GPU semantic-trace candidates")?;
         if candidate_count > workspace.layout.rejection_reason_slots {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU semantic-trace rejection metadata".to_string(),
-                estimated_bytes: candidate_count as u64,
-                budget_bytes: workspace.layout.rejection_reason_slots as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU semantic-trace rejection metadata",
+                candidate_count as u64,
+                workspace.layout.rejection_reason_slots as u64,
+                "rejection slots",
+            ));
         }
         if propagation.literal_count != candidate_generation.literal_count
             || model_membership.literal_count != candidate_generation.literal_count
@@ -1675,18 +1680,20 @@ impl EpistemicGpuModelMembershipTrace {
             "epistemic GPU model-membership tuple sources",
         )?;
         if tuple_source_count > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU model-membership tuple sources".to_string(),
-                estimated_bytes: tuple_source_count as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU model-membership tuple sources",
+                tuple_source_count as u64,
+                u32::MAX as u64,
+                "tuple sources",
+            ));
         }
         if tuple_source_key_column_count > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU model-membership tuple key columns".to_string(),
-                estimated_bytes: tuple_source_key_column_count as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU model-membership tuple key columns",
+                tuple_source_key_column_count as u64,
+                u32::MAX as u64,
+                "key columns",
+            ));
         }
         let model_membership_bytes_written = checked_product(
             checked_product(
@@ -3568,11 +3575,12 @@ impl Executor {
             });
         }
         if trace.candidate_assumption_bytes > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU candidate generation launch".to_string(),
-                estimated_bytes: trace.candidate_assumption_bytes as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU candidate generation launch",
+                trace.candidate_assumption_bytes as u64,
+                u32::MAX as u64,
+                "launch elements",
+            ));
         }
 
         let literal_count =
@@ -3634,29 +3642,25 @@ impl Executor {
             });
         }
         if trace.rejection_reason_slots_written > workspace.layout.rejection_reason_slots {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU propagation rejection workspace".to_string(),
-                estimated_bytes: trace.rejection_reason_slots_written as u64,
-                budget_bytes: workspace.layout.rejection_reason_slots as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU propagation rejection workspace",
+                trace.rejection_reason_slots_written as u64,
+                workspace.layout.rejection_reason_slots as u64,
+                "rejection slots",
+            ));
         }
         if literal_count > u32::MAX as usize || candidate_count > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU propagation launch".to_string(),
-                estimated_bytes: literal_count.max(candidate_count) as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU propagation launch",
+                literal_count.max(candidate_count) as u64,
+                u32::MAX as u64,
+                "launch elements",
+            ));
         }
 
         let world_stride =
             workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
-        if world_stride == 0 || world_stride > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU propagation world stride".to_string(),
-                estimated_bytes: world_stride as u64,
-                budget_bytes: u32::MAX as u64,
-            });
-        }
+        require_positive_u32_dimension(world_stride, "epistemic GPU propagation world stride")?;
         let world_view_bitset_bytes_per_candidate =
             world_view_bitset_bytes_per_candidate(literal_count)?;
         if world_view_bitset_bytes_per_candidate > world_stride {
@@ -3742,29 +3746,25 @@ impl Executor {
             });
         }
         if trace.rejection_reason_slots_written > workspace.layout.rejection_reason_slots {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU validation rejection workspace".to_string(),
-                estimated_bytes: trace.rejection_reason_slots_written as u64,
-                budget_bytes: workspace.layout.rejection_reason_slots as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU validation rejection workspace",
+                trace.rejection_reason_slots_written as u64,
+                workspace.layout.rejection_reason_slots as u64,
+                "rejection slots",
+            ));
         }
         if literal_count > u32::MAX as usize || candidate_count > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU validation launch".to_string(),
-                estimated_bytes: literal_count.max(candidate_count) as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU validation launch",
+                literal_count.max(candidate_count) as u64,
+                u32::MAX as u64,
+                "launch elements",
+            ));
         }
 
         let world_stride =
             workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
-        if world_stride == 0 || world_stride > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU validation world stride".to_string(),
-                estimated_bytes: world_stride as u64,
-                budget_bytes: u32::MAX as u64,
-            });
-        }
+        require_positive_u32_dimension(world_stride, "epistemic GPU validation world stride")?;
         let world_view_bitset_bytes_per_candidate =
             world_view_bitset_bytes_per_candidate(literal_count)?;
         if world_view_bitset_bytes_per_candidate > world_stride {
@@ -3872,43 +3872,43 @@ impl Executor {
             });
         }
         if trace.rejection_reason_slots_checked > workspace.layout.rejection_reason_slots {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU model-membership rejection workspace".to_string(),
-                estimated_bytes: trace.rejection_reason_slots_checked as u64,
-                budget_bytes: workspace.layout.rejection_reason_slots as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU model-membership rejection workspace",
+                trace.rejection_reason_slots_checked as u64,
+                workspace.layout.rejection_reason_slots as u64,
+                "rejection slots",
+            ));
         }
         if trace.model_membership_bytes_written > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU model-membership launch".to_string(),
-                estimated_bytes: trace.model_membership_bytes_written as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU model-membership launch",
+                trace.model_membership_bytes_written as u64,
+                u32::MAX as u64,
+                "launch elements",
+            ));
         }
         if literal_count > u32::MAX as usize
             || candidate_count > u32::MAX as usize
             || reduction_count > u32::MAX as usize
             || models_per_reduction > u32::MAX as usize
         {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU model-membership dimensions".to_string(),
-                estimated_bytes: literal_count
+            return Err(capacity_exceeded(
+                "epistemic GPU model-membership dimensions",
+                literal_count
                     .max(candidate_count)
                     .max(reduction_count)
                     .max(models_per_reduction) as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+                u32::MAX as u64,
+                "dimension elements",
+            ));
         }
 
         let world_stride =
             workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
-        if world_stride == 0 || world_stride > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU model-membership world stride".to_string(),
-                estimated_bytes: world_stride as u64,
-                budget_bytes: u32::MAX as u64,
-            });
-        }
+        require_positive_u32_dimension(
+            world_stride,
+            "epistemic GPU model-membership world stride",
+        )?;
 
         let literal_count = literal_count as u32;
         let candidate_count = candidate_count as u32;
@@ -4006,51 +4006,52 @@ impl Executor {
             });
         }
         if trace.rejection_reason_slots_checked > workspace.layout.rejection_reason_slots {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU model-membership rejection workspace".to_string(),
-                estimated_bytes: trace.rejection_reason_slots_checked as u64,
-                budget_bytes: workspace.layout.rejection_reason_slots as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU model-membership rejection workspace",
+                trace.rejection_reason_slots_checked as u64,
+                workspace.layout.rejection_reason_slots as u64,
+                "rejection slots",
+            ));
         }
         if trace.model_membership_bytes_written > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU model-membership launch".to_string(),
-                estimated_bytes: trace.model_membership_bytes_written as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU model-membership launch",
+                trace.model_membership_bytes_written as u64,
+                u32::MAX as u64,
+                "launch elements",
+            ));
         }
         if literal_count > u32::MAX as usize
             || candidate_count > u32::MAX as usize
             || reduction_count > u32::MAX as usize
             || models_per_reduction > u32::MAX as usize
         {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU model-membership dimensions".to_string(),
-                estimated_bytes: literal_count
+            return Err(capacity_exceeded(
+                "epistemic GPU model-membership dimensions",
+                literal_count
                     .max(candidate_count)
                     .max(reduction_count)
                     .max(models_per_reduction) as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+                u32::MAX as u64,
+                "dimension elements",
+            ));
         }
 
         let world_stride =
             workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
-        if world_stride == 0 || world_stride > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU model-membership world stride".to_string(),
-                estimated_bytes: world_stride as u64,
-                budget_bytes: u32::MAX as u64,
-            });
-        }
+        require_positive_u32_dimension(
+            world_stride,
+            "epistemic GPU model-membership world stride",
+        )?;
 
         let per_binding_launch_elems = checked_product(candidate_count, models_per_reduction)?;
         if per_binding_launch_elems > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU model-membership tuple-source launch".to_string(),
-                estimated_bytes: per_binding_launch_elems as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU model-membership tuple-source launch",
+                per_binding_launch_elems as u64,
+                u32::MAX as u64,
+                "launch elements",
+            ));
         }
 
         let mut tuple_sources = Vec::with_capacity(gpu_plan.tuple_membership_bindings.len());
@@ -4120,11 +4121,12 @@ impl Executor {
                     let key_col0_expectation =
                         TupleKeyExpectation::from_term(&binding.key_terms[0], key_col0_type)?;
                     if key_col0_width > u32::MAX as usize {
-                        return Err(XlogError::ResourceExhausted {
-                            context: "epistemic GPU tuple-key column width".to_string(),
-                            estimated_bytes: key_col0_width as u64,
-                            budget_bytes: u32::MAX as u64,
-                        });
+                        return Err(capacity_exceeded(
+                            "epistemic GPU tuple-key column width",
+                            key_col0_width as u64,
+                            u32::MAX as u64,
+                            "bytes per column",
+                        ));
                     }
                     tuple_sources.push(TupleSourceLaunch::ArityOne {
                         literal_index: binding.literal_index as u32,
@@ -4188,11 +4190,12 @@ impl Executor {
                         TupleKeyExpectation::from_term(&binding.key_terms[1], key_col1_type)?;
                     let max_width = key_col0_width.max(key_col1_width);
                     if max_width > u32::MAX as usize {
-                        return Err(XlogError::ResourceExhausted {
-                            context: "epistemic GPU tuple-key column width".to_string(),
-                            estimated_bytes: max_width as u64,
-                            budget_bytes: u32::MAX as u64,
-                        });
+                        return Err(capacity_exceeded(
+                            "epistemic GPU tuple-key column width",
+                            max_width as u64,
+                            u32::MAX as u64,
+                            "bytes per column",
+                        ));
                     }
                     tuple_sources.push(TupleSourceLaunch::ArityTwo {
                         literal_index: binding.literal_index as u32,
@@ -4284,11 +4287,12 @@ impl Executor {
                         TupleKeyExpectation::from_term(&binding.key_terms[2], key_col2_type)?;
                     let max_width = key_col0_width.max(key_col1_width).max(key_col2_width);
                     if max_width > u32::MAX as usize {
-                        return Err(XlogError::ResourceExhausted {
-                            context: "epistemic GPU tuple-key column width".to_string(),
-                            estimated_bytes: max_width as u64,
-                            budget_bytes: u32::MAX as u64,
-                        });
+                        return Err(capacity_exceeded(
+                            "epistemic GPU tuple-key column width",
+                            max_width as u64,
+                            u32::MAX as u64,
+                            "bytes per column",
+                        ));
                     }
                     tuple_sources.push(TupleSourceLaunch::ArityThree {
                         literal_index: binding.literal_index as u32,
@@ -4311,11 +4315,12 @@ impl Executor {
                 }
                 key_columns => {
                     if key_columns.len() > u32::MAX as usize {
-                        return Err(XlogError::ResourceExhausted {
-                            context: "epistemic GPU tuple-key arity".to_string(),
-                            estimated_bytes: key_columns.len() as u64,
-                            budget_bytes: u32::MAX as u64,
-                        });
+                        return Err(capacity_exceeded(
+                            "epistemic GPU tuple-key arity",
+                            key_columns.len() as u64,
+                            u32::MAX as u64,
+                            "key columns",
+                        ));
                     }
 
                     let mut key_col_ptrs_host = Vec::with_capacity(key_columns.len());
@@ -4349,11 +4354,12 @@ impl Executor {
                             })?;
                         let key_col_width = key_col_type.size_bytes();
                         if key_col_width > u32::MAX as usize {
-                            return Err(XlogError::ResourceExhausted {
-                                context: "epistemic GPU tuple-key column width".to_string(),
-                                estimated_bytes: key_col_width as u64,
-                                budget_bytes: u32::MAX as u64,
-                            });
+                            return Err(capacity_exceeded(
+                                "epistemic GPU tuple-key column width",
+                                key_col_width as u64,
+                                u32::MAX as u64,
+                                "bytes per column",
+                            ));
                         }
 
                         key_col_ptrs_host.push(*key_col_ref.device_ptr());
@@ -4405,12 +4411,12 @@ impl Executor {
                                 }
                                 let bound_col_width = bound_col_type.size_bytes();
                                 if bound_col_width > u32::MAX as usize {
-                                    return Err(XlogError::ResourceExhausted {
-                                        context: "epistemic GPU bound tuple-key column width"
-                                            .to_string(),
-                                        estimated_bytes: bound_col_width as u64,
-                                        budget_bytes: u32::MAX as u64,
-                                    });
+                                    return Err(capacity_exceeded(
+                                        "epistemic GPU bound tuple-key column width",
+                                        bound_col_width as u64,
+                                        u32::MAX as u64,
+                                        "bytes per column",
+                                    ));
                                 }
 
                                 expected_key_bits_host.push(0);
@@ -4881,32 +4887,35 @@ impl Executor {
             });
         }
         if trace.rejection_reason_slots_written > workspace.layout.rejection_reason_slots {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU world-view validation rejection workspace".to_string(),
-                estimated_bytes: trace.rejection_reason_slots_written as u64,
-                budget_bytes: workspace.layout.rejection_reason_slots as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU world-view validation rejection workspace",
+                trace.rejection_reason_slots_written as u64,
+                workspace.layout.rejection_reason_slots as u64,
+                "rejection slots",
+            ));
         }
         if trace.model_membership_bytes_checked > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU world-view validation membership launch".to_string(),
-                estimated_bytes: trace.model_membership_bytes_checked as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU world-view validation membership launch",
+                trace.model_membership_bytes_checked as u64,
+                u32::MAX as u64,
+                "launch elements",
+            ));
         }
         if literal_count > u32::MAX as usize
             || candidate_count > u32::MAX as usize
             || reduction_count > u32::MAX as usize
             || models_per_reduction > u32::MAX as usize
         {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU world-view validation dimensions".to_string(),
-                estimated_bytes: literal_count
+            return Err(capacity_exceeded(
+                "epistemic GPU world-view validation dimensions",
+                literal_count
                     .max(candidate_count)
                     .max(reduction_count)
                     .max(models_per_reduction) as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+                u32::MAX as u64,
+                "dimension elements",
+            ));
         }
 
         let mut literal_op_codes_host = vec![0u8; literal_count];
@@ -4970,13 +4979,10 @@ impl Executor {
 
         let world_stride =
             workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
-        if world_stride == 0 || world_stride > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU world-view validation world stride".to_string(),
-                estimated_bytes: world_stride as u64,
-                budget_bytes: u32::MAX as u64,
-            });
-        }
+        require_positive_u32_dimension(
+            world_stride,
+            "epistemic GPU world-view validation world stride",
+        )?;
 
         let literal_count = literal_count as u32;
         let candidate_count = candidate_count as u32;
@@ -5052,11 +5058,12 @@ impl Executor {
         // launch-metadata channel (like the CSR buffers below), so it adds no
         // tracked data-plane host-to-device transfer and keeps `host_write_ops` at zero.
         if candidate_count > workspace.layout.rejection_reason_slots {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU constraint-violation index workspace".to_string(),
-                estimated_bytes: candidate_count as u64,
-                budget_bytes: workspace.layout.rejection_reason_slots as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU constraint-violation index workspace",
+                candidate_count as u64,
+                workspace.layout.rejection_reason_slots as u64,
+                "candidate slots",
+            ));
         }
         if candidate_count > 0 {
             let sentinel_host = vec![u32::MAX; candidate_count];
@@ -5103,25 +5110,27 @@ impl Executor {
         }
 
         if candidate_count > workspace.layout.rejection_reason_slots {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU world-view constraint rejection workspace".to_string(),
-                estimated_bytes: candidate_count as u64,
-                budget_bytes: workspace.layout.rejection_reason_slots as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU world-view constraint rejection workspace",
+                candidate_count as u64,
+                workspace.layout.rejection_reason_slots as u64,
+                "rejection slots",
+            ));
         }
         if candidate_count > u32::MAX as usize
             || literal_count > u32::MAX as usize
             || constraint_count > u32::MAX as usize
             || constraint_literal_refs > u32::MAX as usize
         {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU world-view constraint dimensions".to_string(),
-                estimated_bytes: candidate_count
+            return Err(capacity_exceeded(
+                "epistemic GPU world-view constraint dimensions",
+                candidate_count
                     .max(literal_count)
                     .max(constraint_count)
                     .max(constraint_literal_refs) as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+                u32::MAX as u64,
+                "dimension elements",
+            ));
         }
 
         let memory = self.provider.memory();
@@ -5220,29 +5229,25 @@ impl Executor {
             });
         }
         if candidate_count > workspace.layout.rejection_reason_slots {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU materialization rejection workspace".to_string(),
-                estimated_bytes: candidate_count as u64,
-                budget_bytes: workspace.layout.rejection_reason_slots as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU materialization rejection workspace",
+                candidate_count as u64,
+                workspace.layout.rejection_reason_slots as u64,
+                "rejection slots",
+            ));
         }
         if candidate_count > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU materialization launch".to_string(),
-                estimated_bytes: candidate_count as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU materialization launch",
+                candidate_count as u64,
+                u32::MAX as u64,
+                "candidates",
+            ));
         }
 
         let world_stride =
             workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
-        if world_stride == 0 || world_stride > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU materialization world stride".to_string(),
-                estimated_bytes: world_stride as u64,
-                budget_bytes: u32::MAX as u64,
-            });
-        }
+        require_positive_u32_dimension(world_stride, "epistemic GPU materialization world stride")?;
 
         let candidate_count = candidate_count as u32;
         let world_stride = world_stride as u32;
@@ -5297,29 +5302,25 @@ impl Executor {
             });
         }
         if candidate_count > workspace.layout.rejection_reason_slots {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final-result rejection workspace".to_string(),
-                estimated_bytes: candidate_count as u64,
-                budget_bytes: workspace.layout.rejection_reason_slots as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU final-result rejection workspace",
+                candidate_count as u64,
+                workspace.layout.rejection_reason_slots as u64,
+                "rejection slots",
+            ));
         }
         if candidate_count > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final-result launch".to_string(),
-                estimated_bytes: candidate_count as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU final-result launch",
+                candidate_count as u64,
+                u32::MAX as u64,
+                "candidates",
+            ));
         }
 
         let world_stride =
             workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
-        if world_stride == 0 || world_stride > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final-result world stride".to_string(),
-                estimated_bytes: world_stride as u64,
-                budget_bytes: u32::MAX as u64,
-            });
-        }
+        require_positive_u32_dimension(world_stride, "epistemic GPU final-result world stride")?;
 
         let candidate_count = candidate_count as u32;
         let world_stride = world_stride as u32;
@@ -5411,11 +5412,12 @@ impl Executor {
     ) -> Result<(CudaBuffer, EpistemicGpuFinalTupleMaterializationTrace)> {
         gpu_plan.validate_tuple_membership_bindings()?;
         if candidate_count > workspace.layout.rejection_reason_slots {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final-tuple rejection workspace".to_string(),
-                estimated_bytes: candidate_count as u64,
-                budget_bytes: workspace.layout.rejection_reason_slots as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU final-tuple rejection workspace",
+                candidate_count as u64,
+                workspace.layout.rejection_reason_slots as u64,
+                "candidate slots",
+            ));
         }
         let literal_count_u32 =
             checked_u32_dimension(literal_count, "epistemic GPU final-tuple literals")?;
@@ -5427,12 +5429,14 @@ impl Executor {
             models_per_reduction,
             "epistemic GPU final-tuple models per reduction",
         )?;
-        let output_row_capacity =
-            usize::try_from(output.num_rows()).map_err(|_| XlogError::ResourceExhausted {
-                context: "epistemic GPU final-tuple output rows".to_string(),
-                estimated_bytes: output.num_rows(),
-                budget_bytes: usize::MAX as u64,
-            })?;
+        let output_row_capacity = usize::try_from(output.num_rows()).map_err(|_| {
+            capacity_exceeded(
+                "epistemic GPU final-tuple output rows",
+                output.num_rows(),
+                usize::MAX as u64,
+                "rows",
+            )
+        })?;
         let output_row_capacity_u32 =
             checked_u32_dimension(output_row_capacity, "epistemic GPU final-tuple output rows")?;
         let final_output_columns =
@@ -5500,11 +5504,12 @@ impl Executor {
             })
             .collect();
         if row_filter_bindings.len() > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final tuple row-filter count".to_string(),
-                estimated_bytes: row_filter_bindings.len() as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU final tuple row-filter count",
+                row_filter_bindings.len() as u64,
+                u32::MAX as u64,
+                "filters",
+            ));
         }
         let negated_row_filter_count = row_filter_bindings
             .iter()
@@ -5535,22 +5540,17 @@ impl Executor {
             });
         }
         if trace.model_membership_bytes_checked > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final-tuple membership launch".to_string(),
-                estimated_bytes: trace.model_membership_bytes_checked as u64,
-                budget_bytes: u32::MAX as u64,
-            });
+            return Err(capacity_exceeded(
+                "epistemic GPU final-tuple membership launch",
+                trace.model_membership_bytes_checked as u64,
+                u32::MAX as u64,
+                "byte launch elements",
+            ));
         }
 
         let world_stride =
             workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
-        if world_stride == 0 || world_stride > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final-tuple world stride".to_string(),
-                estimated_bytes: world_stride as u64,
-                budget_bytes: u32::MAX as u64,
-            });
-        }
+        require_positive_u32_dimension(world_stride, "epistemic GPU final-tuple world stride")?;
         let world_stride =
             checked_u32_dimension(world_stride, "epistemic GPU final-tuple world stride")?;
         let mut metadata_len = 0usize;
@@ -5649,11 +5649,12 @@ impl Executor {
                             })?;
                     let key_col_width = key_col_type.size_bytes();
                     if key_col_width > u32::MAX as usize {
-                        return Err(XlogError::ResourceExhausted {
-                            context: "epistemic GPU final tuple row-filter key width".to_string(),
-                            estimated_bytes: key_col_width as u64,
-                            budget_bytes: u32::MAX as u64,
-                        });
+                        return Err(capacity_exceeded(
+                            "epistemic GPU final tuple row-filter key width",
+                            key_col_width as u64,
+                            u32::MAX as u64,
+                            "bytes per column",
+                        ));
                     }
 
                     key_col_ptrs_host.push(*key_col_ref.device_ptr());
@@ -5704,12 +5705,12 @@ impl Executor {
                             }
                             let bound_col_width = bound_col_type.size_bytes();
                             if bound_col_width > u32::MAX as usize {
-                                return Err(XlogError::ResourceExhausted {
-                                    context: "epistemic GPU final tuple row-filter bound width"
-                                        .to_string(),
-                                    estimated_bytes: bound_col_width as u64,
-                                    budget_bytes: u32::MAX as u64,
-                                });
+                                return Err(capacity_exceeded(
+                                    "epistemic GPU final tuple row-filter bound width",
+                                    bound_col_width as u64,
+                                    u32::MAX as u64,
+                                    "bytes per column",
+                                ));
                             }
                             expected_key_bits_host.push(0);
                             expected_key_type_codes_host.push(key_col_type.to_code());
@@ -6685,21 +6686,35 @@ fn count_helper_relation_leaf_scans(node: &RirNode, helper_relations: &BTreeSet<
 
 fn require_positive(value: usize, context: &str) -> Result<()> {
     if value == 0 {
-        return Err(XlogError::ResourceExhausted {
-            context: context.to_string(),
-            estimated_bytes: 0,
-            budget_bytes: 1,
-        });
+        return Err(capacity_exceeded(context, 1, 0, "items"));
     }
     Ok(())
 }
 
 fn checked_u32_dimension(value: usize, context: &str) -> Result<u32> {
-    u32::try_from(value).map_err(|_| XlogError::ResourceExhausted {
-        context: context.to_string(),
-        estimated_bytes: value as u64,
-        budget_bytes: u32::MAX as u64,
-    })
+    u32::try_from(value)
+        .map_err(|_| capacity_exceeded(context, value as u64, u32::MAX as u64, "elements"))
+}
+
+fn require_positive_u32_dimension(value: usize, context: &str) -> Result<()> {
+    if value == 0 {
+        return Err(capacity_exceeded(context, 1, 0, "elements"));
+    }
+    checked_u32_dimension(value, context).map(|_| ())
+}
+
+fn capacity_exceeded(
+    context: impl Into<String>,
+    required: u64,
+    limit: u64,
+    unit: &'static str,
+) -> XlogError {
+    XlogError::CapacityExceeded {
+        context: context.into(),
+        required,
+        limit,
+        unit: unit.to_string(),
+    }
 }
 
 /// Map each distinct epistemic output head to the reduction indices feeding it.
@@ -6890,11 +6905,12 @@ fn bounded_candidate_count(literal_count: usize, max_candidates: usize) -> Resul
     }
     let required_candidates = 1usize << literal_count;
     if max_candidates < required_candidates {
-        return Err(XlogError::ResourceExhausted {
-            context: "epistemic GPU execution candidate capacity".to_string(),
-            estimated_bytes: required_candidates as u64,
-            budget_bytes: max_candidates as u64,
-        });
+        return Err(capacity_exceeded(
+            "epistemic GPU execution candidate capacity",
+            required_candidates as u64,
+            max_candidates as u64,
+            "candidates",
+        ));
     }
     Ok(required_candidates)
 }

@@ -239,7 +239,8 @@ pub struct McResidentResult {
     /// kernel (device-resident).
     pub sparse_offsets: TrackedCudaSlice<u32>,
     /// Per-world resident status flags, populated by the resident kernel:
-    /// `[converged_flags; sparse_overflow_flags; block_participation; scratch...]`.
+    /// `[postflight_summary(3); converged_flags; sparse_overflow_flags;
+    /// block_participation; changed_flags; global_continue]`.
     pub resident_status_flags: TrackedCudaSlice<u32>,
     pub total_samples: usize,
     pub seed: u64,
@@ -268,6 +269,57 @@ pub struct ResidentPlan {
     num_ads: u32,
     pub num_vars: usize,
     bernoulli_probs: Vec<f32>,
+}
+
+const RESIDENT_POSTFLIGHT_WORDS: usize = 3;
+const RESIDENT_WORLD_STATUS_SECTIONS: usize = 4;
+const RESIDENT_CONTROL_WORDS: usize = 1;
+
+fn resident_status_words(num_worlds: u32) -> usize {
+    (num_worlds as usize)
+        .saturating_mul(RESIDENT_WORLD_STATUS_SECTIONS)
+        .saturating_add(RESIDENT_POSTFLIGHT_WORDS)
+        .saturating_add(RESIDENT_CONTROL_WORDS)
+        .max(1)
+}
+
+fn validate_resident_postflight(
+    summary: &[u32],
+    total_worlds: u32,
+    iteration_limit: u32,
+    sparse_cap: usize,
+) -> Result<()> {
+    let [unconverged_worlds, overflowed_worlds, minimum_required_sparse_rows] = summary else {
+        return Err(XlogError::Kernel(format!(
+            "resident postflight summary length {}, expected {}",
+            summary.len(),
+            RESIDENT_POSTFLIGHT_WORDS
+        )));
+    };
+
+    if *overflowed_worlds > 0 {
+        let minimum_required = sparse_cap.saturating_add(1) as u64;
+        return Err(XlogError::CapacityExceeded {
+            context: format!(
+                "resident Monte Carlo sparse relation arena ({} of {} worlds overflowed)",
+                overflowed_worlds, total_worlds
+            ),
+            required: u64::from(*minimum_required_sparse_rows).max(minimum_required),
+            limit: sparse_cap as u64,
+            unit: "rows per world".to_string(),
+        });
+    }
+
+    if *unconverged_worlds > 0 {
+        return Err(XlogError::ConvergenceFailure {
+            context: "resident Monte Carlo fixpoint".to_string(),
+            unconverged_worlds: u64::from(*unconverged_worlds),
+            total_worlds: u64::from(total_worlds),
+            iteration_limit: u64::from(iteration_limit),
+        });
+    }
+
+    Ok(())
 }
 
 fn resident_memory_budget_bytes() -> Result<Option<u64>> {
@@ -346,7 +398,7 @@ fn estimate_resident_bound_bytes(plan: &ResidentPlan, num_worlds: u32) -> u64 {
         .saturating_add(sat_mul(sat_mul(worlds, 2), 4))
         .saturating_add(sat_mul(worlds, 4))
         .saturating_add(sat_mul(worlds.saturating_add(1), 4))
-        .saturating_add(sat_mul(worlds.saturating_mul(4).saturating_add(1), 4))
+        .saturating_add(sat_mul(worlds.saturating_mul(4).saturating_add(4), 4))
         .saturating_add(sat_mul(meta_words as u64, 4))
         .saturating_add(sat_mul(plan.q_slot.len().max(1) as u64, 4))
         .saturating_add(4)
@@ -834,7 +886,8 @@ impl McProgram {
     ) -> Result<McResidentResult> {
         cfg.validate()?;
         let plan = compile_resident_plan(self).map_err(ResidentRejection::into_error)?;
-        run_resident(&plan, &cfg, self, provider)
+        let sparse_cap = plan.universe_size.max(1) as usize;
+        run_resident(&plan, &cfg, self, provider, sparse_cap)
     }
 
     /// Convenience: evaluate with a fresh provider.
@@ -849,6 +902,7 @@ fn run_resident(
     cfg: &McEvalConfig,
     mc: &McProgram,
     provider: Arc<CudaKernelProvider>,
+    sparse_cap: usize,
 ) -> Result<McResidentResult> {
     let (method, forcing) = mc.resolve_sampling_method(cfg.sampling_method)?;
     let num_worlds = u32::try_from(cfg.samples)
@@ -913,10 +967,17 @@ fn run_resident(
         .memset_zeros(&mut d_rel)
         .map_err(|e| XlogError::Kernel(format!("zero rel: {e}")))?;
 
-    // Sparse world-segmented columnar relation arena. Capacity is the static
-    // universe bound per world/buffer; row counts and offsets remain device
-    // resident and are populated by the resident kernel.
-    let sparse_cap = u.max(1);
+    // Sparse world-segmented columnar relation arena. Production capacity is
+    // the static universe bound per world/buffer; the explicit parameter keeps
+    // the capacity invariant testable without changing the public API.
+    if sparse_cap == 0 {
+        return Err(XlogError::CapacityExceeded {
+            context: "resident Monte Carlo sparse relation arena".to_string(),
+            required: 1,
+            limit: 0,
+            unit: "rows per world".to_string(),
+        });
+    }
     let sparse_len = (num_worlds as usize)
         .saturating_mul(2)
         .saturating_mul(sparse_cap)
@@ -934,12 +995,9 @@ fn run_resident(
     let mut d_sparse_offsets = provider
         .memory()
         .alloc::<u32>((num_worlds as usize).saturating_add(1).max(1))?;
-    let mut d_resident_status_flags = provider.memory().alloc::<u32>(
-        (num_worlds as usize)
-            .saturating_mul(4)
-            .saturating_add(1)
-            .max(1),
-    )?;
+    let mut d_resident_status_flags = provider
+        .memory()
+        .alloc::<u32>(resident_status_words(num_worlds))?;
     dev.inner()
         .memset_zeros(&mut d_sparse_columns)
         .map_err(|e| XlogError::Kernel(format!("zero sparse_columns: {e}")))?;
@@ -1099,6 +1157,13 @@ fn run_resident(
         per_sample_host_launches: 0,
     };
 
+    // Authoritative device-written status is read only after the measured
+    // zero-host region. Invalid worlds were excluded from device-side counts;
+    // no result may escape until this bounded metadata check succeeds.
+    let postflight = provider
+        .dtoh_small_metadata_untracked(&d_resident_status_flags, RESIDENT_POSTFLIGHT_WORDS)?;
+    validate_resident_postflight(&postflight, num_worlds, plan.max_iters, sparse_cap)?;
+
     Ok(McResidentResult {
         query_counts: d_query_counts,
         evidence_count: d_evidence_count,
@@ -1132,5 +1197,98 @@ mod tests {
 
         assert_eq!(plan.ev_slot.len(), 1);
         assert_eq!(plan.ev_expected, [1]);
+    }
+
+    #[test]
+    fn resident_postflight_rejects_unconverged_worlds() {
+        let err = validate_resident_postflight(&[3, 0, 0], 128, 7, 64)
+            .expect_err("unconverged worlds must reject the result");
+        assert!(matches!(
+            err,
+            XlogError::ConvergenceFailure {
+                unconverged_worlds: 3,
+                total_worlds: 128,
+                iteration_limit: 7,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resident_postflight_rejects_sparse_capacity_overflow() {
+        let err = validate_resident_postflight(&[0, 2, 65], 128, 7, 64)
+            .expect_err("overflowed worlds must reject the result");
+        assert!(matches!(
+            err,
+            XlogError::CapacityExceeded {
+                required: 65,
+                limit: 64,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn resident_kernel_nonconvergence_is_authoritative() {
+        let program = McProgram::compile_source(
+            "start().\n\
+             first() :- start().\n\
+             second() :- first().\n\
+             query(second()).\n",
+        )
+        .expect("compile recursive chain");
+        let mut plan = compile_resident_plan(&program).expect("compile resident plan");
+        plan.max_iters = 1;
+        let cfg = McEvalConfig {
+            samples: 8,
+            ..McEvalConfig::default()
+        };
+        let provider = Arc::new(program.provider().expect("CUDA provider"));
+        let sparse_cap = plan.universe_size.max(1) as usize;
+
+        let err = match run_resident(&plan, &cfg, &program, provider, sparse_cap) {
+            Ok(_) => panic!("unconverged resident run returned counts"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            XlogError::ConvergenceFailure {
+                unconverged_worlds: 8,
+                total_worlds: 8,
+                iteration_limit: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn resident_kernel_sparse_overflow_is_authoritative() {
+        let program = McProgram::compile_source(
+            "first().\n\
+             second().\n\
+             query(first()).\n",
+        )
+        .expect("compile two-fact program");
+        let plan = compile_resident_plan(&program).expect("compile resident plan");
+        let cfg = McEvalConfig {
+            samples: 8,
+            ..McEvalConfig::default()
+        };
+        let provider = Arc::new(program.provider().expect("CUDA provider"));
+
+        let err = match run_resident(&plan, &cfg, &program, provider, 1) {
+            Ok(_) => panic!("overflowed resident run returned counts"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            XlogError::CapacityExceeded {
+                required: 2,
+                limit: 1,
+                ..
+            }
+        ));
     }
 }

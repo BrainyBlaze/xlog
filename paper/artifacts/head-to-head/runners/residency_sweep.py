@@ -1,10 +1,16 @@
-"""CRIT-2 residency ablation — instrumented, hang-visible version.
+"""Residency ablation with visible progress for potentially blocking runs.
 
 Prints a BEGIN line before every potentially-blocking run so a stall is
 localized. Output goes straight to stdout (run with `python -u` -> file, no
 grep pipe). Per-run errors are caught so one bad config can't wedge the sweep.
 """
-import os, sys, time, json, statistics as st, torch, pyxlog
+
+import os
+import time
+import json
+import statistics as st
+import torch
+import pyxlog
 
 print("BOOT cuda=%s" % torch.cuda.is_available(), flush=True)
 
@@ -20,8 +26,10 @@ class Net(torch.nn.Module):
 
 def make_src(L):
     labels = "[" + ",".join(str(i) for i in range(L)) + "]"
-    return (f"nn(net, [X], Y, {labels}) :: digit(X, Y).\n"
-            "addition(I, J, S) :- digit(I, A), digit(J, B), S is A + B.\n")
+    return (
+        f"nn(net, [X], Y, {labels}) :: digit(X, Y).\n"
+        "addition(I, J, S) :- digit(I, A), digit(J, B), S is A + B.\n"
+    )
 
 
 def run(L, force, seed, iters=40):
@@ -61,10 +69,14 @@ for L in (4, 10):
     off_m, on_m = st.mean(offs), st.mean(ons)
     row = {
         "labels": L,
-        "off_ms_mean": round(off_m, 4), "off_ms_std": round(st.pstdev(offs), 4),
-        "on_ms_mean": round(on_m, 4), "on_ms_std": round(st.pstdev(ons), 4),
+        "off_ms_mean": round(off_m, 4),
+        "off_ms_std": round(st.pstdev(offs), 4),
+        "on_ms_mean": round(on_m, 4),
+        "on_ms_std": round(st.pstdev(ons), 4),
         "roundtrip_ms": round(on_m - off_m, 4),
-        "residency_overhead_pct": round(100 * (on_m - off_m) / off_m, 1) if off_m > 0 else None,
+        "residency_overhead_pct": round(100 * (on_m - off_m) / off_m, 1)
+        if off_m > 0
+        else None,
     }
     rows.append(row)
     print("ROW " + json.dumps(row), flush=True)
