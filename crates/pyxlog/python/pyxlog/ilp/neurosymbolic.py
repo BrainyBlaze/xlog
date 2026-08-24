@@ -160,6 +160,39 @@ class NeuroSymbolicTrainingResult:
     candidate_train_fit: dict[str, float] | None = None
 
 
+def _restore_callers_torch_runtime_settings(function):
+    """Keep temporary deterministic-training settings local to one call."""
+    from functools import wraps
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        import torch
+
+        deterministic_enabled = torch.are_deterministic_algorithms_enabled()
+        deterministic_warn_only = (
+            torch.is_deterministic_algorithms_warn_only_enabled()
+        )
+        matmul_precision = (
+            torch.get_float32_matmul_precision()
+            if hasattr(torch, "get_float32_matmul_precision")
+            else None
+        )
+        cudnn_benchmark = torch.backends.cudnn.benchmark
+        try:
+            return function(*args, **kwargs)
+        finally:
+            torch.use_deterministic_algorithms(
+                deterministic_enabled,
+                warn_only=deterministic_warn_only,
+            )
+            if matmul_precision is not None:
+                torch.set_float32_matmul_precision(matmul_precision)
+            torch.backends.cudnn.benchmark = cudnn_benchmark
+
+    return wrapped
+
+
+@_restore_callers_torch_runtime_settings
 def train_neurosymbolic_program(
     source: str,
     *,

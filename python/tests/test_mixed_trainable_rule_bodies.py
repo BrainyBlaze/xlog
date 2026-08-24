@@ -293,6 +293,76 @@ JOINT_MIXTURE_SOURCE = """
 
 
 @requires_cuda
+def test_joint_training_restores_callers_torch_runtime_settings() -> None:
+    examples = [
+        {
+            "inputs": torch.zeros((4, 1), dtype=torch.float32),
+            "targets": torch.tensor([1.0, 0.0, 1.0, 0.0], dtype=torch.float32),
+        }
+    ]
+    previous_deterministic = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    previous_precision = torch.get_float32_matmul_precision()
+    previous_benchmark = torch.backends.cudnn.benchmark
+    try:
+        torch.use_deterministic_algorithms(False)
+        torch.set_float32_matmul_precision("highest")
+        torch.backends.cudnn.benchmark = True
+
+        train_neurosymbolic_program(
+            JOINT_MIXTURE_SOURCE.replace("(i64)", "(u64)"),
+            networks={},
+            examples=examples,
+            config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.1),
+        )
+
+        assert not torch.are_deterministic_algorithms_enabled()
+        assert torch.get_float32_matmul_precision() == "highest"
+        assert torch.backends.cudnn.benchmark is True
+    finally:
+        torch.use_deterministic_algorithms(
+            previous_deterministic,
+            warn_only=previous_warn_only,
+        )
+        torch.set_float32_matmul_precision(previous_precision)
+        torch.backends.cudnn.benchmark = previous_benchmark
+
+
+@requires_cuda
+def test_joint_training_restores_callers_settings_after_failure() -> None:
+    previous_deterministic = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    previous_precision = torch.get_float32_matmul_precision()
+    previous_benchmark = torch.backends.cudnn.benchmark
+    try:
+        torch.use_deterministic_algorithms(False)
+        torch.set_float32_matmul_precision("highest")
+        torch.backends.cudnn.benchmark = True
+
+        with pytest.raises(ValueError, match="unsupported training objective"):
+            train_neurosymbolic_program(
+                JOINT_MIXTURE_SOURCE.replace(
+                    "binary_cross_entropy",
+                    "unsupported_objective",
+                ),
+                networks={},
+                examples=[{"targets": torch.ones(1)}],
+                config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.1),
+            )
+
+        assert not torch.are_deterministic_algorithms_enabled()
+        assert torch.get_float32_matmul_precision() == "highest"
+        assert torch.backends.cudnn.benchmark is True
+    finally:
+        torch.use_deterministic_algorithms(
+            previous_deterministic,
+            warn_only=previous_warn_only,
+        )
+        torch.set_float32_matmul_precision(previous_precision)
+        torch.backends.cudnn.benchmark = previous_benchmark
+
+
+@requires_cuda
 def test_joint_multi_rule_same_head_mixture_selects_correct_candidate() -> None:
     """Multi-rule same-head acceptance gate: when N trainable rules derive ONE head
     (multi-rule same-head — previously rejected with 'expected exactly 1 matching
