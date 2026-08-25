@@ -17,6 +17,7 @@ xlog-ir.workspace = true
 xlog-cuda.workspace = true
 xlog-stats.workspace = true
 xlog-logic = { workspace = true, optional = true }
+serde_json.workspace = true
 
 [dev-dependencies]
 

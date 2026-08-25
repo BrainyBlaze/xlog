@@ -231,82 +231,98 @@ impl ExecutionStats {
 
     /// Format stats as JSON string
     pub fn format_json(&self) -> String {
-        let total_ms = self.total_duration_us / 1000;
-        let strata_json: Vec<String> = self.strata.iter().map(|s| {
-            let ops_json: Vec<String> = s.op_summary().iter().map(|(name, (count, duration))| {
-                format!(
-                    r#"{{"op":"{}","calls":{},"duration_ms":{}}}"#,
-                    name, count, duration / 1000
-                )
-            }).collect();
-            format!(
-                r#"{{"stratum":{},"rules":{},"recursive":{},"iterations":{},"duration_ms":{},"ops":[{}]}}"#,
-                s.stratum_id, s.num_rules, s.is_recursive, s.iterations, s.duration_us / 1000,
-                ops_json.join(",")
-            )
-        }).collect();
+        let strata = self
+            .strata
+            .iter()
+            .map(|stratum| {
+                let mut operations: Vec<_> = stratum.op_summary().into_iter().collect();
+                operations.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+                let operations = operations
+                    .into_iter()
+                    .map(|(name, (calls, duration_us))| {
+                        serde_json::json!({
+                            "op": name,
+                            "calls": calls,
+                            "duration_ms": duration_us / 1000,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::json!({
+                    "stratum": stratum.stratum_id,
+                    "rules": stratum.num_rules,
+                    "recursive": stratum.is_recursive,
+                    "iterations": stratum.iterations,
+                    "duration_ms": stratum.duration_us / 1000,
+                    "ops": operations,
+                })
+            })
+            .collect::<Vec<_>>();
 
-        let mut json = format!(
-            r#"{{"total_ms":{},"strata":[{}],"peak_memory_mb":{},"budget_memory_mb":{},"output_rows":{},"wcoj":{{"triangle_dispatch":{},"four_cycle_dispatch":{},"groupby_fusion_dispatch":{},"free_join_dispatch":{},"factorized_delta_dispatch":{},"chain_fallback_scan_equivalents":{},"chain_fallback_filter_equivalents":{},"error_decline":{}}}}}"#,
-            total_ms,
-            strata_json.join(","),
-            self.peak_memory_bytes / (1024 * 1024),
-            self.memory_budget_bytes / (1024 * 1024),
-            self.total_output_rows,
-            self.wcoj_triangle_dispatch_count,
-            self.wcoj_4cycle_dispatch_count,
-            self.wcoj_groupby_fusion_dispatch_count,
-            self.free_join_dispatch_count,
-            self.factorized_delta_dispatch_count,
-            self.chain_fallback_scan_equivalents,
-            self.chain_fallback_filter_equivalents,
-            self.wcoj_error_decline_count,
-        );
+        let mut json = serde_json::json!({
+            "total_ms": self.total_duration_us / 1000,
+            "strata": strata,
+            "peak_memory_mb": self.peak_memory_bytes / (1024 * 1024),
+            "budget_memory_mb": self.memory_budget_bytes / (1024 * 1024),
+            "output_rows": self.total_output_rows,
+            "wcoj": {
+                "triangle_dispatch": self.wcoj_triangle_dispatch_count,
+                "four_cycle_dispatch": self.wcoj_4cycle_dispatch_count,
+                "groupby_fusion_dispatch": self.wcoj_groupby_fusion_dispatch_count,
+                "free_join_dispatch": self.free_join_dispatch_count,
+                "factorized_delta_dispatch": self.factorized_delta_dispatch_count,
+                "chain_fallback_scan_equivalents": self.chain_fallback_scan_equivalents,
+                "chain_fallback_filter_equivalents": self.chain_fallback_filter_equivalents,
+                "error_decline": self.wcoj_error_decline_count,
+            },
+        });
         if let Some(resident) = &self.resident_graph {
-            json.pop();
             let selection = match resident.selection {
                 crate::resident_graph::ResidentGraphSelectionKind::ExistingGpu => "existing_gpu",
                 crate::resident_graph::ResidentGraphSelectionKind::ResidentConditionalGraph => {
                     "resident_conditional_graph"
                 }
             };
-            let decline = resident
-                .decline
-                .as_ref()
-                .map(|reason| format!(r#","resident_graph_declined":"{reason:?}""#))
-                .unwrap_or_default();
-            json.push_str(&format!(
-                r#","resident_graph":{{"selection":"{}","conditional_graph_launches":{},"terminal_synchronizations":{},"host_iterations":{},"host_allocations":{},"host_status_injections":{},"deterministic_d2h_violations":{},"host_dispatched_scan_ops":{},"host_dispatched_filter_ops":{},"device_scan_invocations":{},"device_filter_invocations":{},"semantic_scan_invocations":{},"semantic_filter_invocations":{},"staged_store_mutations":{},"deferred_profile":{{"timed_scan_filter_invocations":{},"device_elapsed_ns":{},"final_sync_misattributed_ns":{}}},"core_transfers":{{"tracked_htod_calls":{},"tracked_htod_bytes":{},"tracked_dtoh_calls":{},"tracked_dtoh_bytes":{},"provider_dtoh_calls":{},"untracked_metadata_dtoh_calls":{}}},"final_observation":{{"dtoh_calls":{},"dtoh_bytes":{},"pinned_receipts":{}}}{}}}}}"#,
-                selection,
-                resident.conditional_graph_launches,
-                resident.terminal_synchronizations,
-                resident.host_iterations,
-                resident.host_allocations,
-                resident.host_status_injections,
-                resident.deterministic_d2h_violations,
-                resident.host_dispatched_scan_ops,
-                resident.host_dispatched_filter_ops,
-                resident.device_scan_invocations,
-                resident.device_filter_invocations,
-                resident.semantic_scan_invocations,
-                resident.semantic_filter_invocations,
-                resident.staged_store_mutations,
-                resident.deferred_profile.timed_scan_filter_invocations,
-                resident.deferred_profile.device_elapsed_ns,
-                resident.deferred_profile.final_sync_misattributed_ns,
-                resident.core_transfers.tracked_htod_calls,
-                resident.core_transfers.tracked_htod_bytes,
-                resident.core_transfers.tracked_dtoh_calls,
-                resident.core_transfers.tracked_dtoh_bytes,
-                resident.core_transfers.provider_dtoh_calls,
-                resident.core_transfers.untracked_metadata_dtoh_calls,
-                resident.final_observation.dtoh_calls,
-                resident.final_observation.dtoh_bytes,
-                resident.final_observation.pinned_receipts,
-                decline,
-            ));
+            let mut resident_json = serde_json::json!({
+                "selection": selection,
+                "conditional_graph_launches": resident.conditional_graph_launches,
+                "terminal_synchronizations": resident.terminal_synchronizations,
+                "host_iterations": resident.host_iterations,
+                "host_allocations": resident.host_allocations,
+                "host_status_injections": resident.host_status_injections,
+                "deterministic_d2h_violations": resident.deterministic_d2h_violations,
+                "host_dispatched_scan_ops": resident.host_dispatched_scan_ops,
+                "host_dispatched_filter_ops": resident.host_dispatched_filter_ops,
+                "device_scan_invocations": resident.device_scan_invocations,
+                "device_filter_invocations": resident.device_filter_invocations,
+                "semantic_scan_invocations": resident.semantic_scan_invocations,
+                "semantic_filter_invocations": resident.semantic_filter_invocations,
+                "staged_store_mutations": resident.staged_store_mutations,
+                "deferred_profile": {
+                    "timed_scan_filter_invocations": resident.deferred_profile.timed_scan_filter_invocations,
+                    "device_elapsed_ns": resident.deferred_profile.device_elapsed_ns,
+                    "final_sync_misattributed_ns": resident.deferred_profile.final_sync_misattributed_ns,
+                },
+                "core_transfers": {
+                    "tracked_htod_calls": resident.core_transfers.tracked_htod_calls,
+                    "tracked_htod_bytes": resident.core_transfers.tracked_htod_bytes,
+                    "tracked_dtoh_calls": resident.core_transfers.tracked_dtoh_calls,
+                    "tracked_dtoh_bytes": resident.core_transfers.tracked_dtoh_bytes,
+                    "provider_dtoh_calls": resident.core_transfers.provider_dtoh_calls,
+                    "untracked_metadata_dtoh_calls": resident.core_transfers.untracked_metadata_dtoh_calls,
+                },
+                "final_observation": {
+                    "dtoh_calls": resident.final_observation.dtoh_calls,
+                    "dtoh_bytes": resident.final_observation.dtoh_bytes,
+                    "pinned_receipts": resident.final_observation.pinned_receipts,
+                },
+            });
+            if let Some(reason) = &resident.decline {
+                resident_json["resident_graph_declined"] =
+                    serde_json::Value::String(format!("{reason:?}"));
+            }
+            json["resident_graph"] = resident_json;
         }
-        json
+        json.to_string()
     }
 }
 
@@ -703,7 +719,9 @@ mod tests {
     #[test]
     fn explicit_chain_equivalents_and_resident_semantic_counts_are_serialized_separately() {
         let mut resident = crate::resident_graph::ResidentGraphExecutionStats::declined(
-            crate::resident_graph::ResidentGraphDeclineReason::FullStoreRequested,
+            crate::resident_graph::ResidentGraphDeclineReason::SourceSetUncertified {
+                relation: "quoted\"relation\\name".to_string(),
+            },
         );
         resident.device_scan_invocations = 17;
         resident.device_filter_invocations = 19;
@@ -722,6 +740,18 @@ mod tests {
             "{human}"
         );
         let json = stats.format_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("execution stats must be valid JSON");
+        assert_eq!(parsed["wcoj"]["chain_fallback_scan_equivalents"], 2);
+        assert_eq!(parsed["wcoj"]["chain_fallback_filter_equivalents"], 3);
+        assert_eq!(parsed["resident_graph"]["device_scan_invocations"], 17);
+        assert_eq!(parsed["resident_graph"]["device_filter_invocations"], 19);
+        assert_eq!(parsed["resident_graph"]["semantic_scan_invocations"], 13);
+        assert_eq!(parsed["resident_graph"]["semantic_filter_invocations"], 11);
+        assert_eq!(
+            parsed["resident_graph"]["resident_graph_declined"],
+            r#"SourceSetUncertified { relation: "quoted\"relation\\name" }"#
+        );
         assert!(
             json.contains("\"chain_fallback_scan_equivalents\":2"),
             "{json}"

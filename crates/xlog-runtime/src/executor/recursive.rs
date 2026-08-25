@@ -457,11 +457,11 @@ impl Executor {
         let mut schema_by_pred: HashMap<String, Schema> = HashMap::new();
         for rule in rules {
             recursive_pred_names.insert(rule.head.clone());
-            if rule.meta.schema.arity() > 0 {
-                schema_by_pred
-                    .entry(rule.head.clone())
-                    .or_insert_with(|| rule.meta.schema.clone());
-            }
+            // An empty column list is the complete schema of a nullary predicate,
+            // not evidence that schema metadata is absent.
+            schema_by_pred
+                .entry(rule.head.clone())
+                .or_insert_with(|| rule.meta.schema.clone());
         }
         let recursive_pred_lookup: HashSet<String> = recursive_pred_names.iter().cloned().collect();
         let recursive_preds: Vec<String> = recursive_pred_names.into_iter().collect();
