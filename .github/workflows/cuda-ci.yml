@@ -3,37 +3,8 @@ name: cuda-ci
 on:
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/cuda-ci.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "crates/**"
-      - "python/tests/conftest.py"
-      - "python/tests/test_logic_relation_provenance.py"
-      - "python/tests/test_pyxlog_epistemic_api.py"
-      - "python/tests/test_pyxlog_epistemic_gpu.py"
-      - "python/tests/test_pyxlog_conditioned_reuse.py"
-      - "python/tests/test_pyxlog_ground_term_encoding.py"
-      - "python/tests/test_relation_callbacks_runtime.py"
-      - "python/tests/test_relation_provenance_contract.py"
-      - "python/tests/test_relation_provenance_public_api.py"
-      - "scripts/validate_release_gpu.sh"
   pull_request:
     branches: [main]
-    paths:
-      - ".github/workflows/cuda-ci.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "crates/**"
-      - "python/tests/conftest.py"
-      - "python/tests/test_logic_relation_provenance.py"
-      - "python/tests/test_pyxlog_epistemic_api.py"
-      - "python/tests/test_pyxlog_epistemic_gpu.py"
-      - "python/tests/test_pyxlog_ground_term_encoding.py"
-      - "python/tests/test_relation_callbacks_runtime.py"
-      - "python/tests/test_relation_provenance_contract.py"
-      - "python/tests/test_relation_provenance_public_api.py"
-      - "scripts/validate_release_gpu.sh"
   workflow_dispatch:
     inputs:
       reviewed_sha:
@@ -53,6 +24,54 @@ env:
   TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.reviewed_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
 jobs:
+  cuda-changes:
+    name: cuda-changes
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.classify.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify CUDA Python-wheel changes
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ env.TARGET_SHA }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              relevant=true
+              ;;
+            pull_request)
+              relevant=$(git diff --no-renames --name-only -z "$BASE_SHA" "$HEAD_SHA" | \
+                python3 scripts/cuda_ci.py classify --null)
+              ;;
+            push)
+              if [[ "$BEFORE_SHA" =~ ^0{40}$ ]]; then
+                relevant=true
+              else
+                relevant=$(git diff --no-renames --name-only -z "$BEFORE_SHA" "$HEAD_SHA" | \
+                  python3 scripts/cuda_ci.py classify --null)
+              fi
+              ;;
+            *)
+              echo "Unsupported event for CUDA change classification: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+          if [[ "$relevant" != "true" && "$relevant" != "false" ]]; then
+            echo "Classifier returned invalid result: $relevant" >&2
+            exit 1
+          fi
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+
   rust-tests:
     if: >-
       github.event_name == 'workflow_dispatch' &&
@@ -77,12 +96,16 @@ jobs:
       - name: Cargo test (release)
         run: cargo test --workspace --all-targets --release
 
-  python-wheel:
+  python-wheel-gpu:
+    name: python-wheel-gpu
+    needs: cuda-changes
     if: >-
-      github.event_name == 'push' ||
+      needs.cuda-changes.result == 'success' &&
+      needs.cuda-changes.outputs.relevant == 'true' &&
+      (github.event_name == 'push' ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository)
+      github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: [self-hosted, linux, x64, cuda]
     timeout-minutes: 90
     steps:
@@ -301,9 +324,8 @@ jobs:
               exit 1
             fi
           done <<< "$submodule_status"
-          # shellcheck disable=SC2016
           git -C "$corpus_root" submodule foreach --quiet --recursive \
-            'test -z "$(git status --porcelain=v1 --untracked-files=all)"'
+            "test -z \"\$(git status --porcelain=v1 --untracked-files=all)\""
 
           export XLOG_PINNED_CORPUS_ROOT="$corpus_root"
 
@@ -499,3 +521,32 @@ jobs:
           name: relation-provenance-test-report
           path: test-results/relation-provenance.xml
           if-no-files-found: warn
+
+  python-wheel:
+    name: python-wheel
+    needs: [cuda-changes, python-wheel-gpu]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+      - name: Enforce the stable Python-wheel result
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          RELEVANT: ${{ needs.cuda-changes.outputs.relevant }}
+          CLASSIFICATION_RESULT: ${{ needs.cuda-changes.result }}
+          GPU_RESULT: ${{ needs.python-wheel-gpu.result }}
+        run: |
+          set -euo pipefail
+          python3 scripts/cuda_ci.py aggregate \
+            --event-name "$EVENT_NAME" \
+            --repository "$REPOSITORY" \
+            --head-repository "$HEAD_REPOSITORY" \
+            --relevant "$RELEVANT" \
+            --classification-result "$CLASSIFICATION_RESULT" \
+            --gpu-result "$GPU_RESULT"

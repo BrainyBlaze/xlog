@@ -94,11 +94,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install pytest
-        run: python -m pip install --upgrade pip pytest
+      - name: Install Python contract test dependencies
+        run: python -m pip install --upgrade pip pytest PyYAML
 
-      - name: Validate Python provenance stubs and documentation
-        run: python -m pytest -q python/tests/test_relation_provenance_contract.py
+      - name: Validate Python and CI contracts
+        run: >-
+          python -m pytest -q
+          python/tests/test_relation_provenance_contract.py
+          python/tests/test_ci_workflow_contract.py
 
   # The CAVIAR and maritime example suites on CPU (review follow-up:
   # previously no workflow ran any of them; the maritime suites were
@@ -195,7 +198,8 @@ jobs:
       - name: Validate README quickstart assumptions
         run: python scripts/validate_package_metadata.py
 
-  clippy-high-signal:
+  clippy:
+    name: clippy
     runs-on: ubuntu-latest
     container:
       image: nvidia/cuda:13.1.1-devel-ubuntu22.04
@@ -223,17 +227,11 @@ jobs:
       - name: Show CUDA toolkit
         run: nvcc --version
 
-      - name: Run clippy high-signal policy
-        run: |
-          # Full -D warnings is still broad repo-wide debt. Keep public CI honest by
-          # gating on high-signal lints we can maintain across all targets today.
-          cargo clippy --workspace --all-targets --locked --no-deps -- \
-            -A clippy::approx_constant \
-            -D clippy::dbg_macro \
-            -D clippy::todo \
-            -D clippy::unimplemented
+      - name: Run complete workspace Clippy policy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-  cuda-build-no-gpu:
+  workspace-tests:
+    name: workspace-tests
     runs-on: ubuntu-latest
     container:
       image: nvidia/cuda:13.1.1-devel-ubuntu22.04
@@ -260,6 +258,9 @@ jobs:
 
       - name: Show CUDA toolkit
         run: nvcc --version
+
+      - name: Test every workspace target without GPU execution
+        run: cargo test --workspace --all-targets --locked
 
       - name: Build workspace without GPU execution
         run: cargo build --workspace --locked --release --exclude pyxlog
