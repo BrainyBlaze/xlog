@@ -83,7 +83,7 @@ fn test_ptx_loads_successfully(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
 
     // If we got here, the TestContext was created successfully, which means
-    // CudaKernelProvider::new() succeeded, which loads all PTX modules.
+    // CudaProviderBuilder::build() succeeded, which loads all PTX modules.
     // Sync and verify no async errors occurred during module loading.
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(

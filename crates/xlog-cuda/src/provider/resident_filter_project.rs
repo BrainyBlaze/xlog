@@ -1014,7 +1014,7 @@ mod tests {
     };
     use crate::{
         cuda_graph::CapturedCudaGraph, device_runtime::StreamPool, provider::CompareOp, CudaBuffer,
-        CudaDevice, CudaKernelProvider, CudaStream, GpuMemoryManager,
+        CudaKernelProvider, CudaStream,
     };
     use xlog_core::{MemoryBudget, Result, ScalarType, Schema};
 
@@ -1027,21 +1027,9 @@ mod tests {
     }
 
     fn provider() -> Option<CudaKernelProvider> {
-        let device = match CudaDevice::new(0) {
-            Ok(device) => Arc::new(device),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA device initialization failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping resident filter CUDA test: {error}");
-                return None;
-            }
-        };
-        let memory = Arc::new(GpuMemoryManager::new(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(512 * 1024 * 1024),
-        ));
-        match CudaKernelProvider::new(device, memory) {
+        match crate::CudaProviderBuilder::new(0, MemoryBudget::with_limit(512 * 1024 * 1024))
+            .build()
+        {
             Ok(provider) => Some(provider),
             Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
                 panic!("XLOG_REQUIRE_CUDA=1 but resident filter provider setup failed: {error}")

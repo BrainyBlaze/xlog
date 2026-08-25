@@ -1,22 +1,14 @@
 use std::sync::Arc;
 use xlog_core::MemoryBudget;
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, InMemorySink, LoggingResource,
-    LoggingSink, StreamPool, XlogDeviceRuntime,
-};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::device_runtime::{InMemorySink, LoggingSink, XlogDeviceRuntime};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager};
 
 /// Canonical CUDA provider for tests. Returns None if CUDA is unavailable.
 #[allow(dead_code)] // not all integration test binaries use this fixture
 pub fn setup_provider() -> Option<Arc<CudaKernelProvider>> {
-    let result = CudaDevice::new(0).and_then(|device| {
-        let device = Arc::new(device);
-        let memory = Arc::new(GpuMemoryManager::new(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(1024 * 1024 * 1024),
-        ));
-        CudaKernelProvider::new(device, memory).map(Arc::new)
-    });
+    let result = CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+        .build()
+        .map(Arc::new);
 
     match result {
         Ok(provider) => Some(provider),
@@ -63,49 +55,24 @@ pub struct RuntimeProviderHandles {
 /// [`setup_provider`].
 #[allow(dead_code)] // exercised by tests in other binaries
 pub fn setup_provider_with_runtime() -> Option<RuntimeProviderHandles> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
-            return None;
-        }
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
     let sink: Arc<InMemorySink> = Arc::new(InMemorySink::new());
-
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        sink.clone() as Arc<dyn LoggingSink>,
-    ));
-    // Generous runtime budget so the fixture is reusable across
-    // tests with varied allocation sizes; tighter budgets belong
-    // in tests that specifically exercise rejection.
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 1024 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-
-    let provider = match CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+    let logging_sink: Arc<dyn LoggingSink> = sink.clone();
+    let provider = match CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+        .with_logging_sink(logging_sink)
+        .build()
     {
-        Ok(p) => Arc::new(p),
+        Ok(provider) => Arc::new(provider),
         Err(e) => {
-            eprintln!("Skipping: provider with_runtime construction failed: {}", e);
+            eprintln!("Skipping: canonical provider construction failed: {e}");
             return None;
         }
     };
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(
+        memory
+            .runtime()
+            .expect("canonical provider must own a runtime"),
+    );
 
     Some(RuntimeProviderHandles {
         provider,

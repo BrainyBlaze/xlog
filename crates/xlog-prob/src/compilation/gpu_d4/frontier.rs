@@ -256,22 +256,13 @@ mod tests {
     use super::D4WorkItem;
     use xlog_core::MemoryBudget;
     use xlog_cuda::provider::{scan_kernels, D4_MODULE, SCAN_MODULE};
-    use xlog_cuda::{
-        AsKernelParam, CudaDevice, CudaKernelProvider, GpuMemoryManager, LaunchAsync, LaunchConfig,
-    };
+    use xlog_cuda::{AsKernelParam, CudaKernelProvider, LaunchAsync, LaunchConfig};
     use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
     fn try_provider() -> Option<Arc<CudaKernelProvider>> {
-        let device = match CudaDevice::new(0) {
-            Ok(d) => Arc::new(d),
-            Err(e) => {
-                eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
-                return None;
-            }
-        };
-        let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GiB
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        match CudaKernelProvider::new(device, memory) {
+        match xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+            .build()
+        {
             Ok(p) => Some(Arc::new(p)),
             Err(e) => {
                 eprintln!(

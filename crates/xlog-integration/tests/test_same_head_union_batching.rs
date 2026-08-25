@@ -11,38 +11,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use xlog_core::MemoryBudget;
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
-};
-use xlog_cuda::memory::GpuMemoryManager;
-use xlog_cuda::{CudaDevice, CudaKernelProvider};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
 use xlog_gpu::logic::LogicProgram;
 
 fn provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let stream_pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let budget = MemoryBudget::with_limit(2 * 1024 * 1024 * 1024);
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&stream_pool)),
-    );
-    let budgeted: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(GlobalDeviceBudget::new(
-        async_resource,
-        budget.device_bytes as usize,
-    ));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        stream_pool,
-        budgeted,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        budget,
-        runtime,
-    ));
-    Some(Arc::new(
-        CudaKernelProvider::with_runtime(device, memory).ok()?,
-    ))
+    CudaProviderBuilder::new(0, MemoryBudget::with_limit(2 * 1024 * 1024 * 1024))
+        .build()
+        .ok()
+        .map(Arc::new)
 }
 
 /// Both tests build a full device runtime; running them concurrently in one

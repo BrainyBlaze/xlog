@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use xlog_core::{symbol, MemoryBudget, Result, ScalarType, XlogError};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
 use xlog_gpu::logic::normalize_program_for_execution;
 use xlog_logic::ground_term_encoding::append_ground_term_bytes;
 use xlog_logic::{
@@ -355,12 +355,8 @@ fn main() -> Result<()> {
     let mut compiler = Compiler::new();
     let plan = compiler.compile_program(&program)?;
 
-    let device = Arc::new(CudaDevice::new(device_id).map_err(|e| {
-        XlogError::Execution(format!("Failed to open CUDA device {}: {}", device_id, e))
-    })?);
     let budget = MemoryBudget::with_limit((memory_mb as u64) * 1024 * 1024);
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    let provider = Arc::new(CudaKernelProvider::new(device, memory)?);
+    let provider = Arc::new(CudaProviderBuilder::new(device_id, budget).build()?);
 
     let mut executor = Executor::new(provider.clone());
 

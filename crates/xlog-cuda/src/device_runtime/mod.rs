@@ -65,6 +65,6 @@ pub use resource::{
 pub(crate) use runtime::RuntimeMemoryReservation;
 pub use runtime::{
     ConditionalGraphStats, EventLifecycleStats, ResidentCompletionEvent,
-    ResidentGraphHandleLifecycleStats, XlogDeviceRuntime, MAX_DEVICE_ORDINALS,
+    ResidentGraphHandleLifecycleStats, XlogDeviceRuntime,
 };
 pub use stream_pool::{StreamPool, StreamPoolError, DEFAULT_MAX_STREAMS};

@@ -34,7 +34,7 @@ use cudarc::driver::DeviceSlice;
 use xlog_core::Schema;
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::CudaKernelProvider;
 #[cfg(feature = "host-io")]
 use xlog_logic::ast::{BodyLiteral, Rule};
 use xlog_logic::ast::{Directives, Evidence, ProbMethod, ProbQuery, Program};
@@ -923,11 +923,10 @@ impl McProgram {
             ));
         }
 
-        let device = Arc::new(CudaDevice::new(self.gpu_config.device_ordinal)?);
-        let memory = Arc::new(GpuMemoryManager::new(
-            device.clone(),
+        xlog_cuda::CudaProviderBuilder::new(
+            self.gpu_config.device_ordinal,
             MemoryBudget::with_limit(self.gpu_config.memory_bytes),
-        ));
-        CudaKernelProvider::new(device, memory)
+        )
+        .build()
     }
 }

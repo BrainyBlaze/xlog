@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_gpu::logic::LogicProgram;
 
 // =============================================================================
@@ -23,15 +23,9 @@ use xlog_gpu::logic::LogicProgram;
 
 /// Creates a CUDA kernel provider with sufficient memory for benchmarks.
 fn make_provider(memory_mb: u64) -> Option<Arc<CudaKernelProvider>> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(_) => return None,
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(memory_mb * 1024 * 1024),
-    ));
-    match CudaKernelProvider::new(device, memory) {
+    match xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(memory_mb * 1024 * 1024))
+        .build()
+    {
         Ok(p) => Some(Arc::new(p)),
         Err(_) => None,
     }

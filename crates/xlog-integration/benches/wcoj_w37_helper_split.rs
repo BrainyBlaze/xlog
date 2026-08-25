@@ -5,12 +5,9 @@ use std::time::{Duration, Instant};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamId, StreamPool};
 use xlog_cuda::memory::CudaBuffer;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager, JoinType};
 
 const DEVICE_BUDGET_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
@@ -37,8 +34,6 @@ impl LoggingSink for DiscardSink {
 }
 
 struct Provider {
-    _device: Arc<CudaDevice>,
-    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
     pool: Arc<StreamPool>,
@@ -55,36 +50,17 @@ struct UploadedFixture {
 }
 
 fn make_provider() -> Option<Provider> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::new(Arc::clone(&device), 1024));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        CudaProviderBuilder::new(0, MemoryBudget::with_limit(DEVICE_BUDGET_BYTES))
+            .with_stream_capacity(1024)
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(GlobalDeviceBudget::new(
-        logging,
-        DEVICE_BUDGET_BYTES as usize,
-    ));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(DEVICE_BUDGET_BYTES),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let memory = Arc::clone(provider.memory());
+    let pool = Arc::clone(memory.runtime()?.stream_pool());
     let launch_stream = pool.acquire().ok()?;
     Some(Provider {
-        _device: device,
-        _runtime: runtime,
         memory,
         provider,
         pool,

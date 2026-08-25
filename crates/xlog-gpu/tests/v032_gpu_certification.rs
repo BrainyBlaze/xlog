@@ -10,13 +10,14 @@ use std::sync::Arc;
 
 use serial_test::serial;
 use xlog_core::{symbol, MemoryBudget, Result, ScalarType, Schema};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 
 fn create_test_provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    Some(Arc::new(CudaKernelProvider::new(device, memory).ok()?))
+    Some(Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+            .build()
+            .ok()?,
+    ))
 }
 
 fn create_buffer_u32(

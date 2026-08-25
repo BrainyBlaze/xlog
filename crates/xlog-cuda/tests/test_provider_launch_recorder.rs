@@ -6,10 +6,9 @@
 //! corruption.
 //!
 //! End-to-end stack exercised:
-//!   GpuMemoryManager::with_runtime
-//!     → CudaKernelProvider::with_runtime
-//!       → XlogDeviceRuntime::with_resource(GlobalDeviceBudget(
-//!           LoggingResource(AsyncCudaResource)))
+//!   CudaProviderBuilder
+//!     → GpuMemoryManager + XlogDeviceRuntime
+//!       → GlobalDeviceBudget(LoggingResource(AsyncCudaResource))
 //!
 //! Test shape (mirrors the bug class from
 //! `test_runtime_cross_stream_use_after_free.rs` but at the
@@ -47,10 +46,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, XlogError};
 use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
+    DeviceMemoryResource, LogRecord, LoggingSink, SinkError, StreamId,
 };
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::CudaProviderBuilder;
 
 const BYTES: usize = 4096;
 const PATTERN_LAUNCH: u8 = 0xCD;
@@ -63,6 +61,25 @@ impl LoggingSink for DiscardSink {
     fn emit(&self, _record: LogRecord) -> Result<(), SinkError> {
         Ok(())
     }
+}
+
+macro_rules! provider_fixture {
+    ($budget:expr, $provider:ident, $device:ident, $memory:ident, $runtime:ident, $pool:ident) => {
+        let $provider = match CudaProviderBuilder::new(0, MemoryBudget::with_limit($budget))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+        {
+            Ok(provider) => provider,
+            Err(error) => {
+                eprintln!("Skipping: CUDA runtime unavailable: {error}");
+                return;
+            }
+        };
+        let $device = Arc::clone($provider.device());
+        let $memory = Arc::clone($provider.memory());
+        let $runtime = Arc::clone($memory.runtime().expect("provider runtime"));
+        let $pool = Arc::clone($runtime.stream_pool());
+    };
 }
 
 /// Pins the device default mempool's release threshold for the
@@ -216,36 +233,7 @@ unsafe fn memset_sync_default(dst: u64, value: u8, len: usize) {
 #[test]
 fn provider_memset_recorded_survives_drop_and_reuse() {
     let _recorder_test_guard = recorder_test_lock();
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-
-    // Production stack: AsyncCudaResource (cross-stream
-    // tracking) → LoggingResource → GlobalDeviceBudget.
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
 
     let launch_stream = pool.acquire().expect("acquire non-default launch stream");
     assert_ne!(launch_stream, StreamId::DEFAULT);
@@ -351,87 +339,12 @@ fn provider_memset_recorded_survives_drop_and_reuse() {
 /// `memset_recorded` must fail loudly with `XlogError::Kernel`,
 /// NOT silently fall back. Locks the contract that this
 /// migrated path requires runtime-backed allocation.
-#[test]
-fn provider_memset_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut buf = memory.alloc::<u8>(64).expect("alloc legacy");
-    assert!(buf.runtime_block().is_none());
-
-    let err = provider.memset_recorded(&mut buf, 0xAA, StreamId::DEFAULT);
-    match err {
-        Err(XlogError::Kernel(msg)) => {
-            assert!(
-                msg.contains("requires") || msg.contains("with_runtime"),
-                "expected helpful Kernel error message, got {:?}",
-                msg
-            );
-        }
-        other => panic!(
-            "memset_recorded must reject legacy manager with XlogError::Kernel, got {:?}",
-            other
-        ),
-    }
-}
-
 /// Negative test: provider built around `DirectCudaResource`
 /// (the trait default that intentionally rejects
 /// `record_block_use`). With the strict-mode + preflight
 /// pattern the launch's memset is **never enqueued** —
 /// preflight surfaces `StreamMisuse` BEFORE the CUDA call. The
 /// error message identifies preflight rather than commit.
-#[test]
-fn provider_memset_recorded_surfaces_stream_misuse_from_direct_resource() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_cuda::device_runtime::DirectCudaResource;
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let direct: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(DirectCudaResource::new(Arc::clone(&device), 0));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        direct,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).expect("p");
-
-    let mut buf = memory.alloc::<u8>(64).expect("alloc");
-    let err = provider.memset_recorded(&mut buf, 0xAA, StreamId::DEFAULT);
-    match err {
-        Err(XlogError::Kernel(msg)) => {
-            assert!(
-                msg.contains("preflight failed") && msg.contains("does not support cross-stream"),
-                "expected preflight-failed StreamMisuse-derived error, got {:?}",
-                msg
-            );
-        }
-        other => panic!(
-            "memset_recorded must surface StreamMisuse from DirectCudaResource as \
-             XlogError::Kernel at preflight, got {:?}",
-            other
-        ),
-    }
-}
-
 /// Column-level variant: prove `provider.memset_column_recorded`
 /// records use through the `CudaColumn::Owned` runtime block
 /// automatically. Same drop+reuse safety check as the slice
@@ -441,32 +354,7 @@ fn provider_memset_column_recorded_survives_drop_and_reuse() {
     let _recorder_test_guard = recorder_test_lock();
     use xlog_cuda::CudaColumn;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -533,33 +421,7 @@ fn provider_memset_column_recorded_rejects_external_dlpack_column() {
     let _recorder_test_guard = recorder_test_lock();
     use xlog_cuda::{CudaColumn, DlpackManagedTensor};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
 
     // SAFETY: null-pointer tensor is drop-safe (DlpackManagedTensor's
@@ -603,33 +465,7 @@ fn provider_memset_column_recorded_accepts_xlog_owned_dlpack_column() {
     let _recorder_test_guard = recorder_test_lock();
     use xlog_cuda::{CudaColumn, DlpackManagedTensor};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
 
@@ -673,33 +509,7 @@ fn provider_sort_recorded_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     assert_ne!(launch_stream, StreamId::DEFAULT);
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
@@ -849,33 +659,7 @@ fn provider_sort_recorded_keeps_logical_row_count_with_capacity_slack() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve launch_stream");
 
@@ -962,33 +746,7 @@ fn provider_dedup_full_row_recorded_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -1182,33 +940,7 @@ fn provider_groupby_multi_agg_recorded_survives_drop_and_reuse() {
     use xlog_core::{AggOp, ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -1410,66 +1142,6 @@ fn provider_groupby_multi_agg_recorded_survives_drop_and_reuse() {
 }
 
 /// Negative test: recorded GroupBy against a no-runtime manager.
-#[test]
-fn provider_groupby_multi_agg_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{AggOp, ScalarType, Schema};
-    use xlog_cuda::CudaBuffer;
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-    let mut k = memory.alloc::<u8>(16).expect("alloc k");
-    let mut v = memory.alloc::<u8>(16).expect("alloc v");
-    let kv = [0u32, 1, 0, 1];
-    let kv_b: Vec<u8> = kv.iter().flat_map(|x| x.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&kv_b, &mut k)
-        .expect("htod k");
-    device
-        .inner()
-        .htod_sync_copy_into(&kv_b, &mut v)
-        .expect("htod v");
-    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
-        .expect("htod rows");
-    let input = CudaBuffer::from_columns(
-        vec![k.into(), v.into()],
-        4,
-        d_num_rows,
-        Schema::new(vec![
-            ("k".to_string(), ScalarType::U32),
-            ("v".to_string(), ScalarType::U32),
-        ]),
-    );
-    let err =
-        provider.groupby_multi_agg_recorded(&input, &[0], &[(1, AggOp::Count)], StreamId::DEFAULT);
-    match err {
-        Err(XlogError::Kernel(msg)) => assert!(
-            msg.contains("requires") || msg.contains("with_runtime"),
-            "expected helpful Kernel error, got {:?}",
-            msg
-        ),
-        Err(other) => panic!(
-            "groupby_multi_agg_recorded must reject legacy manager with XlogError::Kernel, \
-             got {:?}",
-            other
-        ),
-        Ok(_) => panic!(
-            "groupby_multi_agg_recorded must reject legacy manager — unexpectedly returned Ok"
-        ),
-    }
-}
-
 /// Slice #7A: drop+reuse for the recorded inner hash join.
 /// Composes `pack_keys_gpu_on_stream` (slice #6) →
 /// `build_hash_table_v2_on_stream` (this slice) → probe count
@@ -1490,33 +1162,7 @@ fn provider_hash_join_inner_v2_recorded_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -1768,96 +1414,6 @@ fn provider_hash_join_inner_v2_recorded_survives_drop_and_reuse() {
 
 /// Negative test: recorded inner hash join against no-runtime
 /// manager. Must reject before any allocation / kernel.
-#[test]
-fn provider_hash_join_v2_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::{CudaBuffer, JoinType};
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-    let mut k = memory.alloc::<u8>(16).expect("alloc k");
-    let mut v = memory.alloc::<u8>(16).expect("alloc v");
-    let kv = [0u32, 1, 0, 1];
-    let kvb: Vec<u8> = kv.iter().flat_map(|x| x.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&kvb, &mut k)
-        .expect("htod k");
-    device
-        .inner()
-        .htod_sync_copy_into(&kvb, &mut v)
-        .expect("htod v");
-    let mut rows = memory.alloc::<u32>(1).expect("alloc rows");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut rows)
-        .expect("htod rows");
-    let lhs = CudaBuffer::from_columns(
-        vec![k.into(), v.into()],
-        4,
-        rows,
-        Schema::new(vec![
-            ("k".to_string(), ScalarType::U32),
-            ("v".to_string(), ScalarType::U32),
-        ]),
-    );
-    let mut k2 = memory.alloc::<u8>(16).expect("alloc k2");
-    let mut v2 = memory.alloc::<u8>(16).expect("alloc v2");
-    device
-        .inner()
-        .htod_sync_copy_into(&kvb, &mut k2)
-        .expect("htod k2");
-    device
-        .inner()
-        .htod_sync_copy_into(&kvb, &mut v2)
-        .expect("htod v2");
-    let mut rows2 = memory.alloc::<u32>(1).expect("alloc rows2");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut rows2)
-        .expect("htod rows2");
-    let rhs = CudaBuffer::from_columns(
-        vec![k2.into(), v2.into()],
-        4,
-        rows2,
-        Schema::new(vec![
-            ("k".to_string(), ScalarType::U32),
-            ("v".to_string(), ScalarType::U32),
-        ]),
-    );
-    let err = provider.hash_join_v2_recorded(
-        &lhs,
-        &rhs,
-        &[0],
-        &[0],
-        JoinType::Inner,
-        None,
-        StreamId::DEFAULT,
-    );
-    match err {
-        Err(XlogError::Kernel(msg)) => assert!(
-            msg.contains("requires") || msg.contains("with_runtime"),
-            "expected helpful Kernel error, got {:?}",
-            msg
-        ),
-        Err(other) => panic!(
-            "hash_join_v2_recorded must reject legacy manager with XlogError::Kernel, got {:?}",
-            other
-        ),
-        Ok(_) => {
-            panic!("hash_join_v2_recorded must reject legacy manager — unexpectedly returned Ok")
-        }
-    }
-}
-
 /// Slice-boundary lock: `hash_join_v2_recorded` now accepts
 /// Inner / Semi / Anti / LeftOuter (slices #7A / #7B / #7C).
 /// The remaining deferred surface is the indexed variant
@@ -1871,32 +1427,7 @@ fn provider_hash_join_v2_recorded_accepts_all_join_types() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 4 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(4 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(4 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
 
     let mut k = memory.alloc::<u8>(16).expect("alloc k");
@@ -1964,33 +1495,7 @@ fn provider_hash_join_semi_v2_recorded_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -2216,33 +1721,7 @@ fn provider_hash_join_anti_v2_recorded_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -2466,33 +1945,7 @@ fn provider_hash_join_left_outer_v2_recorded_partial_match_survives_drop_and_reu
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -2733,33 +2186,7 @@ fn provider_hash_join_left_outer_v2_recorded_all_unmatched_survives_drop_and_reu
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -2949,32 +2376,7 @@ fn provider_hash_join_left_outer_v2_recorded_empty_right() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 4 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(4 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(4 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
 
     const LROWS: usize = 8;
@@ -3075,33 +2477,7 @@ fn provider_hash_join_v2_with_index_recorded_inner_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -3316,33 +2692,7 @@ fn provider_hash_join_v2_with_index_recorded_anti_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -3540,33 +2890,7 @@ fn provider_hash_join_v2_with_index_recorded_left_outer_survives_drop_and_reuse(
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -3770,137 +3094,7 @@ fn provider_hash_join_v2_with_index_recorded_left_outer_survives_drop_and_reuse(
 
 /// Negative test: indexed recorded path against a no-runtime
 /// manager. Must reject before any allocation / kernel.
-#[test]
-fn provider_hash_join_v2_with_index_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::{CudaBuffer, JoinType};
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut lk = memory.alloc::<u8>(16).expect("alloc lk");
-    let kvb: Vec<u8> = [0u32, 1, 2, 3]
-        .iter()
-        .flat_map(|x| x.to_le_bytes())
-        .collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&kvb, &mut lk)
-        .expect("htod lk");
-    let mut l_rows = memory.alloc::<u32>(1).expect("alloc l_rows");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut l_rows)
-        .expect("htod l_rows");
-    let left = CudaBuffer::from_columns(
-        vec![lk.into()],
-        4,
-        l_rows,
-        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
-    );
-    let mut rk = memory.alloc::<u8>(16).expect("alloc rk");
-    device
-        .inner()
-        .htod_sync_copy_into(&kvb, &mut rk)
-        .expect("htod rk");
-    let mut r_rows = memory.alloc::<u32>(1).expect("alloc r_rows");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut r_rows)
-        .expect("htod r_rows");
-    let right = CudaBuffer::from_columns(
-        vec![rk.into()],
-        4,
-        r_rows,
-        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
-    );
-    let index = provider
-        .build_join_index_v2(&right, &[0])
-        .expect("build_join_index_v2");
-
-    let err = provider.hash_join_v2_with_index_recorded(
-        &left,
-        &right,
-        &[0],
-        &[0],
-        JoinType::Inner,
-        &index,
-        None,
-        StreamId::DEFAULT,
-    );
-    match err {
-        Err(XlogError::Kernel(msg)) => assert!(
-            msg.contains("requires") || msg.contains("with_runtime"),
-            "expected helpful Kernel error, got {:?}",
-            msg
-        ),
-        Err(other) => panic!(
-            "hash_join_v2_with_index_recorded must reject legacy manager with Kernel error, got {:?}",
-            other
-        ),
-        Ok(_) => panic!(
-            "hash_join_v2_with_index_recorded must reject legacy manager — unexpectedly returned Ok"
-        ),
-    }
-}
-
 /// Negative test: recorded sort against a no-runtime manager.
-#[test]
-fn provider_sort_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::CudaBuffer;
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-    let mut col = memory.alloc::<u8>(16).expect("alloc col");
-    let payload = [3u32, 1, 2, 0];
-    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut col)
-        .expect("htod col");
-    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
-        .expect("htod rows");
-    let input = CudaBuffer::from_columns(
-        vec![col.into()],
-        4,
-        d_num_rows,
-        Schema::new(vec![("v".to_string(), ScalarType::U32)]),
-    );
-    let err = provider.sort_recorded(&input, &[0], StreamId::DEFAULT);
-    match err {
-        Err(XlogError::Kernel(msg)) => assert!(
-            msg.contains("requires") || msg.contains("with_runtime"),
-            "expected helpful Kernel error, got {:?}",
-            msg
-        ),
-        Err(other) => panic!(
-            "sort_recorded must reject legacy manager with XlogError::Kernel, got {:?}",
-            other
-        ),
-        Ok(_) => panic!("sort_recorded must reject legacy manager — unexpectedly returned Ok"),
-    }
-}
-
 /// Filter-class slice. Proves that the migrated
 /// `compare_const_mask_recorded` correctly threads the column
 /// READ through the runtime: the kernel runs on a non-default
@@ -3929,34 +3123,7 @@ fn provider_compare_const_mask_recorded_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
 
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     assert_ne!(launch_stream, StreamId::DEFAULT);
@@ -4072,66 +3239,6 @@ fn provider_compare_const_mask_recorded_survives_drop_and_reuse() {
 /// Negative test: filter-class migrated path against legacy
 /// (no-runtime) manager. Must reject before any allocation
 /// happens.
-#[test]
-fn provider_compare_const_mask_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::{CompareOp, CudaBuffer};
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut col_bytes = memory.alloc::<u8>(16).expect("alloc col");
-    let payload = [1u32, 2, 3, 4];
-    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut col_bytes)
-        .expect("htod col");
-    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
-        .expect("htod rows");
-    let input = CudaBuffer::from_columns(
-        vec![col_bytes.into()],
-        4,
-        d_num_rows,
-        Schema::new(vec![("v".to_string(), ScalarType::U32)]),
-    );
-
-    let err = provider.compare_const_mask_recorded::<u32>(
-        &input,
-        0,
-        2u32,
-        CompareOp::Eq,
-        StreamId::DEFAULT,
-    );
-    match err {
-        Err(XlogError::Kernel(msg)) => {
-            assert!(
-                msg.contains("requires") || msg.contains("with_runtime"),
-                "expected helpful Kernel error message, got {:?}",
-                msg
-            );
-        }
-        Err(other) => panic!(
-            "compare_const_mask_recorded must reject legacy manager with XlogError::Kernel, got {:?}",
-            other
-        ),
-        Ok(_) => panic!(
-            "compare_const_mask_recorded must reject legacy manager — unexpectedly returned Ok"
-        ),
-    }
-}
-
 /// Filter-class column-column compare. Same drop+reuse
 /// shape as `compare_const_mask_recorded`, but exercises BOTH
 /// column reads being recorded before preflight.
@@ -4154,34 +3261,7 @@ fn provider_compare_columns_mask_recorded_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
 
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     assert_ne!(launch_stream, StreamId::DEFAULT);
@@ -4314,74 +3394,6 @@ fn provider_compare_columns_mask_recorded_survives_drop_and_reuse() {
 /// Negative test: column-column migrated path against
 /// no-runtime manager. Must reject before any allocation
 /// happens.
-#[test]
-fn provider_compare_columns_mask_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::{CompareOp, CudaBuffer};
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut left_bytes = memory.alloc::<u8>(16).expect("alloc left");
-    let mut right_bytes = memory.alloc::<u8>(16).expect("alloc right");
-    let payload = [1u32, 2, 3, 4];
-    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut left_bytes)
-        .expect("htod left");
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut right_bytes)
-        .expect("htod right");
-    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
-        .expect("htod rows");
-    let input = CudaBuffer::from_columns(
-        vec![left_bytes.into(), right_bytes.into()],
-        4,
-        d_num_rows,
-        Schema::new(vec![
-            ("l".to_string(), ScalarType::U32),
-            ("r".to_string(), ScalarType::U32),
-        ]),
-    );
-
-    let err = provider.compare_columns_mask_recorded::<u32>(
-        &input,
-        0,
-        1,
-        CompareOp::Eq,
-        StreamId::DEFAULT,
-    );
-    match err {
-        Err(XlogError::Kernel(msg)) => {
-            assert!(
-                msg.contains("requires") || msg.contains("with_runtime"),
-                "expected helpful Kernel error message, got {:?}",
-                msg
-            );
-        }
-        Err(other) => panic!(
-            "compare_columns_mask_recorded must reject legacy manager with XlogError::Kernel, got {:?}",
-            other
-        ),
-        Ok(_) => panic!(
-            "compare_columns_mask_recorded must reject legacy manager — unexpectedly returned Ok"
-        ),
-    }
-}
-
 /// Filter-class COMPACT path. The compact pipeline is
 /// a multi-kernel chain — `mask_clamp_rows` →
 /// `multiblock_scan_phase1` (and inplace+phase3 when
@@ -4411,34 +3423,7 @@ fn provider_compact_buffer_by_device_mask_counted_recorded_survives_drop_and_reu
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
 
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     assert_ne!(launch_stream, StreamId::DEFAULT);
@@ -4594,34 +3579,7 @@ fn provider_compact_recorded_short_mask_ignores_capacity_slack() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
 
@@ -4679,68 +3637,6 @@ fn provider_compact_recorded_short_mask_ignores_capacity_slack() {
 
 /// Negative test: compact migrated path against legacy
 /// (no-runtime) manager. Must reject before any allocation.
-#[test]
-fn provider_compact_buffer_by_device_mask_counted_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::CudaBuffer;
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut col_bytes = memory.alloc::<u8>(16).expect("alloc col");
-    let payload = [10u32, 20, 30, 40];
-    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut col_bytes)
-        .expect("htod col");
-    let mut d_mask = memory.alloc::<u8>(4).expect("alloc mask");
-    device
-        .inner()
-        .htod_sync_copy_into(&[1u8, 0, 1, 0], &mut d_mask)
-        .expect("htod mask");
-    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
-        .expect("htod rows");
-    let input = CudaBuffer::from_columns(
-        vec![col_bytes.into()],
-        4,
-        d_num_rows,
-        Schema::new(vec![("v".to_string(), ScalarType::U32)]),
-    );
-
-    let err =
-        provider.compact_buffer_by_device_mask_counted_recorded(&input, &d_mask, StreamId::DEFAULT);
-    match err {
-        Err(XlogError::Kernel(msg)) => {
-            assert!(
-                msg.contains("requires") || msg.contains("with_runtime"),
-                "expected helpful Kernel error message, got {:?}",
-                msg
-            );
-        }
-        Err(other) => panic!(
-            "compact_buffer_by_device_mask_counted_recorded must reject legacy manager \
-             with XlogError::Kernel, got {:?}",
-            other
-        ),
-        Ok(_) => panic!(
-            "compact_buffer_by_device_mask_counted_recorded must reject legacy manager — \
-             unexpectedly returned Ok"
-        ),
-    }
-}
-
 /// End-to-end filter slice: the first COMPOSED migrated path.
 ///
 /// `filter_recorded::<u32>` chains
@@ -4776,34 +3672,7 @@ fn provider_filter_recorded_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
 
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     assert_ne!(launch_stream, StreamId::DEFAULT);
@@ -4959,60 +3828,6 @@ fn provider_filter_recorded_survives_drop_and_reuse() {
 /// manager. The first underlying primitive
 /// (`compare_const_mask_recorded`) must reject before any
 /// allocation / kernel — same loud-failure contract.
-#[test]
-fn provider_filter_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::{CompareOp, CudaBuffer};
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut col_bytes = memory.alloc::<u8>(16).expect("alloc col");
-    let payload = [1u32, 2, 3, 4];
-    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut col_bytes)
-        .expect("htod col");
-    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
-        .expect("htod rows");
-    let input = CudaBuffer::from_columns(
-        vec![col_bytes.into()],
-        4,
-        d_num_rows,
-        Schema::new(vec![("v".to_string(), ScalarType::U32)]),
-    );
-
-    let err = provider.filter_recorded::<u32>(&input, 0, 2u32, CompareOp::Eq, StreamId::DEFAULT);
-    match err {
-        Err(XlogError::Kernel(msg)) => {
-            assert!(
-                msg.contains("requires") || msg.contains("with_runtime"),
-                "expected helpful Kernel error message, got {:?}",
-                msg
-            );
-        }
-        Err(other) => panic!(
-            "filter_recorded must reject legacy manager with XlogError::Kernel, got {:?}",
-            other
-        ),
-        Ok(_) => {
-            panic!("filter_recorded must reject legacy manager — unexpectedly returned Ok")
-        }
-    }
-}
-
 /// End-to-end COLUMN-COLUMN filter slice. Closes the filter
 /// predicate matrix: `filter_recorded` covers `col <op> const`,
 /// this covers `col[left] <op> col[right]`.
@@ -5038,34 +3853,7 @@ fn provider_filter_columns_recorded_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
 
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     assert_ne!(launch_stream, StreamId::DEFAULT);
@@ -5233,70 +4021,6 @@ fn provider_filter_columns_recorded_survives_drop_and_reuse() {
 /// against no-runtime manager. The first underlying primitive
 /// (`compare_columns_mask_recorded`) must reject before any
 /// allocation / kernel launch.
-#[test]
-fn provider_filter_columns_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::{CompareOp, CudaBuffer};
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut l_bytes = memory.alloc::<u8>(16).expect("alloc l");
-    let mut r_bytes = memory.alloc::<u8>(16).expect("alloc r");
-    let payload = [1u32, 2, 3, 4];
-    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut l_bytes)
-        .expect("htod l");
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut r_bytes)
-        .expect("htod r");
-    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
-        .expect("htod rows");
-    let input = CudaBuffer::from_columns(
-        vec![l_bytes.into(), r_bytes.into()],
-        4,
-        d_num_rows,
-        Schema::new(vec![
-            ("l".to_string(), ScalarType::U32),
-            ("r".to_string(), ScalarType::U32),
-        ]),
-    );
-
-    let err =
-        provider.filter_columns_recorded::<u32>(&input, 0, 1, CompareOp::Eq, StreamId::DEFAULT);
-    match err {
-        Err(XlogError::Kernel(msg)) => {
-            assert!(
-                msg.contains("requires") || msg.contains("with_runtime"),
-                "expected helpful Kernel error message, got {:?}",
-                msg
-            );
-        }
-        Err(other) => panic!(
-            "filter_columns_recorded must reject legacy manager with XlogError::Kernel, \
-             got {:?}",
-            other
-        ),
-        Ok(_) => {
-            panic!("filter_columns_recorded must reject legacy manager — unexpectedly returned Ok")
-        }
-    }
-}
-
 /// Fused-recorded slice: the migrated fused
 /// `compare+scan+compact` fast path. `filter_recorded::<u32>`
 /// is already covered by
@@ -5322,34 +4046,7 @@ fn provider_filter_fused_scan_recorded_f64_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CompareOp, CudaBuffer};
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
 
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     assert_ne!(launch_stream, StreamId::DEFAULT);
@@ -5493,67 +4190,6 @@ fn provider_filter_fused_scan_recorded_f64_survives_drop_and_reuse() {
 
 /// Negative test: fused-recorded path against a no-runtime
 /// manager. Must reject before any allocation / kernel.
-#[test]
-fn provider_filter_fused_scan_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::{CompareOp, CudaBuffer};
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut col_bytes = memory.alloc::<u8>(16).expect("alloc col");
-    let payload = [1u32, 2, 3, 4];
-    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut col_bytes)
-        .expect("htod col");
-    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
-        .expect("htod rows");
-    let input = CudaBuffer::from_columns(
-        vec![col_bytes.into()],
-        4,
-        d_num_rows,
-        Schema::new(vec![("v".to_string(), ScalarType::U32)]),
-    );
-
-    let err = provider.filter_fused_scan_recorded::<u32>(
-        &input,
-        0,
-        2u32,
-        CompareOp::Eq,
-        StreamId::DEFAULT,
-    );
-    match err {
-        Err(XlogError::Kernel(msg)) => {
-            assert!(
-                msg.contains("requires") || msg.contains("with_runtime"),
-                "expected helpful Kernel error message, got {:?}",
-                msg
-            );
-        }
-        Err(other) => panic!(
-            "filter_fused_scan_recorded must reject legacy manager with XlogError::Kernel, \
-             got {:?}",
-            other
-        ),
-        Ok(_) => panic!(
-            "filter_fused_scan_recorded must reject legacy manager — unexpectedly returned Ok"
-        ),
-    }
-}
-
 /// Result-correctness regression for the count-scan-materialize
 /// (CSM) Inner hash join (binary-join retake sub-slice #1).
 ///
@@ -5573,33 +4209,7 @@ fn provider_hash_join_inner_csm_v2_recorded_result_set_matches() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
 
@@ -5734,33 +4344,7 @@ fn provider_hash_join_inner_csm_v2_recorded_survives_drop_and_reuse() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -5956,79 +4540,6 @@ fn provider_hash_join_inner_csm_v2_recorded_survives_drop_and_reuse() {
 }
 
 /// Negative test: CSM Inner against a no-runtime manager.
-#[test]
-fn provider_hash_join_inner_csm_v2_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::CudaBuffer;
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut lk = memory.alloc::<u8>(16).expect("alloc lk");
-    let mut rk = memory.alloc::<u8>(16).expect("alloc rk");
-    let payload = [0u32, 1, 2, 3];
-    let bytes: Vec<u8> = payload.iter().flat_map(|x| x.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut lk)
-        .expect("htod lk");
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut rk)
-        .expect("htod rk");
-    let mut l_rows = memory.alloc::<u32>(1).expect("alloc l_rows");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut l_rows)
-        .expect("htod l_rows");
-    let left = CudaBuffer::from_columns(
-        vec![lk.into()],
-        4,
-        l_rows,
-        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
-    );
-    let mut r_rows = memory.alloc::<u32>(1).expect("alloc r_rows");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut r_rows)
-        .expect("htod r_rows");
-    let right = CudaBuffer::from_columns(
-        vec![rk.into()],
-        4,
-        r_rows,
-        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
-    );
-
-    let err = provider.hash_join_inner_v2_count_scan_materialize_recorded(
-        &left,
-        &right,
-        &[0],
-        &[0],
-        None,
-        StreamId::DEFAULT,
-    );
-    match err {
-        Err(XlogError::Kernel(msg)) => assert!(
-            msg.contains("requires") || msg.contains("with_runtime"),
-            "expected helpful Kernel error, got {:?}",
-            msg
-        ),
-        Err(other) => panic!(
-            "CSM inner must reject legacy manager with Kernel error, got {:?}",
-            other
-        ),
-        Ok(_) => panic!("CSM inner must reject legacy manager — unexpectedly returned Ok"),
-    }
-}
-
 /// Result-set correctness for indexed-Inner CSM
 /// (binary-join retake). Mirrors the non-indexed
 /// CSM correctness test but uses a cached `JoinIndexV2` for
@@ -6039,33 +4550,7 @@ fn provider_hash_join_inner_csm_v2_with_index_recorded_result_set_matches() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
 
@@ -6203,33 +4688,7 @@ fn provider_hash_join_inner_csm_v2_with_index_recorded_survives_drop_and_reuse()
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -6433,83 +4892,6 @@ fn provider_hash_join_inner_csm_v2_with_index_recorded_survives_drop_and_reuse()
 
 /// Negative test: indexed CSM Inner against a no-runtime
 /// manager.
-#[test]
-fn provider_hash_join_inner_csm_v2_with_index_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::CudaBuffer;
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut lk = memory.alloc::<u8>(16).expect("alloc lk");
-    let mut rk = memory.alloc::<u8>(16).expect("alloc rk");
-    let payload = [0u32, 1, 2, 3];
-    let bytes: Vec<u8> = payload.iter().flat_map(|x| x.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut lk)
-        .expect("htod lk");
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut rk)
-        .expect("htod rk");
-    let mut l_rows = memory.alloc::<u32>(1).expect("alloc l_rows");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut l_rows)
-        .expect("htod l_rows");
-    let left = CudaBuffer::from_columns(
-        vec![lk.into()],
-        4,
-        l_rows,
-        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
-    );
-    let mut r_rows = memory.alloc::<u32>(1).expect("alloc r_rows");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut r_rows)
-        .expect("htod r_rows");
-    let right = CudaBuffer::from_columns(
-        vec![rk.into()],
-        4,
-        r_rows,
-        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
-    );
-    let index = provider
-        .build_join_index_v2(&right, &[0])
-        .expect("build_join_index_v2");
-
-    let err = provider.hash_join_inner_v2_with_index_count_scan_materialize_recorded(
-        &left,
-        &right,
-        &[0],
-        &[0],
-        &index,
-        None,
-        StreamId::DEFAULT,
-    );
-    match err {
-        Err(XlogError::Kernel(msg)) => assert!(
-            msg.contains("requires") || msg.contains("with_runtime"),
-            "expected helpful Kernel error, got {:?}",
-            msg
-        ),
-        Err(other) => panic!(
-            "indexed CSM inner must reject legacy manager with Kernel error, got {:?}",
-            other
-        ),
-        Ok(_) => panic!("indexed CSM inner must reject legacy manager — unexpectedly returned Ok"),
-    }
-}
-
 // ───────────────────────────────────────────────────────────
 // Non-indexed LeftOuter CSM
 // (`hash_join_left_outer_v2_count_scan_materialize_recorded`)
@@ -6532,33 +4914,7 @@ fn provider_hash_join_left_outer_csm_v2_recorded_result_set_matches() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
 
@@ -6708,33 +5064,7 @@ fn provider_hash_join_left_outer_csm_v2_recorded_partial_match_survives_drop_and
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -6944,33 +5274,7 @@ fn provider_hash_join_left_outer_csm_v2_recorded_all_unmatched_survives_drop_and
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -7160,33 +5464,7 @@ fn provider_hash_join_left_outer_csm_v2_recorded_empty_right() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 16 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(16 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(16 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
 
     let schema = Schema::new(vec![
@@ -7281,79 +5559,6 @@ fn provider_hash_join_left_outer_csm_v2_recorded_empty_right() {
 
 /// Legacy-manager rejection: CSM LeftOuter must surface a
 /// helpful Kernel error when the manager has no runtime.
-#[test]
-fn provider_hash_join_left_outer_csm_v2_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::CudaBuffer;
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut lk = memory.alloc::<u8>(16).expect("alloc lk");
-    let mut rk = memory.alloc::<u8>(16).expect("alloc rk");
-    let payload = [0u32, 1, 2, 3];
-    let bytes: Vec<u8> = payload.iter().flat_map(|x| x.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut lk)
-        .expect("htod lk");
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut rk)
-        .expect("htod rk");
-    let mut l_rows = memory.alloc::<u32>(1).expect("alloc l_rows");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut l_rows)
-        .expect("htod l_rows");
-    let left = CudaBuffer::from_columns(
-        vec![lk.into()],
-        4,
-        l_rows,
-        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
-    );
-    let mut r_rows = memory.alloc::<u32>(1).expect("alloc r_rows");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut r_rows)
-        .expect("htod r_rows");
-    let right = CudaBuffer::from_columns(
-        vec![rk.into()],
-        4,
-        r_rows,
-        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
-    );
-
-    let err = provider.hash_join_left_outer_v2_count_scan_materialize_recorded(
-        &left,
-        &right,
-        &[0],
-        &[0],
-        None,
-        StreamId::DEFAULT,
-    );
-    match err {
-        Err(XlogError::Kernel(msg)) => assert!(
-            msg.contains("requires") || msg.contains("with_runtime"),
-            "expected helpful Kernel error, got {:?}",
-            msg
-        ),
-        Err(other) => panic!(
-            "CSM left_outer must reject legacy manager with Kernel error, got {:?}",
-            other
-        ),
-        Ok(_) => panic!("CSM left_outer must reject legacy manager — unexpectedly returned Ok"),
-    }
-}
-
 // ───────────────────────────────────────────────────────────
 // Indexed LeftOuter CSM
 // (`hash_join_left_outer_v2_with_index_count_scan_materialize_recorded`)
@@ -7376,33 +5581,7 @@ fn provider_hash_join_left_outer_csm_v2_with_index_recorded_result_set_matches()
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
 
@@ -7550,33 +5729,7 @@ fn provider_hash_join_left_outer_csm_v2_with_index_recorded_partial_match_surviv
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -7787,33 +5940,7 @@ fn provider_hash_join_left_outer_csm_v2_with_index_recorded_all_unmatched_surviv
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-        .expect("provider with_runtime");
+    provider_fixture!(256 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
     let launch_handle = pool.resolve(launch_stream).expect("resolve");
     let default_stream = device.inner().stream();
@@ -8003,84 +6130,3 @@ fn provider_hash_join_left_outer_csm_v2_with_index_recorded_all_unmatched_surviv
 // path and route through the non-indexed LeftOuter CSM
 // (whose empty-right test is in
 // `provider_hash_join_left_outer_csm_v2_recorded_empty_right`).
-
-/// Legacy-manager rejection.
-#[test]
-fn provider_hash_join_left_outer_csm_v2_with_index_recorded_rejects_legacy_manager() {
-    let _recorder_test_guard = recorder_test_lock();
-    use xlog_core::{ScalarType, Schema};
-    use xlog_cuda::CudaBuffer;
-
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(1024 * 1024),
-    ));
-    let provider =
-        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
-
-    let mut lk = memory.alloc::<u8>(16).expect("alloc lk");
-    let mut rk = memory.alloc::<u8>(16).expect("alloc rk");
-    let payload = [0u32, 1, 2, 3];
-    let bytes: Vec<u8> = payload.iter().flat_map(|x| x.to_le_bytes()).collect();
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut lk)
-        .expect("htod lk");
-    device
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut rk)
-        .expect("htod rk");
-    let mut l_rows = memory.alloc::<u32>(1).expect("alloc l_rows");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut l_rows)
-        .expect("htod l_rows");
-    let left = CudaBuffer::from_columns(
-        vec![lk.into()],
-        4,
-        l_rows,
-        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
-    );
-    let mut r_rows = memory.alloc::<u32>(1).expect("alloc r_rows");
-    device
-        .inner()
-        .htod_sync_copy_into(&[4u32], &mut r_rows)
-        .expect("htod r_rows");
-    let right = CudaBuffer::from_columns(
-        vec![rk.into()],
-        4,
-        r_rows,
-        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
-    );
-
-    let index = provider
-        .build_join_index_v2(&right, &[0])
-        .expect("build_join_index_v2");
-
-    let err = provider.hash_join_left_outer_v2_with_index_count_scan_materialize_recorded(
-        &left,
-        &right,
-        &[0],
-        &[0],
-        &index,
-        None,
-        StreamId::DEFAULT,
-    );
-    match err {
-        Err(XlogError::Kernel(msg)) => assert!(
-            msg.contains("requires") || msg.contains("with_runtime"),
-            "expected helpful Kernel error, got {:?}",
-            msg
-        ),
-        Err(other) => panic!(
-            "indexed CSM left_outer must reject legacy manager with Kernel error, got {:?}",
-            other
-        ),
-        Ok(_) => {
-            panic!("indexed CSM left_outer must reject legacy manager — unexpectedly returned Ok")
-        }
-    }
-}

@@ -630,7 +630,7 @@ impl GpuMemoryManager {
     /// # Arguments
     /// * `device` - The CUDA device to allocate memory on
     /// * `budget` - Memory budget configuration
-    pub fn new(device: Arc<CudaDevice>, budget: MemoryBudget) -> Self {
+    pub(crate) fn new(device: Arc<CudaDevice>, budget: MemoryBudget) -> Self {
         Self {
             device,
             budget,
@@ -652,7 +652,7 @@ impl GpuMemoryManager {
     /// attached). Provider construction does not yet require the
     /// runtime; callers that want runtime-routed allocations opt in
     /// here.
-    pub fn with_runtime(
+    pub(crate) fn with_runtime(
         device: Arc<CudaDevice>,
         budget: MemoryBudget,
         runtime: Arc<XlogDeviceRuntime>,
@@ -665,53 +665,6 @@ impl GpuMemoryManager {
             #[cfg(test)]
             after_local_reservation_hook: std::sync::Mutex::new(None),
         }
-    }
-
-    /// Attach a stream-safe runtime while preserving this manager's exact
-    /// device, total budget, and atomic accounting ledger.
-    ///
-    /// The overlay is an allocation view, not an independent budget. Parent
-    /// and overlay allocations therefore cannot oversubscribe the configured
-    /// limit, including when they race. Validation is completed before the
-    /// shared ledger is cloned.
-    pub fn with_runtime_overlay(
-        self: &Arc<Self>,
-        runtime: Arc<XlogDeviceRuntime>,
-    ) -> Result<Arc<Self>> {
-        if !Arc::ptr_eq(&self.device, runtime.device()) {
-            return Err(XlogError::Kernel(
-                "GpuMemoryManager::with_runtime_overlay requires the runtime to share the exact CUDA device handle"
-                    .to_string(),
-            ));
-        }
-        let device_ordinal = u32::try_from(self.device.ordinal()).map_err(|_| {
-            XlogError::Kernel(format!(
-                "CUDA device ordinal {} is not representable as u32",
-                self.device.ordinal()
-            ))
-        })?;
-        if runtime.device_ordinal() != device_ordinal {
-            return Err(XlogError::Kernel(format!(
-                "GpuMemoryManager::with_runtime_overlay device ordinal mismatch: manager={} runtime={}",
-                device_ordinal,
-                runtime.device_ordinal()
-            )));
-        }
-        if !runtime.supports_block_use_tracking() {
-            return Err(XlogError::Kernel(
-                "GpuMemoryManager::with_runtime_overlay requires a runtime with cross-stream block-use tracking"
-                    .to_string(),
-            ));
-        }
-
-        Ok(Arc::new(Self {
-            device: Arc::clone(&self.device),
-            budget: self.budget.clone(),
-            accounting: Arc::clone(&self.accounting),
-            runtime: Some(runtime),
-            #[cfg(test)]
-            after_local_reservation_hook: std::sync::Mutex::new(None),
-        }))
     }
 
     /// Atomically reserve `bytes` for one bounded multi-allocation request.

@@ -5,9 +5,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use xlog_core::{resolve_bool, RelId, Result, ScalarType, Schema, XlogError};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
-};
 use xlog_cuda::{CudaBuffer, CudaColumn, CudaKernelProvider};
 use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
 use xlog_logic::ast::{PredColumn, PredDecl, TypeRef};
@@ -2756,51 +2753,18 @@ impl LogicProgram {
                 "provider and memory manager do not share the same CUDA device handle".into(),
             ));
         }
-        if let Some(runtime) = provider.memory().runtime() {
-            if !Arc::ptr_eq(provider.device(), runtime.device())
-                || !runtime.supports_block_use_tracking()
-            {
-                return Err(decline(
-                    "the caller runtime cannot track resident cross-stream block uses".into(),
-                ));
-            }
-            return Ok(Arc::clone(provider));
-        }
-
-        let device = Arc::clone(provider.device());
-        let device_ordinal = u32::try_from(device.ordinal()).map_err(|_| {
-            decline(format!(
-                "CUDA device ordinal {} is not representable as u32",
-                device.ordinal()
-            ))
-        })?;
-        let budget_limit =
-            usize::try_from(provider.memory().budget_limit_bytes()).map_err(|_| {
-                decline("the caller memory budget is not representable as usize".into())
-            })?;
-        let stream_pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-        let asynchronous: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(AsyncCudaResource::new(
-                Arc::clone(&device),
-                device_ordinal,
-                Arc::clone(&stream_pool),
-            ));
-        let resource: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(GlobalDeviceBudget::new(asynchronous, budget_limit));
-        let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-            Arc::clone(&device),
-            device_ordinal,
-            stream_pool,
-            resource,
-        ));
-        let overlay = provider
+        let runtime = provider
             .memory()
-            .with_runtime_overlay(runtime)
-            .map_err(|error| decline(error.to_string()))?;
-        provider
-            .with_runtime_memory_view(overlay)
-            .map(Arc::new)
-            .map_err(|error| decline(error.to_string()))
+            .runtime()
+            .ok_or_else(|| decline("the provider does not own a canonical CUDA runtime".into()))?;
+        if !Arc::ptr_eq(provider.device(), runtime.device())
+            || !runtime.supports_block_use_tracking()
+        {
+            return Err(decline(
+                "the provider runtime cannot track resident cross-stream block uses".into(),
+            ));
+        }
+        Ok(Arc::clone(provider))
     }
 
     fn resident_execution_error(error: ResidentGraphExecutionError) -> XlogError {
@@ -5953,7 +5917,7 @@ mod tests {
     use std::sync::Arc;
 
     use xlog_core::{symbol, MemoryBudget, ScalarType};
-    use xlog_cuda::{cuda_graph::CudaGraphNodeKind, CudaDevice, GpuMemoryManager};
+    use xlog_cuda::cuda_graph::CudaGraphNodeKind;
     use xlog_ir::RirNode;
     use xlog_runtime::resident_graph::{
         ResidentGraphDeclineReason, ResidentGraphRouteCertificate, ResidentGraphSchemaCatalog,
@@ -5962,12 +5926,10 @@ mod tests {
 
     fn ground_term_encoding_test_provider() -> Option<Arc<CudaKernelProvider>> {
         let provider = (|| -> Result<Arc<CudaKernelProvider>> {
-            let device = Arc::new(CudaDevice::new(0)?);
-            let memory = Arc::new(GpuMemoryManager::new(
-                device.clone(),
-                MemoryBudget::with_limit(256 * 1024 * 1024),
-            ));
-            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+            Ok(Arc::new(
+                xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(256 * 1024 * 1024))
+                    .build()?,
+            ))
         })();
 
         finish_test_provider_setup(
@@ -5978,12 +5940,13 @@ mod tests {
 
     fn pinned_corpus_test_provider() -> Option<Arc<CudaKernelProvider>> {
         let provider = (|| -> Result<Arc<CudaKernelProvider>> {
-            let device = Arc::new(CudaDevice::new(0)?);
-            let memory = Arc::new(GpuMemoryManager::new(
-                device.clone(),
-                MemoryBudget::with_limit(2 * 1024 * 1024 * 1024),
-            ));
-            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+            Ok(Arc::new(
+                xlog_cuda::CudaProviderBuilder::new(
+                    0,
+                    MemoryBudget::with_limit(2 * 1024 * 1024 * 1024),
+                )
+                .build()?,
+            ))
         })();
         finish_test_provider_setup(
             provider,
@@ -10127,14 +10090,16 @@ mod relation_delta_coalesce_tests {
     use std::sync::Arc;
 
     use xlog_core::{MemoryBudget, ScalarType};
-    use xlog_cuda::{CudaDevice, GpuMemoryManager};
 
     fn test_provider() -> Option<Arc<CudaKernelProvider>> {
         let provider = (|| -> Result<Arc<CudaKernelProvider>> {
-            let device = Arc::new(CudaDevice::new(0)?);
-            let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-            let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+            Ok(Arc::new(
+                xlog_cuda::CudaProviderBuilder::new(
+                    0,
+                    MemoryBudget::with_limit(1024 * 1024 * 1024),
+                )
+                .build()?,
+            ))
         })();
 
         finish_test_provider_setup(
@@ -10379,14 +10344,12 @@ mod relation_delta_preparation_tests {
     use std::sync::Arc;
 
     use xlog_core::{MemoryBudget, ScalarType};
-    use xlog_cuda::{CudaDevice, GpuMemoryManager};
 
     fn test_provider_with_budget(limit: u64) -> Option<Arc<CudaKernelProvider>> {
         let provider = (|| -> Result<Arc<CudaKernelProvider>> {
-            let device = Arc::new(CudaDevice::new(0)?);
-            let budget = MemoryBudget::with_limit(limit);
-            let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+            Ok(Arc::new(
+                xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(limit)).build()?,
+            ))
         })();
 
         match provider {

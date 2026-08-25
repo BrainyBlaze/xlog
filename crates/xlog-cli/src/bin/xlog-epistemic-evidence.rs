@@ -7,11 +7,8 @@ use clap::{Parser, ValueEnum};
 use cudarc::driver::sys;
 use serde_json::{json, Value};
 use xlog_core::{MemoryBudget, Result, RuntimeConfig, ScalarType, Schema, XlogError};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager};
 use xlog_logic::compile::load_modules;
 use xlog_logic::epistemic::{
     build_epistemic_dependency_graph, compile_epistemic_gpu_execution_with_stats_snapshot,
@@ -289,34 +286,16 @@ fn gpu_budget_bytes(gpu_budget_mib: usize) -> Result<usize> {
 }
 
 fn make_fixture(device_ordinal: usize, gpu_budget_bytes: usize) -> Result<RuntimeFixture> {
-    let device = Arc::new(CudaDevice::new(device_ordinal).map_err(|err| {
-        XlogError::Execution(format!("create CUDA device {device_ordinal}: {err}"))
-    })?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, gpu_budget_bytes));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        device_ordinal as u32,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(gpu_budget_bytes as u64),
-        Arc::clone(&runtime),
-    ));
     let provider = Arc::new(
-        CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
-            .map_err(|err| XlogError::Execution(format!("create CUDA kernel provider: {err}")))?,
+        CudaProviderBuilder::new(
+            device_ordinal,
+            MemoryBudget::with_limit(gpu_budget_bytes as u64),
+        )
+        .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+        .build()
+        .map_err(|err| XlogError::Execution(format!("create CUDA kernel provider: {err}")))?,
     );
+    let memory = Arc::clone(provider.memory());
     Ok(RuntimeFixture {
         memory,
         provider,

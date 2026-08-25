@@ -5345,22 +5345,14 @@ mod tests {
     use std::sync::Arc;
 
     use xlog_core::MemoryBudget;
-    use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+    use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
 
     use super::*;
     use crate::{Clause, Literal};
 
     fn try_provider() -> Option<Arc<CudaKernelProvider>> {
-        let device = match CudaDevice::new(0) {
-            Ok(device) => Arc::new(device),
-            Err(err) => {
-                eprintln!("Skipping test: CUDA runtime unavailable: {err}");
-                return None;
-            }
-        };
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        match CudaKernelProvider::new(device, memory) {
+        match CudaProviderBuilder::new(0, budget).build() {
             Ok(provider) => Some(Arc::new(provider)),
             Err(err) => {
                 eprintln!("Skipping test: failed to create CUDA kernel provider: {err}");

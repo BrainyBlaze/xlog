@@ -40,10 +40,7 @@ use std::sync::Arc;
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamPool, XlogDeviceRuntime};
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
@@ -68,30 +65,15 @@ struct RuntimeFixture {
 }
 
 fn make_runtime_fixture() -> Option<RuntimeFixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
     let provider =
-        CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?;
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(64 * 1024 * 1024))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?;
+    let device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeFixture {
         device,
         runtime,
@@ -450,41 +432,6 @@ fn wcoj_triangle_u32_survives_drop_and_reuse_of_input_buffers() {
     // No assertion needed — survival without abort is the
     // contract. UB on that path would have shown as a memory
     // checker failure or silent wrong answer in the prior run.
-}
-
-#[test]
-fn wcoj_triangle_u32_legacy_manager_rejected() {
-    // The kernel must reject a legacy GpuMemoryManager (no
-    // runtime attached) with a clear error rather than running
-    // unsafe.
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(16 * 1024 * 1024),
-    ));
-    let provider = CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory))
-        .expect("legacy provider construction");
-    let e: Vec<(u32, u32)> = vec![(1, 2)];
-    let buf_xy = upload_binary_u32(&memory, &e);
-    let buf_yz = upload_binary_u32(&memory, &e);
-    let buf_xz = upload_binary_u32(&memory, &e);
-    // No runtime → no real launch_stream. We use DEFAULT here;
-    // the validation should fire on the manager check, not on
-    // stream resolution.
-    let result = provider.wcoj_triangle_u32_recorded(&buf_xy, &buf_yz, &buf_xz, StreamId::DEFAULT);
-    let err = match result {
-        Ok(_) => panic!("legacy manager must be rejected, but kernel returned Ok"),
-        Err(e) => e,
-    };
-    let msg = format!("{:?}", err);
-    assert!(
-        msg.contains("runtime") || msg.contains("with_runtime"),
-        "error must mention runtime requirement, got: {}",
-        msg
-    );
 }
 
 #[test]

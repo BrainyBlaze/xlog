@@ -8,7 +8,7 @@ use std::time::Duration;
 use arrow::csv::WriterBuilder;
 use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{symbol, MemoryBudget, Result, XlogError};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
 use xlog_gpu::logic::{normalize_program_for_execution, LogicProgram};
 use xlog_ir::{EirBodyLiteral, EirTerm};
 use xlog_logic::ast::{BodyLiteral, ProbEngine, Program};
@@ -1149,40 +1149,10 @@ fn memory_budget_bytes(memory_mb: u64) -> Result<u64> {
 }
 
 fn make_provider(device: usize, memory_mb: u64) -> Result<Arc<CudaKernelProvider>> {
-    use xlog_cuda::device_runtime::{
-        AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
-    };
     let memory_bytes = memory_budget_bytes(memory_mb)?;
-    let runtime_memory_bytes = usize::try_from(memory_bytes).map_err(|_| {
-        XlogError::Execution(format!(
-            "memory budget {memory_mb} MiB cannot be represented on this platform"
-        ))
-    })?;
-    let device = Arc::new(CudaDevice::new(device)?);
-    // Runtime-backed memory manager: the recorded GPU primitives (WCOJ
-    // triangle/4-cycle/k-clique, Free Join, factorized delta) require a
-    // DeviceBlock-backed allocation routed through an XlogDeviceRuntime.
-    // The plain `GpuMemoryManager::new` path leaves `memory().runtime()`
-    // == None, so those dispatches silently fall back to binary joins.
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let budget_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        GlobalDeviceBudget::new(async_resource, runtime_memory_bytes),
-    );
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget_resource,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(memory_bytes),
-        Arc::clone(&runtime),
-    ));
-    Ok(Arc::new(CudaKernelProvider::with_runtime(device, memory)?))
+    Ok(Arc::new(
+        CudaProviderBuilder::new(device, MemoryBudget::with_limit(memory_bytes)).build()?,
+    ))
 }
 
 fn parse_inputs(inputs: &[String]) -> Result<HashMap<String, PathBuf>> {

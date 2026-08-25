@@ -3,13 +3,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamPool, XlogDeviceRuntime};
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::provider::{HostLaunchMetadataTransferStats, HostTransferStats};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaDevice, CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager};
 use xlog_ir::{
     rir::{
         CostPredictionRecord, HelperSplitSpec, KCliqueVariableOrder, LookupPerm, MultiwayPlan,
@@ -61,38 +58,9 @@ struct RuntimeFixture {
 }
 
 fn runtime_fixture() -> Option<RuntimeFixture> {
-    let device = match CudaDevice::new(0) {
-        Ok(device) => Arc::new(device),
-        Err(err) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-            panic!("CUDA runtime required by XLOG_REQUIRE_CUDA=1: {err}")
-        }
-        Err(err) => {
-            eprintln!("Skipping test: CUDA runtime unavailable: {err}");
-            return None;
-        }
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 128 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(128 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = match CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+    let provider = match CudaProviderBuilder::new(0, MemoryBudget::with_limit(128 * 1024 * 1024))
+        .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+        .build()
     {
         Ok(provider) => Arc::new(provider),
         Err(err) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
@@ -103,6 +71,10 @@ fn runtime_fixture() -> Option<RuntimeFixture> {
             return None;
         }
     };
+    let device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
 
     Some(RuntimeFixture {
         _device: device,

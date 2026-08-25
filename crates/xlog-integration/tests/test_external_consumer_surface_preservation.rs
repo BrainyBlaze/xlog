@@ -1,11 +1,7 @@
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, Result, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, CudaProviderBuilder};
 use xlog_gpu::logic::{LogicEvalResult, LogicMaterializedStore, LogicProgram};
 use xlog_logic::Compiler;
 use xlog_runtime::{Executor, RelationDelta};
@@ -14,46 +10,9 @@ use xlog_runtime::{Executor, RelationDelta};
 #[path = "../benches/fixtures/paper_class.rs"]
 mod paper_class;
 
-struct DiscardSink;
-
-impl LoggingSink for DiscardSink {
-    fn emit(&self, _record: LogRecord) -> std::result::Result<(), SinkError> {
-        Ok(())
-    }
-}
-
 fn test_provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
     let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    Some(Arc::new(CudaKernelProvider::new(device, memory).ok()?))
-}
-
-fn test_runtime_provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(device.clone()));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(AsyncCudaResource::new(device.clone(), 0, pool.clone()));
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        device.clone(),
-        0,
-        pool,
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        device.clone(),
-        MemoryBudget::with_limit(256 * 1024 * 1024),
-        runtime,
-    ));
-    Some(Arc::new(
-        CudaKernelProvider::with_runtime(device, memory).ok()?,
-    ))
+    Some(Arc::new(CudaProviderBuilder::new(0, budget).build().ok()?))
 }
 
 fn u32_buffer(provider: &CudaKernelProvider, rows: &[u32]) -> CudaBuffer {
@@ -303,7 +262,7 @@ fn logic_session_delta_runtime_preserves_external_consumer_surface_values() -> R
 
 #[test]
 fn external_consumer_analog_fixture_runs_through_wcoj_runtime_path() -> Result<()> {
-    let Some(provider) = test_runtime_provider() else {
+    let Some(provider) = test_provider() else {
         eprintln!("Skipping external consumer WCOJ surface preservation: CUDA unavailable");
         return Ok(());
     };

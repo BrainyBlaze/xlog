@@ -36,7 +36,7 @@ use xlog_cuda::provider::{
     arith_kernels, filter_kernels, neural_kernels, weights_kernels, ARITH_MODULE, FILTER_MODULE,
     NEURAL_MODULE, WEIGHTS_MODULE,
 };
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 
 #[derive(Debug, Clone)]
 pub struct QueryProbability {
@@ -1927,12 +1927,13 @@ impl ExactDdnnfProgram {
             });
         }
 
-        let device = Arc::new(CudaDevice::new(config.device_ordinal)?);
-        let memory = Arc::new(GpuMemoryManager::new(
-            device.clone(),
-            MemoryBudget::with_limit(config.memory_bytes),
-        ));
-        let provider = Arc::new(CudaKernelProvider::new(device, memory)?);
+        let provider = Arc::new(
+            xlog_cuda::CudaProviderBuilder::new(
+                config.device_ordinal,
+                MemoryBudget::with_limit(config.memory_bytes),
+            )
+            .build()?,
+        );
 
         let canonical_cnf_hash = crate::cnf::canonical_pir_hash(&provenance.pir, &roots)?;
         let gpu_pir = GpuPirGraph::from_host(&provenance.pir, &provider)?;
@@ -2395,12 +2396,13 @@ fn try_build_count_lift_gpu_state(
         return Ok(None);
     }
 
-    let device = Arc::new(CudaDevice::new(config.device_ordinal)?);
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(config.memory_bytes),
-    ));
-    let provider = Arc::new(CudaKernelProvider::new(device, memory)?);
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(
+            config.device_ordinal,
+            MemoryBudget::with_limit(config.memory_bytes),
+        )
+        .build()?,
+    );
     let mut gpu_queries = Vec::with_capacity(queries.len());
     for query in queries {
         let target_count = match count_lift_query_target(query)? {

@@ -17,11 +17,11 @@ use fixtures::paper_class::{
 };
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogAction, LogRecord, LogResult,
-    LoggingResource, LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
+    LogAction, LogRecord, LogResult, LoggingSink, SinkError, StreamId, StreamPool,
+    XlogDeviceRuntime,
 };
 use xlog_cuda::memory::CudaBuffer;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager, JoinType};
 
 const SCALE: u32 = 1024;
 const DEVICE_BUDGET_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -135,35 +135,19 @@ impl CudaMemInfoTracker {
 }
 
 fn make_provider() -> Option<Provider> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::new(Arc::clone(&device), 1024));
-    let launch_stream = pool.acquire().ok()?;
     let peak = Arc::new(PeakSink::default());
-    let mem_info = Arc::new(CudaMemInfoTracker::new());
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        CudaProviderBuilder::new(0, MemoryBudget::with_limit(DEVICE_BUDGET_BYTES))
+            .with_stream_capacity(1024)
+            .with_logging_sink(Arc::clone(&peak) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::clone(&peak) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(GlobalDeviceBudget::new(
-        logging,
-        DEVICE_BUDGET_BYTES as usize,
-    ));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(DEVICE_BUDGET_BYTES),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
+    let launch_stream = pool.acquire().ok()?;
+    let mem_info = Arc::new(CudaMemInfoTracker::new());
     Some(Provider {
         memory,
         provider,

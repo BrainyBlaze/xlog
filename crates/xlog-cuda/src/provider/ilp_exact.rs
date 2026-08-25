@@ -516,17 +516,13 @@ mod tests {
     //! fixture uses C=2 candidate relations so the expected flat output
     //! (4 × C × C = 16 slots per count array) is tractable to enumerate.
 
-    use std::sync::Arc;
-
     use xlog_core::{MemoryBudget, ScalarType, Schema};
 
-    use crate::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+    use crate::{CudaKernelProvider, CudaProviderBuilder};
 
     fn make_provider() -> Option<CudaKernelProvider> {
-        let device = Arc::new(CudaDevice::new(0).ok()?);
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        CudaKernelProvider::new(device, memory).ok()
+        CudaProviderBuilder::new(0, budget).build().ok()
     }
 
     /// Build a `(u64, u64)` pair buffer from parallel host-side column arrays.

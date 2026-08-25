@@ -4,14 +4,12 @@ use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
 use xlog_core::{ScalarType, Schema};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
 use xlog_gpu::logic::LogicProgram;
 
 fn sort_label_test_provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
     let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    Some(Arc::new(CudaKernelProvider::new(device, memory).ok()?))
+    Some(Arc::new(CudaProviderBuilder::new(0, budget).build().ok()?))
 }
 
 #[test]

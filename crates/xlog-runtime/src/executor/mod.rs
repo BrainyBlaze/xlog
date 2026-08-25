@@ -235,9 +235,10 @@ enum CommonSubexpressionKey {
 /// ```ignore
 /// use std::sync::Arc;
 /// use xlog_runtime::Executor;
-/// use xlog_cuda::CudaKernelProvider;
+/// use xlog_core::MemoryBudget;
+/// use xlog_cuda::CudaProviderBuilder;
 ///
-/// let provider = Arc::new(CudaKernelProvider::new(device, memory)?);
+/// let provider = Arc::new(CudaProviderBuilder::new(0, MemoryBudget::default()).build()?);
 /// let mut executor = Executor::new(provider);
 ///
 /// // Execute a plan
@@ -1959,7 +1960,7 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
     use xlog_core::MemoryBudget;
-    use xlog_cuda::{CudaDevice, GpuMemoryManager};
+    use xlog_cuda::{CudaDevice, CudaProviderBuilder, GpuMemoryManager};
     use xlog_ir::{CompiledRule, RirMeta, Scc};
 
     fn has_cuda_device() -> bool {
@@ -1971,10 +1972,8 @@ mod tests {
         if !has_cuda_device() {
             return None;
         }
-        let device = Arc::new(CudaDevice::new(0).ok()?);
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
+        let provider = Arc::new(CudaProviderBuilder::new(0, budget).build().ok()?);
         Some(Executor::new(provider))
     }
 
@@ -1982,38 +1981,25 @@ mod tests {
         if !has_cuda_device() {
             return None;
         }
-        let device = Arc::new(CudaDevice::new(0).ok()?);
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
+        let provider = Arc::new(CudaProviderBuilder::new(0, budget).build().ok()?);
         Some(Executor::new_with_config(provider, config))
     }
 
     fn create_manager_stats_fixture() -> Option<(Arc<GpuMemoryManager>, Arc<CudaKernelProvider>)> {
-        let device = match CudaDevice::new(0) {
-            Ok(device) => Arc::new(device),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping test: CUDA runtime unavailable: {error}");
-                return None;
-            }
-        };
-        let memory = Arc::new(GpuMemoryManager::new(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(1024 * 1024 * 1024),
-        ));
-        let provider = match CudaKernelProvider::new(device, Arc::clone(&memory)) {
-            Ok(provider) => Arc::new(provider),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but provider initialization failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping test: provider initialization failed: {error}");
-                return None;
-            }
-        };
+        let provider =
+            match CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024)).build()
+            {
+                Ok(provider) => Arc::new(provider),
+                Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                    panic!("XLOG_REQUIRE_CUDA=1 but provider initialization failed: {error}")
+                }
+                Err(error) => {
+                    eprintln!("Skipping test: provider initialization failed: {error}");
+                    return None;
+                }
+            };
+        let memory = Arc::clone(provider.memory());
         Some((memory, provider))
     }
 

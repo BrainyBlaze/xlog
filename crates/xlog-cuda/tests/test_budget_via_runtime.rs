@@ -28,31 +28,23 @@
 
 use std::sync::Arc;
 
+use xlog_core::MemoryBudget;
 use xlog_cuda::device_runtime::{
-    AllocTag, AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, InMemorySink, LogAction,
-    LogResult, LoggingResource, LoggingSink, ResourceError, StreamId, StreamPool,
+    AllocTag, InMemorySink, LogAction, LogResult, LoggingSink, ResourceError, StreamId, StreamPool,
     XlogDeviceRuntime,
 };
-use xlog_cuda::CudaDevice;
+use xlog_cuda::CudaProviderBuilder;
 
 const LIMIT: usize = 16 * 1024;
 
-fn build_runtime() -> Option<(XlogDeviceRuntime, Arc<InMemorySink>, Arc<StreamPool>)> {
-    let device = CudaDevice::new(0).ok().map(Arc::new)?;
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+fn build_runtime() -> Option<(Arc<XlogDeviceRuntime>, Arc<InMemorySink>, Arc<StreamPool>)> {
     let sink: Arc<InMemorySink> = Arc::new(InMemorySink::new());
-
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        sink.clone() as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, LIMIT));
-    let runtime =
-        XlogDeviceRuntime::with_resource(Arc::clone(&device), 0, Arc::clone(&pool), budget);
+    let provider = CudaProviderBuilder::new(0, MemoryBudget::with_limit(LIMIT as u64))
+        .with_logging_sink(sink.clone() as Arc<dyn LoggingSink>)
+        .build()
+        .ok()?;
+    let runtime = Arc::clone(provider.memory().runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some((runtime, sink, pool))
 }
 

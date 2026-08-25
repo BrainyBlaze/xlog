@@ -1,63 +1,24 @@
-//! [`XlogDeviceRuntime`] — per-CUDA-ordinal singleton hosting the
-//! device-runtime allocator stack.
+//! [`XlogDeviceRuntime`] hosts one provider-owned CUDA device, stream
+//! pool, and decorated memory-resource stack.
 //!
-//! Replaces the per-`CudaKernelProvider` `GpuMemoryManager` model with
-//! a single live runtime per physical GPU. All `CudaKernelProvider`s
-//! on a given ordinal share the same runtime once the migration
-//! commit lands; until then this type is constructed and used by
-//! tests only.
-//!
-//! Singleton lifetime: leaked-Box, so the returned `&'static` borrows
-//! are valid for the process. No teardown on drop — appropriate for a
-//! GPU device runtime that should outlive any single executor.
-//!
-//! # Initialization race semantics
-//!
-//! Earlier revisions used `OnceLock::get_or_init(|| leaked_box)`
-//! after building the runtime outside the lock. That pattern leaked
-//! the loser's runtime (and its CUDA context handle) when two
-//! threads raced on the first access for an ordinal.
-//!
-//! This module now uses an explicit per-ordinal `Mutex` plus
-//! `OnceLock`: callers fast-path on `OnceLock::get()`, and on a miss
-//! take the per-ordinal mutex, double-check the `OnceLock`, and only
-//! the winner inside the mutex builds and stores the runtime. The
-//! mutex is held only across the build, so subsequent reads are still
-//! lock-free.
+//! The canonical provider builder constructs the complete ownership graph and
+//! shares its exact handles with the memory manager. There is no process-global
+//! runtime registry: dropping a provider releases its runtime normally, and
+//! independently built providers never share allocator state accidentally.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::OnceLock;
 
 use cudarc::driver::{CudaEvent, CudaStream};
 use xlog_core::{Result, XlogError};
 
-use super::direct::DirectCudaResource;
 use super::resource::{
     Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, ResourceError, ResourceResult,
     StreamId,
 };
 use super::stream_pool::StreamPool;
 use crate::CudaDevice;
-
-/// Maximum CUDA ordinal supported by the singleton table. CUDA itself
-/// caps at 16 visible devices in typical configurations; raise here
-/// only when a multi-GPU node demands it.
-pub const MAX_DEVICE_ORDINALS: usize = 16;
-
-/// Per-ordinal singleton table. Each slot is initialized at most once
-/// via `OnceLock`, gated by [`INIT_LOCKS`] so failed initialization
-/// does not leak partial state.
-static RUNTIMES: [OnceLock<&'static XlogDeviceRuntime>; MAX_DEVICE_ORDINALS] =
-    [const { OnceLock::new() }; MAX_DEVICE_ORDINALS];
-
-/// Per-ordinal initialization mutex. Only the holder may build and
-/// store a runtime in [`RUNTIMES`]. Held across the device-open and
-/// resource-construction calls so concurrent first callers do not
-/// race-leak loser runtimes.
-static INIT_LOCKS: [Mutex<()>; MAX_DEVICE_ORDINALS] =
-    [const { Mutex::new(()) }; MAX_DEVICE_ORDINALS];
 
 /// Execution counters for the device-controlled conditional-graph route.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -199,7 +160,7 @@ impl Drop for ResidentCompletionEvent {
     }
 }
 
-/// Per-CUDA-ordinal device-runtime singleton.
+/// Provider-owned CUDA device runtime.
 ///
 /// Owns the device handle, stream pool, and resource stack. Allocate
 /// / deallocate calls forward to the resource. The resource is fixed
@@ -289,33 +250,11 @@ impl Drop for RuntimeMemoryReservation {
 }
 
 impl XlogDeviceRuntime {
-    /// Compose an owned runtime around a caller-supplied resource
-    /// stack. **Not** a singleton — the returned value is *not*
-    /// stored in [`RUNTIMES`] and does not interact with `try_get`.
+    /// Compose a runtime from already validated provider-builder parts.
     ///
-    /// Intended uses:
-    ///   * Tests that need to drive a specific backend (e.g.,
-    ///     `AsyncCudaResource`) through the same facade production
-    ///     code uses, instead of constructing the resource directly.
-    ///   * Future decorator stacks (`LoggingResource`,
-    ///     `GlobalDeviceBudget`, `DebugGuardResource`) that wrap the
-    ///     base resource before installation.
-    ///
-    /// The `device` and `stream_pool` arguments must be consistent
-    /// with `device_ordinal` (the pool must be bound to the same
-    /// device handle, and the device must be the one the resource
-    /// allocates against). The constructor does not verify this —
-    /// callers that compose mismatched parts get undefined
-    /// runtime-level behavior, but the per-resource device-ordinal
-    /// check on `deallocate` will still surface obvious mistakes as
-    /// `ResourceError::Driver`.
-    ///
-    /// The singleton path remains [`Self::try_get`], which today
-    /// always installs the cudarc default (non-pooled) backend
-    /// ([`DirectCudaResource`]). Swapping the singleton's default
-    /// resource is a separate later change gated on
-    /// `GlobalDeviceBudget` and `LoggingResource` landing.
-    pub fn with_resource(
+    /// Kept crate-private for allocator fault injection and the canonical
+    /// builder. Production callers cannot assemble mismatched resource stacks.
+    pub(crate) fn with_resource(
         device: Arc<CudaDevice>,
         device_ordinal: u32,
         stream_pool: Arc<StreamPool>,
@@ -371,78 +310,6 @@ impl XlogDeviceRuntime {
             total_bytes: bytes,
             remaining_bytes: bytes,
         })
-    }
-
-    /// Get the singleton for `ordinal`, initializing it on first
-    /// access. Subsequent calls return the same `&'static`.
-    ///
-    /// Errors:
-    ///   * `XlogError::Kernel` if `ordinal >= MAX_DEVICE_ORDINALS`.
-    ///   * `XlogError::Kernel` if the CUDA device cannot be opened.
-    ///
-    /// Concurrency: at most one thread builds the runtime for a
-    /// given ordinal. Other concurrent first callers block on the
-    /// per-ordinal init mutex until the winner publishes via
-    /// `OnceLock::set`, after which they observe the published
-    /// runtime via the inside-mutex double-check or the lock-free
-    /// fast path on subsequent calls.
-    pub fn try_get(ordinal: u32) -> Result<&'static XlogDeviceRuntime> {
-        let idx = ordinal as usize;
-        if idx >= MAX_DEVICE_ORDINALS {
-            return Err(XlogError::Kernel(format!(
-                "XlogDeviceRuntime: ordinal {} exceeds MAX_DEVICE_ORDINALS={}",
-                ordinal, MAX_DEVICE_ORDINALS
-            )));
-        }
-        // Fast path: another thread already initialized this slot.
-        if let Some(rt) = RUNTIMES[idx].get() {
-            return Ok(*rt);
-        }
-
-        // Slow path: take the per-ordinal init mutex. Only one
-        // thread per ordinal builds the runtime; the rest wait here
-        // and observe the published value on the double-check below.
-        let _guard = INIT_LOCKS[idx]
-            .lock()
-            .expect("XlogDeviceRuntime init mutex poisoned");
-
-        // Double-check inside the lock: a previous holder may have
-        // initialized while we were waiting for the mutex.
-        if let Some(rt) = RUNTIMES[idx].get() {
-            return Ok(*rt);
-        }
-
-        // We are the first writer for this ordinal. Build the
-        // runtime; if any step fails, return the error and leave
-        // RUNTIMES[idx] uninitialized so the next caller can retry.
-        let device = Arc::new(CudaDevice::new(ordinal as usize).map_err(|e| {
-            XlogError::Kernel(format!(
-                "XlogDeviceRuntime: failed to open device {}: {}",
-                ordinal, e
-            ))
-        })?);
-        let stream_pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-        let resource: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(DirectCudaResource::new(Arc::clone(&device), ordinal));
-        let runtime = Box::new(XlogDeviceRuntime {
-            device_ordinal: ordinal,
-            device,
-            stream_pool,
-            resource: Mutex::new(resource),
-            reservation_bytes: Mutex::new(0),
-            resident_telemetry: Arc::new(ResidentRuntimeTelemetry::default()),
-        });
-        let leaked: &'static XlogDeviceRuntime = Box::leak(runtime);
-
-        // We hold INIT_LOCKS[idx] and confirmed RUNTIMES[idx] is
-        // empty under that lock, so this `set` cannot fail. Fall
-        // through to a hard panic if it does — it indicates a
-        // process-internal bug we cannot recover from.
-        RUNTIMES[idx]
-            .set(leaked)
-            .map_err(|_| ())
-            .expect("XlogDeviceRuntime: OnceLock::set raced under INIT_LOCKS — bug");
-        Ok(leaked)
     }
 
     /// CUDA ordinal this runtime serves.
@@ -749,33 +616,28 @@ impl XlogDeviceRuntime {
 mod tests {
     use super::*;
 
-    fn try_runtime() -> Option<&'static XlogDeviceRuntime> {
-        match XlogDeviceRuntime::try_get(0) {
-            Ok(runtime) => Some(runtime),
+    fn try_runtime() -> Option<XlogDeviceRuntime> {
+        use super::super::async_resource::AsyncCudaResource;
+
+        match CudaDevice::new(0) {
+            Ok(device) => {
+                let device = Arc::new(device);
+                let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+                let resource = Box::new(AsyncCudaResource::new(
+                    Arc::clone(&device),
+                    0,
+                    Arc::clone(&pool),
+                ));
+                Some(XlogDeviceRuntime::with_resource(device, 0, pool, resource))
+            }
             Err(error) => {
                 if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
-                    panic!(
-                        "XLOG_REQUIRE_CUDA=1 but CUDA is unavailable \
-                         (XlogDeviceRuntime::try_get): {error}"
-                    );
+                    panic!("XLOG_REQUIRE_CUDA=1 but CUDA is unavailable: {error}");
                 }
-                eprintln!(
-                    "Skipping device-runtime test: CUDA unavailable \
-                     (XlogDeviceRuntime::try_get): {error}"
-                );
+                eprintln!("Skipping device-runtime test: CUDA unavailable: {error}");
                 None
             }
         }
-    }
-
-    #[test]
-    fn try_get_returns_same_singleton() {
-        let Some(a) = try_runtime() else {
-            return;
-        };
-        let b = XlogDeviceRuntime::try_get(0).expect("re-get");
-        assert!(std::ptr::eq(a, b), "singleton must be stable for ordinal 0");
-        assert_eq!(a.device_ordinal(), 0);
     }
 
     #[test]
@@ -795,13 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn try_get_rejects_out_of_range_ordinal() {
-        let err = XlogDeviceRuntime::try_get(MAX_DEVICE_ORDINALS as u32);
-        assert!(err.is_err());
-    }
-
-    #[test]
-    fn with_resource_composes_owned_runtime_outside_singleton() {
+    fn with_resource_composes_owned_runtime() {
         use super::super::async_resource::AsyncCudaResource;
 
         let Some(rt) = try_runtime() else {
@@ -826,15 +682,6 @@ mod tests {
         owned.deallocate(block).expect("dealloc");
         owned.reap_pending().expect("reap");
         assert_eq!(owned.bytes_outstanding(), 0);
-
-        // Composed runtime is not stored in the singleton table:
-        // the singleton for ordinal 0 is whatever `try_get` returns,
-        // which must be a different memory address.
-        let singleton = XlogDeviceRuntime::try_get(0).expect("singleton");
-        assert!(
-            !std::ptr::eq(&owned, singleton),
-            "with_resource must not aliase the singleton slot"
-        );
     }
 
     #[test]
@@ -885,40 +732,5 @@ mod tests {
             after.created_graph_execs - before.created_graph_execs,
             after.destroyed_graph_execs - before.destroyed_graph_execs
         );
-    }
-
-    /// `try_get` installs `DirectCudaResource` by default. The
-    /// runtime's `record_block_use` must therefore return
-    /// `StreamMisuse` (the trait's default) rather than silently
-    /// claiming success — anything else would let a launch
-    /// builder running against the singleton observe `Ok(())`
-    /// while no event is actually recorded, reproducing the
-    /// cross-stream use-after-free this whole layer exists to
-    /// prevent. See the trait-level doc on
-    /// `DeviceMemoryResource::record_block_use`.
-    #[test]
-    fn try_get_runtime_record_block_use_rejected_with_stream_misuse() {
-        let Some(rt) = try_runtime() else {
-            return;
-        };
-        let block = rt
-            .allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED)
-            .expect("alloc through runtime");
-        let err = rt.record_block_use(&block, StreamId::DEFAULT);
-        match err {
-            Err(super::super::resource::ResourceError::StreamMisuse(msg)) => {
-                assert!(
-                    msg.contains("unsupported"),
-                    "expected 'unsupported' in StreamMisuse message, got {:?}",
-                    msg
-                );
-            }
-            other => panic!(
-                "XlogDeviceRuntime::try_get default (DirectCudaResource) must \
-                 reject record_block_use with StreamMisuse; got {:?}",
-                other
-            ),
-        }
-        rt.deallocate(block).expect("dealloc still works");
     }
 }

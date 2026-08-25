@@ -2338,11 +2338,10 @@ impl CudaKernelProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use xlog_core::{MemoryBudget, ScalarType, Schema};
 
-    use crate::{cuda_graph::CapturedCudaGraph, CudaDevice, GpuMemoryManager};
+    use crate::cuda_graph::CapturedCudaGraph;
 
     use super::{
         checked_hash_slot_capacity, checked_receipt_pointee, record_receipt_pointee_uses,
@@ -2620,21 +2619,9 @@ mod tests {
     }
 
     fn provider() -> Option<super::CudaKernelProvider> {
-        let device = match CudaDevice::new(0) {
-            Ok(device) => Arc::new(device),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA device initialization failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping resident CUDA test: {error}");
-                return None;
-            }
-        };
-        let memory = Arc::new(GpuMemoryManager::new(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(512 * 1024 * 1024),
-        ));
-        match super::CudaKernelProvider::new(device, memory) {
+        match crate::CudaProviderBuilder::new(0, MemoryBudget::with_limit(512 * 1024 * 1024))
+            .build()
+        {
             Ok(provider) => Some(provider),
             Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
                 panic!("XLOG_REQUIRE_CUDA=1 but resident provider setup failed: {error}")

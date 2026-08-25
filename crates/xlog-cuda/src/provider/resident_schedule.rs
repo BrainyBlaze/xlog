@@ -3272,10 +3272,7 @@ mod tests {
     use crate::cuda_compat::LaunchAsync;
     use crate::cuda_graph::{CapturedCudaGraph, CudaGraphNodeKind};
     use crate::device::CudaFunction;
-    use crate::device_runtime::{
-        AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LoggingResource, NullSink,
-        StreamPool, XlogDeviceRuntime,
-    };
+    use crate::device_runtime::XlogDeviceRuntime;
     use crate::memory::GpuMemoryManager;
     use crate::provider::resident_filter_project::{
         ResidentFilterComparison, ResidentFilterOperand, ResidentProjectExpr, ResidentScalar,
@@ -3284,69 +3281,19 @@ mod tests {
         ResidentJoinKind, ResidentResourceCode, ResidentTerminalCode,
     };
     use crate::provider::CompareOp;
-    use crate::{CudaBuffer, CudaColumn, CudaDevice, CudaKernelProvider, DlpackManagedTensor};
+    use crate::{CudaBuffer, CudaColumn, CudaKernelProvider, DlpackManagedTensor};
     use xlog_core::{ScalarType, Schema, XlogError};
 
-    fn cuda_test_device() -> Option<Arc<CudaDevice>> {
-        match CudaDevice::new(0) {
-            Ok(device) => Some(Arc::new(device)),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA device initialization failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping resident schedule CUDA test: {error}");
-                None
-            }
-        }
-    }
-
     fn provider() -> Option<CudaKernelProvider> {
-        let device = cuda_test_device()?;
-        let memory = Arc::new(GpuMemoryManager::new(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(512 * 1024 * 1024),
-        ));
-        match CudaKernelProvider::new(device, memory) {
+        match crate::CudaProviderBuilder::new(0, MemoryBudget::with_limit(512 * 1024 * 1024))
+            .build()
+        {
             Ok(provider) => Some(provider),
             Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
                 panic!("XLOG_REQUIRE_CUDA=1 but resident schedule setup failed: {error}")
             }
             Err(error) => {
                 eprintln!("Skipping resident schedule CUDA test: {error}");
-                None
-            }
-        }
-    }
-
-    fn runtime_provider() -> Option<CudaKernelProvider> {
-        let device = cuda_test_device()?;
-        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-        let sink = Arc::new(NullSink::new());
-        let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-            AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-        );
-        let logging: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(LoggingResource::new(async_resource, sink));
-        let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(GlobalDeviceBudget::new(logging, 512 * 1024 * 1024));
-        let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-            Arc::clone(&device),
-            0,
-            pool,
-            budget,
-        ));
-        let memory = Arc::new(GpuMemoryManager::with_runtime(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(512 * 1024 * 1024),
-            runtime,
-        ));
-        match CudaKernelProvider::with_runtime(device, memory) {
-            Ok(provider) => Some(provider),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but resident schedule runtime setup failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping resident schedule runtime CUDA test: {error}");
                 None
             }
         }
@@ -6221,7 +6168,7 @@ mod tests {
 
     #[test]
     fn preparation_rejects_cross_slot_shared_runtime_allocation_alias() {
-        let Some(provider) = runtime_provider() else {
+        let Some(provider) = provider() else {
             return;
         };
         let relation_schema = schema("shared_storage", &[ScalarType::U32]);

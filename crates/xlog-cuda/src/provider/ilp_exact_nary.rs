@@ -596,12 +596,10 @@ mod tests {
     //! (see [`make_provider`]); the pod leg runs them for real. All values
     //! are COLUMNAR.
 
-    use std::sync::Arc;
-
     use xlog_core::{MemoryBudget, ScalarType, Schema};
 
     use super::{IlpExactNaryPatterns, IlpExactNaryRequest};
-    use crate::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+    use crate::CudaKernelProvider;
 
     /// Provider fixture for the launcher tests.
     ///
@@ -634,15 +632,10 @@ mod tests {
             None
         }
 
-        let device = match CudaDevice::new(0) {
-            Ok(device) => Arc::new(device),
-            Err(error) => return skip_unless_required("CudaDevice::new", error),
-        };
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        match CudaKernelProvider::new(device, memory) {
+        match crate::CudaProviderBuilder::new(0, budget).build() {
             Ok(provider) => Some(provider),
-            Err(error) => skip_unless_required("CudaKernelProvider::new", error),
+            Err(error) => skip_unless_required("CudaProviderBuilder::build", error),
         }
     }
 

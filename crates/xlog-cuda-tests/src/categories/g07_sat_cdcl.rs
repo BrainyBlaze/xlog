@@ -15,18 +15,7 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
     let start = Instant::now();
     let mut results = CategoryResult::new("gpu_cdcl_sat_unsat_verifier");
 
-    let provider = match CudaKernelProvider::new(ctx.device.clone(), ctx.memory.clone()) {
-        Ok(p) => Arc::new(p),
-        Err(e) => {
-            results.add_result(TestResult::error(
-                "init_cdcl_provider",
-                start.elapsed(),
-                format!("Failed to create CDCL provider: {}", e),
-            ));
-            results.set_duration(start.elapsed());
-            return results;
-        }
-    };
+    let provider = Arc::clone(&ctx.provider);
 
     results.add_result(test_cdcl_sat_unit(ctx, &provider));
     results.add_result(test_cdcl_sat_implication_chain(ctx, &provider));

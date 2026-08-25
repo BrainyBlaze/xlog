@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, CudaProviderBuilder};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
@@ -25,21 +25,10 @@ use xlog_runtime::Executor;
 // Test Infrastructure
 // =============================================================================
 
-/// Check if a CUDA device is available
-fn has_cuda_device() -> bool {
-    CudaDevice::new(0).is_ok()
-}
-
 /// Create a test executor with CUDA device and kernel provider
 fn create_test_executor() -> Option<(Executor, Arc<CudaKernelProvider>)> {
-    if !has_cuda_device() {
-        return None;
-    }
-
-    let device = Arc::new(CudaDevice::new(0).ok()?);
     let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
+    let provider = Arc::new(CudaProviderBuilder::new(0, budget).build().ok()?);
     let executor = Executor::new(provider.clone());
 
     Some((executor, provider))

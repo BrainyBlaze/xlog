@@ -47,10 +47,10 @@ use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
+    DeviceMemoryResource, LogRecord, LoggingSink, SinkError, StreamId, StreamPool,
+    XlogDeviceRuntime,
 };
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
+use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, JoinType};
 
 const TEST_BUDGET_BYTES: usize = 512 * 1024 * 1024;
 const N_THREADS: usize = 8;
@@ -98,30 +98,14 @@ fn build_provider() -> Option<(
     Arc<XlogDeviceRuntime>,
     Arc<StreamPool>,
 )> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(TEST_BUDGET_BYTES as u64))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, TEST_BUDGET_BYTES));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(TEST_BUDGET_BYTES as u64),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let runtime = Arc::clone(provider.memory().runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some((provider, runtime, pool))
 }
 
