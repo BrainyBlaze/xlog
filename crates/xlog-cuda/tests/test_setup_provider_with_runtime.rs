@@ -6,8 +6,7 @@
 //! provider" callers without exposing the device, memory manager,
 //! or kernel-loading details. `setup_provider_with_runtime` produces
 //! the same provider shape and exposes the canonical runtime stack
-//! `GlobalDeviceBudget(LoggingResource(AsyncCudaResource))` and
-//! constructs the provider via the `with_runtime` constructor.
+//! `LoggingResource(GlobalDeviceBudget(AsyncCudaResource))`.
 //!
 //! This test exercises the new fixture end-to-end: build the
 //! provider via the runtime fixture, run a real provider operation

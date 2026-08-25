@@ -424,18 +424,18 @@ impl JointConstraintCarrier {
         let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
             AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
         );
+        let budget: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+            GlobalDeviceBudget::new(async_resource, CARRIER_BUDGET_BYTES as usize),
+        );
         let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-            async_resource,
+            budget,
             Arc::new(SilentSink) as Arc<dyn LoggingSink>,
         ));
-        let budget: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-            GlobalDeviceBudget::new(logging, CARRIER_BUDGET_BYTES as usize),
-        );
         let runtime = Arc::new(XlogDeviceRuntime::with_resource(
             Arc::clone(&device),
             0,
             Arc::clone(&pool),
-            budget,
+            logging,
         ));
         let memory = Arc::new(GpuMemoryManager::with_runtime(
             Arc::clone(&device),

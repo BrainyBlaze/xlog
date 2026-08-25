@@ -28,12 +28,12 @@ type AfterLocalReservationHook = std::sync::Mutex<Option<Arc<dyn Fn(u64) + Send 
 /// Tracks allocated GPU memory and enforces a memory budget.
 /// When the budget would be exceeded, returns `XlogError::ResourceExhausted`.
 ///
-/// # v0.6 device-runtime routing (opt-in)
+/// # Device-runtime routing
 ///
-/// Constructing via [`GpuMemoryManager::with_runtime`] attaches an
-/// [`XlogDeviceRuntime`] that mediates allocations through the v0.6
-/// resource stack (e.g., `GlobalDeviceBudget` → `LoggingResource` →
-/// `AsyncCudaResource`). When attached:
+/// Canonical CUDA providers construct the manager via
+/// [`GpuMemoryManager::with_runtime`]. Its [`XlogDeviceRuntime`] mediates
+/// allocations through `LoggingResource` when enabled, then
+/// `GlobalDeviceBudget`, then `AsyncCudaResource`. When attached:
 ///   * [`GpuMemoryManager::alloc::<T>`] routes the underlying
 ///     allocation through the runtime and produces a typed view via
 ///     cudarc's `upgrade_device_ptr::<T>`. The returned
@@ -45,14 +45,10 @@ type AfterLocalReservationHook = std::sync::Mutex<Option<Arc<dyn Fn(u64) + Send 
 /// `GlobalDeviceBudget` stacked above the runtime's underlying
 /// resource.
 ///
-/// When the manager is constructed via [`GpuMemoryManager::new`]
-/// (no runtime attached), `alloc::<T>` and the rest of the public
-/// API behave bit-for-bit identically to pre-migration: cudarc's
-/// `device.alloc::<T>(len)` allocates and `cudarc` frees on drop.
-/// `alloc_raw` returns `XlogError::Kernel` when no runtime is
-/// attached (no silent fallback). `CudaKernelProvider::new`
-/// continues to construct the manager via `new` for now;
-/// runtime-routed providers are an opt-in through `with_runtime`
+/// The crate-private runtime-free constructor exists for focused allocator
+/// tests. Its typed allocations use cudarc directly, while `alloc_raw` refuses
+/// to run because it cannot honor the runtime ownership contract. Production
+/// provider construction never uses that path.
 /// at construction sites that need it.
 pub struct GpuMemoryManager {
     /// The CUDA device for memory operations

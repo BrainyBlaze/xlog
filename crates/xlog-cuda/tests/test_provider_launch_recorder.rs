@@ -8,7 +8,7 @@
 //! End-to-end stack exercised:
 //!   CudaProviderBuilder
 //!     → GpuMemoryManager + XlogDeviceRuntime
-//!       → GlobalDeviceBudget(LoggingResource(AsyncCudaResource))
+//!       → LoggingResource(GlobalDeviceBudget(AsyncCudaResource))
 //!
 //! Test shape (mirrors the bug class from
 //! `test_runtime_cross_stream_use_after_free.rs` but at the
@@ -5073,7 +5073,10 @@ fn provider_hash_join_left_outer_csm_v2_recorded_partial_match_survives_drop_and
     const LKEYS: u32 = 64;
     const RKEYS: u32 = 32;
     const ITERATIONS: usize = 512;
-    const PROBE_SLOTS: usize = 16;
+    // This path retires more same-size internal buffers than the basic join.
+    // Probe until the allocator recycles one input address instead of assuming
+    // a fixed free-list depth.
+    const MAX_PROBE_SLOTS: usize = 256;
     const TRAMPLE: u8 = 0xEE;
     let schema = Schema::new(vec![
         ("k".to_string(), ScalarType::U32),
@@ -5160,19 +5163,23 @@ fn provider_hash_join_left_outer_csm_v2_recorded_partial_match_survives_drop_and
         drop(right);
 
         // Reuse + trample.
-        let mut probes: Vec<_> = (0..PROBE_SLOTS)
-            .map(|_| memory.alloc::<u8>(LROWS * 4).expect("alloc probe"))
-            .collect();
-        let probe_ptrs: Vec<u64> = probes.iter().map(|p| p.device_ptr_value()).collect();
-        let reused = probe_ptrs
-            .iter()
-            .any(|p| *p == lk_ptr || *p == lv_ptr || *p == rk_ptr || *p == rv_ptr);
+        let input_ptrs = [lk_ptr, lv_ptr, rk_ptr, rv_ptr];
+        let mut probes = Vec::with_capacity(MAX_PROBE_SLOTS);
+        let mut reused = false;
+        for _ in 0..MAX_PROBE_SLOTS {
+            let probe = memory.alloc::<u8>(LROWS * 4).expect("alloc probe");
+            reused = input_ptrs.contains(&probe.device_ptr_value());
+            probes.push(probe);
+            if reused {
+                break;
+            }
+        }
         if reused {
             reuse_observed += 1;
         }
         unsafe {
-            for &p in &probe_ptrs {
-                memset_sync_default(p, TRAMPLE, LROWS * 4);
+            for probe in &probes {
+                memset_sync_default(probe.device_ptr_value(), TRAMPLE, LROWS * 4);
             }
         }
         let _ = &mut probes;

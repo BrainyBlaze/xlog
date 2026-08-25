@@ -162,11 +162,11 @@ impl Drop for ResidentCompletionEvent {
 
 /// Provider-owned CUDA device runtime.
 ///
-/// Owns the device handle, stream pool, and resource stack. Allocate
-/// / deallocate calls forward to the resource. The resource is fixed
-/// at construction (currently always [`DirectCudaResource`]); a
-/// future commit will swap in [`AsyncCudaResource`] as the default
-/// while keeping the direct backend reachable for sanitizer mode.
+/// Owns the device handle, stream pool, and resource stack. Allocation and
+/// deallocation calls forward through the canonical provider-built stack:
+/// optional logging over one global byte budget and the asynchronous CUDA
+/// allocator. Tests may inject a different stack through the crate-private
+/// constructor.
 pub struct XlogDeviceRuntime {
     device_ordinal: u32,
     device: Arc<CudaDevice>,
@@ -442,25 +442,11 @@ impl XlogDeviceRuntime {
             .resource
             .lock()
             .expect("device-runtime resource poisoned");
-        if let Some(snapshot) = resource.budget_snapshot() {
-            let reserved = self
-                .reservation_bytes
-                .lock()
-                .expect("device-runtime reservation accounting poisoned");
-            let current = snapshot.reserved.checked_add(*reserved).ok_or_else(|| {
-                ResourceError::Driver("device-runtime reservation accounting overflow".to_string())
-            })?;
-            let remaining = snapshot.limit.saturating_sub(current);
-            if bytes > remaining {
-                return Err(ResourceError::OutOfBudget {
-                    requested: bytes,
-                    current,
-                    remaining,
-                    limit: snapshot.limit,
-                });
-            }
-        }
-        resource.allocate(bytes, stream, tag)
+        let reservation_pressure_bytes = *self
+            .reservation_bytes
+            .lock()
+            .expect("device-runtime reservation accounting poisoned");
+        resource.allocate_with_reservation_pressure(bytes, reservation_pressure_bytes, stream, tag)
     }
 
     /// Deallocate via the underlying resource.
@@ -495,14 +481,13 @@ impl XlogDeviceRuntime {
     /// Record that work has been (or is being) submitted on
     /// `use_stream` that touches `block`. Forwards to the
     /// underlying resource stack
-    /// (`GlobalDeviceBudget` → `LoggingResource` → `AsyncCudaResource`),
+    /// (`LoggingResource` → `GlobalDeviceBudget` → `AsyncCudaResource`),
     /// where the stream-ordered backend attaches a CUDA event so
     /// `block.alloc_stream` waits on it before the queued
     /// `cuMemFreeAsync` runs. This is the production-reachable
-    /// hook the future xlog launch builder will call for
-    /// `read` / `write` / `read_write` buffer args; until that
-    /// lands, callers that submit raw CUDA work on a stream
-    /// other than `block.alloc_stream` should call this directly.
+    /// hook used by provider-recorded launches for `read`, `write`, and
+    /// `read_write` buffer arguments. Callers that submit raw CUDA work on a
+    /// stream other than `block.alloc_stream` must call this directly.
     /// See [`DeviceMemoryResource::record_block_use`] for the
     /// underlying contract.
     pub fn record_block_use(

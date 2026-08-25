@@ -5,24 +5,19 @@
 //!
 //! This is the production-recommended stack:
 //!
-//!   GlobalDeviceBudget
-//!     -> LoggingResource(InMemorySink)
+//!   LoggingResource(InMemorySink)
+//!     -> GlobalDeviceBudget
 //!         -> AsyncCudaResource
 //!
 //! It exercises:
 //!
 //!   * Successful alloc/dealloc/reap through the full stack.
-//!   * Budget enforcement at the outermost decorator: an over-limit allocation
-//!     reports exact current, requested, remaining, and limit values
-//!     without ever calling into the logger or the underlying
-//!     resource.
+//!   * Budget enforcement reports exact current, requested, remaining, and
+//!     limit values without calling the underlying allocator.
 //!   * Async pending-free behavior end-to-end: dealloc keeps the
 //!     budget reserved until reap_pending drains.
-//!   * Logging records reflect the budget's view: an `OutOfBudget`
-//!     rejection at the top of the stack does not propagate down
-//!     to the inner, so the logger does not see those calls. (In
-//!     this stack ordering, the logger sits *inside* the budget so
-//!     it only records work that actually reached it.)
+//!   * The outer logger records admitted operations and typed `OutOfBudget`
+//!     rejections exactly once.
 //!
 //! Skips when CUDA is unavailable.
 
@@ -84,7 +79,7 @@ fn budget_logging_async_stack_full_lifecycle() {
 }
 
 #[test]
-fn budget_rejects_over_limit_without_calling_inner() {
+fn budget_rejects_over_limit_before_allocator_and_logs_typed_result() {
     let Some((runtime, sink, _pool)) = build_runtime() else {
         return;
     };
@@ -104,14 +99,21 @@ fn budget_rejects_over_limit_without_calling_inner() {
         err
     );
 
-    // The logger sits *inside* the budget, so an OutOfBudget
-    // rejection at the top short-circuits before reaching the
-    // logger — there must be zero records.
-    assert_eq!(
-        sink.len(),
-        0,
-        "OutOfBudget at the top of the stack must not reach the inner logger"
-    );
+    let records = sink.snapshot();
+    assert_eq!(records.len(), 1, "the rejected request must be logged once");
+    let record = &records[0];
+    assert_eq!(record.action, LogAction::Allocate);
+    assert_eq!(record.bytes, Some(LIMIT + 1));
+    assert_eq!(record.tag, Some(AllocTag("budget-rt-too-big")));
+    assert!(record.ptr.is_none());
+    assert!(record.generation.is_none());
+    assert!(matches!(
+        record.result,
+        LogResult::Err {
+            kind: "OutOfBudget",
+            ..
+        }
+    ));
     assert_eq!(runtime.bytes_outstanding(), 0);
 }
 

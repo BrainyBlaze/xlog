@@ -1,23 +1,14 @@
 // crates/xlog-cuda/tests/test_provider_runtime_routing.rs
-//! Migration tests for `GpuMemoryManager`'s runtime-routing paths.
+//! Tests for `GpuMemoryManager`'s runtime-routing paths.
 //!
-//! The manager is composed via [`GpuMemoryManager::with_runtime`]
-//! over an [`XlogDeviceRuntime`] built via
-//! [`XlogDeviceRuntime::with_resource`], stacking
-//! [`GlobalDeviceBudget`] over [`LoggingResource`] over
-//! [`AsyncCudaResource`]. With the runtime attached, **both**
+//! The canonical provider builder supplies a manager backed by an
+//! [`XlogDeviceRuntime`], stacking [`LoggingResource`] over
+//! [`GlobalDeviceBudget`] over [`AsyncCudaResource`]. With the runtime
+//! attached, **both**
 //! `alloc_raw` and the typed `alloc::<T>` path route through the
 //! runtime stack; `TrackedCudaSlice<T>` returned from `alloc::<T>`
 //! frees through the runtime on drop via the `Backing::Runtime`
-//! branch of its `Drop` impl. The legacy
-//! [`GpuMemoryManager::new`] path remains bit-for-bit unchanged
-//! and is covered by the `legacy_*` test below.
-//!
-//! `CudaKernelProvider`'s public surface is unchanged here; the
-//! tests construct managers directly to exercise the manager-level
-//! routing in isolation. Provider-level routing through the
-//! `CudaKernelProvider::with_runtime` opt-in constructor is
-//! covered by `test_provider_with_runtime.rs`.
+//! branch of its `Drop` implementation.
 //!
 //! What these tests assert:
 //!   1. `alloc_raw` and `alloc::<T>` (u8 + non-byte) both produce
@@ -30,13 +21,7 @@
 //!   3. `into_bytes` preserves the `Backing::Runtime` ownership
 //!      tag so a runtime-routed `u32` reinterpreted as bytes still
 //!      frees through the runtime.
-//!   4. An over-limit `alloc_raw` returns
-//!      `XlogError::ResourceExhausted` originating from the budget,
-//!      with no leak to the local counter and no log record for the
-//!      failed inner allocation.
-//!   5. Legacy `GpuMemoryManager::new` (no runtime attached) leaves
-//!      a side-channel runtime/sink completely untouched —
-//!      including for `alloc::<T>`.
+//!   4. Zero-byte allocations preserve their explicit no-allocation behavior.
 
 use std::sync::Arc;
 

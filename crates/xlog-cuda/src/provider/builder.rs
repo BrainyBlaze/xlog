@@ -79,11 +79,12 @@ impl CudaProviderBuilder {
         );
         debug_assert!(Arc::ptr_eq(asynchronous.stream_pool(), &stream_pool));
 
-        let mut resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(asynchronous);
+        let mut resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+            GlobalDeviceBudget::new(Box::new(asynchronous), runtime_budget_limit),
+        );
         if let Some(sink) = self.logging_sink {
             resource = Box::new(LoggingResource::new(resource, sink));
         }
-        resource = Box::new(GlobalDeviceBudget::new(resource, runtime_budget_limit));
 
         let runtime = Arc::new(XlogDeviceRuntime::with_resource(
             Arc::clone(&device),

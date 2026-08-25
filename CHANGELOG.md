@@ -13,6 +13,7 @@ All notable changes to this project are documented in this file.
 - *(runtime)* encode each resident-route certificate node from its local fields once, avoiding repeated recursive plan formatting for deep unary plans while preserving exact expression constants and route identity.
 - *(runtime)* preserve nullary schemas when initializing mutually recursive predicates.
 - *(runtime)* serialize execution statistics through a JSON encoder so diagnostic text and operation names are escaped correctly.
+- *(cuda)* compose lifecycle logging outside the shared byte budget so rejected allocations remain observable.
 
 ## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.11.0...xlog-cli-v0.12.0) - 2026-08-06
 

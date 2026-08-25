@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
-use xlog_cuda::device_runtime::{AllocTag, InMemorySink, LoggingSink};
+use xlog_cuda::device_runtime::{AllocTag, InMemorySink, LogAction, LogResult, LoggingSink};
 use xlog_cuda::CudaProviderBuilder;
 
 fn provider_or_skip(
@@ -63,9 +63,29 @@ fn canonical_builder_owns_one_device_pool_runtime_and_budget() {
         .deallocate(block)
         .expect("deallocation must succeed");
     runtime.reap_pending().expect("pending frees must reap");
+    let records = sink.snapshot();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.action)
+            .collect::<Vec<_>>(),
+        vec![
+            LogAction::Allocate,
+            LogAction::Allocate,
+            LogAction::Deallocate,
+            LogAction::ReapPending,
+        ],
+        "optional logging must preserve the complete lifecycle order"
+    );
     assert!(
-        sink.snapshot().len() >= 4,
-        "optional logging must observe allocation, rejection, deallocation, and reap"
+        matches!(
+            records[1].result,
+            LogResult::Err {
+                kind: "OutOfBudget",
+                ..
+            }
+        ),
+        "the rejected allocation must retain its typed budget result: {records:?}"
     );
 }
 

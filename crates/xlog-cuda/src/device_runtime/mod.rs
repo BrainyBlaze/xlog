@@ -1,47 +1,26 @@
-//! Stream-ordered device memory runtime, RMM-inspired.
+//! Stream-ordered device memory runtime.
 //!
-//! v0.6 architecture work. Replaces the per-`CudaKernelProvider`
-//! `GpuMemoryManager` model (which cannot enforce a real per-device
-//! budget across parallel tests, Python users, or multiple executors
-//! on a single physical GPU) with a per-CUDA-ordinal singleton
-//! [`XlogDeviceRuntime`] composed of swappable
-//! [`DeviceMemoryResource`] adaptors:
+//! [`crate::CudaProviderBuilder`] constructs one [`XlogDeviceRuntime`] and one
+//! [`crate::GpuMemoryManager`] that share the provider's exact CUDA device.
+//! The runtime owns the stream pool and composes the production resource stack:
 //!
 //! ```text
-//! XlogDeviceRuntime per CUDA ordinal
+//! XlogDeviceRuntime
 //!   -> StreamPool of non-blocking streams
-//!   -> GlobalDeviceBudget per physical GPU
-//!   -> Logging / Debug adaptor (optional)
-//!   -> AsyncCudaResource (production) | DirectCudaResource (sanitizer/cert)
+//!   -> LoggingResource (optional)
+//!   -> GlobalDeviceBudget
+//!   -> AsyncCudaResource
 //! ```
 //!
-//! Required resources:
-//!   * [`DirectCudaResource`] — cudarc default (non-pooled) allocation
-//!     backend (`CudaDeviceInner::alloc::<u8>` / drop, which on
-//!     async-alloc hosts forwards to `cuMemAllocAsync`). Candidate
-//!     for the sanitizer/cert role because there is no `xlog`-level
-//!     pool suballocation hiding out-of-bounds access from Compute
-//!     Sanitizer; the sanitizer-visibility property itself is
-//!     **unproven** until the manual Compute Sanitizer acceptance
-//!     gate runs on a supported host. A genuine raw-driver
-//!     `cuMemAlloc`/`cuMemFree` backend is a separate future commit.
-//!   * `AsyncCudaResource` — `cuMemAllocAsync`/`cuMemFreeAsync`
-//!     bound to a caller-supplied stream via the stream pool;
-//!     production default when supported.
-//!   * `PoolResource` — performance tier, not part of this PR; gated
-//!     behind correctness certification of the direct/async backends.
-//!   * `DebugGuardResource` — optional canary/poison/quarantine layer.
-//!   * `LoggingResource` — CSV allocation log: thread, time, action,
-//!     ptr, bytes, stream, device, tag, query id.
+//! [`GlobalDeviceBudget`] is the sole byte-admission authority. Optional
+//! [`LoggingResource`] wraps it so successful operations and typed admission
+//! failures are both observable exactly once. [`DirectCudaResource`] remains
+//! available for crate tests that need a synchronous allocator; canonical
+//! providers always use [`AsyncCudaResource`].
 //!
 //! Stream-ordered contract: every alloc / dealloc names a stream;
 //! reuse across streams requires explicit event/sync. No reliance on
-//! the CUDA legacy null/default stream. Mirrors RMM's stream-ordered
-//! rule — see https://github.com/rapidsai/RMM .
-//!
-//! v0.5.5 closed at PRs #49 / #50 / #52 (metadata-read state for
-//! binary-join output counts). The fully GPU-resident binary-join
-//! materialization rebase is gated on this allocator landing first.
+//! the CUDA null/default stream.
 
 pub mod async_resource;
 pub mod budget;

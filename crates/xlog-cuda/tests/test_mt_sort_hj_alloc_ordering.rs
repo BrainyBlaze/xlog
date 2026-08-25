@@ -26,8 +26,8 @@
 //! # Test shape
 //!
 //! `mt_sort_hj_recorded_no_prewarm` — N threads, each builds
-//! its own runtime stack (`AsyncCudaResource → LoggingResource →
-//! GlobalDeviceBudget`), provider, non-default launch_stream,
+//! its own provider with a `LoggingResource → GlobalDeviceBudget →
+//! AsyncCudaResource` runtime stack, non-default launch_stream,
 //! and runs `sort_recorded(friend, &[1]) →
 //! hash_join_v2_recorded(sorted, friend, &[1], &[0], Inner)`
 //! repeatedly. Result is read once via `download_column::<u32>`
