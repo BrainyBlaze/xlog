@@ -1,6 +1,6 @@
 \section{GPU-Native Symbolic Substrate}\label{sec:datalog}
 
-The deterministic Datalog engine is the device-resident core the neural bridge and knowledge compiler build on: it is what keeps the symbolic half of a neurosymbolic program on the GPU. The algorithmic approach---semi-naive fixpoint iteration over stratified programs---is well established; the contribution here is engineering. Every relational operator runs as a custom CUDA kernel, delta relations are maintained on-device, and no host--device transfers occur during evaluation.
+The deterministic Datalog engine supplies CUDA relational operators and device-resident relation storage used across the system. The algorithmic approach---semi-naive fixpoint iteration over stratified programs---is well established; the contribution here is engineering. The ordinary executor is host-orchestrated. For eligible recursive query plans, automatic selection instead uses a certified resident conditional graph: its core runs one recorded launch and synchronization with zero tracked host--device transfers, then returns one pinned terminal receipt carrying status, counters, trace metadata, and schema selection rather than tuple data.
 
 \subsection{Semi-naive evaluation on GPU}
 
@@ -30,7 +30,7 @@ The executor processes an execution plan as strata ordered by the dependency ana
 
 \subsection{Relational kernels}
 
-xlog implements its relational algebra as direct CUDA kernels rather than wrappers over cuBLAS, cuSPARSE, or Thrust. A library operator imposes its own allocation, synchronization, and host-staging behavior, which would defeat the zero-transfer guarantee of \Cref{sec:arch}; bespoke kernels keep every intermediate buffer on-device. \Cref{tab:kernels} summarizes them.
+xlog implements its relational algebra as direct CUDA kernels rather than wrappers over cuBLAS, cuSPARSE, or Thrust. Bespoke kernels make allocation, synchronization, and host staging explicit and keep relational intermediate buffers on-device. \Cref{tab:kernels} summarizes them.
 
 \begin{table}[htbp]
   \centering
@@ -57,13 +57,13 @@ The filter kernel makes a correctness-critical choice for floating point. Equali
 
 \subsection{Adaptive join planning}
 
-The optimizer performs cost-based transformations using runtime statistics. Each plan node is costed along four dimensions (expected rows, coordination cost, peak GPU memory, and host--device transfers) with transfers penalized heavily so the planner prefers device-resident plans even at higher raw compute cost. Predicate pushdown decomposes filters above joins into left-, right-, and cross-predicates; join ordering uses dynamic programming up to ten relations and a greedy heuristic beyond, with selectivities learned from prior executions. The executor can export a statistics snapshot and merge it back before the next compilation, closing the loop between execution and optimization.
+The optimizer performs predicate pushdown using runtime statistics, decomposing filters above joins into left-, right-, and cross-predicates. Lowering chooses join order with a deterministic greedy heuristic. A selectivity pass recognizes triangle and four-cycle shapes, and prior execution statistics can be exported and merged before a later compilation. A general dynamic-programming join ordering is not active; configuration fields that resemble such a threshold do not change this planning path.
 
 \subsection{Worst-case-optimal joins}
 
-Binary-join plans can materialize intermediates asymptotically larger than the final result, the classic pathology for cyclic queries such as triangle enumeration. This is not a corner case for xlog's target workloads: program-analysis queries (points-to, call-graph and reachability inference over code-dependency graphs) are dominated by cyclic, skewed joins where the intermediate blowup governs cost. xlog addresses this with a worst-case-optimal join (WCOJ) subsystem~\cite{ngo2018wcoj,veldhuizen2014leapfrog,wang2023freejoin}. A pure-Rust hypergraph planner analyzes rule bodies for multiway-join eligibility, derives a deterministic variable ordering from cardinality and selectivity statistics, and emits a \texttt{MultiWayJoin}/\texttt{ChainJoin} node when promotion provably preserves output semantics; otherwise the binary-join plan is retained as a certified fallback.
+Binary-join plans can materialize intermediates asymptotically larger than the final result, the classic pathology for cyclic queries such as triangle enumeration. This is not a corner case for xlog's target workloads: program-analysis queries (points-to, call-graph and reachability inference over code-dependency graphs) can contain cyclic, skewed joins where intermediate size governs cost. xlog addresses this with a worst-case-optimal join (WCOJ) subsystem~\cite{ngo2018wcoj,veldhuizen2014leapfrog,wang2023freejoin}. A pure-Rust hypergraph planner analyzes rule bodies for multiway-join eligibility, derives a deterministic variable ordering from cardinality and selectivity statistics, and emits a \texttt{MultiWayJoin}/\texttt{ChainJoin} node when promotion preserves output semantics; other rules retain their ordinary binary-join plan.
 
-The GPU kernel executes the join via count\,$\to$\,device prefix scan\,$\to$\,materialize over flat sorted-column storage, with a four-byte metadata D2H total and no count-vector transfer. Coverage spans the triangle, 4-cycles, $K$-clique templates ($K{=}5$--$8$), recursive/SCC integration, and helper-relation splitting that exposes inner skew to root-level histograms. A default-on skew classifier decides per query whether to dispatch WCOJ: high-skew inputs take the WCOJ path, while uniform or empty inputs fall back to the binary-join chain. \Cref{sec:wcoj-eval} reports the measured speedup.
+The GPU kernel executes the join via count\,$\to$\,device prefix scan\,$\to$\,materialize over flat sorted-column storage, with a four-byte metadata D2H total and no count-vector transfer. Coverage spans the triangle, 4-cycles, $K$-clique templates ($K{=}5$--$8$), recursive/SCC integration, and helper-relation splitting that exposes inner skew to root-level histograms. A default-on skew classifier decides per query whether to dispatch WCOJ: high-skew inputs take the WCOJ path, while uniform or empty inputs select the binary-join chain. \Cref{sec:wcoj-eval} reports the measured speedup.
 
 \subsection{Runtime optimization}
 

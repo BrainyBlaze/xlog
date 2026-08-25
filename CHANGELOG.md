@@ -3135,7 +3135,7 @@ unchanged; the new path is opt-in via
   --release` passes **206/206**; legacy default still passes
   206/206.
 - **A3/A4 cross-stream lifetime stress harness**
-  (`crates/xlog-integration/tests/test_a3_a4_stress.rs`,
+(`crates/xlog-integration/tests/test_cross_stream_lifetime_stress.rs`,
   `27ec3bd9` + `a01b51fa`). Two workloads (`friends`
   sort+hash-join sensitive, `reach` recursive fixed-point +
   joins). Stable FNV-1a checksums, fixed schedule + seeded
@@ -3213,7 +3213,7 @@ unchanged; the new path is opt-in via
 ### Known Issues (not release blockers)
 
 - **A3 in-process thread-of-N drift on
-  `test_a3_a4_stress`**: 8 threads × 32 iters produce ~3%
+`test_cross_stream_lifetime_stress`**: 8 threads × 32 iters produce ~3%
   checksum drift on recursive Datalog workloads. The 5-mode
   diagnostic matrix demonstrates this is **NOT v0.6.0
   stream-safety regression** — drift fires identically on the

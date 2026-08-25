@@ -1,13 +1,11 @@
-// crates/xlog-cuda/tests/test_setup_provider_with_runtime.rs
-//! Higher-level construction-path test for the v0.6 opt-in fixture.
+//! Higher-level test for observable provider-owned runtime construction.
 //!
 //! `tests/common/mod.rs::setup_provider` is the canonical higher-
 //! level construction path used across xlog-cuda's integration
 //! tests: it builds a `CudaKernelProvider` for "I need a working
 //! provider" callers without exposing the device, memory manager,
-//! or kernel-loading details. The opt-in v0.6 sibling
-//! `setup_provider_with_runtime` produces the same provider shape
-//! but composes the runtime stack
+//! or kernel-loading details. `setup_provider_with_runtime` produces
+//! the same provider shape and exposes the canonical runtime stack
 //! `GlobalDeviceBudget(LoggingResource(AsyncCudaResource))` and
 //! constructs the provider via the `with_runtime` constructor.
 //!
@@ -18,10 +16,8 @@
 //! manager `Arc` that the provider holds. Drop + reap returns the
 //! runtime to baseline.
 //!
-//! Out of scope: A3 parallel stress, join prototype rebase, any
-//! migration of external `setup_provider` call sites. The legacy
-//! fixture remains the default for tests that do not need to
-//! observe runtime routing.
+//! The ordinary fixture remains appropriate for tests that do not
+//! need to inspect runtime routing and logging records.
 
 mod common;
 

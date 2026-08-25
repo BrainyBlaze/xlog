@@ -4,6 +4,7 @@
 //!
 //! Expected runtime: seconds to minutes (GPU-dependent; dominated by hardware reliability stress tests)
 
+use xlog_core::read_bool_env;
 use xlog_cuda_tests::categories;
 use xlog_cuda_tests::harness::TestContext;
 use xlog_cuda_tests::CertificationResults;
@@ -23,16 +24,10 @@ fn run_full_certification() {
                 Ok((major, minor)) => println!("Compute capability: {}.{}", major, minor),
                 Err(e) => println!("Compute capability: <unavailable> ({})", e),
             }
-            // Surface which allocator backend the context is
-            // running on so a cert report makes the runtime
-            // path unambiguous. The selection is driven by
-            // `XLOG_USE_DEVICE_RUNTIME` at process start.
-            let backend = if ctx.uses_device_runtime() {
-                "device-runtime (AsyncCudaResource → LoggingResource → GlobalDeviceBudget)"
-            } else {
-                "legacy (cudarc-backed GpuMemoryManager::new)"
-            };
-            println!("Allocator backend: {}", backend);
+            println!(
+                "Allocator backend: provider-owned runtime \
+                 (AsyncCudaResource → LoggingResource → GlobalDeviceBudget)"
+            );
             // List explicitly-set recorded-op env flags so the
             // report shows the dispatch surface the categories
             // will actually exercise. `XLOG_USE_RECORDED_CSM` is
@@ -42,8 +37,8 @@ fn run_full_certification() {
             // separately so a "runtime+recorded+CSM" run is
             // visibly distinct from a "runtime+recorded" run.
             let env_flag = |var: &str| {
-                std::env::var(var)
-                    .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+                read_bool_env(var)
+                    .unwrap_or_else(|error| panic!("invalid {var}: {error}"))
                     .unwrap_or(false)
             };
             let explicit_flags: Vec<&str> = [
@@ -66,20 +61,8 @@ fn run_full_certification() {
                     explicit_flags.join(", ")
                 );
             }
-            // Synthesize a single cert-mode label keyed off the
-            // EXPLICIT recorded-op env flags (not the implied
-            // umbrella unlock). The three intended modes are:
-            //
-            //   * legacy/default          — no XLOG_USE_DEVICE_RUNTIME
-            //   * runtime+recorded        — XLOG_USE_DEVICE_RUNTIME=1
-            //                               + at least one recorded-op
-            //                               flag (umbrella or specific)
-            //                               but no explicit
-            //                               XLOG_USE_RECORDED_CSM=1
-            //   * runtime+recorded+CSM    — same as above PLUS the
-            //                               explicit
-            //                               XLOG_USE_RECORDED_CSM=1
-            //
+            // Synthesize a cert-mode label from the explicit recorded-op
+            // flags. Provider runtime ownership is invariant, not a mode.
             // CSM is also implicitly active in the dispatch when
             // only the umbrella `XLOG_USE_RECORDED_OPS=1` is set
             // (see `CudaKernelProvider::use_recorded_csm_env`), but
@@ -95,15 +78,11 @@ fn run_full_certification() {
                 || env_flag("XLOG_USE_RECORDED_GROUPBY")
                 || env_flag("XLOG_USE_RECORDED_HASH_JOIN");
             let csm_explicit = env_flag("XLOG_USE_RECORDED_CSM");
-            let cert_mode = match (ctx.uses_device_runtime(), any_recorded, csm_explicit) {
-                (false, false, false) => "legacy/default",
-                (true, true, true) => "runtime+recorded+CSM",
-                (true, true, false) => "runtime+recorded",
-                (true, false, false) => "runtime (no recorded-ops)",
-                (true, false, true) => "runtime+CSM (no other recorded-ops)",
-                (false, true, true) => "recorded+CSM (no device-runtime)",
-                (false, true, false) => "recorded (no device-runtime)",
-                (false, false, true) => "CSM-only (no device-runtime, no other recorded-ops)",
+            let cert_mode = match (any_recorded, csm_explicit) {
+                (true, true) => "provider-runtime+recorded+CSM",
+                (true, false) => "provider-runtime+recorded",
+                (false, false) => "provider-runtime (no recorded ops)",
+                (false, true) => "provider-runtime+CSM (no other recorded ops)",
             };
             println!("Cert mode: {}", cert_mode);
             println!();

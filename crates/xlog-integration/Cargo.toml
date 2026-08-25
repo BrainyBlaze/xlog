@@ -111,8 +111,8 @@ path = "tests/real_world_tests.rs"
 harness = true
 
 [[test]]
-name = "test_a3_a4_stress"
-path = "tests/test_a3_a4_stress.rs"
+name = "test_cross_stream_lifetime_stress"
+path = "tests/test_cross_stream_lifetime_stress.rs"
 harness = true
 
 [lints]

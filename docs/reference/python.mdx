@@ -39,9 +39,11 @@ The `pyxlog` Python module provides:
 
 Convenience outputs that must be read on the host CPU (probabilities, gradients,
 confidence intervals) are behind a `host-io` Cargo build feature. Keeping them
-optional lets GPU-native code enforce a rule that results never transfer from the
-device (GPU) back to host (CPU) memory. For the full map of runtime introspection
-surfaces, see [Living-World Diagnostics](/guides/diagnostics).
+optional lets device-result code keep result buffers out of host memory. Individual
+routes can still observe bounded status or terminal-summary data; their documented
+transfer measurements, not the final tensor's device field alone, establish residency.
+For the full map of runtime introspection surfaces, see
+[Living-World Diagnostics](/guides/diagnostics).
 
 ## Installation
 
@@ -959,7 +961,9 @@ grad_false0 = torch.from_dlpack(result.grad_false[0]) # f64 CUDA tensor, shape [
 
 #### Monte Carlo Inference (Device-Only)
 
-For GPU-native workflows, prefer `CompiledProgram.evaluate_device(...)` (no host reads for results).
+For device-result workflows, prefer `CompiledProgram.evaluate_device(...)`: result
+buffers stay on the GPU, while the runtime may still observe its bounded terminal
+status and convergence summary.
 The optional `samples`, `seed`, `confidence`, `sampling_method`, and
 `max_nonmonotone_iterations` arguments override the corresponding source pragmas only
 when supplied. When an argument is omitted, Python uses `#pragma prob_samples`,

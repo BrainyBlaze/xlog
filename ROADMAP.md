@@ -881,7 +881,7 @@ execution.
 - [x] A3 / A4 stress reproducer suite (cross-stream lifetime
       stress under parallel forks, fixed and random schedules).
       (Commit `27ec3bd9` —
-      `crates/xlog-integration/tests/test_a3_a4_stress.rs`.)
+`crates/xlog-integration/tests/test_cross_stream_lifetime_stress.rs`.)
       Two workloads (`friends` sort+hash-join sensitive,
       `reach` recursive fixed-point + joins). Stable FNV-1a
       checksum over sorted rows; per-`GraphParams` reference
@@ -943,7 +943,7 @@ blockers later.
   out of scope for v0.6.0.
 
 - **A3 in-process thread-of-N drift on the
-  `test_a3_a4_stress` harness**: 8 threads × 32 iters each
+`test_cross_stream_lifetime_stress` harness**: 8 threads × 32 iters each
   produce ~3% checksum drift across two recursive Datalog
   workloads (friends self-join, reach transitive closure).
   The 5-mode diagnostic matrix (commit `27ec3bd9` plus the

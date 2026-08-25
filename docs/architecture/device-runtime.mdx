@@ -1,6 +1,6 @@
 ---
 title: "Device Runtime"
-description: "The optional stream-aware CUDA resource stack used to budget allocations, track cross-stream lifetimes, and defer frees safely."
+description: "The provider-owned CUDA resource graph used to budget allocations, track cross-stream lifetimes, and defer frees safely."
 ---
 
 <Note>
@@ -8,19 +8,21 @@ For contributors — how the device runtime works internally. It documents an
 internal `xlog-cuda` component, not a feature you enable from the CLI.
 </Note>
 
-The device runtime is an optional resource stack inside the `xlog-cuda` crate. It
-sits between the code that runs CUDA kernels and the GPU's memory allocator.
+Every `CudaKernelProvider` owns a device runtime inside the `xlog-cuda` crate.
+It sits between the code that runs CUDA kernels and the GPU's memory allocator.
 
-It gives runtime-backed providers four things: a stream-aware allocator (one that
+It gives every provider four things: a stream-aware allocator (one that
 knows which CUDA stream each allocation belongs to), a process-wide device-memory
 budget, block-use tracking, and deferred free/reap semantics for work that runs on
 a non-default stream. A CUDA *stream* is an ordered queue of GPU operations;
 "non-default" means work that runs on a stream other than the implicit default
 one, so ordering between streams has to be tracked explicitly.
 
-Default providers can still use the simpler memory manager. Reach for the device
-runtime when you need recorded launches, cross-stream dependency tracking, or a
-shared device budget across long-lived workloads.
+There is no alternate provider construction path with a separate allocator.
+`CudaProviderBuilder` constructs and validates the complete ownership graph:
+one device handle, one stream pool, one asynchronous resource stack, one runtime,
+and one memory manager. Those exact shared handles are then used by ordinary,
+recorded, solver, and resident execution.
 
 ## Resource Stack
 
@@ -34,8 +36,10 @@ each layer wraps the one below it and adds one responsibility:
 | `AsyncCudaResource` | Allocates and frees with CUDA async APIs, tracks live and pending bytes, and records stream events. |
 | `StreamPool` | Provides bounded reusable CUDA streams for recorded operations. |
 
-The runtime singleton, `XlogDeviceRuntime`, is keyed by CUDA ordinal (the device
-index) and prepares the resource before first use.
+`XlogDeviceRuntime` is provider-owned, not a process singleton. A process may
+create more than one provider, and each provider has its own coherent runtime
+graph. The builder rejects mismatched device or allocator components instead of
+letting callers assemble them independently.
 
 ## Allocation Lifecycle
 
@@ -67,9 +71,11 @@ exceed the configured limit. It tracks three quantities separately:
 - bytes pending a deferred free;
 - bytes still available for new work.
 
-The runtime uses this budget to make memory pressure explicit. A route (an
-optimized execution path) that cannot fit its allocations returns an allocation or
-capacity error, or declines to a fallback path when the caller defines one.
+The runtime uses this budget to make memory pressure explicit. A byte-addressed
+allocation that cannot fit returns `ResourceExhausted`. A bounded row, slot,
+candidate, or launch-element limit returns `CapacityExceeded` with its unit.
+An optimized route may record a typed decline before the existing ordinary GPU
+route runs; it never changes to host execution implicitly.
 
 ## Recorded Launches
 

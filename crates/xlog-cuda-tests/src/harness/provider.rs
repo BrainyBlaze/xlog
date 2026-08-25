@@ -63,9 +63,8 @@ fn gpu_test_lock_file() -> Result<std::fs::File> {
     Ok(file)
 }
 
-/// Sink that drops every log record. Used by the runtime-backed
-/// `TestContext` mode: the cert harness has no need for a live
-/// log stream during kernel testing, but `LoggingResource`
+/// Sink that drops every log record. The certification harness has
+/// no need for a live log stream during kernel testing, but `LoggingResource`
 /// requires a sink. Errors from the sink would propagate as
 /// allocation failures, which would mask kernel issues — drop
 /// silently here.
@@ -105,8 +104,6 @@ pub fn enforce_cuda_required(context: &str, err: &XlogError) {
 
 impl TestContext {
     /// Create test context with specific memory budget in bytes.
-    /// Backend is chosen by `XLOG_USE_DEVICE_RUNTIME` (default
-    /// legacy).
     ///
     /// When `XLOG_REQUIRE_CUDA=1`, any initialization failure panics via
     /// [`enforce_cuda_required`] so callers' skip-on-error paths cannot turn
@@ -159,14 +156,6 @@ impl TestContext {
             _runtime: runtime,
             transfer,
         })
-    }
-
-    /// Return whether this context was built against the
-    /// runtime-backed allocator stack (vs the legacy cudarc-only
-    /// stack). Cert categories can use this to gate behavior or
-    /// diagnostics.
-    pub fn uses_device_runtime(&self) -> bool {
-        true
     }
 
     /// Drain pending async frees on the provider-owned runtime allocator.

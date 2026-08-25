@@ -2,10 +2,9 @@
 //!
 //! Wraps a [`DeviceMemoryResource`] and enforces a single byte limit
 //! across all allocations that flow through it. Designed to be the
-//! per-runtime singleton replacement for the v0.5 per-provider
-//! `GpuMemoryManager` (which had no way to enforce a coherent budget
-//! across parallel tests, multiple providers, or Python callers
-//! sharing one physical GPU).
+//! provider-owned budget layer replacing manager-only accounting,
+//! which could not enforce a coherent limit across allocations that
+//! share one provider runtime.
 //!
 //! # Accounting model
 //!

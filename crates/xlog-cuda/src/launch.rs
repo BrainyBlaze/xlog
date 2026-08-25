@@ -1,8 +1,8 @@
 //! Launch / use recorder for runtime-backed buffers.
 //!
-//! Closes the production-side of the cross-stream lifetime gap
-//! identified by A4 *and* the use-after-prior-write hazard
-//! discovered by the multi-threaded sort+hash-join regression.
+//! Closes the production-side cross-stream deallocation and
+//! use-after-prior-write hazards discovered by the multi-threaded
+//! sort-and-hash-join regression.
 //! Code that enqueues kernels or copies on a `launch_stream`
 //! other than the buffer's `alloc_stream` MUST tell the runtime
 //! about the use BEFORE the launch (so prior cross-stream waits

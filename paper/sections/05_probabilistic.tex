@@ -1,10 +1,10 @@
 \section{Verified Knowledge Compilation}\label{sec:prob}
 
-Knowledge compilation is the bridge that makes a neural network and a logic program differentiable end-to-end. A network's softmax becomes a distribution over weighted facts; provenance tracking over the program yields a weighted Boolean formula; and that formula compiles into an arithmetic circuit whose forward pass is exact weighted model counting (the query probability) and whose backward pass yields exact gradients with respect to the weights, hence with respect to the network outputs. Probabilistic systems such as ProbLog~\cite{problog2} follow this compile-once/evaluate-many model on the CPU, so a neural pairing like DeepProbLog~\cite{deepproblog} ping-pongs circuit values and gradients across the PCIe bus every iteration. xlog runs the entire pipeline on the GPU and, crucially, \emph{proves the compiled circuit correct on-device}, so the bridge is sound and not assumed.
+Knowledge compilation is the route that makes a neural network and a probabilistic logic program differentiable end-to-end. A network's softmax becomes a distribution over weighted facts; provenance tracking yields a weighted Boolean formula; and that formula compiles into an arithmetic circuit whose forward pass is exact weighted model counting and whose backward pass yields exact gradients. Probabilistic systems such as ProbLog~\cite{problog2} follow this compile-once/evaluate-many model on the CPU. xlog instead keeps the compilation and evaluation data planes in CUDA buffers while the host orchestrates stages and reads bounded control state. Before use, xlog certifies the final smoothed circuit against its back-end source formula; this certificate does not cover provenance extraction or CNF encoding.
 
 \subsection{The compilation pipeline}
 
-The pipeline transforms a probabilistic program into a GPU-resident arithmetic circuit (the XGCF format) through five stages (\Cref{fig:kc}); each is one or more CUDA kernel launches, with all intermediate state device-resident.
+The pipeline transforms a probabilistic program into a GPU-resident arithmetic circuit (the XGCF format) through five host-orchestrated stages (\Cref{fig:kc}). Their intermediate data stays in device buffers, while solver completion is observed through bounded status and error scalars.
 
 \begin{figure*}[tbp]
   \centering
@@ -43,23 +43,23 @@ The pipeline transforms a probabilistic program into a GPU-resident arithmetic c
     \draw[fver] (cert.east) -| (gate.south);
     \node[flabel,anchor=west] at (137.5,-19) {proven $C\equiv\varphi$};
     \node[fnode,anchor=north,draw=figaccent,font=\scriptsize,
-          text=figaccent,inner ysep=1.4mm,minimum height=5mm] (trap) at (82,-49)
-      {$\times$ device-side trap};
-    \draw[fver] (cert.south) -- (trap.north);
+          text=figaccent,inner ysep=1.4mm,minimum height=5mm] (typederr) at (82,-49)
+      {$\times$ typed verification error};
+    \draw[fver] (cert.south) -- (typederr.north);
     \node[flabel,anchor=west] at (83.5,-45.8) {otherwise};
     % ---- GPU device plane ----
     \begin{scope}[on background layer]
-      \node[fplane,fit=(s1)(s5)(cert)(trap),inner sep=3mm] (plane) {};
+      \node[fplane,fit=(s1)(s5)(cert)(typederr),inner sep=3mm] (plane) {};
     \end{scope}
     \node[fplanetitle,anchor=west] at ([xshift=4mm]plane.north west)
-      {\planetitle{gpu device-resident --- all stages}};
+      {\planetitle{gpu-resident data plane}};
   \end{tikzpicture}
-  \caption{Verified knowledge-compilation pipeline. Every stage runs as CUDA
-  kernels on device-resident state. The compiled circuit $C$ reaches
-  evaluation only through the equivalence gate (\checkmark): an on-GPU CDCL
-  solver proves $\varphi\wedge\lnot C$ and $C\wedge\lnot\varphi$ both
-  unsatisfiable, and a failed proof halts in a device-side trap instead of
-  reaching evaluation.}
+  \caption{Verified knowledge-compilation pipeline. The data plane uses CUDA
+  kernels and device-resident state under host orchestration. The final smoothed
+  circuit $C$ reaches evaluation only through the equivalence gate (\checkmark):
+  an on-GPU CDCL solver proves $\varphi\wedge\lnot C$ and
+  $C\wedge\lnot\varphi$ both unsatisfiable; the host observes bounded status and
+  error scalars, and any failed or incomplete proof returns a typed error.}
   \label{fig:kc}
 \end{figure*}
 
@@ -67,29 +67,30 @@ The pipeline transforms a probabilistic program into a GPU-resident arithmetic c
 
 \textbf{CNF encoding.} A Tseitin~\cite{tseitin} transformation lowers the formula to CNF on the GPU, using parallel prefix sums to assign compact, gap-free variable IDs and emit clauses into a device-resident compressed-sparse-row structure.
 
-\textbf{D4 compilation.} The CNF compiles into a Decision-DNNF (d-DNNF) circuit~\cite{darwiche2001dnnf} via a GPU-native variant of the D4 algorithm~\cite{d4compiler}: a BFS frontier exposes parallelism, per-block DFS workers perform component detection, decision-variable selection by VSIDS-like activity~\cite{chaff}, and recursive decomposition. A smoothing pass forces every branch of an OR/decision node to mention the same variable set, and the result is levelized so each topological level evaluates in one kernel launch. Decomposability, determinism, and smoothness (the structural properties that make weighted model counting over a Decision-DNNF correct~\cite{darwicheMarquis2002,chaviraDarwiche2008}) are thus established by construction of this lowering, not by the equivalence check below.
+\textbf{D4 compilation.} The CNF compiles into a Decision-DNNF (d-DNNF) circuit~\cite{darwiche2001dnnf} via a GPU-native variant of the D4 algorithm~\cite{d4compiler}: a BFS frontier exposes parallelism, per-block DFS workers perform component detection, decision-variable selection by VSIDS-like activity~\cite{chaff}, and recursive decomposition. A smoothing pass forces every branch of an OR/decision node to mention the same variable set, and the result is levelized so each topological level evaluates in one kernel launch. Decomposability, determinism, and smoothness (the structural properties that make weighted model counting over a Decision-DNNF correct~\cite{darwicheMarquis2002,chaviraDarwiche2008}) are established by construction. Certification runs after smoothing and therefore gates the exact final circuit that is cached and evaluated.
 
 \subsection{Verification: a machine-checked certificate}
 
-xlog does not trust the compiler; it proves the compiled circuit $C$ equivalent to its source formula $\varphi$ (\Cref{alg:verifiedkc}). It solves $\varphi \land \lnot C$ and $C \land \lnot \varphi$ on a GPU CDCL solver, and both must be unsatisfiable for $C \equiv \varphi$. This is a complete formal proof, not a sampling check: UNSAT results carry a resolution proof checked on-device, and the solver never reads its status back to the host, so a wrong answer triggers a device-side trap instead of silently propagating.
+xlog does not trust the final compilation stage; it proves the final smoothed circuit $C$ equivalent to its back-end source formula $\varphi$ (\Cref{alg:verifiedkc}). It solves $\varphi \land \lnot C$ and $C \land \lnot \varphi$ on a GPU CDCL solver, and both must be unsatisfiable for $C \equiv \varphi$. UNSAT results carry resolution proofs checked on-device. The host reads bounded status and error scalars before accepting that GPU proof result; a wrong, incomplete, or budget-limited result returns a typed error and never reaches circuit caching or evaluation.
 
 The certificate says that the circuit computes the same Boolean function as $\varphi$; the count-correctness invariants are guaranteed separately, by construction. The compilation back-end thus becomes a machine-checked stage instead of an assumption, closing the failure mode in which a silently miscompiled circuit would corrupt every downstream probability and gradient. The check covers the back-end stage specifically: provenance extraction and CNF encoding are trusted, not certified. CPU-side certified knowledge compilation exists~\cite{capelli2019}; the contribution here is performing the check on-device, sharing the GPU substrate. The same device-resident CDCL substrate is reused for SAT/MaxSAT queries and for epistemic candidate validation (\Cref{sec:epistemic}).
 
 \begin{algorithm}[htbp]
-\caption{GPU-native verified knowledge compilation. The circuit is accepted only if proven equivalent to its source formula on-device.}
+\caption{Verified knowledge compilation. The final smoothed circuit is accepted only if proven equivalent to its back-end source formula.}
 \label{alg:verifiedkc}
 \begin{algorithmic}[1]
 \Require weighted Boolean formula $\varphi$ (device-resident)
-\Ensure verified circuit $C$ (XGCF), or device-side trap
+\Ensure verified circuit $C$ (XGCF), or typed error
 \State $\varphi \gets \textsc{InternHashCons}(\varphi)$ \Comment{dedup via atomic GPU hash table}
 \State $\Phi \gets \textsc{TseitinCNF}(\varphi)$ \Comment{prefix-sum variable IDs; CSR clauses}
-\State $C \gets \textsc{D4}(\Phi)$ \Comment{BFS + block DFS; VSIDS; smooth; levelize}
+\State $C \gets \textsc{D4}(\Phi)$; $C \gets \textsc{SmoothLevelize}(C)$
 \State $u_1 \gets \textsc{CDCL}(\varphi \land \lnot C)$;\quad $u_2 \gets \textsc{CDCL}(C \land \lnot \varphi)$
+\State observe bounded status and error scalars for $u_1,u_2$ on host
 \If{$u_1 \neq \textsc{Unsat}$ \textbf{or} $u_2 \neq \textsc{Unsat}$}
-  \State device-side trap \Comment{miscompilation never reaches host}
+  \State \Return typed verification error
 \EndIf
 \State check resolution proofs of $u_1, u_2$ on-device
-\State \Return $C$ \Comment{certificate: $C \equiv \varphi$, machine-checked}
+\State \Return $C$ \Comment{cache the exact circuit that was certified}
 \end{algorithmic}
 \end{algorithm}
 
@@ -97,8 +98,8 @@ The verified circuit supports a level-parallel forward pass (log-space weighted 
 
 \subsection{Circuit caching}
 
-Building and certifying a circuit is the most expensive stage, on the order of a minute for a cold start on the MNIST-addition benchmark, and a naive implementation pays it every epoch. Measured separately, it is the equivalence proof and not the D4 compile that dominates that time (\Cref{sec:overhead}). The key observation is that the circuit \emph{structure} depends on the propositional structure of the grounded program and the evidence pattern, but \emph{not} on the numerical weights. When neural parameters change between iterations, the weights on probabilistic facts change while the Boolean formula and its compiled circuit stay identical. The compiled circuit is therefore cached, keyed by a structural hash of the provenance graph and evidence configuration; subsequent iterations update only the weight buffers and run the forward/backward kernels. On MNIST addition that amortization is what the circuit-cache ablation of \Cref{sec:cache-eval} measures.
+Building and certifying a circuit is the most expensive stage, on the order of a minute for a cold start on the MNIST-addition benchmark, and a naive implementation pays it every epoch. Measured separately, it is the equivalence proof and not the D4 compile that dominates that time (\Cref{sec:overhead}). The key observation is that the circuit \emph{structure} depends on the propositional structure of the grounded program and the evidence pattern, but \emph{not} on the numerical weights. When neural parameters change between iterations, the weights on probabilistic facts change while the Boolean formula and its compiled circuit stay identical. The certified final smoothed circuit is therefore cached, keyed by a structural hash of the provenance graph and evidence configuration; subsequent iterations update only the weight buffers and run the forward/backward kernels. On MNIST addition that amortization is what the circuit-cache ablation of \Cref{sec:cache-eval} measures.
 
-\subsection{Monte Carlo fallback}
+\subsection{Monte Carlo alternative}
 
-When exact compilation is infeasible, because the ground formula is too large for D4 within the GPU memory budget or the user accepts approximate results, xlog provides a GPU-parallel Monte Carlo engine. It draws values for all probabilistic facts on the GPU and evaluates the deterministic program in each sampled world, using rejection sampling or, when every evidence atom is a Bernoulli fact, evidence clamping that forces observed values and eliminates rejection waste. Both methods report confidence intervals. The sampler is a GPU-resident megakernel that evaluates each world in a single device launch with a bounded device-side fixpoint; unsupported fragments are rejected fail-closed with a typed diagnostic instead of silently falling back to the host.
+When the user selects approximate inference, xlog provides a GPU-parallel Monte Carlo engine for its supported fragment. It draws values for probabilistic facts on the GPU and evaluates the deterministic program in each sampled world, using rejection sampling or, when every evidence atom is a Bernoulli fact, evidence clamping that forces observed values and eliminates rejection waste. Both methods report confidence intervals. The resident sampler evaluates all worlds in a single device launch with a bounded device-side fixpoint. Its sampled core records zero tracked transfers; after synchronization, one pinned receipt returns status, counts, and trace metadata. That receipt's convergence status is authoritative: reaching the iteration bound returns \texttt{CONVERGENCE\_FAILURE}, even if partial counters exist. Fixed-count exhaustion returns \texttt{CAPACITY\_EXCEEDED}, byte-budget exhaustion returns \texttt{RESOURCE\_EXHAUSTED}, and unsupported fragments return their typed diagnostic; none selects a host execution path.

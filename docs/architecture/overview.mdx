@@ -127,7 +127,7 @@ its own user-facing documentation.
 | --- | --- | --- |
 | Deterministic Datalog | RIR scans, filters, joins, groupby, recursion, and arithmetic over CUDA buffers. | [GPU Execution](/architecture/gpu-execution), [Query Optimizer](/architecture/query-optimizer) |
 | Multiway joins | Dedicated WCOJ kernels for recognized graph shapes and opportunistic Free Join routes for broader multiway bodies. | [Worst-Case Optimal Joins](/architecture/wcoj) |
-| Device resource management | Optional stream-aware allocator stack with byte budgets and deferred frees. | [Device Runtime](/architecture/device-runtime) |
+| Device resource management | Provider-owned stream-aware allocator stack with byte budgets and deferred frees. | [Device Runtime](/architecture/device-runtime) |
 | Persistent join reuse | Build-side hash-index cache keyed by relation generation, schema, keys, and CUDA device. | [Adaptive Indexing](/architecture/adaptive-indexing) |
 | Solver services | GPU CNF representation and CDCL workspace used by probabilistic and epistemic verification paths. | [Solver Services](/architecture/solver-services) |
 
@@ -162,8 +162,8 @@ XLOG favors an explicit decline over silent semantic drift. When an optimized
 path cannot handle a shape, it says so rather than quietly returning a different
 result. The contracts a contributor must preserve:
 
-- Unsupported optimizer or kernel shapes fall back to the ordinary route. The
-  fallback returns the same row set (row-set parity).
+- Unsupported optimizer or kernel shapes record a decline and use the existing
+  ordinary GPU route. That route must return the same row set (row-set parity).
 - Solver and compilation guards are fail-closed. They return typed errors instead
   of turning an incomplete proof into a reported success.
 - CUDA-required release gates must run on a GPU host with the environment

@@ -1,13 +1,19 @@
 \section{Conclusion}\label{sec:conclusion}
 
-xlog is a logic programming engine that keeps the whole symbolic side of a
-neurosymbolic program on the GPU. A neural network is an ordinary predicate:
-its outputs flow into deterministic, probabilistic and epistemic reasoning
-through one interface, and gradients flow back across the same boundary
-without leaving the device. The knowledge compilation that makes this
-differentiable is itself device-resident, and every circuit it produces is
-proven equivalent to the formula it came from before any probability is read
-off it.
+xlog is a CUDA-native logic programming engine with one typed language and
+provider-owned runtime services for deterministic, probabilistic, epistemic,
+and neural-symbolic use. A neural network is an ordinary predicate; exact query
+gradients flow through the probabilistic knowledge-compilation route, while the
+other routes reuse typed device-buffer interfaces without claiming identical
+differentiability. The final smoothed probabilistic circuit is certified against
+its back-end source formula before it is cached or evaluated. Solver proof traces
+are checked on the GPU, and the host observes bounded status and error scalars.
+
+Residency claims are likewise route-specific. Ordinary relational and exact
+execution are host-orchestrated over device data planes. Eligible recursion and
+resident Monte Carlo use certified cores that record zero tracked transfers and
+then return one authoritative terminal receipt. Byte exhaustion, fixed-capacity
+exhaustion, and nonconvergence remain separate typed outcomes.
 
 The measurements describe a system that pays off where the symbolic workload
 is large and repeated: reusing a verified circuit across training iterations,

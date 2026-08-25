@@ -1,6 +1,6 @@
 // crates/xlog-cuda/tests/test_mt_sort_hj_alloc_ordering.rs
 //! Multi-threaded regression for the cross-thread cert-mode flake
-//! exposed by `XLOG_USE_RECORDED_OPS=1 XLOG_USE_DEVICE_RUNTIME=1
+//! exposed by `XLOG_USE_RECORDED_OPS=1
 //! cargo test -p xlog-integration --test real_world_tests --
 //! --test-threads=8` — observed at ~98% pass / ~4% per-iter
 //! fail rate with `+SORT+HJ` as the minimum env reproducer.
@@ -90,8 +90,7 @@ impl LoggingSink for DiscardSink {
 }
 
 /// Builds the per-thread runtime + provider stack identical in
-/// shape to what `xlog-integration::real_world_tests` uses
-/// under `XLOG_USE_DEVICE_RUNTIME=1`.
+/// shape to what `xlog-integration::real_world_tests` uses.
 fn build_provider() -> Option<(
     Arc<CudaKernelProvider>,
     Arc<XlogDeviceRuntime>,

@@ -1,17 +1,19 @@
 ---
 title: "How XLOG works"
-description: "One compiler and one CUDA runtime span four reasoning paradigms — here is the path a program takes from source to GPU."
+description: "A shared compiler and provider-owned CUDA runtime support four reasoning paradigms — here is the path a program takes from source to GPU."
 ---
 
 XLOG lets you write deterministic Datalog programs, probabilistic models, epistemic
 programs, and differentiable neural-symbolic training programs, then run their
-symbolic computation directly on the GPU. SAT/MaxSAT verification is available
+symbolic computation with CUDA-backed execution. SAT/MaxSAT verification is available
 through a shared solver service. You write in one typed language, and a shared
-compiler plus one CUDA runtime support all four user-facing paradigms.
+compiler plus provider-owned CUDA runtime services support all four user-facing
+paradigms.
 
-Because the results stay on the GPU, you can feed them straight into a PyTorch
-training loop instead of copying data back and forth. This page follows the path a
-program takes from source text to running GPU code.
+Device result buffers can be handed straight to a PyTorch training loop instead of
+being copied through host memory. Some routes still use host orchestration and bounded
+control receipts; residency claims therefore name the measured execution region. This
+page follows the path a program takes from source text to running GPU code.
 
 ## When this matters
 
@@ -66,16 +68,21 @@ branch from the normalized frontend into their own intermediate forms, as shown 
     (fixpoints).
   </Step>
   <Step title="Optimize">
-    A cost-aware pass plans the join order and pushes filters closer to the data so
-    less work reaches later stages.
+    Lowering chooses a deterministic greedy join order, and the optimizer pushes
+    filters closer to the data so less work reaches later stages. Shape-specific
+    selectivity rewrites improve recognized triangle and four-cycle plans; a general
+    dynamic-programming join optimizer is not active.
 
     It also promotes eligible joins to *worst-case-optimal multiway joins* — a join
     method that computes multi-way patterns, such as triangles in a graph, directly
     instead of building a large intermediate table.
   </Step>
   <Step title="Execute">
-    The executor runs the plan on the host and dispatches CUDA kernels over relations
-    that live in GPU memory.
+    The ordinary executor orchestrates the plan on the host and dispatches CUDA kernels
+    over relations in GPU memory. Eligible recursive query plans are selected
+    automatically for a certified resident conditional-graph route; that route runs
+    its bounded fixpoint inside one recorded launch and returns one final control
+    receipt after synchronization.
 
     Deterministic recursion runs as a *semi-naive fixpoint*: a loop that repeats a rule
     until nothing new is derived, processing only the newly-found facts on each round.
@@ -183,14 +190,17 @@ So XLOG compiles a program once and reuses the plan on every evaluation. For
 probabilistic inference it also reuses the compiled circuit. This is what makes XLOG
 usable inside a training loop rather than alongside it.
 
-## Results stay on the GPU
+## Device result handoff
 
-Query outputs and gradient tensors never leave the GPU on their way to your tensor
-code. XLOG exposes them through DLPack capsules and Arrow — two standard formats for
-sharing tensors and tables between GPU libraries without copying.
+Query-output and gradient buffers remain on the GPU when handed to tensor code. XLOG
+exposes them through DLPack capsules and Arrow — two standard formats for sharing
+tensors and tables between GPU libraries without copying the data plane through host
+memory.
 
-Because of that, a downstream tensor computation in PyTorch, JAX, or cuDF reads XLOG's
-output directly, with no round-trip back through the host.
+Because of that, a downstream tensor computation in PyTorch, JAX, or cuDF reads those
+device buffers directly. Host-orchestrated routes may still observe bounded status or
+metadata, so a final tensor's device location is not by itself evidence that the
+entire preceding execution had zero transfers.
 
 <Card title="Why GPU residency matters" icon="microchip" href="/core-concepts/gpu-residency">
   The defining constraint behind XLOG's design — and what separates it from CPU logic
