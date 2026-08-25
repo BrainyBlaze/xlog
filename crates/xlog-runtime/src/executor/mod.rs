@@ -694,22 +694,22 @@ impl Executor {
     pub fn replay_adaptive_reoptimization_decision(
         &self,
         observations: &[AdaptiveJoinObservation],
-    ) -> AdaptiveReoptimizationDecision {
+    ) -> Result<AdaptiveReoptimizationDecision> {
         self.adaptive_reoptimization_decision(observations)
     }
 
-    fn common_subexpression_enabled(&self) -> bool {
+    fn common_subexpression_enabled(&self) -> Result<bool> {
         self.config.resolved_common_subexpression_elimination()
     }
 
-    fn adaptive_reoptimization_enabled(&self) -> bool {
+    fn adaptive_reoptimization_enabled(&self) -> Result<bool> {
         self.config.resolved_adaptive_reoptimization()
     }
 
     fn adaptive_reoptimization_decision(
         &self,
         observations: &[AdaptiveJoinObservation],
-    ) -> AdaptiveReoptimizationDecision {
+    ) -> Result<AdaptiveReoptimizationDecision> {
         let min_misplan_ratio = self
             .config
             .resolved_adaptive_reoptimization_min_misplan_ratio();
@@ -718,25 +718,25 @@ impl Executor {
             .map(|observation| observation.misplan_ratio)
             .fold(1.0_f64, f64::max);
 
-        if !self.adaptive_reoptimization_enabled() {
-            return AdaptiveReoptimizationDecision {
+        if !self.adaptive_reoptimization_enabled()? {
+            return Ok(AdaptiveReoptimizationDecision {
                 action: AdaptiveReoptimizationAction::Disabled,
                 reason: "adaptive_reoptimization_disabled".to_string(),
                 max_misplan_ratio,
                 min_misplan_ratio,
-            };
+            });
         }
 
         if observations.is_empty() {
-            return AdaptiveReoptimizationDecision {
+            return Ok(AdaptiveReoptimizationDecision {
                 action: AdaptiveReoptimizationAction::Skipped,
                 reason: "no_join_telemetry".to_string(),
                 max_misplan_ratio,
                 min_misplan_ratio,
-            };
+            });
         }
 
-        if max_misplan_ratio >= min_misplan_ratio {
+        Ok(if max_misplan_ratio >= min_misplan_ratio {
             AdaptiveReoptimizationDecision {
                 action: AdaptiveReoptimizationAction::AttemptCandidate,
                 reason: "misplan_threshold_crossed".to_string(),
@@ -750,7 +750,7 @@ impl Executor {
                 max_misplan_ratio,
                 min_misplan_ratio,
             }
-        }
+        })
     }
 
     fn record_adaptive_join_observation(
@@ -1285,7 +1285,7 @@ impl Executor {
         self.execute_plan(baseline_plan)?;
         let baseline_observations = self.adaptive_join_observations.clone();
         self.adaptive_reoptimization_stats.last_observations = baseline_observations.clone();
-        let decision = self.adaptive_reoptimization_decision(&baseline_observations);
+        let decision = self.adaptive_reoptimization_decision(&baseline_observations)?;
         self.adaptive_reoptimization_stats.last_decision = Some(decision.clone());
 
         match decision.action {
@@ -3954,10 +3954,14 @@ mod tests {
             .last_observations
             .clone();
 
-        let first = executor.replay_adaptive_reoptimization_decision(&observations);
+        let first = executor
+            .replay_adaptive_reoptimization_decision(&observations)
+            .unwrap();
         for _ in 0..100 {
             assert_eq!(
-                executor.replay_adaptive_reoptimization_decision(&observations),
+                executor
+                    .replay_adaptive_reoptimization_decision(&observations)
+                    .unwrap(),
                 first
             );
         }

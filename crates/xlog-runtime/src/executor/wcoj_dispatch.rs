@@ -75,7 +75,7 @@
 
 use std::collections::HashSet;
 
-use xlog_core::{RelId, Result, ScalarType, Schema};
+use xlog_core::{resolve_bool, RelId, Result, ScalarType, Schema};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::provider::NESTED_LOOP_TOTAL_THRESHOLD;
 use xlog_cuda::wcoj_metadata::{Wcoj4CycleRootAggValue, WcojRootAggValue};
@@ -91,21 +91,20 @@ use super::Executor;
 #[cfg(feature = "wcoj-phase-timing")]
 use std::time::Instant;
 
-/// Env variable controlling the WCOJ triangle dispatch. Treated
-/// as ON when set to `"1"` or case-insensitive `"true"`; anything
-/// else (unset, `"0"`, `"false"`, empty string, …) means OFF.
+/// Environment variable controlling forced WCOJ triangle dispatch.
 pub const ENV_USE_WCOJ_TRIANGLE_U32: &str = "XLOG_USE_WCOJ_TRIANGLE_U32";
 
-/// Resolve the dispatch gate. Config override (set by tests)
-/// takes precedence over the env var. Production callers leave
-/// the override as `None` and configure via env.
-pub(super) fn wcoj_gate_enabled(config_override: Option<bool>) -> bool {
-    if let Some(v) = config_override {
-        return v;
-    }
-    std::env::var(ENV_USE_WCOJ_TRIANGLE_U32)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+/// Environment variable that disables WCOJ triangle dispatch before all other gates.
+pub const ENV_DISABLE_WCOJ_TRIANGLE: &str = "XLOG_DISABLE_WCOJ_TRIANGLE";
+
+/// Resolve forced triangle dispatch as explicit config, environment, then off.
+pub(super) fn wcoj_gate_enabled(config_override: Option<bool>) -> Result<bool> {
+    resolve_bool(config_override, ENV_USE_WCOJ_TRIANGLE_U32, false)
+}
+
+/// Resolve the triangle kill switch as explicit config, environment, then off.
+pub(super) fn wcoj_triangle_disabled(config_override: Option<bool>) -> Result<bool> {
+    resolve_bool(config_override, ENV_DISABLE_WCOJ_TRIANGLE, false)
 }
 
 pub const ENV_WCOJ_BLOCK_WORK_UNIT: &str = "XLOG_WCOJ_BLOCK_WORK_UNIT";
@@ -144,10 +143,8 @@ pub(super) fn wcoj_adaptive_enabled(config_override: Option<bool>) -> bool {
 /// GroupBy-over-triangle through the materialize+groupby path.
 pub const ENV_DISABLE_WCOJ_GROUPBY_FUSION: &str = "XLOG_DISABLE_WCOJ_GROUPBY_FUSION";
 
-pub(super) fn wcoj_groupby_fusion_disabled() -> bool {
-    std::env::var(ENV_DISABLE_WCOJ_GROUPBY_FUSION)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+pub(super) fn wcoj_groupby_fusion_disabled() -> Result<bool> {
+    resolve_bool(None, ENV_DISABLE_WCOJ_GROUPBY_FUSION, false)
 }
 
 /// Kill switch for the generalized Free Join dispatch. Default ON
@@ -155,10 +152,8 @@ pub(super) fn wcoj_groupby_fusion_disabled() -> bool {
 /// multiway body through the embedded binary fallback.
 pub const ENV_DISABLE_FREE_JOIN: &str = "XLOG_DISABLE_FREE_JOIN";
 
-pub(super) fn free_join_disabled() -> bool {
-    std::env::var(ENV_DISABLE_FREE_JOIN)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+pub(super) fn free_join_disabled() -> Result<bool> {
+    resolve_bool(None, ENV_DISABLE_FREE_JOIN, false)
 }
 
 /// Kill switch for the factorized recursive-delta dispatch. Default
@@ -166,10 +161,8 @@ pub(super) fn free_join_disabled() -> bool {
 /// delta step through the legacy hash-join -> diff path.
 pub const ENV_DISABLE_FACTORIZED_DELTA: &str = "XLOG_DISABLE_FACTORIZED_DELTA";
 
-pub(super) fn factorized_delta_disabled() -> bool {
-    std::env::var(ENV_DISABLE_FACTORIZED_DELTA)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+pub(super) fn factorized_delta_disabled() -> Result<bool> {
+    resolve_bool(None, ENV_DISABLE_FACTORIZED_DELTA, false)
 }
 
 /// Default dense-domain dispatch cap (bitmap 32 MiB + counts 128 MiB).
@@ -226,10 +219,8 @@ pub(super) struct FactorizedDeltaCtx {
 /// `XLOG_WCOJ_STRICT=1` to propagate the error instead (diagnostic mode).
 pub const ENV_WCOJ_STRICT: &str = "XLOG_WCOJ_STRICT";
 
-pub(super) fn wcoj_strict_errors_enabled() -> bool {
-    std::env::var(ENV_WCOJ_STRICT)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+pub(super) fn wcoj_strict_errors_enabled() -> Result<bool> {
+    resolve_bool(None, ENV_WCOJ_STRICT, false)
 }
 
 /// Convert a WCOJ pipeline error into a counted, logged decline
@@ -243,7 +234,7 @@ pub(super) fn wcoj_decline_on_error(
     err: xlog_core::XlogError,
 ) -> Result<Option<CudaBuffer>> {
     *counter += 1;
-    if wcoj_strict_errors_enabled() {
+    if wcoj_strict_errors_enabled()? {
         return Err(err);
     }
     eprintln!("warning: WCOJ {stage} pipeline error; declining to binary-join fallback: {err}");
@@ -255,10 +246,8 @@ pub(super) fn wcoj_decline_on_error(
 /// or `false` disables the route for A/B measurements.
 pub const ENV_WCOJ_CHAIN_ENABLE: &str = "XLOG_WCOJ_CHAIN_ENABLE";
 
-pub(super) fn chain_dispatch_enabled() -> bool {
-    std::env::var(ENV_WCOJ_CHAIN_ENABLE)
-        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-        .unwrap_or(true)
+pub(super) fn chain_dispatch_enabled() -> Result<bool> {
+    resolve_bool(None, ENV_WCOJ_CHAIN_ENABLE, true)
 }
 
 // -----------------------------------------------------------------
@@ -283,13 +272,8 @@ pub const ENV_USE_WCOJ_4CYCLE_ADAPTIVE: &str = "XLOG_USE_WCOJ_4CYCLE_ADAPTIVE";
 pub const ENV_DISABLE_WCOJ_4CYCLE: &str = "XLOG_DISABLE_WCOJ_4CYCLE";
 
 /// Resolve the 4-cycle force gate (config override > env > false).
-pub(super) fn wcoj_4cycle_gate_enabled(config_override: Option<bool>) -> bool {
-    if let Some(v) = config_override {
-        return v;
-    }
-    std::env::var(ENV_USE_WCOJ_4CYCLE)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+pub(super) fn wcoj_4cycle_gate_enabled(config_override: Option<bool>) -> Result<bool> {
+    resolve_bool(config_override, ENV_USE_WCOJ_4CYCLE, false)
 }
 
 /// Resolve the 4-cycle adaptive opt-in. Precedence:
@@ -301,23 +285,13 @@ pub(super) fn wcoj_4cycle_gate_enabled(config_override: Option<bool>) -> bool {
 /// when env is unset (default-on flip after baseline evidence).
 /// 4-cycle defaults to `false` until its own baseline evidence
 /// supports a default-on flip in a follow-up slice.
-pub(super) fn wcoj_4cycle_adaptive_enabled(config_override: Option<bool>) -> bool {
-    if let Some(v) = config_override {
-        return v;
-    }
-    std::env::var(ENV_USE_WCOJ_4CYCLE_ADAPTIVE)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+pub(super) fn wcoj_4cycle_adaptive_enabled(config_override: Option<bool>) -> Result<bool> {
+    resolve_bool(config_override, ENV_USE_WCOJ_4CYCLE_ADAPTIVE, false)
 }
 
 /// Resolve the 4-cycle kill switch (config > env > false).
-pub(super) fn wcoj_4cycle_disabled(config_override: Option<bool>) -> bool {
-    if let Some(v) = config_override {
-        return v;
-    }
-    std::env::var(ENV_DISABLE_WCOJ_4CYCLE)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+pub(super) fn wcoj_4cycle_disabled(config_override: Option<bool>) -> Result<bool> {
+    resolve_bool(config_override, ENV_DISABLE_WCOJ_4CYCLE, false)
 }
 
 /// Resolved dispatch mode after consulting both gates.
@@ -1026,11 +1000,11 @@ impl Executor {
         //    d. Else if stats mode resolves to true, consult
         //       the cardinality model.
         //    e. Else → no dispatch.
-        if self.config.wcoj_triangle_dispatch_disabled.unwrap_or(false) {
+        if wcoj_triangle_disabled(self.config.wcoj_triangle_dispatch_disabled)? {
             return Ok(None);
         }
         let force_override = self.config.wcoj_triangle_dispatch;
-        let force_on = wcoj_gate_enabled(force_override);
+        let force_on = wcoj_gate_enabled(force_override)?;
         let mode = if force_on {
             DispatchMode::Force
         } else {
@@ -1527,7 +1501,7 @@ impl Executor {
     ) -> Result<Option<CudaBuffer>> {
         use xlog_cuda::provider::FjDeltaCols;
 
-        if factorized_delta_disabled() {
+        if factorized_delta_disabled()? {
             return Ok(None);
         }
         let RirNode::ChainJoin {
@@ -1804,7 +1778,7 @@ impl Executor {
     pub(super) fn try_dispatch_free_join(&mut self, node: &RirNode) -> Result<Option<CudaBuffer>> {
         use xlog_cuda::provider::{FjNode, FjPlan, FjSubAtom};
 
-        if free_join_disabled() {
+        if free_join_disabled()? {
             return Ok(None);
         }
         let RirNode::MultiWayJoin {
@@ -2081,7 +2055,7 @@ impl Executor {
     ) -> Result<Option<CudaBuffer>> {
         use xlog_cuda::provider::{FjNode, FjPlan, FjSubAtom};
 
-        if free_join_disabled() {
+        if free_join_disabled()? {
             return Ok(None);
         }
         let RirNode::MultiWayJoin {
@@ -2287,7 +2261,7 @@ impl Executor {
         aggs: &[(usize, xlog_core::AggOp)],
     ) -> Result<Option<CudaBuffer>> {
         use xlog_core::AggOp;
-        if wcoj_groupby_fusion_disabled() {
+        if wcoj_groupby_fusion_disabled()? {
             return Ok(None);
         }
         if key_cols != [0] {
@@ -2738,7 +2712,7 @@ impl Executor {
         &mut self,
         body: &RirNode,
     ) -> Result<Option<CudaBuffer>> {
-        if !chain_dispatch_enabled() {
+        if !chain_dispatch_enabled()? {
             return Ok(None);
         }
         let Some(matched) = match_chain_join(body) else {
@@ -2917,12 +2891,12 @@ impl Executor {
         body: &RirNode,
     ) -> Result<Option<CudaBuffer>> {
         // 1. Kill switch.
-        if wcoj_4cycle_disabled(self.config.wcoj_4cycle_dispatch_disabled) {
+        if wcoj_4cycle_disabled(self.config.wcoj_4cycle_dispatch_disabled)? {
             return Ok(None);
         }
         // 2. Force gate.
         let force_override = self.config.wcoj_4cycle_dispatch;
-        let force_on = wcoj_4cycle_gate_enabled(force_override);
+        let force_on = wcoj_4cycle_gate_enabled(force_override)?;
         let mode = if force_on {
             DispatchMode::Force
         } else {
@@ -2932,7 +2906,7 @@ impl Executor {
                 return Ok(None);
             }
             let adaptive_override = self.config.wcoj_4cycle_dispatch_adaptive;
-            if wcoj_4cycle_adaptive_enabled(adaptive_override) {
+            if wcoj_4cycle_adaptive_enabled(adaptive_override)? {
                 DispatchMode::CostModel
             } else {
                 return Ok(None);
@@ -4060,7 +4034,8 @@ mod tests {
     use super::{
         chain_dispatch_enabled, match_chain_join, match_multiway_triangle,
         record_chain_fallback_equivalents, wcoj_adaptive_enabled, wcoj_gate_enabled,
-        ENV_USE_WCOJ_TRIANGLE_U32, ENV_WCOJ_CHAIN_ENABLE,
+        wcoj_triangle_disabled, ENV_DISABLE_WCOJ_TRIANGLE, ENV_USE_WCOJ_TRIANGLE_U32,
+        ENV_WCOJ_CHAIN_ENABLE,
     };
     use xlog_core::RelId;
     use xlog_ir::rir::ProjectExpr;
@@ -4186,19 +4161,19 @@ mod tests {
         unsafe {
             std::env::remove_var(ENV_WCOJ_CHAIN_ENABLE);
         }
-        assert!(chain_dispatch_enabled());
+        assert!(chain_dispatch_enabled().unwrap());
         unsafe {
             std::env::set_var(ENV_WCOJ_CHAIN_ENABLE, "0");
         }
-        assert!(!chain_dispatch_enabled());
+        assert!(!chain_dispatch_enabled().unwrap());
         unsafe {
             std::env::set_var(ENV_WCOJ_CHAIN_ENABLE, "false");
         }
-        assert!(!chain_dispatch_enabled());
+        assert!(!chain_dispatch_enabled().unwrap());
         unsafe {
             std::env::set_var(ENV_WCOJ_CHAIN_ENABLE, "1");
         }
-        assert!(chain_dispatch_enabled());
+        assert!(chain_dispatch_enabled().unwrap());
         unsafe {
             match old {
                 Some(v) => std::env::set_var(ENV_WCOJ_CHAIN_ENABLE, v),
@@ -4333,18 +4308,21 @@ mod tests {
 
     struct EnvSnapshot {
         force: Option<String>,
+        disable: Option<String>,
     }
 
     impl EnvSnapshot {
         fn capture_and_clear() -> Self {
             let snapshot = Self {
                 force: std::env::var(ENV_USE_WCOJ_TRIANGLE_U32).ok(),
+                disable: std::env::var(ENV_DISABLE_WCOJ_TRIANGLE).ok(),
             };
 
             // SAFETY: The caller holds `env_lock`, serializing mutation of
             // this process-global WCOJ env var.
             unsafe {
                 std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_U32);
+                std::env::remove_var(ENV_DISABLE_WCOJ_TRIANGLE);
             }
 
             snapshot
@@ -4359,6 +4337,10 @@ mod tests {
                 match self.force.take() {
                     Some(v) => std::env::set_var(ENV_USE_WCOJ_TRIANGLE_U32, v),
                     None => std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_U32),
+                }
+                match self.disable.take() {
+                    Some(v) => std::env::set_var(ENV_DISABLE_WCOJ_TRIANGLE, v),
+                    None => std::env::remove_var(ENV_DISABLE_WCOJ_TRIANGLE),
                 }
             }
         }
@@ -4399,12 +4381,37 @@ mod tests {
     fn force_resolver_config_still_overrides_env() {
         with_wcoj_env(|| {
             set_env(ENV_USE_WCOJ_TRIANGLE_U32, "1");
-            assert!(wcoj_gate_enabled(None));
-            assert!(!wcoj_gate_enabled(Some(false)));
+            assert!(wcoj_gate_enabled(None).unwrap());
+            assert!(!wcoj_gate_enabled(Some(false)).unwrap());
 
             set_env(ENV_USE_WCOJ_TRIANGLE_U32, "0");
-            assert!(!wcoj_gate_enabled(None));
-            assert!(wcoj_gate_enabled(Some(true)));
+            assert!(!wcoj_gate_enabled(None).unwrap());
+            assert!(wcoj_gate_enabled(Some(true)).unwrap());
+        });
+    }
+
+    #[test]
+    fn triangle_kill_switch_honors_environment_and_explicit_config() {
+        with_wcoj_env(|| {
+            assert!(!wcoj_triangle_disabled(None).unwrap());
+            set_env(ENV_DISABLE_WCOJ_TRIANGLE, "yes");
+            assert!(wcoj_triangle_disabled(None).unwrap());
+            assert!(!wcoj_triangle_disabled(Some(false)).unwrap());
+            set_env(ENV_DISABLE_WCOJ_TRIANGLE, "off");
+            assert!(wcoj_triangle_disabled(Some(true)).unwrap());
+        });
+    }
+
+    #[test]
+    fn malformed_wcoj_boolean_is_a_typed_configuration_error() {
+        with_wcoj_env(|| {
+            set_env(ENV_USE_WCOJ_TRIANGLE_U32, "sometimes");
+            assert!(matches!(
+                wcoj_gate_enabled(None),
+                Err(xlog_core::XlogError::Configuration { ref name, .. })
+                    if name == ENV_USE_WCOJ_TRIANGLE_U32
+            ));
+            assert!(!wcoj_gate_enabled(Some(false)).unwrap());
         });
     }
 
@@ -4508,9 +4515,9 @@ mod tests {
     #[test]
     fn force_4cycle_resolver_defaults_off_when_env_unset() {
         with_4cycle_env(|| {
-            assert!(!wcoj_4cycle_gate_enabled(None));
-            assert!(wcoj_4cycle_gate_enabled(Some(true)));
-            assert!(!wcoj_4cycle_gate_enabled(Some(false)));
+            assert!(!wcoj_4cycle_gate_enabled(None).unwrap());
+            assert!(wcoj_4cycle_gate_enabled(Some(true)).unwrap());
+            assert!(!wcoj_4cycle_gate_enabled(Some(false)).unwrap());
         });
     }
 
@@ -4518,11 +4525,11 @@ mod tests {
     fn force_4cycle_resolver_env_can_enable() {
         with_4cycle_env(|| {
             set_env(ENV_USE_WCOJ_4CYCLE, "1");
-            assert!(wcoj_4cycle_gate_enabled(None));
+            assert!(wcoj_4cycle_gate_enabled(None).unwrap());
             set_env(ENV_USE_WCOJ_4CYCLE, "true");
-            assert!(wcoj_4cycle_gate_enabled(None));
+            assert!(wcoj_4cycle_gate_enabled(None).unwrap());
             set_env(ENV_USE_WCOJ_4CYCLE, "0");
-            assert!(!wcoj_4cycle_gate_enabled(None));
+            assert!(!wcoj_4cycle_gate_enabled(None).unwrap());
         });
     }
 
@@ -4534,11 +4541,11 @@ mod tests {
     fn adaptive_4cycle_resolver_defaults_off_when_env_unset() {
         with_4cycle_env(|| {
             assert!(
-                !wcoj_4cycle_adaptive_enabled(None),
+                !wcoj_4cycle_adaptive_enabled(None).unwrap(),
                 "4-cycle adaptive must be OPT-IN by default (unlike triangle's default-on)"
             );
-            assert!(wcoj_4cycle_adaptive_enabled(Some(true)));
-            assert!(!wcoj_4cycle_adaptive_enabled(Some(false)));
+            assert!(wcoj_4cycle_adaptive_enabled(Some(true)).unwrap());
+            assert!(!wcoj_4cycle_adaptive_enabled(Some(false)).unwrap());
         });
     }
 
@@ -4546,23 +4553,23 @@ mod tests {
     fn adaptive_4cycle_resolver_env_can_enable() {
         with_4cycle_env(|| {
             set_env(ENV_USE_WCOJ_4CYCLE_ADAPTIVE, "1");
-            assert!(wcoj_4cycle_adaptive_enabled(None));
+            assert!(wcoj_4cycle_adaptive_enabled(None).unwrap());
             set_env(ENV_USE_WCOJ_4CYCLE_ADAPTIVE, "0");
-            assert!(!wcoj_4cycle_adaptive_enabled(None));
+            assert!(!wcoj_4cycle_adaptive_enabled(None).unwrap());
             set_env(ENV_USE_WCOJ_4CYCLE_ADAPTIVE, "true");
-            assert!(wcoj_4cycle_adaptive_enabled(None));
+            assert!(wcoj_4cycle_adaptive_enabled(None).unwrap());
         });
     }
 
     #[test]
     fn kill_4cycle_resolver_honors_env_and_config() {
         with_4cycle_env(|| {
-            assert!(!wcoj_4cycle_disabled(None));
+            assert!(!wcoj_4cycle_disabled(None).unwrap());
             set_env(ENV_DISABLE_WCOJ_4CYCLE, "1");
-            assert!(wcoj_4cycle_disabled(None));
-            assert!(!wcoj_4cycle_disabled(Some(false)));
+            assert!(wcoj_4cycle_disabled(None).unwrap());
+            assert!(!wcoj_4cycle_disabled(Some(false)).unwrap());
             set_env(ENV_DISABLE_WCOJ_4CYCLE, "0");
-            assert!(wcoj_4cycle_disabled(Some(true)));
+            assert!(wcoj_4cycle_disabled(Some(true)).unwrap());
         });
     }
 

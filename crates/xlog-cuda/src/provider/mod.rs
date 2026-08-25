@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use std::ffi::c_void;
-use xlog_core::{Result, Schema, XlogError};
+use xlog_core::{resolve_bool, Result, Schema, XlogError};
 
 use crate::{
     cuda_compat::{
@@ -60,10 +60,8 @@ pub struct PtxLoadProfile {
     pub ptx_fallback: u32,
 }
 
-fn warmup_profiling_enabled() -> bool {
-    std::env::var("XLOG_WARMUP_PROFILE")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+fn warmup_profiling_enabled() -> Result<bool> {
+    resolve_bool(None, "XLOG_WARMUP_PROFILE", false)
 }
 
 /// Detect device compute capability as a two-digit number (e.g. 75, 80, 120).
@@ -1331,7 +1329,7 @@ impl CudaKernelProvider {
     /// let provider = CudaKernelProvider::new(device, memory)?;
     /// ```
     pub fn new(device: Arc<CudaDevice>, memory: Arc<GpuMemoryManager>) -> Result<Self> {
-        let profiling = warmup_profiling_enabled();
+        let profiling = warmup_profiling_enabled()?;
         let ptx_load_profile = Self::load_all_kernel_modules(&device, profiling)?;
 
         Ok(Self::from_loaded_device(device, memory, ptx_load_profile))
@@ -1485,12 +1483,17 @@ impl CudaKernelProvider {
         ))
     }
 
-    /// Internal: parse a "boolean" env var. Empty / unset / `"0"`
-    /// → false; any other value → true.
-    fn env_flag(name: &str) -> bool {
-        std::env::var(name)
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false)
+    /// Parse one boolean environment variable with the shared strict contract.
+    fn env_flag(name: &str) -> Result<bool> {
+        resolve_bool(None, name, false)
+    }
+
+    fn any_env_flags(names: &[&str]) -> Result<bool> {
+        let mut enabled = false;
+        for name in names {
+            enabled |= Self::env_flag(name)?;
+        }
+        Ok(enabled)
     }
 
     /// Whether the recorded filter dispatch is enabled via env.
@@ -1504,8 +1507,8 @@ impl CudaKernelProvider {
     /// opt-in for real callers; the existing legacy paths remain
     /// the production default until the runtime stack is
     /// certified end-to-end.
-    pub(crate) fn use_recorded_filters_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_FILTERS") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_filters_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_FILTERS", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the recorded sort dispatch is enabled via env.
@@ -1514,16 +1517,16 @@ impl CudaKernelProvider {
     /// to U32 / Symbol keys only — the public
     /// `sort()` dispatcher checks both this env flag AND key
     /// type compatibility before routing.
-    pub(crate) fn use_recorded_sort_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_SORT") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_sort_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_SORT", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the recorded full-row dedup dispatch is enabled
     /// via env. Reads `XLOG_USE_RECORDED_DEDUP` or the umbrella
     /// `XLOG_USE_RECORDED_OPS`. `dedup_full_row_recorded` is
     /// narrow to all-U32 / Symbol columns.
-    pub(crate) fn use_recorded_dedup_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_DEDUP") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_dedup_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_DEDUP", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the recorded GroupBy dispatch is enabled via
@@ -1531,8 +1534,8 @@ impl CudaKernelProvider {
     /// `XLOG_USE_RECORDED_OPS`. `groupby_multi_agg_recorded`
     /// supports U32 / Symbol keys + Count / Sum / Min / Max
     /// aggs only.
-    pub(crate) fn use_recorded_groupby_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_GROUPBY") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_groupby_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_GROUPBY", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the recorded hash-join dispatch is enabled via
@@ -1542,8 +1545,8 @@ impl CudaKernelProvider {
     /// types (Inner / Semi / Anti / LeftOuter); the only
     /// hard constraint inherited from `pack_keys` is `≤4`
     /// key columns.
-    pub(crate) fn use_recorded_hash_join_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_HASH_JOIN") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_hash_join_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_HASH_JOIN", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the recorded CSM (count-scan-materialize)
@@ -1553,8 +1556,8 @@ impl CudaKernelProvider {
     /// recorded path has already been selected, and only for
     /// `JoinType::Inner` / `JoinType::LeftOuter` where a CSM
     /// implementation exists. `Semi` / `Anti` are not affected.
-    pub(crate) fn use_recorded_csm_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_CSM") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_csm_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_CSM", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the bounded CSM CUDA Graph path is enabled.
@@ -1562,8 +1565,8 @@ impl CudaKernelProvider {
     /// This is narrower than `XLOG_USE_RECORDED_CSM`: callers must first select
     /// the recorded CSM hash-join path, then opt into graph capture/replay with
     /// `XLOG_USE_CSM_CUDA_GRAPH=1` (or the broader `XLOG_USE_CUDA_GRAPHS=1`).
-    pub(crate) fn use_csm_cuda_graph_env() -> bool {
-        Self::env_flag("XLOG_USE_CSM_CUDA_GRAPH") || Self::env_flag("XLOG_USE_CUDA_GRAPHS")
+    pub(crate) fn use_csm_cuda_graph_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_CSM_CUDA_GRAPH", "XLOG_USE_CUDA_GRAPHS"])
     }
 
     /// Test/diagnostic-only telemetry: number of times the recorded
@@ -3098,6 +3101,52 @@ mod tests {
 
     fn has_cuda_device() -> bool {
         CudaDevice::new(0).is_ok()
+    }
+
+    struct ProviderEnvRestore {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ProviderEnvRestore {
+        fn capture(name: &'static str) -> Self {
+            Self {
+                name,
+                previous: std::env::var_os(name),
+            }
+        }
+    }
+
+    impl Drop for ProviderEnvRestore {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(self.name, value),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn provider_boolean_environment_uses_strict_shared_semantics() {
+        const NAME: &str = "XLOG_CUDA_TEST_BOOLEAN";
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        let _restore = ProviderEnvRestore::capture(NAME);
+
+        unsafe {
+            std::env::set_var(NAME, "yes");
+        }
+        assert!(CudaKernelProvider::env_flag(NAME).unwrap());
+
+        unsafe {
+            std::env::set_var(NAME, "invalid");
+        }
+        assert!(matches!(
+            CudaKernelProvider::env_flag(NAME),
+            Err(XlogError::Configuration { ref name, .. }) if name == NAME
+        ));
     }
 
     #[test]

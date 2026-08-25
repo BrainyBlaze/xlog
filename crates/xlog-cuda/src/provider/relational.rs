@@ -1462,7 +1462,7 @@ impl super::CudaKernelProvider {
         // Env-gated recorded dispatch. `dedup_full_row_recorded`
         // requires every column to be U32 / Symbol;
         // mixed-type schemas fall through to the legacy path.
-        if Self::use_recorded_dedup_env() && input.num_rows() > 1 && input.arity() > 0 {
+        if Self::use_recorded_dedup_env()? && input.num_rows() > 1 && input.arity() > 0 {
             if let Some(launch_stream) = self.recorded_op_stream_or_init() {
                 let recorded_compatible = (0..input.arity()).all(|c| {
                     matches!(
@@ -1586,7 +1586,7 @@ impl super::CudaKernelProvider {
 
         // Step 1: typed multi-column sort. Float columns use total-order
         // normalization; signed integers use sign-flipped unsigned compare.
-        let sorted = if Self::use_csm_cuda_graph_env() && row_count <= SMALL_FULL_ROW_SORT_MAX_ROWS
+        let sorted = if Self::use_csm_cuda_graph_env()? && row_count <= SMALL_FULL_ROW_SORT_MAX_ROWS
         {
             self.small_sort_full_row_deterministic(input, row_count)?
         } else {
@@ -1889,7 +1889,7 @@ impl super::CudaKernelProvider {
         // mirrors `sort_recorded`'s validation:
         // U32 / Symbol key columns only. Other types fall
         // through to the legacy multi-type path.
-        if Self::use_recorded_sort_env() && !key_cols.is_empty() && input.num_rows() > 0 {
+        if Self::use_recorded_sort_env()? && !key_cols.is_empty() && input.num_rows() > 0 {
             if let Some(launch_stream) = self.recorded_op_stream_or_init() {
                 let recorded_compatible = key_cols.iter().all(|&k| {
                     matches!(
@@ -2962,7 +2962,7 @@ impl super::CudaKernelProvider {
         // constraint inherited by `hash_join_v2_recorded`
         // requires `left_keys.len() <= 4`. Mismatch falls
         // through to the legacy path.
-        if Self::use_recorded_hash_join_env()
+        if Self::use_recorded_hash_join_env()?
             && !left_keys.is_empty()
             && left_keys.len() == right_keys.len()
             && left_keys.len() <= 4
@@ -3782,7 +3782,7 @@ impl super::CudaKernelProvider {
         right: &CudaBuffer,
         right_keys: &[usize],
     ) -> Result<JoinIndexV2> {
-        if Self::use_recorded_hash_join_env()
+        if Self::use_recorded_hash_join_env()?
             && !right_keys.is_empty()
             && right_keys.len() <= 4
             && right.num_rows() > 0
@@ -3891,7 +3891,7 @@ impl super::CudaKernelProvider {
     ) -> Result<CudaBuffer> {
         // Env-gated recorded dispatch. Same `≤4 key column`
         // constraint as the non-indexed variant.
-        if Self::use_recorded_hash_join_env()
+        if Self::use_recorded_hash_join_env()?
             && !left_keys.is_empty()
             && left_keys.len() == right_keys.len()
             && left_keys.len() <= 4
@@ -7908,7 +7908,7 @@ impl super::CudaKernelProvider {
         max_output: Option<usize>,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
-        if Self::use_csm_cuda_graph_env() {
+        if Self::use_csm_cuda_graph_env()? {
             if let Some(result) = self
                 .hash_join_inner_v2_count_scan_materialize_cuda_graph_recorded(
                     left,
@@ -10862,7 +10862,7 @@ impl super::CudaKernelProvider {
         max_output: Option<usize>,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
-        let csm_on = Self::use_recorded_csm_env();
+        let csm_on = Self::use_recorded_csm_env()?;
         match join_type {
             JoinType::Inner => {
                 if csm_on {
@@ -11971,7 +11971,7 @@ impl super::CudaKernelProvider {
             ));
         }
 
-        let csm_on = Self::use_recorded_csm_env();
+        let csm_on = Self::use_recorded_csm_env()?;
         match join_type {
             JoinType::Inner => {
                 if csm_on {

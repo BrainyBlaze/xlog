@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use xlog_core::{RelId, Result, ScalarType, Schema, XlogError};
+use xlog_core::{resolve_bool, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
 };
@@ -46,14 +46,9 @@ enum ResidentSelectionMode {
 
 impl ResidentSelectionMode {
     fn from_env() -> Result<Self> {
-        let enabled = |name: &str| {
-            std::env::var(name)
-                .map(|value| !value.is_empty() && value != "0")
-                .unwrap_or(false)
-        };
-        let disabled = enabled("XLOG_DISABLE_RESIDENT_RECURSION");
-        let required = enabled("XLOG_REQUIRE_RESIDENT_RECURSION");
-        let preferred = enabled("XLOG_USE_RESIDENT_RECURSION");
+        let disabled = resolve_bool(None, "XLOG_DISABLE_RESIDENT_RECURSION", false)?;
+        let required = resolve_bool(None, "XLOG_REQUIRE_RESIDENT_RECURSION", false)?;
+        let preferred = resolve_bool(None, "XLOG_USE_RESIDENT_RECURSION", false)?;
         if u8::from(disabled) + u8::from(required) + u8::from(preferred) > 1 {
             return Err(XlogError::Execution(
                 "resident execution environment flags are mutually exclusive".to_string(),
@@ -6109,6 +6104,17 @@ mod tests {
     fn resident_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn resident_selection_rejects_malformed_boolean_environment() {
+        let _lock = resident_env_lock().lock().unwrap();
+        let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "sometimes")]);
+        assert!(matches!(
+            ResidentSelectionMode::from_env(),
+            Err(XlogError::Configuration { ref name, .. })
+                if name == "XLOG_REQUIRE_RESIDENT_RECURSION"
+        ));
     }
 
     fn corpus_program(corpus: &std::path::Path) -> Result<LogicProgram> {
