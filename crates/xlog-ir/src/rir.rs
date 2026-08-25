@@ -335,7 +335,10 @@ pub enum ConstValue {
 
 /// Relational IR node types
 #[derive(Debug, Clone)]
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "IR variants are matched pervasively by value; boxing the tensor-join payload would add an allocation and a second representation solely to equalize enum sizes"
+)]
 pub enum RirNode {
     /// A 0-arity relation containing exactly one empty tuple ({()}).
     ///

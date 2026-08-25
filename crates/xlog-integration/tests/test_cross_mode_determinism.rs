@@ -1,5 +1,3 @@
-#![allow(clippy::arc_with_non_send_sync)]
-
 //! Cross-mode determinism harness for WCOJ, binary-join fallback, recursive,
 //! and dynamic-rule-injection execution on a shared fixture.
 
@@ -74,13 +72,12 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct RuntimeFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
+    _pool: Arc<StreamPool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -150,11 +147,11 @@ fn make_runtime_fixture() -> Option<RuntimeFixture> {
     let runtime = Arc::clone(memory.runtime()?);
     let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeFixture {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
-        pool,
+        _pool: pool,
     })
 }
 

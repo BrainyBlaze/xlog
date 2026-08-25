@@ -16,3 +16,6 @@ arrow = { version = "59", default-features = false, features = ["ffi"] }
 
 [dev-dependencies]
 serial_test = "3"
+
+[lints]
+workspace = true

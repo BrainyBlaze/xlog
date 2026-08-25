@@ -43,8 +43,10 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
 ///
 /// Verifies that the weight transfer size is proportional to num_vars (not num_nodes).
 /// For a circuit with N variables, we transfer:
+///
 /// - var_log_true: (N+1) * 8 bytes (f64 per var, index 0 unused)
 /// - var_log_false: (N+1) * 8 bytes
+///
 /// Expected: 2 * (num_vars + 1) * 8 bytes for weight buffers
 fn test_transfer_weight_size(ctx: &TestContext) -> TestResult {
     let start = Instant::now();

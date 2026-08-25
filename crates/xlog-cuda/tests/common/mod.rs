@@ -4,8 +4,7 @@ use xlog_cuda::device_runtime::{InMemorySink, LoggingSink, XlogDeviceRuntime};
 use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager};
 
 /// Canonical CUDA provider for tests. Returns None if CUDA is unavailable.
-#[allow(dead_code)] // not all integration test binaries use this fixture
-pub fn setup_provider() -> Option<Arc<CudaKernelProvider>> {
+pub(crate) fn setup_provider() -> Option<Arc<CudaKernelProvider>> {
     let result = CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
         .build()
         .map(Arc::new);
@@ -21,14 +20,14 @@ pub fn setup_provider() -> Option<Arc<CudaKernelProvider>> {
         }
     }
 }
+const _: fn() -> Option<Arc<CudaKernelProvider>> = setup_provider;
 
 /// Handles produced by [`setup_provider_with_runtime`]. Exposes the
 /// provider plus the underlying [`XlogDeviceRuntime`] and the
 /// [`InMemorySink`] that captured every alloc/dealloc/reap record,
 /// so tests can both run real provider operations and inspect the
 /// resulting routing through the runtime-attached allocator stack.
-#[allow(dead_code)] // not all integration test binaries use every field
-pub struct RuntimeProviderHandles {
+pub(crate) struct RuntimeProviderHandles {
     pub provider: Arc<CudaKernelProvider>,
     pub memory: Arc<GpuMemoryManager>,
     pub runtime: Arc<XlogDeviceRuntime>,
@@ -37,12 +36,9 @@ pub struct RuntimeProviderHandles {
 
 /// Runtime-attached variant of [`setup_provider`].
 ///
-/// Constructs the canonical recommended runtime stack —
-/// `GlobalDeviceBudget(LoggingResource(AsyncCudaResource))` — wires
-/// it into a [`GpuMemoryManager`] via
-/// [`GpuMemoryManager::with_runtime`], then builds the provider via
-/// [`CudaKernelProvider::with_runtime`] (the opt-in constructor
-/// that requires a runtime-attached manager).
+/// Constructs the canonical provider-owned runtime, memory manager,
+/// global byte budget, and optional logging sink through the
+/// provider builder.
 ///
 /// [`setup_provider`] remains the default; existing tests
 /// that do not need to observe runtime routing are unaffected.
@@ -53,8 +49,7 @@ pub struct RuntimeProviderHandles {
 ///
 /// Returns `None` when CUDA is unavailable, mirroring
 /// [`setup_provider`].
-#[allow(dead_code)] // exercised by tests in other binaries
-pub fn setup_provider_with_runtime() -> Option<RuntimeProviderHandles> {
+pub(crate) fn setup_provider_with_runtime() -> Option<RuntimeProviderHandles> {
     let sink: Arc<InMemorySink> = Arc::new(InMemorySink::new());
     let logging_sink: Arc<dyn LoggingSink> = sink.clone();
     let provider = match CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
@@ -74,10 +69,18 @@ pub fn setup_provider_with_runtime() -> Option<RuntimeProviderHandles> {
             .expect("canonical provider must own a runtime"),
     );
 
-    Some(RuntimeProviderHandles {
+    let handles = RuntimeProviderHandles {
         provider,
         memory,
         runtime,
         sink,
-    })
+    };
+    let _owners = (
+        &handles.provider,
+        &handles.memory,
+        &handles.runtime,
+        &handles.sink,
+    );
+    Some(handles)
 }
+const _: fn() -> Option<RuntimeProviderHandles> = setup_provider_with_runtime;

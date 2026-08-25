@@ -333,7 +333,7 @@ impl<'a, T> DevicePtr<T> for RawCudaView<'a, T> {
 }
 
 impl<'a, T> RawCudaView<'a, T> {
-    pub fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
+    pub(crate) fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
         &self.ptr
     }
 }
@@ -1558,20 +1558,6 @@ impl CudaKernelProvider {
             .lock()
             .ok()
             .and_then(|mut g| g.take())
-    }
-
-    /// Internal: store the phase timings produced by a triangle
-    /// dispatch. Overwrites any prior unread slot — the report
-    /// binary is expected to read after every `execute_plan`.
-    #[cfg(feature = "wcoj-phase-timing")]
-    #[allow(dead_code)]
-    pub(crate) fn put_wcoj_triangle_phase_timing(
-        &self,
-        timing: crate::wcoj_phase_timing::WcojTrianglePhaseTiming,
-    ) {
-        if let Ok(mut g) = self.last_triangle_phase_timing.lock() {
-            *g = Some(timing);
-        }
     }
 
     /// Number of times `wcoj_layout_*_recorded` short-circuited

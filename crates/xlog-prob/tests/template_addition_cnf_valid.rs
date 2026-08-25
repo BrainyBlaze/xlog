@@ -163,7 +163,10 @@ fn compute_reachable_device(
     host
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the independent CNF witness checker receives three device tables, three declared capacities, and three observed counts"
+)]
 fn validate_dimacs_host(
     var_cap: u32,
     clause_cap: u32,

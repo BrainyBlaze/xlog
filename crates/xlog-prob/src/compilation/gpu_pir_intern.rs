@@ -16,20 +16,29 @@ use crate::compilation::gpu_pir::{GpuPirGraph, PIR_AND, PIR_CONST};
 /// Host-side PIR batch (for tests and host-driven workflows).
 #[derive(Debug, Clone)]
 pub struct PirBatch {
+    /// Opcode for every candidate node.
     pub node_type: Vec<u8>,
+    /// Leaf identifier for every candidate literal node.
     pub leaf_id: Vec<u32>,
+    /// Choice-variable identifier for every candidate decision node.
     pub decision_var: Vec<u32>,
+    /// False-branch child for every candidate decision node.
     pub decision_child_false: Vec<u32>,
+    /// True-branch child for every candidate decision node.
     pub decision_child_true: Vec<u32>,
+    /// CSR offsets into [`Self::children`].
     pub child_offsets: Vec<u32>,
+    /// Flattened child identifiers.
     pub children: Vec<u32>,
 }
 
 impl PirBatch {
+    /// Returns the number of candidate nodes.
     pub fn len(&self) -> usize {
         self.node_type.len()
     }
 
+    /// Returns whether the batch contains no candidate nodes.
     pub fn is_empty(&self) -> bool {
         self.node_type.is_empty()
     }
@@ -68,6 +77,7 @@ impl PirBatch {
         }
     }
 
+    /// Validates the batch layout and uploads it to the device.
     pub fn to_device(&self, provider: &Arc<CudaKernelProvider>) -> Result<GpuPirBatch> {
         let num_nodes = self.node_type.len();
         if self.leaf_id.len() != num_nodes
@@ -142,20 +152,29 @@ impl PirBatch {
 
 /// Device-resident PIR batch.
 pub struct GpuPirBatch {
+    /// Device opcodes for candidate nodes.
     pub node_type: TrackedCudaSlice<u8>,
+    /// Device leaf identifiers for candidate literal nodes.
     pub leaf_id: TrackedCudaSlice<u32>,
+    /// Device choice-variable identifiers for candidate decision nodes.
     pub decision_var: TrackedCudaSlice<u32>,
+    /// Device false-branch children for candidate decision nodes.
     pub decision_child_false: TrackedCudaSlice<u32>,
+    /// Device true-branch children for candidate decision nodes.
     pub decision_child_true: TrackedCudaSlice<u32>,
+    /// Device CSR offsets into [`Self::children`].
     pub child_offsets: TrackedCudaSlice<u32>,
+    /// Device-resident flattened child identifiers.
     pub children: TrackedCudaSlice<u32>,
 }
 
 impl GpuPirBatch {
+    /// Returns the number of candidate nodes.
     pub fn num_nodes(&self) -> usize {
         self.node_type.len()
     }
 
+    /// Returns the number of flattened child references.
     pub fn num_children(&self) -> usize {
         self.children.len()
     }
@@ -173,6 +192,7 @@ pub struct GpuPirInterner {
 }
 
 impl GpuPirInterner {
+    /// Allocates an interner with fixed node and child capacities.
     pub fn new(provider: &Arc<CudaKernelProvider>, node_cap: u32, child_cap: u32) -> Result<Self> {
         if node_cap < 2 {
             return Err(XlogError::Compilation(
@@ -280,10 +300,12 @@ impl GpuPirInterner {
         })
     }
 
+    /// Returns the device-resident interned graph.
     pub fn graph(&self) -> &GpuPirGraph {
         &self.graph
     }
 
+    /// Uploads and interns a host batch, returning canonical node identifiers.
     pub fn intern_batch(&mut self, batch: &PirBatch) -> Result<TrackedCudaSlice<u32>> {
         if batch.node_type.contains(&PIR_CONST) {
             return Err(XlogError::Compilation(
@@ -294,6 +316,7 @@ impl GpuPirInterner {
         self.intern_device_batch(&mut device_batch)
     }
 
+    /// Interns a device-resident batch and returns canonical node identifiers.
     pub fn intern_device_batch(
         &mut self,
         batch: &mut GpuPirBatch,

@@ -1559,7 +1559,7 @@ fn brute_force_chain_oracle(domains: &[u64], pairs: &[(u32, u32)], scores: &[f32
     let mut assign = vec![0u8; n];
     loop {
         if let Some(t) = total(&assign) {
-            if best.as_ref().map_or(true, |(_, bt)| t > *bt) {
+            if best.as_ref().is_none_or(|(_, bt)| t > *bt) {
                 best = Some((assign.clone(), t));
             }
         }
@@ -1575,7 +1575,7 @@ fn brute_force_chain_oracle(domains: &[u64], pairs: &[(u32, u32)], scores: &[f32
                     'outer: loop {
                         if a2[i] != labels[i] {
                             if let Some(t) = total(&a2) {
-                                if alt.map_or(true, |b| t > b) {
+                                if alt.is_none_or(|b| t > b) {
                                     alt = Some(t);
                                 }
                             }

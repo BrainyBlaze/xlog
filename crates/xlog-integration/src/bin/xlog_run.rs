@@ -214,27 +214,6 @@ fn authored_constraint_descriptors(
         .collect()
 }
 
-#[cfg(test)]
-mod authored_constraint_identity_tests {
-    use super::*;
-
-    #[test]
-    fn reduced_constraint_descriptors_use_authored_identity_not_local_position() {
-        let mut program = parse_program(":- p(0).\n:- p(1).\n").expect("parse constraints");
-        program
-            .prepare_authored_constraint_identity_at_root()
-            .expect("prepare authored identities");
-        program.constraints.remove(0);
-
-        let descriptors = authored_constraint_descriptors(&program)
-            .expect("describe prepared reduced constraints");
-        assert_eq!(descriptors.len(), 1);
-        assert_eq!(descriptors[0].0, 1);
-        assert_eq!(descriptors[0].1, "__xlog_constraint_1");
-        assert_eq!(descriptors[0].2, ":- p(1).");
-    }
-}
-
 fn decode_column_to_strings(
     provider: &CudaKernelProvider,
     buf: &xlog_cuda::CudaBuffer,
@@ -482,4 +461,25 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod authored_constraint_identity_tests {
+    use super::*;
+
+    #[test]
+    fn reduced_constraint_descriptors_use_authored_identity_not_local_position() {
+        let mut program = parse_program(":- p(0).\n:- p(1).\n").expect("parse constraints");
+        program
+            .prepare_authored_constraint_identity_at_root()
+            .expect("prepare authored identities");
+        program.constraints.remove(0);
+
+        let descriptors = authored_constraint_descriptors(&program)
+            .expect("describe prepared reduced constraints");
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].0, 1);
+        assert_eq!(descriptors[0].1, "__xlog_constraint_1");
+        assert_eq!(descriptors[0].2, ":- p(1).");
+    }
 }

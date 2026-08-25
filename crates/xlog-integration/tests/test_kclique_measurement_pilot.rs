@@ -33,7 +33,6 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct Provider {
     _device: Arc<CudaDevice>,
     _runtime: Arc<XlogDeviceRuntime>,

@@ -346,14 +346,14 @@ fn test_u64_overflow_boundaries(ctx: &TestContext) -> TestResult {
     let high_bit_pos = sorted_data.iter().position(|&v| v == high_bit_value);
     if let Some(pos) = high_bit_pos {
         // All values before should be less, all values after should be greater
-        for i in 0..pos {
-            if sorted_data[i] >= high_bit_value {
+        for (i, &actual) in sorted_data.iter().take(pos).enumerate() {
+            if actual >= high_bit_value {
                 return TestResult::error(
                     "test_u64_overflow_boundaries",
                     start.elapsed(),
                     format!(
                         "Value {} at position {} should be less than {} at position {}",
-                        sorted_data[i], i, high_bit_value, pos
+                        actual, i, high_bit_value, pos
                     ),
                 );
             }
@@ -646,14 +646,14 @@ fn test_i64_signed_comparison(ctx: &TestContext) -> TestResult {
     let first_non_negative_idx = sorted_data.iter().position(|&v| v >= 0);
     if let Some(idx) = first_non_negative_idx {
         // All values before idx should be negative
-        for i in 0..idx {
-            if sorted_data[i] >= 0 {
+        for (i, &actual) in sorted_data.iter().take(idx).enumerate() {
+            if actual >= 0 {
                 return TestResult::error(
                     "test_i64_signed_comparison",
                     start.elapsed(),
                     format!(
                         "Negative values should come before positive: found {} at index {}",
-                        sorted_data[i], i
+                        actual, i
                     ),
                 );
             }
@@ -889,17 +889,18 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
     // Specifically verify wraparound keys are handled correctly
     let critical_keys = [u32::MAX, 0, 0x8000_0000];
     for &ckey in &critical_keys {
-        if left_key_set.contains(&ckey) && right_key_set.contains(&ckey) {
-            if !joined_key_set.contains(&ckey) {
-                return TestResult::error(
-                    "test_integer_wraparound_keys",
-                    start.elapsed(),
-                    format!(
-                        "Critical key {} (0x{:08X}) missing from join result",
-                        ckey, ckey
-                    ),
-                );
-            }
+        if left_key_set.contains(&ckey)
+            && right_key_set.contains(&ckey)
+            && !joined_key_set.contains(&ckey)
+        {
+            return TestResult::error(
+                "test_integer_wraparound_keys",
+                start.elapsed(),
+                format!(
+                    "Critical key {} (0x{:08X}) missing from join result",
+                    ckey, ckey
+                ),
+            );
         }
     }
 

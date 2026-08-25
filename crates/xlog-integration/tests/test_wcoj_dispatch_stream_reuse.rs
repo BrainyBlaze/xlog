@@ -37,10 +37,9 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct Fix {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
     pool: Arc<StreamPool>,
@@ -62,8 +61,8 @@ fn make_fix() -> Option<Fix> {
     let runtime = Arc::clone(memory.runtime()?);
     let pool = Arc::clone(runtime.stream_pool());
     Some(Fix {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
         pool,

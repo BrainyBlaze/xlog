@@ -1,4 +1,3 @@
-#![allow(clippy::arc_with_non_send_sync)]
 //! Real-World Integration Tests for XLOG
 //!
 //! These tests validate the xlog-logic subsystem against real-world problems:

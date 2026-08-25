@@ -37,6 +37,9 @@ struct Fixture {
     pool: Arc<StreamPool>,
 }
 
+type BinaryRows = Vec<(u32, u32)>;
+type FourBinaryRelations = (BinaryRows, BinaryRows, BinaryRows, BinaryRows);
+
 fn make_fixture_with_budget(budget_bytes: u64) -> Option<Fixture> {
     let provider = Arc::new(
         xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(budget_bytes))
@@ -564,12 +567,7 @@ fn fj_rejects_unbound_probe_vars() {
 ///   U: 3 b values for the single z* = 7*64 + 3       (|U| = 3)
 /// Left-deep binary intermediates: |R join S| = 100_000,
 /// |R join S join T| = 5_000_000 >> |Q| = 6000.
-fn blowup_chain_fixture() -> (
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-) {
+fn blowup_chain_fixture() -> FourBinaryRelations {
     let mut r = Vec::new();
     for x in 0..2000u32 {
         r.push((0u32, x));
@@ -1288,12 +1286,7 @@ fn fj_count_by_root_matches_oracle() {
 /// single hot z. Expected: count(a) = 100*10*(600 + 9*20) = 780_000
 /// per hub (analytic — the host oracle would be O(10^9) here; the
 /// binary baseline's independently-computed groupby cross-checks it).
-fn count_gate_fixture() -> (
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-) {
+fn count_gate_fixture() -> FourBinaryRelations {
     let mut r = Vec::new();
     for a in 0..10u32 {
         for i in 0..100u32 {

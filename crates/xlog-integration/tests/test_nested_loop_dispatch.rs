@@ -1,5 +1,4 @@
 // crates/xlog-integration/tests/test_nested_loop_dispatch.rs
-#![allow(clippy::doc_lazy_continuation)]
 
 //! Nested-loop dispatch and parity coverage.
 //!
@@ -34,13 +33,12 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct RuntimeBackedFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
+    _pool: Arc<StreamPool>,
 }
 
 fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
@@ -55,11 +53,11 @@ fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
     let runtime = Arc::clone(memory.runtime()?);
     let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeBackedFixture {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
-        pool,
+        _pool: pool,
     })
 }
 
@@ -206,9 +204,11 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
 /// Datalog program with a single inner binary join. The lowerer
 /// produces a `Join` RIR node followed by a `Project` for the
 /// head's (K, A, B) shape. The join node has:
-///   * `JoinType::Inner`.
-///   * 1 key column (k) on each side.
-///   * U32 key type on each side.
+///
+/// - `JoinType::Inner`.
+/// - 1 key column (k) on each side.
+/// - U32 key type on each side.
+///
 /// Combined with row counts in the eligibility envelope (100×100
 /// = 10_000 ≤ NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000), this
 /// routes through the nested-loop provider entry point.

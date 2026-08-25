@@ -42,13 +42,11 @@ use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
 use xlog_cuda::device_runtime::{
-    AllocTag, DeviceMemoryResource, InMemorySink, LogAction, LogResult, LoggingSink,
-    XlogDeviceRuntime,
+    AllocTag, InMemorySink, LogAction, LogResult, LoggingSink, XlogDeviceRuntime,
 };
 use xlog_cuda::GpuMemoryManager;
 
 const RUNTIME_LIMIT: usize = 32 * 1024;
-const LOCAL_BUDGET: u64 = 64 * 1024;
 
 fn build_stack() -> Option<(
     Arc<GpuMemoryManager>,

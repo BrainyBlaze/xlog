@@ -100,25 +100,30 @@ impl GpuWeightSlots {
         })
     }
 
+    /// Returns the number of neural-output groups as a GPU-sized count.
     pub fn num_groups(&self) -> u32 {
         debug_assert!(!self.group_offsets_host.is_empty());
         (self.group_offsets_host.len() - 1) as u32
     }
 
+    /// Returns the number of neural-output groups as a host index.
     pub fn num_groups_usize(&self) -> usize {
         debug_assert!(!self.group_offsets_host.is_empty());
         self.group_offsets_host.len() - 1
     }
 
+    /// Returns the total number of mapped neural output slots.
     pub fn total_slots(&self) -> u32 {
         debug_assert!(!self.group_offsets_host.is_empty());
         self.group_offsets_host[self.group_offsets_host.len() - 1]
     }
 
+    /// Returns the device-resident CSR offsets for all groups.
     pub fn group_offsets(&self) -> &TrackedCudaSlice<u32> {
         &self.group_offsets
     }
 
+    /// Returns the device-resident CNF variable identifier for every slot.
     pub fn slot_cnf_var(&self) -> &TrackedCudaSlice<u32> {
         &self.slot_cnf_var
     }

@@ -1279,9 +1279,9 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
     #[cfg(not(feature = "host-io"))]
     {
         let _ = args;
-        return Err(XlogError::Execution(
+        Err(XlogError::Execution(
             "Host output is disabled (feature \"host-io\" is OFF). Use device-resident APIs (DLPack) or rebuild with --features host-io.".to_string(),
-        ));
+        ))
     }
 
     #[cfg(feature = "host-io")]

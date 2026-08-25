@@ -669,7 +669,6 @@ impl CompiledIlpProgram {
     }
 
     /// Deprecated: use `set_coo_chunk_budget`. Kept for one release cycle.
-    #[allow(deprecated)]
     pub fn set_coo_memory_cap(&mut self, bytes: u64) {
         self.coo_chunk_budget = bytes;
     }
@@ -1007,13 +1006,15 @@ impl CompiledIlpProgram {
         ilp_gpu::forward_backward_reduce(
             &self.provider,
             py,
-            &d_row_offsets,
-            &d_coo_cands,
-            cand_col,
-            &d_is_positive,
-            num_facts,
-            num_cands,
-            is_f64,
+            ilp_gpu::ForwardBackwardInputs {
+                row_offsets: &d_row_offsets,
+                coo_candidates: &d_coo_cands,
+                candidate_probabilities: cand_col,
+                is_positive: &d_is_positive,
+                fact_count: num_facts,
+                candidate_count: num_cands,
+                uses_f64: is_f64,
+            },
         )
     }
 
@@ -1242,13 +1243,15 @@ impl CompiledIlpProgram {
         ilp_gpu::forward_backward_reduce(
             &self.provider,
             py,
-            &d_row_offsets,
-            &d_coo_cands,
-            cand_col,
-            &d_is_positive,
-            num_facts,
-            num_cands,
-            is_f64,
+            ilp_gpu::ForwardBackwardInputs {
+                row_offsets: &d_row_offsets,
+                coo_candidates: &d_coo_cands,
+                candidate_probabilities: cand_col,
+                is_positive: &d_is_positive,
+                fact_count: num_facts,
+                candidate_count: num_cands,
+                uses_f64: is_f64,
+            },
         )
     }
 
@@ -1622,15 +1625,9 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
             columns.push(col_i64);
         }
 
-        let mut result = Vec::with_capacity(num_rows);
-        for r in 0..num_rows {
-            let mut row = Vec::with_capacity(buf.arity());
-            for c in 0..buf.arity() {
-                row.push(columns[c][r]);
-            }
-            result.push(row);
-        }
-        Ok(result)
+        Ok((0..num_rows)
+            .map(|row_index| columns.iter().map(|column| column[row_index]).collect())
+            .collect())
     }
 
     /// Sample up to `max_n` derived facts for `head_rel` that are NOT in `exclude`.
@@ -1717,20 +1714,16 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
         }
 
         // Filter out excluded tuples and cap at max_n
-        let mut result = Vec::with_capacity(max_n.min(num_rows));
-        for r in 0..num_rows {
-            if result.len() >= max_n {
-                break;
-            }
-            let mut row = Vec::with_capacity(buf.arity());
-            for c in 0..buf.arity() {
-                row.push(columns[c][r]);
-            }
-            if !exclude_set.contains(&row) {
-                result.push(row);
-            }
-        }
-        Ok(result)
+        Ok((0..num_rows)
+            .map(|row_index| {
+                columns
+                    .iter()
+                    .map(|column| column[row_index])
+                    .collect::<Vec<_>>()
+            })
+            .filter(|row| !exclude_set.contains(row))
+            .take(max_n)
+            .collect())
     }
 
     pub fn tagged_entries_containing_fact(
@@ -2567,13 +2560,15 @@ impl CompiledIlpProgram {
         ilp_gpu::forward_backward_reduce(
             &self.provider,
             py,
-            &d_row_offsets,
-            &d_col_indices,
-            &dummy_col,
-            &d_is_positive,
-            num_facts,
-            num_cands,
-            is_f64,
+            ilp_gpu::ForwardBackwardInputs {
+                row_offsets: &d_row_offsets,
+                coo_candidates: &d_col_indices,
+                candidate_probabilities: &dummy_col,
+                is_positive: &d_is_positive,
+                fact_count: num_facts,
+                candidate_count: num_cands,
+                uses_f64: is_f64,
+            },
         )
     }
 
@@ -2697,19 +2692,12 @@ impl CompiledIlpProgram {
             columns.push(col_i64);
         }
 
-        for row in 0..num_rows {
-            let mut matches = true;
-            for (col_idx, val) in values.iter().enumerate() {
-                if columns[col_idx][row] != *val {
-                    matches = false;
-                    break;
-                }
-            }
-            if matches {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok((0..num_rows).any(|row_index| {
+            values
+                .iter()
+                .enumerate()
+                .all(|(column_index, value)| columns[column_index][row_index] == *value)
+        }))
     }
 
     /// Like fact_exists_in_buffer but checks only the projected columns.
@@ -2768,18 +2756,11 @@ impl CompiledIlpProgram {
             columns.push(col_i64);
         }
 
-        for row in 0..num_rows {
-            let mut matches = true;
-            for (i, val) in values.iter().enumerate() {
-                if columns[i][row] != *val {
-                    matches = false;
-                    break;
-                }
-            }
-            if matches {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok((0..num_rows).any(|row_index| {
+            values
+                .iter()
+                .enumerate()
+                .all(|(column_index, value)| columns[column_index][row_index] == *value)
+        }))
     }
 }

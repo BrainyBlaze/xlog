@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "resident-graph-tests"))]
 use std::cell::Cell;
 
 use xlog_core::{RelId, Result, ScalarType, Schema};
@@ -64,11 +64,24 @@ impl ResidentGraphSchemaCatalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResidentGraphDeclineReason {
     /// A scan relation has no compiler schema identity.
-    MissingScanSchema { relation: RelId },
+    MissingScanSchema {
+        /// Relation whose scan lacks a compiler schema identity.
+        relation: RelId,
+    },
     /// A physical node has no resident implementation.
-    UnsupportedNode { path: String, node: &'static str },
+    UnsupportedNode {
+        /// Stable path to the unsupported node within the physical plan.
+        path: String,
+        /// Physical node kind that has no resident implementation.
+        node: &'static str,
+    },
     /// The resident route supports only inner and semi joins.
-    UnsupportedJoin { path: String, join_type: JoinType },
+    UnsupportedJoin {
+        /// Stable path to the unsupported join within the physical plan.
+        path: String,
+        /// Join semantics that the resident route cannot execute.
+        join_type: JoinType,
+    },
     /// The caller requested a complete relation store, which cannot be staged
     /// as a query-only transaction.
     FullStoreRequested,
@@ -76,13 +89,25 @@ pub enum ResidentGraphDeclineReason {
     NonOrdinaryPlan,
     /// A caller input is imported or belongs to a different memory manager, so
     /// its lifetime cannot be bound to this resident transaction.
-    ImportedInputUnsupported { relation: String },
+    ImportedInputUnsupported {
+        /// Imported relation whose ownership cannot join the transaction.
+        relation: String,
+    },
     /// A scanned source lacks a current provider-produced full-row set proof.
-    SourceSetUncertified { relation: String },
+    SourceSetUncertified {
+        /// Source relation without a current full-row set certificate.
+        relation: String,
+    },
     /// The CUDA driver cannot construct a conditional WHILE graph.
-    ConditionalGraphUnavailable { detail: String },
+    ConditionalGraphUnavailable {
+        /// Driver capability failure reported during conditional-graph setup.
+        detail: String,
+    },
     /// Setup cannot reserve a bounded workspace without exceeding the budget.
-    WorkspaceUnbounded { detail: String },
+    WorkspaceUnbounded {
+        /// Workspace bound or reservation failure reported during preflight.
+        detail: String,
+    },
 }
 
 /// Complete prelaunch proof of the physical routes selected for a plan.
@@ -123,17 +148,17 @@ impl ResidentGraphCertifiedPlan {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "resident-graph-tests"))]
 thread_local! {
     static RESIDENT_ROUTE_INSPECTION_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "resident-graph-tests"))]
 pub(crate) fn reset_resident_route_inspection_count() {
     RESIDENT_ROUTE_INSPECTION_COUNT.with(|count| count.set(0));
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "resident-graph-tests"))]
 pub(crate) fn resident_route_inspection_count() -> usize {
     RESIDENT_ROUTE_INSPECTION_COUNT.with(Cell::get)
 }
@@ -141,7 +166,7 @@ pub(crate) fn resident_route_inspection_count() -> usize {
 impl ResidentGraphRouteCertificate {
     /// Inspects every explicit and implicit route in deterministic plan order.
     pub fn inspect(plan: &ExecutionPlan, catalog: &ResidentGraphSchemaCatalog) -> Result<Self> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "resident-graph-tests"))]
         RESIDENT_ROUTE_INSPECTION_COUNT.with(|count| count.set(count.get() + 1));
         let mut certificate = Self {
             covered_route_descriptors: BTreeSet::new(),
@@ -547,8 +572,8 @@ impl ResidentGraphRouteCertificate {
                     right,
                     left_keys,
                     right_keys,
-                    join_type,
-                } if matches!(join_type, JoinType::Inner | JoinType::Semi) => {
+                    join_type: JoinType::Inner | JoinType::Semi,
+                } => {
                     let compatible = (|| {
                         let left_schema = node_schema(catalog, left)?;
                         let right_schema = node_schema(catalog, right)?;
@@ -736,20 +761,35 @@ fn stable_descriptor_fingerprint<'a>(descriptors: impl IntoIterator<Item = &'a [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResidentGraphDeviceStatus {
     /// The graph converged and staged output is valid.
-    Success { iterations: u32 },
+    Success {
+        /// Device-observed recursive iterations completed before convergence.
+        iterations: u32,
+    },
     /// The exact configured iteration limit was exhausted.
-    IterationLimit { limit: u32, completed: u32 },
+    IterationLimit {
+        /// Configured maximum recursive iterations.
+        limit: u32,
+        /// Iterations completed when the device stopped the graph.
+        completed: u32,
+    },
     /// An operator's exact output exceeded its reserved row capacity.
     CapacityOverflow {
+        /// Physical operator that exceeded its reserved row count.
         op_id: u32,
+        /// Exact row count required by the operator.
         required: u64,
+        /// Reserved row capacity available to the operator.
         capacity: u64,
     },
     /// A bounded device resource was insufficient.
     ResourceExhausted {
+        /// Physical operator that exhausted the bounded resource.
         op_id: u32,
+        /// Stable name of the exhausted device resource.
         resource: &'static str,
+        /// Exact resource quantity required by the operator.
         required: u64,
+        /// Reserved resource quantity available to the operator.
         capacity: u64,
     },
 }
@@ -760,18 +800,30 @@ pub enum ResidentGraphExecutionError {
     /// A complete prelaunch inspection selected the existing GPU route instead.
     Declined(ResidentGraphDeclineReason),
     /// The exact configured iteration limit was exhausted.
-    IterationLimit { limit: u32, completed: u32 },
+    IterationLimit {
+        /// Configured maximum recursive iterations.
+        limit: u32,
+        /// Iterations completed before the device reported exhaustion.
+        completed: u32,
+    },
     /// An operator's exact output exceeded its reserved row capacity.
     CapacityOverflow {
+        /// Physical operator that exceeded its reserved row count.
         op_id: u32,
+        /// Exact row count required by the operator.
         required: u64,
+        /// Reserved row capacity available to the operator.
         capacity: u64,
     },
     /// A bounded device resource was insufficient.
     ResourceExhausted {
+        /// Physical operator that exhausted the bounded resource.
         op_id: u32,
+        /// Stable name of the exhausted device resource.
         resource: &'static str,
+        /// Exact resource quantity required by the operator.
         required: u64,
+        /// Reserved resource quantity available to the operator.
         capacity: u64,
     },
     /// Setup or execution failed before a valid terminal status existed.
@@ -991,42 +1043,64 @@ pub enum ResidentGraphSelectionKind {
 /// Core-loop host transfer counters.
 #[derive(Debug, Clone, Default)]
 pub struct ResidentGraphCoreTransferStats {
+    /// Host-to-device calls observed by the tracked memory runtime.
     pub tracked_htod_calls: u64,
+    /// Host-to-device bytes observed by the tracked memory runtime.
     pub tracked_htod_bytes: u64,
+    /// Device-to-host calls observed by the tracked memory runtime.
     pub tracked_dtoh_calls: u64,
+    /// Device-to-host bytes observed by the tracked memory runtime.
     pub tracked_dtoh_bytes: u64,
+    /// Device-to-host calls issued through provider metadata operations.
     pub provider_dtoh_calls: u64,
+    /// Metadata device-to-host calls not attributable to the tracked runtime.
     pub untracked_metadata_dtoh_calls: u64,
 }
 
 /// The one bounded observation after the terminal synchronization.
 #[derive(Debug, Clone, Default)]
 pub struct ResidentGraphFinalObservationStats {
+    /// Device-to-host calls used to read the terminal observation.
     pub dtoh_calls: u64,
+    /// Device-to-host bytes used to read the terminal observation.
     pub dtoh_bytes: u64,
+    /// Pinned host receipts used for the terminal observation.
     pub pinned_receipts: u64,
 }
 
 /// CUDA-event timing resolved after the graph completes.
 #[derive(Debug, Clone, Default)]
 pub struct ResidentGraphDeferredProfile {
+    /// Resident scan and filter invocations covered by deferred CUDA timing.
     pub timed_scan_filter_invocations: u64,
+    /// Device elapsed time resolved from CUDA events after completion.
     pub device_elapsed_ns: u64,
+    /// Host synchronization time excluded from device execution timing.
     pub final_sync_misattributed_ns: u64,
 }
 
 /// Truthful telemetry for resident selection, execution, and decline.
 #[derive(Debug, Clone)]
 pub struct ResidentGraphExecutionStats {
+    /// Runtime route selected for the evaluation.
     pub selection: ResidentGraphSelectionKind,
+    /// Preflight decline reason when the existing GPU route was selected.
     pub decline: Option<ResidentGraphDeclineReason>,
+    /// Conditional resident graph launches performed by this evaluation.
     pub conditional_graph_launches: u64,
+    /// Host synchronizations performed to obtain terminal status.
     pub terminal_synchronizations: u64,
+    /// Fixpoint iterations controlled by the host during the core loop.
     pub host_iterations: u64,
+    /// Host allocations performed during the resident core loop.
     pub host_allocations: u64,
+    /// Terminal statuses injected by the host rather than written by a device kernel.
     pub host_status_injections: u64,
+    /// Deterministic device-to-host transfer contract violations.
     pub deterministic_d2h_violations: u64,
+    /// Scan operations dispatched individually by the host.
     pub host_dispatched_scan_ops: u64,
+    /// Filter operations dispatched individually by the host.
     pub host_dispatched_filter_ops: u64,
     /// Physical Scan nodes executed by the resident device graph.
     pub device_scan_invocations: u64,
@@ -1038,9 +1112,13 @@ pub struct ResidentGraphExecutionStats {
     /// Logical Filter count for the selected dependency-closed plan after
     /// excluding recursive variants whose input delta was empty.
     pub semantic_filter_invocations: u64,
+    /// Relation-store mutations staged until terminal success is authoritative.
     pub staged_store_mutations: u64,
+    /// CUDA-event measurements resolved after the graph completes.
     pub deferred_profile: ResidentGraphDeferredProfile,
+    /// Host/device transfers observed inside the resident core loop.
     pub core_transfers: ResidentGraphCoreTransferStats,
+    /// Single bounded terminal observation made after synchronization.
     pub final_observation: ResidentGraphFinalObservationStats,
 }
 
@@ -1086,12 +1164,13 @@ mod tests {
     }
 
     fn rule(head: &str, body: RirNode, columns: &[(&str, ScalarType)]) -> CompiledRule {
-        let mut meta = RirMeta::default();
-        meta.schema = schema(columns);
         CompiledRule {
             head: head.to_owned(),
             body,
-            meta,
+            meta: RirMeta {
+                schema: schema(columns),
+                ..RirMeta::default()
+            },
         }
     }
 

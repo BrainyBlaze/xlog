@@ -10,8 +10,11 @@ use xlog_cuda::{CudaKernelProvider, LaunchAsync};
 
 use crate::compilation::gpu_cnf::GpuCnfVarTables;
 
+/// Device-resident log weights indexed by DIMACS variable.
 pub struct GpuWeights {
+    /// Log weight for assigning each variable true.
     pub log_true: TrackedCudaSlice<f64>,
+    /// Log weight for assigning each variable false.
     pub log_false: TrackedCudaSlice<f64>,
 }
 
@@ -67,6 +70,7 @@ fn evidence_len_for_var_cap(var_cap: u32) -> Result<usize> {
         .ok_or_else(|| XlogError::Compilation("evidence var_cap overflow".to_string()))
 }
 
+/// Builds a device table that maps DIMACS variables to forced evidence values.
 pub fn build_evidence_by_var_gpu(
     node_var: &TrackedCudaSlice<u32>,
     evidence_nodes: &TrackedCudaSlice<u32>,
@@ -129,6 +133,7 @@ pub fn build_evidence_by_var_gpu(
     Ok(evidence_by_var)
 }
 
+/// Maps device-resident PIR node identifiers to their DIMACS variables.
 pub fn map_nodes_to_vars_gpu(
     node_var: &TrackedCudaSlice<u32>,
     node_ids: &TrackedCudaSlice<u32>,
@@ -168,6 +173,7 @@ pub fn map_nodes_to_vars_gpu(
     Ok(out)
 }
 
+/// Temporarily forces query variables true by replacing their false log weights.
 pub fn apply_query_vars_device(
     provider: &Arc<CudaKernelProvider>,
     query_vars: &TrackedCudaSlice<u32>,
@@ -221,6 +227,7 @@ pub fn apply_query_vars_device(
     Ok(())
 }
 
+/// Restores false log weights saved by [`apply_query_vars_device`].
 pub fn restore_query_vars_device(
     provider: &Arc<CudaKernelProvider>,
     query_vars: &TrackedCudaSlice<u32>,
@@ -274,6 +281,7 @@ pub fn restore_query_vars_device(
     Ok(())
 }
 
+/// Builds validated device log-weight tables from probabilities and evidence.
 pub fn build_weights_gpu(
     vars: &GpuCnfVarTables,
     leaf_probs: &TrackedCudaSlice<f64>,
@@ -406,35 +414,6 @@ pub fn build_weights_gpu(
         .map_err(|e| XlogError::Kernel(format!("weights_apply_evidence failed: {}", e)))?;
     }
     // No device synchronize: returns device-resident weights; same-stream ordering suffices.
-    Ok(GpuWeights {
-        log_true,
-        log_false,
-    })
-}
-
-#[allow(dead_code)] // reserved: host-side weight upload path for testing/diagnostics
-pub(crate) fn upload_weights_from_host(
-    provider: &Arc<CudaKernelProvider>,
-    weights: &[(f64, f64)],
-) -> Result<GpuWeights> {
-    let weights_len = weights.len();
-    let mut host_true: Vec<f64> = Vec::with_capacity(weights_len);
-    let mut host_false: Vec<f64> = Vec::with_capacity(weights_len);
-    for &(t, f) in weights {
-        host_true.push(t);
-        host_false.push(f);
-    }
-
-    let memory = provider.memory();
-    let mut log_true = memory.alloc::<f64>(weights_len)?;
-    let mut log_false = memory.alloc::<f64>(weights_len)?;
-    provider
-        .htod_sync_copy_into_tracked(&host_true, &mut log_true)
-        .map_err(|e| XlogError::Kernel(format!("Upload log_true weights failed: {}", e)))?;
-    provider
-        .htod_sync_copy_into_tracked(&host_false, &mut log_false)
-        .map_err(|e| XlogError::Kernel(format!("Upload log_false weights failed: {}", e)))?;
-
     Ok(GpuWeights {
         log_true,
         log_false,

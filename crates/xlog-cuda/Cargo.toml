@@ -46,3 +46,6 @@ arrow-device-import = []
 # to keep the hot path zero-overhead. The phase-report binary
 # in xlog-integration enables it for measurement runs only.
 wcoj-phase-timing = []
+
+[lints]
+workspace = true

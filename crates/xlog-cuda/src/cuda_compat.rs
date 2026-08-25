@@ -302,7 +302,10 @@ unsafe impl LaunchAsync<&mut Vec<*mut c_void>> for CudaFunction {
 
 macro_rules! impl_launch_tuple {
     ([$($var:ident),*], [$($idx:tt),*]) => {
-        #[allow(non_snake_case)]
+        #[expect(
+            non_snake_case,
+            reason = "tuple type parameters are also destructured as bindings by this arity-generating macro"
+        )]
         unsafe impl<$($var: IntoKernelParamStorage),*> LaunchAsync<($($var,)*)> for CudaFunction {
             unsafe fn launch(
                 self,

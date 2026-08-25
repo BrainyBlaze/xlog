@@ -31,3 +31,6 @@ host-io = []
 name = "prob_bench"
 harness = false
 required-features = ["host-io"]
+
+[lints]
+workspace = true

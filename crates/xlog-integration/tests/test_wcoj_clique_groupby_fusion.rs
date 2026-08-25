@@ -228,10 +228,10 @@ fn oracle_group_counts(k: usize, edges: &EdgeMap, group_var: usize) -> Vec<(u32,
             return;
         }
         let mut candidates: Option<BTreeSet<u32>> = None;
-        for prior in 0..level {
+        for (prior, &bound) in binding.iter().take(level).enumerate() {
             let allowed = adj
                 .get(&(prior, level))
-                .and_then(|m| m.get(&binding[prior]))
+                .and_then(|m| m.get(&bound))
                 .cloned()
                 .unwrap_or_default();
             let next = match candidates {

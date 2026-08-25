@@ -82,7 +82,10 @@ use xlog_cuda::CudaDevice;
 const BYTES: usize = 4096;
 
 /// Async HtoD on a specific raw stream handle.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "fixture fields retain CUDA device and runtime ownership across asynchronous stream assertions"
+)]
 unsafe fn htod_async(stream: sys::CUstream, dst: u64, src: &[u8]) {
     let res = sys::cuMemcpyHtoDAsync_v2(dst, src.as_ptr() as *const _, src.len(), stream);
     assert_eq!(

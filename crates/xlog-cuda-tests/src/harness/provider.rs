@@ -352,6 +352,37 @@ impl TestContext {
     }
 }
 
+/// Macro for tests requiring CUDA device - panics if not available.
+#[macro_export]
+macro_rules! gpu_test {
+    ($name:ident, $body:expr) => {
+        #[test]
+        fn $name() {
+            let ctx =
+                $crate::harness::TestContext::new().expect("CUDA device required for this test");
+            $body(&ctx);
+        }
+    };
+}
+
+/// Macro for tests requiring CUDA device - skips if not available.
+#[macro_export]
+macro_rules! gpu_test_skip {
+    ($name:ident, $body:expr) => {
+        #[test]
+        fn $name() {
+            let ctx = match $crate::harness::TestContext::new() {
+                Ok(ctx) => ctx,
+                Err(_) => {
+                    eprintln!("Skipping {}: no CUDA device", stringify!($name));
+                    return;
+                }
+            };
+            $body(&ctx);
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,35 +417,4 @@ mod tests {
 
         drop(ctx);
     }
-}
-
-/// Macro for tests requiring CUDA device - panics if not available.
-#[macro_export]
-macro_rules! gpu_test {
-    ($name:ident, $body:expr) => {
-        #[test]
-        fn $name() {
-            let ctx =
-                $crate::harness::TestContext::new().expect("CUDA device required for this test");
-            $body(&ctx);
-        }
-    };
-}
-
-/// Macro for tests requiring CUDA device - skips if not available.
-#[macro_export]
-macro_rules! gpu_test_skip {
-    ($name:ident, $body:expr) => {
-        #[test]
-        fn $name() {
-            let ctx = match $crate::harness::TestContext::new() {
-                Ok(ctx) => ctx,
-                Err(_) => {
-                    eprintln!("Skipping {}: no CUDA device", stringify!($name));
-                    return;
-                }
-            };
-            $body(&ctx);
-        }
-    };
 }

@@ -375,14 +375,14 @@ fn test_size_distribution_matrix_i64(ctx: &TestContext) -> TestResult {
                         let first_pos_idx = sorted_data.iter().position(|&v| v >= 0);
                         if let Some(pos_idx) = first_pos_idx {
                             // All values before pos_idx should be negative
-                            for i in 0..pos_idx {
-                                if sorted_data[i] >= 0 {
+                            for (i, &actual) in sorted_data.iter().take(pos_idx).enumerate() {
+                                if actual >= 0 {
                                     return TestResult::error(
                                         "test_size_distribution_matrix_i64",
                                         start.elapsed(),
                                         format!(
                                             "I64 signed sort error: non-negative {} at index {} before positive section for size={}, dist={:?}",
-                                            sorted_data[i], i, size, dist
+                                            actual, i, size, dist
                                         ),
                                     );
                                 }
@@ -833,7 +833,7 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let expected_after_filter = (size + 1) / 2; // Ceiling division for odd sizes
+        let expected_after_filter = size.div_ceil(2); // Ceiling division for odd sizes
         if ctx.device_row_count(&filtered) != expected_after_filter as u64 {
             return TestResult::error(
                 "test_operation_matrix",

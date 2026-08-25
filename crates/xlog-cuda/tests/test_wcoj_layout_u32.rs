@@ -48,7 +48,10 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)] // device/runtime kept alive via Arc clones for cross-stream lifetimes
+#[expect(
+    dead_code,
+    reason = "fixture fields retain CUDA device and runtime ownership across asynchronous stream lifetimes"
+)]
 struct RuntimeFixture {
     device: Arc<CudaDevice>,
     runtime: Arc<XlogDeviceRuntime>,

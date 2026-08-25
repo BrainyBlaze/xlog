@@ -21,28 +21,45 @@ use crate::xgcf::{Xgcf, XgcfNodeType};
 /// This matches the XGCF node layout used by `kernels/circuit.cu` and the SAT verifier CNF encoder
 /// in `kernels/sat.cu`.
 pub struct GpuCircuitBuilder {
+    /// Device opcode for every circuit node.
     pub node_type: TrackedCudaSlice<u8>,
+    /// Device CSR offsets into [`Self::child_indices`].
     pub child_offsets: TrackedCudaSlice<u32>,
+    /// Device-resident flattened child indices.
     pub child_indices: TrackedCudaSlice<u32>,
+    /// Signed DIMACS literal for every literal node.
     pub lit: TrackedCudaSlice<i32>,
+    /// Choice-variable identifier for every decision node.
     pub decision_var: TrackedCudaSlice<u32>,
+    /// False-branch child for every decision node.
     pub decision_child_false: TrackedCudaSlice<u32>,
+    /// True-branch child for every decision node.
     pub decision_child_true: TrackedCudaSlice<u32>,
 }
 
 /// Device layout metadata for XGCF construction.
 pub struct GpuCircuitLayout {
+    /// Node-buffer capacity.
     pub num_nodes: u32,
+    /// Edge-buffer capacity.
     pub num_edges: u32,
+    /// Number of topological evaluation levels.
     pub num_levels: u32,
+    /// Device CSR offsets into [`Self::level_nodes`].
     pub level_offsets: TrackedCudaSlice<u32>,
+    /// Device node indices ordered by evaluation level.
     pub level_nodes: TrackedCudaSlice<u32>,
+    /// Circuit root node identifier.
     pub root: u32,
+    /// Largest DIMACS variable represented by the circuit.
     pub max_var: u32,
+    /// Optional device scalar containing the authoritative node count.
     pub num_nodes_device: Option<TrackedCudaSlice<u32>>,
+    /// Optional device scalar containing the authoritative edge count.
     pub num_edges_device: Option<TrackedCudaSlice<u32>>,
 }
 
+/// Device-resident XGCF circuit and reusable evaluation workspaces.
 pub struct GpuXgcf {
     node_type: TrackedCudaSlice<u8>,
     child_offsets: TrackedCudaSlice<u32>,
@@ -268,6 +285,7 @@ fn validate_xgcf_for_gpu_upload(circuit: &Xgcf) -> Result<(u32, u32, u32)> {
 }
 
 impl GpuXgcf {
+    /// Constructs a validated GPU circuit from existing device buffers and layout metadata.
     pub fn from_device(
         builder: GpuCircuitBuilder,
         layout: GpuCircuitLayout,
@@ -1057,6 +1075,7 @@ impl GpuXgcf {
         GpuXgcf::from_device(builder, layout, provider)
     }
 
+    /// Validates and uploads a host XGCF circuit.
     pub fn upload(provider: &CudaKernelProvider, circuit: &Xgcf) -> Result<Self> {
         let (node_cap, edge_cap, num_levels) = validate_xgcf_for_gpu_upload(circuit)?;
 
@@ -1187,6 +1206,7 @@ impl GpuXgcf {
         })
     }
 
+    /// Returns the largest DIMACS variable represented by the circuit.
     pub fn max_var(&self) -> u32 {
         self.max_var
     }
@@ -1256,10 +1276,12 @@ impl GpuXgcf {
         &self.decision_var
     }
 
+    /// Returns the device false-branch child for every decision node.
     pub fn decision_child_false(&self) -> &TrackedCudaSlice<u32> {
         &self.decision_child_false
     }
 
+    /// Returns the device true-branch child for every decision node.
     pub fn decision_child_true(&self) -> &TrackedCudaSlice<u32> {
         &self.decision_child_true
     }
@@ -1309,29 +1331,6 @@ impl GpuXgcf {
             )));
         }
         self.free_var_mask = Some(mask);
-        Ok(())
-    }
-
-    /// Upload a host free-variable mask (length = max_var + 1).
-    #[allow(dead_code)] // reserved: host-side mask upload for testing/diagnostics
-    pub(crate) fn set_free_var_mask_from_host(
-        &mut self,
-        provider: &CudaKernelProvider,
-        mask: &[u8],
-    ) -> Result<()> {
-        if mask.len() != self.var_log_true.len() {
-            return Err(XlogError::Compilation(format!(
-                "GPU free-var mask len {} != weights len {}",
-                mask.len(),
-                self.var_log_true.len()
-            )));
-        }
-        let memory = provider.memory();
-        let mut d_mask = memory.alloc::<u8>(mask.len())?;
-        provider
-            .htod_sync_copy_into_tracked(mask, &mut d_mask)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload free_var_mask: {}", e)))?;
-        self.free_var_mask = Some(d_mask);
         Ok(())
     }
 
@@ -1818,6 +1817,7 @@ impl GpuXgcf {
     }
 
     #[cfg(feature = "host-io")]
+    /// Evaluates log weighted model count and returns the host scalar.
     pub fn eval_log_wmc(
         &mut self,
         provider: &CudaKernelProvider,
@@ -1835,6 +1835,7 @@ impl GpuXgcf {
     }
 
     #[cfg(feature = "host-io")]
+    /// Evaluates log weighted model count and returns host gradients.
     pub fn eval_log_wmc_and_grads(
         &mut self,
         provider: &CudaKernelProvider,

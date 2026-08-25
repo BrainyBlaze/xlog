@@ -351,7 +351,10 @@ impl Executor {
     /// Execute a Join node
     ///
     /// Delegates to the kernel provider's hash_join_v2 which supports all join types natively.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "join dispatch keeps the two inputs, key sets, join semantics, and optional relation identities explicit"
+    )]
     fn execute_join(
         &mut self,
         left: &CudaBuffer,
@@ -603,7 +606,10 @@ impl Executor {
         self.provider.diff_gpu(left, right)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "tensor-masked join dispatch keeps the registered mask, relation catalog, output identity, and projection contract explicit"
+    )]
     fn execute_tensor_masked_join(
         &mut self,
         mask_name: &str,

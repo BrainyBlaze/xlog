@@ -1,4 +1,3 @@
-#![allow(clippy::arc_with_non_send_sync)]
 //! End-to-end integration tests for XLOG
 //!
 //! These tests verify the complete system works by:

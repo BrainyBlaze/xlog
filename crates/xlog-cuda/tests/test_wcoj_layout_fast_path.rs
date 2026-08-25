@@ -43,7 +43,10 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "fixture fields retain CUDA device and runtime ownership across asynchronous stream assertions"
+)]
 struct Fix {
     device: Arc<CudaDevice>,
     runtime: Arc<XlogDeviceRuntime>,

@@ -20,10 +20,8 @@ const SAT_STATUS_BUDGET_EXHAUSTED: i32 = 2;
 struct GpuCdclRun {
     assignment: TrackedCudaSlice<i8>,
     // Scratch buffers used only by sat_cdcl_solve, but must stay alive until the solver kernel completes.
-    #[allow(dead_code)]
-    decision_heap: TrackedCudaSlice<u32>,
-    #[allow(dead_code)]
-    decision_heap_pos: TrackedCudaSlice<u32>,
+    _decision_heap: TrackedCudaSlice<u32>,
+    _decision_heap_pos: TrackedCudaSlice<u32>,
 
     learned_offsets: TrackedCudaSlice<u32>,
     learned_lits: TrackedCudaSlice<i32>,
@@ -147,20 +145,6 @@ impl GpuCdclWorkspace {
         // Intentionally empty; launch flags decide whether learned/proof arenas are imported.
     }
 
-    /// Variable capacity this workspace was allocated for.
-    #[inline]
-    #[allow(dead_code)] // diagnostic accessor, retained for debugging
-    pub(crate) fn var_cap(&self) -> usize {
-        self.var_cap
-    }
-
-    /// Total clause capacity (input + learned) this workspace was allocated for.
-    #[inline]
-    #[allow(dead_code)] // diagnostic accessor, retained for debugging
-    pub(crate) fn clause_total_cap(&self) -> usize {
-        self.clause_total_cap
-    }
-
     /// Device pointer of the assignment buffer (for diagnostics / reuse verification).
     #[inline]
     pub fn assign_device_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
@@ -173,9 +157,13 @@ impl GpuCdclWorkspace {
 /// Production verifier paths should prefer `solve_expect_sat*` / `solve_expect_unsat*`,
 /// which validate results on GPU and return typed errors for status mismatches.
 pub struct GpuCdclRawOutput {
+    /// Device-resident variable assignment indexed by one-based SAT variable identifier.
     pub assignment: TrackedCudaSlice<i8>,
+    /// Device-resident terminal solver status.
     pub out_status: TrackedCudaSlice<i32>,
+    /// Device-resident kernel error code; zero indicates no kernel error.
     pub out_error: TrackedCudaSlice<i32>,
+    /// Device-resident count of learned clauses retained by the solve.
     pub out_learned_count: TrackedCudaSlice<u32>,
 }
 
@@ -319,6 +307,7 @@ impl GpuCdclSolver {
         Ok(())
     }
 
+    /// Create a solver that allocates and launches through `provider` using `config`.
     pub fn new(provider: Arc<CudaKernelProvider>, config: GpuCdclConfig) -> Self {
         Self { provider, config }
     }
@@ -638,8 +627,8 @@ impl GpuCdclSolver {
 
         Ok(GpuCdclRun {
             assignment: assign,
-            decision_heap,
-            decision_heap_pos,
+            _decision_heap: decision_heap,
+            _decision_heap_pos: decision_heap_pos,
             learned_offsets,
             learned_lits,
             proof_offsets,
@@ -654,7 +643,10 @@ impl GpuCdclSolver {
     ///
     /// Like `launch_cdcl_with_decision_ranges_gated` but uses `ws` buffers instead of
     /// allocating per call. Returns `Result<()>` — the caller reads `ws.out_*` directly.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the kernel launch contract keeps its workspace, CNF, four device-side decision bounds, and learned-arena mode explicit"
+    )]
     fn launch_cdcl_with_workspace_gated(
         &self,
         ws: &mut GpuCdclWorkspace,
@@ -1549,7 +1541,10 @@ impl GpuCdclSolver {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the workspace UNSAT operation preserves the exact kernel decision-range contract and learned-arena mode"
+    )]
     fn solve_expect_unsat_with_decision_ranges_gated_ws_inner(
         &self,
         ws: &mut GpuCdclWorkspace,

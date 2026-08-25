@@ -6,7 +6,6 @@ pub mod config_value;
 pub mod error;
 pub mod float_order;
 pub mod symbol;
-pub mod traits;
 pub mod types;
 
 pub use config::{CostModelKind, MemoryBudget, RuntimeConfig};
@@ -16,5 +15,4 @@ pub use float_order::{
     f32_total_order_key, f32_total_order_key_from_bits, f64_total_order_key,
     f64_total_order_key_from_bits,
 };
-pub use traits::{GpuBuffer, KernelProvider, RelationStore};
 pub use types::{AggOp, RelId, ScalarType, Schema};

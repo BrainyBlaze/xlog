@@ -11,3 +11,6 @@ publish = false
 [dependencies]
 xlog-core.workspace = true
 xlog-cuda.workspace = true
+
+[lints]
+workspace = true

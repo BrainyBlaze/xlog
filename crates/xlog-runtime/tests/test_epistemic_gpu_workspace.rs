@@ -4021,8 +4021,7 @@ fn parsed_know_constraint_prunes_world_view_when_constraint_body_true() {
         result
             .semantic_trace
             .rejection_reasons
-            .iter()
-            .any(|&code| code == constraint_code),
+            .contains(&constraint_code),
         "expected a constraint-violation rejection reason, got {:?}",
         result.semantic_trace.rejection_reasons
     );
@@ -4126,18 +4125,18 @@ fn constraint_specific_reason_identifies_firing_constraint() {
     // Reason code 6 must be unchanged for the rejected candidate(s).
     let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
     assert!(
-        reasons_a.iter().any(|&code| code == constraint_code),
+        reasons_a.contains(&constraint_code),
         "expected reason code 6 (constraint violation), got {:?}",
         reasons_a
     );
     // The firing constraint index must be SPECIFICALLY 1, not merely "some".
     assert!(
-        indices_a.iter().any(|idx| *idx == Some(1)),
+        indices_a.contains(&Some(1)),
         "expected constraint-specific index Some(1) for a `unsafe_b` violation, got {:?}",
         indices_a
     );
     assert!(
-        !indices_a.iter().any(|idx| *idx == Some(0)),
+        !indices_a.contains(&Some(0)),
         "constraint index 0 (`unsafe_a`) must NOT be reported when only `unsafe_b` is present, got {:?}",
         indices_a
     );
@@ -4154,12 +4153,12 @@ fn constraint_specific_reason_identifies_firing_constraint() {
         "constraint index 0 should prune at least one candidate"
     );
     assert!(
-        reasons_b.iter().any(|&code| code == constraint_code),
+        reasons_b.contains(&constraint_code),
         "expected reason code 6 (constraint violation), got {:?}",
         reasons_b
     );
     assert!(
-        indices_b.iter().any(|idx| *idx == Some(0)),
+        indices_b.contains(&Some(0)),
         "expected constraint-specific index Some(0) for an `unsafe_a` violation, got {:?}",
         indices_b
     );
@@ -4270,8 +4269,7 @@ fn parsed_possible_constraint_prunes_when_contradiction_possible() {
     assert!(result
         .semantic_trace
         .rejection_reasons
-        .iter()
-        .any(|&code| code == constraint_code));
+        .contains(&constraint_code));
     result
         .require_runtime_dispatch_certification()
         .expect("all-pruned possible-constraint path should retain GPU semantic certification");
@@ -4349,8 +4347,7 @@ fn variable_keyed_constraint_prunes_when_relation_non_empty() {
         result
             .semantic_trace
             .rejection_reasons
-            .iter()
-            .any(|&code| code == constraint_code),
+            .contains(&constraint_code),
         "expected constraint-violation reason code 6, got {:?}",
         result.semantic_trace.rejection_reasons
     );
@@ -4359,8 +4356,7 @@ fn variable_keyed_constraint_prunes_when_relation_non_empty() {
         result
             .semantic_trace
             .constraint_violation_indices
-            .iter()
-            .any(|idx| *idx == Some(0)),
+            .contains(&Some(0)),
         "expected firing constraint index Some(0), got {:?}",
         result.semantic_trace.constraint_violation_indices
     );
@@ -4710,8 +4706,7 @@ fn parsed_not_possible_constraint_prunes_when_required_absent() {
     assert!(result
         .semantic_trace
         .rejection_reasons
-        .iter()
-        .any(|&code| code == constraint_code));
+        .contains(&constraint_code));
     result
         .require_runtime_dispatch_certification()
         .expect("all-pruned not-possible-constraint path should retain GPU semantic certification");
@@ -7340,12 +7335,21 @@ fn kclique_order_without_edge_permutation() -> KCliqueVariableOrder {
 // =====================================================================
 
 #[cfg(feature = "epistemic-logic-tests")]
+type UnaryRelationInput<'a> = (&'a str, &'a [u32]);
+
+#[cfg(feature = "epistemic-logic-tests")]
+type BinaryRelationInput<'a> = (&'a str, &'a [(u32, u32)]);
+
+#[cfg(feature = "epistemic-logic-tests")]
+type TernaryRelationInput<'a> = (&'a str, &'a [(u32, u32, u32)]);
+
+#[cfg(feature = "epistemic-logic-tests")]
 fn run_tuple_key_unary_result(
     fixture: &RuntimeFixture,
     source: &str,
-    unary_inputs: &[(&str, &[u32])],
-    binary_inputs: &[(&str, &[(u32, u32)])],
-    ternary_inputs: &[(&str, &[(u32, u32, u32)])],
+    unary_inputs: &[UnaryRelationInput<'_>],
+    binary_inputs: &[BinaryRelationInput<'_>],
+    ternary_inputs: &[TernaryRelationInput<'_>],
     expected_key_column_reads: u32,
 ) -> Vec<u32> {
     let program = parse_program(source).expect("parse tuple-key membership test program");

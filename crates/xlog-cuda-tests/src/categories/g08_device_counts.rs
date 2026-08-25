@@ -214,7 +214,7 @@ fn test_groupby_device_count_sum(ctx: &TestContext) -> TestResult {
         );
     }
 
-    let mut pairs: Vec<(u32, u64)> = out_keys.into_iter().zip(out_sums.into_iter()).collect();
+    let mut pairs: Vec<(u32, u64)> = out_keys.into_iter().zip(out_sums).collect();
     pairs.sort_by_key(|(k, _)| *k);
 
     let expected = vec![(1u32, 30u64), (2u32, 3u64), (3u32, 5u64)];

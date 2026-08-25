@@ -3,8 +3,6 @@
 //! These tests require a CUDA device to run.
 //! Covers identity masks, empty masks, and execution without a mask.
 
-#![allow(clippy::arc_with_non_send_sync)]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use xlog_core::{MemoryBudget, RelId, ScalarType, Schema};

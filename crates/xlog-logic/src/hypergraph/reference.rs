@@ -574,7 +574,10 @@ fn build_domains(hg: &HypergraphRule, atom_specs: &[AtomSpec<'_>]) -> Vec<Vec<Re
     domains
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the recursive reference evaluator must carry the immutable rule inputs and mutable traversal state explicitly"
+)]
 fn enumerate(
     hg: &HypergraphRule,
     atom_specs: &[AtomSpec<'_>],

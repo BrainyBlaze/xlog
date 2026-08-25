@@ -47,16 +47,9 @@ impl JoinIndexKey {
 }
 
 struct CachedJoinIndex {
-    index: CachedJoinIndexPayload,
+    index: Option<JoinIndexV2>,
     bytes: u64,
     last_used: u64,
-}
-
-#[allow(clippy::large_enum_variant)]
-enum CachedJoinIndexPayload {
-    Ready(JoinIndexV2),
-    #[cfg(test)]
-    Placeholder,
 }
 
 /// Persistent join-index manager telemetry.
@@ -172,16 +165,12 @@ impl JoinIndexCache {
         };
         self.clock = self.clock.saturating_add(1);
         entry.last_used = self.clock;
-        match &entry.index {
-            CachedJoinIndexPayload::Ready(index) => {
-                self.stats.hits = self.stats.hits.saturating_add(1);
-                Some(index)
-            }
-            #[cfg(test)]
-            CachedJoinIndexPayload::Placeholder => {
-                self.stats.misses = self.stats.misses.saturating_add(1);
-                None
-            }
+        if let Some(index) = &entry.index {
+            self.stats.hits = self.stats.hits.saturating_add(1);
+            Some(index)
+        } else {
+            self.stats.misses = self.stats.misses.saturating_add(1);
+            None
         }
     }
 
@@ -204,7 +193,7 @@ impl JoinIndexCache {
         self.entries.insert(
             key,
             CachedJoinIndex {
-                index: CachedJoinIndexPayload::Ready(index),
+                index: Some(index),
                 bytes,
                 last_used,
             },
@@ -300,7 +289,7 @@ impl JoinIndexCache {
         self.entries.insert(
             key,
             CachedJoinIndex {
-                index: CachedJoinIndexPayload::Placeholder,
+                index: None,
                 bytes,
                 last_used: self.clock,
             },

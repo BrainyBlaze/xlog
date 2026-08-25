@@ -174,7 +174,7 @@ fn test_f64_infinity(ctx: &TestContext) -> TestResult {
     }
 
     // Verify +INFINITY is in the filtered results
-    let has_pos_inf = filtered_data.iter().any(|&v| v == f64::INFINITY);
+    let has_pos_inf = filtered_data.contains(&f64::INFINITY);
     if !has_pos_inf {
         return TestResult::error(
             "test_f64_infinity",
@@ -422,14 +422,19 @@ fn test_f64_zero_signs(ctx: &TestContext) -> TestResult {
     // Verify zeros are grouped together in sorted output
     let first_zero_idx = sorted_data.iter().position(|&v| v == 0.0);
     if let Some(start_idx) = first_zero_idx {
-        for i in start_idx..(start_idx + total_zeros) {
-            if sorted_data[i] != 0.0 {
+        for (i, &actual) in sorted_data
+            .iter()
+            .enumerate()
+            .skip(start_idx)
+            .take(total_zeros)
+        {
+            if actual != 0.0 {
                 return TestResult::error(
                     "test_f64_zero_signs",
                     start.elapsed(),
                     format!(
                         "Zeros should be grouped together, found {} at index {}",
-                        sorted_data[i], i
+                        actual, i
                     ),
                 );
             }
@@ -587,7 +592,7 @@ fn test_f64_subnormal(ctx: &TestContext) -> TestResult {
     }
 
     // Verify specific subnormal values are present
-    let has_smallest = sorted_data.iter().any(|&v| v == smallest_subnormal);
+    let has_smallest = sorted_data.contains(&smallest_subnormal);
     if !has_smallest {
         return TestResult::error(
             "test_f64_subnormal",
@@ -730,7 +735,7 @@ fn test_f64_precision_extremes(ctx: &TestContext) -> TestResult {
 
     // Verify all original values are present (no precision loss)
     for &original in &data {
-        let found = sorted_data.iter().any(|&v| v == original);
+        let found = sorted_data.contains(&original);
         if !found {
             return TestResult::error(
                 "test_f64_precision_extremes",

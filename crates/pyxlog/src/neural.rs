@@ -192,7 +192,10 @@ impl CompiledProgram {
     /// consumer's registration signature `(..., cache_size, *, arity, arg_sorts,
     /// artifact_hash)`.
     #[pyo3(signature = (name, module, optimizer, scheduler=None, batching=true, k=None, det=false, cache=true, cache_size=10000, *, arity=None, arg_sorts=None, artifact_hash=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the Python registration API preserves its documented named arguments"
+    )]
     fn register_network(
         &mut self,
         py: Python<'_>,
@@ -1172,6 +1175,10 @@ impl CompiledProgram {
 
     /// Belnap-aware dual-channel loss terms for bridge training.
     #[pyo3(signature = (pro, contra, quarantine, pro_reward=1.0, contra_penalty=1.0, quarantine_penalty=1.0, reduction="mean"))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the Python loss API exposes its documented tensor and weighting arguments"
+    )]
     fn belnap_loss(
         &self,
         py: Python<'_>,

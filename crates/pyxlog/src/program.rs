@@ -151,8 +151,8 @@ impl QuerySignature {
 }
 
 pub(crate) enum CompiledProbProgram {
-    Exact(ExactDdnnfProgram),
-    Mc(McProgram),
+    Exact(Box<ExactDdnnfProgram>),
+    Mc(Box<McProgram>),
 }
 
 impl CompiledProbProgram {
@@ -579,6 +579,10 @@ impl CompiledProgram {
 #[pymethods]
 impl CompiledProgram {
     #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=None, max_nonmonotone_iterations=None, sampling_method=None, memory_mb=None, allow_cpu_oracle=false))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the Python evaluation API exposes each documented Monte Carlo override by name"
+    )]
     pub fn evaluate(
         &self,
         _py: Python<'_>,
@@ -763,6 +767,10 @@ impl CompiledProgram {
     /// This is the primary GPU-native API surface for MC inference. It never performs
     /// device->host reads for result data (only returns device buffers).
     #[pyo3(signature = (samples=None, seed=None, confidence=None, max_nonmonotone_iterations=None, sampling_method=None, memory_mb=None))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the GPU-native Python evaluation API exposes each documented override by name"
+    )]
     pub fn evaluate_device(
         &self,
         py: Python<'_>,

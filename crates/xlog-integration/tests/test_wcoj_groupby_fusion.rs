@@ -529,7 +529,9 @@ fn run_agg_program_u64(
 
 /// U64 triangle fixture: the K4 + disjoint triangle shape shifted above
 /// 2^33 so width truncation visibly fails.
-fn triangle_inputs_u64() -> (BTreeMap<&'static str, Vec<(u64, u64)>>, u64) {
+type U64RelationMap = BTreeMap<&'static str, Vec<(u64, u64)>>;
+
+fn triangle_inputs_u64() -> (U64RelationMap, u64) {
     const B: u64 = 1 << 33;
     let map = |rows: &[(u32, u32)]| -> Vec<(u64, u64)> {
         rows.iter()

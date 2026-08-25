@@ -785,7 +785,7 @@ fn test_memory_pressure(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let expected = (buffer_size + 1) / 2;
+        let expected = buffer_size.div_ceil(2);
         if ctx.device_row_count(&filtered) != expected as u64 {
             return TestResult::error(
                 "test_memory_pressure",

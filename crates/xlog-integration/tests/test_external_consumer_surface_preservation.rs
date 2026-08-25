@@ -6,7 +6,6 @@ use xlog_gpu::logic::{LogicEvalResult, LogicMaterializedStore, LogicProgram};
 use xlog_logic::Compiler;
 use xlog_runtime::{Executor, RelationDelta};
 
-#[allow(dead_code)]
 #[path = "../benches/fixtures/paper_class.rs"]
 mod paper_class;
 
@@ -279,6 +278,7 @@ fn external_consumer_analog_fixture_runs_through_wcoj_runtime_path() -> Result<(
 
     assert!(external_consumer.recursive);
     assert!(external_consumer.total_rows() > 0);
+    assert!(!external_consumer.bundle_path_status.is_empty());
     assert!(!external_consumer.e_xy.is_empty());
     assert!(!external_consumer.e_yz.is_empty());
     assert!(!external_consumer.e_xz.is_empty());

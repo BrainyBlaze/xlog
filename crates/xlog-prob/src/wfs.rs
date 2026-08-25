@@ -45,7 +45,9 @@ use xlog_core::{Result, XlogError};
 /// Ground atom representation for WFS
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WfsAtom {
+    /// Predicate name.
     pub predicate: String,
+    /// Ground argument values in source order.
     pub args: Vec<Value>,
 }
 
@@ -80,8 +82,11 @@ impl std::fmt::Display for WfsAtom {
 /// Three-valued truth value for WFS
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TruthValue {
+    /// The atom is derivable in every supported interpretation.
     True,
+    /// The atom belongs to the greatest unfounded set.
     False,
+    /// Neither truth nor falsity is derivable.
     Undefined,
 }
 
@@ -192,32 +197,6 @@ impl WfsRule {
             }
         }
         Some(true)
-    }
-
-    /// Check if rule body is definitely unsatisfiable.
-    ///
-    /// Reserved API: used for early pruning in more advanced WFS implementations.
-    #[allow(dead_code)] // reserved public API for future WFS optimization
-    pub fn is_definitely_unsatisfiable(
-        &self,
-        true_set: &HashSet<WfsAtom>,
-        false_set: &HashSet<WfsAtom>,
-    ) -> bool {
-        for lit in &self.body {
-            match lit {
-                WfsLiteral::Positive(atom) => {
-                    if false_set.contains(atom) {
-                        return true;
-                    }
-                }
-                WfsLiteral::Negative(atom) => {
-                    if true_set.contains(atom) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
     }
 }
 

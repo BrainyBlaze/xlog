@@ -8,10 +8,11 @@ use xlog_core::{MemoryBudget, RelId, ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{
     CompiledRule, EirAtom, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirTerm,
-    EpistemicExecutablePlan, EpistemicExecutionBackend, EpistemicFallbackPolicy, EpistemicGpuPlan,
-    EpistemicReductionPlan, EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, RirNode, Scc,
-    Stratum,
+    EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
+    EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, RirNode, Scc, Stratum,
 };
+#[cfg(feature = "host-io")]
+use xlog_ir::{EpistemicExecutionBackend, EpistemicFallbackPolicy};
 #[cfg(feature = "host-io")]
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_split_execution,

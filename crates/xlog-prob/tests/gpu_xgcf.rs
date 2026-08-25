@@ -1,4 +1,3 @@
-#![allow(clippy::arc_with_non_send_sync)]
 #![cfg(feature = "host-io")]
 
 use std::sync::Arc;

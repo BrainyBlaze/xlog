@@ -4,8 +4,6 @@
 //! hash-chain baselines for hub-filtered 4-cycle, diagonal 5-clique, and
 //! pivot-heavy 5-clique workloads.
 
-#![allow(dead_code)]
-
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

@@ -253,6 +253,7 @@ impl ResidentLatencyDiagnostic {
     }
 }
 
+#[cfg(test)]
 fn resident_latency_diagnostic_line(
     diagnostic: Option<&ResidentLatencyDiagnostic>,
     total_ns: u64,
@@ -2922,11 +2923,13 @@ impl LogicProgram {
         Ok(executor)
     }
 
+    #[cfg(test)]
     fn resident_certified_plan(&self) -> Result<Arc<ResidentGraphCertifiedPlan>> {
         let plan = self.ordinary_plan("resident route certification")?;
         self.resident_certified_plan_for_plan(plan)
     }
 
+    #[cfg(test)]
     fn resident_certified_plan_with_outcome(
         &self,
     ) -> Result<(Arc<ResidentGraphCertifiedPlan>, bool, bool)> {
@@ -3221,51 +3224,6 @@ impl LogicProgram {
             }
         }
         Ok(true)
-    }
-
-    fn executor_from_relation_store(
-        &self,
-        provider: Arc<CudaKernelProvider>,
-        relation_store: &RelationStore,
-        profiling: bool,
-    ) -> Result<Executor> {
-        let mut executor = Executor::new(provider.clone());
-        executor.set_profiling(profiling);
-        for (name, rel_id) in &self.rel_ids {
-            executor.register_relation(*rel_id, name);
-        }
-
-        for (name, schema) in &self.schemas {
-            executor
-                .store_mut()
-                .put(name, provider.create_empty_buffer(schema.clone())?);
-        }
-
-        for name in relation_store.names() {
-            let buffer = relation_store.get(name).ok_or_else(|| {
-                XlogError::Execution(format!(
-                    "Persistent relation {} disappeared during evaluation",
-                    name
-                ))
-            })?;
-            let schema = self.schemas.get(name).ok_or_else(|| {
-                XlogError::Execution(format!(
-                    "Persistent relation {} not declared in program schemas",
-                    name
-                ))
-            })?;
-            ensure_schema_type_compatible(schema, buffer.schema()).map_err(|e| {
-                XlogError::Execution(format!(
-                    "Persistent relation {} schema mismatch: {}",
-                    name, e
-                ))
-            })?;
-            executor
-                .store_mut()
-                .put(name, provider.clone_buffer(buffer)?);
-        }
-
-        Ok(executor)
     }
 
     fn clone_relation_store(
@@ -6222,8 +6180,7 @@ mod tests {
             .queries
             .iter()
             .map(|query| {
-                let row_count = usize::try_from(provider.device_row_count(&query.buffer)?)
-                    .map_err(|_| XlogError::Execution("query row count exceeds usize".into()))?;
+                let row_count = provider.device_row_count(&query.buffer)?;
                 let mut columns = Vec::with_capacity(query.buffer.schema().arity());
                 for index in 0..query.buffer.schema().arity() {
                     let ty = query
@@ -6508,32 +6465,37 @@ mod tests {
     #[test]
     fn resident_dependency_closure_fails_closed_on_missing_duplicate_or_ambiguous_proof(
     ) -> Result<()> {
-        fn plan_structure(
-            plan: &ExecutionPlan,
-        ) -> (
-            Vec<(u32, Vec<String>)>,
-            Vec<(u32, Vec<u32>)>,
-            Vec<Vec<String>>,
-            Vec<(usize, usize, usize)>,
-        ) {
-            (
-                plan.sccs
+        #[derive(Debug, PartialEq, Eq)]
+        struct ResidentPlanStructure {
+            sccs: Vec<(u32, Vec<String>)>,
+            strata: Vec<(u32, Vec<u32>)>,
+            rule_heads: Vec<Vec<String>>,
+            generated_query_rules: Vec<(usize, usize, usize)>,
+        }
+
+        fn plan_structure(plan: &ExecutionPlan) -> ResidentPlanStructure {
+            ResidentPlanStructure {
+                sccs: plan
+                    .sccs
                     .iter()
                     .map(|scc| (scc.id, scc.predicates.clone()))
                     .collect(),
-                plan.strata
+                strata: plan
+                    .strata
                     .iter()
                     .map(|stratum| (stratum.id, stratum.sccs.clone()))
                     .collect(),
-                plan.rules_by_scc
+                rule_heads: plan
+                    .rules_by_scc
                     .iter()
                     .map(|rules| rules.iter().map(|rule| rule.head.clone()).collect())
                     .collect(),
-                plan.generated_query_rules
+                generated_query_rules: plan
+                    .generated_query_rules
                     .iter()
                     .map(|query| (query.query_index, query.scc_index, query.rule_index))
                     .collect(),
-            )
+            }
         }
 
         let program = LogicProgram::compile(
@@ -6887,7 +6849,7 @@ mod tests {
                     let RirNode::ChainJoin { fallback, .. } = &rule.body else {
                         return None;
                     };
-                    let (scans, filters) = fallback_scan_filter_counts(fallback);
+                    let (scans, filters) = fallback_scan_filter_counts(fallback.as_ref());
                     Some((
                         scc_index,
                         plan.sccs[scc_index].is_recursive,
@@ -8608,10 +8570,11 @@ mod tests {
         assert_eq!(program.resident_certification_initializations(), 0);
         drop(automatic);
 
-        let required = match {
+        let required_result = {
             let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
             program.evaluate_with_options(provider, HashMap::new(), true)
-        } {
+        };
+        let required = match required_result {
             Ok(_) => panic!("no-query evaluation cannot use the resident partial-result route"),
             Err(error) => error,
         };
@@ -9331,10 +9294,17 @@ mod tests {
         Ok(())
     }
 
+    struct RecursiveDuplicateFactProfile {
+        executable_rule_count: usize,
+        scan_count: usize,
+        union_count: usize,
+        rows: Vec<(u32, u32)>,
+    }
+
     fn recursive_duplicate_fact_profile(
         provider: Arc<CudaKernelProvider>,
         fact_count: usize,
-    ) -> Result<(usize, usize, usize, Vec<(u32, u32)>)> {
+    ) -> Result<RecursiveDuplicateFactProfile> {
         let facts = "edge(1, 2).\n".repeat(fact_count);
         let program = LogicProgram::compile(&format!(
             r#"
@@ -9378,7 +9348,12 @@ mod tests {
         let ys = provider.download_column::<u32>(&result.queries[0].buffer, 1)?;
         let mut rows = xs.into_iter().zip(ys).collect::<Vec<_>>();
         rows.sort_unstable();
-        Ok((executable_rule_count, scan_count, union_count, rows))
+        Ok(RecursiveDuplicateFactProfile {
+            executable_rule_count,
+            scan_count,
+            union_count,
+            rows,
+        })
     }
 
     #[test]
@@ -9389,18 +9364,18 @@ mod tests {
 
         let one_fact = recursive_duplicate_fact_profile(provider.clone(), 1)?;
         let many_facts = recursive_duplicate_fact_profile(provider, 64)?;
-        assert_eq!(one_fact.3, vec![(1, 2)]);
-        assert_eq!(many_facts.3, one_fact.3);
+        assert_eq!(one_fact.rows, vec![(1, 2)]);
+        assert_eq!(many_facts.rows, one_fact.rows);
         assert_eq!(
-            many_facts.0, one_fact.0,
+            many_facts.executable_rule_count, one_fact.executable_rule_count,
             "executable rule count must not scale with source fact count"
         );
         assert_eq!(
-            many_facts.1, one_fact.1,
+            many_facts.scan_count, one_fact.scan_count,
             "executable scan count must not scale with source fact count"
         );
         assert_eq!(
-            many_facts.2, one_fact.2,
+            many_facts.union_count, one_fact.union_count,
             "executable union count must not scale with source fact count"
         );
         Ok(())

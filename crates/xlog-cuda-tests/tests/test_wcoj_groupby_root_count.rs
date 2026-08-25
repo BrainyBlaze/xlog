@@ -348,7 +348,10 @@ fn wcoj_triangle_groupby_root_count_measurement_fused_vs_unfused() {
         )
     };
 
-    let cases: Vec<(&str, (Vec<(u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32)>))> = vec![
+    type Rows = Vec<(u32, u32)>;
+    type TriangleRelations = (Rows, Rows, Rows);
+    type BenchCase = (&'static str, TriangleRelations);
+    let cases: Vec<BenchCase> = vec![
         ("hub_10k_z16", hub(10_000, 16)),
         ("hub_50k_z16", hub(50_000, 16)),
         ("small_uniform_200", small_uniform),
@@ -652,7 +655,10 @@ fn wcoj_triangle_groupby_root_count_u64_measurement_fused_vs_unfused() {
         )
     };
 
-    let cases: Vec<(&str, (Vec<(u64, u64)>, Vec<(u64, u64)>, Vec<(u64, u64)>))> = vec![
+    type Rows = Vec<(u64, u64)>;
+    type TriangleRelations = (Rows, Rows, Rows);
+    type BenchCase = (&'static str, TriangleRelations);
+    let cases: Vec<BenchCase> = vec![
         ("u64_hub_10k_z16", hub(10_000, 16)),
         ("u64_hub_50k_z16", hub(50_000, 16)),
     ];

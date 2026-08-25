@@ -1,5 +1,3 @@
-#![allow(clippy::arc_with_non_send_sync)]
-
 //! Replay an external consumer widened-frontier promotion shape through xlog and
 //! assert deterministic clean output.
 
@@ -60,13 +58,12 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct RuntimeFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
-    memory: Arc<GpuMemoryManager>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
+    _memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
+    _pool: Arc<StreamPool>,
 }
 
 fn make_runtime_fixture() -> Option<RuntimeFixture> {
@@ -81,11 +78,11 @@ fn make_runtime_fixture() -> Option<RuntimeFixture> {
     let runtime = Arc::clone(memory.runtime()?);
     let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeFixture {
-        device,
-        runtime,
-        memory,
+        _device: device,
+        _runtime: runtime,
+        _memory: memory,
         provider,
-        pool,
+        _pool: pool,
     })
 }
 

@@ -59,10 +59,9 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)] // device/runtime kept alive via Arc clones for cross-stream lifetimes
 struct RuntimeFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
     pool: Arc<StreamPool>,
@@ -80,8 +79,8 @@ fn make_runtime_fixture() -> Option<RuntimeFixture> {
     let runtime = Arc::clone(memory.runtime()?);
     let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeFixture {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
         pool,

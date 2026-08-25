@@ -254,7 +254,7 @@ fn test_kernel_function_resolution(ctx: &TestContext) -> TestResult {
 
         for entry in &entries {
             total_functions += 1;
-            if device.get_func(&module_name, entry).is_some() {
+            if device.get_func(module_name, entry).is_some() {
                 resolved_functions += 1;
             } else {
                 return TestResult::error(

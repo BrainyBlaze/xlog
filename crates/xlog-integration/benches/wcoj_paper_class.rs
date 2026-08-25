@@ -1,7 +1,7 @@
 //! Paper-class WCOJ benchmark harness.
 
 mod fixtures {
-    pub mod paper_class;
+    pub(crate) mod paper_class;
 }
 
 use std::collections::BTreeSet;

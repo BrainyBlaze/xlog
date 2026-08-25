@@ -47,13 +47,21 @@ pub use validation::{
 /// Per-stage compilation timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]
 pub struct CircuitCompileProfile {
+    /// Seconds spent computing the canonical CNF hash.
     pub cnf_hash_sec: f64,
+    /// Seconds spent compiling the circuit.
     pub d4_compile_sec: f64,
+    /// Seconds spent verifying logical equivalence.
     pub verify_sec: f64,
+    /// Seconds spent smoothing the final circuit.
     pub smooth_sec: f64,
+    /// Seconds spent storing the verified circuit in cache.
     pub cache_store_sec: f64,
+    /// Seconds spent constructing the free-variable mask.
     pub free_var_mask_sec: f64,
+    /// Whether the circuit came from the resident GPU cache.
     pub gpu_cache_hit: bool,
+    /// Whether the circuit came from the verified disk cache.
     pub disk_cache_hit: bool,
     /// BFS frontier item count after `frontier_depth` expansion steps
     /// (0 on cache hits or when profiling is disabled).
@@ -158,6 +166,7 @@ impl CertifiedGpuCircuit {
 }
 
 impl DeviceRandomVarList {
+    /// Constructs a validated list from an existing device allocation and logical count.
     pub fn from_device(list: TrackedCudaSlice<u32>, count: u32) -> Result<Self> {
         let len = u32::try_from(list.len()).map_err(|_| {
             XlogError::Compilation("DeviceRandomVarList: list length exceeds u32".to_string())
@@ -171,6 +180,7 @@ impl DeviceRandomVarList {
         Ok(Self { list, count })
     }
 
+    /// Uploads a host list of random-variable identifiers.
     pub fn from_host(provider: &CudaKernelProvider, host: &[u32]) -> Result<Self> {
         let memory = provider.memory();
         let mut list = memory.alloc::<u32>(host.len())?;
@@ -187,14 +197,17 @@ impl DeviceRandomVarList {
         Ok(Self { list, count })
     }
 
+    /// Returns whether the logical list is empty.
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
 
+    /// Returns the logical number of random variables.
     pub fn count(&self) -> u32 {
         self.count
     }
 
+    /// Returns the device-resident variable identifiers.
     pub fn list(&self) -> &TrackedCudaSlice<u32> {
         &self.list
     }

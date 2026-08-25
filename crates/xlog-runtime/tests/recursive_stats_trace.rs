@@ -32,12 +32,9 @@ use std::sync::Arc;
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError};
 use xlog_cuda::memory::CudaBuffer;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::Compiler;
 use xlog_runtime::executor::RecursiveStatsPhase;
 use xlog_runtime::Executor;
@@ -53,13 +50,9 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct RuntimeBackedFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
 }
 
 fn make_runtime_fixture() -> Option<RuntimeBackedFixture> {
@@ -69,17 +62,9 @@ fn make_runtime_fixture() -> Option<RuntimeBackedFixture> {
             .build()
             .ok()?,
     );
-    let device = Arc::clone(provider.device());
     let memory = Arc::clone(provider.memory());
-    let runtime = Arc::clone(memory.runtime()?);
-    let pool = Arc::clone(runtime.stream_pool());
-    Some(RuntimeBackedFixture {
-        device,
-        runtime,
-        memory,
-        provider,
-        pool,
-    })
+    memory.runtime()?;
+    Some(RuntimeBackedFixture { memory, provider })
 }
 
 fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {

@@ -294,16 +294,13 @@ fn test_coalesced_access(ctx: &TestContext) -> TestResult {
     // Original: key[i] = SIZE-1-i, val[i] = i
     // After sort: sorted_keys[j] = j, so original index was SIZE-1-j
     // Therefore sorted_vals[j] = SIZE-1-j
-    for i in 0..SIZE {
+    for (i, &actual) in sorted_vals.iter().take(SIZE).enumerate() {
         let expected_val = (SIZE - 1 - i) as u32;
-        if sorted_vals[i] != expected_val {
+        if actual != expected_val {
             return TestResult::error(
                 "test_coalesced_access",
                 start.elapsed(),
-                format!(
-                    "sorted_vals[{}] = {}, expected {}",
-                    i, sorted_vals[i], expected_val
-                ),
+                format!("sorted_vals[{}] = {}, expected {}", i, actual, expected_val),
             );
         }
     }

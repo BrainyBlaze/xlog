@@ -31,6 +31,10 @@ pub const RESIDENT_SCHEDULE_SLOT_PERMANENT: u32 = 2;
 pub const RESIDENT_SCHEDULE_SLOT_DEFINED: u32 = 4;
 const SOURCE_SLOT: u32 = RESIDENT_SCHEDULE_SLOT_SOURCE;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "allocation validation compares the complete recorded allocation identity against its expected runtime, stream, and device fields"
+)]
 fn validate_runtime_allocation_fields(
     manager_id: usize,
     allocation_ptr: u64,
@@ -422,7 +426,9 @@ fn decode_test_status(op: &ResidentOpDescriptor) -> Result<ResidentTerminalStatu
     })
 }
 
-fn decode_trace_delta(op: &ResidentOpDescriptor) -> Result<(u32, u32, Option<(u32, u32)>)> {
+type ResidentTraceDelta = (u32, u32, Option<(u32, u32)>);
+
+fn decode_trace_delta(op: &ResidentOpDescriptor) -> Result<ResidentTraceDelta> {
     let has_semantic_guard = op.flags & RESIDENT_SCHEDULE_TRACE_SEMANTIC_GUARD != 0;
     if op.kind != OP_TRACE_DELTA
         || op.flags & !RESIDENT_SCHEDULE_TRACE_SEMANTIC_GUARD != 0
@@ -732,7 +738,6 @@ pub struct ResidentScheduleExternalBindings<'a> {
 }
 
 impl<'a> ResidentScheduleExternalBindings<'a> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         filter_scratch: Option<&'a ResidentFilterScratch>,
         set_workspace: &'a ResidentSetWorkspace,
@@ -1247,6 +1252,7 @@ fn reset_slot_flags(flags: u32) -> u32 {
     }
 }
 
+#[cfg(test)]
 fn reset_slot_state_for_region(flags: u32, generation: u32, count: u32) -> (u32, u32, u32) {
     let fixed = flags & (RESIDENT_SCHEDULE_SLOT_SOURCE | RESIDENT_SCHEDULE_SLOT_PERMANENT) != 0;
     (
@@ -1717,6 +1723,7 @@ fn build_generation_metadata(
     Ok(metadata)
 }
 
+#[cfg(test)]
 fn generation_baseline_count_from_metadata(
     generation_metadata_count: u32,
     schema_winner_count: u32,
@@ -1767,7 +1774,10 @@ struct ResidentScheduleRequirements {
     join_right_capacity: u32,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "schedule validation receives every descriptor table and capacity needed to certify fixed graph bindings"
+)]
 fn validate_schedule_program(
     slots: &[ResidentRelationSlot],
     slot_types: &[Vec<ScalarType>],
@@ -2343,7 +2353,10 @@ impl CudaKernelProvider {
     }
 
     /// Validate, allocate, and upload every descriptor before graph capture.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "schedule preparation keeps slots, descriptors, output contract, limits, seeds, and external owners explicit"
+    )]
     pub fn prepare_resident_schedule<'a>(
         &self,
         mut relations: Vec<ResidentScheduleRelation<'a>>,
@@ -2663,7 +2676,10 @@ impl CudaKernelProvider {
     /// Materialize only compact scheduler metadata from the enclosing runtime's
     /// already-admitted reservation. All relation, workspace, control, trace,
     /// schema-winner, receipt, graph, and lifecycle owners remain external.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "in-reservation preparation keeps the admitted budget plus every fixed graph owner explicit"
+    )]
     pub fn prepare_resident_schedule_program_in_reservation<'a>(
         &self,
         domain: &ResidentExecutionDomain,
@@ -3266,12 +3282,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use cudarc::driver::{CudaStream, LaunchConfig};
+    use cudarc::driver::CudaStream;
     use xlog_core::MemoryBudget;
 
-    use crate::cuda_compat::LaunchAsync;
     use crate::cuda_graph::{CapturedCudaGraph, CudaGraphNodeKind};
-    use crate::device::CudaFunction;
     use crate::device_runtime::XlogDeviceRuntime;
     use crate::memory::GpuMemoryManager;
     use crate::provider::resident_filter_project::{
@@ -3865,18 +3879,6 @@ mod tests {
         (receipt, kinds, stored)
     }
 
-    #[allow(dead_code)]
-    unsafe fn selected_stream_cooperative_launch_is_available(
-        function: CudaFunction,
-        stream: &CudaStream,
-        config: LaunchConfig,
-        params: &mut Vec<*mut std::ffi::c_void>,
-    ) {
-        function
-            .launch_cooperative_on_stream(stream, config, params)
-            .expect("selected-stream cooperative launch");
-    }
-
     #[test]
     fn schedule_wire_abi_has_exact_sizes_alignments_and_offsets() {
         assert_eq!(size_of::<super::ResidentScheduleOpKind>(), 4);
@@ -4021,9 +4023,11 @@ mod tests {
     #[test]
     fn flattened_filter_and_project_descriptors_are_fully_validated() {
         let slot = |widths: &[u32], schema_tag| {
-            let mut relation = super::ResidentRelationView::default();
-            relation.arity = widths.len() as u32;
-            relation.capacity = 4;
+            let mut relation = super::ResidentRelationView {
+                arity: widths.len() as u32,
+                capacity: 4,
+                ..Default::default()
+            };
             relation.widths[..widths.len()].copy_from_slice(widths);
             super::ResidentRelationSlot {
                 relation,
@@ -4168,9 +4172,11 @@ mod tests {
 
     #[test]
     fn shared_validator_rejects_writing_alias_and_accepts_scan_identity() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.arity = 1;
-        relation.capacity = 4;
+        let mut relation = super::ResidentRelationView {
+            arity: 1,
+            capacity: 4,
+            ..Default::default()
+        };
         relation.widths[0] = 4;
         let slots = [super::ResidentRelationSlot {
             relation,
@@ -4235,8 +4241,10 @@ mod tests {
 
     #[test]
     fn shared_validator_rejects_writes_to_immutable_source_slots() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.capacity = 1;
+        let relation = super::ResidentRelationView {
+            capacity: 1,
+            ..Default::default()
+        };
         let slots = [super::ResidentRelationSlot {
             relation,
             generation: 3,
@@ -4282,9 +4290,11 @@ mod tests {
 
     #[test]
     fn shared_validator_rejects_unknown_relation_slot_flags() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.arity = 1;
-        relation.capacity = 1;
+        let mut relation = super::ResidentRelationView {
+            arity: 1,
+            capacity: 1,
+            ..Default::default()
+        };
         relation.widths[0] = 4;
         let slots = [super::ResidentRelationSlot {
             relation,
@@ -4328,8 +4338,10 @@ mod tests {
 
     #[test]
     fn shared_validator_simulates_scratch_definedness_and_generation_transitions() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.capacity = 1;
+        let relation = super::ResidentRelationView {
+            capacity: 1,
+            ..Default::default()
+        };
         let slots = [super::ResidentRelationSlot {
             relation,
             generation: 4,
@@ -4406,9 +4418,11 @@ mod tests {
 
     #[test]
     fn shared_validator_rejects_physical_slots_outside_their_region_scope() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.arity = 1;
-        relation.capacity = 1;
+        let mut relation = super::ResidentRelationView {
+            arity: 1,
+            capacity: 1,
+            ..Default::default()
+        };
         relation.widths[0] = 4;
         let slots = [
             super::ResidentRelationSlot {
@@ -4474,9 +4488,11 @@ mod tests {
 
     #[test]
     fn shared_validator_requires_recursive_novelty_and_accepts_final_delta_copy_marker() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.arity = 1;
-        relation.capacity = 1;
+        let mut relation = super::ResidentRelationView {
+            arity: 1,
+            capacity: 1,
+            ..Default::default()
+        };
         relation.widths[0] = 4;
         let slots = [
             super::ResidentRelationSlot {
@@ -5578,21 +5594,22 @@ mod tests {
 
     #[test]
     fn device_program_construction_consumes_the_runtime_reservation_and_external_bindings() {
-        let _prepare: for<'a> fn(
-            &super::CudaKernelProvider,
-            &super::ResidentExecutionDomain,
-            &[super::ResidentScheduleSlotBinding<'a>],
-            &[super::ResidentOpDescriptor],
-            &[super::ResidentWaveDescriptor],
-            &[super::ResidentRegionDescriptor],
-            &[u32],
-            &[super::ResidentFilterComparisonDescriptor],
-            &[super::ResidentProjectExpressionDescriptor],
-            &[u32],
-            super::ResidentScheduleExternalBindings<'a>,
-            &mut crate::memory::GpuMemoryReservation,
-        )
-            -> xlog_core::Result<super::ResidentScheduleDeviceProgram> =
+        type PrepareResidentProgram =
+            for<'a> fn(
+                &super::CudaKernelProvider,
+                &super::ResidentExecutionDomain,
+                &[super::ResidentScheduleSlotBinding<'a>],
+                &[super::ResidentOpDescriptor],
+                &[super::ResidentWaveDescriptor],
+                &[super::ResidentRegionDescriptor],
+                &[u32],
+                &[super::ResidentFilterComparisonDescriptor],
+                &[super::ResidentProjectExpressionDescriptor],
+                &[u32],
+                super::ResidentScheduleExternalBindings<'a>,
+                &mut crate::memory::GpuMemoryReservation,
+            ) -> xlog_core::Result<super::ResidentScheduleDeviceProgram>;
+        let _prepare: PrepareResidentProgram =
             super::CudaKernelProvider::prepare_resident_schedule_program_in_reservation;
     }
 

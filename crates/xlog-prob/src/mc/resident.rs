@@ -40,16 +40,16 @@ use super::{McEvalConfig, McProgram, McSamplingMethod};
 use crate::provenance::{GroundAtom, Value};
 
 /// Maximum supported predicate arity.
-pub const MAX_ARITY: usize = 3;
+pub(super) const MAX_ARITY: usize = 3;
 /// Maximum supported rule body length (positive literals).
-pub const MAX_BODY: usize = 3;
+pub(super) const MAX_BODY: usize = 3;
 /// Maximum supported distinct variables per rule.
-pub const MAX_VARS: usize = 8;
+pub(super) const MAX_VARS: usize = 8;
 /// Maximum supported bounded-universe slot count (one world must fit one block's
 /// working set comfortably).
-pub const MAX_UNIVERSE: usize = 1 << 16;
+pub(super) const MAX_UNIVERSE: usize = 1 << 16;
 /// Maximum supported domain size (distinct constants).
-pub const MAX_DOMAIN: usize = 256;
+pub(super) const MAX_DOMAIN: usize = 256;
 /// u32 width of one device atom record: base, arity, arg0, arg1, arg2, stride0.
 const ATOM_REC: usize = 6;
 /// u32 width of one device rule record: n_body, n_vars, domain, head, body0..body2.
@@ -87,6 +87,7 @@ pub enum ResidentRejectKind {
 }
 
 impl ResidentRejectKind {
+    /// Returns the stable machine-readable rejection name.
     pub fn as_str(self) -> &'static str {
         match self {
             ResidentRejectKind::Negation => "negation",
@@ -110,8 +111,11 @@ impl ResidentRejectKind {
 /// construct, and the surrounding context (for diagnostics).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidentRejection {
+    /// Rejection category.
     pub kind: ResidentRejectKind,
+    /// Unsupported or unbounded program construct.
     pub construct: String,
+    /// Source context explaining where the construct occurred.
     pub context: String,
 }
 
@@ -229,7 +233,9 @@ impl McNoHostStats {
 /// Device-resident result of a GPU-resident MC run. Counts stay on device; the
 /// caller decides whether/when to download them (after the measured region).
 pub struct McResidentResult {
+    /// Device count of accepted worlds satisfying each query.
     pub query_counts: TrackedCudaSlice<u32>,
+    /// Device count of worlds satisfying all evidence.
     pub evidence_count: TrackedCudaSlice<u32>,
     /// Per-world fixpoint iteration count (device-resident).
     pub iter_trace: TrackedCudaSlice<u32>,
@@ -242,20 +248,28 @@ pub struct McResidentResult {
     /// `[postflight_summary(3); converged_flags; sparse_overflow_flags;
     /// block_participation; changed_flags; global_continue]`.
     pub resident_status_flags: TrackedCudaSlice<u32>,
+    /// Number of sampled worlds.
     pub total_samples: usize,
+    /// Random seed used for sampling.
     pub seed: u64,
+    /// Requested confidence level for reported intervals.
     pub confidence: f64,
+    /// Evidence-sampling strategy used by the resident engine.
     pub sampling_method: McSamplingMethod,
     /// Number of query atoms (== `query_counts.len()`).
     pub num_queries: usize,
+    /// Transfer, launch, and host-loop measurements for the resident region.
     pub no_host: McNoHostStats,
 }
 
 /// Compiled, device-uploadable plan for the resident engine.
 #[derive(Debug, Clone)]
 pub struct ResidentPlan {
+    /// Number of possible grounded predicate slots per world.
     pub universe_size: u32,
+    /// Number of constants in the bounded grounding domain.
     pub domain_size: u32,
+    /// Maximum resident fixpoint iterations per world.
     pub max_iters: u32,
     edb_slots: Vec<u32>,
     pf_slot: Vec<u32>,
@@ -267,6 +281,7 @@ pub struct ResidentPlan {
     ev_expected: Vec<u8>,
     ad_data: Vec<u32>,
     num_ads: u32,
+    /// Number of independent Bernoulli variables sampled per world.
     pub num_vars: usize,
     bernoulli_probs: Vec<f32>,
 }

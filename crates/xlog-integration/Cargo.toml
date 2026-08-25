@@ -114,3 +114,6 @@ harness = true
 name = "test_a3_a4_stress"
 path = "tests/test_a3_a4_stress.rs"
 harness = true
+
+[lints]
+workspace = true

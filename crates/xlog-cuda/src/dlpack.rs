@@ -60,9 +60,8 @@ pub struct DLManagedTensor {
     pub deleter: DLDeleter,
 }
 
-#[allow(dead_code)]
 struct DlpackCtx {
-    buffer: Arc<CudaBuffer>,
+    _buffer: Arc<CudaBuffer>,
     shape: Box<[i64]>,
 }
 
@@ -327,7 +326,7 @@ impl DlpackTable {
         let device_ptr = *col.device_ptr() as usize as *mut c_void;
 
         let mut ctx = Box::new(DlpackCtx {
-            buffer: self.buffer.clone(),
+            _buffer: self.buffer.clone(),
             shape: vec![logical_rows as i64].into_boxed_slice(),
         });
         let shape_ptr = ctx.shape.as_mut_ptr();

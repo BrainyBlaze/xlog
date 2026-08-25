@@ -28,9 +28,9 @@ use crate::compilation::{
 #[cfg(feature = "host-io")]
 use crate::logsumexp::{validate_circuit_gradient_values, validate_circuit_value};
 use crate::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
-use crate::provenance::{
-    extract_from_program, extract_from_source, AggregateLiftStatus, GroundAtom, Provenance, Value,
-};
+use crate::provenance::{extract_from_program, extract_from_source, GroundAtom, Provenance};
+#[cfg(feature = "host-io")]
+use crate::provenance::{AggregateLiftStatus, Value};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{
     arith_kernels, filter_kernels, neural_kernels, weights_kernels, ARITH_MODULE, FILTER_MODULE,
@@ -39,36 +39,52 @@ use xlog_cuda::provider::{
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 
 #[derive(Debug, Clone)]
+/// Exact probability reported for one ground query.
 pub struct QueryProbability {
+    /// Ground query atom.
     pub atom: GroundAtom,
+    /// Natural logarithm of the conditional query probability.
     pub log_prob: f64,
+    /// Conditional query probability in linear space.
     pub prob: f64,
 }
 
 #[derive(Debug, Clone)]
+/// Result of exact probabilistic evaluation.
 pub struct ExactResult {
+    /// Log probability of the compiled evidence.
     pub log_z_e: f64,
+    /// Conditional probabilities for requested queries.
     pub query_probs: Vec<QueryProbability>,
 }
 
 #[derive(Debug, Clone)]
+/// Exact probability and literal-log-weight gradients for one query.
 pub struct QueryGradients {
+    /// Ground query atom.
     pub atom: GroundAtom,
+    /// Natural logarithm of the conditional query probability.
     pub log_prob: f64,
+    /// Conditional query probability in linear space.
     pub prob: f64,
+    /// Derivative with respect to each true literal log weight.
     pub grad_true: Vec<f64>,
+    /// Derivative with respect to each false literal log weight.
     pub grad_false: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
+/// Result of exact evaluation with per-query gradients.
 pub struct ExactResultWithGrads {
+    /// Log probability of the compiled evidence.
     pub log_z_e: f64,
+    /// Query probabilities and their literal-log-weight gradients.
     pub query_grads: Vec<QueryGradients>,
 }
 
 #[derive(Debug, Clone)]
 struct QuerySpec {
-    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+    #[cfg(feature = "host-io")]
     atom: GroundAtom,
     var: Option<u32>,
 }
@@ -267,7 +283,7 @@ impl GpuExactState {
     }
 }
 
-#[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+#[cfg(feature = "host-io")]
 struct GpuCountLiftQuery {
     atom: GroundAtom,
     target_count: u32,
@@ -275,12 +291,13 @@ struct GpuCountLiftQuery {
     leaf_probs: TrackedCudaSlice<f64>,
 }
 
-#[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+#[cfg(feature = "host-io")]
 struct GpuCountLiftState {
     provider: Arc<CudaKernelProvider>,
     queries: Vec<GpuCountLiftQuery>,
 }
 
+#[cfg(feature = "host-io")]
 impl GpuCountLiftState {
     fn new(provider: Arc<CudaKernelProvider>, queries: Vec<GpuCountLiftQuery>) -> Self {
         Self { provider, queries }
@@ -364,7 +381,12 @@ pub enum ProbVarInfo {
     /// exactly the Bernoulli weight `w_true` stored in the GPU weight table
     /// for this variable, so `p*(1-p)` is the correct Jacobian for
     /// `grad_true`/`grad_false` at this slot.
-    Fact { atom: GroundAtom, prob: f64 },
+    Fact {
+        /// Ground atom controlled by this Bernoulli variable.
+        atom: GroundAtom,
+        /// Bernoulli probability assigned to the true branch.
+        prob: f64,
+    },
     /// One Bernoulli decision of an annotated disjunction's chain.
     Choice {
         /// Declared heads of the whole disjunction with their *marginal*
@@ -410,18 +432,17 @@ fn fact_log_weights(prob: f64, evidence: Option<bool>) -> (f64, f64) {
 }
 
 #[derive(Clone)]
+/// Reusable exact-inference program backed by a certified GPU circuit.
 pub struct ExactDdnnfProgram {
     gpu: Option<Arc<GpuExactState>>,
-    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+    #[cfg(feature = "host-io")]
     count_lift_gpu: Option<Arc<GpuCountLiftState>>,
     queries: Vec<QuerySpec>,
-    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+    #[cfg(feature = "host-io")]
     random_vars: Option<Arc<DeviceRandomVarList>>,
     max_var: u32,
-    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+    #[cfg(feature = "host-io")]
     origin: ExactProgramOrigin,
-    #[allow(dead_code)] // retained: config is stored for future re-compilation paths
-    gpu_config: GpuConfig,
     /// Latest circuit compilation profile (populated on cache miss when profiling).
     last_compile_profile: Option<CircuitCompileProfile>,
     /// Sparse storage for what each CNF variable stands for: only variables that
@@ -455,6 +476,7 @@ pub(crate) enum ExactProgramOrigin {
 }
 
 impl ExactDdnnfProgram {
+    /// Parses source and compiles a certified exact program with default GPU settings.
     pub fn compile_source(source: &str) -> Result<Self> {
         let provenance = extract_from_source(source)?;
         Self::compile_provenance_with_gpu(
@@ -464,6 +486,7 @@ impl ExactDdnnfProgram {
         )
     }
 
+    /// Parses source and compiles a certified exact program with explicit GPU settings.
     pub fn compile_source_with_gpu(source: &str, config: GpuConfig) -> Result<Self> {
         let provenance = extract_from_source(source)?;
         Self::compile_provenance_with_gpu(provenance, config, ExactProgramOrigin::Source)
@@ -478,16 +501,12 @@ impl ExactDdnnfProgram {
         Self::compile_provenance_with_gpu(provenance, config, ExactProgramOrigin::Program)
     }
 
-    #[allow(dead_code)] // retained: accessor for future re-compilation paths
-    pub(crate) fn gpu_config(&self) -> GpuConfig {
-        self.gpu_config
-    }
-
     #[cfg(feature = "host-io")]
     pub(crate) fn origin(&self) -> ExactProgramOrigin {
         self.origin
     }
 
+    /// Returns whether evaluation uses the certified GPU circuit backend.
     pub fn uses_gpu_production_backend(&self) -> bool {
         self.gpu.is_some()
     }
@@ -765,11 +784,13 @@ impl ExactDdnnfProgram {
 
     #[doc(hidden)]
     #[cfg(feature = "host-io")]
+    /// Returns whether compilation selected the exact GPU aggregate-lifting backend.
     pub fn uses_gpu_native_count_lift(&self) -> bool {
         self.count_lift_gpu.is_some()
     }
 
     #[cfg(feature = "host-io")]
+    /// Evaluates all compiled queries conditioned on the program evidence.
     pub fn evaluate(&self) -> Result<ExactResult> {
         if let Some(count_lift_gpu) = &self.count_lift_gpu {
             return count_lift_gpu.evaluate();
@@ -1409,7 +1430,10 @@ impl ExactDdnnfProgram {
         Ok(losses)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "neural backpropagation keeps the weight slots, query, probability and gradient buffers, execution config, optional loss, and target label explicit"
+    )]
     fn neural_backward_nll_buffers_inner(
         &self,
         slots: &GpuWeightSlots,
@@ -1717,6 +1741,7 @@ impl ExactDdnnfProgram {
     }
 
     #[cfg(feature = "host-io")]
+    /// Evaluates all queries and returns literal-log-weight gradients.
     pub fn evaluate_gpu_with_grads(&self) -> Result<ExactResultWithGrads> {
         if self.gpu.is_none() {
             if self.count_lift_gpu.is_some() {
@@ -1818,7 +1843,7 @@ impl ExactDdnnfProgram {
     fn compile_provenance_with_gpu(
         provenance: Provenance,
         config: GpuConfig,
-        origin: ExactProgramOrigin,
+        _origin: ExactProgramOrigin,
     ) -> Result<Self> {
         if config.memory_bytes == 0 {
             return Err(XlogError::Kernel(
@@ -1866,6 +1891,7 @@ impl ExactDdnnfProgram {
                 }
             }
             queries.push(QuerySpec {
+                #[cfg(feature = "host-io")]
                 atom: atom.clone(),
                 var: None,
             });
@@ -1891,12 +1917,14 @@ impl ExactDdnnfProgram {
         if roots.is_empty() {
             return Ok(Self {
                 gpu: None,
+                #[cfg(feature = "host-io")]
                 count_lift_gpu: None,
                 queries,
+                #[cfg(feature = "host-io")]
                 random_vars: None,
                 max_var: 0,
-                origin,
-                gpu_config: config,
+                #[cfg(feature = "host-io")]
+                origin: _origin,
                 last_compile_profile: None,
                 prob_var_entries: Vec::new(),
                 #[cfg(feature = "host-io")]
@@ -1904,8 +1932,9 @@ impl ExactDdnnfProgram {
             });
         }
 
-        let count_lift_gpu = try_build_count_lift_gpu_state(&provenance, &queries, config)?;
-        if let Some(count_lift_gpu) = count_lift_gpu {
+        #[cfg(feature = "host-io")]
+        if let Some(count_lift_gpu) = try_build_count_lift_gpu_state(&provenance, &queries, config)?
+        {
             // No CNF encoding is built on this path (count aggregates are
             // evaluated by a dedicated GPU kernel instead), so there is no
             // leaf_var/choice_var table to derive a variable map from. Leave
@@ -1918,8 +1947,7 @@ impl ExactDdnnfProgram {
                 queries,
                 random_vars: None,
                 max_var: 0,
-                origin,
-                gpu_config: config,
+                origin: _origin,
                 last_compile_profile: None,
                 prob_var_entries: Vec::new(),
                 #[cfg(feature = "host-io")]
@@ -2200,12 +2228,14 @@ impl ExactDdnnfProgram {
 
         Ok(Self {
             gpu: Some(Arc::new(state)),
+            #[cfg(feature = "host-io")]
             count_lift_gpu: None,
             queries,
+            #[cfg(feature = "host-io")]
             random_vars: Some(Arc::new(random_vars)),
             max_var: encoding.vars.max_var,
-            origin,
-            gpu_config: config,
+            #[cfg(feature = "host-io")]
+            origin: _origin,
             last_compile_profile: compile_profile,
             prob_var_entries,
             #[cfg(feature = "host-io")]
@@ -2366,6 +2396,7 @@ impl ExactDdnnfProgram {
     }
 }
 
+#[cfg(feature = "host-io")]
 fn try_build_count_lift_gpu_state(
     provenance: &Provenance,
     queries: &[QuerySpec],
@@ -2449,6 +2480,7 @@ fn try_build_count_lift_gpu_state(
     ))))
 }
 
+#[cfg(feature = "host-io")]
 fn count_lift_query_target(query: &QuerySpec) -> Result<Option<u32>> {
     match query.atom.args.last() {
         Some(Value::I64(value)) if *value >= 0 => u32::try_from(*value)
@@ -2458,6 +2490,7 @@ fn count_lift_query_target(query: &QuerySpec) -> Result<Option<u32>> {
     }
 }
 
+#[cfg(feature = "host-io")]
 fn collect_count_lift_leaves(
     provenance: &Provenance,
     node: crate::pir::PirNodeId,

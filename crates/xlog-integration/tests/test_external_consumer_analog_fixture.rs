@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! External consumer analog fixture: registration metadata AND real execution.
 //!
 //! The original test only asserted that `bundle_path_status` (a hardcoded
@@ -31,11 +29,11 @@ impl LoggingSink for DiscardSink {
 }
 
 struct RuntimeFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
+    _pool: Arc<StreamPool>,
 }
 
 fn make_runtime_fixture() -> Option<RuntimeFixture> {
@@ -50,11 +48,11 @@ fn make_runtime_fixture() -> Option<RuntimeFixture> {
     let runtime = Arc::clone(memory.runtime()?);
     let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeFixture {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
-        pool,
+        _pool: pool,
     })
 }
 
@@ -167,7 +165,7 @@ fn external_consumer_analog_fixture_is_registered_with_paper_class_harness() {
     let fixtures = paper_class::paper_class_fixtures(128);
     assert_eq!(
         fixtures.len(),
-        4,
+        paper_class::paper_class_expected_fixture_count(),
         "fixture registry extends the three paper-class fixtures with one external consumer analog"
     );
 
@@ -179,6 +177,10 @@ fn external_consumer_analog_fixture_is_registered_with_paper_class_harness() {
     assert!(
         external_consumer.recursive,
         "external consumer analog must exercise recursive set maintenance"
+    );
+    assert!(
+        external_consumer.total_rows() > 0,
+        "external consumer analog must contain rows"
     );
     assert!(
         !external_consumer.e_xy.is_empty()

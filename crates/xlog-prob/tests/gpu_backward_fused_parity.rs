@@ -8,8 +8,6 @@
 //! This is the primary correctness safety net for the fused backward kernel
 //! (xgcf_backward_all_levels_cached).
 
-#![allow(clippy::arc_with_non_send_sync)]
-
 use std::sync::Arc;
 
 use cudarc::driver::DeviceSlice;

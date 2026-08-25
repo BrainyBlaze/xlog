@@ -1,35 +1,35 @@
 use std::collections::BTreeSet;
 
 #[path = "external_consumer_analog.rs"]
-pub mod external_consumer_analog;
+pub(crate) mod external_consumer_analog;
 
 #[derive(Clone)]
-pub struct TriangleFixture {
-    pub name: &'static str,
-    pub recursive: bool,
-    pub bundle_path_status: &'static str,
-    pub e_xy: Vec<(u32, u32)>,
-    pub e_yz: Vec<(u32, u32)>,
-    pub e_xz: Vec<(u32, u32)>,
+pub(crate) struct TriangleFixture {
+    pub(crate) name: &'static str,
+    pub(crate) recursive: bool,
+    pub(crate) bundle_path_status: &'static str,
+    pub(crate) e_xy: Vec<(u32, u32)>,
+    pub(crate) e_yz: Vec<(u32, u32)>,
+    pub(crate) e_xz: Vec<(u32, u32)>,
 }
 
 impl TriangleFixture {
-    pub fn total_rows(&self) -> u64 {
+    pub(crate) fn total_rows(&self) -> u64 {
         (self.e_xy.len() + self.e_yz.len() + self.e_xz.len()) as u64
     }
 }
 
 #[derive(Default)]
-pub struct FixtureRegistry {
+pub(crate) struct FixtureRegistry {
     modules: Vec<String>,
 }
 
 impl FixtureRegistry {
-    pub fn add_fixture_module(&mut self, module_path: impl Into<String>) {
+    pub(crate) fn add_fixture_module(&mut self, module_path: impl Into<String>) {
         self.modules.push(module_path.into());
     }
 
-    pub fn module_count(&self) -> usize {
+    pub(crate) fn module_count(&self) -> usize {
         self.modules.len()
     }
 }
@@ -48,7 +48,7 @@ fn insert_diagonal_band(rows: &mut BTreeSet<(u32, u32)>, root: u32, scale: u32, 
     }
 }
 
-pub fn call_graph_edge_analog(scale: u32) -> TriangleFixture {
+pub(crate) fn call_graph_edge_analog(scale: u32) -> TriangleFixture {
     let scale = scale.max(32);
     let hot_targets = (scale / 16).clamp(16, 64);
     let match_width = (scale / 16).clamp(32, 64);
@@ -77,7 +77,7 @@ pub fn call_graph_edge_analog(scale: u32) -> TriangleFixture {
     }
 }
 
-pub fn andersen_analog(scale: u32) -> TriangleFixture {
+pub(crate) fn andersen_analog(scale: u32) -> TriangleFixture {
     let scale = scale.max(32);
     let fields = (scale / 16).clamp(16, 64);
     let match_width = (scale / 16).clamp(32, 64);
@@ -106,7 +106,7 @@ pub fn andersen_analog(scale: u32) -> TriangleFixture {
     }
 }
 
-pub fn ddisasm_analog(scale: u32) -> TriangleFixture {
+pub(crate) fn ddisasm_analog(scale: u32) -> TriangleFixture {
     let scale = scale.max(32);
     let stages = (scale / 16).clamp(16, 64);
     let match_width = (scale / 16).clamp(32, 64);
@@ -135,11 +135,11 @@ pub fn ddisasm_analog(scale: u32) -> TriangleFixture {
     }
 }
 
-pub fn paper_class_expected_fixture_count() -> usize {
+pub(crate) fn paper_class_expected_fixture_count() -> usize {
     4
 }
 
-pub fn paper_class_fixtures(scale: u32) -> Vec<TriangleFixture> {
+pub(crate) fn paper_class_fixtures(scale: u32) -> Vec<TriangleFixture> {
     let mut registry = FixtureRegistry::default();
     registry.add_fixture_module("fixtures::paper_class");
     registry.add_fixture_module("fixtures::external_consumer_analog");

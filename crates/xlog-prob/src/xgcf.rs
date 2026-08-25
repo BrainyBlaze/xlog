@@ -12,30 +12,49 @@ use crate::logsumexp::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+/// Node opcode in the structure-of-arrays XLOG GPU Circuit Format.
 pub enum XgcfNodeType {
+    /// Boolean false constant.
     Const0 = 0,
+    /// Boolean true constant.
     Const1 = 1,
+    /// Signed literal whose variable is stored in [`Xgcf::lit`].
     Lit = 2,
+    /// Conjunction over the node's child range.
     And = 3,
+    /// Deterministic disjunction over the node's child range.
     Or = 4,
+    /// Binary decision with explicit false and true children.
     Decision = 5,
 }
 
 #[derive(Debug, Clone)]
+/// Host-side structure-of-arrays representation of a compiled probabilistic circuit.
 pub struct Xgcf {
+    /// Opcode for every node.
     pub node_type: Vec<XgcfNodeType>,
+    /// CSR offsets into [`Self::child_indices`] for each node.
     pub child_offsets: Vec<u32>,
+    /// Flattened children of conjunction and disjunction nodes.
     pub child_indices: Vec<u32>,
+    /// Signed DIMACS literal for each literal node, or zero otherwise.
     pub lit: Vec<i32>,
+    /// Decision variable for each decision node, or zero otherwise.
     pub decision_var: Vec<u32>,
+    /// False-branch child for each decision node.
     pub decision_child_false: Vec<u32>,
+    /// True-branch child for each decision node.
     pub decision_child_true: Vec<u32>,
+    /// Circuit root node indices.
     pub roots: Vec<u32>,
+    /// CSR offsets into [`Self::level_nodes`] for bottom-up evaluation levels.
     pub level_offsets: Vec<u32>,
+    /// Node indices ordered by bottom-up evaluation level.
     pub level_nodes: Vec<u32>,
 }
 
 impl Xgcf {
+    /// Converts a decision-DNNF circuit into XGCF and validates its topology.
     pub fn from_ddnnf(ddnnf: &DecisionDnnf) -> Result<Self> {
         XgcfBuilder::new(ddnnf).build()
     }
@@ -51,6 +70,7 @@ impl Xgcf {
         XgcfSmoother::new(self, is_random_var)?.smooth()
     }
 
+    /// Evaluates the circuit's weighted model count in log space on the CPU.
     pub fn eval_log_wmc<F>(&self, var_log_weights: F) -> Result<f64>
     where
         F: Fn(u32) -> (f64, f64),
@@ -168,6 +188,7 @@ impl Xgcf {
         Ok(values[self.roots[0] as usize])
     }
 
+    /// Evaluates log weighted model count and literal log-weight gradients on the CPU.
     pub fn eval_log_wmc_and_grads(
         &self,
         var_log_weights: &[(f64, f64)],
@@ -1170,7 +1191,10 @@ impl<'a> XgcfBuilder<'a> {
         let mut levels: Vec<Option<u32>> = vec![None; n];
         let mut visiting: Vec<bool> = vec![false; n];
 
-        #[allow(clippy::too_many_arguments)]
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "recursive levelization keeps the immutable circuit tables and its two mutable traversal-state tables explicit"
+        )]
         fn level_of(
             idx: usize,
             node_type: &[XgcfNodeType],

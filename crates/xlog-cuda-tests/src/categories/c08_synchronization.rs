@@ -201,7 +201,8 @@ fn test_filter_scan_sync(ctx: &TestContext) -> TestResult {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     // Test various sizes that exercise different scan patterns
-    let test_cases: Vec<(usize, Box<dyn Fn(usize) -> bool>)> = vec![
+    type SizePredicate = (usize, Box<dyn Fn(usize) -> bool>);
+    let test_cases: Vec<SizePredicate> = vec![
         // (size, predicate)
         (1000, Box::new(|i| i % 2 == 0)),          // Keep even
         (10000, Box::new(|i| i % 3 == 0)),         // Keep multiples of 3
@@ -694,7 +695,7 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
         let (op, ref result) = results[idx];
         assert!(op == "sort");
 
-        if ctx.device_row_count(&result) != BUFFER_SIZE as u64 {
+        if ctx.device_row_count(result) != BUFFER_SIZE as u64 {
             return TestResult::error(
                 "test_concurrent_operations",
                 start.elapsed(),
@@ -702,7 +703,7 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
                     "Buffer {}: {} returned {} rows, expected {}",
                     idx,
                     op,
-                    ctx.device_row_count(&result),
+                    ctx.device_row_count(result),
                     BUFFER_SIZE
                 ),
             );
@@ -752,13 +753,13 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
     // Buffer 1: first half
     let (op1, ref result1) = results[1];
     assert!(op1 == "filter");
-    if ctx.device_row_count(&result1) != (BUFFER_SIZE / 2) as u64 {
+    if ctx.device_row_count(result1) != (BUFFER_SIZE / 2) as u64 {
         return TestResult::error(
             "test_concurrent_operations",
             start.elapsed(),
             format!(
                 "Buffer 1: filter returned {} rows, expected {}",
-                ctx.device_row_count(&result1),
+                ctx.device_row_count(result1),
                 BUFFER_SIZE / 2
             ),
         );
@@ -767,14 +768,14 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
     // Buffer 3: even indices
     let (op3, ref result3) = results[3];
     assert!(op3 == "filter");
-    if ctx.device_row_count(&result3) != ((BUFFER_SIZE + 1) / 2) as u64 {
+    if ctx.device_row_count(result3) != BUFFER_SIZE.div_ceil(2) as u64 {
         return TestResult::error(
             "test_concurrent_operations",
             start.elapsed(),
             format!(
                 "Buffer 3: filter returned {} rows, expected {}",
-                ctx.device_row_count(&result3),
-                (BUFFER_SIZE + 1) / 2
+                ctx.device_row_count(result3),
+                BUFFER_SIZE.div_ceil(2)
             ),
         );
     }

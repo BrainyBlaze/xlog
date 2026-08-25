@@ -3,8 +3,6 @@
 //! This module verifies that all v0.3.2 features (symbols, UDFs, modules)
 //! work correctly when executed on the GPU.
 
-#![allow(clippy::arc_with_non_send_sync)]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 

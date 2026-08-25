@@ -1282,7 +1282,10 @@ impl CudaKernelProvider {
     ///     runtime dispatcher routes every edge through the generic
     ///     full-row layout-sort accessors before
     ///     calling here; provider does NOT layout-sort itself.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the clique launch core mirrors the kernel's explicit inputs, variable layout, output projection, limits, and stream"
+    )]
     fn wcoj_clique_recorded_inner(
         &self,
         k: usize,
@@ -2221,7 +2224,10 @@ impl CudaKernelProvider {
     /// All reduction work is O(n_leader) — input-sized, never
     /// join-output-sized. Output schema (root: U32/Symbol, count: U64)
     /// matches the unfused materialize+groupby baseline.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "fused clique aggregation keeps every relation, variable layout, aggregate selector, output bound, and stream explicit"
+    )]
     fn wcoj_clique_groupby_root_count_recorded_inner(
         &self,
         k: usize,

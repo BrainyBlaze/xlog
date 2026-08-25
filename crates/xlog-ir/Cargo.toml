@@ -12,3 +12,6 @@ readme = "../../README.md"
 
 [dependencies]
 xlog-core.workspace = true
+
+[lints]
+workspace = true

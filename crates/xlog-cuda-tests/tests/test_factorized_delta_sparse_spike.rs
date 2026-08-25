@@ -29,6 +29,8 @@ struct Fixture {
     provider: Arc<CudaKernelProvider>,
 }
 
+type BinaryRows = Vec<(u32, u32)>;
+
 fn make_fixture_with_budget(budget_bytes: u64) -> Option<Fixture> {
     let provider = Arc::new(
         xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(budget_bytes))
@@ -282,7 +284,7 @@ fn median(v: &mut [f64]) -> f64 {
 /// every hub. One semi-naive step then produces |x|*|sink| distinct
 /// novel pairs with multiplicity = #hubs — a witness blowup over a
 /// domain far above 2^16.
-fn hub_fixture(n_x: u32, n_hub: u32, n_sink: u32) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
+fn hub_fixture(n_x: u32, n_hub: u32, n_sink: u32) -> (BinaryRows, BinaryRows) {
     const HUB_BASE: u32 = 1 << 20;
     const SINK_BASE: u32 = 1 << 22;
     let mut edge = Vec::with_capacity((n_hub * n_sink) as usize);

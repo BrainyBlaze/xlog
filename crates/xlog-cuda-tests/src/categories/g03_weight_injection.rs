@@ -726,8 +726,7 @@ fn test_weight_uniform_distribution(ctx: &TestContext) -> TestResult {
     }
 
     // Verify all children have equal values in the 10-way case
-    for i in 0..10 {
-        let child_val = values_10[i];
+    for (i, &child_val) in values_10.iter().take(10).enumerate() {
         let expected_child = p.ln();
         if (child_val - expected_child).abs() > 1e-14 {
             return TestResult::error(
@@ -833,11 +832,10 @@ fn test_weight_sparse_nonzero(ctx: &TestContext) -> TestResult {
     };
 
     // Verify all -inf children are -inf
-    for i in 0..num_vars {
+    for (i, &child_val) in values.iter().take(num_vars).enumerate() {
         if i == nonzero_idx - 1 {
             continue; // Skip the non-zero one
         }
-        let child_val = values[i];
         if !child_val.is_infinite() || !child_val.is_sign_negative() {
             return TestResult::error(
                 "test_weight_sparse_nonzero",

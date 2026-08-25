@@ -1,5 +1,4 @@
 // crates/xlog-integration/tests/test_wcoj_4cycle_rir_shape_cert.rs
-#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 //! RIR-shape certification for the 4-cycle WCOJ
 //! dispatch.
@@ -41,13 +40,12 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct RuntimeFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
+    _pool: Arc<StreamPool>,
 }
 
 fn make_runtime_fixture() -> Option<RuntimeFixture> {
@@ -62,11 +60,11 @@ fn make_runtime_fixture() -> Option<RuntimeFixture> {
     let runtime = Arc::clone(memory.runtime()?);
     let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeFixture {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
-        pool,
+        _pool: pool,
     })
 }
 
@@ -117,7 +115,7 @@ fn download_n_cols(buf: &CudaBuffer, arity: usize) -> Vec<Vec<u32>> {
         return vec![Vec::new(); arity];
     }
     let mut cols = vec![Vec::with_capacity(n); arity];
-    for c in 0..arity {
+    for (c, column) in cols.iter_mut().enumerate().take(arity) {
         let mut bytes = vec![0u8; n * 4];
         unsafe {
             sys::cuMemcpyDtoH_v2(
@@ -127,7 +125,7 @@ fn download_n_cols(buf: &CudaBuffer, arity: usize) -> Vec<Vec<u32>> {
             );
         }
         for i in 0..n {
-            cols[c].push(u32::from_le_bytes(
+            column.push(u32::from_le_bytes(
                 bytes[i * 4..i * 4 + 4].try_into().unwrap(),
             ));
         }
@@ -179,8 +177,7 @@ fn run_program(
 }
 
 fn assert_dispatch_policy(
-    provider: Arc<CudaKernelProvider>,
-    memory: &Arc<GpuMemoryManager>,
+    fixture: &RuntimeFixture,
     source: &str,
     inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
     head_predicate: &str,
@@ -188,7 +185,13 @@ fn assert_dispatch_policy(
     expected_dispatched: u64,
     case_label: &str,
 ) {
-    let (exec_off, counter_off) = run_program(Arc::clone(&provider), memory, false, source, inputs);
+    let (exec_off, counter_off) = run_program(
+        Arc::clone(&fixture.provider),
+        &fixture.memory,
+        false,
+        source,
+        inputs,
+    );
     assert_eq!(counter_off, 0, "[{case_label}] gate-off must not dispatch");
     let buf_off = exec_off
         .store()
@@ -197,7 +200,13 @@ fn assert_dispatch_policy(
     let cols_off = download_n_cols(buf_off, head_arity);
     let rows_off = rows_sorted_dedup(&cols_off);
 
-    let (exec_on, counter_on) = run_program(Arc::clone(&provider), memory, true, source, inputs);
+    let (exec_on, counter_on) = run_program(
+        Arc::clone(&fixture.provider),
+        &fixture.memory,
+        true,
+        source,
+        inputs,
+    );
     assert_eq!(
         counter_on, expected_dispatched,
         "[{case_label}] gate-on counter: expected {expected_dispatched}, got {counter_on}"
@@ -225,8 +234,7 @@ fn rir_cert_canonical_4cycle_dispatches() {
         return;
     };
     assert_dispatch_policy(
-        Arc::clone(&fix.provider),
-        &fix.memory,
+        &fix,
         "cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).",
         &fourcycle_fixture(),
         "cycle4",
@@ -246,8 +254,7 @@ fn rir_cert_head_var_order_rotated_falls_back() {
         return;
     };
     assert_dispatch_policy(
-        Arc::clone(&fix.provider),
-        &fix.memory,
+        &fix,
         "rotated(X, Y, Z, W) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).",
         &fourcycle_fixture(),
         "rotated",
@@ -266,8 +273,7 @@ fn rir_cert_3arity_head_falls_back() {
         return;
     };
     assert_dispatch_policy(
-        Arc::clone(&fix.provider),
-        &fix.memory,
+        &fix,
         "three(W, X, Y) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).",
         &fourcycle_fixture(),
         "three",
@@ -286,8 +292,7 @@ fn rir_cert_with_comparison_filter_falls_back() {
         return;
     };
     assert_dispatch_policy(
-        Arc::clone(&fix.provider),
-        &fix.memory,
+        &fix,
         "filtered(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W), W != X.",
         &fourcycle_fixture(),
         "filtered",

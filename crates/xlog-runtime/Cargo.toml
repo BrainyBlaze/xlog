@@ -48,3 +48,6 @@ recursive-stats-trace = ["dep:xlog-logic"]
 name = "recursive_stats_trace"
 path = "tests/recursive_stats_trace.rs"
 required-features = ["recursive-stats-trace"]
+
+[lints]
+workspace = true

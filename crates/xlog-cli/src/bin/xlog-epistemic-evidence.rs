@@ -972,6 +972,357 @@ fn probability_production_trace_json(
     })
 }
 
+fn preflight_json(preflight: &xlog_runtime::EpistemicGpuRuntimePreflight) -> Value {
+    json!({
+        "execution_backend": epistemic_execution_backend_label(preflight.execution_backend),
+        "fallback_policy": epistemic_fallback_policy_label(preflight.fallback_policy),
+        "epistemic_mode": format!("{:?}", preflight.epistemic_mode),
+        "reduced_runtime_rule_count": preflight.reduced_runtime_rule_count,
+        "wcoj_required_reduction_count": preflight.wcoj_required_reduction_count,
+        "multiway_reduction_count": preflight.multiway_reduction_count,
+        "kclique_wcoj_plan_count": preflight.kclique_wcoj_plan_count,
+        "planned_hash_route_count": preflight.planned_hash_route_count,
+        "free_join_route_count": preflight.free_join_route_count,
+        "tuple_membership_binding_count": preflight.tuple_membership_binding_count,
+        "solver_assumption_binding_count": preflight.solver_assumption_binding_count,
+        "solver_required_capability_count": preflight.solver_required_capability_count,
+        "solver_required_status_count": preflight.solver_required_status_count,
+        "know_operator_count": preflight.know_operator_count,
+        "possible_operator_count": preflight.possible_operator_count,
+        "not_know_operator_count": preflight.not_know_operator_count,
+        "not_possible_operator_count": preflight.not_possible_operator_count,
+    })
+}
+
+fn epistemic_execution_backend_label(backend: xlog_ir::EpistemicExecutionBackend) -> &'static str {
+    match backend {
+        xlog_ir::EpistemicExecutionBackend::Gpu => "gpu",
+    }
+}
+
+fn epistemic_fallback_policy_label(policy: xlog_ir::EpistemicFallbackPolicy) -> &'static str {
+    match policy {
+        xlog_ir::EpistemicFallbackPolicy::RejectUnsupported => "reject_unsupported",
+    }
+}
+
+fn runtime_json(result: &xlog_runtime::EpistemicGpuExecutionResult) -> Value {
+    json!({
+        "candidate_generation": {
+            "generated_candidates": result.candidate_generation.generated_candidates,
+            "literal_count": result.candidate_generation.literal_count,
+            "kernel_launches": result.candidate_generation.kernel_launches,
+            "host_write_ops": result.candidate_generation.host_write_ops,
+            "timing_recorded": result.candidate_generation.kernel_timing.is_recorded(),
+        },
+        "semantic_trace": {
+            "generated_candidates": result.semantic_trace.generated_candidates,
+            "guesses": result.semantic_trace.guesses,
+            "accepted_candidates": result.semantic_trace.accepted_candidates,
+            "accepted_candidate_indices": result.semantic_trace.accepted_candidate_indices,
+            "accepted_world_views": result.semantic_trace.accepted_world_views,
+            "rejected_candidates": result.semantic_trace.rejected_candidates,
+            "rejected_candidate_indices": result.semantic_trace.rejected_candidate_indices,
+            "rejection_reasons": result.semantic_trace.rejection_reasons,
+            "rejection_reason_metadata_bytes": result.semantic_trace.rejection_reason_metadata_bytes,
+        },
+        "reduced_output": {
+            "row_count": result.output.cached_row_count(),
+            "arity": result.output.arity(),
+        },
+        "model_membership": {
+            "membership_source": format!("{:?}", result.model_membership.membership_source),
+            "tuple_source_key_column_device_reads": result.model_membership.tuple_source_key_column_device_reads,
+            "host_write_ops": result.model_membership.host_write_ops,
+            "kernel_launches": result.model_membership.kernel_launches,
+            "timing_recorded": result.model_membership.kernel_timing.is_recorded(),
+        },
+        "world_view_validation": {
+            "kernel_launches": result.world_view_validation.kernel_launches,
+            "host_write_ops": result.world_view_validation.host_write_ops,
+            "timing_recorded": result.world_view_validation.kernel_timing.is_recorded(),
+        },
+        "final_tuple_materialization": {
+            "output_column_count": result.final_tuple_materialization.output_column_count,
+            "row_filter_count": result.final_tuple_materialization.row_filter_count,
+            "negated_row_filter_count": result.final_tuple_materialization.negated_row_filter_count,
+            "kernel_launches": result.final_tuple_materialization.kernel_launches,
+            "host_write_ops": result.final_tuple_materialization.host_write_ops,
+            "timing_recorded": result.final_tuple_materialization.kernel_timing.is_recorded(),
+        },
+        "transfer_budget": {
+            "candidate_count": result.transfer_budget.candidate_count,
+            "tracked_dtoh_calls": result.transfer_budget.tracked_dtoh_calls,
+            "tracked_htod_calls": result.transfer_budget.tracked_htod_calls,
+            "tracked_data_plane_htod_calls": result.transfer_budget.tracked_data_plane_htod_calls,
+            "tracked_data_plane_htod_bytes": result.transfer_budget.tracked_data_plane_htod_bytes,
+            "per_candidate_host_round_trips": result.transfer_budget.per_candidate_host_round_trips,
+        },
+        "final_result_transfer": {
+            "final_output_rows": result.final_result_transfer.final_output_rows,
+            "final_output_column_count": result.final_result_transfer.final_output_column_count,
+            "tracked_data_plane_dtoh_calls": result.final_result_transfer.tracked_data_plane_dtoh_calls,
+            "tracked_data_plane_dtoh_bytes": result.final_result_transfer.tracked_data_plane_dtoh_bytes,
+        },
+        "wcoj": {
+            "certification": format!("{:?}", result.trace.wcoj_certification),
+            "wcoj_4cycle_dispatch_count": result.trace.counter_delta.wcoj_4cycle_dispatch_count,
+            "wcoj_triangle_dispatch_count": result.trace.counter_delta.wcoj_triangle_dispatch_count,
+            "wcoj_clique5_dispatch_count": result.trace.counter_delta.wcoj_clique5_dispatch_count,
+            "wcoj_clique6_dispatch_count": result.trace.counter_delta.wcoj_clique6_dispatch_count,
+            "wcoj_clique7_dispatch_count": result.trace.counter_delta.wcoj_clique7_dispatch_count,
+            "wcoj_clique8_dispatch_count": result.trace.counter_delta.wcoj_clique8_dispatch_count,
+        },
+    })
+}
+
+fn gpu_execution_dispatch_count(result: &xlog_runtime::EpistemicGpuExecutionResult) -> u64 {
+    result.candidate_generation.kernel_launches as u64
+        + result.model_membership.kernel_launches as u64
+        + result.world_view_validation.kernel_launches as u64
+        + result.final_tuple_materialization.kernel_launches as u64
+}
+
+fn input_relation_row_count(relations: &InputRelations, relation_name: &str) -> usize {
+    relations
+        .get(relation_name)
+        .map(|(_, rows)| rows.len())
+        .unwrap_or(0)
+}
+
+fn derived_relation_row_count(derived_relation_rows: &Value, relation_name: &str) -> usize {
+    derived_relation_rows
+        .get(relation_name)
+        .and_then(|spec| spec.get("rows"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0)
+}
+
+fn attach_program_runtime_diagnostics(
+    source_file_name: &str,
+    result: &xlog_runtime::EpistemicGpuExecutionResult,
+    relations: &InputRelations,
+    derived_relation_rows: &Value,
+    runtime: &mut Value,
+) {
+    let Some(runtime_object) = runtime.as_object_mut() else {
+        return;
+    };
+    let dispatch_count = gpu_execution_dispatch_count(result);
+    match source_file_name {
+        "epistemic_dilp_proof_schema_selection.xlog" => {
+            runtime_object.insert(
+                "gpu_proof_schema_selection_diagnostics".to_string(),
+                json!({
+                    "source": "xlog_v090_gpu_proof_schema_selection",
+                    "program": "programs/epistemic/epistemic_dilp_proof_schema_selection.xlog",
+                    "xlog_selection_dispatches": dispatch_count,
+                    "generated_proof_schema_rows_consumed": input_relation_row_count(relations, "generated_proof_schema"),
+                    "schema_symbolic_weight_rows_consumed": input_relation_row_count(relations, "schema_symbolic_weight"),
+                    "schema_proof_search_support_rows_consumed": input_relation_row_count(relations, "schema_proof_search_support"),
+                    "schema_solver_support_rows_consumed": input_relation_row_count(relations, "schema_solver_support"),
+                    "heldout_promoted_schema_rows_consumed": input_relation_row_count(relations, "heldout_promoted_schema"),
+                    "blocked_promoted_schema_rows_consumed": input_relation_row_count(relations, "blocked_promoted_schema"),
+                    "derived_schema_promotion_score_rows": derived_relation_row_count(derived_relation_rows, "schema_promotion_score"),
+                    "derived_schema_promotion_threshold_rows": derived_relation_row_count(derived_relation_rows, "schema_promotion_threshold"),
+                    "derived_promotion_candidate_rows": derived_relation_row_count(derived_relation_rows, "promotion_candidate"),
+                    "derived_dominated_promoted_proof_schema_rows": derived_relation_row_count(derived_relation_rows, "dominated_promoted_proof_schema"),
+                    "derived_selection_candidate_rows": derived_relation_row_count(derived_relation_rows, "selection_candidate"),
+                    "derived_selected_promoted_proof_schema_rows": derived_relation_row_count(derived_relation_rows, "selected_promoted_proof_schema"),
+                    "final_selected_promoted_proof_schema_rows": result.final_result_transfer.final_output_rows,
+                }),
+            );
+        }
+        "epistemic_dilp_candidate_scoring.xlog" => {
+            runtime_object.insert(
+                "gpu_candidate_scoring_diagnostics".to_string(),
+                json!({
+                    "source": "xlog_v090_gpu_dilp_candidate_scoring",
+                    "program": "programs/epistemic/epistemic_dilp_candidate_scoring.xlog",
+                    "xlog_scoring_dispatches": dispatch_count,
+                    "scoring_candidate_rows_consumed": input_relation_row_count(relations, "scoring_candidate"),
+                    "neural_margin_score_rows_consumed": input_relation_row_count(relations, "neural_margin_score"),
+                    "proof_trace_support_rows_consumed": input_relation_row_count(relations, "proof_trace_support"),
+                    "selected_proof_schema_weight_rows_consumed": input_relation_row_count(relations, "selected_proof_schema_weight"),
+                    "selector_accepted_score_rows_consumed": input_relation_row_count(relations, "selector_accepted_score"),
+                    "unsafe_score_candidate_rows_consumed": input_relation_row_count(relations, "unsafe_score_candidate"),
+                    "derived_selected_proof_support_score_rows": derived_relation_row_count(derived_relation_rows, "selected_proof_support_score"),
+                    "derived_proof_weighted_score_rows": derived_relation_row_count(derived_relation_rows, "proof_weighted_score"),
+                    "derived_dilp_transductive_transfer_signal_rows": derived_relation_row_count(derived_relation_rows, "dilp_transductive_transfer_signal"),
+                    "derived_dilp_neural_instability_score_rows": derived_relation_row_count(derived_relation_rows, "dilp_neural_instability_score"),
+                    "derived_bounded_dilp_metastable_transfer_margin_rows": derived_relation_row_count(derived_relation_rows, "bounded_dilp_metastable_transfer_margin"),
+                    "derived_dilp_candidate_score_rows": result.final_result_transfer.final_output_rows,
+                }),
+            );
+        }
+        "epistemic_generalization_candidate_scoring.xlog" => {
+            runtime_object.insert(
+                "gpu_candidate_scoring_diagnostics".to_string(),
+                json!({
+                    "source": "xlog_v090_gpu_generalization_candidate_scoring",
+                    "program": "programs/epistemic/epistemic_generalization_candidate_scoring.xlog",
+                    "xlog_scoring_dispatches": dispatch_count,
+                    "selector_accepted_neural_score_rows_consumed": input_relation_row_count(relations, "selector_accepted_neural_score"),
+                    "candidate_raw_feature_score_rows_consumed": input_relation_row_count(relations, "candidate_raw_feature_score"),
+                    "scoring_epistemic_gate_rows_consumed": input_relation_row_count(relations, "scoring_epistemic_gate"),
+                    "unsafe_score_candidate_rows_consumed": input_relation_row_count(relations, "unsafe_score_candidate"),
+                    "derived_bfo_evidence_score_rows": derived_relation_row_count(derived_relation_rows, "bfo_evidence_score"),
+                    "derived_literal_observation_score_rows": derived_relation_row_count(derived_relation_rows, "literal_observation_score"),
+                    "derived_mismatch_penalty_score_rows": derived_relation_row_count(derived_relation_rows, "mismatch_penalty_score"),
+                    "derived_candidate_feature_score_rows": derived_relation_row_count(derived_relation_rows, "candidate_feature_score"),
+                    "derived_transductive_transfer_signal_rows": derived_relation_row_count(derived_relation_rows, "transductive_transfer_signal"),
+                    "derived_bounded_metastable_transfer_margin_rows": derived_relation_row_count(derived_relation_rows, "bounded_metastable_transfer_margin"),
+                    "derived_xlog_candidate_score_rows": derived_relation_row_count(derived_relation_rows, "xlog_candidate_score"),
+                }),
+            );
+        }
+        "epistemic_showcase_transfer_candidate_scoring.xlog" => {
+            runtime_object.insert(
+                "gpu_candidate_scoring_diagnostics".to_string(),
+                json!({
+                    "source": "xlog_v090_gpu_showcase_transfer_candidate_scoring",
+                    "program": "programs/epistemic/epistemic_showcase_transfer_candidate_scoring.xlog",
+                    "xlog_scoring_dispatches": dispatch_count,
+                    "scoring_candidate_rows_consumed": input_relation_row_count(relations, "scoring_candidate"),
+                    "neural_primary_score_rows_consumed": input_relation_row_count(relations, "neural_primary_score"),
+                    "candidate_raw_feature_score_rows_consumed": input_relation_row_count(relations, "candidate_raw_feature_score"),
+                    "selector_accepted_score_rows_consumed": input_relation_row_count(relations, "selector_accepted_score"),
+                    "unsafe_score_candidate_rows_consumed": input_relation_row_count(relations, "unsafe_score_candidate"),
+                    "derived_bfo_evidence_score_rows": derived_relation_row_count(derived_relation_rows, "bfo_evidence_score"),
+                    "derived_literal_observation_score_rows": derived_relation_row_count(derived_relation_rows, "literal_observation_score"),
+                    "derived_mismatch_penalty_score_rows": derived_relation_row_count(derived_relation_rows, "mismatch_penalty_score"),
+                    "derived_candidate_feature_score_rows": derived_relation_row_count(derived_relation_rows, "candidate_feature_score"),
+                    "derived_showcase_transductive_transfer_signal_rows": derived_relation_row_count(derived_relation_rows, "showcase_transductive_transfer_signal"),
+                    "derived_bounded_showcase_metastable_transfer_margin_rows": derived_relation_row_count(derived_relation_rows, "bounded_showcase_metastable_transfer_margin"),
+                    "derived_showcase_transfer_candidate_score_rows": derived_relation_row_count(derived_relation_rows, "showcase_transfer_candidate_score"),
+                }),
+            );
+        }
+        "epistemic_generalization_decision.xlog" => {
+            runtime_object.insert(
+                "gpu_maxsat_diagnostics".to_string(),
+                json!({
+                    "source": "xlog_v090_gpu_maxsat_intervention_selection",
+                    "program": "programs/epistemic/epistemic_generalization_decision.xlog",
+                    "xlog_decision_dispatches": dispatch_count,
+                    "accepted_candidates": result.semantic_trace.accepted_candidates,
+                }),
+            );
+        }
+        "epistemic_generalization_abstention.xlog" => {
+            let abstention_case_rows = input_relation_row_count(relations, "abstention_case");
+            let accepted_world_view_rows =
+                input_relation_row_count(relations, "accepted_world_view");
+            let rejected_world_view_rows =
+                input_relation_row_count(relations, "rejected_world_view");
+            let threshold_rows =
+                derived_relation_row_count(derived_relation_rows, "abstention_threshold");
+            let solver_probability_trace_rows =
+                input_relation_row_count(relations, "solver_probability_trace");
+            let abstention_rows =
+                derived_relation_row_count(derived_relation_rows, "xlog_abstention_decision");
+            let proof_evidence_count_rows =
+                derived_relation_row_count(derived_relation_rows, "proof_evidence_count");
+            let proof_confidence_rows =
+                derived_relation_row_count(derived_relation_rows, "proof_confidence");
+            let solver_trace_rows: &[Vec<u32>] = relations
+                .get("solver_probability_trace")
+                .map(|(_, rows)| rows.as_slice())
+                .unwrap_or(&[]);
+            let gpu_cnf_encodes: u64 = solver_trace_rows
+                .iter()
+                .map(|row| u64::from(row.get(1).copied().unwrap_or(0)))
+                .sum();
+            let accepted_gpu_production_path_events: u64 = solver_trace_rows
+                .iter()
+                .map(|row| u64::from(row.get(2).copied().unwrap_or(0)))
+                .sum();
+            let resident_mc_tracked_dtoh_calls = result
+                .transfer_budget
+                .tracked_dtoh_calls
+                .saturating_add(result.final_result_transfer.tracked_data_plane_dtoh_calls);
+            let resident_mc_tracked_htod_calls = result
+                .transfer_budget
+                .tracked_htod_calls
+                .saturating_add(result.transfer_budget.tracked_data_plane_htod_calls);
+            let resident_mc_no_host = resident_mc_tracked_dtoh_calls == 0
+                && resident_mc_tracked_htod_calls == 0
+                && result.transfer_budget.per_candidate_host_round_trips == 0;
+            runtime_object.insert(
+                "gpu_probability_diagnostics".to_string(),
+                json!({
+                    "source": "xlog_v090_gpu_probabilistic_abstention",
+                    "program": "programs/epistemic/epistemic_generalization_abstention.xlog",
+                    "resident_mc_source": "xlog_v092_mc_resident_engine",
+                    "resident_mc_total_samples": result.transfer_budget.candidate_count,
+                    "resident_mc_query_count": 1,
+                    "resident_mc_engine_launches": dispatch_count,
+                    "resident_mc_no_host": resident_mc_no_host,
+                    "resident_mc_tracked_htod_calls": resident_mc_tracked_htod_calls,
+                    "resident_mc_tracked_dtoh_calls": resident_mc_tracked_dtoh_calls,
+                    "resident_mc_per_sample_host_launches": result.transfer_budget.per_candidate_host_round_trips,
+                    "abstention_kernel_dispatches": dispatch_count,
+                    "accepted_world_view_count": accepted_world_view_rows,
+                    "accepted_gpu_production_path_events": accepted_gpu_production_path_events,
+                    "gpu_pir_graph_uploads": dispatch_count,
+                    "gpu_cnf_encodes": gpu_cnf_encodes,
+                    "abstention_case_rows_consumed": abstention_case_rows,
+                    "abstention_relation_rows_consumed": abstention_rows,
+                    "world_view_relation_rows_consumed": accepted_world_view_rows,
+                    "rejected_world_view_relation_rows_consumed": rejected_world_view_rows,
+                    "derived_proof_evidence_count_rows": proof_evidence_count_rows,
+                    "proof_evidence_count_relation_rows_consumed": proof_evidence_count_rows,
+                    "proof_confidence_relation_rows_consumed": proof_confidence_rows,
+                    "threshold_relation_rows_consumed": threshold_rows,
+                    "solver_probability_trace_rows_consumed": solver_probability_trace_rows,
+                }),
+            );
+        }
+        "epistemic_generalization_explanation.xlog" => {
+            let accepted_claim_rows = input_relation_row_count(relations, "accepted_claim");
+            let blocked_explanation_rows =
+                input_relation_row_count(relations, "blocked_explanation");
+            let explanation_rows =
+                derived_relation_row_count(derived_relation_rows, "xlog_explanation");
+            let explanation_identifier_rows =
+                derived_relation_row_count(derived_relation_rows, "explanation_identifier");
+            let explanation_metadata_rows =
+                derived_relation_row_count(derived_relation_rows, "explanation_metadata");
+            let selected_explanation_metadata_rows =
+                derived_relation_row_count(derived_relation_rows, "selected_explanation_metadata");
+            let explanation_support_rows =
+                derived_relation_row_count(derived_relation_rows, "explanation_support");
+            let explanation_dependency_rows =
+                derived_relation_row_count(derived_relation_rows, "explanation_dependency");
+            runtime_object.insert(
+                "gpu_explanation_diagnostics".to_string(),
+                json!({
+                    "source": "xlog_v090_gpu_explanation_generation",
+                    "decision_path": "xlog_v090_faeel_generalization_decision",
+                    "program": "programs/epistemic/epistemic_generalization_explanation.xlog",
+                    "explanation_kernel_dispatches": dispatch_count,
+                    "accepted_claim_rows_consumed": accepted_claim_rows,
+                    "explanation_relation_rows_consumed": explanation_rows,
+                    "explanation_identifier_rows_consumed": explanation_identifier_rows,
+                    "xlog_explanation_metadata_rows_consumed": explanation_metadata_rows,
+                    "accepted_claim_relation_rows_consumed": accepted_claim_rows,
+                    "bfo_claim_support_relation_rows_consumed": explanation_dependency_rows,
+                    "explanation_dependency_rows_consumed": explanation_dependency_rows,
+                    "blocked_explanation_rows_consumed": blocked_explanation_rows,
+                    "derived_explanation_identifier_rows": explanation_identifier_rows,
+                    "derived_selected_explanation_metadata_rows": selected_explanation_metadata_rows,
+                    "explanation_metadata_rows_consumed": explanation_metadata_rows,
+                    "derived_explanation_support_rows": explanation_support_rows,
+                    "support_relation_device_reads": explanation_dependency_rows,
+                    "final_xlog_explanation_rows": result.final_result_transfer.final_output_rows,
+                }),
+            );
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1507,356 +1858,5 @@ mod tests {
             err.to_string().contains("exceeds u32::MAX"),
             "unexpected error: {err}"
         );
-    }
-}
-
-fn preflight_json(preflight: &xlog_runtime::EpistemicGpuRuntimePreflight) -> Value {
-    json!({
-        "execution_backend": epistemic_execution_backend_label(preflight.execution_backend),
-        "fallback_policy": epistemic_fallback_policy_label(preflight.fallback_policy),
-        "epistemic_mode": format!("{:?}", preflight.epistemic_mode),
-        "reduced_runtime_rule_count": preflight.reduced_runtime_rule_count,
-        "wcoj_required_reduction_count": preflight.wcoj_required_reduction_count,
-        "multiway_reduction_count": preflight.multiway_reduction_count,
-        "kclique_wcoj_plan_count": preflight.kclique_wcoj_plan_count,
-        "planned_hash_route_count": preflight.planned_hash_route_count,
-        "free_join_route_count": preflight.free_join_route_count,
-        "tuple_membership_binding_count": preflight.tuple_membership_binding_count,
-        "solver_assumption_binding_count": preflight.solver_assumption_binding_count,
-        "solver_required_capability_count": preflight.solver_required_capability_count,
-        "solver_required_status_count": preflight.solver_required_status_count,
-        "know_operator_count": preflight.know_operator_count,
-        "possible_operator_count": preflight.possible_operator_count,
-        "not_know_operator_count": preflight.not_know_operator_count,
-        "not_possible_operator_count": preflight.not_possible_operator_count,
-    })
-}
-
-fn epistemic_execution_backend_label(backend: xlog_ir::EpistemicExecutionBackend) -> &'static str {
-    match backend {
-        xlog_ir::EpistemicExecutionBackend::Gpu => "gpu",
-    }
-}
-
-fn epistemic_fallback_policy_label(policy: xlog_ir::EpistemicFallbackPolicy) -> &'static str {
-    match policy {
-        xlog_ir::EpistemicFallbackPolicy::RejectUnsupported => "reject_unsupported",
-    }
-}
-
-fn runtime_json(result: &xlog_runtime::EpistemicGpuExecutionResult) -> Value {
-    json!({
-        "candidate_generation": {
-            "generated_candidates": result.candidate_generation.generated_candidates,
-            "literal_count": result.candidate_generation.literal_count,
-            "kernel_launches": result.candidate_generation.kernel_launches,
-            "host_write_ops": result.candidate_generation.host_write_ops,
-            "timing_recorded": result.candidate_generation.kernel_timing.is_recorded(),
-        },
-        "semantic_trace": {
-            "generated_candidates": result.semantic_trace.generated_candidates,
-            "guesses": result.semantic_trace.guesses,
-            "accepted_candidates": result.semantic_trace.accepted_candidates,
-            "accepted_candidate_indices": result.semantic_trace.accepted_candidate_indices,
-            "accepted_world_views": result.semantic_trace.accepted_world_views,
-            "rejected_candidates": result.semantic_trace.rejected_candidates,
-            "rejected_candidate_indices": result.semantic_trace.rejected_candidate_indices,
-            "rejection_reasons": result.semantic_trace.rejection_reasons,
-            "rejection_reason_metadata_bytes": result.semantic_trace.rejection_reason_metadata_bytes,
-        },
-        "reduced_output": {
-            "row_count": result.output.cached_row_count(),
-            "arity": result.output.arity(),
-        },
-        "model_membership": {
-            "membership_source": format!("{:?}", result.model_membership.membership_source),
-            "tuple_source_key_column_device_reads": result.model_membership.tuple_source_key_column_device_reads,
-            "host_write_ops": result.model_membership.host_write_ops,
-            "kernel_launches": result.model_membership.kernel_launches,
-            "timing_recorded": result.model_membership.kernel_timing.is_recorded(),
-        },
-        "world_view_validation": {
-            "kernel_launches": result.world_view_validation.kernel_launches,
-            "host_write_ops": result.world_view_validation.host_write_ops,
-            "timing_recorded": result.world_view_validation.kernel_timing.is_recorded(),
-        },
-        "final_tuple_materialization": {
-            "output_column_count": result.final_tuple_materialization.output_column_count,
-            "row_filter_count": result.final_tuple_materialization.row_filter_count,
-            "negated_row_filter_count": result.final_tuple_materialization.negated_row_filter_count,
-            "kernel_launches": result.final_tuple_materialization.kernel_launches,
-            "host_write_ops": result.final_tuple_materialization.host_write_ops,
-            "timing_recorded": result.final_tuple_materialization.kernel_timing.is_recorded(),
-        },
-        "transfer_budget": {
-            "candidate_count": result.transfer_budget.candidate_count,
-            "tracked_dtoh_calls": result.transfer_budget.tracked_dtoh_calls,
-            "tracked_htod_calls": result.transfer_budget.tracked_htod_calls,
-            "tracked_data_plane_htod_calls": result.transfer_budget.tracked_data_plane_htod_calls,
-            "tracked_data_plane_htod_bytes": result.transfer_budget.tracked_data_plane_htod_bytes,
-            "per_candidate_host_round_trips": result.transfer_budget.per_candidate_host_round_trips,
-        },
-        "final_result_transfer": {
-            "final_output_rows": result.final_result_transfer.final_output_rows,
-            "final_output_column_count": result.final_result_transfer.final_output_column_count,
-            "tracked_data_plane_dtoh_calls": result.final_result_transfer.tracked_data_plane_dtoh_calls,
-            "tracked_data_plane_dtoh_bytes": result.final_result_transfer.tracked_data_plane_dtoh_bytes,
-        },
-        "wcoj": {
-            "certification": format!("{:?}", result.trace.wcoj_certification),
-            "wcoj_4cycle_dispatch_count": result.trace.counter_delta.wcoj_4cycle_dispatch_count,
-            "wcoj_triangle_dispatch_count": result.trace.counter_delta.wcoj_triangle_dispatch_count,
-            "wcoj_clique5_dispatch_count": result.trace.counter_delta.wcoj_clique5_dispatch_count,
-            "wcoj_clique6_dispatch_count": result.trace.counter_delta.wcoj_clique6_dispatch_count,
-            "wcoj_clique7_dispatch_count": result.trace.counter_delta.wcoj_clique7_dispatch_count,
-            "wcoj_clique8_dispatch_count": result.trace.counter_delta.wcoj_clique8_dispatch_count,
-        },
-    })
-}
-
-fn gpu_execution_dispatch_count(result: &xlog_runtime::EpistemicGpuExecutionResult) -> u64 {
-    result.candidate_generation.kernel_launches as u64
-        + result.model_membership.kernel_launches as u64
-        + result.world_view_validation.kernel_launches as u64
-        + result.final_tuple_materialization.kernel_launches as u64
-}
-
-fn input_relation_row_count(relations: &InputRelations, relation_name: &str) -> usize {
-    relations
-        .get(relation_name)
-        .map(|(_, rows)| rows.len())
-        .unwrap_or(0)
-}
-
-fn derived_relation_row_count(derived_relation_rows: &Value, relation_name: &str) -> usize {
-    derived_relation_rows
-        .get(relation_name)
-        .and_then(|spec| spec.get("rows"))
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0)
-}
-
-fn attach_program_runtime_diagnostics(
-    source_file_name: &str,
-    result: &xlog_runtime::EpistemicGpuExecutionResult,
-    relations: &InputRelations,
-    derived_relation_rows: &Value,
-    runtime: &mut Value,
-) {
-    let Some(runtime_object) = runtime.as_object_mut() else {
-        return;
-    };
-    let dispatch_count = gpu_execution_dispatch_count(result);
-    match source_file_name {
-        "epistemic_dilp_proof_schema_selection.xlog" => {
-            runtime_object.insert(
-                "gpu_proof_schema_selection_diagnostics".to_string(),
-                json!({
-                    "source": "xlog_v090_gpu_proof_schema_selection",
-                    "program": "programs/epistemic/epistemic_dilp_proof_schema_selection.xlog",
-                    "xlog_selection_dispatches": dispatch_count,
-                    "generated_proof_schema_rows_consumed": input_relation_row_count(relations, "generated_proof_schema"),
-                    "schema_symbolic_weight_rows_consumed": input_relation_row_count(relations, "schema_symbolic_weight"),
-                    "schema_proof_search_support_rows_consumed": input_relation_row_count(relations, "schema_proof_search_support"),
-                    "schema_solver_support_rows_consumed": input_relation_row_count(relations, "schema_solver_support"),
-                    "heldout_promoted_schema_rows_consumed": input_relation_row_count(relations, "heldout_promoted_schema"),
-                    "blocked_promoted_schema_rows_consumed": input_relation_row_count(relations, "blocked_promoted_schema"),
-                    "derived_schema_promotion_score_rows": derived_relation_row_count(derived_relation_rows, "schema_promotion_score"),
-                    "derived_schema_promotion_threshold_rows": derived_relation_row_count(derived_relation_rows, "schema_promotion_threshold"),
-                    "derived_promotion_candidate_rows": derived_relation_row_count(derived_relation_rows, "promotion_candidate"),
-                    "derived_dominated_promoted_proof_schema_rows": derived_relation_row_count(derived_relation_rows, "dominated_promoted_proof_schema"),
-                    "derived_selection_candidate_rows": derived_relation_row_count(derived_relation_rows, "selection_candidate"),
-                    "derived_selected_promoted_proof_schema_rows": derived_relation_row_count(derived_relation_rows, "selected_promoted_proof_schema"),
-                    "final_selected_promoted_proof_schema_rows": result.final_result_transfer.final_output_rows,
-                }),
-            );
-        }
-        "epistemic_dilp_candidate_scoring.xlog" => {
-            runtime_object.insert(
-                "gpu_candidate_scoring_diagnostics".to_string(),
-                json!({
-                    "source": "xlog_v090_gpu_dilp_candidate_scoring",
-                    "program": "programs/epistemic/epistemic_dilp_candidate_scoring.xlog",
-                    "xlog_scoring_dispatches": dispatch_count,
-                    "scoring_candidate_rows_consumed": input_relation_row_count(relations, "scoring_candidate"),
-                    "neural_margin_score_rows_consumed": input_relation_row_count(relations, "neural_margin_score"),
-                    "proof_trace_support_rows_consumed": input_relation_row_count(relations, "proof_trace_support"),
-                    "selected_proof_schema_weight_rows_consumed": input_relation_row_count(relations, "selected_proof_schema_weight"),
-                    "selector_accepted_score_rows_consumed": input_relation_row_count(relations, "selector_accepted_score"),
-                    "unsafe_score_candidate_rows_consumed": input_relation_row_count(relations, "unsafe_score_candidate"),
-                    "derived_selected_proof_support_score_rows": derived_relation_row_count(derived_relation_rows, "selected_proof_support_score"),
-                    "derived_proof_weighted_score_rows": derived_relation_row_count(derived_relation_rows, "proof_weighted_score"),
-                    "derived_dilp_transductive_transfer_signal_rows": derived_relation_row_count(derived_relation_rows, "dilp_transductive_transfer_signal"),
-                    "derived_dilp_neural_instability_score_rows": derived_relation_row_count(derived_relation_rows, "dilp_neural_instability_score"),
-                    "derived_bounded_dilp_metastable_transfer_margin_rows": derived_relation_row_count(derived_relation_rows, "bounded_dilp_metastable_transfer_margin"),
-                    "derived_dilp_candidate_score_rows": result.final_result_transfer.final_output_rows,
-                }),
-            );
-        }
-        "epistemic_generalization_candidate_scoring.xlog" => {
-            runtime_object.insert(
-                "gpu_candidate_scoring_diagnostics".to_string(),
-                json!({
-                    "source": "xlog_v090_gpu_generalization_candidate_scoring",
-                    "program": "programs/epistemic/epistemic_generalization_candidate_scoring.xlog",
-                    "xlog_scoring_dispatches": dispatch_count,
-                    "selector_accepted_neural_score_rows_consumed": input_relation_row_count(relations, "selector_accepted_neural_score"),
-                    "candidate_raw_feature_score_rows_consumed": input_relation_row_count(relations, "candidate_raw_feature_score"),
-                    "scoring_epistemic_gate_rows_consumed": input_relation_row_count(relations, "scoring_epistemic_gate"),
-                    "unsafe_score_candidate_rows_consumed": input_relation_row_count(relations, "unsafe_score_candidate"),
-                    "derived_bfo_evidence_score_rows": derived_relation_row_count(derived_relation_rows, "bfo_evidence_score"),
-                    "derived_literal_observation_score_rows": derived_relation_row_count(derived_relation_rows, "literal_observation_score"),
-                    "derived_mismatch_penalty_score_rows": derived_relation_row_count(derived_relation_rows, "mismatch_penalty_score"),
-                    "derived_candidate_feature_score_rows": derived_relation_row_count(derived_relation_rows, "candidate_feature_score"),
-                    "derived_transductive_transfer_signal_rows": derived_relation_row_count(derived_relation_rows, "transductive_transfer_signal"),
-                    "derived_bounded_metastable_transfer_margin_rows": derived_relation_row_count(derived_relation_rows, "bounded_metastable_transfer_margin"),
-                    "derived_xlog_candidate_score_rows": derived_relation_row_count(derived_relation_rows, "xlog_candidate_score"),
-                }),
-            );
-        }
-        "epistemic_showcase_transfer_candidate_scoring.xlog" => {
-            runtime_object.insert(
-                "gpu_candidate_scoring_diagnostics".to_string(),
-                json!({
-                    "source": "xlog_v090_gpu_showcase_transfer_candidate_scoring",
-                    "program": "programs/epistemic/epistemic_showcase_transfer_candidate_scoring.xlog",
-                    "xlog_scoring_dispatches": dispatch_count,
-                    "scoring_candidate_rows_consumed": input_relation_row_count(relations, "scoring_candidate"),
-                    "neural_primary_score_rows_consumed": input_relation_row_count(relations, "neural_primary_score"),
-                    "candidate_raw_feature_score_rows_consumed": input_relation_row_count(relations, "candidate_raw_feature_score"),
-                    "selector_accepted_score_rows_consumed": input_relation_row_count(relations, "selector_accepted_score"),
-                    "unsafe_score_candidate_rows_consumed": input_relation_row_count(relations, "unsafe_score_candidate"),
-                    "derived_bfo_evidence_score_rows": derived_relation_row_count(derived_relation_rows, "bfo_evidence_score"),
-                    "derived_literal_observation_score_rows": derived_relation_row_count(derived_relation_rows, "literal_observation_score"),
-                    "derived_mismatch_penalty_score_rows": derived_relation_row_count(derived_relation_rows, "mismatch_penalty_score"),
-                    "derived_candidate_feature_score_rows": derived_relation_row_count(derived_relation_rows, "candidate_feature_score"),
-                    "derived_showcase_transductive_transfer_signal_rows": derived_relation_row_count(derived_relation_rows, "showcase_transductive_transfer_signal"),
-                    "derived_bounded_showcase_metastable_transfer_margin_rows": derived_relation_row_count(derived_relation_rows, "bounded_showcase_metastable_transfer_margin"),
-                    "derived_showcase_transfer_candidate_score_rows": derived_relation_row_count(derived_relation_rows, "showcase_transfer_candidate_score"),
-                }),
-            );
-        }
-        "epistemic_generalization_decision.xlog" => {
-            runtime_object.insert(
-                "gpu_maxsat_diagnostics".to_string(),
-                json!({
-                    "source": "xlog_v090_gpu_maxsat_intervention_selection",
-                    "program": "programs/epistemic/epistemic_generalization_decision.xlog",
-                    "xlog_decision_dispatches": dispatch_count,
-                    "accepted_candidates": result.semantic_trace.accepted_candidates,
-                }),
-            );
-        }
-        "epistemic_generalization_abstention.xlog" => {
-            let abstention_case_rows = input_relation_row_count(relations, "abstention_case");
-            let accepted_world_view_rows =
-                input_relation_row_count(relations, "accepted_world_view");
-            let rejected_world_view_rows =
-                input_relation_row_count(relations, "rejected_world_view");
-            let threshold_rows =
-                derived_relation_row_count(derived_relation_rows, "abstention_threshold");
-            let solver_probability_trace_rows =
-                input_relation_row_count(relations, "solver_probability_trace");
-            let abstention_rows =
-                derived_relation_row_count(derived_relation_rows, "xlog_abstention_decision");
-            let proof_evidence_count_rows =
-                derived_relation_row_count(derived_relation_rows, "proof_evidence_count");
-            let proof_confidence_rows =
-                derived_relation_row_count(derived_relation_rows, "proof_confidence");
-            let solver_trace_rows: &[Vec<u32>] = relations
-                .get("solver_probability_trace")
-                .map(|(_, rows)| rows.as_slice())
-                .unwrap_or(&[]);
-            let gpu_cnf_encodes: u64 = solver_trace_rows
-                .iter()
-                .map(|row| u64::from(row.get(1).copied().unwrap_or(0)))
-                .sum();
-            let accepted_gpu_production_path_events: u64 = solver_trace_rows
-                .iter()
-                .map(|row| u64::from(row.get(2).copied().unwrap_or(0)))
-                .sum();
-            let resident_mc_tracked_dtoh_calls = result
-                .transfer_budget
-                .tracked_dtoh_calls
-                .saturating_add(result.final_result_transfer.tracked_data_plane_dtoh_calls);
-            let resident_mc_tracked_htod_calls = result
-                .transfer_budget
-                .tracked_htod_calls
-                .saturating_add(result.transfer_budget.tracked_data_plane_htod_calls);
-            let resident_mc_no_host = resident_mc_tracked_dtoh_calls == 0
-                && resident_mc_tracked_htod_calls == 0
-                && result.transfer_budget.per_candidate_host_round_trips == 0;
-            runtime_object.insert(
-                "gpu_probability_diagnostics".to_string(),
-                json!({
-                    "source": "xlog_v090_gpu_probabilistic_abstention",
-                    "program": "programs/epistemic/epistemic_generalization_abstention.xlog",
-                    "resident_mc_source": "xlog_v092_mc_resident_engine",
-                    "resident_mc_total_samples": result.transfer_budget.candidate_count,
-                    "resident_mc_query_count": 1,
-                    "resident_mc_engine_launches": dispatch_count,
-                    "resident_mc_no_host": resident_mc_no_host,
-                    "resident_mc_tracked_htod_calls": resident_mc_tracked_htod_calls,
-                    "resident_mc_tracked_dtoh_calls": resident_mc_tracked_dtoh_calls,
-                    "resident_mc_per_sample_host_launches": result.transfer_budget.per_candidate_host_round_trips,
-                    "abstention_kernel_dispatches": dispatch_count,
-                    "accepted_world_view_count": accepted_world_view_rows,
-                    "accepted_gpu_production_path_events": accepted_gpu_production_path_events,
-                    "gpu_pir_graph_uploads": dispatch_count,
-                    "gpu_cnf_encodes": gpu_cnf_encodes,
-                    "abstention_case_rows_consumed": abstention_case_rows,
-                    "abstention_relation_rows_consumed": abstention_rows,
-                    "world_view_relation_rows_consumed": accepted_world_view_rows,
-                    "rejected_world_view_relation_rows_consumed": rejected_world_view_rows,
-                    "derived_proof_evidence_count_rows": proof_evidence_count_rows,
-                    "proof_evidence_count_relation_rows_consumed": proof_evidence_count_rows,
-                    "proof_confidence_relation_rows_consumed": proof_confidence_rows,
-                    "threshold_relation_rows_consumed": threshold_rows,
-                    "solver_probability_trace_rows_consumed": solver_probability_trace_rows,
-                }),
-            );
-        }
-        "epistemic_generalization_explanation.xlog" => {
-            let accepted_claim_rows = input_relation_row_count(relations, "accepted_claim");
-            let blocked_explanation_rows =
-                input_relation_row_count(relations, "blocked_explanation");
-            let explanation_rows =
-                derived_relation_row_count(derived_relation_rows, "xlog_explanation");
-            let explanation_identifier_rows =
-                derived_relation_row_count(derived_relation_rows, "explanation_identifier");
-            let explanation_metadata_rows =
-                derived_relation_row_count(derived_relation_rows, "explanation_metadata");
-            let selected_explanation_metadata_rows =
-                derived_relation_row_count(derived_relation_rows, "selected_explanation_metadata");
-            let explanation_support_rows =
-                derived_relation_row_count(derived_relation_rows, "explanation_support");
-            let explanation_dependency_rows =
-                derived_relation_row_count(derived_relation_rows, "explanation_dependency");
-            runtime_object.insert(
-                "gpu_explanation_diagnostics".to_string(),
-                json!({
-                    "source": "xlog_v090_gpu_explanation_generation",
-                    "decision_path": "xlog_v090_faeel_generalization_decision",
-                    "program": "programs/epistemic/epistemic_generalization_explanation.xlog",
-                    "explanation_kernel_dispatches": dispatch_count,
-                    "accepted_claim_rows_consumed": accepted_claim_rows,
-                    "explanation_relation_rows_consumed": explanation_rows,
-                    "explanation_identifier_rows_consumed": explanation_identifier_rows,
-                    "xlog_explanation_metadata_rows_consumed": explanation_metadata_rows,
-                    "accepted_claim_relation_rows_consumed": accepted_claim_rows,
-                    "bfo_claim_support_relation_rows_consumed": explanation_dependency_rows,
-                    "explanation_dependency_rows_consumed": explanation_dependency_rows,
-                    "blocked_explanation_rows_consumed": blocked_explanation_rows,
-                    "derived_explanation_identifier_rows": explanation_identifier_rows,
-                    "derived_selected_explanation_metadata_rows": selected_explanation_metadata_rows,
-                    "explanation_metadata_rows_consumed": explanation_metadata_rows,
-                    "derived_explanation_support_rows": explanation_support_rows,
-                    "support_relation_device_reads": explanation_dependency_rows,
-                    "final_xlog_explanation_rows": result.final_result_transfer.final_output_rows,
-                }),
-            );
-        }
-        _ => {}
     }
 }

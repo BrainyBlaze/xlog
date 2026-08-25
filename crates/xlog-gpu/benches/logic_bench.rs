@@ -1,4 +1,3 @@
-#![allow(clippy::arc_with_non_send_sync)]
 //! Performance benchmarks for XLOG GPU-accelerated logic evaluation.
 //!
 //! Run with: `cargo bench -p xlog-gpu`

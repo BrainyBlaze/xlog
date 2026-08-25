@@ -127,6 +127,17 @@ pub(crate) struct RelationSnapshot {
     metadata: Option<Arc<RelationMetadata>>,
 }
 
+pub(crate) struct RelationReplacementRequest<'a, 'py> {
+    pub(crate) relation: &'a str,
+    pub(crate) arguments: &'a [LogicArgumentSchema],
+    pub(crate) schema: &'a Schema,
+    pub(crate) provider: &'a Arc<CudaKernelProvider>,
+    pub(crate) relation_buffer: &'a CudaBuffer,
+    pub(crate) roles: &'a Bound<'py, PyAny>,
+    pub(crate) facts: &'a Bound<'py, PyAny>,
+    pub(crate) row_count: usize,
+}
+
 #[pyclass(frozen, module = "pyxlog._native")]
 pub struct RelationEvidence {
     snapshot: RelationSnapshot,
@@ -148,15 +159,18 @@ impl RelationEvidence {
 impl RelationMetadataStore {
     pub(crate) fn prepare_replacement(
         &self,
-        relation: &str,
-        arguments: &[LogicArgumentSchema],
-        schema: &Schema,
-        provider: &Arc<CudaKernelProvider>,
-        relation_buffer: &CudaBuffer,
-        roles: &Bound<'_, PyAny>,
-        facts: &Bound<'_, PyAny>,
-        row_count: usize,
+        request: RelationReplacementRequest<'_, '_>,
     ) -> PyResult<(Self, RelationSnapshot)> {
+        let RelationReplacementRequest {
+            relation,
+            arguments,
+            schema,
+            provider,
+            relation_buffer,
+            roles,
+            facts,
+            row_count,
+        } = request;
         require_positive_metadata_arity(relation, schema)?;
         validate_argument_contract(relation, arguments, schema)?;
 

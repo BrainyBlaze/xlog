@@ -72,3 +72,6 @@ harness = true
 name = "ilp_exact_nary_engine"
 path = "tests/ilp_exact_nary_engine.rs"
 harness = true
+
+[lints]
+workspace = true

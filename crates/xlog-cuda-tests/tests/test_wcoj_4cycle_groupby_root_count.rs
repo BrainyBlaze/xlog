@@ -386,7 +386,9 @@ fn wcoj_4cycle_groupby_root_count_measurement_fused_vs_unfused() {
     };
 
     type Rows = Vec<(u32, u32)>;
-    let cases: Vec<(&str, (Rows, Rows, Rows, Rows))> = vec![
+    type FourRelations = (Rows, Rows, Rows, Rows);
+    type BenchCase = (&'static str, FourRelations);
+    let cases: Vec<BenchCase> = vec![
         ("cycle4_hub_5k", hub(5_000)),
         ("cycle4_hub_10k", hub(10_000)),
     ];

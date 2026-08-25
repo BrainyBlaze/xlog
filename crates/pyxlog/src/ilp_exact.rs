@@ -65,7 +65,10 @@ impl CompiledIlpProgram {
         k_per_topology = 2,
         deterministic = true,
     ))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the Python binding exposes each exact-induction input as a named argument"
+    )]
     pub fn induce_exact_native<'py>(
         &mut self,
         py: Python<'py>,

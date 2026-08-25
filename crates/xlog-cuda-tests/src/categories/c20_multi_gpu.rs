@@ -113,7 +113,7 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let expected_count = (SIZE + 2) / 3;
+    let expected_count = SIZE.div_ceil(3);
     if ctx.device_row_count(&filtered) != expected_count as u64 {
         return TestResult::error(
             "test_single_gpu_baseline",
@@ -693,7 +693,7 @@ fn test_device_capability_query(ctx: &TestContext) -> TestResult {
 
     // Verify reasonable compute capability
     // CUDA compute capability ranges from about 2.0 to 9.x as of 2024
-    if major < 2 || major > 12 {
+    if !(2..=12).contains(&major) {
         return TestResult::error(
             "test_device_capability_query",
             start.elapsed(),

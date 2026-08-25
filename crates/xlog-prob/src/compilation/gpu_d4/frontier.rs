@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 
-use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchConfig};
+use cudarc::driver::{DeviceRepr, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{d4_kernels, D4_MODULE};
@@ -37,35 +37,23 @@ pub(crate) struct GpuFrontierBitset {
     true_bits: TrackedCudaSlice<u32>,
     false_bits: TrackedCudaSlice<u32>,
     pub(super) words_per_item: u32,
-    #[allow(dead_code)] // retained for diagnostics / future sizing checks
-    max_frontier_items: u32,
 }
 
 impl GpuFrontierBitset {
-    pub fn size_device(&self) -> &TrackedCudaSlice<u32> {
+    pub(crate) fn size_device(&self) -> &TrackedCudaSlice<u32> {
         &self.size
     }
 
-    pub fn true_bits_device(&self) -> &TrackedCudaSlice<u32> {
+    pub(crate) fn true_bits_device(&self) -> &TrackedCudaSlice<u32> {
         &self.true_bits
     }
 
-    pub fn false_bits_device(&self) -> &TrackedCudaSlice<u32> {
+    pub(crate) fn false_bits_device(&self) -> &TrackedCudaSlice<u32> {
         &self.false_bits
     }
 
-    pub fn words_per_item(&self) -> u32 {
+    pub(crate) fn words_per_item(&self) -> u32 {
         self.words_per_item
-    }
-
-    #[allow(dead_code)] // diagnostic accessor
-    pub fn max_frontier_items(&self) -> u32 {
-        self.max_frontier_items
-    }
-
-    #[allow(dead_code)] // diagnostic accessor
-    pub fn items_len(&self) -> usize {
-        self.items.len()
     }
 }
 
@@ -244,7 +232,6 @@ pub(crate) fn build_frontier_bitset(
         true_bits: cur_true,
         false_bits: cur_false,
         words_per_item,
-        max_frontier_items,
     })
 }
 

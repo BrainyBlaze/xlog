@@ -74,18 +74,10 @@ mod tests {
     #[test]
     fn accepts_documented_true_and_false_values_case_insensitively() {
         for value in ["1", "true", "TRUE", " yes ", "On"] {
-            assert_eq!(
-                parse_bool_value(TEST_ENV, value).unwrap(),
-                true,
-                "{value:?}"
-            );
+            assert!(parse_bool_value(TEST_ENV, value).unwrap(), "{value:?}");
         }
         for value in ["0", "false", "FALSE", " no ", "Off"] {
-            assert_eq!(
-                parse_bool_value(TEST_ENV, value).unwrap(),
-                false,
-                "{value:?}"
-            );
+            assert!(!parse_bool_value(TEST_ENV, value).unwrap(), "{value:?}");
         }
     }
 
@@ -129,12 +121,12 @@ mod tests {
         let _restore = EnvRestore::capture();
 
         std::env::set_var(TEST_ENV, "invalid");
-        assert_eq!(resolve_bool(Some(false), TEST_ENV, true).unwrap(), false);
+        assert!(!resolve_bool(Some(false), TEST_ENV, true).unwrap());
 
         std::env::set_var(TEST_ENV, "on");
-        assert_eq!(resolve_bool(None, TEST_ENV, false).unwrap(), true);
+        assert!(resolve_bool(None, TEST_ENV, false).unwrap());
 
         std::env::remove_var(TEST_ENV);
-        assert_eq!(resolve_bool(None, TEST_ENV, true).unwrap(), true);
+        assert!(resolve_bool(None, TEST_ENV, true).unwrap());
     }
 }

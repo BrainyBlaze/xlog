@@ -2604,7 +2604,10 @@ impl GpuSolverProductionAdapter {
     ///
     /// This is deliberately bounded to same-device-CNF reuse. The existing GPU proof trace is
     /// valid for the imported solve only when the base CNF buffers are the same.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "accepted-evidence reuse keeps the evidence provider, workspace, and both CNF decision-bound pairs explicit"
+    )]
     pub fn solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result(
         &mut self,
         provider: &CudaKernelProvider,
@@ -2641,7 +2644,10 @@ impl GpuSolverProductionAdapter {
     }
 
     /// Publish and reuse learned clauses once per accepted GPU epistemic candidate.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "multi-candidate reuse adds an accepted-result set to the same explicit source and target CNF contract"
+    )]
     pub fn solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results(
         &mut self,
         provider: &CudaKernelProvider,
@@ -2665,7 +2671,10 @@ impl GpuSolverProductionAdapter {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the internal multi-candidate operation carries the public evidence and source-target reuse contract unchanged"
+    )]
     fn solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results_impl(
         &mut self,
         provider: &CudaKernelProvider,
@@ -2734,7 +2743,10 @@ impl GpuSolverProductionAdapter {
     /// The batch evidence must prove every split component reused the existing
     /// single-plan GPU runtime path before each component is delegated to the
     /// existing multi-candidate learned-clause reuse adapter.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "batch-evidence reuse keeps the accepted batch proof, workspace, and both CNF decision-bound pairs explicit"
+    )]
     pub fn solve_learned_clause_reuse_with_gpu_batch_execution_result(
         &mut self,
         provider: &CudaKernelProvider,

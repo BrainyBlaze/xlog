@@ -414,10 +414,7 @@ mod tests {
         let _restore = EnvRestore::capture("XLOG_CSE");
         std::env::set_var("XLOG_CSE", "invalid");
         let config = RuntimeConfig::default().with_common_subexpression_elimination(Some(false));
-        assert_eq!(
-            config.resolved_common_subexpression_elimination().unwrap(),
-            false
-        );
+        assert!(!config.resolved_common_subexpression_elimination().unwrap());
     }
 
     #[test]

@@ -47,8 +47,7 @@ use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
-    DeviceMemoryResource, LogRecord, LoggingSink, SinkError, StreamId, StreamPool,
-    XlogDeviceRuntime,
+    LogRecord, LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
 };
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, JoinType};
 

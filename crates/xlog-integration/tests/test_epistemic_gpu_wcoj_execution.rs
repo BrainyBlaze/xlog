@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{DeviceMemoryResource, LogRecord, LoggingSink, SinkError};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider, GpuMemoryManager};
 use xlog_ir::{

@@ -104,7 +104,10 @@ impl Drop for ArrowDeviceArrayOwned {
 }
 
 impl ArrowDeviceArray {
-    #[allow(clippy::new_ret_no_self)]
+    #[expect(
+        clippy::new_ret_no_self,
+        reason = "the Arrow C device ABI constructor returns its paired FFI schema and array handles"
+    )]
     pub fn new(
         device_type: i32,
         device_id: i32,

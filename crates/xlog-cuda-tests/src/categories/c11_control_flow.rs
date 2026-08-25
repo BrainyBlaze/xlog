@@ -512,7 +512,7 @@ fn test_alternating_predicate(ctx: &TestContext) -> TestResult {
 
         // Alternating mask: 1, 0, 1, 0, ...
         let mask: Vec<u8> = (0..size).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect();
-        let expected_count = (size + 1) / 2;
+        let expected_count = size.div_ceil(2);
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
             Ok(f) => f,
@@ -665,7 +665,7 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
         let mask1: Vec<u8> = (0..size)
             .map(|i| {
                 let hash = ((i as u64 * 1103515245 + 12345) >> 16) & 0x7FFF;
-                if hash % 2 == 0 {
+                if hash.is_multiple_of(2) {
                     1
                 } else {
                     0

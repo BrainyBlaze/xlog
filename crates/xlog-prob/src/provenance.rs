@@ -21,10 +21,15 @@ use crate::aggregates::{AggState, AggStateKey};
 use crate::pir::{ChoiceVarId, LeafId, PirGraph, PirNodeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Canonical ground value used by probabilistic provenance.
 pub enum Value {
+    /// Signed 64-bit integer.
     I64(i64),
+    /// IEEE-754 `f64` stored by its canonical bit representation.
     F64(u64),
+    /// Interned symbol identifier.
     Symbol(u32),
+    /// Source string value.
     String(String),
 }
 
@@ -51,12 +56,16 @@ impl From<String> for Value {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Canonical ground predicate application.
 pub struct GroundAtom {
+    /// Predicate name.
     pub predicate: String,
+    /// Ground arguments in declaration order.
     pub args: Vec<Value>,
 }
 
 impl GroundAtom {
+    /// Constructs a ground atom from a predicate and arguments.
     pub fn new(predicate: impl Into<String>, args: Vec<Value>) -> Self {
         Self {
             predicate: predicate.into(),
@@ -81,13 +90,18 @@ pub struct ChoiceSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Outcome of attempting finite-domain aggregate lifting.
 pub enum AggregateLiftStatus {
+    /// Dynamic-programming aggregate lifting was applied.
     Fired,
+    /// The domain was valid but required exact outcome enumeration.
     FallbackExactEnumeration,
+    /// Lifting was inapplicable and no lifted aggregate was produced.
     Declined,
 }
 
 impl AggregateLiftStatus {
+    /// Returns the stable machine-readable status name.
     pub fn as_str(self) -> &'static str {
         match self {
             AggregateLiftStatus::Fired => "fired",
@@ -98,18 +112,31 @@ impl AggregateLiftStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Diagnostic record for one aggregate-lifting decision.
 pub struct AggregateLiftReport {
+    /// Predicate containing the aggregate.
     pub predicate: String,
+    /// Canonical values that identify the aggregate group.
     pub group_key: Vec<Value>,
+    /// Aggregate operator name.
     pub operator: String,
+    /// Description of the finite-domain evidence used for lifting.
     pub finite_domain_source: String,
+    /// Number of rows whose membership is deterministic.
     pub deterministic_rows: usize,
+    /// Number of rows whose membership is probabilistic.
     pub uncertain_rows: usize,
+    /// Number of distinct values in the finite aggregate domain.
     pub domain_size: usize,
+    /// Configured maximum number of dynamic-programming states.
     pub cap: usize,
+    /// Result of the lifting attempt.
     pub status: AggregateLiftStatus,
+    /// Human-readable explanation of the selected outcome.
     pub reason: String,
+    /// Number of outcomes a naive exact enumeration would consider.
     pub naive_outcomes: u128,
+    /// Number of states materialized by dynamic programming.
     pub dynamic_programming_states: usize,
 }
 
@@ -389,19 +416,28 @@ impl PirBuilder {
 /// Provenance extraction result: PIR graph plus per-tuple formulas and weight metadata.
 #[derive(Debug)]
 pub struct Provenance {
+    /// Probabilistic intermediate-representation graph.
     pub pir: PirGraph,
+    /// Bernoulli probability assigned to each independent leaf.
     pub leaf_probs: BTreeMap<LeafId, f64>,
+    /// False and true branch probabilities for each choice variable.
     pub choice_probs: BTreeMap<ChoiceVarId, (f64, f64)>,
     tuple_formulas: BTreeMap<GroundAtom, PirNodeId>,
+    /// Ground probabilistic queries in source order.
     pub queries: Vec<GroundAtom>,
+    /// Ground evidence atoms paired with their asserted truth values.
     pub evidence: Vec<(GroundAtom, bool)>,
+    /// Source-facing atom represented by each independent leaf.
     pub leaf_atoms: BTreeMap<LeafId, GroundAtom>,
+    /// Annotated-disjunction metadata for each choice variable.
     pub choice_sources: BTreeMap<ChoiceVarId, ChoiceSource>,
+    /// Aggregate-lifting decisions made during extraction.
     pub aggregate_lifting: Vec<AggregateLiftReport>,
     schemas: HashMap<String, Schema>,
 }
 
 impl Provenance {
+    /// Returns the provenance formula for a ground query after schema canonicalization.
     pub fn query_formula(&self, predicate: &str, args: &[Value]) -> Option<PirNodeId> {
         let atom = self
             .canonical_atom(&GroundAtom::new(predicate, args.to_vec()))
@@ -414,10 +450,12 @@ impl Provenance {
         Ok(GroundAtom::new(atom.predicate.clone(), args))
     }
 
+    /// Returns the source-facing atom represented by `leaf`.
     pub fn leaf_atom(&self, leaf: LeafId) -> Option<&GroundAtom> {
         self.leaf_atoms.get(&leaf)
     }
 
+    /// Returns annotated-disjunction metadata for `var`.
     pub fn choice_source(&self, var: ChoiceVarId) -> Option<&ChoiceSource> {
         self.choice_sources.get(&var)
     }
@@ -433,6 +471,7 @@ impl Provenance {
     }
 }
 
+/// Parses XLOG source and extracts its canonical probabilistic provenance.
 pub fn extract_from_source(source: &str) -> Result<Provenance> {
     let program = xlog_logic::parse_program(source)?;
     extract_from_program(&program)
@@ -618,6 +657,7 @@ pub(crate) fn presentation_atom_from_canonical(
     Ok(atom)
 }
 
+/// Extracts canonical probabilistic provenance from a validated XLOG program.
 pub fn extract_from_program(program: &Program) -> Result<Provenance> {
     // Stratify first to fail fast on unsupported recursion patterns.
     let _ = stratify(program)?;
@@ -1823,13 +1863,14 @@ fn eval_aggregate_head_provenance(
 ///
 /// Returns the folded outcomes as `(aggregate states, any-uncertain-row-selected,
 /// proof formula)` triples plus the total number of DP states visited.
-#[allow(clippy::type_complexity)]
+type FactorizedAggregateOutcome = (Vec<AggState>, bool, PirNodeId);
+
 fn factorized_aggregate_outcomes(
     agg_specs: &[(AggOp, String)],
     always_rows: &[AggregateProvRow],
     uncertain_rows: &[AggregateProvRow],
     builder: &mut PirBuilder,
-) -> Result<(Vec<(Vec<AggState>, bool, PirNodeId)>, usize)> {
+) -> Result<(Vec<FactorizedAggregateOutcome>, usize)> {
     use std::collections::btree_map::Entry;
 
     fn states_key(states: &[AggState]) -> Vec<AggStateKey> {
@@ -1988,7 +2029,10 @@ fn materialize_count_lift_tuple(
     Ok(tuple)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "aggregate lift reporting records the exact group, operator set, row counts, status, cap, and dynamic-programming state count"
+)]
 fn record_aggregate_lift_reports(
     aggregate_lifting: &mut Vec<AggregateLiftReport>,
     head: &Atom,

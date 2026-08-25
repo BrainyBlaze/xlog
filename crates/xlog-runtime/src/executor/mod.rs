@@ -393,8 +393,8 @@ pub struct Executor {
 /// instrumentation.
 #[cfg(feature = "recursive-stats-trace")]
 #[derive(Debug, Default, Clone)]
-#[allow(missing_docs)]
 pub struct RecursiveStatsTrace {
+    /// Ordered snapshots captured at recursive cardinality update boundaries.
     pub entries: Vec<RecursiveStatsTraceEntry>,
 }
 
@@ -407,14 +407,20 @@ pub struct RecursiveStatsTrace {
 /// assertions only see delta-update snapshots.
 #[cfg(feature = "recursive-stats-trace")]
 #[derive(Debug, Clone)]
-#[allow(missing_docs)]
 pub struct RecursiveStatsTraceEntry {
+    /// Zero-based fixpoint iteration; zero denotes the seed pass.
     pub iteration: usize,
+    /// Recursive predicate whose cardinalities were recorded.
     pub pred: String,
+    /// Relation identifier for the accumulated full relation.
     pub full_rel: RelId,
+    /// Relation identifier for the current delta relation.
     pub delta_rel: RelId,
+    /// Full-relation cardinality visible at this boundary.
     pub full_rows: u64,
+    /// Delta-relation cardinality visible at this boundary.
     pub delta_rows: u64,
+    /// Recursive update phase that produced this snapshot.
     pub phase: RecursiveStatsPhase,
     /// Optional binary-join estimate the cost model would use
     /// for the variant body's first binary hop. Triangle:
@@ -426,7 +432,7 @@ pub struct RecursiveStatsTraceEntry {
 
 #[cfg(feature = "recursive-stats-trace")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
+/// Recursive cardinality update boundary represented by a trace entry.
 pub enum RecursiveStatsPhase {
     /// Seed pass — full_rel + delta_rel both updated; trace
     /// entry contains both row counts. iteration == 0.

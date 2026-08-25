@@ -983,7 +983,10 @@ impl Optimizer {
     }
 
     /// Estimates cost for a join operation.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "join cost estimation consumes both child costs, both plans, both key sets, and the join semantics as distinct inputs"
+    )]
     fn estimate_join_cost(
         &self,
         left_cost: PlanCost,
@@ -2450,17 +2453,16 @@ mod reorder {
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    #[allow(clippy::enum_variant_names)]
     enum TriangleInnerPair {
-        YShared,
-        XShared,
-        ZShared,
+        SharedY,
+        SharedX,
+        SharedZ,
     }
 
     fn build_triangle_body(s: &TriangleSemantics, inner_pair: TriangleInnerPair) -> RirNode {
         let mk_scan = |r: RelId| RirNode::Scan { rel: r };
         match inner_pair {
-            TriangleInnerPair::YShared => {
+            TriangleInnerPair::SharedY => {
                 let inner = RirNode::Join {
                     left: Box::new(mk_scan(s.rel_xy)),
                     right: Box::new(mk_scan(s.rel_yz)),
@@ -2484,7 +2486,7 @@ mod reorder {
                     ],
                 }
             }
-            TriangleInnerPair::XShared => {
+            TriangleInnerPair::SharedX => {
                 let inner = RirNode::Join {
                     left: Box::new(mk_scan(s.rel_xy)),
                     right: Box::new(mk_scan(s.rel_xz)),
@@ -2508,7 +2510,7 @@ mod reorder {
                     ],
                 }
             }
-            TriangleInnerPair::ZShared => {
+            TriangleInnerPair::SharedZ => {
                 let inner = RirNode::Join {
                     left: Box::new(mk_scan(s.rel_xz)),
                     right: Box::new(mk_scan(s.rel_yz)),
@@ -2535,7 +2537,7 @@ mod reorder {
         }
     }
 
-    pub fn try_reorder_triangle(body: &RirNode, stats: &StatsManager) -> Option<RirNode> {
+    pub(super) fn try_reorder_triangle(body: &RirNode, stats: &StatsManager) -> Option<RirNode> {
         let s = match_and_infer_triangle(body)?;
         let _ = (
             populated_card(stats, s.rel_xy)?,
@@ -2545,12 +2547,12 @@ mod reorder {
         let est_y = stats.estimate_join_cardinality(s.rel_xy, s.rel_yz, &[1], &[0]);
         let est_x = stats.estimate_join_cardinality(s.rel_xy, s.rel_xz, &[0], &[0]);
         let est_z = stats.estimate_join_cardinality(s.rel_yz, s.rel_xz, &[1], &[1]);
-        let mut best = (TriangleInnerPair::YShared, est_y);
+        let mut best = (TriangleInnerPair::SharedY, est_y);
         if est_x < best.1 {
-            best = (TriangleInnerPair::XShared, est_x);
+            best = (TriangleInnerPair::SharedX, est_x);
         }
         if est_z < best.1 {
-            best = (TriangleInnerPair::ZShared, est_z);
+            best = (TriangleInnerPair::SharedZ, est_z);
         }
         let candidate = build_triangle_body(&s, best.0);
         // Skip when the candidate is structurally identical to
@@ -2809,7 +2811,7 @@ mod reorder {
         }
     }
 
-    pub fn try_reorder_4cycle(body: &RirNode, stats: &StatsManager) -> Option<RirNode> {
+    pub(super) fn try_reorder_4cycle(body: &RirNode, stats: &StatsManager) -> Option<RirNode> {
         let s = match_and_infer_4cycle(body)?;
         let _ = (
             populated_card(stats, s.rel_wx)?,

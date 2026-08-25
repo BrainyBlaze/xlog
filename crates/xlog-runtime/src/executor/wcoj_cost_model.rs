@@ -1,14 +1,8 @@
 use xlog_core::{CostModelKind, RelId, RuntimeConfig};
-use xlog_cuda::device_runtime::StreamId;
 use xlog_stats::StatsManager;
 
-use super::wcoj_dispatch::WcojKeyWidth;
-
-#[allow(dead_code)]
 pub(super) struct WcojDispatchCtx<'a> {
     pub stats: &'a StatsManager,
-    pub launch_stream: StreamId,
-    pub width: WcojKeyWidth,
     pub slot_rels: &'a [RelId],
 }
 
@@ -291,7 +285,7 @@ fn best_greedy_peak(
     for leader in 0..n {
         if let Some((order, peak)) = greedy_from_leader(ctx, atom_vars, cards, constrained, leader)
         {
-            if best.as_ref().map_or(true, |(_, bp)| peak < *bp) {
+            if best.as_ref().is_none_or(|(_, bp)| peak < *bp) {
                 best = Some((order, peak));
             }
         }
@@ -326,7 +320,7 @@ fn greedy_from_leader(
                 continue;
             }
             let new_running = estimate_join_onto_prefix(ctx, atom_vars, cards, &order, running, a);
-            if choice.as_ref().map_or(true, |(_, c)| new_running < *c) {
+            if choice.as_ref().is_none_or(|(_, c)| new_running < *c) {
                 choice = Some((a, new_running));
             }
         }
@@ -452,11 +446,11 @@ fn pairwise_estimate(
     let stats_present = ctx
         .stats
         .get_relation_stats(ctx.slot_rels[p])
-        .map_or(false, |s| s.cardinality > 0)
+        .is_some_and(|s| s.cardinality > 0)
         && ctx
             .stats
             .get_relation_stats(ctx.slot_rels[a])
-            .map_or(false, |s| s.cardinality > 0);
+            .is_some_and(|s| s.cardinality > 0);
     if stats_present {
         ctx.stats
             .estimate_join_cardinality(ctx.slot_rels[p], ctx.slot_rels[a], p_keys, a_keys)
@@ -472,21 +466,11 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     fn triangle_ctx<'a>(stats: &'a StatsManager, slot_rels: &'a [RelId; 3]) -> WcojDispatchCtx<'a> {
-        WcojDispatchCtx {
-            stats,
-            launch_stream: StreamId::DEFAULT,
-            width: WcojKeyWidth::FourByte,
-            slot_rels,
-        }
+        WcojDispatchCtx { stats, slot_rels }
     }
 
     fn cycle4_ctx<'a>(stats: &'a StatsManager, slot_rels: &'a [RelId; 4]) -> WcojDispatchCtx<'a> {
-        WcojDispatchCtx {
-            stats,
-            launch_stream: StreamId::DEFAULT,
-            width: WcojKeyWidth::FourByte,
-            slot_rels,
-        }
+        WcojDispatchCtx { stats, slot_rels }
     }
 
     fn stats_with_cards(cards: &[u64]) -> StatsManager {
@@ -648,8 +632,6 @@ mod tests {
         let slots = [RelId(0), RelId(1), RelId(2), RelId(3), RelId(4)];
         let ctx = WcojDispatchCtx {
             stats: &stats,
-            launch_stream: StreamId::DEFAULT,
-            width: WcojKeyWidth::FourByte,
             slot_rels: &slots,
         };
         let m = CardinalityAwareCostModel::default();
@@ -661,8 +643,6 @@ mod tests {
         let stats_big = stats_with_cards(&[10, 10, 2_000_000, 10, 10]);
         let ctx_big = WcojDispatchCtx {
             stats: &stats_big,
-            launch_stream: StreamId::DEFAULT,
-            width: WcojKeyWidth::FourByte,
             slot_rels: &slots,
         };
         assert!(
@@ -701,12 +681,7 @@ mod tests {
     // -- Free Join order planner ------------------------------------------
 
     fn nway_ctx<'a>(stats: &'a StatsManager, slot_rels: &'a [RelId]) -> WcojDispatchCtx<'a> {
-        WcojDispatchCtx {
-            stats,
-            launch_stream: StreamId::DEFAULT,
-            width: WcojKeyWidth::FourByte,
-            slot_rels,
-        }
+        WcojDispatchCtx { stats, slot_rels }
     }
 
     fn slots(n: usize) -> Vec<RelId> {

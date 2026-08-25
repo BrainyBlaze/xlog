@@ -12,6 +12,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use xlog_core::{ScalarType, XlogError};
 
+/// Predicate and function names mapped to the source module selected by import validation.
+pub type ValidatedImports = (HashMap<String, ModulePath>, HashMap<String, ModulePath>);
+
 fn collect_term_predicate_dependencies(term: &Term, predicates: &mut HashSet<String>) {
     match term {
         Term::List(items) => {
@@ -670,22 +673,17 @@ impl ModuleResolver {
     /// merging. Constants, head variables typed by ordinary body atoms or
     /// built-in arithmetic bindings, and aggregate result types supply evidence;
     /// unanchored variables do not.
-    #[allow(clippy::type_complexity)]
-    pub fn validate_imports(
-        &self,
-        program: &Program,
-    ) -> Result<(HashMap<String, ModulePath>, HashMap<String, ModulePath>), ModuleError> {
+    pub fn validate_imports(&self, program: &Program) -> Result<ValidatedImports, ModuleError> {
         let imports = self.resolved_imports_for_program(program)?;
         let validated = self.validate_resolved_imports(&imports)?;
         self.validate_program_against_imports(program, &imports)?;
         Ok(validated)
     }
 
-    #[allow(clippy::type_complexity)]
     fn validate_resolved_imports(
         &self,
         imports: &[ResolvedImport],
-    ) -> Result<(HashMap<String, ModulePath>, HashMap<String, ModulePath>), ModuleError> {
+    ) -> Result<ValidatedImports, ModuleError> {
         let mut imported_predicates: HashMap<String, ModulePath> = HashMap::new();
         let mut imported_functions: HashMap<String, ModulePath> = HashMap::new();
         let mut function_providers: HashMap<String, ImportProvider> = HashMap::new();

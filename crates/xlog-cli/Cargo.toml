@@ -43,3 +43,6 @@ tempfile = "3"
 [features]
 default = []
 host-io = ["xlog-prob/host-io"]
+
+[lints]
+workspace = true

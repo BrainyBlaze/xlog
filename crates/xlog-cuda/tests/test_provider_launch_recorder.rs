@@ -45,9 +45,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, XlogError};
-use xlog_cuda::device_runtime::{
-    DeviceMemoryResource, LogRecord, LoggingSink, SinkError, StreamId,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamId};
 use xlog_cuda::CudaProviderBuilder;
 
 const BYTES: usize = 4096;
@@ -4890,8 +4888,6 @@ fn provider_hash_join_inner_csm_v2_with_index_recorded_survives_drop_and_reuse()
     );
 }
 
-/// Negative test: indexed CSM Inner against a no-runtime
-/// manager.
 // ───────────────────────────────────────────────────────────
 // Non-indexed LeftOuter CSM
 // (`hash_join_left_outer_v2_count_scan_materialize_recorded`)
@@ -5557,8 +5553,6 @@ fn provider_hash_join_left_outer_csm_v2_recorded_empty_right() {
     assert_eq!(observed, expected, "empty-right LeftOuter result mismatch");
 }
 
-/// Legacy-manager rejection: CSM LeftOuter must surface a
-/// helpful Kernel error when the manager has no runtime.
 // ───────────────────────────────────────────────────────────
 // Indexed LeftOuter CSM
 // (`hash_join_left_outer_v2_with_index_count_scan_materialize_recorded`)

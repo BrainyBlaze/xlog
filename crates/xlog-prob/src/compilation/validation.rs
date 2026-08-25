@@ -62,7 +62,9 @@ pub struct GpuEquivalenceConfig {
 
 /// GPU-resident equivalence queries + device metadata required to solve them without host reads.
 pub struct GpuEquivalenceQueries {
+    /// CNF query that is satisfiable exactly when the source entails a circuit counterexample.
     pub q1: GpuCnf,
+    /// CNF query that is satisfiable exactly when the circuit entails a source counterexample.
     pub q2: GpuCnf,
     /// Base variable id for the ¬phi selector vars in q2 (len=1, device-resident).
     pub q2_unsat_var_base: TrackedCudaSlice<u32>,
@@ -1031,6 +1033,7 @@ pub(crate) fn check_verify_size_bound(phi: &GpuCnf, context: &str) -> Result<()>
     )
 }
 
+/// Proves source-CNF and circuit equivalence with the GPU CDCL verifier.
 pub fn validate_equivalence_gpu(
     phi: &GpuCnf,
     phi_decision_var_limit: &TrackedCudaSlice<u32>,
@@ -1042,6 +1045,7 @@ pub fn validate_equivalence_gpu(
     check_equivalence_gpu(phi, phi_decision_var_limit, circuit, provider, config)
 }
 
+/// Proves equivalence only when the device-resident compilation gate is set.
 pub fn validate_equivalence_gpu_gated(
     phi: &GpuCnf,
     phi_decision_var_limit: &TrackedCudaSlice<u32>,

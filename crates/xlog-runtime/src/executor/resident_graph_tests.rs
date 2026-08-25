@@ -2,11 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, InMemorySink, LogAction,
-    LoggingResource, LoggingSink, StreamPool, XlogDeviceRuntime,
-};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::device_runtime::{InMemorySink, LogAction, LoggingSink, XlogDeviceRuntime};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{ExecutionPlan, GeneratedQueryRuleProvenance};
 use xlog_logic::Compiler;
 
@@ -1340,7 +1337,7 @@ fn schema_equations_accept_stable_collapse_and_acyclic_lineage_but_decline_ambig
             let relation = inherited
                 .executor
                 .store()
-                .get(*name)
+                .get(name)
                 .unwrap_or_else(|| panic!("resident executor did not install {name}"));
             assert_eq!(relation.schema(), schema, "schema mismatch for {name}");
             assert_eq!(

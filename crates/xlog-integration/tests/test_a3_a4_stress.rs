@@ -1,5 +1,3 @@
-#![allow(clippy::ptr_arg)]
-
 //! A3 / A4 cross-stream lifetime stress harness.
 //!
 //! Closes v0.6.0 release blocker #2: the recorded launch
@@ -256,7 +254,7 @@ fn build_reach_edges(p: GraphParams) -> Vec<(u32, u32)> {
 // even across mildly different toolchain builds.
 // ---------------------------------------------------------------
 
-fn checksum_pairs(pairs: &mut Vec<(u32, u32)>) -> u64 {
+fn checksum_pairs(pairs: &mut [(u32, u32)]) -> u64 {
     pairs.sort();
     let mut h: u64 = 0xcbf29ce484222325;
     for (a, b) in pairs.iter() {

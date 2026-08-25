@@ -1,5 +1,4 @@
 // crates/xlog-integration/tests/test_wcoj_recursive_dispatch.rs
-#![allow(clippy::doc_lazy_continuation)]
 
 //! Recursive-SCC WCOJ dispatch coverage.
 //!
@@ -61,13 +60,12 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct RuntimeBackedFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
+    _pool: Arc<StreamPool>,
 }
 
 fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
@@ -82,11 +80,11 @@ fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
     let runtime = Arc::clone(memory.runtime()?);
     let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeBackedFixture {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
-        pool,
+        _pool: pool,
     })
 }
 
@@ -820,8 +818,10 @@ fn linear_recursive_4cycle_dispatches_on_seeding_and_per_variant() {
 /// (`r1`, `r2`) are recursive — they receive feedback from `cyc`
 /// via SHIFTED projections so iter 1 produces non-empty deltas
 /// for BOTH:
-///   * `r1(W, X) :- cyc(Y, W, X, Z)` — extracts cyc cols 1,2.
-///   * `r2(A, B) :- cyc(W, X, A, B)` — extracts cyc cols 2,3.
+///
+/// - `r1(W, X) :- cyc(Y, W, X, Z)` — extracts cyc cols 1,2.
+/// - `r2(A, B) :- cyc(W, X, A, B)` — extracts cyc cols 2,3.
+///
 /// The other two atoms (`r3`, `r4`) are extensional. Under
 /// semi-naive occurrence semantics, the occurrence-aware recursive
 /// promoter admits this body because the recursive Scans target
@@ -830,12 +830,13 @@ fn linear_recursive_4cycle_dispatches_on_seeding_and_per_variant() {
 /// occurrence with a non-empty delta and dispatches WCOJ on each.
 ///
 /// Counter dynamics:
-///   * Seeding pass (`recursive.rs:331-347`): cyc rule fires
-///     once on its full body — counter += 1.
-///   * Iteration 1 (`recursive.rs:455-540`): both `r1_init` and
-///     `r2_init` are non-empty AND the shifted projections of
-///     the seeded `cyc` rows lie outside the initial r1/r2, so
-///     two variants fire — counter += 2.
+///
+/// - Seeding pass (`recursive.rs:331-347`): cyc rule fires
+///   once on its full body — counter += 1.
+/// - Iteration 1 (`recursive.rs:455-540`): both `r1_init` and
+///   `r2_init` are non-empty AND the shifted projections of
+///   the seeded `cyc` rows lie outside the initial r1/r2, so
+///   two variants fire — counter += 2.
 ///
 /// Total: counter `>= 2` (in fact `== 3` for this fixture).
 const MULTIREC_4CYCLE: &str = r#"

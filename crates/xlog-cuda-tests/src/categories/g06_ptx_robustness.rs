@@ -145,15 +145,15 @@ fn test_kernel_single_level(ctx: &TestContext) -> TestResult {
 
     // All 100 literals should have the same value: ln(0.5)
     let expected_lit_val = 0.5_f64.ln();
-    for i in 0..100 {
-        let diff = (values[i] - expected_lit_val).abs();
+    for (i, &actual) in values.iter().take(100).enumerate() {
+        let diff = (actual - expected_lit_val).abs();
         if diff > 1e-10 {
             return TestResult::error(
                 "test_kernel_single_level",
                 start.elapsed(),
                 format!(
                     "Literal {} should have value {}, got {} (diff={})",
-                    i, expected_lit_val, values[i], diff
+                    i, expected_lit_val, actual, diff
                 ),
             );
         }
@@ -659,15 +659,15 @@ fn test_kernel_many_literals(ctx: &TestContext) -> TestResult {
 
     // All 1000 literals should have ln(0.5)
     let expected_lit_val = 0.5_f64.ln();
-    for i in 0..1000 {
-        let diff = (values[i] - expected_lit_val).abs();
+    for (i, &actual) in values.iter().take(1000).enumerate() {
+        let diff = (actual - expected_lit_val).abs();
         if diff > 1e-10 {
             return TestResult::error(
                 "test_kernel_many_literals",
                 start.elapsed(),
                 format!(
                     "Literal {} should have value {}, got {} (diff={})",
-                    i, expected_lit_val, values[i], diff
+                    i, expected_lit_val, actual, diff
                 ),
             );
         }
@@ -784,15 +784,15 @@ fn test_kernel_log_underflow(ctx: &TestContext) -> TestResult {
     }
 
     // Verify literals have the extreme value (should be preserved exactly)
-    for i in 0..2 {
-        let diff = (values[i] - log_tiny).abs();
+    for (i, &actual) in values.iter().take(2).enumerate() {
+        let diff = (actual - log_tiny).abs();
         if diff > 1e-10 {
             return TestResult::error(
                 "test_kernel_log_underflow",
                 start.elapsed(),
                 format!(
                     "Literal {} should have value {} (log(1e-300)), got {} (diff={})",
-                    i, log_tiny, values[i], diff
+                    i, log_tiny, actual, diff
                 ),
             );
         }

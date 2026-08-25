@@ -15,15 +15,21 @@ use crate::compilation::gpu_pir::GpuPirRoots;
 
 /// GPU-resident CNF variable tables for PIR ids.
 pub struct GpuCnfVarTables {
+    /// DIMACS variable assigned to each PIR node.
     pub node_var: TrackedCudaSlice<u32>,
+    /// DIMACS variable assigned to each probabilistic leaf.
     pub leaf_var: TrackedCudaSlice<u32>,
+    /// DIMACS variable assigned to each choice variable.
     pub choice_var: TrackedCudaSlice<u32>,
+    /// Largest assigned DIMACS variable.
     pub max_var: u32,
 }
 
 /// GPU-resident CNF encoding bundle (CNF + var tables).
 pub struct GpuCnfEncoding {
+    /// Encoded clauses and offsets resident on the device.
     pub cnf: GpuCnf,
+    /// Maps from PIR identities to DIMACS variables.
     pub vars: GpuCnfVarTables,
     /// Largest variable id that is semantically meaningful and should be eligible for branching
     /// in the GPU CDCL verifier (len = 1, device-resident).

@@ -541,11 +541,10 @@ fn wcoj_triangle_groupby_root_agg_measurement_fused_vs_unfused() {
         )
     };
 
-    let cases: Vec<(
-        &str,
-        AggOp,
-        (Vec<(u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32)>),
-    )> = vec![
+    type Rows = Vec<(u32, u32)>;
+    type TriangleRelations = (Rows, Rows, Rows);
+    type BenchCase = (&'static str, AggOp, TriangleRelations);
+    let cases: Vec<BenchCase> = vec![
         ("sum_z_hub_10k_z16", AggOp::Sum, hub(10_000, 16)),
         ("sum_z_hub_50k_z16", AggOp::Sum, hub(50_000, 16)),
         ("min_z_hub_10k_z16", AggOp::Min, hub(10_000, 16)),

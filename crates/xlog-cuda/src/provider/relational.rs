@@ -2219,7 +2219,10 @@ impl super::CudaKernelProvider {
         self.apply_permutation_gpu(input, &indices_a)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "radix sorting keeps each caller-owned ping-pong and scan scratch buffer explicit"
+    )]
     fn radix_sort_u32_pairs_with_scratch(
         &self,
         keys_a: &mut crate::memory::TrackedCudaSlice<u32>,
@@ -3878,7 +3881,10 @@ impl super::CudaKernelProvider {
     /// Hash join using a cached build-side join index.
     ///
     /// The `index` must have been built for the same `right` buffer and `right_keys`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the cached join entry accepts both relations, their key projections, join semantics, cache identity, and output bound"
+    )]
     pub fn hash_join_v2_with_index(
         &self,
         left: &CudaBuffer,
@@ -6373,7 +6379,10 @@ impl super::CudaKernelProvider {
     /// `block_sums` allocations created by the inner scan are
     /// recorded directly inside
     /// [`Self::multiblock_scan_u32_view_inplace_on_stream`].
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "recorded radix sorting keeps scratch ownership plus the exact stream and runtime explicit"
+    )]
     fn radix_sort_u32_pairs_with_scratch_on_stream(
         &self,
         keys_a: &mut TrackedCudaSlice<u32>,
@@ -8661,7 +8670,10 @@ impl super::CudaKernelProvider {
         Ok(Some(result))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "cached CUDA graph replay must update every input, table, capacity, launch, stream, and runtime binding explicitly"
+    )]
     fn launch_csm_cuda_graph_entry(
         &self,
         entry: &mut CsmCudaGraphEntry,
@@ -9646,7 +9658,10 @@ impl super::CudaKernelProvider {
     /// recorders — dropping the index after the call returns
     /// is correctly serialized through the runtime's
     /// record-all + wait-all event chain.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the indexed recorded inner join exposes both relation/key pairs, cache identity, output bound, and stream"
+    )]
     pub fn hash_join_inner_v2_with_index_count_scan_materialize_recorded(
         &self,
         left: &CudaBuffer,
@@ -10114,7 +10129,10 @@ impl super::CudaKernelProvider {
     ///     `right_keys`.
     ///   * `left_packed.key_bytes` mismatches `index.key_bytes`.
     ///   * Preflight / kernel / commit failures.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the indexed recorded outer join exposes both relation/key pairs, cache identity, output bound, and stream"
+    )]
     pub fn hash_join_left_outer_v2_with_index_count_scan_materialize_recorded(
         &self,
         left: &CudaBuffer,
@@ -10851,7 +10869,10 @@ impl super::CudaKernelProvider {
     /// ≤4 keys, key-type match, row-count caps) are validated
     /// upstream by the public `hash_join_v2_with_limit` and inside
     /// each per-type method.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the recorded join dispatcher keeps both relation/key pairs, semantics, output bound, and stream explicit"
+    )]
     pub fn hash_join_v2_recorded(
         &self,
         left: &CudaBuffer,
@@ -11859,7 +11880,10 @@ impl super::CudaKernelProvider {
     /// through the legacy indexed recorded methods. `Semi` /
     /// `Anti` always route through their existing indexed
     /// recorded methods — no CSM implementation exists for them.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the indexed recorded dispatcher keeps both relation/key pairs, semantics, cache identity, output bound, and stream explicit"
+    )]
     pub fn hash_join_v2_with_index_recorded(
         &self,
         left: &CudaBuffer,
