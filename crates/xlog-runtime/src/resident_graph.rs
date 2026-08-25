@@ -5,7 +5,7 @@
 //! enqueues CUDA work.  Unsupported shapes remain on the existing executor.
 
 use std::collections::{BTreeSet, HashMap};
-use std::fmt;
+use std::fmt::{self, Write};
 use std::sync::Arc;
 
 #[cfg(all(test, feature = "resident-graph-tests"))]
@@ -130,6 +130,194 @@ pub struct ResidentGraphCertifiedPlan {
     certificate: ResidentGraphRouteCertificate,
 }
 
+fn append_resident_expression_descriptor(descriptor: &mut String, expression: &Expr) {
+    fn schedule_binary<'a>(pending: &mut Vec<&'a Expr>, left: &'a Expr, right: &'a Expr) {
+        pending.push(right);
+        pending.push(left);
+    }
+
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            Expr::Column(index) => write!(descriptor, "column:{index};").unwrap(),
+            Expr::Const(value) => {
+                descriptor.push_str("constant:");
+                match value {
+                    ConstValue::U32(value) => write!(descriptor, "u32:{value};").unwrap(),
+                    ConstValue::U64(value) => write!(descriptor, "u64:{value};").unwrap(),
+                    ConstValue::I32(value) => write!(descriptor, "i32:{value};").unwrap(),
+                    ConstValue::I64(value) => write!(descriptor, "i64:{value};").unwrap(),
+                    ConstValue::F32(value) => {
+                        write!(descriptor, "f32:{:08x};", value.to_bits()).unwrap()
+                    }
+                    ConstValue::F64(value) => {
+                        write!(descriptor, "f64:{:016x};", value.to_bits()).unwrap()
+                    }
+                    ConstValue::Bool(value) => write!(descriptor, "bool:{value};").unwrap(),
+                    ConstValue::Symbol(value) => {
+                        write!(descriptor, "symbol:{}:", value.len()).unwrap();
+                        descriptor.push_str(value);
+                        descriptor.push(';');
+                    }
+                }
+            }
+            Expr::Compare { left, op, right } => {
+                write!(descriptor, "compare:{op:?};").unwrap();
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::And(items) => {
+                write!(descriptor, "and:{};", items.len()).unwrap();
+                pending.extend(items.iter().rev());
+            }
+            Expr::Or(items) => {
+                write!(descriptor, "or:{};", items.len()).unwrap();
+                pending.extend(items.iter().rev());
+            }
+            Expr::Not(inner) => {
+                descriptor.push_str("not;");
+                pending.push(inner);
+            }
+            Expr::Add(left, right) => {
+                descriptor.push_str("add;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Sub(left, right) => {
+                descriptor.push_str("subtract;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Mul(left, right) => {
+                descriptor.push_str("multiply;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Div(left, right) => {
+                descriptor.push_str("divide;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Mod(left, right) => {
+                descriptor.push_str("modulo;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Abs(inner) => {
+                descriptor.push_str("absolute_value;");
+                pending.push(inner);
+            }
+            Expr::Min(left, right) => {
+                descriptor.push_str("minimum;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Max(left, right) => {
+                descriptor.push_str("maximum;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Pow(left, right) => {
+                descriptor.push_str("power;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Cast(inner, target) => {
+                write!(descriptor, "cast:{target:?};").unwrap();
+                pending.push(inner);
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                descriptor.push_str("conditional;");
+                pending.push(else_expr);
+                pending.push(then_expr);
+                pending.push(condition);
+            }
+        }
+    }
+}
+
+fn resident_project_columns_descriptor(columns: &[ProjectExpr]) -> String {
+    let mut descriptor = format!("column_count={};", columns.len());
+    for column in columns {
+        match column {
+            ProjectExpr::Column(index) => write!(descriptor, "column:{index};").unwrap(),
+            ProjectExpr::Computed(expression, scalar_type) => {
+                write!(descriptor, "computed:{scalar_type:?};").unwrap();
+                append_resident_expression_descriptor(&mut descriptor, expression);
+            }
+        }
+    }
+    descriptor
+}
+
+fn resident_node_descriptor(node: &RirNode) -> String {
+    match node {
+        RirNode::Unit => "unit".to_owned(),
+        RirNode::Scan { rel } => format!("scan;relation={}", rel.0),
+        RirNode::Filter { predicate, .. } => {
+            let mut descriptor = "filter;predicate=".to_owned();
+            append_resident_expression_descriptor(&mut descriptor, predicate);
+            descriptor
+        }
+        RirNode::Project { columns, .. } => {
+            format!("project;{}", resident_project_columns_descriptor(columns))
+        }
+        RirNode::Join {
+            left_keys,
+            right_keys,
+            join_type,
+            ..
+        } => format!(
+            "join;left_keys={left_keys:?};right_keys={right_keys:?};join_type={join_type:?}"
+        ),
+        RirNode::ChainJoin {
+            left_key,
+            right_key,
+            output_columns,
+            ..
+        } => format!(
+            "chain_join;left_key={left_key};right_key={right_key};output_{}",
+            resident_project_columns_descriptor(output_columns)
+        ),
+        RirNode::GroupBy { key_cols, aggs, .. } => {
+            format!("group_by;key_cols={key_cols:?};aggregates={aggs:?}")
+        }
+        RirNode::Union { inputs } => format!("union;input_count={}", inputs.len()),
+        RirNode::Distinct { key_cols, .. } => format!("distinct;key_cols={key_cols:?}"),
+        RirNode::Diff { .. } => "difference".to_owned(),
+        RirNode::Fixpoint {
+            scc_id,
+            delta_rel,
+            full_rel,
+            ..
+        } => format!(
+            "fixpoint;scc_id={scc_id};delta_relation={};full_relation={}",
+            delta_rel.0, full_rel.0
+        ),
+        RirNode::MultiWayJoin {
+            inputs,
+            slot_vars,
+            output_columns,
+            plan,
+            var_order,
+            ..
+        } => format!(
+            "multi_way_join;input_count={};slot_variables={slot_vars:?};output_{};plan={plan:?};variable_order={var_order:?}",
+            inputs.len(),
+            resident_project_columns_descriptor(output_columns)
+        ),
+        RirNode::TensorMaskedJoin {
+            mask_name,
+            schema_size,
+            left_keys,
+            right_keys,
+            rel_index,
+            head_rel_name,
+            head_rel_id,
+            max_active_rules,
+            head_projection,
+        } => format!(
+            "tensor_masked_join;mask={mask_name:?};schema_size={schema_size};left_keys={left_keys:?};right_keys={right_keys:?};relation_index={rel_index:?};head_relation_name={head_rel_name:?};head_relation_id={};max_active_rules={max_active_rules};head_projection={head_projection:?}",
+            head_rel_id.0
+        ),
+    }
+}
+
 impl ResidentGraphCertifiedPlan {
     /// Inspect and seal one immutable plan allocation.
     pub fn inspect(plan: Arc<ExecutionPlan>, catalog: &ResidentGraphSchemaCatalog) -> Result<Self> {
@@ -226,8 +414,8 @@ impl ResidentGraphRouteCertificate {
             ));
             for (rule_index, rule) in rules.iter().enumerate() {
                 certificate.covered_route_descriptors.insert(format!(
-                    "plan;rules_by_scc={scc_index};rule={rule_index};head={:?};meta={:#?};body={:#?}",
-                    rule.head, rule.meta, rule.body
+                    "plan;rules_by_scc={scc_index};rule={rule_index};head={:?};meta={:?}",
+                    rule.head, rule.meta
                 ));
             }
         }
@@ -356,8 +544,9 @@ impl ResidentGraphRouteCertificate {
             },
             _ => String::new(),
         };
+        let node_descriptor = resident_node_descriptor(node);
         self.covered_route_descriptors.insert(format!(
-            "scc={scc_index};rule={rule_index};recursive={recursive};path={path};node={node:#?};scan_schema={scan_schema}"
+            "scc={scc_index};rule={rule_index};recursive={recursive};path={path};node={node_descriptor};scan_schema={scan_schema}"
         ));
         match node {
             RirNode::Unit | RirNode::Scan { .. } => {}
@@ -1281,6 +1470,80 @@ mod tests {
         let certificate = ResidentGraphRouteCertificate::inspect(&plan, &catalog()).unwrap();
         mutate(&mut plan.generated_query_rules[0]);
         assert!(!certificate.matches_plan(&plan).unwrap());
+    }
+
+    #[test]
+    fn resident_node_descriptors_encode_only_local_fields() {
+        let descendant = RirNode::Project {
+            input: Box::new(RirNode::Scan { rel: RelId(9) }),
+            columns: vec![ProjectExpr::Column(0)],
+        };
+        let project = RirNode::Project {
+            input: Box::new(descendant),
+            columns: vec![ProjectExpr::Computed(
+                Expr::Const(ConstValue::U32(7)),
+                ScalarType::U32,
+            )],
+        };
+
+        let descriptor = resident_node_descriptor(&project);
+        assert_eq!(
+            descriptor,
+            "project;column_count=1;computed:U32;constant:u32:7;"
+        );
+        assert!(!descriptor.contains("Scan"));
+        assert!(!descriptor.contains("input"));
+    }
+
+    #[test]
+    fn resident_node_descriptors_distinguish_local_semantics() {
+        let left = resident_node_descriptor(&RirNode::Join {
+            left: Box::new(RirNode::Unit),
+            right: Box::new(RirNode::Unit),
+            left_keys: vec![0],
+            right_keys: vec![1],
+            join_type: JoinType::Inner,
+        });
+        let right = resident_node_descriptor(&RirNode::Join {
+            left: Box::new(RirNode::Unit),
+            right: Box::new(RirNode::Unit),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        });
+        assert_ne!(left, right);
+
+        let negative_zero = resident_node_descriptor(&RirNode::Filter {
+            input: Box::new(RirNode::Unit),
+            predicate: Expr::Const(ConstValue::F64(-0.0)),
+        });
+        let positive_zero = resident_node_descriptor(&RirNode::Filter {
+            input: Box::new(RirNode::Unit),
+            predicate: Expr::Const(ConstValue::F64(0.0)),
+        });
+        assert_ne!(negative_zero, positive_zero);
+    }
+
+    #[test]
+    fn certificate_descriptors_remain_bounded_for_deep_unary_plans() {
+        let mut body = RirNode::Scan { rel: RelId(1) };
+        for _ in 0..128 {
+            body = RirNode::Project {
+                input: Box::new(body),
+                columns: vec![ProjectExpr::Column(0)],
+            };
+        }
+        let mut plan = representative_plan();
+        plan.rules_by_scc[0][0].body = body;
+
+        let certificate = ResidentGraphRouteCertificate::inspect(&plan, &catalog()).unwrap();
+        let largest_descriptor = certificate
+            .covered_route_descriptors
+            .iter()
+            .map(String::len)
+            .max()
+            .unwrap();
+        assert!(largest_descriptor < 8_192, "{largest_descriptor}");
     }
 
     #[test]
