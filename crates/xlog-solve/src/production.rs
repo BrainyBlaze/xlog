@@ -5387,6 +5387,22 @@ mod tests {
         slot
     }
 
+    fn assert_raw_gpu_trace_requires_accepted_evidence(trace: GpuSolverProductionTrace) {
+        assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 0);
+        assert_eq!(trace.accepted_gpu_solver_production_path_events, 0);
+        let error = trace
+            .require_production_metric_eligibility()
+            .expect_err("raw GPU solver work must not satisfy production metrics");
+        let XlogError::UnsupportedEpistemicConstruct { construct, context } = error else {
+            panic!("expected accepted-evidence metric rejection, got {error:?}");
+        };
+        assert_eq!(construct, "GPU solver production metric gate");
+        assert_eq!(
+            context,
+            "production solver metrics require accepted GPU candidate evidence"
+        );
+    }
+
     #[test]
     fn weighted_maxsat_frontier_completion_fails_closed_before_cpu_expansion() {
         let clauses: Vec<_> = (0..18)
@@ -5427,7 +5443,7 @@ mod tests {
     }
 
     #[test]
-    fn encoded_weighted_maxsat_search_runs_real_gpu_sat_unsat_candidates() {
+    fn raw_encoded_maxsat_search_runs_gpu_candidates_but_requires_accepted_evidence() {
         let Some(provider) = try_provider() else {
             return;
         };
@@ -5498,13 +5514,11 @@ mod tests {
         assert_eq!(trace.gpu_cdcl_sat_solves, 1);
         assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
         assert_eq!(trace.gpu_maxsat_optima, 1);
-        trace
-            .require_production_metric_eligibility()
-            .expect("MaxSAT production search must not use CPU search");
+        assert_raw_gpu_trace_requires_accepted_evidence(trace);
     }
 
     #[test]
-    fn portfolio_jobs_dispatch_real_gpu_sat_and_encoded_maxsat_paths() {
+    fn raw_portfolio_dispatches_gpu_paths_but_requires_accepted_evidence() {
         let Some(provider) = try_provider() else {
             return;
         };
@@ -5573,13 +5587,11 @@ mod tests {
         assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
         assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 1);
         assert_eq!(trace.gpu_maxsat_optima, 1);
-        trace
-            .require_production_metric_eligibility()
-            .expect("portfolio production search must not use CPU search");
+        assert_raw_gpu_trace_requires_accepted_evidence(trace);
     }
 
     #[test]
-    fn learned_clause_reuse_publishes_and_imports_gpu_workspace_arena() {
+    fn raw_learned_clause_reuse_preserves_gpu_arena_but_requires_accepted_evidence() {
         let Some(provider) = try_provider() else {
             return;
         };
@@ -5642,8 +5654,6 @@ mod tests {
         assert_eq!(trace.gpu_learned_count_buffer_publications, 1);
         assert_eq!(trace.gpu_learned_clause_imports, 1);
         assert_eq!(trace.gpu_learned_clause_reused_solves, 1);
-        trace
-            .require_production_metric_eligibility()
-            .expect("learned-clause production reuse must not use CPU search");
+        assert_raw_gpu_trace_requires_accepted_evidence(trace);
     }
 }
