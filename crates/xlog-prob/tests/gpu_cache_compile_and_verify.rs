@@ -32,16 +32,12 @@ fn compile_config() -> GpuCompileConfig {
 }
 
 fn cache_config(compile: &GpuCompileConfig, cnf: &GpuCnf) -> GpuCircuitCacheConfig {
-    let level_cap = u32::from(compile.max_depth)
-        .checked_mul(2)
-        .and_then(|value| value.checked_add(8))
-        .expect("level_cap overflow");
     let mut config = GpuCircuitCacheConfig::default();
     config.num_slots = 1;
     config.table_size = 4;
     config.node_cap = compile.smooth_node_cap;
     config.edge_cap = compile.smooth_edge_cap;
-    config.level_cap = level_cap;
+    config.level_cap = compile.smooth_node_cap;
     config.var_cap = cnf.var_cap;
     config
 }
