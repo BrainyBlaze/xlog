@@ -2709,7 +2709,7 @@ mod arithmetic_evaluation_tests {
             eval_arith_expr(&conditional, &binding).expect("conditional comparison"),
             Value::I64(1)
         );
-        assert!(!eval_comparison(
+        assert!(eval_comparison(
             CompOp::Eq,
             &Term::Variable("X".to_string()),
             &Term::Variable("X".to_string()),
