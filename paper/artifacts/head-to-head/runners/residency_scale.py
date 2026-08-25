@@ -1,4 +1,4 @@
-"""CRIT-2 at-scale residency ablation (batched path).
+"""At-scale residency ablation for the batched path.
 
 The single-query residency sweep measured only 2 neural->symbolic handoffs per
 iteration. Real training batches many queries per step, so the host round-trip a
@@ -9,12 +9,20 @@ grows with scale. Compile once, reuse (toggle the env per measurement) so we pay
 the ~40 s CDCL verify only once. lr=0 keeps weights fixed (timing-only).
 The per-buffer round-trip is an upper bound on a hybrid's coalesced transfer.
 """
-import os, time, json, statistics as st, torch, pyxlog
+
+import os
+import time
+import json
+import statistics as st
+import torch
+import pyxlog
 
 print("BOOT cuda=%s" % torch.cuda.is_available(), flush=True)
 
-SRC = ("nn(net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).\n"
-       "addition(I, J, S) :- digit(I, A), digit(J, B), S is A + B.\n")
+SRC = (
+    "nn(net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).\n"
+    "addition(I, J, S) :- digit(I, A), digit(J, B), S is A + B.\n"
+)
 NQ = (1, 4, 16, 64, 256)
 MAXQ = max(NQ)
 ITERS = 50
@@ -71,11 +79,15 @@ for nq in NQ:
     ons = [measure(nq, True) for _ in range(3)]
     off_m, on_m = st.mean(offs), st.mean(ons)
     row = {
-        "queries": nq, "handoffs": 2 * nq,
-        "off_ms": round(off_m, 4), "on_ms": round(on_m, 4),
+        "queries": nq,
+        "handoffs": 2 * nq,
+        "off_ms": round(off_m, 4),
+        "on_ms": round(on_m, 4),
         "roundtrip_ms": round(on_m - off_m, 4),
         "overhead_pct": round(100 * (on_m - off_m) / off_m, 1) if off_m > 0 else None,
-        "roundtrip_per_handoff_us": round((on_m - off_m) / (2 * nq) * 1000, 2) if nq else None,
+        "roundtrip_per_handoff_us": round((on_m - off_m) / (2 * nq) * 1000, 2)
+        if nq
+        else None,
     }
     rows.append(row)
     print("ROW " + json.dumps(row), flush=True)

@@ -10,7 +10,7 @@
 //! 5. Wraps recursive predicates in Fixpoint nodes
 //! 6. Projects to match head variables
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use xlog_core::{symbol, AggOp as CoreAggOp, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_ir::{
@@ -167,6 +167,49 @@ fn validate_lowerable_terms(program: &Program) -> Result<()> {
             if let BodyLiteral::Positive(atom) = lit {
                 validate_atom_terms(atom, "learnable rule body")?;
             }
+        }
+    }
+    Ok(())
+}
+
+/// Variables bound by the positive relational portion of a rule body.
+///
+/// The lowerer joins every positive atom before evaluating deterministic
+/// arithmetic bindings, regardless of conjunct order.
+pub(crate) fn positive_body_bound_variables(body: &[BodyLiteral]) -> BTreeSet<String> {
+    body.iter()
+        .filter_map(|literal| match literal {
+            BodyLiteral::Positive(atom) => Some(atom),
+            _ => None,
+        })
+        .flat_map(Atom::variables)
+        .filter(|name| *name != "_")
+        .map(str::to_string)
+        .collect()
+}
+
+fn validate_is_expression_bindings(program: &Program) -> Result<()> {
+    for rule in program.proper_rules() {
+        let mut bound = positive_body_bound_variables(&rule.body);
+        for literal in &rule.body {
+            let BodyLiteral::IsExpr(is_expr) = literal else {
+                continue;
+            };
+            if bound.contains(&is_expr.target) {
+                return Err(XlogError::Compilation(format!(
+                    "Variable {} already bound; 'is' requires fresh variable",
+                    is_expr.target
+                )));
+            }
+            for variable in is_expr.expr.variables() {
+                if !bound.contains(variable) {
+                    return Err(XlogError::Compilation(format!(
+                        "Variable {} used in arithmetic but not bound",
+                        variable
+                    )));
+                }
+            }
+            bound.insert(is_expr.target.clone());
         }
     }
     Ok(())
@@ -884,6 +927,7 @@ impl Lowerer {
 
     fn prepare_program_for_lowering(&mut self, program: &Program) -> Result<()> {
         validate_lowerable_terms(program)?;
+        validate_is_expression_bindings(program)?;
         self.infer_and_validate_schemas(program)?;
         self.infer_cardinalities(program);
 
@@ -2877,36 +2921,19 @@ impl Lowerer {
         input: RirNode,
         var_env: &mut VariableEnv,
     ) -> Result<RirNode> {
-        // 1. Verify target is NOT already bound
-        if var_env.contains(&is_expr.target) {
-            return Err(XlogError::Compilation(format!(
-                "Variable {} already bound; 'is' requires fresh variable",
-                is_expr.target
-            )));
-        }
-
-        // 2. Verify all variables in expression are bound
-        for var in is_expr.expr.variables() {
-            if !var_env.contains(var) {
-                return Err(XlogError::Compilation(format!(
-                    "Variable {} used in arithmetic but not bound",
-                    var
-                )));
-            }
-        }
-
-        // 3. Infer result type
+        // Binding freshness and source order are validated once for the full
+        // program before schema inference can preempt their diagnostics.
         let result_type = self.infer_arith_type(&is_expr.expr, var_env)?;
 
-        // 4. Convert expression to IR
+        // Convert expression to IR.
         let ir_expr = self.arith_to_expr(&is_expr.expr, var_env)?;
 
-        // 5. Build projection: pass through all existing columns + add computed column
+        // Build projection: pass through all existing columns + add computed column.
         let num_cols = var_env.column_count();
         let mut proj_exprs: Vec<ProjectExpr> = (0..num_cols).map(ProjectExpr::Column).collect();
         proj_exprs.push(ProjectExpr::Computed(ir_expr, result_type));
 
-        // 6. Bind the new variable
+        // Bind the new variable.
         var_env.bind(&is_expr.target, num_cols, result_type);
 
         Ok(RirNode::Project {
@@ -2967,11 +2994,6 @@ impl VariableEnv {
     /// Get the type of a bound variable
     fn get_type(&self, name: &str) -> Option<ScalarType> {
         self.types.get(name).copied()
-    }
-
-    /// Check if a variable is bound
-    fn contains(&self, name: &str) -> bool {
-        self.occurrences.contains_key(name)
     }
 
     /// Get the current column count (for adding new computed columns)

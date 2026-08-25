@@ -960,6 +960,14 @@ grad_false0 = torch.from_dlpack(result.grad_false[0]) # f64 CUDA tensor, shape [
 #### Monte Carlo Inference (Device-Only)
 
 For GPU-native workflows, prefer `CompiledProgram.evaluate_device(...)` (no host reads for results).
+The optional `samples`, `seed`, `confidence`, `sampling_method`, and
+`max_nonmonotone_iterations` arguments override the corresponding source pragmas only
+when supplied. When an argument is omitted, Python uses `#pragma prob_samples`,
+`prob_seed`, `prob_confidence`, `prob_method`, or
+`prob_max_nonmonotone_iterations`; if neither layer supplies a value, the documented
+language default applies. This is the same source-then-explicit-override precedence as
+the CLI. Supplying any of these Monte Carlo options, or `allow_cpu_oracle=True`, to an
+exact-engine `evaluate(...)` call is an error; the binding does not silently ignore them.
 
 ```python
 program = pyxlog.Program.compile(source, prob_engine="mc")
@@ -1528,7 +1536,8 @@ program = pyxlog.LogicProgram.compile(
 ```python
 program = pyxlog.Program.compile(
     source,                    # str: Probabilistic Datalog source
-    prob_engine="exact_ddnnf", # str: "exact_ddnnf" or "mc"
+    prob_engine=None,          # Optional[str]: explicit "exact_ddnnf"/"mc" override;
+                               # otherwise use #pragma prob_engine, then exact_ddnnf
     device=0,                  # int: CUDA device index
     memory_mb=32768,          # int: GPU memory limit in megabytes
 )

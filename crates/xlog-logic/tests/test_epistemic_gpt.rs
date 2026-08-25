@@ -129,14 +129,16 @@ fn gpt_candidate_guard_is_typed_and_bounded() {
     .unwrap_err();
 
     match err {
-        XlogError::ResourceExhausted {
+        XlogError::CapacityExceeded {
             context,
-            estimated_bytes,
-            budget_bytes,
+            required,
+            limit,
+            unit,
         } => {
             assert_eq!(context, "epistemic GPT candidate guard");
-            assert_eq!(estimated_bytes, 3);
-            assert_eq!(budget_bytes, 2);
+            assert_eq!(required, 3);
+            assert_eq!(limit, 2);
+            assert_eq!(unit, "candidates");
         }
         other => panic!("expected typed GPT guard error, got {other:?}"),
     }

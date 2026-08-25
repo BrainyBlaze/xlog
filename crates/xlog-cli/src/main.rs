@@ -24,7 +24,7 @@ use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::GpuConfig;
 #[cfg(feature = "host-io")]
-use xlog_prob::mc::{McEvalConfig, McProgram, McSamplingMethod};
+use xlog_prob::mc::{McEvalConfig, McEvalOverrides, McProgram, McSamplingMethod};
 use xlog_prob::provenance::{AggregateLiftReport, Value};
 
 mod generated_rule_diagnostics;
@@ -1366,26 +1366,17 @@ fn resolve_prob_engine(args: &ProbArgs, program: &Program) -> ProbEngineCli {
 
 #[cfg(feature = "host-io")]
 fn apply_mc_cli_overrides(args: &ProbArgs, cfg: &mut McEvalConfig) -> Result<()> {
-    if let Some(samples) = args.samples {
-        cfg.samples = samples;
-    }
-    if let Some(seed) = args.seed {
-        cfg.seed = seed;
-    }
-    if let Some(confidence) = args.confidence {
-        cfg.confidence = confidence;
-    }
-    if let Some(iterations) = args.prob_max_nonmonotone_iterations {
-        cfg.max_nonmonotone_iterations = iterations;
-    }
-    if let Some(method) = args.prob_method {
-        cfg.sampling_method = Some(match method {
+    cfg.apply_overrides(McEvalOverrides {
+        samples: args.samples,
+        seed: args.seed,
+        confidence: args.confidence,
+        max_nonmonotone_iterations: args.prob_max_nonmonotone_iterations,
+        sampling_method: args.prob_method.map(|method| match method {
             ProbMethodCli::Rejection => McSamplingMethod::Rejection,
             ProbMethodCli::EvidenceClamping => McSamplingMethod::EvidenceClamping,
-        });
-    }
-    cfg.allow_cpu_oracle_fallback = args.allow_cpu_oracle;
-    cfg.validate()
+        }),
+        allow_cpu_oracle_fallback: Some(args.allow_cpu_oracle),
+    })
 }
 
 fn emit_logic_results(

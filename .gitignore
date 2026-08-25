@@ -15,7 +15,6 @@
 # Local assistant/tooling state
 .claude/
 /CLAUDE.md
-/AGENTS.md
 /JCODEMUNCH.md
 /LEAN-CTX.md
 

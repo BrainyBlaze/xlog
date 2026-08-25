@@ -29,6 +29,34 @@ pub enum XlogError {
         budget_bytes: u64,
     },
 
+    /// A non-memory cardinality, dimension, or fixed-capacity limit was exceeded.
+    #[error("Capacity exceeded: {context}, required {required} {unit}, limit {limit} {unit}")]
+    CapacityExceeded {
+        /// Operation or data structure whose capacity was exceeded.
+        context: String,
+        /// Minimum observed or requested capacity.
+        required: u64,
+        /// Configured or representable capacity.
+        limit: u64,
+        /// Human-readable unit shared by `required` and `limit`.
+        unit: String,
+    },
+
+    /// A bounded iterative computation failed to reach its required fixpoint.
+    #[error(
+        "Convergence failed: {context}, {unconverged_worlds} of {total_worlds} worlds did not converge within {iteration_limit} iterations"
+    )]
+    ConvergenceFailure {
+        /// Iterative computation that did not converge.
+        context: String,
+        /// Number of worlds that remained unconverged.
+        unconverged_worlds: u64,
+        /// Total number of evaluated worlds.
+        total_worlds: u64,
+        /// Maximum iterations executed per world.
+        iteration_limit: u64,
+    },
+
     /// The D4 **compile** phase declined a CNF too large to compile safely
     /// (the knowledge-compilation emit buffers are fixed-capacity; a larger
     /// instance would overrun them and fail with a context-poisoning CUDA
@@ -143,6 +171,34 @@ mod tests {
         };
         assert!(err.to_string().contains("1024"));
         assert!(err.to_string().contains("512"));
+    }
+
+    #[test]
+    fn test_capacity_exceeded_display_preserves_non_byte_units() {
+        let err = XlogError::CapacityExceeded {
+            context: "resident sparse rows".to_string(),
+            required: 65,
+            limit: 64,
+            unit: "rows per world".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Capacity exceeded: resident sparse rows, required 65 rows per world, limit 64 rows per world"
+        );
+    }
+
+    #[test]
+    fn test_convergence_failure_display_reports_affected_worlds_and_limit() {
+        let err = XlogError::ConvergenceFailure {
+            context: "resident Monte Carlo fixpoint".to_string(),
+            unconverged_worlds: 3,
+            total_worlds: 128,
+            iteration_limit: 7,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Convergence failed: resident Monte Carlo fixpoint, 3 of 128 worlds did not converge within 7 iterations"
+        );
     }
 
     #[test]

@@ -99,7 +99,7 @@ The ablation is a separate experiment from the full run: its uncached arm recomp
 
 \begin{table*}[htbp]
   \centering
-  \caption{Head-to-head comparisons: one external engine per reasoning mode, matched programs, data, metrics and seeds, on cloud GPUs. The correctness gate passes in all three.}
+  \caption{Head-to-head comparisons: one external engine per reasoning mode, matched programs, data, metrics and seeds, on cloud GPU pods. The core correctness gate passes in all three; the deterministic all-arm completeness gate is false because its materializing diagnostic arm exhausts the declared byte budget at the largest case.}
   \label{tab:h2h}
   \small
   \begin{tabularx}{\linewidth}{@{}L l L L l@{}}
@@ -118,11 +118,11 @@ The ablation is a separate experiment from the full run: its uncached arm recomp
       & $0$ error; per query $0.014$--$0.028$\,s
       & $9$--$19\times$ \emph{slower} \\
     \addlinespace
-    Deterministic: triangle counting on hub-skewed graphs of $5.4$M, $13.1$M and $23.1$M triangles
-      & Soufflé
-      & counts match at every size; $0.24$--$0.33$\,s; peak device memory flat at $4$--$15$\,MB
-      & $3.0$--$13.6$\,s; materializing the join intermediate needs $3$--$7$\,GB and exhausts the budget (OOM) at $23$M triangles
-      & $\mathbf{12.6}$--$\mathbf{42.5\times}$ faster \\
+    Deterministic: triangle counting on hub-skewed graphs of $3.65$M, $7.51$M and $9.39$M triangles
+      & Soufflé (standalone compiled mode, 8 jobs)
+      & counts match at every size; $1.51$, $1.39$ and $1.12$\,s; peak device allocations $85$, $204$ and $359$\,MB
+      & $1.44$, $3.65$ and $5.25$\,s; one-time per-case compilation recorded separately
+      & Soufflé/xlog: $0.95\times$, $\mathbf{2.63\times}$, $\mathbf{4.69\times}$ \\
     \bottomrule
   \end{tabularx}
 \end{table*}
@@ -131,7 +131,7 @@ The ablation is a separate experiment from the full run: its uncached arm recomp
 
 \textbf{Probabilistic: exact inference vs.\ ProbLog2.} On five programs (a conditioned Bayesian fragment and probabilistic reach chains) xlog's exact query probabilities match the analytic answers to zero error, identical to ProbLog2 (correctness gate $|\Delta| < 10^{-4}$). On timing, however, xlog is \emph{not} competitive on these small programs. Its per-query time is flat, a fixed GPU launch plus a per-call D4 compile and CDCL verify, while ProbLog2's mature CPU compiler runs each query $9$--$19\times$ faster. We therefore make no exact-inference \emph{speed} claim; the probabilistic contribution is correctness-equivalent inference that is machine-verified on-device and GPU-resident, which amortizes only at scale or under repeated evaluation.
 
-\textbf{Deterministic: WCOJ triangle counting vs.\ Soufflé.} On hub-skewed graphs, xlog's fused worst-case-optimal triangle counting produces the same triangle totals as Soufflé at every size while running $12.6\times$, $23.9\times$ and $42.5\times$ faster on wall-clock, the gap widening with graph size. Crucially, fused counting never materializes the triangles: peak device memory stays flat across all sizes, whereas materializing the join intermediate exhausts the budget at the largest. This is the worst-case-optimal thesis demonstrated externally. The win is bounded intermediate memory on skewed, large-intermediate workloads, not a universal Datalog speedup: on moderate skew the advantage over xlog's own binary join is only $1.1$--$1.5\times$.
+\textbf{Deterministic: WCOJ triangle counting vs.\ Soufflé.} On hub-skewed graphs, xlog's fused worst-case-optimal triangle counting produces the same per-root triangle totals as Soufflé at every size. The comparison uses the median of three full-process executions after one-time native builds: a standalone Soufflé executable is generated once per case with eight jobs, and its $16.43$--$19.01$\,s compilation is recorded separately. Soufflé is 5\% faster at the smallest case; xlog is $2.63\times$ and $4.69\times$ faster at the two larger cases. Fused counting never materializes the triangles and its peak device allocations are $85$, $204$ and $359$\,MB. The enumerate-then-count diagnostic arm peaks at $3{,}287$ and $8{,}403$\,MB on the smaller cases, then requests $3{,}914{,}290{,}728$ additional bytes with $15{,}703{,}762{,}340$ bytes live at the largest. Its required $19{,}618{,}053{,}068$ bytes exceed the declared $19{,}327{,}352{,}832$-byte budget, producing a typed byte-memory exhaustion; consequently the all-arm comparison gate is false even though the fused-vs.-Soufflé core gate passes. This supports bounded intermediates on skewed, large-intermediate workloads, not a universal Datalog speed claim: Soufflé wins the smallest case, and on moderate skew the advantage over xlog's own binary join is only $1.1$--$1.5\times$.
 
 \subsection{Event-Calculus rule induction}\label{sec:ec-eval}
 

@@ -1,4 +1,4 @@
-//! GPU-resident Datalog/MC engine: no-host instrumentation + exact-value pilots.
+//! GPU-resident Datalog/MC engine: no-host instrumentation and exact-value tests.
 //!
 //! These are GPU-native acceptance tests. The engine evaluates ALL worlds in a
 //! single megakernel launch; the measured region must show zero host
@@ -108,13 +108,14 @@ fn download_resident_diagnostics(
         .dtoh_sync_copy_into(&r.resident_status_flags, &mut flags)
         .expect("dtoh resident status flags");
     let worlds = r.total_samples;
-    let converged = flags[0..worlds].to_vec();
-    let overflow = flags[worlds..worlds * 2].to_vec();
-    let participation = flags[worlds * 2..worlds * 3].to_vec();
+    let world_flags = &flags[3..];
+    let converged = world_flags[0..worlds].to_vec();
+    let overflow = world_flags[worlds..worlds * 2].to_vec();
+    let participation = world_flags[worlds * 2..worlds * 3].to_vec();
     (converged, overflow, participation)
 }
 
-/// K1 walking-skeleton proof: fact-marginal, no rules. The measured region has
+/// Fact-marginal residency proof with no rules. The measured region has
 /// zero host interaction, and every in-region counter is identical at N=128 and
 /// N=1024 (constant in N => nothing is per-sample on the host).
 #[test]
@@ -140,7 +141,7 @@ query(coin()).
         .evaluate_resident_with_provider(cfg(1024, 7), provider.clone())
         .expect("resident 1024");
 
-    // K1: no host interaction in the measured region.
+    // No host interaction occurs in the measured region.
     assert!(r128.no_host.is_no_host(), "N=128: {:?}", r128.no_host);
     assert!(r1024.no_host.is_no_host(), "N=1024: {:?}", r1024.no_host);
 
@@ -181,10 +182,10 @@ fn oracle_count(program: &McProgram, c: McEvalConfig, qi: usize) -> usize {
     (r.query_estimates[qi].prob * r.evidence_samples as f64).round() as usize
 }
 
-/// Pilot 2 — probabilistic fact marginal, exact vs seeded oracle.
+/// Probabilistic fact marginal, exact against the seeded oracle.
 #[cfg(feature = "host-io")]
 #[test]
-fn resident_pilot_prob_fact_marginal_exact() {
+fn resident_probabilistic_fact_marginal_matches_seeded_oracle() {
     let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
@@ -202,10 +203,10 @@ fn resident_pilot_prob_fact_marginal_exact() {
     assert_eq!(counts[0] as usize, want, "device count == seeded oracle");
 }
 
-/// Pilot 3 — evidence conditioning (clamped), exact vs seeded oracle.
+/// Evidence conditioning with clamping, exact against the seeded oracle.
 #[cfg(feature = "host-io")]
 #[test]
-fn resident_pilot_evidence_conditioning_exact() {
+fn resident_evidence_conditioning_matches_seeded_oracle() {
     let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
@@ -226,10 +227,10 @@ fn resident_pilot_evidence_conditioning_exact() {
     assert_eq!(counts[0] as usize, want, "device b-count == seeded oracle");
 }
 
-/// Pilot 4 — multi-evidence (two evidence atoms), exact vs seeded oracle.
+/// Two-atom evidence conditioning, exact against the seeded oracle.
 #[cfg(feature = "host-io")]
 #[test]
-fn resident_pilot_multi_evidence_exact() {
+fn resident_multi_evidence_matches_seeded_oracle() {
     let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
@@ -253,12 +254,12 @@ fn resident_pilot_multi_evidence_exact() {
     assert_eq!(counts[0] as usize, want, "device c-count == seeded oracle");
 }
 
-/// Pilot 4b — annotated disjunction / exclusive choice. Exactly one of x()/y()
+/// Annotated disjunction / exclusive choice. Exactly one of x()/y()
 /// holds per world (exact RNG-independent invariant: count(x)+count(y) == N),
 /// and each individual count matches the seeded oracle.
 #[cfg(feature = "host-io")]
 #[test]
-fn resident_pilot_annotated_disjunction_exclusive() {
+fn resident_annotated_disjunction_is_exclusive() {
     let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
@@ -284,10 +285,10 @@ fn resident_pilot_annotated_disjunction_exclusive() {
     assert_eq!(counts[1] as usize, oy, "y() device count == seeded oracle");
 }
 
-/// Pilot 5 — recursive transitive closure (K3: non-base derived tuple,
-/// K4: device-side fixpoint trace shows >1 iteration). Deterministic (1.0 edges).
+/// Recursive transitive closure proves a non-base tuple is derived and the
+/// device-side fixpoint trace records more than one iteration. Edges are deterministic.
 #[test]
-fn resident_pilot_transitive_closure_recursion() {
+fn resident_transitive_closure_derives_non_base_tuple() {
     let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
@@ -312,7 +313,7 @@ query(reach(1, 2)).
 
     let (counts, ev) = download(&provider, &r);
     assert_eq!(ev as usize, c.samples);
-    // K3: reach(1,3) is a NON-base derived tuple (needs reach(1,2) ⋈ edge(2,3)).
+    // reach(1,3) is a non-base derived tuple (needs reach(1,2) ⋈ edge(2,3)).
     assert_eq!(
         counts[0] as usize, c.samples,
         "reach(1,3) derived in all worlds"
@@ -322,7 +323,7 @@ query(reach(1, 2)).
         "reach(1,2) holds in all worlds"
     );
 
-    // K4: device-side fixpoint trace recorded a multi-pass derivation.
+    // The device-side fixpoint trace records a multi-pass derivation.
     let iters = download_iters(&provider, &r);
     assert!(
         iters.iter().all(|&i| i >= 2),
@@ -331,10 +332,10 @@ query(reach(1, 2)).
     );
 }
 
-/// Pilot 6 — recursion genuinely requiring >1 iteration: a 4-node chain whose
+/// Recursion genuinely requiring more than one iteration: a four-node chain whose
 /// longest derived path (reach(1,4)) cannot appear before the 2nd pass.
 #[test]
-fn resident_pilot_recursion_requires_multiple_iterations() {
+fn resident_recursion_requires_multiple_iterations() {
     let _resident_test_guard = resident_test_lock();
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
@@ -622,7 +623,7 @@ query(path_rel(4, 1)).
     );
 }
 
-/// Pilot 7 — sparse/WCOJ multiway join: three positive body atoms share
+/// Sparse/WCOJ multiway join: three positive body atoms share
 /// variables, the output predicate is not name-special-cased, and the measured
 /// region remains host-free.
 #[test]
@@ -859,7 +860,7 @@ query(out_rel(1, 3)).
 }
 
 // ---------------------------------------------------------------------------
-// K5 — fail-closed negative tests. Compilation is pure (host-only): unsupported
+// Fail-closed negative tests. Compilation is pure (host-only): unsupported
 // fragments must be rejected BEFORE execution with a typed diagnostic carrying
 // kind + non-empty construct + context. No GPU needed.
 // ---------------------------------------------------------------------------

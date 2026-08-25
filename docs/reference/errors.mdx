@@ -20,13 +20,16 @@ variants may be added without a breaking change.
 | `Parse` | Parse error from the Datalog frontend. |
 | `StratificationCycle` | Stratification failed: a cycle through negation, reported with the predicates involved. |
 | `UnsafeVariable` | Domain safety violation: a variable is not bound in any positive body literal. |
-| `ResourceExhausted` | GPU memory budget exceeded; carries the operation context, the estimated bytes, and the budget. |
+| `ResourceExhausted` | A byte-addressed GPU allocation, buffer, or workspace exceeds its memory budget; carries the operation context, required bytes, and available bytes. It is not used for row, candidate, slot, dimension, or iteration limits. |
+| `CapacityExceeded` | A bounded count or representational capacity is insufficient; carries the context, required count, limit, and unit (for example candidates, rows, slots, or launch elements). |
+| `ConvergenceFailure` | A bounded iterative computation reached its iteration limit without convergence; resident Monte Carlo reports the unconverged and total world counts and the configured limit. |
 | `CompileCapacityExceeded` | The knowledge-compilation phase (the step, named D4, that turns the program into a compiled Boolean circuit) declined the input: the Boolean formula it was asked to compile — a formula in conjunctive normal form, or CNF — was too large to compile safely. Compiling it anyway would overrun the fixed-capacity output buffers and trigger a CUDA launch error that leaves the GPU unusable for the rest of the process. Means "too big to compile"; catchable; distinct from the verify-phase signal below. Available since 0.10.0. |
 | `VerifyBudgetExceeded` | The GPU verifier that checks whether two formulas are equivalent declined. Its conflict-driven SAT search (CDCL) ran out of the per-verify conflict budget before reaching a definite answer. An indeterminate result is never trusted as a proof. Available since 0.10.0. |
 | `Kernel` | GPU kernel launch or execution error. |
 | `Type` | Type checking or inference error. |
 | `Compilation` | Compilation pipeline error (also carries the resident MC rejections, the exact aggregate cap declines, and the cross-predicate type mismatch described below). |
-| `UnsupportedEpistemicConstruct` | An epistemic construct known to the frontend but unsupported in the given context; names the construct and the context. Every construct name is listed under [Epistemic rejections](#epistemic-rejections). |
+| `UnsupportedEpistemicConstruct` | An epistemic construct known to the frontend but unsupported in the given context; names the construct and the context. Common source-level constructs are described under [Epistemic rejections](#epistemic-rejections). |
+| `ConstraintViolation` | An authored integrity constraint produced one or more witness rows; carries the authored source-order index, generated relation name, and witness-row count. |
 | `Execution` | Runtime execution error. |
 
 ## Exit codes
@@ -121,7 +124,8 @@ GPU schema error that did not name the rule.
 
 `UnsupportedEpistemicConstruct` is one error type covering many distinct
 rejections. The `construct` field in the message tells you which one you hit;
-find it in the left column below. (A *modal* literal is one written with `know`
+the table below covers the source-level constructs users are most likely to encounter.
+(A *modal* literal is one written with `know`
 or `possible`. A *world view* is the set of models the program considers possible
 at once. A *tuple key* is the argument list that identifies which tuple a modal
 literal is talking about.)
@@ -138,6 +142,10 @@ literal is talking about.)
 | `epistemic GPU split execution` | Split execution was selected but no split component contains an epistemic rule — that is, the program has no `know`/`possible` rules at all. |
 | `cross-component epistemic coupling` | Two or more epistemic output heads land in one dependency component, and a modal literal in that component ranges over another epistemic-derived head from the same component. A single joint world-view enumeration would mis-evaluate that nesting. |
 | `epistemic modal tuple key` | A modal literal's tuple key does not flatten to exactly one scalar term per target column. Use one scalar key term per column of the modal target. New in 0.12.0. |
+| `modal tuple-key cons pattern` | A modal key uses an open-ended cons pattern whose tail length is not statically fixed. Bind a fixed-arity list of scalar terms instead. |
+| `modal tuple-key predicate reference` | A modal key uses a predicate reference, which has no scalar GPU key-column encoding. |
+| `modal tuple-key aggregate` | A modal key contains an aggregate result instead of a fixed scalar key term. Bind the aggregate outside the modal key. |
+| `nested modal tuple-key structure` | A list or compound modal key contains another structured value. Only one fixed outer structure containing scalar or symbol elements can be flattened to relation columns. |
 | `epistemic derived predicate schema` | The same predicate name is defined as a rule-derived epistemic relation at more than one arity. A derived epistemic relation needs exactly one source signature per name. New in 0.12.0. |
 | `epistemic augmented predicate schema` | Sibling clauses for one head bind different hidden columns. A variable that appears only inside a modal literal adds hidden columns to the head, so every clause for one predicate signature must bind the same shape. New in 0.12.0. |
 | `epistemic augmented head query` | A query against a head that carries those hidden modal-bound columns, where the query's arguments are not all distinct named variables. A constant, `_`, a repeated variable, or a compound term is refused. New in 0.12.0. |
@@ -161,6 +169,12 @@ what the device can run; anything outside that model is rejected with a typed
 `ResidentRejection` (surfaced as a `Compilation` error of the form
 `resident MC engine rejected program [kind=...] construct=... context=...`).
 There is no silent CPU fallback.
+
+After a resident Monte Carlo launch, XLOG reads a fixed three-word device summary.
+If any sampled world exhausted its sparse-row capacity, evaluation returns
+`CapacityExceeded`; if any world failed to converge, evaluation returns
+`ConvergenceFailure`. Probabilities are never returned from a partial or
+unconverged resident run.
 
 | Rejection kind | Trigger |
 |---|---|
@@ -250,7 +264,7 @@ answered.
 | `KeyError` | `LogicRelationSession.relation(name)` or `evidence(name)` when the named relation is not currently stored. |
 | `BufferError` | A tensor-like DLPack producer reports a non-CUDA device from `__dlpack_device__()`. XLOG raises before calling `__dlpack__()` or consuming a capsule. |
 | `MemoryError` | The per-call memory limit: when `memory_mb` is passed to an evaluation and the provider's allocated bytes already exceed it, the call raises before evaluating. |
-| `RuntimeError` | Any `XlogError` propagated from the engine (parse, compilation, kernel, execution, resource exhaustion — including the resident MC rejection and aggregate cap messages above), host-output calls on a build without the `host-io` feature, and construction of fallback `RelationEvidence` when `pyxlog._native` is unavailable. |
+| `RuntimeError` | Any `XlogError` propagated from the engine (including parse, compilation, kernel, execution, byte-memory exhaustion, count-capacity exhaustion, and convergence failure), host-output calls on a build without the `host-io` feature, and construction of fallback `RelationEvidence` when `pyxlog._native` is unavailable. |
 | `IlpConfigError` (a `ValueError` subclass) | `induce_exact(backend="python")` without `XLOG_ALLOW_PYTHON_ILP_REFERENCE=1`. The Python reference scorer exists only to cross-check results (parity-only) and is never a production path. |
 | `CarrierRefused` (a `RuntimeError` subclass) | Every typed refusal from the device-resident joint-constraint solver (`JointConstraintCarrier`) except running out of fuel: registering a schema twice, a zero-capacity dimension, using the carrier before `register_schema`, rebinding already-bound signature masks, a signature-mask shape mismatch, solving before `bind_signatures`, running the top-two stage before feasibility has solved, a malformed component plan, an out-of-range abstain label index, or an unavailable joint-solve kernel. Available since 0.11.0. |
 | `SolverResourceExhausted` (a `RuntimeError` subclass) | The joint-constraint solver used up its device fuel budget — a cap on how many search nodes it may expand — during `solve_label_feasibility`. The message is `solver fuel exhausted: spent {fuel_spent} of {fuel_limit} node expansions`. The fuel meter lives in the carrier session, so retrying reproduces the identical refusal instead of making partial progress; raise `fuel_limit` on a new carrier. Available since 0.11.0. |

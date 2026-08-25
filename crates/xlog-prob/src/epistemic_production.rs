@@ -5,6 +5,8 @@
 //! provenance path instead of using the bounded epistemic fixture circuit.
 
 #[cfg(feature = "host-io")]
+use std::borrow::Cow;
+#[cfg(feature = "host-io")]
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -2127,37 +2129,33 @@ impl EpistemicProbProductionAdapter {
         result: &EpistemicGpuExecutionResult,
         assumptions: Vec<EpistemicAssumption>,
     ) -> Result<ExactResult> {
-        epistemic_prob_trace_transaction!(self, {
-            let auto_derived = assumptions.is_empty();
-            let evidence = AcceptedWorldViewEvidence::from_gpu_execution_result(
-                provider,
-                result,
-                assumptions,
-            )?;
-            let program = parse_program(source)?;
-            let provenance = extract_from_program(&program)?;
-            let filtered_evidence;
-            let evidence = if auto_derived {
-                filtered_evidence =
-                    evidence_with_provenance_backed_assumptions(&evidence, &provenance)?;
-                &filtered_evidence
-            } else {
-                &evidence
-            };
-            self.compile_and_evaluate_conditioned_program_with_path(
-                &program,
-                &provenance,
-                evidence,
-                EpistemicProbConditionedEvidencePath::Source,
-                "epistemic probabilistic conditioned source exact compile/evaluate",
-            )
-        })
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.compile_and_evaluate_conditioned_source_with_accepted_world_view(source, &evidence)
     }
 
     /// Compile accepted epistemic evidence and an exact probabilistic source once.
     ///
     /// The returned handle reuses the conditioned circuit and permits atomic
     /// updates only for independent probabilistic fact variables.
+    #[cfg(feature = "host-io")]
+    pub fn prepare_conditioned_source_with_accepted_world_view(
+        &mut self,
+        source: &str,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<PreparedConditionedProgram> {
+        epistemic_prob_trace_transaction!(self, {
+            let program = parse_program(source)?;
+            let provenance = extract_from_program(&program)?;
+            self.prepare_conditioned_program_with_accepted_world_view(
+                &program,
+                &provenance,
+                evidence,
+            )
+        })
+    }
+
+    /// Validate a GPU execution result, then prepare its accepted world view.
     #[cfg(feature = "host-io")]
     pub fn prepare_conditioned_source_with_gpu_execution_result(
         &mut self,
@@ -2166,67 +2164,60 @@ impl EpistemicProbProductionAdapter {
         result: &EpistemicGpuExecutionResult,
         assumptions: Vec<EpistemicAssumption>,
     ) -> Result<PreparedConditionedProgram> {
-        epistemic_prob_trace_transaction!(self, {
-            let auto_derived = assumptions.is_empty();
-            let evidence = AcceptedWorldViewEvidence::from_gpu_execution_result(
-                provider,
-                result,
-                assumptions,
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.prepare_conditioned_source_with_accepted_world_view(source, &evidence)
+    }
+
+    #[cfg(feature = "host-io")]
+    fn prepare_conditioned_program_with_accepted_world_view(
+        &mut self,
+        program: &Program,
+        provenance: &Provenance,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<PreparedConditionedProgram> {
+        let evidence = accepted_evidence_for_provenance(evidence, provenance)?;
+        let evidence = evidence.as_ref();
+        if program.directives.prob_engine_or_default() != ProbEngine::ExactDdnnf {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "reusable conditioned circuit".to_string(),
+                context: "reusable conditioned programs require the exact Decision-DNNF engine; Monte Carlo programs cannot expose mutable CNF fact weights"
+                    .to_string(),
+            });
+        }
+        if source_has_only_gpu_count_lift_queries(provenance) {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "reusable conditioned circuit".to_string(),
+                context: "GPU count-lift exact programs do not expose mutable CNF fact variables"
+                    .to_string(),
+            });
+        }
+        self.require_accepted_evidence(evidence)?;
+        let production_events_before = self.trace.checked_gpu_production_path_events()?;
+        let (conditioned_program, evidence_counts) =
+            condition_program_with_accepted_evidence_using_provenance(
+                program, provenance, evidence,
             )?;
-            let program = parse_program(source)?;
-            if program.directives.prob_engine_or_default() != ProbEngine::ExactDdnnf {
-                return Err(XlogError::UnsupportedEpistemicConstruct {
-                    construct: "reusable conditioned circuit".to_string(),
-                    context: "reusable conditioned programs require the exact Decision-DNNF engine; Monte Carlo programs cannot expose mutable CNF fact weights"
-                        .to_string(),
-                });
-            }
-            let provenance = extract_from_program(&program)?;
-            if source_has_only_gpu_count_lift_queries(&provenance) {
-                return Err(XlogError::UnsupportedEpistemicConstruct {
-                    construct: "reusable conditioned circuit".to_string(),
-                    context:
-                        "GPU count-lift exact programs do not expose mutable CNF fact variables"
-                            .to_string(),
-                });
-            }
-            let filtered_evidence;
-            let evidence = if auto_derived {
-                filtered_evidence =
-                    evidence_with_provenance_backed_assumptions(&evidence, &provenance)?;
-                &filtered_evidence
-            } else {
-                &evidence
-            };
-            self.require_accepted_evidence(evidence)?;
-            let production_events_before = self.trace.checked_gpu_production_path_events()?;
-            let (conditioned_program, evidence_counts) =
-                condition_program_with_accepted_evidence_using_provenance(
-                    &program,
-                    &provenance,
-                    evidence,
-                )?;
-            let exact = ExactDdnnfProgram::compile_from_program(&conditioned_program, self.config)?;
-            if exact.uses_gpu_native_count_lift() {
-                return Err(XlogError::UnsupportedEpistemicConstruct {
-                    construct: "reusable conditioned circuit".to_string(),
-                    context: "GPU count-lift exact programs do not expose mutable CNF fact weights"
-                        .to_string(),
-                });
-            }
-            require_gpu_exact_backend(
-                &exact,
-                "epistemic probabilistic reusable conditioned source exact compile",
-            )?;
-            checked_prob_trace_counter_inc!(self, gpu_exact_source_compiles);
-            self.record_conditioned_evidence_counts(
-                evidence_counts,
-                EpistemicProbConditionedEvidencePath::Source,
-            )?;
-            self.record_accepted_gpu_production_path_events_since(production_events_before)?;
-            self.record_accepted_evidence(evidence)?;
-            PreparedConditionedProgram::new(exact, self.trace)
-        })
+        let exact = ExactDdnnfProgram::compile_from_program(&conditioned_program, self.config)?;
+        if exact.uses_gpu_native_count_lift() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "reusable conditioned circuit".to_string(),
+                context: "GPU count-lift exact programs do not expose mutable CNF fact weights"
+                    .to_string(),
+            });
+        }
+        require_gpu_exact_backend(
+            &exact,
+            "epistemic probabilistic reusable conditioned source exact compile",
+        )?;
+        checked_prob_trace_counter_inc!(self, gpu_exact_source_compiles);
+        self.record_conditioned_evidence_counts(
+            evidence_counts,
+            EpistemicProbConditionedEvidencePath::Source,
+        )?;
+        self.record_accepted_gpu_production_path_events_since(production_events_before)?;
+        self.record_accepted_evidence(evidence)?;
+        PreparedConditionedProgram::new(exact, self.trace)
     }
 
     /// Compile conditioned source once per accepted GPU epistemic execution result.
@@ -2487,6 +2478,8 @@ impl EpistemicProbProductionAdapter {
         path: EpistemicProbConditionedEvidencePath,
         backend_context: &'static str,
     ) -> Result<ExactResult> {
+        let evidence = accepted_evidence_for_provenance(evidence, provenance)?;
+        let evidence = evidence.as_ref();
         self.require_accepted_evidence(evidence)?;
         let production_events_before = self.trace.checked_gpu_production_path_events()?;
         let (program, evidence_counts) = condition_program_with_accepted_evidence_using_provenance(
@@ -2536,6 +2529,8 @@ impl EpistemicProbProductionAdapter {
         path: EpistemicProbConditionedEvidencePath,
         backend_context: &'static str,
     ) -> Result<ExactResultWithGrads> {
+        let evidence = accepted_evidence_for_provenance(evidence, provenance)?;
+        let evidence = evidence.as_ref();
         self.require_accepted_evidence(evidence)?;
         let production_events_before = self.trace.checked_gpu_production_path_events()?;
         let (program, evidence_counts) = condition_program_with_accepted_evidence_using_provenance(
@@ -3529,10 +3524,11 @@ impl EpistemicProbProductionAdapter {
                 "accepted_gpu_nonzero_arity_evidence_assumptions_consumed",
             )?;
         if evidence.max_assumption_arity() > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
+            return Err(XlogError::CapacityExceeded {
                 context: "accepted GPU probability evidence max arity".to_string(),
-                estimated_bytes: evidence.max_assumption_arity() as u64,
-                budget_bytes: u32::MAX as u64,
+                required: evidence.max_assumption_arity() as u64,
+                limit: u32::MAX as u64,
+                unit: "arguments per assumption".to_string(),
             });
         }
         self.trace.accepted_gpu_max_evidence_arity_consumed = self
@@ -3947,6 +3943,20 @@ fn evidence_with_provenance_backed_assumptions(
         });
     }
     Ok(evidence.with_assumptions(assumptions))
+}
+
+#[cfg(feature = "host-io")]
+fn accepted_evidence_for_provenance<'a>(
+    evidence: &'a AcceptedWorldViewEvidence,
+    provenance: &Provenance,
+) -> Result<Cow<'a, AcceptedWorldViewEvidence>> {
+    if evidence.assumptions_auto_derived_from_gpu() {
+        Ok(Cow::Owned(evidence_with_provenance_backed_assumptions(
+            evidence, provenance,
+        )?))
+    } else {
+        Ok(Cow::Borrowed(evidence))
+    }
 }
 
 fn production_pir_roots(provenance: &Provenance) -> Result<Vec<PirNodeId>> {
