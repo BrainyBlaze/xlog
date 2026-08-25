@@ -181,23 +181,25 @@ jobs:
             # PR entirely. Post-merge and post-publish reruns stay
             # convergent: release-plz sees manifests already at the
             # target version and produces no PR.
-            last_tag=$(git describe --tags --match 'xlog-cli-v*' --abbrev=0 2>/dev/null || echo "")
-            if [[ -n "$last_tag" ]]; then
-              range="$last_tag..HEAD"
-            else
-              range="HEAD"
-            fi
-            if git log --format=%s "$range" | grep -qE '^(feat|fix|perf|refactor|docs|build|ci|test|revert)(\([^)]+\))?!?:' \
-              || git log --format=%B "$range" | grep -q 'BREAKING CHANGE:'; then
-              echo "Release-worthy commits found since ${last_tag:-repository start}."
-            else
-              echo "No release-worthy commits since ${last_tag:-repository start}; skipping release PR."
-              {
-                echo "prs_created=false"
-                echo "release_prs_json=[]"
-              } >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+            set +e
+            python3 scripts/release_worthiness.py
+            release_worthiness_status=$?
+            set -e
+            case "$release_worthiness_status" in
+              0)
+                ;;
+              1)
+                {
+                  echo "prs_created=false"
+                  echo "release_prs_json=[]"
+                } >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              *)
+                echo "Release-worthiness evaluation failed with status ${release_worthiness_status}." >&2
+                exit "$release_worthiness_status"
+                ;;
+            esac
 
             release_pr_output=$(release-plz release-pr \
               --git-token "$GITHUB_TOKEN" \
