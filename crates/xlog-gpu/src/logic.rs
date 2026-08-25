@@ -36,8 +36,8 @@ use xlog_runtime::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResidentSelectionMode {
+    Auto,
     Disabled,
-    Prefer,
     Require,
 }
 
@@ -45,8 +45,7 @@ impl ResidentSelectionMode {
     fn from_env() -> Result<Self> {
         let disabled = resolve_bool(None, "XLOG_DISABLE_RESIDENT_RECURSION", false)?;
         let required = resolve_bool(None, "XLOG_REQUIRE_RESIDENT_RECURSION", false)?;
-        let preferred = resolve_bool(None, "XLOG_USE_RESIDENT_RECURSION", false)?;
-        if u8::from(disabled) + u8::from(required) + u8::from(preferred) > 1 {
+        if disabled && required {
             return Err(XlogError::Execution(
                 "resident execution environment flags are mutually exclusive".to_string(),
             ));
@@ -55,14 +54,12 @@ impl ResidentSelectionMode {
             Self::Disabled
         } else if required {
             Self::Require
-        } else if preferred {
-            Self::Prefer
         } else {
-            Self::Disabled
+            Self::Auto
         })
     }
 
-    fn requested(self) -> bool {
+    fn enabled(self) -> bool {
         self != Self::Disabled
     }
 }
@@ -1521,7 +1518,7 @@ impl LogicProgram {
         } else {
             None
         };
-        if resident_mode.requested() {
+        if resident_mode.enabled() {
             if resident_mode == ResidentSelectionMode::Require {
                 return Err(XlogError::Execution(
                     "resident conditional-graph execution was required, but complete-store evaluation requires the existing GPU path"
@@ -1603,7 +1600,7 @@ impl LogicProgram {
         } else {
             None
         };
-        if resident_mode.requested() {
+        if resident_mode.enabled() {
             if resident_mode == ResidentSelectionMode::Require {
                 return Err(XlogError::Execution(
                     "resident conditional-graph execution was required, but persistent session evaluation requires the existing GPU path"
@@ -2067,7 +2064,7 @@ impl LogicProgram {
     ) -> Result<LogicEvalResult> {
         match mode {
             ResidentSelectionMode::Disabled => Ok(result),
-            ResidentSelectionMode::Prefer => {
+            ResidentSelectionMode::Auto => {
                 if let Some(stats) = result.stats.as_mut() {
                     stats.resident_graph = Some(ResidentGraphExecutionStats::declined(
                         ResidentGraphDeclineReason::NonOrdinaryPlan,
@@ -2281,72 +2278,27 @@ impl LogicProgram {
             }
         }
 
-        let caller_has_runtime = provider.memory().runtime().is_some();
-        let resident_provider = match Self::resident_provider_view(&provider) {
-            Ok(provider) => provider,
-            Err(reason) => {
-                return self.evaluate_existing_gpu_after_resident_decline(
-                    provider,
-                    inputs,
-                    profiling,
-                    ordinary_plan,
-                    mode,
-                    reason,
-                )
-            }
-        };
-        let runtime = Arc::clone(
-            resident_provider
-                .memory()
-                .runtime()
-                .expect("resident provider view was validated with a runtime"),
-        );
+        let runtime = Arc::clone(provider.memory().runtime().ok_or_else(|| {
+            XlogError::Execution(
+                "internal invariant violated: CUDA provider has no owned runtime".into(),
+            )
+        })?);
+        if !Arc::ptr_eq(provider.device(), provider.memory().device())
+            || !Arc::ptr_eq(provider.device(), runtime.device())
+            || !runtime.supports_block_use_tracking()
+        {
+            return Err(XlogError::Execution(
+                "internal invariant violated: CUDA provider runtime ownership graph is inconsistent"
+                    .into(),
+            ));
+        }
+        let resident_provider = provider;
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.runtime_bytes[0] = runtime.bytes_outstanding();
             diagnostic.manager_bytes[0] = resident_provider.memory().allocated_bytes();
         }
 
-        let resident_inputs = if caller_has_runtime {
-            inputs
-        } else {
-            let mut migrated = HashMap::with_capacity(inputs.len());
-            let migration = inputs.iter().try_for_each(|(name, buffer)| {
-                resident_provider
-                    .clone_buffer(buffer)
-                    .map(|clone| migrated.insert(name.clone(), clone))
-                    .map(|_| ())
-            });
-            if let Err(error) = migration {
-                drop(migrated);
-                resident_provider.device().synchronize().map_err(|cleanup| {
-                        XlogError::Kernel(format!(
-                            "resident input migration failed ({error}); cleanup synchronization failed: {cleanup}"
-                        ))
-                    })?;
-                runtime.reap_pending().map_err(|cleanup| {
-                    XlogError::Kernel(format!(
-                        "resident input migration failed ({error}); cleanup reap failed: {cleanup}"
-                    ))
-                })?;
-                return self.evaluate_existing_gpu_after_resident_decline(
-                    provider,
-                    inputs,
-                    profiling,
-                    ordinary_plan,
-                    mode,
-                    ResidentGraphDeclineReason::WorkspaceUnbounded {
-                        detail: format!("input migration to the async runtime failed: {error}"),
-                    },
-                );
-            }
-            resident_provider.device().synchronize().map_err(|error| {
-                XlogError::Kernel(format!(
-                    "resident input migration synchronization failed: {error}"
-                ))
-            })?;
-            drop(inputs);
-            migrated
-        };
+        let resident_inputs = inputs;
 
         let mut canonical_replacements = HashMap::new();
         let canonicalization = resident_inputs.iter().try_for_each(|(name, buffer)| {
@@ -2441,7 +2393,7 @@ impl LogicProgram {
                     .reap_pending()
                     .map_err(|error| XlogError::Kernel(error.to_string()))?;
                 return match mode {
-                        ResidentSelectionMode::Prefer => {
+                        ResidentSelectionMode::Auto => {
                             executor.execute_plan(ordinary_plan)?;
                             let mut result = self.finish_ordinary_evaluation(
                                 &resident_provider,
@@ -2718,7 +2670,7 @@ impl LogicProgram {
             ResidentSelectionMode::Require => Err(XlogError::Execution(format!(
                 "resident conditional-graph execution was required but declined: {reason:?}"
             ))),
-            ResidentSelectionMode::Prefer | ResidentSelectionMode::Disabled => {
+            ResidentSelectionMode::Auto | ResidentSelectionMode::Disabled => {
                 let mut executor = self.prepare_executor(&provider, inputs, profiling)?;
                 executor.execute_plan(plan)?;
                 let mut result =
@@ -2741,30 +2693,6 @@ impl LogicProgram {
                         if slice.memory_manager_ptr_value() == expected_manager
                 )
             })
-    }
-
-    fn resident_provider_view(
-        provider: &Arc<CudaKernelProvider>,
-    ) -> std::result::Result<Arc<CudaKernelProvider>, ResidentGraphDeclineReason> {
-        let decline =
-            |detail: String| ResidentGraphDeclineReason::ConditionalGraphUnavailable { detail };
-        if !Arc::ptr_eq(provider.device(), provider.memory().device()) {
-            return Err(decline(
-                "provider and memory manager do not share the same CUDA device handle".into(),
-            ));
-        }
-        let runtime = provider
-            .memory()
-            .runtime()
-            .ok_or_else(|| decline("the provider does not own a canonical CUDA runtime".into()))?;
-        if !Arc::ptr_eq(provider.device(), runtime.device())
-            || !runtime.supports_block_use_tracking()
-        {
-            return Err(decline(
-                "the provider runtime cannot track resident cross-stream block uses".into(),
-            ));
-        }
-        Ok(Arc::clone(provider))
     }
 
     fn resident_execution_error(error: ResidentGraphExecutionError) -> XlogError {
@@ -3144,7 +3072,7 @@ impl LogicProgram {
             "caller input",
         )?;
         let resident_mode = ResidentSelectionMode::from_env()?;
-        if matches!(&self.plan, LogicExecutionPlan::Ordinary(_)) && resident_mode.requested() {
+        if matches!(&self.plan, LogicExecutionPlan::Ordinary(_)) && resident_mode.enabled() {
             return self.evaluate_ordinary_with_resident_mode(
                 provider,
                 inputs,
@@ -5955,9 +5883,8 @@ mod tests {
     }
 
     const PINNED_CORPUS_SHA: &str = "74f2895486737b4caa42229389d309994e7ad3ea";
-    const RESIDENT_ENV_NAMES: [&str; 4] = [
+    const RESIDENT_ENV_NAMES: [&str; 3] = [
         "XLOG_DISABLE_RESIDENT_RECURSION",
-        "XLOG_USE_RESIDENT_RECURSION",
         "XLOG_REQUIRE_RESIDENT_RECURSION",
         RESIDENT_LATENCY_DIAGNOSTICS_ENV,
     ];
@@ -6077,6 +6004,45 @@ mod tests {
             ResidentSelectionMode::from_env(),
             Err(XlogError::Configuration { ref name, .. })
                 if name == "XLOG_REQUIRE_RESIDENT_RECURSION"
+        ));
+    }
+
+    #[test]
+    fn resident_selection_defaults_to_auto_and_honors_explicit_policy() {
+        let _lock = resident_env_lock().lock().unwrap();
+
+        let automatic = ResidentEnvGuard::set(&[]);
+        assert_eq!(
+            ResidentSelectionMode::from_env().unwrap(),
+            ResidentSelectionMode::Auto
+        );
+        drop(automatic);
+
+        let disabled = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+        assert_eq!(
+            ResidentSelectionMode::from_env().unwrap(),
+            ResidentSelectionMode::Disabled
+        );
+        drop(disabled);
+
+        let _required = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+        assert_eq!(
+            ResidentSelectionMode::from_env().unwrap(),
+            ResidentSelectionMode::Require
+        );
+    }
+
+    #[test]
+    fn resident_selection_rejects_conflicting_explicit_policy() {
+        let _lock = resident_env_lock().lock().unwrap();
+        let _env = ResidentEnvGuard::set(&[
+            ("XLOG_DISABLE_RESIDENT_RECURSION", "1"),
+            ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+        ]);
+        assert!(matches!(
+            ResidentSelectionMode::from_env(),
+            Err(XlogError::Execution(ref message))
+                if message.contains("mutually exclusive")
         ));
     }
 
@@ -6685,13 +6651,13 @@ mod tests {
     fn resident_certification_cache_is_ordinary_only_and_caches_declines_without_policy(
     ) -> Result<()> {
         let _env_lock = resident_env_lock().lock().expect("resident env lock");
-        for (name, value) in [
-            ("XLOG_DISABLE_RESIDENT_RECURSION", "1"),
-            ("XLOG_USE_RESIDENT_RECURSION", "1"),
-            ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+        for policy in [
+            &[][..],
+            &[("XLOG_DISABLE_RESIDENT_RECURSION", "1")][..],
+            &[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")][..],
         ] {
             let program = {
-                let _env = ResidentEnvGuard::set(&[(name, value)]);
+                let _env = ResidentEnvGuard::set(policy);
                 LogicProgram::compile(
                     r#"
                         pred input(u32).
@@ -6774,16 +6740,13 @@ mod tests {
         let Some(provider) = pinned_corpus_test_provider() else {
             return Ok(());
         };
-        let resident_provider =
-            LogicProgram::resident_provider_view(&provider).map_err(|reason| {
-                XlogError::Execution(format!("resident provider preflight declined: {reason:?}"))
-            })?;
+        let resident_provider = Arc::clone(&provider);
         let executor =
             program.prepare_resident_executor(&resident_provider, HashMap::new(), false, plan)?;
         let runtime = resident_provider
             .memory()
             .runtime()
-            .expect("resident provider view must own an async runtime");
+            .expect("canonical provider must own an async runtime");
         let graph_before = runtime.conditional_graph_stats();
         let allocated_before = resident_provider.memory().allocated_bytes();
 
@@ -8133,14 +8096,14 @@ mod tests {
             .get("__xlog_query_0")
             .expect("generated query schema")
             .clone();
-        for (name, value) in [
-            ("XLOG_DISABLE_RESIDENT_RECURSION", "1"),
-            ("XLOG_USE_RESIDENT_RECURSION", "1"),
-            ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+        for policy in [
+            &[][..],
+            &[("XLOG_DISABLE_RESIDENT_RECURSION", "1")][..],
+            &[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")][..],
         ] {
             let input = provider.create_empty_buffer(generated_schema.clone())?;
             let allocations_before = provider.memory().alloc_count();
-            let _env = ResidentEnvGuard::set(&[(name, value)]);
+            let _env = ResidentEnvGuard::set(policy);
             let error = match program.evaluate_with_options(
                 provider.clone(),
                 HashMap::from([("__xlog_query_0".to_string(), input)]),
@@ -8486,7 +8449,6 @@ mod tests {
             )?;
             let store = program.create_relation_store(provider.clone())?;
             let mut session = program.create_session_runtime(provider.clone(), &store, true)?;
-            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
             let (result, _) = program.evaluate_with_session_runtime(provider, &mut session)?;
             let graph = result
                 .stats
@@ -8518,15 +8480,13 @@ mod tests {
             };
             let expected = snapshot_query_results(provider.as_ref(), &baseline)?;
             drop(baseline);
-            let preferred = {
-                let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
-                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-            };
+            let automatic =
+                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
             assert_eq!(
-                snapshot_query_results(provider.as_ref(), &preferred)?,
+                snapshot_query_results(provider.as_ref(), &automatic)?,
                 expected
             );
-            let graph = preferred
+            let graph = automatic
                 .stats
                 .as_ref()
                 .and_then(|stats| stats.resident_graph.as_ref())
@@ -8563,7 +8523,6 @@ mod tests {
             "#,
         )?;
         let seed = program.create_relation_store(provider.clone())?;
-        let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
         let (result, store) =
             program.evaluate_with_relation_store_and_cache(provider.clone(), &seed, true)?;
 
@@ -8629,16 +8588,13 @@ mod tests {
         assert_eq!(program.resident_certification_initializations(), 0);
         drop(baseline);
 
-        let preferred = {
-            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
-            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-        };
-        assert!(preferred.queries.is_empty());
+        let automatic = program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
+        assert!(automatic.queries.is_empty());
         assert_eq!(
-            strata_op_profile(preferred.stats.as_ref().expect("preferred profile")),
+            strata_op_profile(automatic.stats.as_ref().expect("automatic profile")),
             baseline_profile
         );
-        let graph = preferred
+        let graph = automatic
             .stats
             .as_ref()
             .and_then(|stats| stats.resident_graph.as_ref())
@@ -8650,7 +8606,7 @@ mod tests {
         );
         assert_eq!(graph.conditional_graph_launches, 0);
         assert_eq!(program.resident_certification_initializations(), 0);
-        drop(preferred);
+        drop(automatic);
 
         let required = match {
             let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
@@ -8668,7 +8624,7 @@ mod tests {
     }
 
     #[test]
-    fn preferred_resident_decline_executes_the_untouched_full_plan() -> Result<()> {
+    fn automatic_resident_decline_executes_the_untouched_full_plan() -> Result<()> {
         let _env_lock = resident_env_lock().lock().expect("resident env lock");
         let Some(provider) = ground_term_encoding_test_provider() else {
             return Ok(());
@@ -8694,19 +8650,16 @@ mod tests {
         assert_eq!(op_count(baseline.stats.as_ref().unwrap(), "scan"), 2);
         drop(baseline);
 
-        let preferred = {
-            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
-            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-        };
+        let automatic = program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
         assert_eq!(
-            snapshot_query_results(provider.as_ref(), &preferred)?,
+            snapshot_query_results(provider.as_ref(), &automatic)?,
             baseline_snapshot
         );
         assert_eq!(
-            strata_op_profile(preferred.stats.as_ref().expect("preferred profile")),
+            strata_op_profile(automatic.stats.as_ref().expect("automatic profile")),
             baseline_profile
         );
-        let graph = preferred
+        let graph = automatic
             .stats
             .as_ref()
             .and_then(|stats| stats.resident_graph.as_ref())
@@ -8742,12 +8695,10 @@ mod tests {
         ];
         for source in programs {
             let program = LogicProgram::compile(source)?;
-            let preferred = {
-                let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
-                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-            };
-            assert_eq!(preferred.queries[0].buffer.cached_row_count(), Some(1));
-            let graph = preferred
+            let automatic =
+                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
+            assert_eq!(automatic.queries[0].buffer.cached_row_count(), Some(1));
+            let graph = automatic
                 .stats
                 .as_ref()
                 .and_then(|stats| stats.resident_graph.as_ref())
@@ -8755,7 +8706,7 @@ mod tests {
             assert_eq!(graph.selection, ResidentGraphSelectionKind::ExistingGpu);
             assert!(graph.decline.is_some());
             assert_eq!(graph.conditional_graph_launches, 0);
-            drop(preferred);
+            drop(automatic);
 
             let error = {
                 let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
@@ -8789,19 +8740,17 @@ mod tests {
                 ))
             })
             .expect_err("injected certification must fail");
-        let preferred = {
-            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
-            cached_failure.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-        };
-        assert_eq!(preferred.queries[0].buffer.cached_row_count(), Some(1));
-        let decline = preferred
+        let automatic =
+            cached_failure.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
+        assert_eq!(automatic.queries[0].buffer.cached_row_count(), Some(1));
+        let decline = automatic
             .stats
             .as_ref()
             .and_then(|stats| stats.resident_graph.as_ref())
             .and_then(|stats| stats.decline.as_ref())
-            .expect("preferred certification failure must report its decline");
+            .expect("automatic certification failure must report its decline");
         assert!(format!("{decline:?}").contains("deterministic certification failure"));
-        drop(preferred);
+        drop(automatic);
 
         let required = {
             let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
@@ -8827,7 +8776,7 @@ mod tests {
         let Some(provider) = ground_term_encoding_test_provider() else {
             return Ok(());
         };
-        assert!(provider.memory().runtime().is_none());
+        assert!(provider.memory().runtime().is_some());
         let program = LogicProgram::compile(
             r#"
                 pred seed(u32).
@@ -8943,7 +8892,7 @@ mod tests {
         assert!(error.to_string().contains("schema mismatch"));
         assert!(provider.memory().allocated_bytes() <= allocated_before);
         assert_eq!(provider.memory().alloc_count(), 0);
-        assert!(provider.memory().runtime().is_none());
+        assert!(provider.memory().runtime().is_some());
         Ok(())
     }
 
@@ -8961,9 +8910,9 @@ mod tests {
                 ?- output(X).
             "#,
         )?;
-        for selection_env in [
-            "XLOG_USE_RESIDENT_RECURSION",
-            "XLOG_REQUIRE_RESIDENT_RECURSION",
+        for (selection, policy) in [
+            ("automatic", &[][..]),
+            ("required", &[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")][..]),
         ] {
             let mut column = provider.memory().alloc::<u8>(4)?;
             provider
@@ -8985,7 +8934,7 @@ mod tests {
             );
             provider.memory().reset_alloc_count();
             let allocated_before = provider.memory().allocated_bytes();
-            let _env = ResidentEnvGuard::set(&[(selection_env, "1")]);
+            let _env = ResidentEnvGuard::set(policy);
             let error = match program.evaluate_with_options(
                 provider.clone(),
                 HashMap::from([("input".to_string(), input)]),
@@ -8998,11 +8947,11 @@ mod tests {
                 error
                     .to_string()
                     .contains("Logical row count 2 exceeds row capacity 1"),
-                "unexpected error for {selection_env}: {error}"
+                "unexpected error for {selection}: {error}"
             );
             assert!(provider.memory().allocated_bytes() <= allocated_before);
             assert_eq!(provider.memory().alloc_count(), 0);
-            assert!(provider.memory().runtime().is_none());
+            assert!(provider.memory().runtime().is_some());
         }
         Ok(())
     }
