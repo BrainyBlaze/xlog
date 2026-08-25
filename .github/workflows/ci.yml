@@ -102,6 +102,7 @@ jobs:
           python -m pytest -q
           python/tests/test_relation_provenance_contract.py
           python/tests/test_ci_workflow_contract.py
+          python/tests/test_triangle_benchmark_runner.py
 
   # The CAVIAR and maritime example suites on CPU (review follow-up:
   # previously no workflow ran any of them; the maritime suites were
