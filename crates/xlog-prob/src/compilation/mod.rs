@@ -145,6 +145,18 @@ pub struct DeviceRandomVarList {
     count: u32,
 }
 
+/// Circuit whose exact topology has passed equivalence verification.
+///
+/// The field is private so topology-changing code cannot construct this type
+/// without going through [`certify_final_circuit`].
+struct CertifiedGpuCircuit(GpuXgcf);
+
+impl CertifiedGpuCircuit {
+    fn as_xgcf(&self) -> &GpuXgcf {
+        &self.0
+    }
+}
+
 impl DeviceRandomVarList {
     pub fn from_device(list: TrackedCudaSlice<u32>, count: u32) -> Result<Self> {
         let len = u32::try_from(list.len()).map_err(|_| {
@@ -186,6 +198,18 @@ impl DeviceRandomVarList {
     pub fn list(&self) -> &TrackedCudaSlice<u32> {
         &self.list
     }
+}
+
+fn certify_final_circuit(
+    cnf: &GpuCnf,
+    decision_var_limit: &TrackedCudaSlice<u32>,
+    circuit: GpuXgcf,
+    provider: &Arc<CudaKernelProvider>,
+    config: GpuEquivalenceConfig,
+    gate: &TrackedCudaSlice<u32>,
+) -> Result<CertifiedGpuCircuit> {
+    validate_equivalence_gpu_gated(cnf, decision_var_limit, &circuit, provider, config, gate)?;
+    Ok(CertifiedGpuCircuit(circuit))
 }
 
 fn upload_disk_artifact_for_verification(
@@ -424,10 +448,10 @@ pub(crate) fn compile_gpu_d4_and_verify_cached_with_ledger(
                 } else {
                     None
                 };
-                match validate_equivalence_gpu_gated(
+                match certify_final_circuit(
                     cnf,
                     verifier_decision_var_limit,
-                    &circuit,
+                    circuit,
                     provider,
                     GpuEquivalenceConfig {
                         cdcl,
@@ -435,7 +459,7 @@ pub(crate) fn compile_gpu_d4_and_verify_cached_with_ledger(
                     },
                     handle.compile_needed_device(),
                 ) {
-                    Ok(()) => {
+                    Ok(_certified_circuit) => {
                         if let Some(t0) = t_verify {
                             provider.device().synchronize().map_err(|e| {
                                 XlogError::Kernel(format!("sync after disk cache verify: {}", e))
@@ -512,61 +536,7 @@ pub(crate) fn compile_gpu_d4_and_verify_cached_with_ledger(
         return Ok((handle, out_profile));
     }
 
-    // --- Verify equivalence stage ---
-    //
-    // Verify equivalence on the *base* circuit (pre-smoothing) to keep the verifier CNFs minimal.
-    //
-    // `encode_cnf_gpu` sets `decision_var_limit` to the end of the leaf+choice var range. For
-    // deterministic programs with no probabilistic vars, this range is empty (limit=0). In that
-    // case, the verifier must still be able to branch, so fall back to `cnf.num_vars` (all CNF
-    // vars are semantically meaningful when there is no probabilistic decision set).
-    let verifier_decision_var_limit = if random_vars.is_empty() {
-        &cnf.num_vars
-    } else {
-        decision_var_limit
-    };
-    let cdcl = cdcl_config_from_compile(config)?;
-    #[cfg(debug_assertions)]
-    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: validate_equivalence_gpu_gated");
-    let t_verify = if profiling {
-        Some(Instant::now())
-    } else {
-        None
-    };
-    validate_equivalence_gpu_gated(
-        cnf,
-        verifier_decision_var_limit,
-        &circuit_base,
-        provider,
-        GpuEquivalenceConfig {
-            cdcl,
-            reuse_workspace: config.incremental_verify,
-        },
-        handle.compile_needed_device(),
-    )?;
-    if let Some(t0) = t_verify {
-        provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("sync after verify: {}", e)))?;
-        profile.verify_sec = t0.elapsed().as_secs_f64();
-    }
-    #[cfg(debug_assertions)]
-    {
-        if !profiling {
-            provider.device().synchronize().map_err(|e| {
-                XlogError::Kernel(format!(
-                    "sync after validate_equivalence_gpu_gated failed: {}",
-                    e
-                ))
-            })?;
-        }
-    }
-
     // --- Smoothing stage ---
-    //
-    // Smoothing is evaluation-only (WMC/grad correctness); it is semantics-preserving and does not
-    // need to participate in the equivalence check.
     let t_smooth = if profiling {
         Some(Instant::now())
     } else {
@@ -605,6 +575,59 @@ pub(crate) fn compile_gpu_d4_and_verify_cached_with_ledger(
         profile.smooth_sec = t0.elapsed().as_secs_f64();
     }
 
+    // --- Verify final-circuit equivalence stage ---
+    //
+    // Certification is deliberately after every topology-changing pass. The
+    // exact `circuit_eval` value verified here is the value cached below and
+    // consumed by weighted model counting and gradients.
+    //
+    // `encode_cnf_gpu` sets `decision_var_limit` to the end of the leaf+choice var range. For
+    // deterministic programs with no probabilistic vars, this range is empty (limit=0). In that
+    // case, the verifier must still be able to branch, so fall back to `cnf.num_vars` (all CNF
+    // vars are semantically meaningful when there is no probabilistic decision set).
+    let verifier_decision_var_limit = if random_vars.is_empty() {
+        &cnf.num_vars
+    } else {
+        decision_var_limit
+    };
+    let cdcl = cdcl_config_from_compile(config)?;
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: validate_equivalence_gpu_gated");
+    let t_verify = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
+    let certified_circuit = certify_final_circuit(
+        cnf,
+        verifier_decision_var_limit,
+        circuit_eval,
+        provider,
+        GpuEquivalenceConfig {
+            cdcl,
+            reuse_workspace: config.incremental_verify,
+        },
+        handle.compile_needed_device(),
+    )?;
+    if let Some(t0) = t_verify {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after verify: {}", e)))?;
+        profile.verify_sec = t0.elapsed().as_secs_f64();
+    }
+    #[cfg(debug_assertions)]
+    {
+        if !profiling {
+            provider.device().synchronize().map_err(|e| {
+                XlogError::Kernel(format!(
+                    "sync after validate_equivalence_gpu_gated failed: {}",
+                    e
+                ))
+            })?;
+        }
+    }
+
     // --- Cache store stage ---
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: store_from_xgcf");
@@ -613,7 +636,7 @@ pub(crate) fn compile_gpu_d4_and_verify_cached_with_ledger(
     } else {
         None
     };
-    cache.store_from_xgcf(&mut handle, &circuit_eval)?;
+    cache.store_from_xgcf(&mut handle, certified_circuit.as_xgcf())?;
     if let Some(t0) = t_store {
         provider
             .device()
@@ -640,7 +663,7 @@ pub(crate) fn compile_gpu_d4_and_verify_cached_with_ledger(
     };
     let free_var_mask = gpu_d4::compute_free_var_mask_gpu_gated(
         cnf,
-        &circuit_eval,
+        certified_circuit.as_xgcf(),
         provider,
         handle.compile_needed_device(),
     )?;
