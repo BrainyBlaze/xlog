@@ -196,8 +196,7 @@ fn test_f64_infinity(ctx: &TestContext) -> TestResult {
 
 /// Test 2: Test f64::NAN handling (NaN propagation in operations).
 ///
-/// Verifies that NaN values are handled correctly in sorting and filtering.
-/// NaN should sort to a consistent position (typically at the end).
+/// Verifies that positive canonical NaN values sort after positive infinity.
 fn test_f64_nan_handling(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
     let schema = Schema::new(vec![("val".to_string(), ScalarType::F64)]);
@@ -230,7 +229,7 @@ fn test_f64_nan_handling(ctx: &TestContext) -> TestResult {
         }
     };
 
-    // Sort the buffer - NaN handling is implementation-defined but should be consistent
+    // Sort using the canonical total order.
     let sorted = match ctx.provider.sort(&buffer, &[0]) {
         Ok(s) => s,
         Err(e) => {
@@ -300,8 +299,7 @@ fn test_f64_nan_handling(ctx: &TestContext) -> TestResult {
         }
     }
 
-    // Verify all NaN values are grouped together (either at start or end)
-    // Based on IEEE total ordering, NaN should sort to end
+    // These positive canonical NaNs sort after every non-NaN in the corpus.
     let first_nan_idx = sorted_data.iter().position(|v| v.is_nan());
     if let Some(idx) = first_nan_idx {
         // All remaining values after first NaN should also be NaN

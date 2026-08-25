@@ -1,4 +1,4 @@
-use xlog_core::{Result, XlogError};
+use xlog_core::{f64_total_order_key_from_bits, Result, XlogError};
 use xlog_logic::ast::AggOp;
 
 use crate::provenance::Value;
@@ -198,7 +198,9 @@ impl AggState {
 fn value_le(a: &Value, b: &Value) -> Result<bool> {
     match (a, b) {
         (Value::I64(x), Value::I64(y)) => Ok(x <= y),
-        (Value::F64(x), Value::F64(y)) => Ok(f64::from_bits(*x) <= f64::from_bits(*y)),
+        (Value::F64(x), Value::F64(y)) => {
+            Ok(f64_total_order_key_from_bits(*x) <= f64_total_order_key_from_bits(*y))
+        }
         (Value::Symbol(x), Value::Symbol(y)) => Ok(x <= y),
         (Value::String(x), Value::String(y)) => Ok(x <= y),
         _ => Err(XlogError::Compilation(
@@ -209,4 +211,50 @@ fn value_le(a: &Value, b: &Value) -> Result<bool> {
 
 fn internal_state_error() -> XlogError {
     XlogError::Compilation("Internal aggregate state mismatch".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selected_f64_bits(op: AggOp, inputs: &[u64]) -> u64 {
+        let mut state = AggState::new(op);
+        for &bits in inputs {
+            state
+                .update(op, &Value::F64(bits))
+                .expect("aggregate update");
+        }
+        let Value::F64(bits) = state.finish(op).expect("aggregate result") else {
+            panic!("expected f64 aggregate result");
+        };
+        bits
+    }
+
+    #[test]
+    fn floating_min_max_are_total_and_input_order_independent() {
+        let pairs = [
+            ((-0.0_f64).to_bits(), 0.0_f64.to_bits()),
+            (0xfff8_0000_0000_0042, 0x7ff8_0000_0000_0024),
+            (0x7ff8_0000_0000_0001, 0x7ff8_0000_0000_0002),
+        ];
+
+        for (left, right) in pairs {
+            let expected_min =
+                if f64_total_order_key_from_bits(left) <= f64_total_order_key_from_bits(right) {
+                    left
+                } else {
+                    right
+                };
+            let expected_max =
+                if f64_total_order_key_from_bits(left) >= f64_total_order_key_from_bits(right) {
+                    left
+                } else {
+                    right
+                };
+            for inputs in [[left, right], [right, left]] {
+                assert_eq!(selected_f64_bits(AggOp::Min, &inputs), expected_min);
+                assert_eq!(selected_f64_bits(AggOp::Max, &inputs), expected_max);
+            }
+        }
+    }
 }

@@ -155,6 +155,22 @@ Apply operations using CudaKernelProvider arithmetic helpers
 Output column in projected CudaBuffer
 ```
 
+### Relational floating-point order
+
+XLOG maps every `f32` and `f64` bit pattern to one unsigned ordering key. The
+mapping is shared by host evaluation and CUDA and matches Rust's
+`f32::total_cmp` and `f64::total_cmp`. All six comparison operators, arithmetic
+`min` and `max`, probabilistic `min` and `max`, sorting, difference, and
+deduplication therefore agree on one total order.
+
+The order distinguishes negative zero from positive zero and preserves the
+sign, signaling state, and payload of NaNs. Equality is equality in that total
+order: two values compare equal only when their bit patterns are identical.
+Consequently, `-0.0` is not equal to `0.0`, and a NaN compares equal to the
+same NaN bit pattern. Arithmetic operations that produce a NaN normalize it to
+one positive quiet-NaN bit pattern, so host and CUDA results do not depend on a
+platform-specific NaN payload.
+
 ### Error Handling
 
 Arithmetic faults do not raise an error at runtime. Instead they produce special

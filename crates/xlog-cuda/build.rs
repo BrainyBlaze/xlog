@@ -184,6 +184,10 @@ fn main() {
     // kernel module) leaves other build configs reusing a cached
     // OUT_DIR whose embedded PTX table predates the module.
     println!("cargo:rerun-if-changed=src/kernel_manifest_data.rs");
+    println!(
+        "cargo:rerun-if-changed={}",
+        kernels_dir.join("totalorder.cuh").display()
+    );
 
     println!("cargo:rerun-if-env-changed=XLOG_RUSTDOC_NO_CUDA");
     println!("cargo:rerun-if-env-changed=DOCS_RS");

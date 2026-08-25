@@ -4,6 +4,8 @@
 pub mod reference {
     use std::collections::HashMap;
 
+    use xlog_core::f64_total_order_key;
+
     /// Hash join returning (left_idx, right_idx) pairs.
     pub fn hash_join_u32(left: &[u32], right: &[u32]) -> Vec<(usize, usize)> {
         let mut result = Vec::new();
@@ -419,6 +421,8 @@ pub mod reference {
         }
 
         pub fn apply_f64(&self, a: f64, b: f64) -> bool {
+            let a = f64_total_order_key(a);
+            let b = f64_total_order_key(b);
             match self {
                 CompareOp::Eq => a == b,
                 CompareOp::Ne => a != b,

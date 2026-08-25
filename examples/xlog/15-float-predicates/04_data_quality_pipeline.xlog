@@ -28,13 +28,12 @@ pred nan_source(u32, f64, f64).
 nan_source(110, 0.0, 0.0).  // Will produce NaN
 raw_measurement(Id, V) :- nan_source(Id, A, B), V is A / B.
 
-// Step 1: Identify missing data (NaN values)
-// NaN != NaN under IEEE, so if V != V, it's NaN
-missing_data(Id) :- raw_measurement(Id, V), V != V.
+// Step 1: Preserve the provenance of the invalid producing operation.
+missing_data(Id) :- nan_source(Id, _, Denom), Denom = 0.0.
 
-// Step 2: Filter to clean data (not NaN, not infinite)
-// Value must equal itself (not NaN) and be bounded (not infinite)
-clean_data(Id, V) :- raw_measurement(Id, V), V = V, V > -1000000.0, V < 1000000.0.
+// Step 2: Accept only the application's finite operating domain. Under the
+// total order these bounds exclude infinities and both signed NaN regions.
+clean_data(Id, V) :- raw_measurement(Id, V), V > -1000000.0, V < 1000000.0.
 
 // Step 3: Detect outliers (outside expected range 0-100)
 outlier(Id, V) :- clean_data(Id, V), V < 0.0.

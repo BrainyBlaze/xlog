@@ -2184,20 +2184,22 @@ Unsupported REPL/watch mutation semantics, such as dynamic `assert` or
 
 ---
 
-## Float Predicates and IEEE 754 Semantics
+## Float Predicates and Total-Order Semantics
 
-XLOG uses **hybrid semantics** for floating-point comparisons to handle special values (NaN, Infinity, signed zero) correctly.
+XLOG uses one total order for every floating-point comparison. Host and CUDA
+execution use the same bit-to-key mapping, consistent with Rust's
+`f32::total_cmp` and `f64::total_cmp`.
 
 ### Comparison Semantics
 
-| Operator | Semantics | NaN Behavior |
-|----------|-----------|--------------|
-| `=`, `!=` | IEEE 754 equality | `NaN = NaN` is **FALSE** |
-| `<`, `<=`, `>`, `>=` | Total ordering | NaN is comparable |
+| Operator | Semantics | Special-value behavior |
+|----------|-----------|------------------------|
+| `=`, `!=` | Total-order identity | Equal only when the float bit patterns match |
+| `<`, `<=`, `>`, `>=` | Total ordering | Every NaN and infinity is comparable |
 
 ### Total Ordering
 
-For ordering comparisons, XLOG uses a **total ordering** consistent with Rust's `f64::total_cmp`:
+The total order has this broad shape:
 
 ```
 -NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN
@@ -2205,50 +2207,48 @@ For ordering comparisons, XLOG uses a **total ordering** consistent with Rust's 
 
 This means:
 - NaN values are at the extremes (negative NaN is smallest, positive NaN is largest)
-- `-0.0` and `+0.0` are distinguishable in ordering (unlike IEEE equality)
+- `-0.0` and `+0.0` are distinct, including for equality
+- NaN sign, signaling state, and payload are distinct
 - All values are comparable (no undefined ordering)
+- `min`, `max`, sorting, difference, and deduplication use the same order
 
-### Filtering NaN Values
+Arithmetic-generated NaNs are normalized to one positive quiet-NaN bit pattern,
+so the result does not depend on a host or CUDA payload choice.
 
-Since `NaN != NaN` under IEEE 754, use equality to filter out NaN:
+### Preventing Invalid Arithmetic
 
-```xlog
-// V = V is true only for non-NaN values
-valid(Id, V) :- data(Id, V), V = V.
-```
-
-### Detecting Special Values
-
-Use ordering to detect special values:
+A NaN is equal to the same NaN bit pattern, so `V != V` is not a NaN test in
+XLOG. Validate the producing operation instead:
 
 ```xlog
-// NaN is greater than any finite value
-is_nan(Id, V) :- data(Id, V), V > 1e308.
-
-// Infinity detection
-is_infinite(Id, V) :- data(Id, V), V > 1e300, V = V.
-
-// Finite values only
-is_finite(Id, V) :- data(Id, V), V > -1e308, V < 1e308.
+valid(Id, V) :- input(Id, Num, Denom), Denom != 0.0, V is Num / Denom.
 ```
+
+When the accepted data domain has finite bounds, total-order comparisons can
+also reject infinities and both signed NaN regions:
+
+```xlog
+accepted(Id, V) :- data(Id, V), V > -1000000.0, V < 1000000.0.
+```
+
+Use bounds only when they are genuine application limits. Track source
+validation or import metadata when exact fault classification matters.
 
 ### Example: Data Cleaning Pipeline
 
 ```xlog
-pred raw(u32, f64).
+pred raw(u32, f64, f64).
+pred reading(u32, f64).
 pred valid(u32, f64).
-pred anomaly(u32, f64).
+pred invalid_divisor(u32).
 
-raw(1, 22.5).
-raw(2, 0.0).        // Will compute NaN from 0/0
-raw(3, 28.3).
+raw(1, 22.5, 1.0).
+raw(2, 0.0, 0.0).
+raw(3, 28.3, 1.0).
 
-// Filter valid readings (not NaN)
-valid(Id, V) :- raw(Id, V), V = V.
-
-// Detect anomalies (NaN or extreme values)
-anomaly(Id, V) :- raw(Id, V), V > 1000.0.
-anomaly(Id, V) :- raw(Id, V), V < -1000.0.
+reading(Id, V) :- raw(Id, Num, Denom), V is Num / Denom.
+valid(Id, V) :- raw(Id, Num, Denom), Denom != 0.0, V is Num / Denom.
+invalid_divisor(Id) :- raw(Id, _, Denom), Denom = 0.0.
 ```
 
 ---

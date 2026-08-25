@@ -816,9 +816,9 @@ fn test_xlog_engine_workflow() {
 // Float Predicate Tests - Total Ordering Semantics (v0.3.1)
 // =============================================================================
 //
-// These tests validate IEEE 754 total ordering semantics for float predicates:
-// - Eq/Ne use IEEE semantics (NaN == NaN is false)
-// - Lt/Le/Gt/Ge use total ordering (NaN > Inf, -0.0 < +0.0)
+// These tests validate the exact IEEE 754 total order used by float predicates.
+// Equality preserves NaN payload and signed-zero identity; inequalities use the
+// same ordering.
 //
 // Total ordering: -NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN
 
@@ -1119,11 +1119,11 @@ fn test_float_predicate_financial_infinity() {
 /// Test 3: Scientific data with signed zero (-0.0 vs +0.0)
 ///
 /// Real-world scenario: Physics simulation approaching zero from different
-/// directions. Under IEEE 754, -0.0 == +0.0, but total ordering distinguishes them.
+/// directions. XLOG's total order distinguishes the two zero bit patterns.
 ///
 /// Expected behavior:
-/// - -0.0 < +0.0 under total ordering for Lt/Le/Gt/Ge
-/// - -0.0 == +0.0 under IEEE for Eq/Ne
+/// - -0.0 < +0.0 for ordering comparisons
+/// - -0.0 != +0.0 for exact total-order identity
 #[test]
 fn test_float_predicate_signed_zero() {
     let (mut executor, provider) = match create_test_executor() {
@@ -1153,7 +1153,7 @@ fn test_float_predicate_signed_zero() {
         // Values less than +0.0 (includes -0.0 under total ordering!)
         below_zero(Id) :- measurement(Id, V), V < 0.0.
 
-        // Values equal to zero (both -0.0 and +0.0 under IEEE equality)
+        // Exact positive-zero identity; negative zero remains distinct.
         at_zero(Id) :- measurement(Id, V), V = 0.0.
     "#;
 
@@ -1189,16 +1189,17 @@ fn test_float_predicate_signed_zero() {
     );
     assert!(below_ids.contains(&6), "-0.001 should be < 0.0");
 
-    // at_zero: 1, 2, 3, 4 (both -0.0 and +0.0 are equal under IEEE)
+    // at_zero: 2, 4 (only the exact positive-zero identity)
     let at_zero = executor.store().get("at_zero").expect("at_zero not found");
     let zero_ids = read_buffer_u32(&provider, at_zero, 0);
     println!("at_zero ids: {:?}", zero_ids);
     assert_eq!(
         zero_ids.len(),
-        4,
-        "Expected 4 at zero (both -0.0 and +0.0), got {:?}",
+        2,
+        "Expected the two positive-zero rows, got {:?}",
         zero_ids
     );
+    assert_eq!(zero_ids, vec![2, 4]);
 }
 
 /// Test 4: Complex multi-predicate filter with mixed operators

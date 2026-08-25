@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
-use xlog_core::ScalarType;
+use xlog_core::{f64_total_order_key, ScalarType};
 use xlog_core::{RelId, Result, RuntimeConfig, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
@@ -1510,8 +1510,12 @@ impl Executor {
                     Self::expr_may_be_float(left, schema) || Self::expr_may_be_float(right, schema);
 
                 if use_float {
-                    let left_val = Self::evaluate_expr_as_f64(left, columns, row_idx, schema)?;
-                    let right_val = Self::evaluate_expr_as_f64(right, columns, row_idx, schema)?;
+                    let left_val = f64_total_order_key(Self::evaluate_expr_as_f64(
+                        left, columns, row_idx, schema,
+                    )?);
+                    let right_val = f64_total_order_key(Self::evaluate_expr_as_f64(
+                        right, columns, row_idx, schema,
+                    )?);
 
                     Ok(match op {
                         CompareOp::Eq => left_val == right_val,
@@ -2240,7 +2244,7 @@ mod tests {
         let results: Vec<bool> = (0..values.len())
             .map(|row| Executor::evaluate_predicate(&gt_two, &columns, row, &schema).unwrap())
             .collect();
-        assert_eq!(results, vec![false, false, true, false]);
+        assert_eq!(results, vec![false, false, true, true]);
 
         let eq_nan = Expr::Compare {
             left: Box::new(Expr::Column(0)),
@@ -2250,7 +2254,7 @@ mod tests {
         let results: Vec<bool> = (0..values.len())
             .map(|row| Executor::evaluate_predicate(&eq_nan, &columns, row, &schema).unwrap())
             .collect();
-        assert_eq!(results, vec![false, false, false, false]);
+        assert_eq!(results, vec![false, false, false, true]);
 
         let ne_nan = Expr::Compare {
             left: Box::new(Expr::Column(0)),
@@ -2260,7 +2264,7 @@ mod tests {
         let results: Vec<bool> = (0..values.len())
             .map(|row| Executor::evaluate_predicate(&ne_nan, &columns, row, &schema).unwrap())
             .collect();
-        assert_eq!(results, vec![true, true, true, true]);
+        assert_eq!(results, vec![true, true, true, false]);
     }
 
     #[test]
