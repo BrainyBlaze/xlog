@@ -71,6 +71,11 @@ def test_workspace_validation_runs_cpu_tests_and_compiles_every_target() -> None
     assert workspace_tests["container"] == {
         "image": "nvidia/cuda:13.1.1-devel-ubuntu22.04"
     }
+    workspace_env = workspace_tests["env"]
+    assert isinstance(workspace_env, dict)
+    assert workspace_env["CARGO_BUILD_JOBS"] == "1"
+    assert workspace_env["CARGO_INCREMENTAL"] == "0"
+    assert workspace_env["CARGO_PROFILE_TEST_DEBUG"] == "0"
     workspace_commands = job_commands(workspace_tests)
     complete_compile = "cargo test --workspace --all-targets --locked --no-run"
     assert complete_compile in workspace_commands

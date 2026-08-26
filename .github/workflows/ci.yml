@@ -237,6 +237,10 @@ jobs:
     container:
       image: nvidia/cuda:13.1.1-devel-ubuntu22.04
     env:
+      # Keep the complete target matrix within hosted-runner memory and disk limits.
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
       XLOG_NO_CUBIN: "1"
     steps:
       - name: Install system dependencies
