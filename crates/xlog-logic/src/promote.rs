@@ -2130,7 +2130,6 @@ mod tests {
                 slot_vars,
                 output_columns,
                 fallback,
-                var_order: _,
                 ..
             } => {
                 assert_eq!(inputs.len(), 3);
@@ -2189,14 +2188,14 @@ mod tests {
             &StatsManager::new(),
             &CompilerConfig::default(),
         );
-        let first = format!("{:?}", &plan.rules_by_scc[0][0].body);
+        let first = format!("{:?}", plan.rules_by_scc[0][0].body);
         promote_multiway(
             &mut plan,
             &HashMap::new(),
             &StatsManager::new(),
             &CompilerConfig::default(),
         );
-        let second = format!("{:?}", &plan.rules_by_scc[0][0].body);
+        let second = format!("{:?}", plan.rules_by_scc[0][0].body);
         assert_eq!(first, second);
     }
 
@@ -2511,7 +2510,7 @@ mod tests {
             &CompilerConfig::default(),
         );
         assert_eq!(
-            format!("{:?}", &plan.rules_by_scc[0][0].meta),
+            format!("{:?}", plan.rules_by_scc[0][0].meta),
             format!("{:?}", meta_pre),
         );
     }
@@ -2758,7 +2757,6 @@ mod tests {
                 slot_vars,
                 output_columns,
                 fallback,
-                var_order: _,
                 ..
             } => {
                 assert_eq!(inputs.len(), 4);
@@ -2816,14 +2814,14 @@ mod tests {
             &StatsManager::new(),
             &CompilerConfig::default(),
         );
-        let first = format!("{:?}", &plan.rules_by_scc[0][0].body);
+        let first = format!("{:?}", plan.rules_by_scc[0][0].body);
         promote_multiway(
             &mut plan,
             &HashMap::new(),
             &StatsManager::new(),
             &CompilerConfig::default(),
         );
-        let second = format!("{:?}", &plan.rules_by_scc[0][0].body);
+        let second = format!("{:?}", plan.rules_by_scc[0][0].body);
         assert_eq!(first, second);
     }
 

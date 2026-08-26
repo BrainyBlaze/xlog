@@ -36,7 +36,6 @@ fn compile_triangle_program_produces_multiway_body() {
             slot_vars,
             output_columns,
             fallback,
-            var_order: _,
             ..
         } => {
             assert_eq!(inputs.len(), 3);
@@ -115,7 +114,6 @@ fn compile_4cycle_program_produces_multiway_body() {
             slot_vars,
             output_columns,
             fallback,
-            var_order: _,
             ..
         } => {
             assert_eq!(inputs.len(), 4);
