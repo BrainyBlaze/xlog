@@ -7202,112 +7202,121 @@ mod tests {
             return Ok(());
         };
 
-        let mut base_seconds = Vec::with_capacity(5);
+        const WARMUP_PAIRS: usize = 2;
+        const MEASURED_PAIRS: usize = 5;
+
+        let mut warmup_base_seconds = Vec::with_capacity(WARMUP_PAIRS);
+        let mut warmup_augmented_seconds = Vec::with_capacity(WARMUP_PAIRS);
+        let mut base_seconds = Vec::with_capacity(MEASURED_PAIRS);
+        let mut augmented_seconds = Vec::with_capacity(MEASURED_PAIRS);
         let mut expected_snapshot = None;
         let mut expected_profile = None;
-        for run in 0..5 {
-            let started = std::time::Instant::now();
-            let result = {
-                let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
-                base_program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        for pair in 0..(WARMUP_PAIRS + MEASURED_PAIRS) {
+            let augmented_order = if pair % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
             };
-            base_seconds.push(started.elapsed().as_secs_f64());
-            let snapshot = snapshot_query_results(provider.as_ref(), &result)?;
-            if let Some(expected) = &expected_snapshot {
-                assert_eq!(&snapshot, expected, "base resident run {run} drifted");
-            } else {
-                expected_snapshot = Some(snapshot);
-            }
-            let stats = result.stats.as_ref().expect("base resident profile");
-            let graph = stats
-                .resident_graph
-                .as_ref()
-                .expect("base resident graph telemetry");
-            assert_eq!(
-                graph.selection,
-                ResidentGraphSelectionKind::ResidentConditionalGraph
-            );
-            assert_eq!(graph.conditional_graph_launches, 1);
-            assert_eq!(
-                op_count(stats, "scan") as u64,
-                graph.device_scan_invocations
-            );
-            assert_eq!(
-                op_count(stats, "filter") as u64,
-                graph.device_filter_invocations
-            );
-            let profile = (
-                strata_op_profile(stats),
-                graph.device_scan_invocations,
-                graph.device_filter_invocations,
-                graph.semantic_scan_invocations,
-                graph.semantic_filter_invocations,
-                graph.deferred_profile.timed_scan_filter_invocations,
-            );
-            if let Some(expected) = &expected_profile {
-                assert_eq!(&profile, expected, "base resident run {run} op drift");
-            } else {
-                expected_profile = Some(profile);
-            }
-            drop(result);
-        }
+            for augmented in augmented_order {
+                let program = if augmented {
+                    &augmented_program
+                } else {
+                    &base_program
+                };
+                let started = std::time::Instant::now();
+                let result = {
+                    let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+                    program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+                };
+                let elapsed = started.elapsed().as_secs_f64();
+                match (pair < WARMUP_PAIRS, augmented) {
+                    (true, false) => warmup_base_seconds.push(elapsed),
+                    (true, true) => warmup_augmented_seconds.push(elapsed),
+                    (false, false) => base_seconds.push(elapsed),
+                    (false, true) => augmented_seconds.push(elapsed),
+                }
 
-        let expected_snapshot = expected_snapshot.expect("base resident snapshot");
-        let expected_profile = expected_profile.expect("base resident operation profile");
-        let mut augmented_seconds = Vec::with_capacity(5);
-        for run in 0..5 {
-            let started = std::time::Instant::now();
-            let result = {
-                let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
-                augmented_program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-            };
-            augmented_seconds.push(started.elapsed().as_secs_f64());
-            assert_eq!(
-                snapshot_query_results(provider.as_ref(), &result)?,
-                expected_snapshot,
-                "disconnected family changed query output on run {run}"
-            );
-            let stats = result.stats.as_ref().expect("augmented resident profile");
-            let graph = stats
-                .resident_graph
-                .as_ref()
-                .expect("augmented resident graph telemetry");
-            assert_eq!(
-                graph.selection,
-                ResidentGraphSelectionKind::ResidentConditionalGraph
-            );
-            assert_eq!(graph.conditional_graph_launches, 1);
-            assert_eq!(
-                op_count(stats, "scan") as u64,
-                graph.device_scan_invocations
-            );
-            assert_eq!(
-                op_count(stats, "filter") as u64,
-                graph.device_filter_invocations
-            );
-            assert_eq!(
-                (
+                let sample_kind = if augmented { "augmented" } else { "base" };
+                let snapshot = snapshot_query_results(provider.as_ref(), &result)?;
+                if let Some(expected) = &expected_snapshot {
+                    assert_eq!(
+                        &snapshot, expected,
+                        "{sample_kind} resident pair {pair} changed query output"
+                    );
+                } else {
+                    assert!(
+                        !augmented,
+                        "first resident scaling sample must be the base plan"
+                    );
+                    expected_snapshot = Some(snapshot);
+                }
+
+                let stats = result.stats.as_ref().expect("resident scaling profile");
+                let graph = stats
+                    .resident_graph
+                    .as_ref()
+                    .expect("resident scaling graph telemetry");
+                assert_eq!(
+                    graph.selection,
+                    ResidentGraphSelectionKind::ResidentConditionalGraph
+                );
+                assert_eq!(graph.conditional_graph_launches, 1);
+                assert_eq!(
+                    op_count(stats, "scan") as u64,
+                    graph.device_scan_invocations
+                );
+                assert_eq!(
+                    op_count(stats, "filter") as u64,
+                    graph.device_filter_invocations
+                );
+                let profile = (
                     strata_op_profile(stats),
                     graph.device_scan_invocations,
                     graph.device_filter_invocations,
                     graph.semantic_scan_invocations,
                     graph.semantic_filter_invocations,
                     graph.deferred_profile.timed_scan_filter_invocations,
-                ),
-                expected_profile,
-                "disconnected family changed semantic or device op counts on run {run}"
-            );
-            drop(result);
+                );
+                if let Some(expected) = &expected_profile {
+                    assert_eq!(
+                        &profile, expected,
+                        "{sample_kind} resident pair {pair} changed semantic or device op counts"
+                    );
+                } else {
+                    assert!(
+                        !augmented,
+                        "first resident scaling profile must be the base plan"
+                    );
+                    expected_profile = Some(profile);
+                }
+                drop(result);
+            }
         }
 
-        let base_median = median_seconds(&mut base_seconds);
-        let augmented_median = median_seconds(&mut augmented_seconds);
+        let mut base_median_samples = base_seconds.clone();
+        let mut augmented_median_samples = augmented_seconds.clone();
+        let base_median = median_seconds(&mut base_median_samples);
+        let augmented_median = median_seconds(&mut augmented_median_samples);
+        let paired_deltas = augmented_seconds
+            .iter()
+            .zip(&base_seconds)
+            .map(|(augmented, base)| augmented - base)
+            .collect::<Vec<_>>();
+        let mut paired_delta_samples = paired_deltas.clone();
+        let paired_delta_median = median_seconds(&mut paired_delta_samples);
         let allowed_delta = (base_median * 0.10).max(0.100);
+        eprintln!(
+            "disconnected 4,000-rule resident timings: warmup_base={warmup_base_seconds:?} warmup_augmented={warmup_augmented_seconds:?} measured_base={base_seconds:?} measured_augmented={augmented_seconds:?} paired_deltas={paired_deltas:?} base_median={base_median:.6}s augmented_median={augmented_median:.6}s paired_delta_median={paired_delta_median:.6}s allowed_delta={allowed_delta:.6}s"
+        );
         assert!(
             augmented_median - base_median <= allowed_delta,
             "disconnected 4,000-rule resident median delta {:.6}s exceeds {:.6}s: base={base_seconds:?} augmented={augmented_seconds:?}",
             augmented_median - base_median,
             allowed_delta,
+        );
+        assert!(
+            paired_delta_median <= allowed_delta,
+            "disconnected 4,000-rule resident paired median delta {paired_delta_median:.6}s exceeds {allowed_delta:.6}s: base={base_seconds:?} augmented={augmented_seconds:?} paired={paired_deltas:?}"
         );
         Ok(())
     }
