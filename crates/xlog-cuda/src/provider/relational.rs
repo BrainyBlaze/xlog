@@ -703,13 +703,17 @@ impl super::CudaKernelProvider {
 
         // Build lookup set from b
         let b_keys_set: std::collections::HashSet<u32> = b_keys_host
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
 
         // Find indices of a rows not in b
         let diff_indices: Vec<usize> = a_keys_host
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .map(|(i, chunk)| {
                 (

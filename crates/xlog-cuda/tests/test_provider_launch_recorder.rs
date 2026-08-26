@@ -715,11 +715,15 @@ fn provider_sort_recorded_keeps_logical_row_count_with_capacity_slack() {
         );
     }
     let observed_keys: Vec<u32> = observed_keys
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect();
     let observed_vals: Vec<u32> = observed_vals
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect();
     assert_eq!(observed_keys, vec![1, 2, 3]);
@@ -3627,7 +3631,9 @@ fn provider_compact_recorded_short_mask_ignores_capacity_slack() {
     let mut readback = vec![0u8; 2 * 4];
     unsafe { dtoh_sync(&mut readback, *out_col.device_ptr()) };
     let observed: Vec<u32> = readback
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect();
     assert_eq!(observed, vec![10, 30]);

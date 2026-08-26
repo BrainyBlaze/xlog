@@ -3256,10 +3256,8 @@ impl CudaKernelProvider {
                 .expect("four bytes checked"),
         );
         let mut counts = Vec::new();
-        for chunk in bytes[status_bytes + 4..].chunks_exact(4) {
-            counts.push(u32::from_ne_bytes(
-                chunk.try_into().expect("four-byte chunk"),
-            ));
+        for chunk in bytes[status_bytes + 4..].as_chunks::<4>().0 {
+            counts.push(u32::from_ne_bytes(*chunk));
         }
         finalize_schedule_output_counts(
             self,

@@ -179,7 +179,7 @@ impl super::CudaKernelProvider {
             })?;
 
         let mut selected = Vec::new();
-        for chunk in words.chunks_exact(ILP_EXACT_TOPK_FIELDS) {
+        for chunk in words.as_chunks::<ILP_EXACT_TOPK_FIELDS>().0 {
             if chunk[3] == 0 {
                 continue;
             }
