@@ -61,7 +61,7 @@ def test_required_contexts_are_stable_and_report_for_every_change() -> None:
         assert job.get("name") == context
 
 
-def test_workspace_and_clippy_commands_cover_the_complete_workspace() -> None:
+def test_workspace_validation_runs_cpu_tests_and_compiles_every_target() -> None:
     workflow = load_workflow("ci.yml")
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
@@ -71,10 +71,19 @@ def test_workspace_and_clippy_commands_cover_the_complete_workspace() -> None:
     assert workspace_tests["container"] == {
         "image": "nvidia/cuda:13.1.1-devel-ubuntu22.04"
     }
-    assert (
-        "cargo test --workspace --all-targets --locked"
-        in job_commands(workspace_tests)
-    )
+    workspace_commands = job_commands(workspace_tests)
+    complete_compile = "cargo test --workspace --all-targets --locked --no-run"
+    assert complete_compile in workspace_commands
+    assert workspace_commands.count("cargo test --workspace --all-targets --locked") == 1
+    for crate in (
+        "xlog-core",
+        "xlog-ir",
+        "xlog-logic",
+        "xlog-stats",
+        "xlog-solve",
+        "xlog-induce",
+    ):
+        assert f"-p {crate}" in workspace_commands
 
     clippy = jobs["clippy"]
     assert isinstance(clippy, dict)

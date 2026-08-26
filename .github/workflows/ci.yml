@@ -260,8 +260,18 @@ jobs:
       - name: Show CUDA toolkit
         run: nvcc --version
 
-      - name: Test every workspace target without GPU execution
-        run: cargo test --workspace --all-targets --locked
+      - name: Run CPU-only Rust tests
+        run: |
+          cargo test --locked --all-targets \
+            -p xlog-core \
+            -p xlog-ir \
+            -p xlog-logic \
+            -p xlog-stats \
+            -p xlog-solve \
+            -p xlog-induce
+
+      - name: Compile every workspace test target without GPU execution
+        run: cargo test --workspace --all-targets --locked --no-run
 
       - name: Build workspace without GPU execution
         run: cargo build --workspace --locked --release --exclude pyxlog
