@@ -6972,9 +6972,13 @@ mod tests {
             "external certificate audits and the disabled-resident baseline must reuse the compile-time certification"
         );
 
-        let mut resident_seconds = Vec::with_capacity(5);
-        let mut device_seconds = Vec::with_capacity(5);
-        for run in 0..5 {
+        const WARMUP_RUNS: usize = 2;
+        const MEASURED_RUNS: usize = 5;
+        let mut warmup_seconds = Vec::with_capacity(WARMUP_RUNS);
+        let mut warmup_device_seconds = Vec::with_capacity(WARMUP_RUNS);
+        let mut resident_seconds = Vec::with_capacity(MEASURED_RUNS);
+        let mut device_seconds = Vec::with_capacity(MEASURED_RUNS);
+        for run in 0..(WARMUP_RUNS + MEASURED_RUNS) {
             let started = std::time::Instant::now();
             let resident = {
                 let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
@@ -6985,7 +6989,12 @@ mod tests {
                 1,
                 "resident corpus run {run} must reuse the single cached certification"
             );
-            resident_seconds.push(started.elapsed().as_secs_f64());
+            let elapsed_seconds = started.elapsed().as_secs_f64();
+            if run < WARMUP_RUNS {
+                warmup_seconds.push(elapsed_seconds);
+            } else {
+                resident_seconds.push(elapsed_seconds);
+            }
             assert_eq!(
                 snapshot_query_results(provider.as_ref(), &resident)?,
                 baseline_snapshot,
@@ -7033,7 +7042,13 @@ mod tests {
             );
             assert!(graph.deferred_profile.device_elapsed_ns > 0);
             assert_eq!(graph.deferred_profile.final_sync_misattributed_ns, 0);
-            device_seconds.push(graph.deferred_profile.device_elapsed_ns as f64 / 1_000_000_000.0);
+            let device_elapsed_seconds =
+                graph.deferred_profile.device_elapsed_ns as f64 / 1_000_000_000.0;
+            if run < WARMUP_RUNS {
+                warmup_device_seconds.push(device_elapsed_seconds);
+            } else {
+                device_seconds.push(device_elapsed_seconds);
+            }
             assert_eq!(graph.core_transfers.tracked_htod_calls, 0);
             assert_eq!(graph.core_transfers.tracked_htod_bytes, 0);
             assert_eq!(graph.core_transfers.tracked_dtoh_calls, 0);
@@ -7067,21 +7082,27 @@ mod tests {
             drop(resident);
         }
         assert_eq!(program.resident_certification_initializations(), 1);
+        assert_eq!(warmup_seconds.len(), WARMUP_RUNS);
+        assert_eq!(resident_seconds.len(), MEASURED_RUNS);
         let compile_plus_first_resident_seconds =
-            compile_and_certification_seconds + resident_seconds[0];
-        let max_seconds = resident_seconds.iter().copied().fold(0.0_f64, f64::max);
+            compile_and_certification_seconds + warmup_seconds[0];
+        let max_seconds = warmup_seconds
+            .iter()
+            .chain(&resident_seconds)
+            .copied()
+            .fold(0.0_f64, f64::max);
         let mut sorted_resident_seconds = resident_seconds.clone();
         let median_seconds = median_seconds(&mut sorted_resident_seconds);
         eprintln!(
-            "resident corpus latency: compile_and_certification_seconds={compile_and_certification_seconds:.6} compile_plus_first_resident_seconds={compile_plus_first_resident_seconds:.6} end_to_end_seconds={resident_seconds:?} device_event_seconds={device_seconds:?} median_end_to_end_seconds={median_seconds:.6} max_end_to_end_seconds={max_seconds:.6}"
+            "resident corpus latency: compile_and_certification_seconds={compile_and_certification_seconds:.6} compile_plus_first_resident_seconds={compile_plus_first_resident_seconds:.6} warmup_end_to_end_seconds={warmup_seconds:?} measured_end_to_end_seconds={resident_seconds:?} warmup_device_event_seconds={warmup_device_seconds:?} measured_device_event_seconds={device_seconds:?} median_measured_end_to_end_seconds={median_seconds:.6} max_all_end_to_end_seconds={max_seconds:.6}"
         );
         assert!(
             median_seconds <= 1.25,
-            "five-run resident corpus median {median_seconds:.6}s exceeds 1.25s: {resident_seconds:?}"
+            "five-run steady-state resident corpus median {median_seconds:.6}s exceeds 1.25s: {resident_seconds:?}"
         );
         assert!(
             max_seconds <= 1.75,
-            "five-run resident corpus max {max_seconds:.6}s exceeds 1.75s: {resident_seconds:?}"
+            "seven-run resident corpus max {max_seconds:.6}s exceeds 1.75s: warmup={warmup_seconds:?} measured={resident_seconds:?}"
         );
         Ok(())
     }
