@@ -752,8 +752,10 @@ fn download_rows(
         }
         columns.push(
             bytes
-                .chunks_exact(std::mem::size_of::<u32>())
-                .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("u32 chunk")))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| u32::from_le_bytes(*chunk))
                 .collect::<Vec<_>>(),
         );
     }

@@ -1759,7 +1759,7 @@ fn require_python_int(value: &Bound<'_, PyAny>, context: &str) -> PyResult<()> {
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
     let mut bytes = Vec::with_capacity(value.len() / 2);
     let raw = value.as_bytes();
-    for pair in raw.chunks_exact(2) {
+    for pair in raw.as_chunks::<2>().0 {
         let high = hex_digit(pair[0])?;
         let low = hex_digit(pair[1])?;
         bytes.push((high << 4) | low);

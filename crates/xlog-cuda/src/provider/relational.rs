@@ -185,7 +185,6 @@ impl super::CudaKernelProvider {
             columns: combined_columns,
             row_cap,
             d_num_rows,
-            schema: _,
             ..
         } = combined;
 

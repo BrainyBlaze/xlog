@@ -121,12 +121,16 @@ fn download_column_bytes(
 fn download_group_counts(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> Vec<(u32, u64)> {
     assert_eq!(buffer.arity(), 2, "expected (root, count) output");
     let keys: Vec<u32> = download_column_bytes(memory, buffer, 0, 4)
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect();
     let counts: Vec<u64> = download_column_bytes(memory, buffer, 1, 8)
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect();
     let mut out: Vec<(u32, u64)> = keys.into_iter().zip(counts).collect();
     out.sort();

@@ -596,7 +596,7 @@ fn main() {
     println!("---\n");
     println!("## Cross-cell verdict\n");
     let mut counts = BTreeMap::<String, u32>::new();
-    for (_, v) in verdicts.iter() {
+    for v in verdicts.values() {
         *counts.entry(format!("{v:?}")).or_insert(0) += 1;
     }
     for (k, v) in &counts {

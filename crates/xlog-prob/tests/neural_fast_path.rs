@@ -115,7 +115,9 @@ query(pred(0, 2)).
         .dtoh_sync_copy_into(grads[0].column(0).unwrap(), &mut out_bytes)
         .unwrap();
     let out: Vec<f32> = out_bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
 

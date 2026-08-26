@@ -115,12 +115,16 @@ fn download_column_bytes(
 fn download_group_counts(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> Vec<(u32, u64)> {
     assert_eq!(buffer.arity(), 2, "expected (X, count) output");
     let keys: Vec<u32> = download_column_bytes(memory, buffer, 0, 4)
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect();
     let counts: Vec<u64> = download_column_bytes(memory, buffer, 1, 8)
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect();
     let mut out: Vec<(u32, u64)> = keys.into_iter().zip(counts).collect();
     out.sort();
@@ -172,12 +176,16 @@ fn run_agg_program<T>(
 fn download_groups_u32(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> Vec<(u32, u32)> {
     assert_eq!(buffer.arity(), 2, "expected (X, agg) output");
     let keys: Vec<u32> = download_column_bytes(memory, buffer, 0, 4)
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect();
     let aggs: Vec<u32> = download_column_bytes(memory, buffer, 1, 4)
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect();
     let mut out: Vec<(u32, u32)> = keys.into_iter().zip(aggs).collect();
     out.sort();
@@ -418,12 +426,16 @@ fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> Cud
 fn download_groups_u64_u64(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> Vec<(u64, u64)> {
     assert_eq!(buffer.arity(), 2, "expected (X, count) output");
     let keys: Vec<u64> = download_column_bytes(memory, buffer, 0, 8)
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect();
     let counts: Vec<u64> = download_column_bytes(memory, buffer, 1, 8)
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect();
     let mut out: Vec<(u64, u64)> = keys.into_iter().zip(counts).collect();
     out.sort();

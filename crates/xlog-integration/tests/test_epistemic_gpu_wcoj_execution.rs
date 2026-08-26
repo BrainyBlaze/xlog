@@ -272,8 +272,10 @@ fn download_unary_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec
         );
     }
     bytes
-        .chunks_exact(std::mem::size_of::<u32>())
-        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
         .collect()
 }
 
@@ -296,14 +298,11 @@ fn download_binary_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Ve
             col1.len(),
         );
     }
-    col0.chunks_exact(std::mem::size_of::<u32>())
-        .zip(col1.chunks_exact(std::mem::size_of::<u32>()))
-        .map(|(a, b)| {
-            (
-                u32::from_le_bytes(a.try_into().unwrap()),
-                u32::from_le_bytes(b.try_into().unwrap()),
-            )
-        })
+    col0.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(col1.as_chunks::<4>().0.iter())
+        .map(|(a, b)| (u32::from_le_bytes(*a), u32::from_le_bytes(*b)))
         .collect()
 }
 
@@ -350,14 +349,16 @@ fn download_ternary_u32(
             col2.len(),
         );
     }
-    col0.chunks_exact(std::mem::size_of::<u32>())
-        .zip(col1.chunks_exact(std::mem::size_of::<u32>()))
-        .zip(col2.chunks_exact(std::mem::size_of::<u32>()))
+    col0.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(col1.as_chunks::<4>().0.iter())
+        .zip(col2.as_chunks::<4>().0.iter())
         .map(|((a, b), c)| {
             (
-                u32::from_le_bytes(a.try_into().unwrap()),
-                u32::from_le_bytes(b.try_into().unwrap()),
-                u32::from_le_bytes(c.try_into().unwrap()),
+                u32::from_le_bytes(*a),
+                u32::from_le_bytes(*b),
+                u32::from_le_bytes(*c),
             )
         })
         .collect()
@@ -397,16 +398,18 @@ fn download_quaternary_u32(
             col3.len(),
         );
     }
-    col0.chunks_exact(std::mem::size_of::<u32>())
-        .zip(col1.chunks_exact(std::mem::size_of::<u32>()))
-        .zip(col2.chunks_exact(std::mem::size_of::<u32>()))
-        .zip(col3.chunks_exact(std::mem::size_of::<u32>()))
+    col0.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(col1.as_chunks::<4>().0.iter())
+        .zip(col2.as_chunks::<4>().0.iter())
+        .zip(col3.as_chunks::<4>().0.iter())
         .map(|(((a, b), c), d)| {
             (
-                u32::from_le_bytes(a.try_into().unwrap()),
-                u32::from_le_bytes(b.try_into().unwrap()),
-                u32::from_le_bytes(c.try_into().unwrap()),
-                u32::from_le_bytes(d.try_into().unwrap()),
+                u32::from_le_bytes(*a),
+                u32::from_le_bytes(*b),
+                u32::from_le_bytes(*c),
+                u32::from_le_bytes(*d),
             )
         })
         .collect()

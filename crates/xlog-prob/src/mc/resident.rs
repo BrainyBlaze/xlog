@@ -420,7 +420,7 @@ fn estimate_resident_bound_bytes(plan: &ResidentPlan, num_worlds: u32) -> u64 {
         .saturating_add(sat_mul(worlds, 4));
 
     let mut sparse_join_bytes = 0u64;
-    for rule in plan.rule_data.chunks_exact(RULE_REC) {
+    for rule in plan.rule_data.as_chunks::<RULE_REC>().0 {
         let n_body = rule[0];
         if n_body < 2 {
             continue;

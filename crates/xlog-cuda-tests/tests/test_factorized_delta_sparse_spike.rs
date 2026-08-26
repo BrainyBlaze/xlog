@@ -100,8 +100,10 @@ fn download_set(memory: &Arc<GpuMemoryManager>, buf: &CudaBuffer) -> Vec<(u32, u
             assert_eq!(r, sys::cudaError_enum::CUDA_SUCCESS);
         }
         bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect()
     };
     let (c0, c1) = (col(0), col(1));

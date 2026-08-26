@@ -113,8 +113,10 @@ fn download_count_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) ->
         .dtoh_sync_copy_into(col, &mut bytes)
         .expect("dtoh count column");
     bytes
-        .chunks_exact(4)
-        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("u32 bytes")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
         .collect()
 }
 

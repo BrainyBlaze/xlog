@@ -239,12 +239,12 @@ fn decode_column_to_strings(
     let mut out = Vec::with_capacity(num_rows);
     match typ {
         ScalarType::U32 => {
-            for chunk in bytes.chunks_exact(4) {
+            for chunk in bytes.as_chunks::<4>().0 {
                 out.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string());
             }
         }
         ScalarType::Symbol => {
-            for chunk in bytes.chunks_exact(4) {
+            for chunk in bytes.as_chunks::<4>().0 {
                 let id = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 // Avoid crashing the example runner when a relation contains a non-interned symbol ID.
                 // Keep output printable while preserving the raw identifier for debugging.
@@ -253,17 +253,17 @@ fn decode_column_to_strings(
             }
         }
         ScalarType::I32 => {
-            for chunk in bytes.chunks_exact(4) {
+            for chunk in bytes.as_chunks::<4>().0 {
                 out.push(i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string());
             }
         }
         ScalarType::F32 => {
-            for chunk in bytes.chunks_exact(4) {
+            for chunk in bytes.as_chunks::<4>().0 {
                 out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string());
             }
         }
         ScalarType::U64 => {
-            for chunk in bytes.chunks_exact(8) {
+            for chunk in bytes.as_chunks::<8>().0 {
                 out.push(
                     u64::from_le_bytes([
                         chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
@@ -274,7 +274,7 @@ fn decode_column_to_strings(
             }
         }
         ScalarType::I64 => {
-            for chunk in bytes.chunks_exact(8) {
+            for chunk in bytes.as_chunks::<8>().0 {
                 out.push(
                     i64::from_le_bytes([
                         chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
@@ -285,7 +285,7 @@ fn decode_column_to_strings(
             }
         }
         ScalarType::F64 => {
-            for chunk in bytes.chunks_exact(8) {
+            for chunk in bytes.as_chunks::<8>().0 {
                 out.push(
                     f64::from_le_bytes([
                         chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],

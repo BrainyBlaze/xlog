@@ -129,8 +129,10 @@ fn download_u32_column(
         assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS, "dtoh column copy");
     }
     bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect()
 }
 
@@ -1025,8 +1027,10 @@ fn download_u64_column(
         assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS, "dtoh column copy");
     }
     bytes
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect()
 }
 

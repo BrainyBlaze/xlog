@@ -751,7 +751,7 @@ query(path_rel(1, 4)).
     assert_eq!(counts[0] as usize, c.samples);
 
     let iters = download_iters(&provider, &r);
-    assert!(iters.iter().all(|&i| i == 4), "trace: {:?}", &iters);
+    assert!(iters.iter().all(|&i| i == 4), "trace: {:?}", iters);
 
     let (sparse_counts, sparse_offsets) = download_sparse_trace(&provider, &r);
     assert!(sparse_counts.iter().all(|&count| count == 9));
@@ -813,7 +813,7 @@ query(path_rel(4, 1)).
         "counts={counts:?} iters={iters:?} sparse_counts={sparse_counts:?} converged={converged:?} overflow={overflow:?} participation={participation:?}"
     );
     assert_eq!(counts[1], 0);
-    assert!(iters.iter().all(|&i| i == 4), "trace: {:?}", &iters);
+    assert!(iters.iter().all(|&i| i == 4), "trace: {:?}", iters);
     assert!(sparse_counts.iter().all(|&count| count == 9));
 
     assert!(converged.iter().all(|&flag| flag == 1));
