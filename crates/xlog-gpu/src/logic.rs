@@ -6026,42 +6026,18 @@ mod tests {
         ))
     }
 
-    fn scan_schema_descriptor(program: &LogicProgram, rel: RelId) -> String {
-        let schemas = program
-            .rel_ids
-            .iter()
-            .filter(|(_, candidate)| **candidate == rel)
-            .filter_map(|(name, _)| {
-                program
-                    .schemas
-                    .get(name)
-                    .map(|schema| format!("{name}={schema:#?}"))
-            })
-            .collect::<BTreeSet<_>>();
-        assert!(
-            !schemas.is_empty(),
-            "compiled Scan {rel:?} has no schema identity"
-        );
-        schemas.into_iter().collect::<Vec<_>>().join("|")
-    }
-
     struct RouteWalk<'a> {
-        program: &'a LogicProgram,
         scc_index: usize,
         rule_index: usize,
         recursive: bool,
-        descriptors: &'a mut BTreeSet<String>,
+        identities: &'a mut BTreeSet<String>,
     }
 
     impl RouteWalk<'_> {
         fn visit(&mut self, node: &RirNode, path: &str) {
-            let scan_schema = match node {
-                RirNode::Scan { rel } => scan_schema_descriptor(self.program, *rel),
-                _ => String::new(),
-            };
             assert!(
-                self.descriptors.insert(format!(
-                    "scc={};rule={};recursive={};path={path};node={node:#?};scan_schema={scan_schema}",
+                self.identities.insert(format!(
+                    "scc={};rule={};recursive={};path={path}",
                     self.scc_index, self.rule_index, self.recursive
                 )),
                 "route occurrence paths must be unique"
@@ -6109,11 +6085,8 @@ mod tests {
         }
     }
 
-    fn independent_route_descriptors(
-        program: &LogicProgram,
-        plan: &ExecutionPlan,
-    ) -> BTreeSet<String> {
-        let mut descriptors = BTreeSet::new();
+    fn independent_route_identities(plan: &ExecutionPlan) -> BTreeSet<String> {
+        let mut identities = BTreeSet::new();
         for (scc_index, scc) in plan.sccs.iter().enumerate() {
             let rules = plan
                 .rules_by_scc
@@ -6121,26 +6094,25 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing rule vector for SCC {scc_index}"));
             for (rule_index, rule) in rules.iter().enumerate() {
                 RouteWalk {
-                    program,
                     scc_index,
                     rule_index,
                     recursive: scc.is_recursive,
-                    descriptors: &mut descriptors,
+                    identities: &mut identities,
                 }
                 .visit(&rule.body, "primary/root");
                 let rule_identity = format!(
                     "scc={scc_index};rule={rule_index};head={};schema={:#?}",
                     rule.head, rule.meta.schema
                 );
-                descriptors.insert(format!("{rule_identity};implicit=rule_result_union"));
-                descriptors.insert(format!("{rule_identity};implicit=full_row_dedup"));
+                identities.insert(format!("{rule_identity};implicit=rule_result_union"));
+                identities.insert(format!("{rule_identity};implicit=full_row_dedup"));
                 if scc.is_recursive {
-                    descriptors.insert(format!("{rule_identity};implicit=novel_tuple_difference"));
-                    descriptors.insert(format!("{rule_identity};implicit=device_convergence"));
+                    identities.insert(format!("{rule_identity};implicit=novel_tuple_difference"));
+                    identities.insert(format!("{rule_identity};implicit=device_convergence"));
                 }
             }
         }
-        descriptors
+        identities
     }
 
     fn op_count(stats: &ExecutionStats, name: &str) -> usize {
@@ -6882,24 +6854,30 @@ mod tests {
             chain_fallbacks.iter().map(|route| route.4).sum::<usize>()
         );
 
-        let expected_routes = independent_route_descriptors(&program, plan);
+        // Prove occurrence completeness independently without duplicating the
+        // certificate's bounded local-node encoding. `matches_plan` and the
+        // resident-graph mutation tests verify that semantic binding.
+        let expected_route_identities = independent_route_identities(plan);
         let certificate = ResidentGraphRouteCertificate::inspect(plan, &schema_catalog(&program))?;
         assert!(certificate.is_supported(), "{:#?}", certificate.declines());
         assert!(certificate.matches_plan(plan)?);
         let mut covered_structural_bindings = BTreeSet::new();
-        let mut covered_physical_routes = BTreeSet::new();
+        let mut covered_physical_route_identities = BTreeSet::new();
         for descriptor in certificate.covered_route_descriptors() {
             if descriptor.starts_with("plan;") {
                 covered_structural_bindings.insert(descriptor.clone());
             } else if descriptor.starts_with("scc=") {
-                covered_physical_routes.insert(descriptor.clone());
+                let identity = descriptor
+                    .split_once(";node=")
+                    .map_or(descriptor.as_str(), |(identity, _)| identity);
+                covered_physical_route_identities.insert(identity.to_owned());
             } else {
                 panic!("unknown resident certificate descriptor class: {descriptor}");
             }
         }
         assert!(!covered_structural_bindings.is_empty());
-        assert!(!covered_physical_routes.is_empty());
-        assert_eq!(covered_physical_routes, expected_routes);
+        assert!(!covered_physical_route_identities.is_empty());
+        assert_eq!(covered_physical_route_identities, expected_route_identities);
 
         let Some(provider) = pinned_corpus_test_provider() else {
             return Ok(());
