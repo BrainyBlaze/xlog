@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceSlice, SyncOnDrop};
-use xlog_core::{MemoryBudget, Result, Schema, XlogError};
+use xlog_core::{resolve_bool, MemoryBudget, Result, Schema, XlogError};
 
 use crate::arrow_device::ArrowDeviceImport;
 use crate::cuda_compat::{AsKernelParam, DeviceParamStorage, IntoKernelParamStorage};
@@ -283,9 +283,14 @@ enum Backing {
 /// Debug probe: poison legacy allocations with 0xDD at drop so any
 /// live alias of freed memory becomes visually distinct. Gated on
 /// `XLOG_DEBUG_POISON_FREE=1`, read once per process.
+fn debug_env_enabled(name: &str) -> bool {
+    resolve_bool(None, name, false)
+        .unwrap_or_else(|error| panic!("invalid CUDA memory debug configuration: {error}"))
+}
+
 fn poison_free_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("XLOG_DEBUG_POISON_FREE").map(|v| v == "1") == Ok(true))
+    *ENABLED.get_or_init(|| debug_env_enabled("XLOG_DEBUG_POISON_FREE"))
 }
 
 /// Debug probe: poison fresh legacy allocations with 0xDD so reads of
@@ -293,7 +298,7 @@ fn poison_free_enabled() -> bool {
 /// `XLOG_DEBUG_POISON_ALLOC=1`, read once per process.
 fn poison_alloc_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("XLOG_DEBUG_POISON_ALLOC").map(|v| v == "1") == Ok(true))
+    *ENABLED.get_or_init(|| debug_env_enabled("XLOG_DEBUG_POISON_ALLOC"))
 }
 
 /// Debug probe: track live legacy allocation ranges and panic if the
@@ -306,7 +311,7 @@ fn alloc_guard() -> Option<&'static std::sync::Mutex<std::collections::BTreeMap<
     > = std::sync::OnceLock::new();
     GUARD
         .get_or_init(|| {
-            if std::env::var("XLOG_DEBUG_ALLOC_GUARD").map(|v| v == "1") == Ok(true) {
+            if debug_env_enabled("XLOG_DEBUG_ALLOC_GUARD") {
                 Some(std::sync::Mutex::new(std::collections::BTreeMap::new()))
             } else {
                 None

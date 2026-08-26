@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import sys
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -22,6 +23,8 @@ _PROB_SOURCE = """
 0.6::observed().
 query(observed()).
 """
+
+_MC_SAMPLES = 1_000_000
 
 
 @pytest.fixture(scope="module")
@@ -45,45 +48,62 @@ accepted() :- pair({_JOIN_WIDTH - 1}, {_JOIN_WIDTH - 1}), know observed().
     return pyxlog.LogicProgram.compile(source, device=0, memory_mb=1_024)
 
 
+@pytest.fixture(scope="module")
+def long_logic_program():
+    left = "\n".join(f"left({index})." for index in range(_JOIN_WIDTH))
+    right = "\n".join(f"right({index})." for index in range(_JOIN_WIDTH))
+    source = f"""
+pred left(u32).
+pred right(u32).
+pred pair(u32, u32).
+
+{left}
+{right}
+pair(X, Y) :- left(X), right(Y).
+?- pair(X, Y).
+"""
+    return pyxlog.LogicProgram.compile(source, device=0, memory_mb=1_024)
+
+
+@pytest.fixture(scope="module")
+def long_mc_program():
+    return pyxlog.Program.compile(_PROB_SOURCE, prob_engine="mc")
+
+
 def _call_while_observer_waits(operation: Callable[[], Any]) -> Any:
-    rendezvous = threading.Barrier(2)
-    observer_waiting = threading.Event()
-    begin_call = threading.Event()
-    call_returned = threading.Event()
-    observer_progressed = threading.Event()
-    observer_saw_return: list[bool] = []
-    observer_errors: list[Exception] = []
+    observer_started = threading.Event()
+    stop_observer = threading.Event()
+    observer_iterations = [0]
 
     def observe() -> None:
-        try:
-            rendezvous.wait(timeout=10)
-            observer_waiting.set()
-            if not begin_call.wait(timeout=30):
-                raise AssertionError("native call was never started")
-            observer_saw_return.append(call_returned.is_set())
-            observer_progressed.set()
-        except Exception as exc:  # pragma: no cover - surfaced on the test thread
-            observer_errors.append(exc)
+        observer_started.set()
+        while not stop_observer.is_set():
+            observer_iterations[0] += 1
+            time.sleep(0)
 
     observer = threading.Thread(target=observe, daemon=True)
     observer.start()
-    rendezvous.wait(timeout=10)
-    assert observer_waiting.wait(timeout=10)
+    assert observer_started.wait(timeout=10)
+    deadline = time.monotonic() + 10
+    while observer_iterations[0] == 0 and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert observer_iterations[0] > 0
 
     previous_switch_interval = sys.getswitchinterval()
     sys.setswitchinterval(60.0)
     try:
-        begin_call.set()
+        iterations_before_call = observer_iterations[0]
         result = operation()
+        iterations_after_call = observer_iterations[0]
     finally:
-        call_returned.set()
         sys.setswitchinterval(previous_switch_interval)
+        stop_observer.set()
 
     observer.join(timeout=10)
     assert not observer.is_alive()
-    assert not observer_errors
-    assert observer_progressed.is_set()
-    assert observer_saw_return == [False], "observer ran only after the native call returned"
+    assert iterations_after_call > iterations_before_call, (
+        "observer made no progress while the native call held the GIL"
+    )
     return result
 
 
@@ -101,3 +121,36 @@ def test_evaluate_conditioned_releases_gil(long_epistemic_program) -> None:
 
     assert result.log_z_e == pytest.approx(math.log(0.6), abs=1e-9)
     assert result.trace["gpu_conditioned_evidence_facts"] == 1
+
+
+def test_compiled_logic_evaluate_releases_gil(long_logic_program) -> None:
+    result = _call_while_observer_waits(long_logic_program.evaluate)
+
+    assert len(result.queries) == 1
+    assert result.queries[0].relation_name == "pair"
+
+
+def test_logic_session_evaluate_releases_gil(long_logic_program) -> None:
+    session = long_logic_program.session()
+    result = _call_while_observer_waits(session.evaluate)
+
+    assert len(result.queries) == 1
+    assert result.queries[0].relation_name == "pair"
+
+
+def test_probabilistic_evaluate_releases_gil(long_mc_program) -> None:
+    result = _call_while_observer_waits(
+        lambda: long_mc_program.evaluate(samples=_MC_SAMPLES, seed=17)
+    )
+
+    assert result.samples == _MC_SAMPLES
+    assert result.seed == 17
+
+
+def test_probabilistic_device_evaluate_releases_gil(long_mc_program) -> None:
+    result = _call_while_observer_waits(
+        lambda: long_mc_program.evaluate_device(samples=_MC_SAMPLES, seed=17)
+    )
+
+    assert result.total_samples == _MC_SAMPLES
+    assert result.seed == 17

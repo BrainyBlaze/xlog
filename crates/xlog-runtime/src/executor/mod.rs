@@ -17,7 +17,7 @@ use xlog_ir::{ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode};
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::ilp_registry::{IlpRegistry, IlpTaggedResult};
-use crate::profiler::{ExecutionStats, Profiler};
+use crate::profiler::{ExecutionStats, Profiler, WcojFallbackStats};
 use crate::RelationStore;
 
 mod delta;
@@ -331,6 +331,8 @@ pub struct Executor {
     /// `XLOG_WCOJ_STRICT=1` propagates the error instead. Public accessor:
     /// `Executor::wcoj_error_decline_count(&self) -> u64`.
     pub(super) wcoj_error_decline_count: u64,
+    /// Actual WCOJ-family fallback executions, classified by attempted route.
+    pub(super) wcoj_fallback: WcojFallbackStats,
     /// Count of fused group-by-root count dispatches that produced the
     /// installed result. Public accessor:
     /// `Executor::wcoj_groupby_fusion_dispatch_count(&self) -> u64`.
@@ -490,6 +492,7 @@ impl Executor {
             kclique_histogram_refresh_nanos: 0,
             nested_loop_dispatch_count: 0,
             wcoj_error_decline_count: 0,
+            wcoj_fallback: WcojFallbackStats::default(),
             wcoj_groupby_fusion_dispatch_count: 0,
             free_join_dispatch_count: 0,
             factorized_delta_dispatch_count: 0,
@@ -560,6 +563,7 @@ impl Executor {
         stats.free_join_dispatch_count = self.free_join_dispatch_count();
         stats.factorized_delta_dispatch_count = self.factorized_delta_dispatch_count();
         stats.wcoj_error_decline_count = self.wcoj_error_decline_count();
+        stats.wcoj_fallback = self.wcoj_fallback_stats();
         stats.chain_fallback_scan_equivalents = self.chain_fallback_scan_equivalents;
         stats.chain_fallback_filter_equivalents = self.chain_fallback_filter_equivalents;
         stats
@@ -3092,6 +3096,46 @@ mod tests {
         let result = result.unwrap();
         // Result should be union of [1] and [2] = [1, 2]
         assert_eq!(buffer_row_count(&executor, &result), 2);
+    }
+
+    #[test]
+    fn test_execute_fixpoint_honors_runtime_iteration_limit() {
+        let mut config = RuntimeConfig::default();
+        config.max_iterations = 1;
+        let mut executor = match create_test_executor_with_config(config) {
+            Some(executor) => executor,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let base_buffer = create_test_buffer(&executor, &[1], "key");
+        executor.store_mut().put("base_rel", base_buffer);
+        executor.register_relation(RelId(1), "base_rel");
+
+        let recursive_buffer = create_test_buffer(&executor, &[1, 2], "key");
+        executor.store_mut().put("recursive_rel", recursive_buffer);
+        executor.register_relation(RelId(4), "recursive_rel");
+
+        let node = RirNode::Fixpoint {
+            scc_id: 7,
+            base: Box::new(RirNode::Scan { rel: RelId(1) }),
+            recursive: Box::new(RirNode::Scan { rel: RelId(4) }),
+            delta_rel: RelId(2),
+            full_rel: RelId(3),
+        };
+
+        let error = match executor.execute_node(&node) {
+            Ok(_) => panic!("fixpoint unexpectedly ignored max_iterations=1"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Fixpoint iteration limit (1) exceeded for SCC 7"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

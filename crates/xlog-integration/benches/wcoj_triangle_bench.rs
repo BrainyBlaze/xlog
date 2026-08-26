@@ -734,9 +734,8 @@ fn full_extra_sizes() -> &'static [u32] {
 }
 
 fn full_matrix() -> bool {
-    std::env::var("WCOJ_BENCH_FULL")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    xlog_core::resolve_bool(None, "WCOJ_BENCH_FULL", false)
+        .unwrap_or_else(|error| panic!("invalid WCOJ benchmark configuration: {error}"))
 }
 
 fn run_family(

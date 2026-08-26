@@ -200,9 +200,10 @@ impl CompiledLogicProgram {
             }
         }
 
-        let result = self
-            .program
-            .evaluate(self.provider.clone(), inputs)
+        let program = self.program.clone();
+        let provider = self.provider.clone();
+        let result = py
+            .detach(move || program.evaluate(provider, inputs))
             .map_err(types::xlog_err)?;
         pack_logic_result_with_provider(py, &self.provider, result)
     }
@@ -381,23 +382,29 @@ impl LogicRelationSession {
     ) -> PyResult<LogicEvalResult> {
         enforce_call_memory_limit(&self.provider, memory_mb)?;
         let result = if let Some(store) = &self.evaluation_store {
-            self.program
-                .evaluate_cached_relation_store(self.provider.clone(), store)
+            let program = self.program.clone();
+            let provider = self.provider.clone();
+            py.detach(move || program.evaluate_cached_relation_store(provider, store))
                 .map_err(types::xlog_err)?
         } else {
             if self.session_runtime.is_none() {
+                let program = self.program.clone();
+                let provider = self.provider.clone();
+                let relation_store = &self.relation_store;
                 self.session_runtime = Some(
-                    self.program
-                        .create_session_runtime(self.provider.clone(), &self.relation_store, false)
-                        .map_err(types::xlog_err)?,
+                    py.detach(move || {
+                        program.create_session_runtime(provider, relation_store, false)
+                    })
+                    .map_err(types::xlog_err)?,
                 );
             }
             let runtime = self.session_runtime.as_mut().ok_or_else(|| {
                 PyRuntimeError::new_err("session runtime unavailable during evaluation")
             })?;
-            let (result, store) = self
-                .program
-                .evaluate_with_session_runtime(self.provider.clone(), runtime)
+            let program = self.program.clone();
+            let provider = self.provider.clone();
+            let (result, store) = py
+                .detach(move || program.evaluate_with_session_runtime(provider, runtime))
                 .map_err(types::xlog_err)?;
             self.evaluation_store = Some(store);
             result
@@ -740,6 +747,15 @@ impl LogicRelationSession {
             stats.wcoj_groupby_fusion_dispatch_count,
         )?;
         dict.set_item("wcoj_error_decline_count", stats.wcoj_error_decline_count)?;
+        let fallback = PyDict::new(py);
+        fallback.set_item("total", stats.wcoj_fallback.total())?;
+        fallback.set_item("chain", stats.wcoj_fallback.chain)?;
+        fallback.set_item("dedicated_multiway", stats.wcoj_fallback.dedicated_multiway)?;
+        fallback.set_item("free_join", stats.wcoj_fallback.free_join)?;
+        fallback.set_item("planned_hash", stats.wcoj_fallback.planned_hash)?;
+        fallback.set_item("factorized_delta", stats.wcoj_fallback.factorized_delta)?;
+        fallback.set_item("groupby_fusion", stats.wcoj_fallback.groupby_fusion)?;
+        dict.set_item("wcoj_fallback", fallback)?;
         Ok(dict.into())
     }
 

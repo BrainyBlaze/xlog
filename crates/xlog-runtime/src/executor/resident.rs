@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cudarc::driver::{sys::CUevent_flags, CudaEvent};
-use xlog_core::{symbol, RelId, Result, ScalarType, Schema, XlogError};
+use xlog_core::{resolve_bool, symbol, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::cuda_graph::{
     CapturedCudaGraph, ConditionalCudaGraphSequenceBuilder, CudaConditionalGraphUnavailable,
     CudaGraphNodeKind,
@@ -2492,8 +2492,8 @@ impl<'executor> ResidentGraphSynchronized<'executor> {
     pub fn observe_final_receipt(
         mut self,
     ) -> std::result::Result<ObservedResidentGraphReceipt, ResidentGraphExecutionError> {
-        let phase_diagnostics =
-            std::env::var("XLOG_RESIDENT_LATENCY_DIAGNOSTICS").as_deref() == Ok("1");
+        let phase_diagnostics = resolve_bool(None, "XLOG_RESIDENT_LATENCY_DIAGNOSTICS", false)
+            .map_err(runtime_error)?;
         let receipt_d2h_started = phase_diagnostics.then(Instant::now);
         let encoded_len = self.owners.receipt.len_bytes();
         let bytes = self

@@ -1243,17 +1243,19 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
                     + stats.factorized_delta_dispatch_count;
                 if fired > 0 {
                     eprintln!(
-                        "WCOJ kernels dispatched: triangle {}, 4-cycle {}, groupby-fusion {}, free-join {}, factorized-delta {} (declines {})",
+                        "WCOJ kernels dispatched: triangle {}, 4-cycle {}, groupby-fusion {}, free-join {}, factorized-delta {} (fallbacks {}, pipeline errors {})",
                         stats.wcoj_triangle_dispatch_count,
                         stats.wcoj_4cycle_dispatch_count,
                         stats.wcoj_groupby_fusion_dispatch_count,
                         stats.free_join_dispatch_count,
                         stats.factorized_delta_dispatch_count,
+                        stats.wcoj_fallback.total(),
                         stats.wcoj_error_decline_count,
                     );
                 } else {
                     eprintln!(
-                        "WARNING: --wcoj set but no WCOJ kernel dispatched (declines {}); the run fell back to binary joins",
+                        "WARNING: --wcoj set but no WCOJ kernel dispatched (fallbacks {}, pipeline errors {}); the run fell back to binary joins",
+                        stats.wcoj_fallback.total(),
                         stats.wcoj_error_decline_count,
                     );
                 }

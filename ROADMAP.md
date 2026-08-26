@@ -1746,8 +1746,10 @@ documentation.
 
 ### Validation
 
-- [x] Add `python/tests/test_v088_lwm_source.py` for pyxlog stubs, docs, and
-      Rust/Python source-surface coverage.
+- [x] Verify pyxlog diagnostics through compiled runtime behavior in
+      `python/tests/test_pyxlog_provenance_packer_parity.py`,
+      `python/tests/test_logic_relation_provenance.py`, and
+      `python/tests/test_python_runtime_api.py`.
 - [x] Add `the external world-model provenance architecture record` as the issue-by-
       issue v0.8.8 architecture note.
 

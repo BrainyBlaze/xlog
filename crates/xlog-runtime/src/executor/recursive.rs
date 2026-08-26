@@ -13,9 +13,6 @@ use super::delta::DeltaRelationTracker;
 use super::Executor;
 
 impl Executor {
-    /// Maximum iterations for fixpoint computation to prevent infinite loops
-    const MAX_FIXPOINT_ITERATIONS: usize = 1000;
-
     /// Union a batch of same-head contributions in one multiway pass,
     /// recording a single profiled "union" op for the whole batch.
     ///
@@ -422,6 +419,7 @@ impl Executor {
                                 | xlog_ir::RirNode::ChainJoin { fallback, .. } => fallback.as_ref(),
                                 other => other,
                             };
+                            self.record_wcoj_body_fallback(&rule.body);
                             (self.execute_node(body_to_execute)?, false)
                         };
 
@@ -698,6 +696,7 @@ impl Executor {
                         rule_delta_novel.push(novel);
                         continue;
                     }
+                    self.record_factorized_delta_fallback(&variant_node);
 
                     // Try WCOJ on the rewritten variant body before falling
                     // back to the binary-join walker.
@@ -1013,7 +1012,8 @@ impl Executor {
         self.store_put(&delta_name, delta_initial);
 
         // Iterate until fixpoint
-        for _iteration in 0..Self::MAX_FIXPOINT_ITERATIONS {
+        let max_iterations = self.config.max_iterations as usize;
+        for _iteration in 0..max_iterations {
             // Evaluate recursive step using current delta
             // The recursive RIR tree should reference delta_rel internally
             let delta_new_raw = self.execute_node(recursive)?;
@@ -1054,8 +1054,7 @@ impl Executor {
         // Iteration limit exceeded
         Err(XlogError::Execution(format!(
             "Fixpoint iteration limit ({}) exceeded for SCC {}",
-            Self::MAX_FIXPOINT_ITERATIONS,
-            scc_id
+            max_iterations, scc_id
         )))
     }
 }

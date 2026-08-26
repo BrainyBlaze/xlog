@@ -40,11 +40,24 @@ def test_pyxlog_session_reuses_persistent_hash_index_after_relation_delta():
         assert stats["affected_sccs"] >= 1
 
     cache_stats = session.join_index_cache_stats()
+    dispatch_stats = session.wcoj_dispatch_stats()
     transfer_stats = session.host_transfer_stats()
 
     assert cache_stats["builds"] >= 1
     assert cache_stats["hits"] >= 1
     assert cache_stats["entries"] >= 1
     assert cache_stats["stale_rejections"] == 0
+    fallback = dispatch_stats["wcoj_fallback"]
+    assert fallback["total"] == sum(
+        fallback[route]
+        for route in (
+            "chain",
+            "dedicated_multiway",
+            "free_join",
+            "planned_hash",
+            "factorized_delta",
+            "groupby_fusion",
+        )
+    )
     assert transfer_stats["dtoh_calls"] == 0
     assert transfer_stats["htod_calls"] == 0

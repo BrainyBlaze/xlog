@@ -1437,6 +1437,52 @@ impl Executor {
         self.wcoj_error_decline_count
     }
 
+    /// Actual fallback executions after a WCOJ-family route declined.
+    pub fn wcoj_fallback_stats(&self) -> crate::profiler::WcojFallbackStats {
+        self.wcoj_fallback
+    }
+
+    /// Record the one fallback that is about to execute for a specialized body.
+    pub(super) fn record_wcoj_body_fallback(&mut self, body: &RirNode) {
+        match body {
+            RirNode::ChainJoin { .. } => {
+                self.wcoj_fallback.chain = self.wcoj_fallback.chain.saturating_add(1);
+            }
+            RirNode::MultiWayJoin {
+                plan: Some(MultiwayPlan::FreeJoin),
+                ..
+            } => {
+                self.wcoj_fallback.free_join = self.wcoj_fallback.free_join.saturating_add(1);
+            }
+            RirNode::MultiWayJoin {
+                plan: Some(MultiwayPlan::PlannedHashRoute { .. }),
+                ..
+            } => {
+                self.wcoj_fallback.planned_hash = self.wcoj_fallback.planned_hash.saturating_add(1);
+            }
+            RirNode::MultiWayJoin { .. } => {
+                self.wcoj_fallback.dedicated_multiway =
+                    self.wcoj_fallback.dedicated_multiway.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    /// Record a qualifying recursive chain that declined factorized delta.
+    pub(super) fn record_factorized_delta_fallback(&mut self, body: &RirNode) {
+        if matches!(body, RirNode::ChainJoin { .. }) {
+            self.wcoj_fallback.factorized_delta =
+                self.wcoj_fallback.factorized_delta.saturating_add(1);
+        }
+    }
+
+    /// Record an aggregate-capable multiway body that used ordinary group-by.
+    pub(super) fn record_wcoj_groupby_fallback(&mut self, input: &RirNode) {
+        if matches!(input, RirNode::MultiWayJoin { .. }) {
+            self.wcoj_fallback.groupby_fusion = self.wcoj_fallback.groupby_fusion.saturating_add(1);
+        }
+    }
+
     /// Count of times the generalized Free Join dispatch produced
     /// the installed result (vs. the embedded binary fallback).
     pub fn free_join_dispatch_count(&self) -> u64 {

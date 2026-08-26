@@ -313,6 +313,8 @@ fn chain_dispatch_default_on_matches_env_disabled_fallback() {
     let fallback_profile = fallback.execution_stats(fallback_rows.len() as u64);
     assert_eq!(fallback_profile.chain_fallback_scan_equivalents, 0);
     assert_eq!(fallback_profile.chain_fallback_filter_equivalents, 0);
+    assert_eq!(fallback_profile.wcoj_fallback.chain, 1);
+    assert_eq!(fallback_profile.wcoj_fallback.total(), 1);
 
     unsafe {
         std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE");
@@ -338,6 +340,7 @@ fn chain_dispatch_default_on_matches_env_disabled_fallback() {
     let dispatched_profile = dispatched.execution_stats(dispatched_rows.len() as u64);
     assert_eq!(dispatched_profile.chain_fallback_scan_equivalents, 2);
     assert_eq!(dispatched_profile.chain_fallback_filter_equivalents, 0);
+    assert_eq!(dispatched_profile.wcoj_fallback.total(), 0);
     assert_eq!(dispatched_rows.len(), 128);
     assert_eq!(dispatched_rows, fallback_rows);
 }
@@ -380,6 +383,8 @@ fn matched_chain_projection_error_declines_to_physical_fallback_without_equivale
     assert_eq!(executor.chain_dispatch_count(), 0);
     assert_eq!(executor.wcoj_error_decline_count(), 1);
     let profile = executor.execution_stats(rows.len() as u64);
+    assert_eq!(profile.wcoj_fallback.chain, 1);
+    assert_eq!(profile.wcoj_fallback.total(), 1);
     assert_eq!(profile.chain_fallback_scan_equivalents, 0);
     assert_eq!(profile.chain_fallback_filter_equivalents, 0);
     assert_eq!(profile_op_count(&executor, "scan", rows.len() as u64), 2);

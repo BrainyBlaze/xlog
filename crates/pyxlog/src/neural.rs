@@ -4,7 +4,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use xlog_core::{symbol, ScalarType, Schema};
+use xlog_core::{resolve_bool, symbol, ScalarType, Schema};
 #[cfg(feature = "host-io")]
 use xlog_logic::ast::ArithExpr;
 use xlog_logic::ast::{Atom, BodyLiteral, Rule, Term};
@@ -34,10 +34,8 @@ fn prob_schema(scalar_type: ScalarType) -> Schema {
 /// isolates xlog's transfer-free residency benefit from ordinary GPU
 /// acceleration. The round-trip is value-preserving (identity); only the data
 /// path changes.
-fn force_host_roundtrip_enabled() -> bool {
-    std::env::var("XLOG_FORCE_HOST_ROUNDTRIP")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+fn force_host_roundtrip_enabled() -> PyResult<bool> {
+    resolve_bool(None, "XLOG_FORCE_HOST_ROUNDTRIP", false).map_err(types::xlog_err)
 }
 
 /// How a neural group's forward input row is fetched. The placeholder/slot path
@@ -1866,7 +1864,7 @@ impl CompiledProgram {
                 let output_detached = output_row.call_method0("detach")?;
                 // Residency ablation: optionally force a host round-trip
                 // on the neural output before the GPU-resident reasoner reads it.
-                let output_detached = if force_host_roundtrip_enabled() {
+                let output_detached = if force_host_roundtrip_enabled()? {
                     output_detached.call_method0("cpu")?.call_method0("cuda")?
                 } else {
                     output_detached
@@ -2156,7 +2154,7 @@ impl CompiledProgram {
         let torch = py.import("torch")?;
         let schema_f32 = prob_schema(ScalarType::F32);
         // Residency ablation gate, read once per batch.
-        let force_roundtrip = force_host_roundtrip_enabled();
+        let force_roundtrip = force_host_roundtrip_enabled()?;
 
         // Storage indexed by (query, group).
         let mut prob_map: StdHashMap<(usize, usize), xlog_cuda::CudaBuffer> = StdHashMap::new();

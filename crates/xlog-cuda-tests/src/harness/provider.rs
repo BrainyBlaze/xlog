@@ -6,7 +6,7 @@ use fs2::FileExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::{fs::OpenOptions, path::Path};
-use xlog_core::{MemoryBudget, Result, XlogError};
+use xlog_core::{resolve_bool, MemoryBudget, Result, XlogError};
 use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, XlogDeviceRuntime};
 use xlog_cuda::{
     CudaBuffer, CudaDevice, CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager,
@@ -97,7 +97,9 @@ pub struct TestContext {
 /// vacuously without a GPU; `scripts/validate_release_gpu.sh` exports this
 /// variable so a CPU-only machine can never satisfy the certification gate.
 pub fn enforce_cuda_required(context: &str, err: &XlogError) {
-    if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+    if resolve_bool(None, "XLOG_REQUIRE_CUDA", false)
+        .unwrap_or_else(|error| panic!("invalid CUDA test configuration: {error}"))
+    {
         panic!("XLOG_REQUIRE_CUDA=1 but CUDA is unavailable ({context}): {err}");
     }
 }

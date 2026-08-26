@@ -585,7 +585,7 @@ impl CompiledProgram {
     )]
     pub fn evaluate(
         &self,
-        _py: Python<'_>,
+        py: Python<'_>,
         return_grads: bool,
         samples: Option<usize>,
         seed: Option<u64>,
@@ -614,13 +614,13 @@ impl CompiledProgram {
                 #[cfg(feature = "host-io")]
                 {
                     if return_grads {
-                        let result = _program
-                            .evaluate_gpu_with_grads()
+                        let result = py
+                            .detach(|| _program.evaluate_gpu_with_grads())
                             .map_err(types::xlog_err)?;
-                        self.pack_result_with_grads(_py, result)
+                        self.pack_result_with_grads(py, result)
                     } else {
-                        let result = _program.evaluate().map_err(types::xlog_err)?;
-                        self.pack_result_probs(_py, result.query_probs, result.log_z_e)
+                        let result = py.detach(|| _program.evaluate()).map_err(types::xlog_err)?;
+                        self.pack_result_probs(py, result.query_probs, result.log_z_e)
                     }
                 }
                 #[cfg(not(feature = "host-io"))]
@@ -648,8 +648,10 @@ impl CompiledProgram {
                 .map_err(types::xlog_err)?;
                 #[cfg(feature = "host-io")]
                 {
-                    let result = _program.evaluate(cfg).map_err(types::xlog_err)?;
-                    self.pack_result_mc(_py, result)
+                    let result = py
+                        .detach(|| _program.evaluate(cfg))
+                        .map_err(types::xlog_err)?;
+                    self.pack_result_mc(py, result)
                 }
                 #[cfg(not(feature = "host-io"))]
                 {
@@ -806,8 +808,9 @@ impl CompiledProgram {
                 )
                 .map_err(types::xlog_err)?;
 
-                let result = program
-                    .evaluate_gpu_device_with_provider(cfg, self.output_provider.clone())
+                let provider = self.output_provider.clone();
+                let result = py
+                    .detach(|| program.evaluate_gpu_device_with_provider(cfg, provider))
                     .map_err(types::xlog_err)?;
 
                 (

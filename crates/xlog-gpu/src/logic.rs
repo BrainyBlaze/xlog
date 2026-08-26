@@ -278,8 +278,8 @@ where
     ])
 }
 
-fn resident_latency_diagnostics_enabled() -> bool {
-    std::env::var(RESIDENT_LATENCY_DIAGNOSTICS_ENV).as_deref() == Ok("1")
+fn resident_latency_diagnostics_enabled() -> Result<bool> {
+    resolve_bool(None, RESIDENT_LATENCY_DIAGNOSTICS_ENV, false)
 }
 
 fn resident_latency_elapsed_ns(started: Option<std::time::Instant>) -> u64 {
@@ -414,6 +414,7 @@ impl LogicSessionRuntime {
             factorized_delta_dispatch_count: self.executor.factorized_delta_dispatch_count(),
             wcoj_groupby_fusion_dispatch_count: self.executor.wcoj_groupby_fusion_dispatch_count(),
             wcoj_error_decline_count: self.executor.wcoj_error_decline_count(),
+            wcoj_fallback: self.executor.wcoj_fallback_stats(),
         }
     }
 }
@@ -431,6 +432,8 @@ pub struct WcojDispatchStats {
     pub wcoj_groupby_fusion_dispatch_count: u64,
     /// WCOJ pipeline errors that declined to the binary-join fallback.
     pub wcoj_error_decline_count: u64,
+    /// Actual fallbacks classified by the route that was attempted.
+    pub wcoj_fallback: xlog_runtime::WcojFallbackStats,
 }
 
 /// Planner-grade telemetry for a persistent-session relation delta update.
@@ -2170,7 +2173,7 @@ impl LogicProgram {
         mode: ResidentSelectionMode,
     ) -> Result<LogicEvalResult> {
         let mut latency_diagnostic =
-            resident_latency_diagnostics_enabled().then(ResidentLatencyDiagnostic::new);
+            resident_latency_diagnostics_enabled()?.then(ResidentLatencyDiagnostic::new);
         let total_started = latency_diagnostic
             .as_ref()
             .map(|_| std::time::Instant::now());
@@ -4099,6 +4102,9 @@ fn collect_iterative_execution_stats(stats: &mut Option<ExecutionStats>, executo
     combined.wcoj_error_decline_count = combined
         .wcoj_error_decline_count
         .saturating_add(pass.wcoj_error_decline_count);
+    combined
+        .wcoj_fallback
+        .saturating_add_assign(pass.wcoj_fallback);
     combined.strata.append(&mut pass.strata);
 }
 

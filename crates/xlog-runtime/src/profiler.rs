@@ -122,6 +122,51 @@ impl StratumStats {
     }
 }
 
+/// Counts of actual fallbacks taken after a WCOJ-family dispatch attempt.
+///
+/// These counters are recorded at the execution boundary, not at individual
+/// eligibility checks. One attempted route therefore contributes at most one
+/// fallback count before the ordinary execution path runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WcojFallbackStats {
+    /// Two-relation chain specialization declined.
+    pub chain: u64,
+    /// A dedicated triangle, cycle, or clique route declined.
+    pub dedicated_multiway: u64,
+    /// A general Free Join route declined.
+    pub free_join: u64,
+    /// The planner explicitly selected the captured hash route.
+    pub planned_hash: u64,
+    /// Factorized recursive-delta execution declined to the ordinary delta path.
+    pub factorized_delta: u64,
+    /// Fused group-by execution declined to materialize-then-aggregate.
+    pub groupby_fusion: u64,
+}
+
+impl WcojFallbackStats {
+    /// Total number of WCOJ-family fallbacks actually executed.
+    pub fn total(self) -> u64 {
+        self.chain
+            .saturating_add(self.dedicated_multiway)
+            .saturating_add(self.free_join)
+            .saturating_add(self.planned_hash)
+            .saturating_add(self.factorized_delta)
+            .saturating_add(self.groupby_fusion)
+    }
+
+    /// Accumulate another execution's counters without overflowing.
+    pub fn saturating_add_assign(&mut self, other: Self) {
+        self.chain = self.chain.saturating_add(other.chain);
+        self.dedicated_multiway = self
+            .dedicated_multiway
+            .saturating_add(other.dedicated_multiway);
+        self.free_join = self.free_join.saturating_add(other.free_join);
+        self.planned_hash = self.planned_hash.saturating_add(other.planned_hash);
+        self.factorized_delta = self.factorized_delta.saturating_add(other.factorized_delta);
+        self.groupby_fusion = self.groupby_fusion.saturating_add(other.groupby_fusion);
+    }
+}
+
 /// Final execution statistics returned to CLI
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -162,6 +207,8 @@ pub struct ExecutionStats {
     /// healthy; a nonzero value signals a regressed WCOJ pipeline hiding
     /// behind the silent-fallback contract.
     pub wcoj_error_decline_count: u64,
+    /// Exhaustive route-level telemetry for WCOJ-family fallbacks that ran.
+    pub wcoj_fallback: WcojFallbackStats,
     /// Selection, transfer, and device-timing evidence for an attempted
     /// resident conditional-graph execution.
     pub resident_graph: Option<crate::resident_graph::ResidentGraphExecutionStats>,
@@ -213,12 +260,13 @@ impl ExecutionStats {
             format_rows(self.total_output_rows)
         ));
         output.push_str(&format!(
-            "WCOJ dispatch: triangle {}, 4-cycle {}, groupby-fusion {}, free-join {}, factorized-delta {}, declines {}\n",
+            "WCOJ dispatch: triangle {}, 4-cycle {}, groupby-fusion {}, free-join {}, factorized-delta {}, fallbacks {}, pipeline-errors {}\n",
             self.wcoj_triangle_dispatch_count,
             self.wcoj_4cycle_dispatch_count,
             self.wcoj_groupby_fusion_dispatch_count,
             self.free_join_dispatch_count,
             self.factorized_delta_dispatch_count,
+            self.wcoj_fallback.total(),
             self.wcoj_error_decline_count,
         ));
         output.push_str(&format!(
@@ -273,6 +321,15 @@ impl ExecutionStats {
                 "chain_fallback_scan_equivalents": self.chain_fallback_scan_equivalents,
                 "chain_fallback_filter_equivalents": self.chain_fallback_filter_equivalents,
                 "error_decline": self.wcoj_error_decline_count,
+                "fallback": {
+                    "total": self.wcoj_fallback.total(),
+                    "chain": self.wcoj_fallback.chain,
+                    "dedicated_multiway": self.wcoj_fallback.dedicated_multiway,
+                    "free_join": self.wcoj_fallback.free_join,
+                    "planned_hash": self.wcoj_fallback.planned_hash,
+                    "factorized_delta": self.wcoj_fallback.factorized_delta,
+                    "groupby_fusion": self.wcoj_fallback.groupby_fusion,
+                },
             },
         });
         if let Some(resident) = &self.resident_graph {
@@ -730,6 +787,14 @@ mod tests {
         let stats = ExecutionStats {
             chain_fallback_scan_equivalents: 2,
             chain_fallback_filter_equivalents: 3,
+            wcoj_fallback: WcojFallbackStats {
+                chain: 5,
+                dedicated_multiway: 7,
+                free_join: 11,
+                planned_hash: 13,
+                factorized_delta: 17,
+                groupby_fusion: 19,
+            },
             resident_graph: Some(resident),
             ..ExecutionStats::default()
         };
@@ -744,6 +809,13 @@ mod tests {
             serde_json::from_str(&json).expect("execution stats must be valid JSON");
         assert_eq!(parsed["wcoj"]["chain_fallback_scan_equivalents"], 2);
         assert_eq!(parsed["wcoj"]["chain_fallback_filter_equivalents"], 3);
+        assert_eq!(parsed["wcoj"]["fallback"]["total"], 72);
+        assert_eq!(parsed["wcoj"]["fallback"]["chain"], 5);
+        assert_eq!(parsed["wcoj"]["fallback"]["dedicated_multiway"], 7);
+        assert_eq!(parsed["wcoj"]["fallback"]["free_join"], 11);
+        assert_eq!(parsed["wcoj"]["fallback"]["planned_hash"], 13);
+        assert_eq!(parsed["wcoj"]["fallback"]["factorized_delta"], 17);
+        assert_eq!(parsed["wcoj"]["fallback"]["groupby_fusion"], 19);
         assert_eq!(parsed["resident_graph"]["device_scan_invocations"], 17);
         assert_eq!(parsed["resident_graph"]["device_filter_invocations"], 19);
         assert_eq!(parsed["resident_graph"]["semantic_scan_invocations"], 13);

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cudarc::driver::DeviceSlice;
-use xlog_core::{Result, XlogError};
+use xlog_core::{resolve_bool, Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::CudaKernelProvider;
 use xlog_solve::{GpuCdclConfig, GpuCnf};
@@ -141,10 +141,8 @@ fn increment_circuit_event(counter: &AtomicU64, event: &str) -> Result<()> {
         .map_err(|_| XlogError::Compilation(format!("{event} counter overflowed")))
 }
 
-pub(crate) fn warmup_profiling_enabled() -> bool {
-    std::env::var("XLOG_WARMUP_PROFILE")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+pub(crate) fn warmup_profiling_enabled() -> Result<bool> {
+    resolve_bool(None, "XLOG_WARMUP_PROFILE", false)
 }
 
 /// Device-resident random-variable list for GPU smoothing.
@@ -348,7 +346,7 @@ pub(crate) fn compile_gpu_d4_and_verify_cached_with_ledger(
     // the verify on a large CNF).
     validation::check_verify_size_bound(cnf, "compile_gpu_d4_and_verify_cached")?;
 
-    let profiling = warmup_profiling_enabled();
+    let profiling = warmup_profiling_enabled()?;
     let mut profile = CircuitCompileProfile::default();
 
     // --- CNF hash stage ---

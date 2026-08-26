@@ -2,6 +2,8 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use cudarc::driver::LaunchConfig;
+#[cfg(debug_assertions)]
+use xlog_core::resolve_bool;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{sat_kernels, SAT_MODULE};
@@ -960,7 +962,7 @@ impl GpuCdclSolver {
         decision_extra_count: &TrackedCudaSlice<u32>,
     ) -> Result<TrackedCudaSlice<i8>> {
         #[cfg(debug_assertions)]
-        let trace = std::env::var_os("XLOG_CDCL_TRACE").is_some();
+        let trace = resolve_bool(None, "XLOG_CDCL_TRACE", false)?;
         #[cfg(debug_assertions)]
         let t0 = std::time::Instant::now();
 
@@ -1178,7 +1180,7 @@ impl GpuCdclSolver {
         decision_extra_count: &TrackedCudaSlice<u32>,
     ) -> Result<()> {
         #[cfg(debug_assertions)]
-        let trace = std::env::var_os("XLOG_CDCL_TRACE").is_some();
+        let trace = resolve_bool(None, "XLOG_CDCL_TRACE", false)?;
         #[cfg(debug_assertions)]
         let t0 = std::time::Instant::now();
 
@@ -1556,7 +1558,7 @@ impl GpuCdclSolver {
         import_existing_learned: bool,
     ) -> Result<()> {
         #[cfg(debug_assertions)]
-        let trace = std::env::var_os("XLOG_CDCL_TRACE").is_some();
+        let trace = resolve_bool(None, "XLOG_CDCL_TRACE", false)?;
         #[cfg(debug_assertions)]
         let t0 = std::time::Instant::now();
 

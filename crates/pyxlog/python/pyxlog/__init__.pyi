@@ -141,4 +141,5 @@ class _StreamingResultMixin:
 # Neural lineage package extensions:
 # def nn4_lineage(self, name: Optional[str] = None) -> dict[str, Any]: ...
 # def record_nn4_influence(self, name: str, *, query: str, changed_acceptance: bool, before: Any = None, after: Any = None, evidence: Optional[dict[str, Any]] = None) -> dict[str, Any]: ...
-# nn/4 lineage keys: checkpoint_hash, split_hashes, calibration_metrics, cuda_device, influence_audit
+# nn/4 lineage keys: checkpoint_hash, split_hashes, calibration_metrics,
+# cuda_device, influence_audit {registration, records}

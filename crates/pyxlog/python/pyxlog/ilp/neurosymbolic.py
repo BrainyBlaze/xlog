@@ -1,7 +1,7 @@
 """Joint neural-predicate and symbolic-rule training on the real xlog engine.
 
-``train_neurosymbolic_program`` accepts an xlog program extended with two
-training declarations:
+``train_neurosymbolic_program`` accepts a Python training document: ordinary
+XLOG plus two declarations owned by this API:
 
 ``trainable_rule(id) :: head :- body.`` (optionally ``weight=<logit>``)
     A rule whose inclusion strength is learned. It is desugared into a guard
@@ -12,6 +12,14 @@ training declarations:
 ``train(head_predicate, objective).``
     Names the supervised head (arity 1, ranging over example row indices) and
     the training objective.
+
+These declarations are intentionally not part of the XLOG language accepted by
+the CLI or native parser. They describe Python/Torch optimizer state that those
+surfaces cannot execute. This module is the sole parser for the two declarations;
+it lowers them to ordinary XLOG rules and ``nn`` declarations, then sends every
+remaining statement through the native parser/compiler. Native
+``learnable(mask)`` rules are a different engine-level tensor-masked-join feature
+and pass through unchanged.
 
 Everything else in the source is REAL xlog: after desugaring, the whole
 program is parsed and compiled by the native engine (``pyxlog.Program``), and
@@ -172,6 +180,11 @@ def train_neurosymbolic_program(
     candidate_masses: dict[str, Any] | None = None,
 ) -> NeuroSymbolicTrainingResult:
     """Jointly train neural predicates and symbolic rule weights on the engine.
+
+    ``source`` is a Python training document, not a CLI-loadable XLOG program.
+    This API alone owns ``trainable_rule`` and ``train``; after lowering those
+    declarations, the native parser/compiler remains authoritative for all XLOG
+    syntax and semantics.
 
     ``neural_bodies`` attaches a neural conjunct
     ``g_theta_k(phi(x)) >= tau_k`` to a same-head candidate (keyed by its
@@ -954,10 +967,11 @@ def _train_joint_mixture(
 
 
 def _read_only_source(source: str) -> str:
-    """The program with ONLY the training sugar (``trainable_rule`` / ``train``)
-    removed. Facts, ``pred`` declarations, ``nn`` declarations and any ordinary
-    rules are real xlog and stay — this is the logic program itself, minus the two
-    statements the native parser does not know."""
+    """Remove the Python-only declarations from a training document.
+
+    Facts, ``pred`` declarations, ``nn`` declarations, native ``learnable``
+    declarations, and ordinary rules are XLOG and remain byte-for-byte intact.
+    """
     spans = [
         (start, end)
         for start, end, statement in _statement_spans(source)
@@ -1909,7 +1923,7 @@ def _statement_spans(source: str):
     """Yield ``(start, end, text)`` for '.'-terminated statements.
 
     Tracks bracket depth, quoted spans, and ``//`` comments so a '.' inside a
-    term, a float, or a comment never terminates a statement. The desugaring
+    term, a float, or a comment never terminates a statement. The Python training
     layer only interprets statements that start with ``trainable_rule`` or
     ``train(``; everything else passes through to the native parser verbatim.
     """

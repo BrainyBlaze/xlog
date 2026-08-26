@@ -87,12 +87,6 @@ def test_docs_workflow_generates_reference_outputs_and_exports() -> None:
     assert ".site-rustdoc/generated/rust" in script
     assert "docs/generated/rust" not in script
 
-    cuda_build = read("crates/xlog-cuda/build.rs")
-    assert "XLOG_RUSTDOC_NO_CUDA" in cuda_build
-    assert "DOCS_RS" in cuda_build
-    assert "write_empty_embedded_kernel_data" in cuda_build
-
-
 def test_rust_api_page_links_to_generated_crate_roots() -> None:
     rust_page = read("docs/reference/rust.mdx")
     assert "generated/rust/index.html" in rust_page

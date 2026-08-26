@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::ffi::c_void;
 
 use cudarc::driver::LaunchConfig;
-use xlog_core::{Result, XlogError};
+use xlog_core::{resolve_bool, Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::sat_kernels;
 use xlog_cuda::provider::SAT_MODULE;
@@ -1017,7 +1017,7 @@ pub(crate) fn check_verify_size_bound(phi: &GpuCnf, context: &str) -> Result<()>
     // safe value of XLOG_D4_VERIFY_MAX_VARS/_MAX_CLAUSES can be read off a real
     // workload (must sit above every program that compiles fine, below the
     // explosion boundary). Off unless XLOG_DEBUG_VERIFY_SIZE=1.
-    if std::env::var("XLOG_DEBUG_VERIFY_SIZE").as_deref() == Ok("1") {
+    if resolve_bool(None, "XLOG_DEBUG_VERIFY_SIZE", false)? {
         eprintln!(
             "[xlog-prob] verify-size {context}: var_cap={} clause_cap={} lit_cap={}",
             phi.var_cap, phi.clause_cap, phi.lit_cap

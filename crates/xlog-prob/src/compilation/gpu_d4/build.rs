@@ -91,7 +91,7 @@ pub(super) fn compile_gpu_d4_with_gate(
     // No device synchronize after build_frontier: words_per_item is a host-side
     // struct field and all subsequent device ops use same-stream ordering.
 
-    let frontier_items = if crate::compilation::warmup_profiling_enabled() {
+    let frontier_items = if crate::compilation::warmup_profiling_enabled()? {
         let size_host: Vec<u32> = provider
             .device()
             .inner()

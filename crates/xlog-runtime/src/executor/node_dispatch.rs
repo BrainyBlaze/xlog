@@ -215,6 +215,7 @@ impl Executor {
                 {
                     return Ok(fused);
                 }
+                self.record_wcoj_groupby_fallback(input);
                 let input_buf = self.execute_node(input)?;
                 let input_rows = input_buf.num_rows();
                 let start = self.profiler.start_op();
@@ -313,6 +314,7 @@ impl Executor {
             // dispatch-eligible bodies before reaching here; this
             // arm is the safety net for everyone else.
             RirNode::MultiWayJoin { fallback, .. } | RirNode::ChainJoin { fallback, .. } => {
+                self.record_wcoj_body_fallback(node);
                 self.execute_node(fallback)
             }
         }

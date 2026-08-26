@@ -191,8 +191,11 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=XLOG_RUSTDOC_NO_CUDA");
     println!("cargo:rerun-if-env-changed=DOCS_RS");
-    let docs_only = env::var("XLOG_RUSTDOC_NO_CUDA").as_deref() == Ok("1")
-        || env::var("DOCS_RS").as_deref() == Ok("1");
+    let build_flag = |name| {
+        xlog_core::resolve_bool(None, name, false)
+            .unwrap_or_else(|error| panic!("invalid CUDA build configuration: {error}"))
+    };
+    let docs_only = build_flag("XLOG_RUSTDOC_NO_CUDA") || build_flag("DOCS_RS");
     if docs_only {
         for name in KERNEL_CU_NAMES {
             let cu_path = kernels_dir.join(format!("{name}.cu"));
@@ -207,7 +210,7 @@ fn main() {
     let ptxas = find_ptxas_override();
 
     // Environment knobs.
-    let no_cubin = env::var("XLOG_NO_CUBIN").map(|v| v == "1").unwrap_or(false);
+    let no_cubin = build_flag("XLOG_NO_CUBIN");
     let cubin_archs: Vec<String> = env::var("XLOG_CUBIN_ARCHS")
         .unwrap_or_else(|_| "sm_120".to_string())
         .split(',')
