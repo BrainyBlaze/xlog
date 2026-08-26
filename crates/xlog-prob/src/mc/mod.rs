@@ -146,6 +146,25 @@ pub struct McEvalConfig {
     pub allow_cpu_oracle_fallback: bool,
 }
 
+/// Explicit caller overrides layered on top of source directives.
+///
+/// `None` preserves the corresponding source directive or language default.
+#[derive(Debug, Clone, Default)]
+pub struct McEvalOverrides {
+    /// Replacement sample count.
+    pub samples: Option<usize>,
+    /// Replacement deterministic seed.
+    pub seed: Option<u64>,
+    /// Replacement two-sided confidence level.
+    pub confidence: Option<f64>,
+    /// Replacement non-monotone iteration limit.
+    pub max_nonmonotone_iterations: Option<usize>,
+    /// Replacement sampling method.
+    pub sampling_method: Option<McSamplingMethod>,
+    /// Replacement explicit CPU-oracle opt-in.
+    pub allow_cpu_oracle_fallback: Option<bool>,
+}
+
 impl Default for McEvalConfig {
     fn default() -> Self {
         Self {
@@ -177,6 +196,29 @@ impl McEvalConfig {
         cfg.sampling_method = directives.prob_method.map(McSamplingMethod::from);
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Apply only explicitly supplied caller values, then validate the resolved config.
+    pub fn apply_overrides(&mut self, overrides: McEvalOverrides) -> Result<()> {
+        if let Some(samples) = overrides.samples {
+            self.samples = samples;
+        }
+        if let Some(seed) = overrides.seed {
+            self.seed = seed;
+        }
+        if let Some(confidence) = overrides.confidence {
+            self.confidence = confidence;
+        }
+        if let Some(iterations) = overrides.max_nonmonotone_iterations {
+            self.max_nonmonotone_iterations = iterations;
+        }
+        if let Some(method) = overrides.sampling_method {
+            self.sampling_method = Some(method);
+        }
+        if let Some(allow) = overrides.allow_cpu_oracle_fallback {
+            self.allow_cpu_oracle_fallback = allow;
+        }
+        self.validate()
     }
 
     pub fn validate(&self) -> Result<()> {

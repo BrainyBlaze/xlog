@@ -2,6 +2,18 @@
 
 \usepackage{arxiv}
 \usepackage[htt]{hyphenat}
+% Break long \texttt identifiers at their underscores, and never with a
+% hyphen: both\_low\_or\_stopped must not read as both\_-low\_or\_stopped.
+% The [htt] option alone does not hold that line (RESOURCE\_EXHAUSTED still
+% broke as RE-/SOURCE\_EXHAUSTED), so \texttt additionally switches to a
+% pattern-free language and clears the tt font's hyphen character.
+\makeatletter
+\@ifundefined{l@nohyphenation}{\newlanguage\l@nohyphenation}{}
+\let\xlog@texttt\texttt
+\renewcommand{\texttt}[1]{{\language\l@nohyphenation
+  \xlog@texttt{\hyphenchar\font\m@ne\relax #1}}}
+\renewcommand{\_}{\textunderscore\hspace{0pt}}
+\makeatother
 \usepackage{amsmath,amssymb}
 \usepackage{algorithm}
 \usepackage[noend]{algpseudocode}
@@ -78,6 +90,9 @@
   prebreak=\mbox{\textcolor{codecomment}{$\hookleftarrow$}},
   postbreak=\mbox{\textcolor{codecomment}{$\hookrightarrow$}\space},
   columns=fullflexible,
+  % Without this the literate replacements below swallow the space that
+  % follows them, so `:- both_inactive' sets as `:-both_inactive'.
+  keepspaces=true,
   showstringspaces=false,
   numbers=none,
   captionpos=b,
@@ -158,7 +173,7 @@
 % --- Title block ---
 \title{{\Huge\bfseries XLOG}\\[0.45em]
 A Universal GPU-Native Engine for Neurosymbolic Integration}
-\author{Levi Dubrovin, Nikita Pospelov, Kirill Sabitov,\\Anna Obikhodova, Antonina Bugaeva\\[0.35em]\small BrainyBlaze\\\small \texttt{levi@brainyblaze.com}, \texttt{nikita\_pospelov@brainyblaze.com}, \texttt{kirill@brainyblaze.com}, \texttt{anna@brainyblaze.com}, \texttt{antonina@brainyblaze.com}\\[0.35em]\small Technical Whitepaper}
+\author{Levi Dubrovin, Nikita Pospelov, Kirill Sabitov\\[0.35em]\small BrainyBlaze\\\small \texttt{levi@brainyblaze.com}, \texttt{nikita\_pospelov@brainyblaze.com}, \texttt{kirill@brainyblaze.com}\\[0.35em]\small Technical Whitepaper}
 \date{July 2026}
 
 \begin{document}
@@ -182,6 +197,7 @@ A Universal GPU-Native Engine for Neurosymbolic Integration}
 \input{sections/10_evaluation.tex}
 \input{sections/11_related_work.tex}
 \input{sections/12_limitations.tex}
+\input{sections/13_conclusion.tex}
 
 \printbibliography
 

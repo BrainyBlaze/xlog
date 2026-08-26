@@ -336,6 +336,8 @@ pub struct CircuitUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedWorldViewEvidence {
     assumptions: Vec<EpistemicAssumption>,
+    #[cfg(feature = "host-io")]
+    assumptions_auto_derived_from_gpu: bool,
     world_count: usize,
     gpu_epistemic_mode: Option<EirEpistemicMode>,
     gpu_tuple_key_column_reads: usize,
@@ -364,6 +366,8 @@ impl AcceptedWorldViewEvidence {
         validate_world_view_assumptions(world_view, &assumptions)?;
         Ok(Self {
             assumptions,
+            #[cfg(feature = "host-io")]
+            assumptions_auto_derived_from_gpu: false,
             world_count: world_view.world_count(),
             gpu_epistemic_mode: None,
             gpu_tuple_key_column_reads: 0,
@@ -388,6 +392,8 @@ impl AcceptedWorldViewEvidence {
         result: &EpistemicGpuExecutionResult,
         assumptions: Vec<EpistemicAssumption>,
     ) -> Result<Self> {
+        #[cfg(feature = "host-io")]
+        let assumptions_auto_derived_from_gpu = assumptions.is_empty();
         let provider_identity = EpistemicGpuProviderIdentity::from_provider(provider);
         if result.provider_identity != provider_identity {
             return Err(XlogError::UnsupportedEpistemicConstruct {
@@ -537,6 +543,8 @@ impl AcceptedWorldViewEvidence {
 
         Ok(Self {
             assumptions: accepted_assumptions,
+            #[cfg(feature = "host-io")]
+            assumptions_auto_derived_from_gpu,
             world_count: result.semantic_trace.accepted_world_views,
             gpu_epistemic_mode: Some(result.prepared.preflight.epistemic_mode),
             gpu_tuple_key_column_reads: result.model_membership.tuple_source_key_column_device_reads
@@ -574,6 +582,12 @@ impl AcceptedWorldViewEvidence {
         let mut evidence = self.clone();
         evidence.assumptions = assumptions;
         evidence
+    }
+
+    /// Whether the GPU evidence boundary derived assumptions from the execution result.
+    #[cfg(feature = "host-io")]
+    pub(crate) fn assumptions_auto_derived_from_gpu(&self) -> bool {
+        self.assumptions_auto_derived_from_gpu
     }
 
     /// Epistemic mode reported by the accepted GPU runtime evidence, when present.

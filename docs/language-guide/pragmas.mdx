@@ -89,7 +89,9 @@ A few of the values are short names worth spelling out:
 The probabilistic pragmas (`prob_samples`, `prob_seed`, `prob_confidence`,
 `prob_method`, `prob_max_nonmonotone_iterations`) shape Monte Carlo inference and take
 effect when `prob_engine = mc`. `prob_max_nonmonotone_iterations` is validated at parse
-time and must be strictly greater than zero.
+time and must be strictly greater than zero. Both CLI flags and explicitly supplied
+Python `evaluate(...)` or `evaluate_device(...)` arguments override these source values;
+omitted Python arguments preserve the source pragmas.
 </Note>
 
 ## Magic sets

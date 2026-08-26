@@ -19,7 +19,7 @@ use xlog_logic::ast::Term;
 use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::{ExactResultWithGrads, QueryProbability};
-use xlog_prob::mc::{McEvalConfig, McProgram, McSamplingMethod};
+use xlog_prob::mc::{McEvalConfig, McEvalOverrides, McProgram, McSamplingMethod};
 use xlog_prob::neural_fast_path::GpuWeightSlots;
 
 use super::neural_registry::NeuralPredicateInfo;
@@ -197,6 +197,27 @@ pub(crate) fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String
     s
 }
 
+fn resolve_mc_eval_config(
+    directives: &xlog_logic::ast::Directives,
+    samples: Option<usize>,
+    seed: Option<u64>,
+    confidence: Option<f64>,
+    max_nonmonotone_iterations: Option<usize>,
+    sampling_method: Option<McSamplingMethod>,
+    allow_cpu_oracle_fallback: bool,
+) -> xlog_core::Result<McEvalConfig> {
+    let mut cfg = McEvalConfig::from_directives(directives)?;
+    cfg.apply_overrides(McEvalOverrides {
+        samples,
+        seed,
+        confidence,
+        max_nonmonotone_iterations,
+        sampling_method,
+        allow_cpu_oracle_fallback: Some(allow_cpu_oracle_fallback),
+    })?;
+    Ok(cfg)
+}
+
 // =========================================================================
 // impl CompiledProgram — private helpers
 // =========================================================================
@@ -258,7 +279,16 @@ impl CompiledProgram {
                         McProgram::compile_source_with_gpu(&source_with_queries, self._gpu_config)
                             .map_err(|e| types::gpu_err("Query compilation error", e))?;
 
-                    let cfg = McEvalConfig::default();
+                    let cfg = resolve_mc_eval_config(
+                        &self.ast.directives,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                    )
+                    .map_err(types::xlog_err)?;
                     program
                         .evaluate(cfg)
                         .map_err(|e| types::gpu_err("Query evaluation error", e))?
@@ -548,15 +578,15 @@ impl CompiledProgram {
 
 #[pymethods]
 impl CompiledProgram {
-    #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None, memory_mb=None, allow_cpu_oracle=false))]
+    #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=None, max_nonmonotone_iterations=None, sampling_method=None, memory_mb=None, allow_cpu_oracle=false))]
     pub fn evaluate(
         &self,
         _py: Python<'_>,
         return_grads: bool,
         samples: Option<usize>,
         seed: Option<u64>,
-        confidence: f64,
-        max_nonmonotone_iterations: usize,
+        confidence: Option<f64>,
+        max_nonmonotone_iterations: Option<usize>,
         sampling_method: Option<String>,
         memory_mb: Option<u64>,
         allow_cpu_oracle: bool,
@@ -564,9 +594,17 @@ impl CompiledProgram {
         enforce_call_memory_limit(&self.output_provider, memory_mb)?;
         match &self.program {
             CompiledProbProgram::Exact(_program) => {
-                if samples.is_some() || seed.is_some() {
+                if samples.is_some()
+                    || seed.is_some()
+                    || confidence.is_some()
+                    || max_nonmonotone_iterations.is_some()
+                    || sampling_method.is_some()
+                    || allow_cpu_oracle
+                {
                     return Err(PyValueError::new_err(
-                        "samples/seed are only supported for prob_engine='mc'",
+                        "samples, seed, confidence, max_nonmonotone_iterations, \
+                         sampling_method, and allow_cpu_oracle are only supported for \
+                         prob_engine='mc'",
                     ));
                 }
                 #[cfg(feature = "host-io")]
@@ -594,16 +632,16 @@ impl CompiledProgram {
                     ));
                 }
 
-                let mut cfg = McEvalConfig::default();
-                cfg.samples = samples.unwrap_or(10000);
-                cfg.seed = seed.unwrap_or(0);
-                cfg.confidence = confidence;
-                cfg.max_nonmonotone_iterations = max_nonmonotone_iterations;
-                cfg.sampling_method = Self::parse_sampling_method(sampling_method)?;
-                // Fail-closed contract: resident-rejected programs (negation,
-                // aggregates, ...) error unless the caller explicitly opts
-                // into the labeled CPU oracle.
-                cfg.allow_cpu_oracle_fallback = allow_cpu_oracle;
+                let cfg = resolve_mc_eval_config(
+                    &self.ast.directives,
+                    samples,
+                    seed,
+                    confidence,
+                    max_nonmonotone_iterations,
+                    Self::parse_sampling_method(sampling_method)?,
+                    allow_cpu_oracle,
+                )
+                .map_err(types::xlog_err)?;
                 #[cfg(feature = "host-io")]
                 {
                     let result = _program.evaluate(cfg).map_err(types::xlog_err)?;
@@ -724,14 +762,14 @@ impl CompiledProgram {
     ///
     /// This is the primary GPU-native API surface for MC inference. It never performs
     /// device->host reads for result data (only returns device buffers).
-    #[pyo3(signature = (samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None, memory_mb=None))]
+    #[pyo3(signature = (samples=None, seed=None, confidence=None, max_nonmonotone_iterations=None, sampling_method=None, memory_mb=None))]
     pub fn evaluate_device(
         &self,
         py: Python<'_>,
         samples: Option<usize>,
         seed: Option<u64>,
-        confidence: f64,
-        max_nonmonotone_iterations: usize,
+        confidence: Option<f64>,
+        max_nonmonotone_iterations: Option<usize>,
         sampling_method: Option<String>,
         memory_mb: Option<u64>,
     ) -> PyResult<McDeviceEvalResult> {
@@ -749,12 +787,16 @@ impl CompiledProgram {
             no_host,
         ) = match &self.program {
             CompiledProbProgram::Mc(program) => {
-                let mut cfg = McEvalConfig::default();
-                cfg.samples = samples.unwrap_or(10000);
-                cfg.seed = seed.unwrap_or(0);
-                cfg.confidence = confidence;
-                cfg.max_nonmonotone_iterations = max_nonmonotone_iterations;
-                cfg.sampling_method = Self::parse_sampling_method(sampling_method)?;
+                let cfg = resolve_mc_eval_config(
+                    &self.ast.directives,
+                    samples,
+                    seed,
+                    confidence,
+                    max_nonmonotone_iterations,
+                    Self::parse_sampling_method(sampling_method)?,
+                    false,
+                )
+                .map_err(types::xlog_err)?;
 
                 let result = program
                     .evaluate_gpu_device_with_provider(cfg, self.output_provider.clone())
@@ -1320,5 +1362,55 @@ impl CompiledProgram {
             self.output_provider.csm_cuda_graph_cache_hits(),
         )?;
         Ok(dict.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlog_logic::ast::{Directives, ProbMethod};
+
+    #[test]
+    fn mc_config_inherits_directives_and_only_explicit_python_args_override_them() {
+        let directives = Directives {
+            prob_samples: Some(321),
+            prob_seed: Some(17),
+            prob_confidence: Some(0.8),
+            prob_method: Some(ProbMethod::EvidenceClamping),
+            prob_max_nonmonotone_iterations: Some(23),
+            ..Directives::default()
+        };
+
+        let inherited = resolve_mc_eval_config(&directives, None, None, None, None, None, false)
+            .expect("valid source directives");
+        assert_eq!(inherited.samples, 321);
+        assert_eq!(inherited.seed, 17);
+        assert_eq!(inherited.confidence, 0.8);
+        assert_eq!(
+            inherited.sampling_method,
+            Some(McSamplingMethod::EvidenceClamping)
+        );
+        assert_eq!(inherited.max_nonmonotone_iterations, 23);
+        assert!(!inherited.allow_cpu_oracle_fallback);
+
+        let overridden = resolve_mc_eval_config(
+            &directives,
+            Some(654),
+            Some(29),
+            Some(0.9),
+            Some(31),
+            Some(McSamplingMethod::Rejection),
+            true,
+        )
+        .expect("valid explicit overrides");
+        assert_eq!(overridden.samples, 654);
+        assert_eq!(overridden.seed, 29);
+        assert_eq!(overridden.confidence, 0.9);
+        assert_eq!(
+            overridden.sampling_method,
+            Some(McSamplingMethod::Rejection)
+        );
+        assert_eq!(overridden.max_nonmonotone_iterations, 31);
+        assert!(overridden.allow_cpu_oracle_fallback);
     }
 }

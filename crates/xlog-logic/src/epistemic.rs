@@ -18,7 +18,7 @@ use crate::ast::{
 use crate::build_eir;
 use crate::compile::Compiler;
 use crate::eir::convert_term;
-use crate::lower::Lowerer;
+use crate::lower::{positive_body_bound_variables, Lowerer};
 
 /// Boolean truth value for bounded epistemic fixture evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2007,10 +2007,9 @@ fn eir_term_is_scalar_key_element(term: &EirTerm) -> bool {
 /// equal the modal relation's arity (the runtime arity check enforces that
 /// downstream). Scalar terms pass through unchanged.
 ///
-/// Genuinely UNBOUNDED or UNTYPED structured forms (a `cons` with a non-list
+/// Genuinely unbounded or untyped structured forms (a `cons` with a non-list
 /// tail, a nested structure, a `predref`, or an `aggregate`) carry no fixed,
-/// typed column set and stay rejected with a precise finiteness/resource
-/// diagnostic -- NOT an "unsupported construct".
+/// typed column set and are rejected as unsupported tuple-key constructs.
 fn flatten_structured_key_terms(
     predicate: &str,
     terms: &[EirTerm],
@@ -2030,34 +2029,31 @@ fn flatten_structured_key_terms(
                 )?;
             }
             EirTerm::Cons { .. } => {
-                return Err(XlogError::ResourceExhausted {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "modal tuple-key cons pattern".to_string(),
                     context: format!(
                         "modal tuple-key for {predicate} uses a `cons` pattern whose tail length \
                          is not statically fixed, so it has no finite, typed GPU key-column set; \
                          bind it to a fixed-arity list literal `[a, b, ...]` instead"
                     ),
-                    estimated_bytes: 0,
-                    budget_bytes: 0,
                 });
             }
             EirTerm::PredRef(name) => {
-                return Err(XlogError::ResourceExhausted {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "modal tuple-key predicate reference".to_string(),
                     context: format!(
                         "modal tuple-key for {predicate} uses predref `{name}`, which has no \
                          finite, typed GPU key-column encoding"
                     ),
-                    estimated_bytes: 0,
-                    budget_bytes: 0,
                 });
             }
             EirTerm::Aggregate { op, variable } => {
-                return Err(XlogError::ResourceExhausted {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "modal tuple-key aggregate".to_string(),
                     context: format!(
                         "modal tuple-key for {predicate} uses aggregate `{op}({variable})`, whose \
                          value is not a finite, typed GPU key-column tuple"
                     ),
-                    estimated_bytes: 0,
-                    budget_bytes: 0,
                 });
             }
             scalar => flattened.push(scalar.clone()),
@@ -2073,7 +2069,7 @@ fn flatten_structured_key_terms(
 ///
 /// Each element must itself be a scalar/Symbol key element; a nested structure
 /// would need a column to hold its own sub-tuple, which a flat relation schema
-/// cannot express, so it is rejected with a precise finiteness diagnostic.
+/// cannot express, so it is rejected with a precise unsupported-shape diagnostic.
 fn flatten_structured_elements(
     predicate: &str,
     shape: &str,
@@ -2084,14 +2080,13 @@ fn flatten_structured_elements(
         if eir_term_is_scalar_key_element(element) {
             flattened.push(element.clone());
         } else {
-            return Err(XlogError::ResourceExhausted {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "nested modal tuple-key structure".to_string(),
                 context: format!(
                     "modal tuple-key for {predicate} nests a non-scalar element {element:?} inside \
                      a {shape}; only fixed-arity structures of scalar/Symbol-typed elements have a \
                      finite, typed GPU key-column encoding"
                 ),
-                estimated_bytes: 0,
-                budget_bytes: 0,
             });
         }
     }
@@ -2457,18 +2452,7 @@ fn rewrite_modal_literals_for_source_validation(
 /// once in source order. A reversed arithmetic dependency is therefore not accepted by a
 /// fixed-point approximation.
 fn non_epistemic_bound_variables(body: &[BodyLiteral]) -> BTreeSet<String> {
-    let mut bound = BTreeSet::new();
-    for literal in body {
-        let BodyLiteral::Positive(atom) = literal else {
-            continue;
-        };
-        bound.extend(
-            atom.variables()
-                .into_iter()
-                .filter(|name| *name != "_")
-                .map(str::to_string),
-        );
-    }
+    let mut bound = positive_body_bound_variables(body);
 
     for literal in body {
         let BodyLiteral::IsExpr(binding) = literal else {
@@ -3774,7 +3758,7 @@ pub struct GeneratePropagateTestOutcome {
 ///
 /// These reasons make the split planner's structural decisions explainable: a
 /// caller can read, for every component, *why* its rules could not be solved
-/// independently of one another (K3 split diagnostics).
+/// independently of one another through split-component diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EpistemicComponentMergeReason {
     /// Two rules share the same head predicate, so they jointly define one
@@ -3939,6 +3923,15 @@ pub fn evaluate_epistemic_candidate(
     interpretation: &EpistemicInterpretation,
     mode: EpistemicMode,
 ) -> Result<FaeelCandidateResult> {
+    let prepared = prepare_root_authored_constraint_identity(program)?;
+    evaluate_prepared_epistemic_candidate(&prepared, interpretation, mode)
+}
+
+fn evaluate_prepared_epistemic_candidate(
+    program: &Program,
+    interpretation: &EpistemicInterpretation,
+    mode: EpistemicMode,
+) -> Result<FaeelCandidateResult> {
     reject_gpt_epistemic_constraints(program)?;
     if let Some((predicate, arity)) = interpretation.first_contradiction() {
         return Ok(FaeelCandidateResult::NoModel(
@@ -4008,12 +4001,14 @@ pub fn run_generate_propagate_test_with_mode(
     config: GeneratePropagateTestConfig,
     mode: EpistemicMode,
 ) -> Result<GeneratePropagateTestOutcome> {
-    reject_gpt_epistemic_constraints(program)?;
+    let prepared = prepare_root_authored_constraint_identity(program)?;
+    reject_gpt_epistemic_constraints(&prepared)?;
     if candidates.len() > config.max_candidates {
-        return Err(xlog_core::XlogError::ResourceExhausted {
+        return Err(xlog_core::XlogError::CapacityExceeded {
             context: "epistemic GPT candidate guard".to_string(),
-            estimated_bytes: candidates.len() as u64,
-            budget_bytes: config.max_candidates as u64,
+            required: candidates.len() as u64,
+            limit: config.max_candidates as u64,
+            unit: "candidates".to_string(),
         });
     }
 
@@ -4047,7 +4042,7 @@ pub fn run_generate_propagate_test_with_mode(
 
     for (idx, candidate) in &propagated_candidates {
         trace.tested += 1;
-        match evaluate_epistemic_candidate(program, candidate, mode)? {
+        match evaluate_prepared_epistemic_candidate(&prepared, candidate, mode)? {
             FaeelCandidateResult::Model => {
                 trace.accepted += 1;
                 trace.accepted_world_views += 1;

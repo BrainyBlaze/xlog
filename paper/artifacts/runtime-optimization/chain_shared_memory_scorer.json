@@ -1,0 +1,150 @@
+{
+  "claim": "Profile-gated shared-memory chain scorer: 5.58x speedup on a chain-hot fixture, with the small-input control unchanged within 1.3% at the median.",
+  "paper_section": "sections/10_evaluation.tex, Runtime Optimization (sec:runtime-eval)",
+  "kind": "single-system ablation (xlog against its own baseline)",
+  "hardware": {
+    "device": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
+    "compute_capability": "12.0 (sm_120)",
+    "host": "development machine, Linux",
+    "device_provenance": "the measurement bundle itself does not record the device; it is attributed from the same campaign's runtime probe (docs/evidence/2026-05-18-v080-exact/runtime_probe.json, one day earlier, same host paths and same kernel packaging)"
+  },
+  "code_version": {
+    "release_line": "v0.8.6",
+    "measurement_commit": "ce78e32f9c740187fb893f169632e1d9e67f1c25",
+    "measurement_commit_subject": "feat(v086): add chain exact shared-memory scorer",
+    "branch_at_measurement": "feat/v086-runtime-completion",
+    "kernel": "crates/xlog-cuda/kernels/ilp_exact.cu (ilp_exact_score_chain_smem, ilp_exact_score_chain_smem_u32)",
+    "date": "2026-05-19"
+  },
+  "how_to_reproduce": {
+    "runner_at_measurement_time": "scripts/measure_v086_chain_smem.py",
+    "runner_now": "scripts/measure_chain_shared_memory.py (renamed; the profile-trigger runner is scripts/measure_chain_shared_memory_profile.py)",
+    "path": "pyxlog induce_exact(backend=\"native\") -> xlog_induce::induce_exact -> CudaKernelProvider::ilp_exact_score",
+    "gate": "XLOG_ILP_EXACT_CHAIN_SMEM (default on) and XLOG_ILP_EXACT_CHAIN_SMEM_MIN_ROWS (default 256), crates/xlog-cuda/src/provider/ilp_exact.rs",
+    "ab_method": "the same fixture is run twice in one process, once with the shared-memory path enabled and once disabled"
+  },
+  "fixtures": {
+    "chain_hot": {
+      "role": "above the gate threshold",
+      "rows_per_candidate": 768,
+      "query_pairs_positive": 32,
+      "query_pairs_negative": 32,
+      "topology": "chain"
+    },
+    "small_control": {
+      "role": "below the gate threshold (baseline scorer must run unchanged)",
+      "rows_per_candidate": 32,
+      "query_pairs_positive": 8,
+      "query_pairs_negative": 8,
+      "topology": "chain"
+    }
+  },
+  "protocol": {
+    "warmup_iterations": 3,
+    "timed_iterations": 12,
+    "aggregation": "median over the timed iterations",
+    "dispersion_recorded": true,
+    "dispersion_note": "min and max seconds are recorded per arm; per-iteration times were not emitted, so the range is min-max rather than an IQR"
+  },
+  "measurements": {
+    "chain_hot": {
+      "baseline": {
+        "chain_smem": false,
+        "median_seconds": 0.027507680497365072,
+        "min_seconds": 0.02734149800380692,
+        "max_seconds": 0.028317899035755545,
+        "iterations": 12,
+        "warmup": 3,
+        "dtoh_calls": 2,
+        "result_signature": [
+          [
+            "chain",
+            "p_B",
+            "p_C",
+            32,
+            0,
+            0
+          ]
+        ]
+      },
+      "chain_smem": {
+        "chain_smem": true,
+        "median_seconds": 0.004927040485199541,
+        "min_seconds": 0.004898363025858998,
+        "max_seconds": 0.00541784503730014,
+        "iterations": 12,
+        "warmup": 3,
+        "dtoh_calls": 2,
+        "result_signature": [
+          [
+            "chain",
+            "p_B",
+            "p_C",
+            32,
+            0,
+            0
+          ]
+        ]
+      },
+      "parity": true,
+      "speedup_ratio": 5.58300273358745
+    },
+    "small_control": {
+      "baseline": {
+        "chain_smem": false,
+        "median_seconds": 0.0011941255070269108,
+        "min_seconds": 0.0008972260402515531,
+        "max_seconds": 0.0012547150254249573,
+        "iterations": 12,
+        "warmup": 3,
+        "dtoh_calls": 2,
+        "result_signature": [
+          [
+            "chain",
+            "p_B",
+            "p_C",
+            8,
+            0,
+            0
+          ]
+        ]
+      },
+      "chain_smem": {
+        "chain_smem": true,
+        "median_seconds": 0.0011783409863710403,
+        "min_seconds": 0.0011135960230603814,
+        "max_seconds": 0.0016609960002824664,
+        "iterations": 12,
+        "warmup": 3,
+        "dtoh_calls": 2,
+        "result_signature": [
+          [
+            "chain",
+            "p_B",
+            "p_C",
+            8,
+            0,
+            0
+          ]
+        ]
+      },
+      "parity": true,
+      "median_delta_percent": -1.3218477088869953,
+      "delta_sign_note": "regression_percent is computed by the runner as (smem_median - baseline_median) / baseline_median * 100, so the recorded -1.3218% means the shared-memory arm's median is 1.32% FASTER than the baseline's: the small-input control does not regress, and the 5% small-case guard is met with room. The min-max ranges of the two arms overlap, so the paper reports the control as unchanged within 1.3% rather than claiming a gain. The earlier draft of the paper described this figure as a 1.3% regression, which inverted the sign."
+    },
+    "transfer_budget": {
+      "baseline_dtoh_calls": 2,
+      "chain_smem_dtoh_calls": 2,
+      "added_dtoh_calls": 0
+    },
+    "fallback": {
+      "non_chain_uses_baseline_logic": true
+    }
+  },
+  "caveats": [
+    "Point medians on two synthetic fixtures; no per-fixture dispersion beyond min-max was collected.",
+    "No committed test executes the shared-memory kernel: the exact-induction parity tests use fixtures below the gate threshold and therefore exercise only the baseline scorer. Parity above the threshold is established by this A/B run, not by the test suite.",
+    "Parity is compared on the public coverage signature, which is identical across the two arms on both fixtures."
+  ],
+  "recovered_from": "docs/evidence/2026-05-19-v086-chain-smem/{README.md,measurements.json}, removed from the tree by 5fd0f224 (\"docs: fix generated docs and local agent workspaces\") because docs/evidence/ is an untracked agent workspace. Values here are transcribed verbatim from that bundle at ce78e32f."
+}

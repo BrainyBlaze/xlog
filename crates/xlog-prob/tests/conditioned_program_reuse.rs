@@ -10,6 +10,7 @@ use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::epistemic::compile_epistemic_gpu_execution;
 use xlog_logic::parse_program;
+use xlog_prob::epistemic::AcceptedWorldViewEvidence;
 use xlog_prob::epistemic_production::EpistemicProbProductionAdapter;
 use xlog_prob::exact::{ExactResult, ExactResultWithGrads, GpuConfig, ProbVarInfo};
 use xlog_runtime::{EpistemicGpuWorkspaceCapacities, Executor};
@@ -110,15 +111,13 @@ fn conditioned_program_compiles_once_and_reuses_circuit_for_atomic_prior_updates
     };
     let _cache = IsolatedCircuitCache::empty();
     let evidence = execute_accepted_derived_and_negated_evidence(&provider);
+    let accepted =
+        AcceptedWorldViewEvidence::from_gpu_execution_result(&provider, &evidence, Vec::new())
+            .expect("validate accepted GPU world-view evidence");
     let config = gpu_config(&provider);
     let mut adapter = EpistemicProbProductionAdapter::new(config);
     let prepared = adapter
-        .prepare_conditioned_source_with_gpu_execution_result(
-            PROBABILITY_SOURCE,
-            &provider,
-            &evidence,
-            Vec::new(),
-        )
+        .prepare_conditioned_source_with_accepted_world_view(PROBABILITY_SOURCE, &accepted)
         .expect("prepare one conditioned exact circuit");
     let prepared_circuit = prepared
         .circuit_witness()

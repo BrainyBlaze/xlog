@@ -16,6 +16,8 @@ use xlog_core::{ScalarType, Schema};
 #[cfg(feature = "host-io")]
 use xlog_cuda::{CudaKernelProvider, DlpackManagedTensor};
 #[cfg(feature = "host-io")]
+use xlog_prob::epistemic::AcceptedWorldViewEvidence;
+#[cfg(feature = "host-io")]
 use xlog_prob::epistemic_production::{
     EpistemicProbProductionAdapter, EpistemicProbProductionTrace,
 };
@@ -58,12 +60,13 @@ impl CompiledLogicProgram {
                 config.device_ordinal = evidence_provider.device().ordinal();
                 config.memory_bytes = evidence_provider.memory().budget().device_bytes;
                 let mut adapter = EpistemicProbProductionAdapter::new(config);
-                let program = adapter.prepare_conditioned_source_with_gpu_execution_result(
-                    &prob_source,
+                let accepted = AcceptedWorldViewEvidence::from_gpu_execution_result(
                     &evidence_provider,
                     &evidence,
                     Vec::new(),
                 )?;
+                let program = adapter
+                    .prepare_conditioned_source_with_accepted_world_view(&prob_source, &accepted)?;
                 Ok::<_, xlog_core::XlogError>((program, evidence_provider))
             })
             .map_err(types::xlog_err)?;
@@ -154,12 +157,15 @@ impl CompiledLogicProgram {
                 config.device_ordinal = provider.device().ordinal();
                 config.memory_bytes = provider.memory().budget().device_bytes;
                 let mut adapter = EpistemicProbProductionAdapter::new(config);
+                let accepted = AcceptedWorldViewEvidence::from_gpu_execution_result(
+                    &provider,
+                    &evidence,
+                    Vec::new(),
+                )?;
                 let exact = adapter
-                    .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+                    .compile_and_evaluate_conditioned_source_with_accepted_world_view(
                         &prob_source,
-                        &provider,
-                        &evidence,
-                        Vec::new(),
+                        &accepted,
                     )?;
                 let trace = adapter.trace();
 

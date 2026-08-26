@@ -1,10 +1,10 @@
 \section{The xlog Language}\label{sec:lang}
 
-This section describes the xlog surface: types, expressions, user-defined functions, modules, and stratified aggregation. Probabilistic facts (\texttt{p::f.}) and neural predicate declarations (\texttt{nn/k}) are language-level constructs covered in \Cref{sec:prob,sec:nesy}.
+Probabilistic facts (\texttt{p::f.}) and neural predicate declarations (\texttt{nn/k}) are language-level constructs covered in \Cref{sec:prob,sec:nesy}.
 
-\subsection{Design Principles}
+\subsection{Design principles}
 
-Three principles shape the surface, each a deliberate enabler of GPU execution rather than a concession. \textbf{Typed predicates:} every predicate has a statically known signature over a closed set of scalar types (\texttt{u32}, \texttt{u64}, \texttt{i32}, \texttt{i64}, \texttt{f32}, \texttt{f64}, \texttt{bool}, \texttt{symbol}), supplied by a \texttt{pred} declaration or inferred during compilation, so argument mismatches are caught before any kernel is generated and allocation stays bounded and columnar. \textbf{Classified dependencies:} negation, aggregation, modal operators, and recursion interact through SCC analysis on the predicate dependency graph. The ordinary deterministic core requires a monotone or stratified schedule, while supported nonmonotone probabilistic and epistemic components enter dedicated plans, including GPU-backed well-founded semantics for supported recursion through negation. \textbf{One language for many paradigms:} probabilistic facts, annotated disjunctions, neural predicates, and SAT constraints share the syntactic core of deterministic Datalog; parsing, normalization, and dependency analysis are shared, while backend-specific lowering preserves the semantics needed by each plan. Unsupported shapes and unbounded terms are rejected before execution rather than entering an implicit fallback.
+Three principles shape the surface, each chosen to enable GPU execution. \textbf{Typed predicates:} every predicate has a statically known signature over a closed set of scalar types (\texttt{u32}, \texttt{u64}, \texttt{i32}, \texttt{i64}, \texttt{f32}, \texttt{f64}, \texttt{bool}, \texttt{symbol}), supplied by a \texttt{pred} declaration or inferred during compilation, so argument mismatches are caught before any kernel is generated and allocation stays bounded and columnar. \textbf{Classified dependencies:} negation, aggregation, modal operators, and recursion interact through SCC analysis on the predicate dependency graph. The ordinary deterministic core requires a monotone or stratified schedule, while supported nonmonotone probabilistic and epistemic components enter dedicated plans, including GPU-backed well-founded semantics for supported recursion through negation. \textbf{One language for many paradigms:} probabilistic facts, annotated disjunctions, neural predicates, and SAT constraints share the syntactic core of deterministic Datalog; parsing, normalization, and dependency analysis are shared, while backend-specific lowering preserves the semantics needed by each plan. Unsupported shapes and unbounded terms are rejected before execution, not routed into an implicit fallback.
 
 A minimal program exhibits the core surface:
 
@@ -12,7 +12,7 @@ A minimal program exhibits the core surface:
                  caption={Minimal xlog program: typed predicates, facts, a recursive rule, a query.},
                  label={lst:hello}]{examples/01_hello.xlog}
 
-\subsection{Type System}\label{sec:lang:types}
+\subsection{Type system}\label{sec:lang:types}
 
 Every predicate is assigned a schema over the eight scalar types, with \texttt{f32}/\texttt{f64} following IEEE~754. A \texttt{pred} declaration supplies that schema explicitly; when it is omitted, compilation infers the schema from facts, rule heads, typed body columns, and arithmetic bindings. String literals (\texttt{"alice"}) map to \texttt{symbol} through a global symbol table, giving the runtime dense integer identifiers while preserving source-level readability; \texttt{domain} declarations introduce named aliases. Type consistency is enforced by predicate schemas and lowering-time checks: variable occurrences must agree with known column types, constants are validated against their destination columns, and arithmetic expressions preserve scalar types.
 
@@ -22,21 +22,21 @@ Every predicate is assigned a schema over the eight scalar types, with \texttt{f
 
 Declaring \texttt{bridge} so that its head argument is constrained at two incompatible types (e.g.\ \texttt{symbol} in the head but \texttt{u32} through \texttt{connected}) rejects the program at compile time.
 
-\subsection{Expressions, Arithmetic, and User-Defined Functions}\label{sec:lang:arith}
+\subsection{Expressions, arithmetic, and user-defined functions}\label{sec:lang:arith}
 
-Rule bodies may contain arithmetic, comparisons, and calls. Arithmetic bindings use the \texttt{is} operator (\texttt{D is X + Y}); the right-hand side supports \texttt{+ - * / \%}, the built-ins \texttt{abs}, \texttt{min}, \texttt{max}, \texttt{pow}, \texttt{cast}, and user-defined functions. Comparisons compile to \texttt{Filter} nodes and push below joins where profitable. Float comparison uses a total ordering---\texttt{NaN} and signed zeros yield deterministic results rather than contaminating downstream aggregations.
+Rule bodies may contain arithmetic, comparisons, and calls. Arithmetic bindings use the \texttt{is} operator (\texttt{D is X + Y}); the right-hand side supports \texttt{+ - * / \%}, the built-ins \texttt{abs}, \texttt{min}, \texttt{max}, \texttt{pow}, \texttt{cast}, and user-defined functions. Comparisons compile to \texttt{Filter} nodes and push below joins where profitable. Float comparison uses a total ordering, so \texttt{NaN} and signed zeros yield deterministic results instead of contaminating downstream aggregations.
 
 \lstinputlisting[style=xlogstyle,
                  caption={Arithmetic in rule bodies: pairwise proximity via squared Euclidean distance.},
                  label={lst:arith}]{examples/03_arith.xlog}
 
-A user-defined function (UDF) is introduced with \texttt{func}, with optional parameter types and a return type after \texttt{->}. Arithmetic bodies (optionally with \texttt{if/then/else}) inline into the same \texttt{Expr} trees as built-in arithmetic and participate in the same predicate-pushdown and expression-level optimization. A predicate body, as in \texttt{func get\_parent(Child) = Parent :- parent(Child, Parent).}, contributes its relational literals immediately before the calling \texttt{is} binding in an ordinary rule or integrity constraint. Its relation may contribute zero, one, or many caller rows; the function syntax does not impose uniqueness, while ordinary set semantics deduplicates identical projected tuples. Each invocation alpha-renames its non-parameter result and body-local variables, and multiple calls expand from left to right. Nested expansion is depth-bounded; relational calls in conditional result branches and non-term arithmetic arguments are rejected rather than hoisted or coerced with changed semantics.
+A user-defined function (UDF) is introduced with \texttt{func}, with optional parameter types and a return type after \texttt{->}. Arithmetic bodies (optionally with \texttt{if/then/else}) inline into the same \texttt{Expr} trees as built-in arithmetic and participate in the same predicate-pushdown and expression-level optimization. A predicate body, as in \texttt{func get\_parent(Child) = Parent :- parent(Child, Parent).}, contributes its relational literals immediately before the calling \texttt{is} binding in an ordinary rule or integrity constraint. Its relation may contribute zero, one, or many caller rows; the function syntax does not impose uniqueness, while ordinary set semantics deduplicates identical projected tuples. Each invocation alpha-renames its non-parameter result and body-local variables, and multiple calls expand from left to right. Nested expansion is depth-bounded; relational calls in conditional result branches and non-term arithmetic arguments are rejected, not hoisted or coerced with changed semantics.
 
 \lstinputlisting[style=xlogstyle,
                  caption={User-defined function: \texttt{clamp01} normalizes a raw score into the unit interval.},
                  label={lst:udf}]{examples/04_udf.xlog}
 
-\subsection{Modules and Imports}\label{sec:lang:modules}
+\subsection{Modules and imports}\label{sec:lang:modules}
 
 Programs decompose into \texttt{.xlog} modules on a search path. The \texttt{use} directive loads a module (\texttt{use graph.}) or selectively imports names (\texttt{use utils/math::\{abs, clamp\}.}); a \texttt{private} modifier hides declarations from importers. The resolver traverses the import graph, detects cycles, validates participating declarations, and performs bounded cross-module schema inference for undeclared predicate contributions before merging them. The resulting logical program then undergoes full compiler type inference, dependency analysis, and route-specific execution planning, so imported rules participate as if written inline.
 
@@ -48,7 +48,7 @@ Programs decompose into \texttt{.xlog} modules on a search path. The \texttt{use
                  caption={Entry \texttt{graph\_main.xlog}: imports \texttt{graph\_lib} and queries \texttt{reach}.},
                  label={lst:graph-main}]{examples/graph_main.xlog}
 
-\subsection{Aggregations and Constraints}\label{sec:lang:agg}
+\subsection{Aggregations and constraints}\label{sec:lang:agg}
 
 Aggregation operators---\texttt{count}, \texttt{sum}, \texttt{min}, \texttt{max}, \texttt{logsumexp}---appear at rule heads with an explicit aggregation variable and lower to \texttt{GroupBy} nodes executed as radix-sort-and-reduce kernels; the stratifier rejects aggregation inside a recursive SCC. Integrity constraints are headless rules (\texttt{:- body.}) asserting that \texttt{body} is unsatisfiable once evaluation reaches fixpoint; a violation raises a diagnostic. \texttt{logsumexp} is included because it is the workhorse aggregation for probabilistic circuits, where log-space numerical stability is essential (\Cref{sec:prob}).
 
@@ -56,6 +56,6 @@ Aggregation operators---\texttt{count}, \texttt{sum}, \texttt{min}, \texttt{max}
                  caption={Stratified aggregation: per-source out-degree with an integrity constraint.},
                  label={lst:agg}]{examples/06_agg.xlog}
 
-\subsection{Completeness over Finite Domains}\label{sec:lang:completeness}
+\subsection{Completeness over finite domains}\label{sec:lang:completeness}
 
-The surface extends toward language completeness while preserving GPU-native execution: accepted constructs normalize into the typed AST and lower through their semantic backend, while forms that cannot be lowered safely are rejected at compile time rather than executed on a hidden CPU interpreter. The accepted extensions are finite typed lists (\texttt{[]}, \texttt{[H|T]}, the \texttt{list<T>} column type), statically-resolvable meta-predicates (\texttt{ground}, \texttt{functor}, \texttt{=..}, source-fact \texttt{findall}, \texttt{maplist}), explicit stratified negation-as-failure over deterministic relations, magic-set rewriting of bound recursive queries, and finite probabilistic aggregates. Deterministic extensions lower to relational joins and aggregations in RIR; probabilistic aggregates preserve their probabilistic intermediate representation. Open-ended generators, dynamic database mutation, unrestricted \texttt{call/N}, and runtime-variable predicate names remain outside the contract.
+The surface extends toward language completeness while preserving GPU-native execution: accepted constructs normalize into the typed AST and lower through their semantic backend, while forms that cannot be lowered safely are rejected at compile time, not executed on a hidden CPU interpreter. The accepted extensions are finite typed lists (\texttt{[]}, \texttt{[H|T]}, the \texttt{list<T>} column type), statically-resolvable meta-predicates (\texttt{ground}, \texttt{functor}, \texttt{=..}, source-fact \texttt{findall}, \texttt{maplist}), explicit stratified negation-as-failure over deterministic relations, magic-set rewriting of bound recursive queries, and finite probabilistic aggregates. Deterministic extensions lower to relational joins and aggregations in RIR; probabilistic aggregates preserve their probabilistic intermediate representation. Open-ended generators, dynamic database mutation, unrestricted \texttt{call/N}, and runtime-variable predicate names remain outside the contract.

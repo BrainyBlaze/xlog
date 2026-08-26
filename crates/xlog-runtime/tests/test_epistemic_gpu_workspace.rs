@@ -113,22 +113,24 @@ fn runtime_fixture() -> Option<RuntimeFixture> {
     })
 }
 
-fn assert_u32_resource_exhausted(
+fn assert_u32_capacity_exceeded(
     err: xlog_core::XlogError,
     expected_context: &str,
-    expected_estimated_bytes: u64,
+    expected_required: u64,
 ) {
     match err {
-        xlog_core::XlogError::ResourceExhausted {
+        xlog_core::XlogError::CapacityExceeded {
             context,
-            estimated_bytes,
-            budget_bytes,
+            required,
+            limit,
+            unit,
         } => {
             assert_eq!(context, expected_context);
-            assert_eq!(estimated_bytes, expected_estimated_bytes);
-            assert_eq!(budget_bytes, u32::MAX as u64);
+            assert_eq!(required, expected_required);
+            assert_eq!(limit, u32::MAX as u64);
+            assert_eq!(unit, "elements");
         }
-        other => panic!("expected u32 resource exhaustion error, got {other:?}"),
+        other => panic!("expected u32 capacity error, got {other:?}"),
     }
 }
 
@@ -191,14 +193,16 @@ fn workspace_layout_rejects_zero_candidate_capacity() {
     .unwrap_err();
 
     match err {
-        xlog_core::XlogError::ResourceExhausted {
+        xlog_core::XlogError::CapacityExceeded {
             context,
-            estimated_bytes,
-            budget_bytes,
+            required,
+            limit,
+            unit,
         } => {
             assert_eq!(context, "epistemic GPU workspace candidates");
-            assert_eq!(estimated_bytes, 0);
-            assert_eq!(budget_bytes, 1);
+            assert_eq!(required, 1);
+            assert_eq!(limit, 0);
+            assert_eq!(unit, "items");
         }
         other => panic!("expected workspace capacity error, got {other:?}"),
     }
@@ -245,14 +249,14 @@ fn accepted_gpu_execution_dispatches_kclique_wcoj_reduction_through_runtime_path
         return;
     };
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
-    let complete_k5_edges = complete_k5_edge_rows();
+    let complete_five_clique_edges = complete_five_clique_edge_rows();
 
     for rel in 1..=10 {
         let name = format!("edge{rel}");
         executor.register_relation(RelId(rel), &name);
         executor.put_relation(
             &name,
-            upload_binary_u32(&fixture.memory, &complete_k5_edges, "src", "dst"),
+            upload_binary_u32(&fixture.memory, &complete_five_clique_edges, "src", "dst"),
         );
     }
     executor.register_relation(RelId(99), "__kclique_helper_99");
@@ -322,22 +326,23 @@ fn parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
-    let program = parse_program(EPISTEMIC_K5_MARKER_SRC).expect("parse epistemic K5 WCOJ program");
-    let rel_ids = rel_ids_for_parsed_k5_reduced();
-    let stats = k5_stats(&rel_ids, Some((3, 5.0)));
+    let program = parse_program(EPISTEMIC_FIVE_CLIQUE_MARKER_SOURCE)
+        .expect("parse epistemic five-clique WCOJ program");
+    let rel_ids = rel_ids_for_parsed_five_clique_reduction();
+    let stats = five_clique_stats(&rel_ids, Some((3, 5.0)));
     let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, Some(&stats))
-        .expect("compile parsed epistemic K5 through production WCOJ planner");
+        .expect("compile parsed epistemic five-clique through production WCOJ planner");
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
 
     for (name, rel) in &executable.relation_ids {
         executor.register_relation(*rel, name);
     }
 
-    let complete_k5_edges = complete_k5_edge_rows();
-    for (name, _, _) in K5_EDGES {
+    let complete_five_clique_edges = complete_five_clique_edge_rows();
+    for (name, _, _) in FIVE_CLIQUE_EDGES {
         executor.put_relation(
             name,
-            upload_binary_u32(&fixture.memory, &complete_k5_edges, "src", "dst"),
+            upload_binary_u32(&fixture.memory, &complete_five_clique_edges, "src", "dst"),
         );
     }
     executor.put_relation(
@@ -358,7 +363,7 @@ fn parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path() {
                 max_models_per_reduction: 2,
             },
         )
-        .expect("parsed epistemic K5 should dispatch through runtime WCOJ path");
+        .expect("parsed epistemic five-clique should dispatch through runtime WCOJ path");
 
     assert_eq!(
         executable.gpu_plan.reductions[0].wcoj_status,
@@ -397,7 +402,7 @@ fn parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path() {
             assert_eq!(certified_helper_relation_rules, 1);
             assert_eq!(certified_helper_relation_scans, 1);
         }
-        other => panic!("expected parsed K5 WCOJ certification, got {other:?}"),
+        other => panic!("expected parsed five-clique WCOJ certification, got {other:?}"),
     }
     assert_eq!(result.output.arity(), 5);
     assert_eq!(result.final_output.arity(), 5);
@@ -405,23 +410,23 @@ fn parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path() {
     let a_values = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
-        .expect("download parsed K5 final A values");
+        .expect("download parsed five-clique final A values");
     let b_values = fixture
         .provider
         .download_column::<u32>(&result.final_output, 1)
-        .expect("download parsed K5 final B values");
+        .expect("download parsed five-clique final B values");
     let c_values = fixture
         .provider
         .download_column::<u32>(&result.final_output, 2)
-        .expect("download parsed K5 final C values");
+        .expect("download parsed five-clique final C values");
     let d_values = fixture
         .provider
         .download_column::<u32>(&result.final_output, 3)
-        .expect("download parsed K5 final D values");
+        .expect("download parsed five-clique final D values");
     let e_values = fixture
         .provider
         .download_column::<u32>(&result.final_output, 4)
-        .expect("download parsed K5 final E values");
+        .expect("download parsed five-clique final E values");
     assert_eq!(
         (a_values, b_values, c_values, d_values, e_values),
         (vec![1], vec![2], vec![3], vec![4], vec![5])
@@ -454,9 +459,9 @@ fn parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path() {
             .expect("decode typed GPU rejection reason"),
         vec![EpistemicGpuRejectionReason::UnsatisfiedMembership]
     );
-    result
-        .require_runtime_dispatch_certification()
-        .expect("parsed K5 runtime result should retain dispatch and semantic certification");
+    result.require_runtime_dispatch_certification().expect(
+        "parsed five-clique runtime result should retain dispatch and semantic certification",
+    );
 }
 
 #[cfg(feature = "epistemic-logic-tests")]
@@ -2780,14 +2785,16 @@ fn runtime_execution_rejects_candidate_capacity_below_epistemic_guess_space() {
     };
 
     match err {
-        xlog_core::XlogError::ResourceExhausted {
+        xlog_core::XlogError::CapacityExceeded {
             context,
-            estimated_bytes,
-            budget_bytes,
+            required,
+            limit,
+            unit,
         } => {
             assert_eq!(context, "epistemic GPU execution candidate capacity");
-            assert_eq!(estimated_bytes, 8);
-            assert_eq!(budget_bytes, 4);
+            assert_eq!(required, 8);
+            assert_eq!(limit, 4);
+            assert_eq!(unit, "candidates");
         }
         other => panic!("expected runtime candidate-capacity guard error, got {other:?}"),
     }
@@ -3866,7 +3873,7 @@ fn parsed_bound_quaternary_know_filters_final_gpu_tuple_values() {
 }
 
 // =====================================================================
-// Epistemic integrity constraint world-view pilots.
+// Epistemic integrity constraint world-view behavior tests.
 //
 // `:- know unsafe().` must prune candidate world views in which the
 // constraint body holds, leaving valid world views untouched. The
@@ -5313,14 +5320,16 @@ fn candidate_generation_trace_rejects_unlaunchable_candidate_mask_product() {
         .expect_err("candidate trace must fail before recording an unlaunchable GPU kernel");
 
     match err {
-        xlog_core::XlogError::ResourceExhausted {
+        xlog_core::XlogError::CapacityExceeded {
             context,
-            estimated_bytes,
-            budget_bytes,
+            required,
+            limit,
+            unit,
         } => {
             assert_eq!(context, "epistemic GPU candidate generation launch");
-            assert_eq!(estimated_bytes, 31u64 << 31);
-            assert_eq!(budget_bytes, u32::MAX as u64);
+            assert_eq!(required, 31u64 << 31);
+            assert_eq!(limit, u32::MAX as u64);
+            assert_eq!(unit, "elements");
         }
         other => panic!("expected candidate launch bound error, got {other:?}"),
     }
@@ -5377,7 +5386,7 @@ fn propagation_trace_rejects_unlaunchable_candidate_count() {
     let err = EpistemicGpuPropagationTrace::for_counts(1, u32::MAX as usize + 1)
         .expect_err("propagation trace must fail before recording an unlaunchable GPU kernel");
 
-    assert_u32_resource_exhausted(err, "epistemic GPU propagation launch", u32::MAX as u64 + 1);
+    assert_u32_capacity_exceeded(err, "epistemic GPU propagation launch", u32::MAX as u64 + 1);
 }
 
 #[test]
@@ -5399,7 +5408,7 @@ fn candidate_validation_trace_rejects_unlaunchable_candidate_count() {
     let err = EpistemicGpuCandidateValidationTrace::for_counts(1, u32::MAX as usize + 1)
         .expect_err("validation trace must fail before recording an unlaunchable GPU kernel");
 
-    assert_u32_resource_exhausted(err, "epistemic GPU validation launch", u32::MAX as u64 + 1);
+    assert_u32_capacity_exceeded(err, "epistemic GPU validation launch", u32::MAX as u64 + 1);
 }
 
 #[test]
@@ -5423,7 +5432,7 @@ fn model_membership_trace_rejects_unlaunchable_membership_product() {
     let err = EpistemicGpuModelMembershipTrace::for_counts(2, (u32::MAX as usize / 2) + 1, 1, 1)
         .expect_err("model-membership trace must fail before recording an unlaunchable GPU kernel");
 
-    assert_u32_resource_exhausted(
+    assert_u32_capacity_exceeded(
         err,
         "epistemic GPU model-membership launch",
         u32::MAX as u64 + 1,
@@ -5514,7 +5523,7 @@ fn tuple_source_model_membership_trace_rejects_unlaunchable_membership_product()
     )
     .expect_err("tuple-source trace must fail before recording an unlaunchable GPU kernel");
 
-    assert_u32_resource_exhausted(
+    assert_u32_capacity_exceeded(
         err,
         "epistemic GPU model-membership launch",
         u32::MAX as u64 + 1,
@@ -5564,7 +5573,7 @@ fn world_view_validation_trace_rejects_unlaunchable_membership_product() {
         EpistemicGpuWorldViewValidationTrace::for_counts(2, (u32::MAX as usize / 2) + 1, 1, 1)
             .expect_err("world-view trace must fail before recording an unlaunchable GPU kernel");
 
-    assert_u32_resource_exhausted(
+    assert_u32_capacity_exceeded(
         err,
         "epistemic GPU world-view validation membership launch",
         u32::MAX as u64 + 1,
@@ -5587,7 +5596,7 @@ fn materialization_trace_rejects_unlaunchable_candidate_count() {
     let err = EpistemicGpuMaterializationTrace::for_count(u32::MAX as usize + 1)
         .expect_err("materialization trace must fail before recording an unlaunchable GPU kernel");
 
-    assert_u32_resource_exhausted(
+    assert_u32_capacity_exceeded(
         err,
         "epistemic GPU materialization launch",
         u32::MAX as u64 + 1,
@@ -5611,7 +5620,7 @@ fn final_result_materialization_trace_rejects_unlaunchable_candidate_count() {
     let err = EpistemicGpuFinalResultMaterializationTrace::for_count(u32::MAX as usize + 1)
         .expect_err("final-result trace must fail before recording an unlaunchable GPU kernel");
 
-    assert_u32_resource_exhausted(
+    assert_u32_capacity_exceeded(
         err,
         "epistemic GPU final-result launch",
         u32::MAX as u64 + 1,
@@ -5650,7 +5659,7 @@ fn final_tuple_materialization_trace_rejects_unlaunchable_output_rows() {
     )
     .expect_err("final tuple trace must reject unlaunchable row-map kernels");
 
-    assert_u32_resource_exhausted(
+    assert_u32_capacity_exceeded(
         err,
         "epistemic GPU final-tuple output rows",
         u32::MAX as u64 + 1,
@@ -5670,7 +5679,7 @@ fn final_tuple_materialization_trace_rejects_unlaunchable_membership_product() {
     )
     .expect_err("final tuple trace must reject unlaunchable membership kernels");
 
-    assert_u32_resource_exhausted(
+    assert_u32_capacity_exceeded(
         err,
         "epistemic GPU final-tuple membership launch",
         u32::MAX as u64 + 1,
@@ -5734,14 +5743,16 @@ fn final_tuple_materialization_trace_rejects_launch_counter_overflow() {
     .expect_err("final tuple trace must not truncate kernel launch counts");
 
     match err {
-        xlog_core::XlogError::ResourceExhausted {
+        xlog_core::XlogError::CapacityExceeded {
             context,
-            estimated_bytes,
-            budget_bytes,
+            required,
+            limit,
+            unit,
         } => {
             assert_eq!(context, "epistemic GPU final-tuple output columns");
-            assert_eq!(estimated_bytes, u32::MAX as u64 + 1);
-            assert_eq!(budget_bytes, u32::MAX as u64);
+            assert_eq!(required, u32::MAX as u64 + 1);
+            assert_eq!(limit, u32::MAX as u64);
+            assert_eq!(unit, "columns");
         }
         other => panic!("expected output-column overflow error, got {other:?}"),
     }
@@ -5938,9 +5949,9 @@ fn cycle4_epistemic_literal() -> EirEpistemicLiteral {
 }
 
 // =====================================================================
-// Mixed per-row + global modal membership value-level pilots.
+// Mixed per-row + global modal membership value-level behavior tests.
 //
-// Each pilot compiles a single rule that combines a GLOBAL modal gate
+// Each case compiles a single rule that combines a GLOBAL modal gate
 // (nullary `know flag()` / `possible flag()` / `not possible block()`)
 // with a PER-ROW bound-variable modal literal (`possible edge(X)` etc.).
 // The two gate classes must compose CONJUNCTIVELY on the GPU row-map
@@ -5948,11 +5959,11 @@ fn cycle4_epistemic_literal() -> EirEpistemicLiteral {
 //   * global gate true  + per-row tuple true  -> exact rows emitted
 //   * global gate true  + per-row tuple false -> those rows rejected
 //   * global gate false + per-row tuple true  -> ALL rows rejected
-// Pilots assert exact output tuples, device membership reads, and certified GPU dispatch/timing.
+// The tests assert exact output tuples, device membership reads, and certified GPU dispatch/timing.
 // =====================================================================
 
 #[cfg(feature = "epistemic-logic-tests")]
-struct MixedModalPilotInputs<'a> {
+struct MixedModalTestInputs<'a> {
     seed: &'a [u32],
     /// Per-row bound-variable membership source (`possible edge(X)`).
     edge: &'a [u32],
@@ -5961,14 +5972,14 @@ struct MixedModalPilotInputs<'a> {
 }
 
 #[cfg(feature = "epistemic-logic-tests")]
-fn run_mixed_modal_pilot(
+fn run_mixed_modal_test(
     fixture: &RuntimeFixture,
     source: &str,
-    inputs: MixedModalPilotInputs<'_>,
+    inputs: MixedModalTestInputs<'_>,
 ) -> xlog_runtime::EpistemicGpuExecutionResult {
-    let program = parse_program(source).expect("parse mixed modal pilot program");
+    let program = parse_program(source).expect("parse mixed modal test program");
     let executable =
-        compile_epistemic_gpu_execution(&program).expect("compile mixed modal pilot GPU plan");
+        compile_epistemic_gpu_execution(&program).expect("compile mixed modal test GPU plan");
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
     for (name, rel) in &executable.relation_ids {
         executor.register_relation(*rel, name);
@@ -6013,7 +6024,7 @@ fn sorted_output_rows(
     let mut rows = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
-        .expect("download mixed modal pilot output values");
+        .expect("download mixed modal test output values");
     rows.sort_unstable();
     rows
 }
@@ -6028,17 +6039,17 @@ const MIXED_KNOW_FLAG_POSSIBLE_EDGE: &str = r#"
     out(X) :- seed(X), know flag(), possible edge(X).
 "#;
 
-// Pilot 1: global gate TRUE + per-row tuple TRUE -> exact rows emitted.
+// A true global gate and true per-row tuple emit the exact rows.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn mixed_modal_global_true_row_true_emits_exact_rows() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
-    let result = run_mixed_modal_pilot(
+    let result = run_mixed_modal_test(
         &fixture,
         MIXED_KNOW_FLAG_POSSIBLE_EDGE,
-        MixedModalPilotInputs {
+        MixedModalTestInputs {
             seed: &[1, 2, 3],
             edge: &[1, 2, 3],
             flag_rows: 1,
@@ -6048,17 +6059,17 @@ fn mixed_modal_global_true_row_true_emits_exact_rows() {
     assert_gpu_membership_dispatch(&result);
 }
 
-// Pilot 2: global gate TRUE + per-row tuple PARTIAL -> only matching rows.
+// A true global gate and partially matching per-row tuples emit only matching rows.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn mixed_modal_global_true_row_partial_filters_rows() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
-    let result = run_mixed_modal_pilot(
+    let result = run_mixed_modal_test(
         &fixture,
         MIXED_KNOW_FLAG_POSSIBLE_EDGE,
-        MixedModalPilotInputs {
+        MixedModalTestInputs {
             seed: &[1, 2, 3],
             edge: &[1, 3],
             flag_rows: 1,
@@ -6069,17 +6080,17 @@ fn mixed_modal_global_true_row_partial_filters_rows() {
     assert_gpu_membership_dispatch(&result);
 }
 
-// Pilot 3: global gate TRUE + per-row tuple FALSE (no edges) -> all rejected.
+// A true global gate and false per-row tuples reject every row.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn mixed_modal_global_true_row_false_rejects_all_rows() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
-    let result = run_mixed_modal_pilot(
+    let result = run_mixed_modal_test(
         &fixture,
         MIXED_KNOW_FLAG_POSSIBLE_EDGE,
-        MixedModalPilotInputs {
+        MixedModalTestInputs {
             seed: &[1, 2, 3],
             edge: &[],
             flag_rows: 1,
@@ -6089,7 +6100,7 @@ fn mixed_modal_global_true_row_false_rejects_all_rows() {
     assert_gpu_membership_dispatch(&result);
 }
 
-// Pilot 4: global gate FALSE + per-row tuple TRUE -> ALL rows rejected,
+// A false global gate and true per-row tuples reject every row,
 // because the global gate fails once per accepted candidate.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
@@ -6097,10 +6108,10 @@ fn mixed_modal_global_false_row_true_rejects_all_rows() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
-    let result = run_mixed_modal_pilot(
+    let result = run_mixed_modal_test(
         &fixture,
         MIXED_KNOW_FLAG_POSSIBLE_EDGE,
-        MixedModalPilotInputs {
+        MixedModalTestInputs {
             seed: &[1, 2, 3],
             edge: &[1, 2, 3],
             flag_rows: 0,
@@ -6110,14 +6121,14 @@ fn mixed_modal_global_false_row_true_rejects_all_rows() {
     assert_gpu_membership_dispatch(&result);
 }
 
-// Pilot 5: global `possible` gate TRUE + per-row `possible` tuple -> exact.
+// A true global `possible` gate and per-row `possible` tuple emit exact rows.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn mixed_modal_possible_global_and_row_emits_exact_rows() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
-    let result = run_mixed_modal_pilot(
+    let result = run_mixed_modal_test(
         &fixture,
         r#"
         pred seed(u32).
@@ -6127,7 +6138,7 @@ fn mixed_modal_possible_global_and_row_emits_exact_rows() {
 
         out(X) :- seed(X), possible flag(), possible edge(X).
         "#,
-        MixedModalPilotInputs {
+        MixedModalTestInputs {
             seed: &[4, 5, 6],
             edge: &[4, 6],
             flag_rows: 1,
@@ -6137,7 +6148,7 @@ fn mixed_modal_possible_global_and_row_emits_exact_rows() {
     assert_gpu_membership_dispatch(&result);
 }
 
-// Pilot 6: global `know` gate TRUE + `not possible` global block + per-row
+// A true global `know` gate, `not possible` global block, and per-row
 // `possible` tuple -> mixed know + possible + not-possible conjunction.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
@@ -6156,9 +6167,9 @@ fn mixed_modal_know_notpossible_and_row_emits_exact_rows() {
         out(X) :- seed(X), know flag(), not possible block(), possible edge(X).
         "#,
     )
-    .expect("parse know+not-possible mixed pilot");
+    .expect("parse know+not-possible mixed test");
     let executable =
-        compile_epistemic_gpu_execution(&program).expect("compile know+not-possible mixed pilot");
+        compile_epistemic_gpu_execution(&program).expect("compile know+not-possible mixed test");
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
     for (name, rel) in &executable.relation_ids {
         executor.register_relation(*rel, name);
@@ -6182,7 +6193,7 @@ fn mixed_modal_know_notpossible_and_row_emits_exact_rows() {
     assert_gpu_membership_dispatch(&result);
 }
 
-// Pilot 7: global `know` gate TRUE but `not possible block()` FALSE (block
+// A true global `know` gate with false `not possible block()` (block
 // non-empty) + per-row tuple TRUE -> ALL rows rejected (global gate fails).
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
@@ -6201,9 +6212,9 @@ fn mixed_modal_know_notpossible_global_false_rejects_all_rows() {
         out(X) :- seed(X), know flag(), not possible block(), possible edge(X).
         "#,
     )
-    .expect("parse know+not-possible global-false mixed pilot");
+    .expect("parse know+not-possible global-false mixed test");
     let executable =
-        compile_epistemic_gpu_execution(&program).expect("compile global-false mixed pilot");
+        compile_epistemic_gpu_execution(&program).expect("compile global-false mixed test");
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
     for (name, rel) in &executable.relation_ids {
         executor.register_relation(*rel, name);
@@ -6227,15 +6238,14 @@ fn mixed_modal_know_notpossible_global_false_rejects_all_rows() {
     assert_gpu_membership_dispatch(&result);
 }
 
-// Structured-key negative pilot: a mixed rule whose per-row tuple key is a
+// Structured-key negative test: a mixed rule whose per-row tuple key is a
 // genuinely UNBOUNDED structured class (a `cons` `[X | T]` with a
 // statically-unknown tail) must still fail closed via an INDEPENDENT guard --
 // now the structured-key FINITENESS guard -- proving removal of the mixed guard
 // opened no hole. Note the contract shift: a FINITE+TYPED 1-element list `[X]`
 // is now ACCEPTED and flattened onto the GPU (see the structured-key device
 // tests); only unbounded/untyped forms stay rejected, and they reject with a
-// precise resource/finiteness diagnostic rather than a blanket "unsupported
-// construct".
+// precise unsupported-construct diagnostic rather than a memory-budget error.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn mixed_modal_unsupported_tuple_key_still_fails_closed() {
@@ -6251,13 +6261,13 @@ fn mixed_modal_unsupported_tuple_key_still_fails_closed() {
     )
     .expect("parse mixed rule with unbounded cons tuple key");
     // The unbounded-cons key has no finite, typed GPU key-column set, so the plan
-    // fails closed at COMPILE time with a precise finiteness/resource diagnostic.
+    // fails closed at COMPILE time with a precise unsupported-construct diagnostic.
     let err = match compile_epistemic_gpu_execution(&program) {
         Ok(_) => panic!("unbounded structured tuple-key in a mixed rule must fail closed"),
         Err(err) => err,
     };
     match err {
-        xlog_core::XlogError::ResourceExhausted { context, .. } => {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { context, .. } => {
             assert!(
                 context.contains("cons") && context.contains("tail length is not statically fixed"),
                 "finiteness diagnostic must name the unbounded cons tail: {context}"
@@ -6267,11 +6277,11 @@ fn mixed_modal_unsupported_tuple_key_still_fails_closed() {
                 "finiteness diagnostic must point at the finite-typed alternative: {context}"
             );
         }
-        other => panic!("expected precise finiteness/resource error, got {other:?}"),
+        other => panic!("expected precise unsupported-construct error, got {other:?}"),
     }
 }
 
-fn complete_k5_edge_rows() -> Vec<(u32, u32)> {
+fn complete_five_clique_edge_rows() -> Vec<(u32, u32)> {
     let mut rows = Vec::new();
     for left in 1..=5 {
         for right in (left + 1)..=5 {
@@ -6515,7 +6525,7 @@ fn upload_unary_typed_u32(
 }
 
 #[cfg(feature = "epistemic-logic-tests")]
-const EPISTEMIC_K5_MARKER_SRC: &str = r#"
+const EPISTEMIC_FIVE_CLIQUE_MARKER_SOURCE: &str = r#"
     pred e01(u32, u32). pred e02(u32, u32). pred e03(u32, u32). pred e04(u32, u32).
     pred e12(u32, u32). pred e13(u32, u32). pred e14(u32, u32).
     pred e23(u32, u32). pred e24(u32, u32).
@@ -6532,7 +6542,7 @@ const EPISTEMIC_K5_MARKER_SRC: &str = r#"
 "#;
 
 #[cfg(feature = "epistemic-logic-tests")]
-const REDUCED_K5_MARKER_SRC: &str = r#"
+const REDUCED_FIVE_CLIQUE_MARKER_SOURCE: &str = r#"
     pred e01(u32, u32). pred e02(u32, u32). pred e03(u32, u32). pred e04(u32, u32).
     pred e12(u32, u32). pred e13(u32, u32). pred e14(u32, u32).
     pred e23(u32, u32). pred e24(u32, u32).
@@ -6548,7 +6558,7 @@ const REDUCED_K5_MARKER_SRC: &str = r#"
 "#;
 
 #[cfg(feature = "epistemic-logic-tests")]
-const K5_EDGES: [(&str, usize, usize); 10] = [
+const FIVE_CLIQUE_EDGES: [(&str, usize, usize); 10] = [
     ("e01", 0, 1),
     ("e02", 0, 2),
     ("e03", 0, 3),
@@ -6562,11 +6572,11 @@ const K5_EDGES: [(&str, usize, usize); 10] = [
 ];
 
 #[cfg(feature = "epistemic-logic-tests")]
-fn rel_ids_for_parsed_k5_reduced() -> BTreeMap<String, RelId> {
+fn rel_ids_for_parsed_five_clique_reduction() -> BTreeMap<String, RelId> {
     let mut compiler = Compiler::new();
     let _ = compiler
-        .compile(REDUCED_K5_MARKER_SRC)
-        .expect("compile reduced K5 marker source");
+        .compile(REDUCED_FIVE_CLIQUE_MARKER_SOURCE)
+        .expect("compile reduced five-clique marker source");
     compiler
         .rel_ids()
         .iter()
@@ -6575,9 +6585,12 @@ fn rel_ids_for_parsed_k5_reduced() -> BTreeMap<String, RelId> {
 }
 
 #[cfg(feature = "epistemic-logic-tests")]
-fn k5_stats(rel_ids: &BTreeMap<String, RelId>, hot: Option<(usize, f64)>) -> StatsSnapshot {
+fn five_clique_stats(
+    rel_ids: &BTreeMap<String, RelId>,
+    hot: Option<(usize, f64)>,
+) -> StatsSnapshot {
     let mut snapshot = StatsSnapshot::default();
-    for (name, left, right) in K5_EDGES {
+    for (name, left, right) in FIVE_CLIQUE_EDGES {
         let rel = *rel_ids.get(name).expect("edge rel id");
         snapshot.rel_names.push((rel, name.to_string()));
         let mut stats = RelationStats::new(rel);
@@ -6596,9 +6609,9 @@ fn k5_stats(rel_ids: &BTreeMap<String, RelId>, hot: Option<(usize, f64)>) -> Sta
         snapshot.relations.push(stats);
     }
 
-    for (left_idx, (left_name, left_i, left_j)) in K5_EDGES.iter().enumerate() {
+    for (left_idx, (left_name, left_i, left_j)) in FIVE_CLIQUE_EDGES.iter().enumerate() {
         let left_rel = *rel_ids.get(*left_name).expect("left rel id");
-        for (right_name, right_i, right_j) in K5_EDGES.iter().skip(left_idx + 1) {
+        for (right_name, right_i, right_j) in FIVE_CLIQUE_EDGES.iter().skip(left_idx + 1) {
             if left_i == right_i || left_i == right_j || left_j == right_i || left_j == right_j {
                 let right_rel = *rel_ids.get(*right_name).expect("right rel id");
                 let mut sel = JoinSelectivity::new(left_rel, right_rel);
@@ -7346,9 +7359,9 @@ fn kclique_order_without_edge_permutation() -> KCliqueVariableOrder {
 }
 
 // =====================================================================
-// Tuple-key / bound-value modal membership pilots.
+// Tuple-key / bound-value modal membership behavior tests.
 //
-// Each pilot parses a real epistemic program, compiles it through the
+// Each case parses a real epistemic program, compiles it through the
 // production lowering boundary, and executes it on the GPU device path.
 // They assert (a) the exact founded result rows, (b) device-backed tuple-key column reads,
 // and (c) certified runtime dispatch with recorded CUDA-event timing.
@@ -7363,9 +7376,9 @@ fn run_tuple_key_unary_result(
     ternary_inputs: &[(&str, &[(u32, u32, u32)])],
     expected_key_column_reads: u32,
 ) -> Vec<u32> {
-    let program = parse_program(source).expect("parse tuple-key membership pilot program");
+    let program = parse_program(source).expect("parse tuple-key membership test program");
     let executable =
-        compile_epistemic_gpu_execution(&program).expect("compile tuple-key membership pilot plan");
+        compile_epistemic_gpu_execution(&program).expect("compile tuple-key membership test plan");
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
     for (name, rel) in &executable.relation_ids {
         executor.register_relation(*rel, name);
@@ -7392,7 +7405,7 @@ fn run_tuple_key_unary_result(
                 max_models_per_reduction: 4,
             },
         )
-        .expect("tuple-key membership pilot should execute through GPU runtime path");
+        .expect("tuple-key membership test should execute through GPU runtime path");
 
     // Device-backed tuple-key reads are paired with runtime dispatch/CUDA-event certification.
     assert_eq!(
@@ -7401,12 +7414,12 @@ fn run_tuple_key_unary_result(
     );
     result
         .require_runtime_dispatch_certification()
-        .expect("tuple-key membership pilot runtime evidence must remain certified");
+        .expect("tuple-key membership test runtime evidence must remain certified");
 
     let mut rows = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
-        .expect("download tuple-key membership pilot output column 0");
+        .expect("download tuple-key membership test output column 0");
     rows.sort_unstable();
     rows
 }
@@ -7573,9 +7586,9 @@ fn multiple_bound_variables_tuple_key_through_gpu_membership() {
         out(X, Y) :- pair(X, Y), know edge(X, Y).
         "#,
     )
-    .expect("parse multi-bound-variable pilot program");
+    .expect("parse multi-bound-variable test program");
     let executable =
-        compile_epistemic_gpu_execution(&program).expect("compile multi-bound pilot plan");
+        compile_epistemic_gpu_execution(&program).expect("compile multi-bound test plan");
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
     for (name, rel) in &executable.relation_ids {
         executor.register_relation(*rel, name);
@@ -7597,14 +7610,14 @@ fn multiple_bound_variables_tuple_key_through_gpu_membership() {
                 max_models_per_reduction: 4,
             },
         )
-        .expect("multi-bound pilot should execute through GPU runtime path");
+        .expect("multi-bound test should execute through GPU runtime path");
     assert_eq!(
         result.model_membership.tuple_source_key_column_device_reads, 2,
         "two bound columns must read two device key columns"
     );
     result
         .require_runtime_dispatch_certification()
-        .expect("multi-bound pilot runtime evidence must remain certified");
+        .expect("multi-bound test runtime evidence must remain certified");
     let mut xs = fixture
         .provider
         .download_column::<u32>(&result.final_output, 0)
@@ -7772,14 +7785,14 @@ fn arity_zero_tuple_key_through_gpu_membership() {
                     max_models_per_reduction: 4,
                 },
             )
-            .expect("arity-zero modal pilot should execute through GPU runtime path");
+            .expect("arity-zero modal test should execute through GPU runtime path");
         assert_eq!(
             result.model_membership.tuple_source_key_column_device_reads, 0,
             "arity-zero tuple sources read no key columns"
         );
         result
             .require_runtime_dispatch_certification()
-            .expect("arity-zero pilot runtime evidence must remain certified");
+            .expect("arity-zero test runtime evidence must remain certified");
         let mut rows = fixture
             .provider
             .download_column::<u32>(&result.final_output, 0)
@@ -8142,7 +8155,7 @@ fn mixed_bound_and_ground_tuple_key_through_gpu_membership() {
 // ---------------------------------------------------------------------------
 // Arbitrary-EIR candidate-world enumeration.
 //
-// These pilots prove the production device path
+// These tests prove the production device path
 // (compile_epistemic_gpu_execution -> execute_epistemic_gpu_execution) derives
 // the candidate assumption space FROM the program's EIR epistemic literals --
 // no hand-supplied EpistemicInterpretation candidate lists -- generates the
@@ -8797,14 +8810,16 @@ fn over_budget_joint_fails_closed_before_execution() {
         Err(err) => err,
     };
     match err {
-        xlog_core::XlogError::ResourceExhausted {
+        xlog_core::XlogError::CapacityExceeded {
             context,
-            estimated_bytes,
-            budget_bytes,
+            required,
+            limit,
+            unit,
         } => {
             assert_eq!(context, "epistemic GPU execution candidate capacity");
-            assert_eq!(estimated_bytes, 8);
-            assert_eq!(budget_bytes, 4);
+            assert_eq!(required, 8);
+            assert_eq!(limit, 4);
+            assert_eq!(unit, "candidates");
         }
         other => panic!("expected joint resource-capacity diagnostic, got {other:?}"),
     }
