@@ -11,7 +11,7 @@ mixed within a comparison.
 |------|-----------|----------|--------------------------|
 | `mnist_addition_vs_scallop.json` | Neural: MNIST addition, xlog vs Scallop | RTX 3090 | **true** |
 | `exact_inference_vs_problog2.json` | Probabilistic: exact inference, xlog vs ProbLog2 | RTX 4090 | **true** |
-| `triangle_counting_vs_souffle.json` | Deterministic: fused WCOJ triangle counting vs Soufflé (skewed) | A40 pod; 7.65-core CPU quota | **false** — see note |
+| `triangle_counting_vs_souffle.json` | Deterministic: fused WCOJ triangle counting vs Soufflé (skewed) | A40 pod; 7.65-core CPU quota | **true** |
 | `triangle_counting_moderate_skew_vs_souffle.json` | Deterministic: WCOJ vs binary vs Soufflé, moderate skew | RTX 4090 | **true** |
 | `residency_ablation.json` | xlog-only: forced host round-trip, single query | RTX 3090 | n/a (single-system) |
 | `residency_scale_ablation.json` | xlog-only: forced host round-trip vs handoff count, batched | RTX 3090 | n/a (single-system) |
@@ -27,17 +27,14 @@ mixed within a comparison.
   probabilities match the analytic answer within 1e-4 (both engines reach 0
   error). Timing is full inference (compile + evaluate), median of 3.
 - **Triangle counting vs Soufflé** — fused-WCOJ count (A), enumerate-then-count
-  (B), and Soufflé count (C) on hub-skewed graphs. **`comparison_acceptable` is
-  `false`** because the enumerate arm (B) is incomplete at the 80-hub / 500k-edge
-  case. It requests 3,914,290,728 additional bytes while 15,703,762,340 bytes
-  are live, requiring 19,618,053,068 bytes against a 19,327,352,832-byte budget;
-  the typed result is `ResourceExhausted`, not a tuple-capacity failure. The
-  enumerate arm succeeds at the two smaller cases with 3,287 MB and 8,403 MB
-  provider-allocation peaks, while fused counting uses 85--359 MB. The separate
-  `core_comparison_acceptable` gate is `true`: fused XLOG and Soufflé produce
-  identical per-root counts at every size. Soufflé-to-XLOG execution-time ratios
-  are 0.95x, 2.63x and 4.69x, so compiled Soufflé is 5% faster at the smallest
-  case and XLOG is faster at the two larger cases.
+  (B), and Soufflé count (C) on hub-skewed graphs. All three arms complete and
+  produce identical per-root counts at every size, so both
+  `core_comparison_acceptable` and `comparison_acceptable` are `true`. The
+  enumerate arm peaks at 3,287 MB, 8,403 MB and 15,247 MB of provider
+  allocations, while fused counting uses 85 MB, 204 MB and 359 MB.
+  Soufflé-to-fused-XLOG execution-time ratios are 2.37x, 7.95x and 9.00x on
+  these three heavy-skew cases; the separate moderate-skew artifact remains the
+  lower-bound companion and does not support a universal Datalog speed claim.
 - **Residency ablation** — same pipeline with vs without
   `XLOG_FORCE_HOST_ROUNDTRIP`; the on-minus-off per-iteration delta is the
   transfer cost residency eliminates. The single-query file measures 2 handoffs
