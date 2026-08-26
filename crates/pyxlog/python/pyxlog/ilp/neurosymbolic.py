@@ -198,8 +198,9 @@ def train_neurosymbolic_program(
     neural predicate to an ordinary relation on an existential variable, the
     predicate is grounded over this real domain and OR-aggregated at the head; the
     ``examples`` then carry ONLY per-head-binding ``targets`` (no per-query
-    ``inputs``). The head-binding (e.g. edge) ids must be ``0..len(targets)-1``,
-    row-aligned with ``targets``. Currently supports a single join network.
+    ``inputs``). Head-binding identifiers (for example, edge ids) use ``u64`` and must
+    be ``0..len(targets)-1``, row-aligned with ``targets``. Currently supports a single
+    join network.
 
     ``domain_ids`` says WHICH CONSTANT EACH ROW HOLDS: ``domain_ids[net][j]`` is the
     domain constant whose feature vector is row ``j`` of ``domain_inputs[net]``. The

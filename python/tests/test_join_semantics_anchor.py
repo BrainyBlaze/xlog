@@ -55,8 +55,8 @@ def _source() -> str:
     return f"""
         nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
 {facts}
-        pred pre_before_post(i64, i64).
-        pred plastic(i64).
+        pred pre_before_post(u64, u64).
+        pred plastic(u64).
         trainable_rule(rule_plastic, weight=0.0) :: plastic(Edge) :- saliency(Event, strengthen), pre_before_post(Event, Edge).
         train(plastic, binary_cross_entropy).
     """
@@ -149,8 +149,8 @@ def _sparse_source() -> str:
     return f"""
         nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
 {facts}
-        pred pbp(i64, i64).
-        pred plastic(i64).
+        pred pbp(u64, u64).
+        pred plastic(u64).
         trainable_rule(rule_plastic, weight=0.0) :: plastic(Edge) :- saliency(Event, strengthen), pbp(Event, Edge).
         train(plastic, binary_cross_entropy).
     """
@@ -245,8 +245,8 @@ def _superset_source() -> str:
     return f"""
         nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
 {facts}
-        pred pbp(i64, i64).
-        pred plastic(i64).
+        pred pbp(u64, u64).
+        pred plastic(u64).
         trainable_rule(rule_plastic, weight=0.0) :: plastic(Edge) :- saliency(Event, strengthen), pbp(Event, Edge).
         train(plastic, binary_cross_entropy).
     """
@@ -315,8 +315,8 @@ def test_a_joined_constant_absent_from_domain_ids_is_refused() -> None:
         nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
         pbp(1, 0).
         pbp(7, 1).
-        pred pbp(i64, i64).
-        pred plastic(i64).
+        pred pbp(u64, u64).
+        pred plastic(u64).
         trainable_rule(rule_plastic, weight=0.0) :: plastic(Edge) :- saliency(Event, strengthen), pbp(Event, Edge).
         train(plastic, binary_cross_entropy).
     """
@@ -348,8 +348,8 @@ def test_a_mixture_trains_on_a_sparse_domain() -> None:
     source = f"""
         nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
 {facts}
-        pred pbp(i64, i64).
-        pred plastic(i64).
+        pred pbp(u64, u64).
+        pred plastic(u64).
         trainable_rule(c_a, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pbp(Ev, E).
         trainable_rule(c_b, weight=0.0) :: plastic(E) :- saliency(Ev, low), pbp(Ev, E).
         train(plastic, binary_cross_entropy).
@@ -402,8 +402,8 @@ def _shuffled_source() -> str:
     return f"""
         nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
 {facts}
-        pred pbp(i64, i64).
-        pred plastic(i64).
+        pred pbp(u64, u64).
+        pred plastic(u64).
         trainable_rule(rule_plastic, weight=0.0) :: plastic(Edge) :- saliency(Event, strengthen), pbp(Event, Edge).
         train(plastic, binary_cross_entropy).
     """

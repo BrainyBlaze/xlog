@@ -221,7 +221,7 @@ def test_existential_join_trains_with_or_aggregation() -> None:
         pre_before_post(0, 0).
         pre_before_post(1, 0).
         pre_before_post(2, 1).
-        pred pre_before_post(i64, i64).
+        pred pre_before_post(u64, u64).
         trainable_rule(rule_plastic, weight=2.0) :: plastic(Edge) :-
             saliency(Event, strengthen), pre_before_post(Event, Edge).
         train(plastic, binary_cross_entropy).
@@ -255,7 +255,7 @@ def test_existential_join_gradients_reach_net_and_guard_not_structure() -> None:
         pre_before_post(0, 0).
         pre_before_post(1, 0).
         pre_before_post(2, 1).
-        pred pre_before_post(i64, i64).
+        pred pre_before_post(u64, u64).
         trainable_rule(rule_plastic, weight=0.0) :: plastic(Edge) :-
             saliency(Event, strengthen), pre_before_post(Event, Edge).
         train(plastic, binary_cross_entropy).
