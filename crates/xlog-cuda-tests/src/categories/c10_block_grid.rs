@@ -108,7 +108,7 @@ fn test_single_block_operations(ctx: &TestContext) -> TestResult {
 
         // Test filter in single block
         let mask: Vec<u8> = (0..size).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect();
-        let expected_count = (size + 1) / 2;
+        let expected_count = size.div_ceil(2);
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
             Ok(f) => f,
@@ -302,7 +302,7 @@ fn test_multi_block_operations(ctx: &TestContext) -> TestResult {
 
         // Test filter across multiple blocks
         let mask: Vec<u8> = (0..size).map(|i| if i % 10 == 0 { 1 } else { 0 }).collect();
-        let expected_count = (size + 9) / 10;
+        let expected_count = size.div_ceil(10);
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
             Ok(f) => f,
@@ -627,7 +627,7 @@ fn test_grid_stride_correctness(ctx: &TestContext) -> TestResult {
         let mask: Vec<u8> = (0..size)
             .map(|i| if i % 100 == 0 { 1 } else { 0 })
             .collect();
-        let expected_count = (size + 99) / 100;
+        let expected_count = size.div_ceil(100);
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
             Ok(f) => f,

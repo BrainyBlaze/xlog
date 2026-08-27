@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::compilation::gpu_cache::hash_cnf_gpu;
 use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
@@ -19,18 +18,14 @@ fn cpu_hash_u64(vals: &[u64]) -> u64 {
 
 #[test]
 fn gpu_cnf_hash_matches_cpu_reference() {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
-            return;
-        }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1 << 30),
-    ));
-    let provider = Arc::new(CudaKernelProvider::new(device, memory).expect("provider"));
+    let provider =
+        match xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1 << 30)).build() {
+            Ok(provider) => Arc::new(provider),
+            Err(e) => {
+                eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
+                return;
+            }
+        };
 
     let clauses = vec![
         Clause::new(vec![Literal::negative(0), Literal::positive(1)]),

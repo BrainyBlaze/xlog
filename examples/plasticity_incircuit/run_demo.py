@@ -53,7 +53,7 @@ def source() -> str:
     return f"""
         nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
 {facts}
-        pred pre_before_post(i64, i64).
+        pred pre_before_post(u64, u64).
         trainable_rule(rule_plastic, weight=0.0) :: plastic(Edge) :-
             saliency(Event, strengthen), pre_before_post(Event, Edge).
         train(plastic, binary_cross_entropy).
@@ -113,6 +113,8 @@ def main() -> None:
 
     recovered = preds == targets and held_sal[0] > 0.5 and held_sal[1] < 0.5
     print("\n" + ("RULE RECOVERED ✓" if recovered else "rule NOT recovered ✗"))
+    if not recovered:
+        raise SystemExit("plasticity recovery acceptance criteria were not met")
 
 
 if __name__ == "__main__":

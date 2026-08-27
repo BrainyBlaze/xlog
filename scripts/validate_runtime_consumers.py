@@ -43,6 +43,14 @@ REQUIRED_CONSUMERS = {
     "pyxlog-compatibility",
 }
 KERNEL_ARTIFACT_SUFFIXES = (".cubin", ".portable.ptx")
+MEASURED_FEATURES = (
+    "delta",
+    "exact_induction",
+    "chain_shared_memory",
+    "common_subexpression_elimination",
+    "adaptive_reoptimization",
+    "persistent_hash_index",
+)
 
 
 def _find_measurement_file(feature: str) -> Path:
@@ -61,8 +69,14 @@ def _find_measurement_file(feature: str) -> Path:
             return "performance_fixture" in measurements and "repeated_session_fixture" in measurements
         return False
 
+    evidence_root = ROOT / "docs-internal" / "evidence"
+    if not evidence_root.is_dir():
+        raise RuntimeError(
+            f"Runtime feature evidence directory does not exist: {evidence_root}"
+        )
+
     matches = []
-    for path in sorted((ROOT / "docs-internal" / "evidence").iterdir()):
+    for path in sorted(evidence_root.iterdir()):
         measurements_path = path / "measurements.json"
         if not measurements_path.exists():
             continue
@@ -72,19 +86,6 @@ def _find_measurement_file(feature: str) -> Path:
     if len(matches) != 1:
         raise RuntimeError(f"Expected one measurements file for {feature}, found {matches}")
     return matches[0]
-
-
-FEATURE_EVIDENCE = {
-    feature: _find_measurement_file(feature)
-    for feature in [
-        "delta",
-        "exact_induction",
-        "chain_shared_memory",
-        "common_subexpression_elimination",
-        "adaptive_reoptimization",
-        "persistent_hash_index",
-    ]
-}
 
 
 def _probe(
@@ -695,17 +696,13 @@ def _prepare_local_pyxlog_env(args: argparse.Namespace) -> dict[str, str]:
 
 def _feature_measurements() -> dict[str, Any]:
     measurements: dict[str, Any] = {}
-    missing = []
-    for feature, path in FEATURE_EVIDENCE.items():
-        if not path.exists():
-            missing.append(str(path.relative_to(ROOT)))
-            continue
+    for feature in MEASURED_FEATURES:
+        path = _find_measurement_file(feature)
         payload = _read_json(path)
         measurements[feature] = {
             "path": str(path.relative_to(ROOT)),
             "raw": payload,
         }
-    _require(not missing, f"Missing runtime feature evidence: {missing}")
     return measurements
 
 
@@ -849,8 +846,10 @@ def _production_path_reuse() -> dict[str, Any]:
     }
 
 
-def _reuse_audit() -> dict[str, Any]:
-    evidence_paths = [str(path.relative_to(ROOT)) for path in FEATURE_EVIDENCE.values()]
+def _reuse_audit(feature_measurements: dict[str, Any]) -> dict[str, Any]:
+    evidence_paths = [
+        measurement["path"] for measurement in feature_measurements.values()
+    ]
     return {
         "status": "PASS",
         "duplicate_engine_helper_path": False,
@@ -859,7 +858,7 @@ def _reuse_audit() -> dict[str, Any]:
             "xlog-runtime production executor/provider dispatch",
             "external consumer example validator",
             "language showcase validator",
-            "committed runtime feature evidence",
+            "runtime feature measurements supplied to this run",
         ],
         "evidence_paths": evidence_paths,
     }
@@ -888,7 +887,7 @@ def _aggregate(
     )
 
     production_path_reuse = _production_path_reuse()
-    reuse_audit = _reuse_audit()
+    reuse_audit = _reuse_audit(feature_measurements)
     behavior_probes = _consumer_behavior_probes(
         results,
         feature_measurements,

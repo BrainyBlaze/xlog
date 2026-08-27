@@ -1062,7 +1062,7 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
 
     let left_single = match ctx
         .provider
-        .create_buffer_from_u32_columns(&[&vec![42u32], &vec![100u32]], join_schema.clone())
+        .create_buffer_from_u32_columns(&[&[42u32], &[100u32]], join_schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -1076,7 +1076,7 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
 
     let right_matching = match ctx
         .provider
-        .create_buffer_from_u32_columns(&[&vec![42u32], &vec![200u32]], join_schema.clone())
+        .create_buffer_from_u32_columns(&[&[42u32], &[200u32]], join_schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -1117,7 +1117,7 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
     // Join two single-element tables with non-matching key
     let right_nonmatch = match ctx
         .provider
-        .create_buffer_from_u32_columns(&[&vec![99u32], &vec![200u32]], join_schema.clone())
+        .create_buffer_from_u32_columns(&[&[99u32], &[200u32]], join_schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceSlice, SyncOnDrop};
-use xlog_core::{MemoryBudget, Result, Schema, XlogError};
+use xlog_core::{resolve_bool, MemoryBudget, Result, Schema, XlogError};
 
 use crate::arrow_device::ArrowDeviceImport;
 use crate::cuda_compat::{AsKernelParam, DeviceParamStorage, IntoKernelParamStorage};
@@ -28,12 +28,12 @@ type AfterLocalReservationHook = std::sync::Mutex<Option<Arc<dyn Fn(u64) + Send 
 /// Tracks allocated GPU memory and enforces a memory budget.
 /// When the budget would be exceeded, returns `XlogError::ResourceExhausted`.
 ///
-/// # v0.6 device-runtime routing (opt-in)
+/// # Device-runtime routing
 ///
-/// Constructing via [`GpuMemoryManager::with_runtime`] attaches an
-/// [`XlogDeviceRuntime`] that mediates allocations through the v0.6
-/// resource stack (e.g., `GlobalDeviceBudget` → `LoggingResource` →
-/// `AsyncCudaResource`). When attached:
+/// Canonical CUDA providers construct the manager via
+/// [`GpuMemoryManager::with_runtime`]. Its [`XlogDeviceRuntime`] mediates
+/// allocations through `LoggingResource` when enabled, then
+/// `GlobalDeviceBudget`, then `AsyncCudaResource`. When attached:
 ///   * [`GpuMemoryManager::alloc::<T>`] routes the underlying
 ///     allocation through the runtime and produces a typed view via
 ///     cudarc's `upgrade_device_ptr::<T>`. The returned
@@ -45,14 +45,10 @@ type AfterLocalReservationHook = std::sync::Mutex<Option<Arc<dyn Fn(u64) + Send 
 /// `GlobalDeviceBudget` stacked above the runtime's underlying
 /// resource.
 ///
-/// When the manager is constructed via [`GpuMemoryManager::new`]
-/// (no runtime attached), `alloc::<T>` and the rest of the public
-/// API behave bit-for-bit identically to pre-migration: cudarc's
-/// `device.alloc::<T>(len)` allocates and `cudarc` frees on drop.
-/// `alloc_raw` returns `XlogError::Kernel` when no runtime is
-/// attached (no silent fallback). `CudaKernelProvider::new`
-/// continues to construct the manager via `new` for now;
-/// runtime-routed providers are an opt-in through `with_runtime`
+/// The crate-private runtime-free constructor exists for focused allocator
+/// tests. Its typed allocations use cudarc directly, while `alloc_raw` refuses
+/// to run because it cannot honor the runtime ownership contract. Production
+/// provider construction never uses that path.
 /// at construction sites that need it.
 pub struct GpuMemoryManager {
     /// The CUDA device for memory operations
@@ -287,9 +283,14 @@ enum Backing {
 /// Debug probe: poison legacy allocations with 0xDD at drop so any
 /// live alias of freed memory becomes visually distinct. Gated on
 /// `XLOG_DEBUG_POISON_FREE=1`, read once per process.
+fn debug_env_enabled(name: &str) -> bool {
+    resolve_bool(None, name, false)
+        .unwrap_or_else(|error| panic!("invalid CUDA memory debug configuration: {error}"))
+}
+
 fn poison_free_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("XLOG_DEBUG_POISON_FREE").map(|v| v == "1") == Ok(true))
+    *ENABLED.get_or_init(|| debug_env_enabled("XLOG_DEBUG_POISON_FREE"))
 }
 
 /// Debug probe: poison fresh legacy allocations with 0xDD so reads of
@@ -297,7 +298,7 @@ fn poison_free_enabled() -> bool {
 /// `XLOG_DEBUG_POISON_ALLOC=1`, read once per process.
 fn poison_alloc_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("XLOG_DEBUG_POISON_ALLOC").map(|v| v == "1") == Ok(true))
+    *ENABLED.get_or_init(|| debug_env_enabled("XLOG_DEBUG_POISON_ALLOC"))
 }
 
 /// Debug probe: track live legacy allocation ranges and panic if the
@@ -310,7 +311,7 @@ fn alloc_guard() -> Option<&'static std::sync::Mutex<std::collections::BTreeMap<
     > = std::sync::OnceLock::new();
     GUARD
         .get_or_init(|| {
-            if std::env::var("XLOG_DEBUG_ALLOC_GUARD").map(|v| v == "1") == Ok(true) {
+            if debug_env_enabled("XLOG_DEBUG_ALLOC_GUARD") {
                 Some(std::sync::Mutex::new(std::collections::BTreeMap::new()))
             } else {
                 None
@@ -630,7 +631,7 @@ impl GpuMemoryManager {
     /// # Arguments
     /// * `device` - The CUDA device to allocate memory on
     /// * `budget` - Memory budget configuration
-    pub fn new(device: Arc<CudaDevice>, budget: MemoryBudget) -> Self {
+    pub(crate) fn new(device: Arc<CudaDevice>, budget: MemoryBudget) -> Self {
         Self {
             device,
             budget,
@@ -652,7 +653,7 @@ impl GpuMemoryManager {
     /// attached). Provider construction does not yet require the
     /// runtime; callers that want runtime-routed allocations opt in
     /// here.
-    pub fn with_runtime(
+    pub(crate) fn with_runtime(
         device: Arc<CudaDevice>,
         budget: MemoryBudget,
         runtime: Arc<XlogDeviceRuntime>,
@@ -665,53 +666,6 @@ impl GpuMemoryManager {
             #[cfg(test)]
             after_local_reservation_hook: std::sync::Mutex::new(None),
         }
-    }
-
-    /// Attach a stream-safe runtime while preserving this manager's exact
-    /// device, total budget, and atomic accounting ledger.
-    ///
-    /// The overlay is an allocation view, not an independent budget. Parent
-    /// and overlay allocations therefore cannot oversubscribe the configured
-    /// limit, including when they race. Validation is completed before the
-    /// shared ledger is cloned.
-    pub fn with_runtime_overlay(
-        self: &Arc<Self>,
-        runtime: Arc<XlogDeviceRuntime>,
-    ) -> Result<Arc<Self>> {
-        if !Arc::ptr_eq(&self.device, runtime.device()) {
-            return Err(XlogError::Kernel(
-                "GpuMemoryManager::with_runtime_overlay requires the runtime to share the exact CUDA device handle"
-                    .to_string(),
-            ));
-        }
-        let device_ordinal = u32::try_from(self.device.ordinal()).map_err(|_| {
-            XlogError::Kernel(format!(
-                "CUDA device ordinal {} is not representable as u32",
-                self.device.ordinal()
-            ))
-        })?;
-        if runtime.device_ordinal() != device_ordinal {
-            return Err(XlogError::Kernel(format!(
-                "GpuMemoryManager::with_runtime_overlay device ordinal mismatch: manager={} runtime={}",
-                device_ordinal,
-                runtime.device_ordinal()
-            )));
-        }
-        if !runtime.supports_block_use_tracking() {
-            return Err(XlogError::Kernel(
-                "GpuMemoryManager::with_runtime_overlay requires a runtime with cross-stream block-use tracking"
-                    .to_string(),
-            ));
-        }
-
-        Ok(Arc::new(Self {
-            device: Arc::clone(&self.device),
-            budget: self.budget.clone(),
-            accounting: Arc::clone(&self.accounting),
-            runtime: Some(runtime),
-            #[cfg(test)]
-            after_local_reservation_hook: std::sync::Mutex::new(None),
-        }))
     }
 
     /// Atomically reserve `bytes` for one bounded multi-allocation request.

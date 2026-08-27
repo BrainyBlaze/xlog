@@ -478,6 +478,11 @@ impl ResidentSchemaWinners {
         self.len
     }
 
+    /// Whether no schema winner slots are active.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub(crate) fn schedule_owner_snapshots(
         &self,
     ) -> Result<[Option<crate::memory::RuntimeAllocationIdentity>; 2]> {
@@ -556,6 +561,7 @@ impl Drop for ResidentPinnedReceipt {
 }
 
 impl ResidentPackedReceipt {
+    #[cfg(test)]
     pub(crate) fn pointee_manifest(&self) -> &[ResidentReceiptPointee] {
         &self.pointees
     }
@@ -922,7 +928,7 @@ impl CudaKernelProvider {
             };
             columns.push(CudaColumn::Owned(column));
         }
-        let d_num_rows = match reservation.as_deref_mut() {
+        let d_num_rows = match reservation.as_mut() {
             Some(reservation) => reservation.alloc::<u32>(1)?,
             None => self.memory().alloc::<u32>(1)?,
         };
@@ -1002,7 +1008,7 @@ impl CudaKernelProvider {
             Some(reservation) => reservation.alloc::<u64>(slots as usize)?,
             None => self.memory().alloc::<u64>(slots as usize)?,
         };
-        let required = match reservation.as_deref_mut() {
+        let required = match reservation.as_mut() {
             Some(reservation) => reservation.alloc::<u64>(1)?,
             None => self.memory().alloc::<u64>(1)?,
         };
@@ -1045,7 +1051,7 @@ impl CudaKernelProvider {
             Some(reservation) => reservation.alloc::<u32>(right_capacity as usize)?,
             None => self.memory().alloc::<u32>(right_capacity as usize)?,
         };
-        let required = match reservation.as_deref_mut() {
+        let required = match reservation.as_mut() {
             Some(reservation) => reservation.alloc::<u64>(1)?,
             None => self.memory().alloc::<u64>(1)?,
         };
@@ -1082,7 +1088,7 @@ impl CudaKernelProvider {
             Some(reservation) => reservation.alloc::<u32>(1)?,
             None => self.memory().alloc::<u32>(1)?,
         };
-        let loop_iterations = match reservation.as_deref_mut() {
+        let loop_iterations = match reservation.as_mut() {
             Some(reservation) => reservation.alloc::<u32>(1)?,
             None => self.memory().alloc::<u32>(1)?,
         };
@@ -1122,7 +1128,7 @@ impl CudaKernelProvider {
             Some(reservation) => reservation.alloc::<u32>(1)?,
             None => self.memory().alloc::<u32>(1)?,
         };
-        let semantic_filter_invocations = match reservation.as_deref_mut() {
+        let semantic_filter_invocations = match reservation.as_mut() {
             Some(reservation) => reservation.alloc::<u32>(1)?,
             None => self.memory().alloc::<u32>(1)?,
         };
@@ -1163,7 +1169,7 @@ impl CudaKernelProvider {
             Some(reservation) => reservation.alloc::<u32>(allocation_len)?,
             None => self.memory().alloc::<u32>(allocation_len)?,
         };
-        let mut winner_schema_ids = match reservation.as_deref_mut() {
+        let mut winner_schema_ids = match reservation.as_mut() {
             Some(reservation) => reservation.alloc::<u32>(allocation_len)?,
             None => self.memory().alloc::<u32>(allocation_len)?,
         };
@@ -1473,7 +1479,7 @@ impl CudaKernelProvider {
                     XlogError::Kernel("resident receipt byte size overflow".into())
                 })?)
                 .ok_or_else(|| XlogError::Kernel("resident receipt byte size overflow".into()))?;
-        let bytes = match reservation.as_deref_mut() {
+        let bytes = match reservation.as_mut() {
             Some(reservation) => reservation.alloc::<u8>(bytes)?,
             None => self.memory().alloc::<u8>(bytes)?,
         };
@@ -1828,6 +1834,10 @@ impl CudaKernelProvider {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "resident union recording keeps both inputs, output, row widths, capacity, and selected stream explicit"
+    )]
     pub fn record_resident_union_on_stream(
         &self,
         left: &CudaBuffer,
@@ -1845,6 +1855,10 @@ impl CudaKernelProvider {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "resident difference recording keeps both inputs, output, row widths, capacity, and selected stream explicit"
+    )]
     pub fn record_resident_diff_on_stream(
         &self,
         left: &CudaBuffer,
@@ -1862,7 +1876,10 @@ impl CudaKernelProvider {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the shared resident set-operation launch core mirrors the fixed kernel ABI and stream binding"
+    )]
     fn record_resident_set_on_stream(
         &self,
         left: &CudaBuffer,
@@ -1986,7 +2003,10 @@ impl CudaKernelProvider {
         launch_pass(1)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "resident join recording keeps both relation views, key sets, output, scratch, capacity, and stream explicit"
+    )]
     pub fn record_resident_join_on_stream(
         &self,
         kind: ResidentJoinKind,
@@ -2137,7 +2157,6 @@ impl CudaKernelProvider {
         launch_probe(1)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn record_resident_finalize_on_stream(
         &self,
         kernel: &str,
@@ -2338,11 +2357,10 @@ impl CudaKernelProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use xlog_core::{MemoryBudget, ScalarType, Schema};
 
-    use crate::{cuda_graph::CapturedCudaGraph, CudaDevice, GpuMemoryManager};
+    use crate::cuda_graph::CapturedCudaGraph;
 
     use super::{
         checked_hash_slot_capacity, checked_receipt_pointee, record_receipt_pointee_uses,
@@ -2620,21 +2638,9 @@ mod tests {
     }
 
     fn provider() -> Option<super::CudaKernelProvider> {
-        let device = match CudaDevice::new(0) {
-            Ok(device) => Arc::new(device),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA device initialization failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping resident CUDA test: {error}");
-                return None;
-            }
-        };
-        let memory = Arc::new(GpuMemoryManager::new(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(512 * 1024 * 1024),
-        ));
-        match super::CudaKernelProvider::new(device, memory) {
+        match crate::CudaProviderBuilder::new(0, MemoryBudget::with_limit(512 * 1024 * 1024))
+            .build()
+        {
             Ok(provider) => Some(provider),
             Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
                 panic!("XLOG_REQUIRE_CUDA=1 but resident provider setup failed: {error}")
@@ -3455,14 +3461,14 @@ mod tests {
         output_columns.extend(pair_schema().columns);
         let output_schema = Schema::new(output_columns);
         let sentinel_columns = [
-            vec![0xaaaa_aaaa_u32.to_le_bytes(), 0xbbbb_bbbb_u32.to_le_bytes()].concat(),
-            vec![
+            [0xaaaa_aaaa_u32.to_le_bytes(), 0xbbbb_bbbb_u32.to_le_bytes()].concat(),
+            [
                 0x1111_2222_3333_4444_u64.to_le_bytes(),
                 0x5555_6666_7777_8888_u64.to_le_bytes(),
             ]
             .concat(),
-            vec![0xcccc_cccc_u32.to_le_bytes(), 0xdddd_dddd_u32.to_le_bytes()].concat(),
-            vec![
+            [0xcccc_cccc_u32.to_le_bytes(), 0xdddd_dddd_u32.to_le_bytes()].concat(),
+            [
                 0x9999_aaaa_bbbb_cccc_u64.to_le_bytes(),
                 0xdddd_eeee_ffff_0000_u64.to_le_bytes(),
             ]

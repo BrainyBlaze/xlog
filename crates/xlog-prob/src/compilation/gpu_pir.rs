@@ -13,25 +13,37 @@ use crate::pir::{PirGraph, PirNode, PirNodeId};
 
 /// Node type tags matching `PirNode` variants.
 pub(crate) const PIR_CONST: u8 = 0;
+/// Device opcode for a positive leaf literal.
 pub const PIR_LIT: u8 = 1;
+/// Device opcode for a negated leaf literal.
 pub const PIR_NEG_LIT: u8 = 2;
+/// Device opcode for a conjunction.
 pub const PIR_AND: u8 = 3;
+/// Device opcode for a disjunction.
 pub const PIR_OR: u8 = 4;
 pub(crate) const PIR_DECISION: u8 = 5;
 
 /// GPU-resident PIR graph (device-side mirror of `pir::PirGraph`).
 pub struct GpuPirGraph {
+    /// Node opcode for each graph node.
     pub node_type: TrackedCudaSlice<u8>,
+    /// CSR offsets into [`Self::children`].
     pub child_offsets: TrackedCudaSlice<u32>,
+    /// Flattened child node identifiers.
     pub children: TrackedCudaSlice<u32>,
+    /// Leaf identifier for each literal node.
     pub leaf_id: TrackedCudaSlice<u32>,
+    /// Choice-variable identifier for each decision node.
     pub decision_var: TrackedCudaSlice<u32>,
+    /// False-branch child for each decision node.
     pub decision_child_false: TrackedCudaSlice<u32>,
+    /// True-branch child for each decision node.
     pub decision_child_true: TrackedCudaSlice<u32>,
 }
 
 /// GPU-resident PIR root list.
 pub struct GpuPirRoots {
+    /// Device-resident PIR node identifiers used as circuit roots.
     pub roots: TrackedCudaSlice<u32>,
 }
 
@@ -181,12 +193,14 @@ impl GpuPirGraph {
         })
     }
 
+    /// Returns the number of graph nodes.
     pub fn num_nodes(&self) -> usize {
         self.node_type.len()
     }
 }
 
 impl GpuPirRoots {
+    /// Uploads host PIR root identifiers to the device.
     pub fn from_host(roots: &[PirNodeId], provider: &Arc<CudaKernelProvider>) -> Result<Self> {
         let mut host: Vec<u32> = Vec::with_capacity(roots.len());
         for &r in roots {

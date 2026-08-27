@@ -91,7 +91,7 @@ pub(super) fn compile_gpu_d4_with_gate(
     // No device synchronize after build_frontier: words_per_item is a host-side
     // struct field and all subsequent device ops use same-stream ordering.
 
-    let frontier_items = if crate::compilation::warmup_profiling_enabled() {
+    let frontier_items = if crate::compilation::warmup_profiling_enabled()? {
         let size_host: Vec<u32> = provider
             .device()
             .inner()
@@ -495,21 +495,14 @@ mod tests {
     use xlog_core::MemoryBudget;
     use xlog_cuda::provider::{d4_kernels, D4_MODULE};
     use xlog_cuda::{
-        AsKernelParam, CudaDevice, CudaKernelProvider, GpuMemoryManager, LaunchAsync, LaunchConfig,
+        AsKernelParam, CudaKernelProvider, GpuMemoryManager, LaunchAsync, LaunchConfig,
     };
     use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
     fn try_provider() -> Option<Arc<CudaKernelProvider>> {
-        let device = match CudaDevice::new(0) {
-            Ok(d) => Arc::new(d),
-            Err(e) => {
-                eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
-                return None;
-            }
-        };
-        let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GiB
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        match CudaKernelProvider::new(device, memory) {
+        match xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+            .build()
+        {
             Ok(p) => Some(Arc::new(p)),
             Err(e) => {
                 eprintln!(

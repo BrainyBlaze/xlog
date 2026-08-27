@@ -184,6 +184,8 @@ def main() -> None:
     ok = selection.rule == f"cand_{CORRECT_RELATION}" and accuracy > 0.95 and unseen[0] > 0.5
     print("\n" + ("CORRECT RELATION SELECTED, detector learned ✓" if ok
                   else "rule NOT selected ✗"))
+    if not ok:
+        raise SystemExit("neural join discovery acceptance criteria were not met")
 
 
 if __name__ == "__main__":

@@ -13,10 +13,7 @@ use std::time::{Duration, Instant};
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamPool, XlogDeviceRuntime};
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_ir::{ExecutionPlan, ProjectExpr, RirNode};
@@ -30,13 +27,12 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct RuntimeBackedFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
+    _pool: Arc<StreamPool>,
 }
 
 fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
@@ -44,36 +40,22 @@ fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
 }
 
 fn make_runtime_backed_fixture_with_budget(budget_bytes: usize) -> Option<RuntimeBackedFixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(budget_bytes as u64))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, budget_bytes));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(budget_bytes as u64),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeBackedFixture {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
-        pool,
+        _pool: pool,
     })
 }
 
@@ -331,6 +313,8 @@ fn chain_dispatch_default_on_matches_env_disabled_fallback() {
     let fallback_profile = fallback.execution_stats(fallback_rows.len() as u64);
     assert_eq!(fallback_profile.chain_fallback_scan_equivalents, 0);
     assert_eq!(fallback_profile.chain_fallback_filter_equivalents, 0);
+    assert_eq!(fallback_profile.wcoj_fallback.chain, 1);
+    assert_eq!(fallback_profile.wcoj_fallback.total(), 1);
 
     unsafe {
         std::env::remove_var("XLOG_WCOJ_CHAIN_ENABLE");
@@ -356,6 +340,7 @@ fn chain_dispatch_default_on_matches_env_disabled_fallback() {
     let dispatched_profile = dispatched.execution_stats(dispatched_rows.len() as u64);
     assert_eq!(dispatched_profile.chain_fallback_scan_equivalents, 2);
     assert_eq!(dispatched_profile.chain_fallback_filter_equivalents, 0);
+    assert_eq!(dispatched_profile.wcoj_fallback.total(), 0);
     assert_eq!(dispatched_rows.len(), 128);
     assert_eq!(dispatched_rows, fallback_rows);
 }
@@ -398,6 +383,8 @@ fn matched_chain_projection_error_declines_to_physical_fallback_without_equivale
     assert_eq!(executor.chain_dispatch_count(), 0);
     assert_eq!(executor.wcoj_error_decline_count(), 1);
     let profile = executor.execution_stats(rows.len() as u64);
+    assert_eq!(profile.wcoj_fallback.chain, 1);
+    assert_eq!(profile.wcoj_fallback.total(), 1);
     assert_eq!(profile.chain_fallback_scan_equivalents, 0);
     assert_eq!(profile.chain_fallback_filter_equivalents, 0);
     assert_eq!(profile_op_count(&executor, "scan", rows.len() as u64), 2);

@@ -617,7 +617,8 @@ fn test_atomic_counting(ctx: &TestContext) -> TestResult {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     // Test prefix_sum_mask directly (if available) and verify through filter
-    let test_cases: Vec<(usize, Box<dyn Fn(usize) -> bool>)> = vec![
+    type SizePredicate = (usize, Box<dyn Fn(usize) -> bool>);
+    let test_cases: Vec<SizePredicate> = vec![
         // (size, predicate)
         (1000, Box::new(|i| i % 2 == 0)),   // 50% selectivity
         (10000, Box::new(|i| i % 10 == 0)), // 10% selectivity
@@ -839,7 +840,7 @@ fn test_concurrent_atomic_updates(ctx: &TestContext) -> TestResult {
 
         // Operation 2: Filter (uses atomic scan)
         let mask: Vec<u8> = (0..SIZE).map(|i| if i % 3 == 0 { 1 } else { 0 }).collect();
-        let expected_filter = (SIZE + 2) / 3;
+        let expected_filter = SIZE.div_ceil(3);
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
             Ok(f) => f,

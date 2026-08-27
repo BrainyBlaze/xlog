@@ -167,12 +167,12 @@ impl ExecutionPlan {
         let mut remapped_sccs = vec![None; scc_count];
         let mut sccs = Vec::with_capacity(retained.len());
         let mut rules_by_scc = Vec::with_capacity(retained.len());
-        for old_index in 0..scc_count {
+        for (old_index, remapped_scc) in remapped_sccs.iter_mut().enumerate() {
             if !retained.contains(&old_index) {
                 continue;
             }
             let new_index = u32::try_from(sccs.len()).ok()?;
-            remapped_sccs[old_index] = Some(new_index);
+            *remapped_scc = Some(new_index);
             let mut scc = self.sccs[old_index].clone();
             scc.id = new_index;
             sccs.push(scc);

@@ -141,7 +141,7 @@ fn test_sequential_batch_operations(ctx: &TestContext) -> TestResult {
     // Verify filter results
     for (i, (filtered, mask)) in filtered_buffers.iter().zip(masks.iter()).enumerate() {
         let expected_count: usize = mask.iter().map(|&m| m as usize).sum();
-        if ctx.device_row_count(&filtered) != expected_count as u64 {
+        if ctx.device_row_count(filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_sequential_batch_operations",
                 start.elapsed(),
@@ -149,7 +149,7 @@ fn test_sequential_batch_operations(ctx: &TestContext) -> TestResult {
                     "Filter {}: expected {} rows, got {}",
                     i,
                     expected_count,
-                    ctx.device_row_count(&filtered)
+                    ctx.device_row_count(filtered)
                 ),
             );
         }
@@ -295,7 +295,7 @@ fn test_interleaved_operations(ctx: &TestContext) -> TestResult {
         let expected_min = (SIZE * selectivity / 100).saturating_sub(SIZE / 20);
         let expected_max = (SIZE * selectivity / 100) + SIZE / 20 + 1;
 
-        let count = ctx.device_row_count(&filtered) as usize;
+        let count = ctx.device_row_count(filtered) as usize;
         if count < expected_min || count > expected_max {
             return TestResult::error(
                 "test_interleaved_operations",

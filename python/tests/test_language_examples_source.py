@@ -36,23 +36,6 @@ REQUIRED_FEATURES = [
 ]
 
 
-def language_examples_evidence_dir() -> Path:
-    matches = []
-    for path in sorted((ROOT / "docs-internal" / "evidence").glob("*-examples")):
-        summary_path = path / "validation_summary.json"
-        if not summary_path.exists() or not (path / "README.md").exists():
-            continue
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        if (
-            summary.get("example_count") == len(EXAMPLES)
-            and summary.get("interaction_count") == len(EXAMPLES)
-            and set(REQUIRED_FEATURES).issubset(summary.get("feature_coverage", {}))
-        ):
-            matches.append(path)
-    assert len(matches) == 1
-    return matches[0]
-
-
 def test_language_examples_layout_is_committed() -> None:
     suite = ROOT / "examples/language-completeness/showcase"
 
@@ -87,13 +70,10 @@ def test_language_showcase_run_checks_do_not_accept_raw_kernel_schema_errors() -
         assert raw_schema_error not in combined_needles, name
 
 
-def test_language_examples_validator_and_evidence_contract_is_committed() -> None:
+def test_language_examples_validator_contract_is_committed() -> None:
     validator = ROOT / "scripts/validate_language_examples.py"
-    evidence = language_examples_evidence_dir()
 
     assert validator.exists()
-    assert (evidence / "README.md").exists()
-    assert (evidence / "validation_summary.json").exists()
 
     source = validator.read_text(encoding="utf-8")
     for needle in [

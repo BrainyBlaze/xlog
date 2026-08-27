@@ -943,13 +943,11 @@ impl<'a> ExpansionContext<'a> {
         });
     }
 
-    /// Check if a function has a predicate body.
-    #[allow(dead_code)]
-    pub(crate) fn is_predicate_func(&self, name: &str) -> bool {
+    #[cfg(test)]
+    fn is_predicate_func(&self, name: &str) -> bool {
         self.registry
             .get(name)
-            .map(|f| matches!(f.body, FuncBody::Predicate { .. }))
-            .unwrap_or(false)
+            .is_some_and(|function| matches!(function.body, FuncBody::Predicate { .. }))
     }
 }
 

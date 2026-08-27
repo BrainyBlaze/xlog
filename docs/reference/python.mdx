@@ -39,9 +39,11 @@ The `pyxlog` Python module provides:
 
 Convenience outputs that must be read on the host CPU (probabilities, gradients,
 confidence intervals) are behind a `host-io` Cargo build feature. Keeping them
-optional lets GPU-native code enforce a rule that results never transfer from the
-device (GPU) back to host (CPU) memory. For the full map of runtime introspection
-surfaces, see [Living-World Diagnostics](/guides/diagnostics).
+optional lets device-result code keep result buffers out of host memory. Individual
+routes can still observe bounded status or terminal-summary data; their documented
+transfer measurements, not the final tensor's device field alone, establish residency.
+For the full map of runtime introspection surfaces, see
+[Living-World Diagnostics](/guides/diagnostics).
 
 ## Installation
 
@@ -267,6 +269,13 @@ delta recompute calls, so persistent hash indexes can be reused through public
 pyxlog mutation loops. `session.join_index_cache_stats()` returns the retained
 executor's `lookups`, `hits`, `misses`, `builds`, invalidation counters,
 background-build counters, `entries`, and `total_bytes`.
+
+`session.wcoj_dispatch_stats()` separates successful specialized dispatches
+from actual fallbacks. Its `wcoj_fallback` object reports `total` and the
+`chain`, `dedicated_multiway`, `free_join`, `planned_hash`, `factorized_delta`,
+and `groupby_fusion` routes. `wcoj_error_decline_count` is narrower: it counts
+pipeline errors that declined to a fallback, not ordinary eligibility or cost
+decisions.
 
 #### Relation Change Callbacks
 
@@ -700,8 +709,11 @@ program.neural_hot_loop_diagnostics()["nn4_lineage"]
 ```
 
 The lineage payload contains `checkpoint_hash`, `split_hashes`,
-`calibration_metrics`, `cuda_device`, `influence_audit`, and
-`changed_acceptance` evidence recorded through `record_nn4_influence(...)`.
+`calibration_metrics`, and `cuda_device`. Its `influence_audit` object keeps
+registration metadata under `registration` and copied event snapshots under
+`records`; each event includes the `changed_acceptance` evidence recorded through
+`record_nn4_influence(...)`. Reading named lineage or recording an event for an
+unregistered network is an error.
 
 `register_network` also accepts three keyword-only arguments that record and
 check the network's typed signature. All three are available since 0.11.0:
@@ -959,7 +971,9 @@ grad_false0 = torch.from_dlpack(result.grad_false[0]) # f64 CUDA tensor, shape [
 
 #### Monte Carlo Inference (Device-Only)
 
-For GPU-native workflows, prefer `CompiledProgram.evaluate_device(...)` (no host reads for results).
+For device-result workflows, prefer `CompiledProgram.evaluate_device(...)`: result
+buffers stay on the GPU, while the runtime may still observe its bounded terminal
+status and convergence summary.
 The optional `samples`, `seed`, `confidence`, `sampling_method`, and
 `max_nonmonotone_iterations` arguments override the corresponding source pragmas only
 when supplied. When an argument is omitted, Python uses `#pragma prob_samples`,

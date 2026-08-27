@@ -128,10 +128,10 @@ def _world_source(
 {pre}
 {post}
 {extra_facts}
-        pred pre_before_post(i64, i64).
-        pred post_before_pre(i64, i64).
+        pred pre_before_post(u64, u64).
+        pred post_before_pre(u64, u64).
 {extra_preds}
-        pred plastic(i64).
+        pred plastic(u64).
 {candidates}
         train(plastic, binary_cross_entropy).
     """
@@ -192,7 +192,7 @@ def test_a_longer_body_is_rejected_not_silently_trained() -> None:
         trainable_rule(cand_post, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), post_before_pre(Ev, E).
 """,
         extra_facts="    high_degree(0).\n    high_degree(1).\n    high_degree(2).\n    high_degree(3).",
-        extra_preds="        pred high_degree(i64).",
+        extra_preds="        pred high_degree(u64).",
     )
     with pytest.raises(ValueError) as exc:
         _train(source, net, feats, steps=5)
@@ -341,7 +341,7 @@ def test_a_network_named_like_a_candidate_is_refused() -> None:
         trainable_rule(cand_pre, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pre_before_post(Ev, E).
 """,
         extra_facts="    high_degree(0).\n    high_degree(1).\n    high_degree(2).\n    high_degree(3).",
-        extra_preds="        pred high_degree(i64).",
+        extra_preds="        pred high_degree(u64).",
     )
     with pytest.raises(ValueError, match="must not collide"):
         train_neurosymbolic_program(
@@ -405,8 +405,8 @@ def _sparse_source() -> str:
     return f"""
         nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
 {facts}
-        pred pbp(i64, i64).
-        pred plastic(i64).
+        pred pbp(u64, u64).
+        pred plastic(u64).
         trainable_rule(c_a, weight=0.0) :: plastic(E) :- saliency(Ev, strengthen), pbp(Ev, E).
         trainable_rule(c_b, weight=0.0) :: plastic(E) :- saliency(Ev, low), pbp(Ev, E).
         train(plastic, binary_cross_entropy).
@@ -580,8 +580,8 @@ def test_an_arity_2_head_is_refused_not_silently_trained_on_arity_1() -> None:
     source = f"""
         nn(sal_net, [Event], Label, [low, strengthen]) :: saliency(Event, Label).
 {pre}
-        pred pre_before_post(i64, i64).
-        pred plastic(i64, i64).
+        pred pre_before_post(u64, u64).
+        pred plastic(u64, u64).
         trainable_rule(c_a, weight=0.0) :: plastic(E, L) :- saliency(Ev, L), pre_before_post(Ev, E).
         trainable_rule(c_b, weight=0.0) :: plastic(E, L) :- saliency(Ev, L), pre_before_post(Ev, E).
         train(plastic, binary_cross_entropy).

@@ -40,10 +40,9 @@
 use std::sync::Arc;
 
 use cudarc::driver::sys;
-use xlog_cuda::device_runtime::{
-    AllocTag, AsyncCudaResource, StreamId, StreamPool, XlogDeviceRuntime,
-};
-use xlog_cuda::CudaDevice;
+use xlog_core::MemoryBudget;
+use xlog_cuda::device_runtime::{AllocTag, StreamId};
+use xlog_cuda::CudaProviderBuilder;
 
 const BYTES: usize = 4096;
 
@@ -69,18 +68,20 @@ unsafe fn dtoh_sync(dst: &mut [u8], src: u64) {
 
 #[test]
 fn stream_ordered_alloc_free_reuse_through_runtime_facade() {
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+    let Some(provider) = CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024))
+        .build()
+        .ok()
+    else {
         eprintln!("Skipping stream-ordered runtime-facade test: CUDA runtime unavailable");
         return;
     };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let resource = Box::new(AsyncCudaResource::new(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-    ));
-    let runtime =
-        XlogDeviceRuntime::with_resource(Arc::clone(&device), 0, Arc::clone(&pool), resource);
+    let runtime = Arc::clone(
+        provider
+            .memory()
+            .runtime()
+            .expect("provider builder attaches runtime"),
+    );
+    let pool = Arc::clone(runtime.stream_pool());
 
     let stream_id = match pool.acquire() {
         Ok(id) => id,

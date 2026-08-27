@@ -1,4 +1,5 @@
 #include <cstdint>
+#include "totalorder.cuh"
 #include <cmath>
 
 /**
@@ -161,8 +162,8 @@ extern "C" __global__ void arith_binary_f64(
         case ARITH_OP_MUL: v = x * y; break;
         case ARITH_OP_DIV: v = normalize_nan_f64(x / y); break;
         case ARITH_OP_MOD: v = normalize_nan_f64(fmod(x, y)); break;
-        case ARITH_OP_MIN: v = (x < y) ? x : y; break;
-        case ARITH_OP_MAX: v = (x > y) ? x : y; break;
+        case ARITH_OP_MIN: v = xlog_f64_total_min(x, y); break;
+        case ARITH_OP_MAX: v = xlog_f64_total_max(x, y); break;
         default: v = 0.0;
     }
     out[gid] = v;
@@ -186,8 +187,8 @@ extern "C" __global__ void arith_binary_f32(
         case ARITH_OP_MUL: v = x * y; break;
         case ARITH_OP_DIV: v = normalize_nan_f32(x / y); break;
         case ARITH_OP_MOD: v = normalize_nan_f32(fmodf(x, y)); break;
-        case ARITH_OP_MIN: v = (x < y) ? x : y; break;
-        case ARITH_OP_MAX: v = (x > y) ? x : y; break;
+        case ARITH_OP_MIN: v = xlog_f32_total_min(x, y); break;
+        case ARITH_OP_MAX: v = xlog_f32_total_max(x, y); break;
         default: v = 0.0f;
     }
     out[gid] = v;

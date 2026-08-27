@@ -1,10 +1,11 @@
 //! Category 25: Float filter predicate edge cases
 //!
 //! Tests floating-point comparison semantics in filter operations:
-//! - Eq/Ne use IEEE 754 semantics (NaN == NaN is false, NaN != NaN is true)
-//! - Lt/Le/Gt/Ge use total ordering (NaN > Inf is true, -0.0 < +0.0 is true)
+//! - all six operators use exact IEEE total-order identity and ordering
+//! - NaN payloads and signed zeros remain distinct
 //!
-//! Total ordering: -Inf < negative numbers < -0.0 < +0.0 < positive numbers < +Inf < NaN
+//! Broad ordering: negative NaNs < -Inf < negative numbers < -0.0 < +0.0
+//! < positive numbers < +Inf < positive NaNs.
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
@@ -19,14 +20,14 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
     // f64 tests
     results.add_result(test_f64_nan_greater_than_inf(ctx));
     results.add_result(test_f64_negative_zero_less_than_positive_zero(ctx));
-    results.add_result(test_f64_nan_equality_ieee(ctx));
+    results.add_result(test_f64_nan_equality_total(ctx));
     results.add_result(test_f64_nan_ordering_total(ctx));
     results.add_result(test_f64_total_ordering_comprehensive(ctx));
 
     // f32 tests
     results.add_result(test_f32_nan_greater_than_inf(ctx));
     results.add_result(test_f32_negative_zero_less_than_positive_zero(ctx));
-    results.add_result(test_f32_nan_equality_ieee(ctx));
+    results.add_result(test_f32_nan_equality_total(ctx));
     results.add_result(test_f32_nan_ordering_total(ctx));
     results.add_result(test_f32_total_ordering_comprehensive(ctx));
 
@@ -178,15 +179,15 @@ fn test_f64_negative_zero_less_than_positive_zero(ctx: &TestContext) -> TestResu
     )
 }
 
-/// Test 3: f64 NaN == NaN should return FALSE, NaN != NaN should return TRUE (IEEE 754).
-///
-/// Equality comparisons use IEEE 754 semantics where NaN is not equal to anything.
-fn test_f64_nan_equality_ieee(ctx: &TestContext) -> TestResult {
+/// Test 3: f64 equality uses exact identity within the IEEE total order.
+fn test_f64_nan_equality_total(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
     let schema = Schema::new(vec![("val".to_string(), ScalarType::F64)]);
 
     // Data with NaN values
-    let data: Vec<f64> = vec![f64::NAN, 1.0, f64::NAN, 2.0, f64::NAN, 3.0];
+    let nan = f64::from_bits(0x7ff8_0000_0000_0001);
+    let other_nan = f64::from_bits(0x7ff8_0000_0000_0002);
+    let data: Vec<f64> = vec![nan, 1.0, nan, 2.0, other_nan, 3.0];
 
     let buffer = match ctx
         .provider
@@ -195,60 +196,54 @@ fn test_f64_nan_equality_ieee(ctx: &TestContext) -> TestResult {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
-                "test_f64_nan_equality_ieee",
+                "test_f64_nan_equality_total",
                 start.elapsed(),
                 format!("Failed to create buffer: {}", e),
             )
         }
     };
 
-    // Test NaN == NaN (should be FALSE per IEEE 754)
-    let eq_result = match ctx
-        .provider
-        .filter::<f64>(&buffer, 0, f64::NAN, CompareOp::Eq)
-    {
+    // Exact NaN bits compare equal; a different payload does not.
+    let eq_result = match ctx.provider.filter::<f64>(&buffer, 0, nan, CompareOp::Eq) {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
-                "test_f64_nan_equality_ieee",
+                "test_f64_nan_equality_total",
                 start.elapsed(),
                 format!("Filter Eq failed: {}", e),
             )
         }
     };
 
-    if ctx.device_row_count(&eq_result) != 0 {
+    if ctx.device_row_count(&eq_result) != 2 {
         return TestResult::error(
-            "test_f64_nan_equality_ieee",
+            "test_f64_nan_equality_total",
             start.elapsed(),
             format!(
-                "Expected 0 rows where val == NaN, got {} (NaN == NaN should be false per IEEE 754)",
+                "Expected 2 rows with the exact NaN payload, got {}",
                 ctx.device_row_count(&eq_result)
             ),
         );
     }
 
-    // Test NaN != NaN (should be TRUE per IEEE 754) - all 6 values should pass
-    let ne_result = match ctx
-        .provider
-        .filter::<f64>(&buffer, 0, f64::NAN, CompareOp::Ne)
-    {
+    // Every non-identical bit pattern, including another NaN payload, differs.
+    let ne_result = match ctx.provider.filter::<f64>(&buffer, 0, nan, CompareOp::Ne) {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
-                "test_f64_nan_equality_ieee",
+                "test_f64_nan_equality_total",
                 start.elapsed(),
                 format!("Filter Ne failed: {}", e),
             )
         }
     };
 
-    if ctx.device_row_count(&ne_result) != 6 {
+    if ctx.device_row_count(&ne_result) != 4 {
         return TestResult::error(
-            "test_f64_nan_equality_ieee",
+            "test_f64_nan_equality_total",
             start.elapsed(),
             format!(
-                "Expected 6 rows where val != NaN (all values), got {} (x != NaN should be true for all x per IEEE 754)",
+                "Expected 4 rows with a different total-order identity, got {}",
                 ctx.device_row_count(&ne_result)
             ),
         );
@@ -256,13 +251,13 @@ fn test_f64_nan_equality_ieee(ctx: &TestContext) -> TestResult {
 
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
-            "test_f64_nan_equality_ieee",
+            "test_f64_nan_equality_total",
             start.elapsed(),
             format!("Sync failed: {}", e),
         );
     }
 
-    TestResult::passed("test_f64_nan_equality_ieee", start.elapsed())
+    TestResult::passed("test_f64_nan_equality_total", start.elapsed())
 }
 
 /// Test 4: f64 NaN ordering comparisons use total ordering (NaN > everything).
@@ -671,15 +666,15 @@ fn test_f32_negative_zero_less_than_positive_zero(ctx: &TestContext) -> TestResu
     )
 }
 
-/// Test 8: f32 NaN == NaN should return FALSE, NaN != NaN should return TRUE (IEEE 754).
-///
-/// Equality comparisons use IEEE 754 semantics where NaN is not equal to anything.
-fn test_f32_nan_equality_ieee(ctx: &TestContext) -> TestResult {
+/// Test 8: f32 equality uses exact identity within the IEEE total order.
+fn test_f32_nan_equality_total(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
     let schema = Schema::new(vec![("val".to_string(), ScalarType::F32)]);
 
     // Data with NaN values
-    let data: Vec<f32> = vec![f32::NAN, 1.0f32, f32::NAN, 2.0f32, f32::NAN, 3.0f32];
+    let nan = f32::from_bits(0x7fc0_0001);
+    let other_nan = f32::from_bits(0x7fc0_0002);
+    let data: Vec<f32> = vec![nan, 1.0, nan, 2.0, other_nan, 3.0];
 
     let buffer = match ctx
         .provider
@@ -688,60 +683,54 @@ fn test_f32_nan_equality_ieee(ctx: &TestContext) -> TestResult {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
-                "test_f32_nan_equality_ieee",
+                "test_f32_nan_equality_total",
                 start.elapsed(),
                 format!("Failed to create buffer: {}", e),
             )
         }
     };
 
-    // Test NaN == NaN (should be FALSE per IEEE 754)
-    let eq_result = match ctx
-        .provider
-        .filter::<f32>(&buffer, 0, f32::NAN, CompareOp::Eq)
-    {
+    // Exact NaN bits compare equal; a different payload does not.
+    let eq_result = match ctx.provider.filter::<f32>(&buffer, 0, nan, CompareOp::Eq) {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
-                "test_f32_nan_equality_ieee",
+                "test_f32_nan_equality_total",
                 start.elapsed(),
                 format!("Filter Eq failed: {}", e),
             )
         }
     };
 
-    if ctx.device_row_count(&eq_result) != 0 {
+    if ctx.device_row_count(&eq_result) != 2 {
         return TestResult::error(
-            "test_f32_nan_equality_ieee",
+            "test_f32_nan_equality_total",
             start.elapsed(),
             format!(
-                "Expected 0 rows where val == NaN, got {} (NaN == NaN should be false per IEEE 754)",
+                "Expected 2 rows with the exact NaN payload, got {}",
                 ctx.device_row_count(&eq_result)
             ),
         );
     }
 
-    // Test NaN != NaN (should be TRUE per IEEE 754) - all 6 values should pass
-    let ne_result = match ctx
-        .provider
-        .filter::<f32>(&buffer, 0, f32::NAN, CompareOp::Ne)
-    {
+    // Every non-identical bit pattern, including another NaN payload, differs.
+    let ne_result = match ctx.provider.filter::<f32>(&buffer, 0, nan, CompareOp::Ne) {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
-                "test_f32_nan_equality_ieee",
+                "test_f32_nan_equality_total",
                 start.elapsed(),
                 format!("Filter Ne failed: {}", e),
             )
         }
     };
 
-    if ctx.device_row_count(&ne_result) != 6 {
+    if ctx.device_row_count(&ne_result) != 4 {
         return TestResult::error(
-            "test_f32_nan_equality_ieee",
+            "test_f32_nan_equality_total",
             start.elapsed(),
             format!(
-                "Expected 6 rows where val != NaN (all values), got {} (x != NaN should be true for all x per IEEE 754)",
+                "Expected 4 rows with a different total-order identity, got {}",
                 ctx.device_row_count(&ne_result)
             ),
         );
@@ -749,13 +738,13 @@ fn test_f32_nan_equality_ieee(ctx: &TestContext) -> TestResult {
 
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
-            "test_f32_nan_equality_ieee",
+            "test_f32_nan_equality_total",
             start.elapsed(),
             format!("Sync failed: {}", e),
         );
     }
 
-    TestResult::passed("test_f32_nan_equality_ieee", start.elapsed())
+    TestResult::passed("test_f32_nan_equality_total", start.elapsed())
 }
 
 /// Test 9: f32 NaN ordering comparisons use total ordering (NaN > everything).

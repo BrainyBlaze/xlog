@@ -9,26 +9,38 @@ use crate::logsumexp::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Logical operator represented by a decision-DNNF node.
 pub enum DdnnfNodeKind {
+    /// Deterministic disjunction.
     Or,
+    /// Decomposable conjunction.
     And,
+    /// Boolean true terminal.
     True,
+    /// Boolean false terminal.
     False,
 }
 
 #[derive(Debug, Clone)]
+/// A node in a parsed decision-DNNF circuit.
 pub struct DdnnfNode {
+    /// Logical operator of the node.
     pub kind: DdnnfNodeKind,
 }
 
 #[derive(Debug, Clone)]
+/// Directed circuit edge annotated with signed DIMACS literals.
 pub struct DdnnfEdge {
+    /// Source node identifier.
     pub from: u32,
+    /// Target node identifier.
     pub to: u32,
+    /// Conjunctive literals attached to this edge.
     pub lits: Vec<i32>,
 }
 
 #[derive(Debug, Clone)]
+/// Parsed decision-DNNF circuit with indexed outgoing edges.
 pub struct DecisionDnnf {
     root: u32,
     nodes: BTreeMap<u32, DdnnfNode>,
@@ -38,26 +50,32 @@ pub struct DecisionDnnf {
 }
 
 impl DecisionDnnf {
+    /// Returns the circuit root identifier.
     pub fn root(&self) -> u32 {
         self.root
     }
 
+    /// Returns the largest DIMACS variable referenced by the circuit.
     pub fn max_var(&self) -> u32 {
         self.max_var
     }
 
+    /// Returns the operator of `node_id`, if the node exists.
     pub fn node_kind(&self, node_id: u32) -> Option<DdnnfNodeKind> {
         self.nodes.get(&node_id).map(|n| n.kind)
     }
 
+    /// Returns indices of edges leaving `node_id`.
     pub fn outgoing_edge_indices(&self, node_id: u32) -> Option<&[usize]> {
         self.outgoing.get(&node_id).map(|v| v.as_slice())
     }
 
+    /// Returns an edge by its stable index.
     pub fn edge(&self, edge_idx: usize) -> Option<&DdnnfEdge> {
         self.edges.get(edge_idx)
     }
 
+    /// Parses and validates a textual decision-DNNF circuit.
     pub fn parse_str(input: &str) -> Result<Self> {
         let mut nodes: BTreeMap<u32, DdnnfNode> = BTreeMap::new();
         let mut edges: Vec<DdnnfEdge> = Vec::new();
@@ -293,6 +311,7 @@ impl DecisionDnnf {
         dfs(root, nodes, edges, outgoing, &mut visiting, &mut visited)
     }
 
+    /// Evaluates the circuit's weighted model count in log space.
     pub fn eval_log_wmc<F>(&self, var_log_weights: F) -> Result<f64>
     where
         F: Fn(u32) -> (f64, f64),

@@ -1447,6 +1447,27 @@ mod tests {
     use std::sync::Barrier;
     use std::thread;
 
+    fn conditional_cuda_context_or_skip() -> Option<Arc<CudaContext>> {
+        if let Err(error) = ConditionalGraphDriverApi::load() {
+            if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") {
+                panic!("XLOG_REQUIRE_CUDA=1 but CUDA conditional-graph setup failed: {error}");
+            }
+            eprintln!("Skipping test: {}", error.decline_detail());
+            return None;
+        }
+
+        match CudaContext::new(0) {
+            Ok(context) => Some(context),
+            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                panic!("XLOG_REQUIRE_CUDA=1 but CUDA setup failed: {error}")
+            }
+            Err(error) => {
+                eprintln!("Skipping test: CUDA unavailable: {error}");
+                None
+            }
+        }
+    }
+
     #[test]
     fn conditional_graphs_expose_dependency_ordered_linear_chain_inventory() {
         let _: fn(
@@ -1576,15 +1597,8 @@ mod tests {
 
     #[test]
     fn real_capture_helper_returns_typed_busy_before_beginning_driver_capture() {
-        let context = match CudaContext::new(0) {
-            Ok(context) => context,
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA setup failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping test: CUDA unavailable: {error}");
-                return;
-            }
+        let Some(context) = conditional_cuda_context_or_skip() else {
+            return;
         };
         let stream = context.new_stream().expect("non-default CUDA stream");
         let _lease = try_acquire_stream_capture(&stream).expect("held stream capture lease");
@@ -1683,15 +1697,8 @@ mod tests {
 
     #[test]
     fn real_conditional_while_graph_creates_instantiates_and_launches() {
-        let context = match CudaContext::new(0) {
-            Ok(context) => context,
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA setup failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping test: CUDA unavailable: {error}");
-                return;
-            }
+        let Some(context) = conditional_cuda_context_or_skip() else {
+            return;
         };
         let stream = context.new_stream().expect("non-default CUDA stream");
         let body_buffer = stream.alloc_zeros::<u32>(1).expect("body buffer");
@@ -1757,15 +1764,8 @@ mod tests {
 
     #[test]
     fn real_conditional_sequence_orders_segments_around_multiple_while_capability() {
-        let context = match CudaContext::new(0) {
-            Ok(context) => context,
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA setup failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping test: CUDA unavailable: {error}");
-                return;
-            }
+        let Some(context) = conditional_cuda_context_or_skip() else {
+            return;
         };
         let stream = context.new_stream().expect("non-default CUDA stream");
         let buffer = stream.alloc_zeros::<u32>(1).expect("sequence buffer");

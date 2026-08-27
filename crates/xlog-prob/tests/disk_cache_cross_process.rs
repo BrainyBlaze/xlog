@@ -20,7 +20,6 @@ use xlog_prob::cnf::encode_cnf;
 use xlog_prob::pir::{LeafId, PirGraph, PirNodeId};
 
 use xlog_core::MemoryBudget;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::compilation::gpu_cache::hash_cnf_gpu;
 use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
@@ -47,19 +46,11 @@ fn cnf_to_solve_instance(num_vars: u32, clauses: &[Vec<i32>]) -> SolveInstance {
 /// Build a non-trivial PIR graph through HashMap-based interning and return
 /// the GPU cache hash. Returns None if GPU is unavailable.
 fn build_encode_and_hash_gpu() -> Option<u64> {
-    // Initialize CUDA; skip if unavailable.
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(_) => return None,
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1 << 30),
-    ));
-    let provider = match CudaKernelProvider::new(device, memory) {
-        Ok(p) => Arc::new(p),
-        Err(_) => return None,
-    };
+    let provider =
+        match xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1 << 30)).build() {
+            Ok(p) => Arc::new(p),
+            Err(_) => return None,
+        };
 
     // Simulate provenance's HashMap-based interning.
     let mut intern: HashMap<String, ()> = HashMap::new();

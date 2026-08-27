@@ -1,6 +1,6 @@
 \section{Neurosymbolic Integration}\label{sec:nesy}
 
-This section is where the three pillars meet. The device-resident substrate (\Cref{sec:datalog}) keeps the symbolic state on the GPU; verified knowledge compilation (\Cref{sec:prob}) turns a network's outputs into a sound differentiable circuit; and zero-copy coupling carries gradients back into the neural optimizer without leaving the device. Together they let neural perception and logical reasoning train jointly, end to end, with no host--device transfers in the loop.
+This section is where the relational substrate (\Cref{sec:datalog}), verified probabilistic knowledge compilation (\Cref{sec:prob}), and device-buffer interoperability meet. Network outputs feed weighted facts into the probabilistic route; the final smoothed circuit is certified before use; and DLPack carries device gradient buffers into the neural optimizer without copying them through host memory. Host orchestration and bounded control reads remain outside that zero-copy data-plane handoff.
 
 \subsection{Neural predicates}\label{subsec:neural-pred}
 
@@ -87,7 +87,7 @@ history = pyxlog.train_model_tensor(
       {one training iteration --- circuit \& proof reused across iterations};
     % ---- GPU device plane around the whole loop ----
     \node[flabel] (foot) at (84,-45.5)
-      {zero host--device transfers in the loop (byte-accounted)};
+      {zero tracked data-plane transfers in the measured circuit hot region};
     \begin{scope}[on background layer]
       \node[fplane,fit=(net)(loss)(back)(opt)(foot),inner sep=3mm] (plane) {};
     \end{scope}
@@ -104,12 +104,12 @@ history = pyxlog.train_model_tensor(
       (96,-56.5) rectangle +(3,3);
     \node[fsub,anchor=west] at (100.5,-55) {verified (\Cref{fig:kc})};
   \end{tikzpicture}
-  \caption{One end-to-end neurosymbolic training iteration. The entire
-  loop---neural forward pass, symbolic grounding, circuit evaluation, loss,
-  and gradient return---executes on one CUDA device (shaded plane) with zero
-  host--device data-plane transfers. The circuit is compiled and proven
-  correct once (\checkmark, \Cref{fig:kc}), then reused across iterations,
-  and gradients re-enter PyTorch's autograd graph zero-copy through DLPack.}
+  \caption{One neurosymbolic training iteration. Neural tensors, circuit values,
+  and gradient buffers occupy one CUDA device (shaded plane); the measured circuit
+  hot region records zero tracked data-plane transfers. The host still orchestrates
+  stages and observes bounded control state. The final smoothed circuit is compiled
+  and certified once (\checkmark, \Cref{fig:kc}), then reused across iterations, and
+  gradients re-enter PyTorch's autograd graph zero-copy through DLPack.}
   \label{fig:training}
 \end{figure*}
 
@@ -129,7 +129,7 @@ A GPU-native engine is only useful if results reach the frameworks researchers a
 
 \subsection{Trainable rule bodies}\label{subsec:trainable-bodies}
 
-Placing a neural predicate in a rule body lifts xlog from learning a single perceptual predicate to learning whole rules, while the pipeline stays device-resident with no host round-trips.
+Placing a neural predicate in a rule body lifts xlog from learning a single perceptual predicate to learning whole rules. The tensor and circuit data planes remain device-resident; route-specific orchestration and control observations are documented separately.
 
 \textbf{Mixed bodies.} A trainable body may interleave neural-evaluated atoms with ordinary symbolic literals. The symbolic literals act as hard join conditions: they gate which groundings can fire but carry no probability mass or gradient. The head probability therefore factors as a $0/1$ indicator of the symbolic condition times the neural probability scaled by a learned per-rule weight~$\sigma(w)$, and gradients flow only through the network outputs and the rule weight, never through the ground facts.
 

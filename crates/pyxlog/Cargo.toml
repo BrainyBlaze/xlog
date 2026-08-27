@@ -34,3 +34,6 @@ default = ["host-io"]
 host-io = ["xlog-prob/host-io"]
 extension-module = ["pyo3/extension-module"]
 arrow-device-import = ["xlog-cuda/arrow-device-import"]
+
+[lints]
+workspace = true

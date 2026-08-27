@@ -14,14 +14,17 @@ pub struct CnfFormula {
 }
 
 impl CnfFormula {
+    /// Returns the highest DIMACS variable identifier used by the formula.
     pub fn num_vars(&self) -> u32 {
         self.num_vars
     }
 
+    /// Returns the formula's clauses as signed DIMACS literals.
     pub fn clauses(&self) -> &[Vec<i32>] {
         &self.clauses
     }
 
+    /// Serializes the formula in deterministic DIMACS CNF format.
     pub fn to_dimacs(&self) -> String {
         let mut out = String::new();
         out.push_str("c xlog-prob cnf\n");
@@ -37,10 +40,15 @@ impl CnfFormula {
 }
 
 #[derive(Debug, Clone)]
+/// A Tseitin encoding together with maps from PIR identities to CNF variables.
 pub struct CnfEncoding {
+    /// The encoded conjunctive-normal-form formula.
     pub cnf: CnfFormula,
+    /// CNF variable assigned to each encoded PIR node.
     pub node_var: BTreeMap<PirNodeId, u32>,
+    /// CNF variable assigned to each probabilistic leaf.
     pub leaf_var: BTreeMap<LeafId, u32>,
+    /// CNF variable assigned to each exclusive-choice variable.
     pub choice_var: BTreeMap<ChoiceVarId, u32>,
 }
 
@@ -147,6 +155,7 @@ pub fn canonical_pir_hash(pir: &PirGraph, roots: &[PirNodeId]) -> Result<u64> {
     Ok(fnv1a(&buf))
 }
 
+/// Encodes the subgraph reachable from `roots` as a deterministic Tseitin CNF.
 pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
     if roots.is_empty() {
         return Err(XlogError::Compilation(

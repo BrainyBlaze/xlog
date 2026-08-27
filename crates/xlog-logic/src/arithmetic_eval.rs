@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use xlog_core::{symbol, Result, ScalarType, XlogError};
+use xlog_core::{f32_total_order_key, f64_total_order_key, symbol, Result, ScalarType, XlogError};
 use xlog_ir::ConstValue;
 
 use crate::ast::{ArithExpr, CompOp, Term};
@@ -416,14 +416,14 @@ fn evaluate_binary(
                 BinaryOperation::Divide => normalize_nan_f32(left / right),
                 BinaryOperation::Modulo => normalize_nan_f32(left % right),
                 BinaryOperation::Minimum => {
-                    if left < right {
+                    if f32_total_order_key(left) <= f32_total_order_key(right) {
                         left
                     } else {
                         right
                     }
                 }
                 BinaryOperation::Maximum => {
-                    if left > right {
+                    if f32_total_order_key(left) >= f32_total_order_key(right) {
                         left
                     } else {
                         right
@@ -440,14 +440,14 @@ fn evaluate_binary(
                 BinaryOperation::Divide => normalize_nan_f64(left / right),
                 BinaryOperation::Modulo => normalize_nan_f64(left % right),
                 BinaryOperation::Minimum => {
-                    if left < right {
+                    if f64_total_order_key(left) <= f64_total_order_key(right) {
                         left
                     } else {
                         right
                     }
                 }
                 BinaryOperation::Maximum => {
-                    if left > right {
+                    if f64_total_order_key(left) >= f64_total_order_key(right) {
                         left
                     } else {
                         right
@@ -479,8 +479,9 @@ fn evaluate_abs(value: ArithmeticValue) -> Result<ArithmeticValue> {
 ///
 /// Equal-width floating-point operands retain their width. When exactly one operand
 /// is floating point, or the widths differ, both numeric values are converted to
-/// `f64`, matching runtime predicate evaluation. Float equality remains IEEE 754;
-/// ordered comparisons use IEEE total ordering.
+/// `f64`, matching runtime predicate evaluation. Every comparison operator uses
+/// XLOG's IEEE 754 total order, including equality of exact NaN bit patterns and
+/// distinction between negative and positive zero.
 pub fn compare_arithmetic_values(
     left: &ArithmeticValue,
     op: CompOp,
@@ -539,24 +540,28 @@ pub fn compare_arithmetic_values(
 }
 
 fn compare_f32(left: f32, op: CompOp, right: f32) -> bool {
+    let left = f32_total_order_key(left);
+    let right = f32_total_order_key(right);
     match op {
         CompOp::Eq => left == right,
         CompOp::Ne => left != right,
-        CompOp::Lt => left.total_cmp(&right).is_lt(),
-        CompOp::Le => !left.total_cmp(&right).is_gt(),
-        CompOp::Gt => left.total_cmp(&right).is_gt(),
-        CompOp::Ge => !left.total_cmp(&right).is_lt(),
+        CompOp::Lt => left < right,
+        CompOp::Le => left <= right,
+        CompOp::Gt => left > right,
+        CompOp::Ge => left >= right,
     }
 }
 
 fn compare_f64(left: f64, op: CompOp, right: f64) -> bool {
+    let left = f64_total_order_key(left);
+    let right = f64_total_order_key(right);
     match op {
         CompOp::Eq => left == right,
         CompOp::Ne => left != right,
-        CompOp::Lt => left.total_cmp(&right).is_lt(),
-        CompOp::Le => !left.total_cmp(&right).is_gt(),
-        CompOp::Gt => left.total_cmp(&right).is_gt(),
-        CompOp::Ge => !left.total_cmp(&right).is_lt(),
+        CompOp::Lt => left < right,
+        CompOp::Le => left <= right,
+        CompOp::Gt => left > right,
+        CompOp::Ge => left >= right,
     }
 }
 
@@ -784,17 +789,17 @@ mod tests {
             assert_eq!(value.to_bits(), 0x7ff8_0000_0000_0000);
         }
 
-        assert_eq!(
-            evaluate_arithmetic_expression(
-                &ArithExpr::Min(
-                    Box::new(ArithExpr::Variable("nan".to_string())),
-                    Box::new(ArithExpr::Variable("one".to_string())),
-                ),
-                &bindings,
-            )
-            .expect("minimum"),
-            ArithmeticValue::F64(1.0)
-        );
+        let ArithmeticValue::F64(minimum_nan) = evaluate_arithmetic_expression(
+            &ArithExpr::Min(
+                Box::new(ArithExpr::Variable("nan".to_string())),
+                Box::new(ArithExpr::Variable("one".to_string())),
+            ),
+            &bindings,
+        )
+        .expect("minimum") else {
+            panic!("expected f64 minimum");
+        };
+        assert_eq!(minimum_nan.to_bits(), nan.to_bits());
         let ArithmeticValue::F64(minimum_zero) = evaluate_arithmetic_expression(
             &ArithExpr::Min(
                 Box::new(ArithExpr::Variable("negative_zero".to_string())),
@@ -805,7 +810,7 @@ mod tests {
         .expect("minimum zero") else {
             panic!("expected f64 minimum");
         };
-        assert_eq!(minimum_zero.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(minimum_zero.to_bits(), (-0.0_f64).to_bits());
         let ArithmeticValue::F64(maximum_zero) = evaluate_arithmetic_expression(
             &ArithExpr::Max(
                 Box::new(ArithExpr::Variable("positive_zero".to_string())),
@@ -816,7 +821,7 @@ mod tests {
         .expect("maximum zero") else {
             panic!("expected f64 maximum");
         };
-        assert_eq!(maximum_zero.to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(maximum_zero.to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]
@@ -829,11 +834,11 @@ mod tests {
         )
         .expect("NaN ordering"));
         assert!(
-            !compare_arithmetic_values(&positive_nan, CompOp::Eq, &positive_nan)
+            compare_arithmetic_values(&positive_nan, CompOp::Eq, &positive_nan)
                 .expect("NaN equality")
         );
         assert!(
-            compare_arithmetic_values(&positive_nan, CompOp::Ne, &positive_nan)
+            !compare_arithmetic_values(&positive_nan, CompOp::Ne, &positive_nan)
                 .expect("NaN inequality")
         );
         assert!(compare_arithmetic_values(
@@ -873,6 +878,127 @@ mod tests {
             else_expr: Box::new(ArithExpr::Float(1.0)),
         };
         assert!(evaluate(&mismatched_branches).is_err());
+    }
+
+    #[test]
+    fn float_comparison_and_selection_follow_one_total_order() {
+        let f64_values = [
+            f64::from_bits(0xfff8_0000_0000_0002),
+            f64::NEG_INFINITY,
+            -0.0,
+            0.0,
+            f64::INFINITY,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            f64::from_bits(0x7ff8_0000_0000_0002),
+        ];
+        for &left in &f64_values {
+            for &right in &f64_values {
+                let ordering = left.total_cmp(&right);
+                for (op, expected) in [
+                    (CompOp::Eq, ordering.is_eq()),
+                    (CompOp::Ne, !ordering.is_eq()),
+                    (CompOp::Lt, ordering.is_lt()),
+                    (CompOp::Le, !ordering.is_gt()),
+                    (CompOp::Gt, ordering.is_gt()),
+                    (CompOp::Ge, !ordering.is_lt()),
+                ] {
+                    assert_eq!(
+                        compare_arithmetic_values(
+                            &ArithmeticValue::F64(left),
+                            op,
+                            &ArithmeticValue::F64(right),
+                        )
+                        .expect("f64 comparison"),
+                        expected,
+                        "f64 comparison mismatch: left={:#018x} op={op:?} right={:#018x}",
+                        left.to_bits(),
+                        right.to_bits(),
+                    );
+                }
+            }
+        }
+
+        let f32_values = [
+            f32::from_bits(0xffc0_0002),
+            f32::NEG_INFINITY,
+            -0.0,
+            0.0,
+            f32::INFINITY,
+            f32::from_bits(0x7fc0_0001),
+            f32::from_bits(0x7fc0_0002),
+        ];
+        for &left in &f32_values {
+            for &right in &f32_values {
+                let ordering = left.total_cmp(&right);
+                for (op, expected) in [
+                    (CompOp::Eq, ordering.is_eq()),
+                    (CompOp::Ne, !ordering.is_eq()),
+                    (CompOp::Lt, ordering.is_lt()),
+                    (CompOp::Le, !ordering.is_gt()),
+                    (CompOp::Gt, ordering.is_gt()),
+                    (CompOp::Ge, !ordering.is_lt()),
+                ] {
+                    assert_eq!(
+                        compare_arithmetic_values(
+                            &ArithmeticValue::F32(left),
+                            op,
+                            &ArithmeticValue::F32(right),
+                        )
+                        .expect("f32 comparison"),
+                        expected,
+                        "f32 comparison mismatch: left={:#010x} op={op:?} right={:#010x}",
+                        left.to_bits(),
+                        right.to_bits(),
+                    );
+                }
+            }
+        }
+
+        for (left, right) in [
+            (-0.0, 0.0),
+            (
+                f64::from_bits(0xfff8_0000_0000_0042),
+                f64::from_bits(0x7ff8_0000_0000_0024),
+            ),
+        ] {
+            for (first, second) in [(left, right), (right, left)] {
+                let bindings = HashMap::from([
+                    ("first".to_string(), ArithmeticValue::F64(first)),
+                    ("second".to_string(), ArithmeticValue::F64(second)),
+                ]);
+                for (expr, expected) in [
+                    (
+                        ArithExpr::Min(
+                            Box::new(ArithExpr::Variable("first".to_string())),
+                            Box::new(ArithExpr::Variable("second".to_string())),
+                        ),
+                        if left.total_cmp(&right).is_gt() {
+                            right
+                        } else {
+                            left
+                        },
+                    ),
+                    (
+                        ArithExpr::Max(
+                            Box::new(ArithExpr::Variable("first".to_string())),
+                            Box::new(ArithExpr::Variable("second".to_string())),
+                        ),
+                        if left.total_cmp(&right).is_lt() {
+                            right
+                        } else {
+                            left
+                        },
+                    ),
+                ] {
+                    let ArithmeticValue::F64(actual) =
+                        evaluate_arithmetic_expression(&expr, &bindings).expect("f64 selection")
+                    else {
+                        panic!("expected f64 selection result");
+                    };
+                    assert_eq!(actual.to_bits(), expected.to_bits());
+                }
+            }
+        }
     }
 
     #[test]

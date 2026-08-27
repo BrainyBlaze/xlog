@@ -34,17 +34,18 @@ use cudarc::driver::DeviceSlice;
 use xlog_core::Schema;
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::CudaKernelProvider;
 #[cfg(feature = "host-io")]
 use xlog_logic::ast::{BodyLiteral, Rule};
 use xlog_logic::ast::{Directives, Evidence, ProbMethod, ProbQuery, Program};
 
 use crate::exact::GpuConfig;
 #[cfg(feature = "host-io")]
+use crate::provenance::presentation_atom_from_canonical;
+#[cfg(feature = "host-io")]
 use crate::provenance::Value;
 use crate::provenance::{
-    atom_key_from_ground_atom, canonicalize_probabilistic_program,
-    presentation_atom_from_canonical, GroundAtom,
+    atom_key_from_ground_atom, canonicalize_probabilistic_program, GroundAtom,
 };
 
 /// Sampling method for Monte Carlo inference.
@@ -57,6 +58,7 @@ pub enum McSamplingMethod {
 }
 
 impl McSamplingMethod {
+    /// Returns the stable machine-readable sampling-method name.
     pub fn as_str(self) -> &'static str {
         match self {
             McSamplingMethod::Rejection => "rejection",
@@ -101,14 +103,20 @@ impl McCountStrategy {
 /// Gate with `XLOG_MC_PROFILE=1` to print at the end of evaluation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct McTimingBreakdown {
+    /// Microseconds spent drawing Bernoulli samples.
     pub sampler_us: u64,
+    /// Microseconds spent resetting per-sample state.
     pub sample_reset_us: u64,
+    /// Microseconds spent materializing sampled extensional facts.
     pub sample_build_us: u64,
+    /// Microseconds spent evaluating deterministic rules.
     pub eval_us: u64,
+    /// Microseconds spent accumulating evidence and query counts.
     pub count_us: u64,
 }
 
 impl McTimingBreakdown {
+    /// Returns the saturating sum of all measured phases.
     pub fn total_us(&self) -> u64 {
         self.sampler_us
             .saturating_add(self.sample_reset_us)
@@ -179,6 +187,7 @@ impl Default for McEvalConfig {
 }
 
 impl McEvalConfig {
+    /// Resolves Monte Carlo settings from program directives and validates them.
     pub fn from_directives(directives: &Directives) -> Result<Self> {
         let mut cfg = Self::default();
         if let Some(samples) = directives.prob_samples {
@@ -221,6 +230,7 @@ impl McEvalConfig {
         self.validate()
     }
 
+    /// Validates numeric ranges and required positive limits.
     pub fn validate(&self) -> Result<()> {
         if self.samples == 0 {
             return Err(XlogError::Compilation(
@@ -243,12 +253,19 @@ impl McEvalConfig {
 }
 
 #[derive(Debug, Clone)]
+/// Monte Carlo probability estimate and confidence interval for one query.
 pub struct McQueryEstimate {
+    /// Ground query atom.
     pub atom: GroundAtom,
+    /// Estimated conditional probability.
     pub prob: f64,
+    /// Natural logarithm of the estimated conditional probability.
     pub log_prob: f64,
+    /// Estimated standard error.
     pub stderr: f64,
+    /// Lower endpoint of the configured confidence interval.
     pub ci_low: f64,
+    /// Upper endpoint of the configured confidence interval.
     pub ci_high: f64,
 }
 
@@ -274,15 +291,25 @@ impl McEngine {
 }
 
 #[derive(Debug, Clone)]
+/// Materialized Monte Carlo evaluation result.
 pub struct McResult {
+    /// Number of sampled worlds.
     pub total_samples: usize,
+    /// Number of sampled worlds satisfying all evidence.
     pub evidence_samples: usize,
+    /// Random seed used for sampling.
     pub seed: u64,
+    /// Confidence level used for intervals.
     pub confidence: f64,
+    /// Per-query conditional estimates.
     pub query_estimates: Vec<McQueryEstimate>,
+    /// Number of non-monotone strongly connected components evaluated.
     pub nonmonotone_sccs: usize,
+    /// Number of detected non-monotone evaluation cycles.
     pub nonmonotone_cycles: usize,
+    /// Number of non-monotone components that reached the iteration limit.
     pub nonmonotone_iteration_limit_hits: usize,
+    /// Evidence-sampling method used for the run.
     pub sampling_method: McSamplingMethod,
     /// Engine that produced this result; CPU-oracle results are reachable
     /// only through explicit opt-in and are labeled so downstream consumers
@@ -322,14 +349,23 @@ impl McHotLoopTransfers {
 
 /// Device-resident Monte Carlo result counts.
 pub struct McDeviceResult {
+    /// Device count of evidence-satisfying worlds that also satisfy each query.
     pub query_counts: TrackedCudaSlice<u32>,
+    /// Device count of worlds satisfying all evidence.
     pub evidence_count: TrackedCudaSlice<u32>,
+    /// Number of sampled worlds.
     pub total_samples: usize,
+    /// Random seed used for sampling.
     pub seed: u64,
+    /// Confidence level requested for result materialization.
     pub confidence: f64,
+    /// Number of non-monotone strongly connected components evaluated.
     pub nonmonotone_sccs: usize,
+    /// Number of detected non-monotone evaluation cycles.
     pub nonmonotone_cycles: usize,
+    /// Number of non-monotone components that reached the iteration limit.
     pub nonmonotone_iteration_limit_hits: usize,
+    /// Evidence-sampling method used for the run.
     pub sampling_method: McSamplingMethod,
     /// Legacy back-compat field: tracked transfers measured around the resident
     /// engine's measured region (zero). The authoritative no-host contract is
@@ -349,7 +385,7 @@ pub(super) struct ProbFactSpec {
 pub(super) struct AdSpec {
     pub(super) decision_vars: Vec<usize>,
     pub(super) choices: Vec<GroundAtom>,
-    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+    #[cfg(feature = "host-io")]
     pub(super) has_none: bool,
 }
 
@@ -390,7 +426,7 @@ pub(super) struct SccPlan {
     pub(super) kind: SccKind,
 }
 
-#[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+#[cfg(feature = "host-io")]
 #[derive(Debug, Clone, Default)]
 pub(super) struct EvalStats {
     pub(super) nonmonotone_sccs: usize,
@@ -399,6 +435,7 @@ pub(super) struct EvalStats {
 }
 
 #[derive(Clone)]
+/// Compiled Monte Carlo program with canonical probabilistic variables and GPU settings.
 pub struct McProgram {
     pub(super) gpu_config: GpuConfig,
     pub(super) program: Program,
@@ -409,7 +446,7 @@ pub struct McProgram {
     #[cfg(feature = "host-io")]
     pub(super) arithmetic_schemas: HashMap<String, Schema>,
     pub(super) queries: Vec<GroundAtom>,
-    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+    #[cfg(feature = "host-io")]
     query_presentations: Vec<GroundAtom>,
     pub(super) evidence: Vec<(GroundAtom, bool)>,
     pub(super) bernoulli_probs: Vec<f32>,
@@ -418,11 +455,13 @@ pub struct McProgram {
 }
 
 impl McProgram {
+    /// Parses source and compiles a Monte Carlo program with default GPU settings.
     pub fn compile_source(source: &str) -> Result<Self> {
         let program = xlog_logic::parse_program(source)?;
         Self::compile_from_program(&program, GpuConfig::default())
     }
 
+    /// Parses source and compiles a Monte Carlo program with explicit GPU settings.
     pub fn compile_source_with_gpu(source: &str, config: GpuConfig) -> Result<Self> {
         let program = xlog_logic::parse_program(source)?;
         Self::compile_from_program(&program, config)
@@ -438,6 +477,7 @@ impl McProgram {
         Ok(compiled)
     }
 
+    /// Returns the number of independent Bernoulli variables sampled per world.
     pub fn num_vars(&self) -> usize {
         self.bernoulli_probs.len()
     }
@@ -795,24 +835,31 @@ impl McProgram {
     }
 
     fn compile_program(program: &Program) -> Result<Self> {
+        #[cfg(feature = "host-io")]
         let source_program = program;
         let arithmetic_schemas = crate::provenance::arithmetic_schemas(program)?;
         let canonical_program = canonicalize_probabilistic_program(program, &arithmetic_schemas)?;
         let program = &canonical_program;
 
         let mut queries: Vec<GroundAtom> = Vec::new();
-        let mut query_presentations: Vec<GroundAtom> = Vec::new();
-        for (ProbQuery { atom }, ProbQuery { atom: source_atom }) in program
-            .prob_queries
-            .iter()
-            .zip(&source_program.prob_queries)
-        {
+        for ProbQuery { atom } in &program.prob_queries {
             queries.push(atom_key_from_ground_atom(atom)?);
-            query_presentations.push(presentation_atom_from_canonical(
-                source_atom,
-                atom,
-                &arithmetic_schemas,
-            )?);
+        }
+        #[cfg(feature = "host-io")]
+        let mut query_presentations: Vec<GroundAtom> = Vec::new();
+        #[cfg(feature = "host-io")]
+        {
+            for (ProbQuery { atom }, ProbQuery { atom: source_atom }) in program
+                .prob_queries
+                .iter()
+                .zip(&source_program.prob_queries)
+            {
+                query_presentations.push(presentation_atom_from_canonical(
+                    source_atom,
+                    atom,
+                    &arithmetic_schemas,
+                )?);
+            }
         }
 
         let mut evidence: Vec<(GroundAtom, bool)> = Vec::new();
@@ -908,6 +955,7 @@ impl McProgram {
             #[cfg(feature = "host-io")]
             arithmetic_schemas,
             queries,
+            #[cfg(feature = "host-io")]
             query_presentations,
             evidence,
             bernoulli_probs,
@@ -923,11 +971,10 @@ impl McProgram {
             ));
         }
 
-        let device = Arc::new(CudaDevice::new(self.gpu_config.device_ordinal)?);
-        let memory = Arc::new(GpuMemoryManager::new(
-            device.clone(),
+        xlog_cuda::CudaProviderBuilder::new(
+            self.gpu_config.device_ordinal,
             MemoryBudget::with_limit(self.gpu_config.memory_bytes),
-        ));
-        CudaKernelProvider::new(device, memory)
+        )
+        .build()
     }
 }

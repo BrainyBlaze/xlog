@@ -3,13 +3,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamPool, XlogDeviceRuntime};
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::provider::{HostLaunchMetadataTransferStats, HostTransferStats};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaDevice, CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager};
 use xlog_ir::{
     rir::{
         CostPredictionRecord, HelperSplitSpec, KCliqueVariableOrder, LookupPerm, MultiwayPlan,
@@ -61,38 +58,9 @@ struct RuntimeFixture {
 }
 
 fn runtime_fixture() -> Option<RuntimeFixture> {
-    let device = match CudaDevice::new(0) {
-        Ok(device) => Arc::new(device),
-        Err(err) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-            panic!("CUDA runtime required by XLOG_REQUIRE_CUDA=1: {err}")
-        }
-        Err(err) => {
-            eprintln!("Skipping test: CUDA runtime unavailable: {err}");
-            return None;
-        }
-    };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 128 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(128 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider = match CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+    let provider = match CudaProviderBuilder::new(0, MemoryBudget::with_limit(128 * 1024 * 1024))
+        .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+        .build()
     {
         Ok(provider) => Arc::new(provider),
         Err(err) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
@@ -103,6 +71,10 @@ fn runtime_fixture() -> Option<RuntimeFixture> {
             return None;
         }
     };
+    let device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
 
     Some(RuntimeFixture {
         _device: device,
@@ -4049,8 +4021,7 @@ fn parsed_know_constraint_prunes_world_view_when_constraint_body_true() {
         result
             .semantic_trace
             .rejection_reasons
-            .iter()
-            .any(|&code| code == constraint_code),
+            .contains(&constraint_code),
         "expected a constraint-violation rejection reason, got {:?}",
         result.semantic_trace.rejection_reasons
     );
@@ -4154,18 +4125,18 @@ fn constraint_specific_reason_identifies_firing_constraint() {
     // Reason code 6 must be unchanged for the rejected candidate(s).
     let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
     assert!(
-        reasons_a.iter().any(|&code| code == constraint_code),
+        reasons_a.contains(&constraint_code),
         "expected reason code 6 (constraint violation), got {:?}",
         reasons_a
     );
     // The firing constraint index must be SPECIFICALLY 1, not merely "some".
     assert!(
-        indices_a.iter().any(|idx| *idx == Some(1)),
+        indices_a.contains(&Some(1)),
         "expected constraint-specific index Some(1) for a `unsafe_b` violation, got {:?}",
         indices_a
     );
     assert!(
-        !indices_a.iter().any(|idx| *idx == Some(0)),
+        !indices_a.contains(&Some(0)),
         "constraint index 0 (`unsafe_a`) must NOT be reported when only `unsafe_b` is present, got {:?}",
         indices_a
     );
@@ -4182,12 +4153,12 @@ fn constraint_specific_reason_identifies_firing_constraint() {
         "constraint index 0 should prune at least one candidate"
     );
     assert!(
-        reasons_b.iter().any(|&code| code == constraint_code),
+        reasons_b.contains(&constraint_code),
         "expected reason code 6 (constraint violation), got {:?}",
         reasons_b
     );
     assert!(
-        indices_b.iter().any(|idx| *idx == Some(0)),
+        indices_b.contains(&Some(0)),
         "expected constraint-specific index Some(0) for an `unsafe_a` violation, got {:?}",
         indices_b
     );
@@ -4298,8 +4269,7 @@ fn parsed_possible_constraint_prunes_when_contradiction_possible() {
     assert!(result
         .semantic_trace
         .rejection_reasons
-        .iter()
-        .any(|&code| code == constraint_code));
+        .contains(&constraint_code));
     result
         .require_runtime_dispatch_certification()
         .expect("all-pruned possible-constraint path should retain GPU semantic certification");
@@ -4377,8 +4347,7 @@ fn variable_keyed_constraint_prunes_when_relation_non_empty() {
         result
             .semantic_trace
             .rejection_reasons
-            .iter()
-            .any(|&code| code == constraint_code),
+            .contains(&constraint_code),
         "expected constraint-violation reason code 6, got {:?}",
         result.semantic_trace.rejection_reasons
     );
@@ -4387,8 +4356,7 @@ fn variable_keyed_constraint_prunes_when_relation_non_empty() {
         result
             .semantic_trace
             .constraint_violation_indices
-            .iter()
-            .any(|idx| *idx == Some(0)),
+            .contains(&Some(0)),
         "expected firing constraint index Some(0), got {:?}",
         result.semantic_trace.constraint_violation_indices
     );
@@ -4738,8 +4706,7 @@ fn parsed_not_possible_constraint_prunes_when_required_absent() {
     assert!(result
         .semantic_trace
         .rejection_reasons
-        .iter()
-        .any(|&code| code == constraint_code));
+        .contains(&constraint_code));
     result
         .require_runtime_dispatch_certification()
         .expect("all-pruned not-possible-constraint path should retain GPU semantic certification");
@@ -7368,12 +7335,21 @@ fn kclique_order_without_edge_permutation() -> KCliqueVariableOrder {
 // =====================================================================
 
 #[cfg(feature = "epistemic-logic-tests")]
+type UnaryRelationInput<'a> = (&'a str, &'a [u32]);
+
+#[cfg(feature = "epistemic-logic-tests")]
+type BinaryRelationInput<'a> = (&'a str, &'a [(u32, u32)]);
+
+#[cfg(feature = "epistemic-logic-tests")]
+type TernaryRelationInput<'a> = (&'a str, &'a [(u32, u32, u32)]);
+
+#[cfg(feature = "epistemic-logic-tests")]
 fn run_tuple_key_unary_result(
     fixture: &RuntimeFixture,
     source: &str,
-    unary_inputs: &[(&str, &[u32])],
-    binary_inputs: &[(&str, &[(u32, u32)])],
-    ternary_inputs: &[(&str, &[(u32, u32, u32)])],
+    unary_inputs: &[UnaryRelationInput<'_>],
+    binary_inputs: &[BinaryRelationInput<'_>],
+    ternary_inputs: &[TernaryRelationInput<'_>],
     expected_key_column_reads: u32,
 ) -> Vec<u32> {
     let program = parse_program(source).expect("parse tuple-key membership test program");

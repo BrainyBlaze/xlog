@@ -28,6 +28,8 @@ pub(crate) struct CooTask {
     pub(crate) num_query: u32,
 }
 
+pub(crate) type BuiltCoo = (TrackedCudaSlice<u32>, TrackedCudaSlice<u32>, u32);
+
 // ---------------------------------------------------------------------------
 // Phase C: COO construction
 // ---------------------------------------------------------------------------
@@ -44,7 +46,7 @@ pub(crate) fn build_coo_single(
     num_facts: u32,
     num_cands: u32,
     upper_bound: u32,
-) -> PyResult<(TrackedCudaSlice<u32>, TrackedCudaSlice<u32>, u32)> {
+) -> PyResult<BuiltCoo> {
     let num_tasks = tasks.len();
 
     let mut offsets_host = vec![0u32; num_tasks];
@@ -129,7 +131,7 @@ pub(crate) fn build_coo_chunked(
     fact_indices_buffers: &[TrackedCudaSlice<u32>],
     _num_facts: u32,
     coo_chunk_budget: u64,
-) -> PyResult<Option<(TrackedCudaSlice<u32>, TrackedCudaSlice<u32>, u32)>> {
+) -> PyResult<Option<BuiltCoo>> {
     let num_tasks = tasks.len();
     let max_queries_per_chunk = (coo_chunk_budget / 8).max(1) as u32;
 
@@ -167,8 +169,7 @@ pub(crate) fn build_coo_chunked(
                 chunk_end = chunk_start + 1;
             }
 
-            for task_idx in chunk_start..chunk_end {
-                let task = &tasks[task_idx];
+            for (task_idx, task) in tasks.iter().enumerate().take(chunk_end).skip(chunk_start) {
                 provider
                     .count_mask_into_slot(
                         &task.d_mask,
@@ -238,9 +239,7 @@ pub(crate) fn build_coo_chunked(
                 chunk_end = chunk_start + 1;
             }
 
-            for task_idx in chunk_start..chunk_end {
-                let task = &tasks[task_idx];
-
+            for (task_idx, task) in tasks.iter().enumerate().take(chunk_end).skip(chunk_start) {
                 let d_prefix = provider
                     .scan_u8_mask_device(&task.d_mask, task.num_query)
                     .map_err(|e| types::gpu_err("scan mask", e))?;
@@ -329,43 +328,47 @@ pub(crate) fn sort_and_build_csr(
 
 /// Run forward credit-gather, NLL loss reduction, and backward gradient
 /// scatter on device. Returns `(loss_capsule, grad_capsule)` DLPack objects.
+pub(crate) struct ForwardBackwardInputs<'a> {
+    pub(crate) row_offsets: &'a TrackedCudaSlice<u32>,
+    pub(crate) coo_candidates: &'a TrackedCudaSlice<u32>,
+    pub(crate) candidate_probabilities: &'a xlog_cuda::CudaColumn,
+    pub(crate) is_positive: &'a TrackedCudaSlice<u8>,
+    pub(crate) fact_count: u32,
+    pub(crate) candidate_count: u32,
+    pub(crate) uses_f64: bool,
+}
+
 pub(crate) fn forward_backward_reduce(
     provider: &CudaKernelProvider,
     py: Python<'_>,
-    d_row_offsets: &TrackedCudaSlice<u32>,
-    d_coo_cands: &TrackedCudaSlice<u32>,
-    cand_col: &xlog_cuda::CudaColumn,
-    d_is_positive: &TrackedCudaSlice<u8>,
-    num_facts: u32,
-    num_cands: u32,
-    is_f64: bool,
+    inputs: ForwardBackwardInputs<'_>,
 ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
-    if is_f64 {
+    if inputs.uses_f64 {
         let eps_f64 = 1e-8f64;
 
         let (credit_out, loss_contrib) = provider
             .ilp_credit_forward_f64_launch(
-                d_row_offsets,
-                d_coo_cands,
-                cand_col,
-                d_is_positive,
-                num_facts,
+                inputs.row_offsets,
+                inputs.coo_candidates,
+                inputs.candidate_probabilities,
+                inputs.is_positive,
+                inputs.fact_count,
                 eps_f64,
             )
             .map_err(|e| types::gpu_err("forward f64", e))?;
 
         let d_total_loss = provider
-            .ilp_reduce_sum_f64_launch(&loss_contrib, num_facts)
+            .ilp_reduce_sum_f64_launch(&loss_contrib, inputs.fact_count)
             .map_err(|e| types::gpu_err("reduce f64", e))?;
 
         let d_grad = provider
             .ilp_credit_backward_f64_launch(
-                d_row_offsets,
-                d_coo_cands,
+                inputs.row_offsets,
+                inputs.coo_candidates,
                 &credit_out,
-                d_is_positive,
-                num_facts,
-                num_cands,
+                inputs.is_positive,
+                inputs.fact_count,
+                inputs.candidate_count,
             )
             .map_err(|e| types::gpu_err("backward f64", e))?;
 
@@ -374,7 +377,7 @@ pub(crate) fn forward_backward_reduce(
             py,
             d_total_loss,
             d_grad,
-            num_cands,
+            inputs.candidate_count,
             ScalarType::F64,
         )
     } else {
@@ -382,27 +385,27 @@ pub(crate) fn forward_backward_reduce(
 
         let (credit_out, loss_contrib) = provider
             .ilp_credit_forward_f32_launch(
-                d_row_offsets,
-                d_coo_cands,
-                cand_col,
-                d_is_positive,
-                num_facts,
+                inputs.row_offsets,
+                inputs.coo_candidates,
+                inputs.candidate_probabilities,
+                inputs.is_positive,
+                inputs.fact_count,
                 eps_f32,
             )
             .map_err(|e| types::gpu_err("forward f32", e))?;
 
         let d_total_loss = provider
-            .ilp_reduce_sum_f32_launch(&loss_contrib, num_facts)
+            .ilp_reduce_sum_f32_launch(&loss_contrib, inputs.fact_count)
             .map_err(|e| types::gpu_err("reduce f32", e))?;
 
         let d_grad = provider
             .ilp_credit_backward_f32_launch(
-                d_row_offsets,
-                d_coo_cands,
+                inputs.row_offsets,
+                inputs.coo_candidates,
                 &credit_out,
-                d_is_positive,
-                num_facts,
-                num_cands,
+                inputs.is_positive,
+                inputs.fact_count,
+                inputs.candidate_count,
             )
             .map_err(|e| types::gpu_err("backward f32", e))?;
 
@@ -411,7 +414,7 @@ pub(crate) fn forward_backward_reduce(
             py,
             d_total_loss,
             d_grad,
-            num_cands,
+            inputs.candidate_count,
             ScalarType::F32,
         )
     }

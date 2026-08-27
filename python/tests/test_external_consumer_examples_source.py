@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 
@@ -13,23 +12,6 @@ EXAMPLES = [
 ]
 
 
-def external_consumer_examples_evidence_dir() -> Path:
-    matches = []
-    for path in sorted((ROOT / "docs-internal" / "evidence").glob("*-examples")):
-        summary_path = path / "validation_summary.json"
-        if not summary_path.exists() or not (path / "README.md").exists():
-            continue
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        if (
-            summary.get("example_count") == len(EXAMPLES)
-            and "exact_induction_parity" in summary
-            and "relation_delta_equivalence" in summary
-        ):
-            matches.append(path)
-    assert len(matches) == 1
-    return matches[0]
-
-
 def test_external_consumer_examples_layout_is_committed() -> None:
     suite = ROOT / "examples/external-consumer-python"
 
@@ -39,13 +21,10 @@ def test_external_consumer_examples_layout_is_committed() -> None:
         assert (suite / name / "run.py").exists()
 
 
-def test_external_consumer_examples_validator_and_evidence_contract_is_committed() -> None:
+def test_external_consumer_examples_validator_contract_is_committed() -> None:
     validator = ROOT / "scripts/validate_external_consumer_examples.py"
-    evidence = external_consumer_examples_evidence_dir()
 
     assert validator.exists()
-    assert (evidence / "README.md").exists()
-    assert (evidence / "validation_summary.json").exists()
 
     source = validator.read_text()
     for needle in [

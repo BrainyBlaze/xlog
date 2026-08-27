@@ -1,10 +1,7 @@
-#![allow(clippy::arc_with_non_send_sync)]
 #![cfg(feature = "host-io")]
 
-use std::sync::Arc;
-
 use xlog_core::MemoryBudget;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::CudaKernelProvider;
 
 use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
 use xlog_prob::neural_fast_path::GpuWeightSlots;
@@ -25,24 +22,12 @@ fn neural_fast_path_config() -> NeuralFastPathConfig {
 }
 
 fn try_provider() -> Option<CudaKernelProvider> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
+    match xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+        .build()
+    {
+        Ok(provider) => Some(provider),
         Err(e) => {
             eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
-            return None;
-        }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1024 * 1024 * 1024),
-    ));
-    match CudaKernelProvider::new(device, memory) {
-        Ok(p) => Some(p),
-        Err(e) => {
-            eprintln!(
-                "Skipping test: failed to create CUDA kernel provider: {}",
-                e
-            );
             None
         }
     }
@@ -130,7 +115,9 @@ query(pred(0, 2)).
         .dtoh_sync_copy_into(grads[0].column(0).unwrap(), &mut out_bytes)
         .unwrap();
     let out: Vec<f32> = out_bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
 

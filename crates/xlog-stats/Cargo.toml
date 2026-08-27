@@ -19,3 +19,6 @@ criterion = "0.5"
 [[bench]]
 name = "stats_bench"
 harness = false
+
+[lints]
+workspace = true

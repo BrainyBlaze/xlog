@@ -76,7 +76,10 @@ counters are how you confirm what actually ran.
 The counters are:
 
 - triangle, 4-cycle, and clique WCOJ dispatch counts;
-- WCOJ error-decline count;
+- actual fallback counts by attempted route: chain, dedicated multiway,
+  Free Join, planned hash, factorized delta, and group-by fusion;
+- WCOJ pipeline-error decline count, reported separately from ordinary
+  eligibility or cost-gate fallbacks;
 - aggregate-fused groupby dispatch count;
 - Free Join dispatch count;
 - factorized recursive-delta dispatch count.

@@ -5,12 +5,12 @@ floating-point data with special values (NaN, Infinity, signed zero).
 
 ## Semantics
 
-XLOG uses **hybrid semantics** for float comparisons:
+XLOG uses one total order for every float comparison:
 
 | Operator | Semantics | Example |
 |----------|-----------|---------|
-| `=`, `!=` | IEEE 754 | `NaN = NaN` → FALSE |
-| `<`, `<=`, `>`, `>=` | Total Ordering | `NaN > Inf` → TRUE |
+| `=`, `!=` | Total-order identity | `-0.0 = 0.0` → FALSE |
+| `<`, `<=`, `>`, `>=` | Total ordering | positive `NaN > Inf` → TRUE |
 
 ### Total Ordering
 
@@ -20,8 +20,12 @@ XLOG uses **hybrid semantics** for float comparisons:
 
 This ordering:
 - Places NaN at the extremes (negative NaN smallest, positive NaN largest)
-- Distinguishes `-0.0` from `+0.0` (unlike IEEE equality)
+- Distinguishes `-0.0` from `+0.0`
+- Distinguishes NaN sign, signaling state, and payload
 - Matches Rust's `f64::total_cmp` behavior
+
+Arithmetic-generated NaNs use one canonical positive quiet-NaN bit pattern.
+They therefore compare equal to themselves. Do not use `V != V` to detect NaN.
 
 ## Examples
 
@@ -43,10 +47,10 @@ xlog run examples/xlog/15-float-predicates/01_nan_handling.xlog --device 0
 
 ## Common Patterns
 
-### Filtering Out NaN
+### Preventing invalid arithmetic
 ```xlog
-// NaN != NaN under IEEE, so V = V is only true for non-NaN values
-valid(Id, V) :- data(Id, V), V = V.
+// Validate the producing operation instead of relying on NaN self-inequality.
+valid(Id, V) :- input(Id, Num, Denom), Denom != 0.0, V is Num / Denom.
 ```
 
 ### Filtering Out Infinity
@@ -55,9 +59,8 @@ valid(Id, V) :- data(Id, V), V = V.
 finite(Id, V) :- data(Id, V), V > -1000000.0, V < 1000000.0.
 ```
 
-### Detecting Special Values
+### Classifying invalid inputs
 ```xlog
-// Values greater than any normal bound are Inf or NaN
-special(Id, V) :- data(Id, V), V > 1000000000.0.
-special(Id, V) :- data(Id, V), V < -1000000000.0.
+// Preserve provenance when the invalid operation itself matters.
+invalid_divisor(Id) :- input(Id, _, Denom), Denom = 0.0.
 ```

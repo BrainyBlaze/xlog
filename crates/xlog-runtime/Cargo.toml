@@ -17,6 +17,7 @@ xlog-ir.workspace = true
 xlog-cuda.workspace = true
 xlog-stats.workspace = true
 xlog-logic = { workspace = true, optional = true }
+serde_json.workspace = true
 
 [dev-dependencies]
 
@@ -48,3 +49,6 @@ recursive-stats-trace = ["dep:xlog-logic"]
 name = "recursive_stats_trace"
 path = "tests/recursive_stats_trace.rs"
 required-features = ["recursive-stats-trace"]
+
+[lints]
+workspace = true

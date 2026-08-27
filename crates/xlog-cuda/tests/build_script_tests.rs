@@ -37,6 +37,10 @@ fn test_build_script_includes_circuit_and_mc_sample() {
         build_contents.contains(".join(\"kernels\")"),
         "build.rs should still support the workspace-root kernels/ layout"
     );
+    assert!(
+        build_contents.contains("totalorder.cuh"),
+        "the shared float-order header must invalidate embedded kernel artifacts"
+    );
 }
 
 #[test]

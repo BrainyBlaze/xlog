@@ -76,10 +76,7 @@ impl super::CudaKernelProvider {
         let mut bytes = vec![0u8; num_bytes];
         self.dtoh_sync_copy_into_tracked(&col_view, &mut bytes)?;
 
-        Ok(bytes
-            .chunks_exact(T::BYTE_WIDTH)
-            .map(|c| T::from_le_bytes(c))
-            .collect())
+        Ok(Self::decode_column_bytes::<T>(&bytes, num_rows))
     }
 
     /// Shared implementation for tracked column downloads, with the row
@@ -111,10 +108,16 @@ impl super::CudaKernelProvider {
         self.dtoh_sync_copy_into_tracked(&col_view, &mut bytes)
             .map_err(|e| XlogError::kernel_ctx("download_column", "dtoh copy failed", &e))?;
 
-        Ok(bytes
-            .chunks_exact(T::BYTE_WIDTH)
-            .map(|c| T::from_le_bytes(c))
-            .collect())
+        Ok(Self::decode_column_bytes::<T>(&bytes, num_rows))
+    }
+
+    fn decode_column_bytes<T: GpuScalar>(bytes: &[u8], num_rows: usize) -> Vec<T> {
+        (0..num_rows)
+            .map(|row| {
+                let start = row * T::BYTE_WIDTH;
+                T::from_le_bytes(&bytes[start..start + T::BYTE_WIDTH])
+            })
+            .collect()
     }
 
     /// Upload a typed slice as a single-column GPU buffer.

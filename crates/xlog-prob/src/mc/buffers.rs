@@ -117,6 +117,7 @@ pub(super) fn compile_sampling_plan(
         ad_specs.push(AdSpec {
             decision_vars,
             choices: choice_atoms,
+            #[cfg(feature = "host-io")]
             has_none,
         });
     }

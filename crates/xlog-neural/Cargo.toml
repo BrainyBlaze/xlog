@@ -51,3 +51,6 @@ required-features = ["python-tests"]
 name = "bridge_test"
 path = "tests/bridge_test.rs"
 required-features = ["python-tests"]
+
+[lints]
+workspace = true

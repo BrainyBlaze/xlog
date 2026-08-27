@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
-use xlog_core::ScalarType;
+use xlog_core::{f64_total_order_key, ScalarType};
 use xlog_core::{RelId, Result, RuntimeConfig, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
@@ -17,7 +17,7 @@ use xlog_ir::{ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode};
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::ilp_registry::{IlpRegistry, IlpTaggedResult};
-use crate::profiler::{ExecutionStats, Profiler};
+use crate::profiler::{ExecutionStats, Profiler, WcojFallbackStats};
 use crate::RelationStore;
 
 mod delta;
@@ -235,9 +235,10 @@ enum CommonSubexpressionKey {
 /// ```ignore
 /// use std::sync::Arc;
 /// use xlog_runtime::Executor;
-/// use xlog_cuda::CudaKernelProvider;
+/// use xlog_core::MemoryBudget;
+/// use xlog_cuda::CudaProviderBuilder;
 ///
-/// let provider = Arc::new(CudaKernelProvider::new(device, memory)?);
+/// let provider = Arc::new(CudaProviderBuilder::new(0, MemoryBudget::default()).build()?);
 /// let mut executor = Executor::new(provider);
 ///
 /// // Execute a plan
@@ -330,6 +331,8 @@ pub struct Executor {
     /// `XLOG_WCOJ_STRICT=1` propagates the error instead. Public accessor:
     /// `Executor::wcoj_error_decline_count(&self) -> u64`.
     pub(super) wcoj_error_decline_count: u64,
+    /// Actual WCOJ-family fallback executions, classified by attempted route.
+    pub(super) wcoj_fallback: WcojFallbackStats,
     /// Count of fused group-by-root count dispatches that produced the
     /// installed result. Public accessor:
     /// `Executor::wcoj_groupby_fusion_dispatch_count(&self) -> u64`.
@@ -392,8 +395,8 @@ pub struct Executor {
 /// instrumentation.
 #[cfg(feature = "recursive-stats-trace")]
 #[derive(Debug, Default, Clone)]
-#[allow(missing_docs)]
 pub struct RecursiveStatsTrace {
+    /// Ordered snapshots captured at recursive cardinality update boundaries.
     pub entries: Vec<RecursiveStatsTraceEntry>,
 }
 
@@ -406,14 +409,20 @@ pub struct RecursiveStatsTrace {
 /// assertions only see delta-update snapshots.
 #[cfg(feature = "recursive-stats-trace")]
 #[derive(Debug, Clone)]
-#[allow(missing_docs)]
 pub struct RecursiveStatsTraceEntry {
+    /// Zero-based fixpoint iteration; zero denotes the seed pass.
     pub iteration: usize,
+    /// Recursive predicate whose cardinalities were recorded.
     pub pred: String,
+    /// Relation identifier for the accumulated full relation.
     pub full_rel: RelId,
+    /// Relation identifier for the current delta relation.
     pub delta_rel: RelId,
+    /// Full-relation cardinality visible at this boundary.
     pub full_rows: u64,
+    /// Delta-relation cardinality visible at this boundary.
     pub delta_rows: u64,
+    /// Recursive update phase that produced this snapshot.
     pub phase: RecursiveStatsPhase,
     /// Optional binary-join estimate the cost model would use
     /// for the variant body's first binary hop. Triangle:
@@ -425,7 +434,7 @@ pub struct RecursiveStatsTraceEntry {
 
 #[cfg(feature = "recursive-stats-trace")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
+/// Recursive cardinality update boundary represented by a trace entry.
 pub enum RecursiveStatsPhase {
     /// Seed pass — full_rel + delta_rel both updated; trace
     /// entry contains both row counts. iteration == 0.
@@ -483,6 +492,7 @@ impl Executor {
             kclique_histogram_refresh_nanos: 0,
             nested_loop_dispatch_count: 0,
             wcoj_error_decline_count: 0,
+            wcoj_fallback: WcojFallbackStats::default(),
             wcoj_groupby_fusion_dispatch_count: 0,
             free_join_dispatch_count: 0,
             factorized_delta_dispatch_count: 0,
@@ -553,6 +563,7 @@ impl Executor {
         stats.free_join_dispatch_count = self.free_join_dispatch_count();
         stats.factorized_delta_dispatch_count = self.factorized_delta_dispatch_count();
         stats.wcoj_error_decline_count = self.wcoj_error_decline_count();
+        stats.wcoj_fallback = self.wcoj_fallback_stats();
         stats.chain_fallback_scan_equivalents = self.chain_fallback_scan_equivalents;
         stats.chain_fallback_filter_equivalents = self.chain_fallback_filter_equivalents;
         stats
@@ -694,22 +705,22 @@ impl Executor {
     pub fn replay_adaptive_reoptimization_decision(
         &self,
         observations: &[AdaptiveJoinObservation],
-    ) -> AdaptiveReoptimizationDecision {
+    ) -> Result<AdaptiveReoptimizationDecision> {
         self.adaptive_reoptimization_decision(observations)
     }
 
-    fn common_subexpression_enabled(&self) -> bool {
+    fn common_subexpression_enabled(&self) -> Result<bool> {
         self.config.resolved_common_subexpression_elimination()
     }
 
-    fn adaptive_reoptimization_enabled(&self) -> bool {
+    fn adaptive_reoptimization_enabled(&self) -> Result<bool> {
         self.config.resolved_adaptive_reoptimization()
     }
 
     fn adaptive_reoptimization_decision(
         &self,
         observations: &[AdaptiveJoinObservation],
-    ) -> AdaptiveReoptimizationDecision {
+    ) -> Result<AdaptiveReoptimizationDecision> {
         let min_misplan_ratio = self
             .config
             .resolved_adaptive_reoptimization_min_misplan_ratio();
@@ -718,25 +729,25 @@ impl Executor {
             .map(|observation| observation.misplan_ratio)
             .fold(1.0_f64, f64::max);
 
-        if !self.adaptive_reoptimization_enabled() {
-            return AdaptiveReoptimizationDecision {
+        if !self.adaptive_reoptimization_enabled()? {
+            return Ok(AdaptiveReoptimizationDecision {
                 action: AdaptiveReoptimizationAction::Disabled,
                 reason: "adaptive_reoptimization_disabled".to_string(),
                 max_misplan_ratio,
                 min_misplan_ratio,
-            };
+            });
         }
 
         if observations.is_empty() {
-            return AdaptiveReoptimizationDecision {
+            return Ok(AdaptiveReoptimizationDecision {
                 action: AdaptiveReoptimizationAction::Skipped,
                 reason: "no_join_telemetry".to_string(),
                 max_misplan_ratio,
                 min_misplan_ratio,
-            };
+            });
         }
 
-        if max_misplan_ratio >= min_misplan_ratio {
+        Ok(if max_misplan_ratio >= min_misplan_ratio {
             AdaptiveReoptimizationDecision {
                 action: AdaptiveReoptimizationAction::AttemptCandidate,
                 reason: "misplan_threshold_crossed".to_string(),
@@ -750,7 +761,7 @@ impl Executor {
                 max_misplan_ratio,
                 min_misplan_ratio,
             }
-        }
+        })
     }
 
     fn record_adaptive_join_observation(
@@ -1285,7 +1296,7 @@ impl Executor {
         self.execute_plan(baseline_plan)?;
         let baseline_observations = self.adaptive_join_observations.clone();
         self.adaptive_reoptimization_stats.last_observations = baseline_observations.clone();
-        let decision = self.adaptive_reoptimization_decision(&baseline_observations);
+        let decision = self.adaptive_reoptimization_decision(&baseline_observations)?;
         self.adaptive_reoptimization_stats.last_decision = Some(decision.clone());
 
         match decision.action {
@@ -1509,8 +1520,12 @@ impl Executor {
                     Self::expr_may_be_float(left, schema) || Self::expr_may_be_float(right, schema);
 
                 if use_float {
-                    let left_val = Self::evaluate_expr_as_f64(left, columns, row_idx, schema)?;
-                    let right_val = Self::evaluate_expr_as_f64(right, columns, row_idx, schema)?;
+                    let left_val = f64_total_order_key(Self::evaluate_expr_as_f64(
+                        left, columns, row_idx, schema,
+                    )?);
+                    let right_val = f64_total_order_key(Self::evaluate_expr_as_f64(
+                        right, columns, row_idx, schema,
+                    )?);
 
                     Ok(match op {
                         CompareOp::Eq => left_val == right_val,
@@ -1959,7 +1974,7 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
     use xlog_core::MemoryBudget;
-    use xlog_cuda::{CudaDevice, GpuMemoryManager};
+    use xlog_cuda::{CudaDevice, CudaProviderBuilder, GpuMemoryManager};
     use xlog_ir::{CompiledRule, RirMeta, Scc};
 
     fn has_cuda_device() -> bool {
@@ -1971,10 +1986,8 @@ mod tests {
         if !has_cuda_device() {
             return None;
         }
-        let device = Arc::new(CudaDevice::new(0).ok()?);
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
+        let provider = Arc::new(CudaProviderBuilder::new(0, budget).build().ok()?);
         Some(Executor::new(provider))
     }
 
@@ -1982,38 +1995,25 @@ mod tests {
         if !has_cuda_device() {
             return None;
         }
-        let device = Arc::new(CudaDevice::new(0).ok()?);
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
+        let provider = Arc::new(CudaProviderBuilder::new(0, budget).build().ok()?);
         Some(Executor::new_with_config(provider, config))
     }
 
     fn create_manager_stats_fixture() -> Option<(Arc<GpuMemoryManager>, Arc<CudaKernelProvider>)> {
-        let device = match CudaDevice::new(0) {
-            Ok(device) => Arc::new(device),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping test: CUDA runtime unavailable: {error}");
-                return None;
-            }
-        };
-        let memory = Arc::new(GpuMemoryManager::new(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(1024 * 1024 * 1024),
-        ));
-        let provider = match CudaKernelProvider::new(device, Arc::clone(&memory)) {
-            Ok(provider) => Arc::new(provider),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but provider initialization failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping test: provider initialization failed: {error}");
-                return None;
-            }
-        };
+        let provider =
+            match CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024)).build()
+            {
+                Ok(provider) => Arc::new(provider),
+                Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                    panic!("XLOG_REQUIRE_CUDA=1 but provider initialization failed: {error}")
+                }
+                Err(error) => {
+                    eprintln!("Skipping test: provider initialization failed: {error}");
+                    return None;
+                }
+            };
+        let memory = Arc::clone(provider.memory());
         Some((memory, provider))
     }
 
@@ -2254,7 +2254,7 @@ mod tests {
         let results: Vec<bool> = (0..values.len())
             .map(|row| Executor::evaluate_predicate(&gt_two, &columns, row, &schema).unwrap())
             .collect();
-        assert_eq!(results, vec![false, false, true, false]);
+        assert_eq!(results, vec![false, false, true, true]);
 
         let eq_nan = Expr::Compare {
             left: Box::new(Expr::Column(0)),
@@ -2264,7 +2264,7 @@ mod tests {
         let results: Vec<bool> = (0..values.len())
             .map(|row| Executor::evaluate_predicate(&eq_nan, &columns, row, &schema).unwrap())
             .collect();
-        assert_eq!(results, vec![false, false, false, false]);
+        assert_eq!(results, vec![false, false, false, true]);
 
         let ne_nan = Expr::Compare {
             left: Box::new(Expr::Column(0)),
@@ -2274,7 +2274,7 @@ mod tests {
         let results: Vec<bool> = (0..values.len())
             .map(|row| Executor::evaluate_predicate(&ne_nan, &columns, row, &schema).unwrap())
             .collect();
-        assert_eq!(results, vec![true, true, true, true]);
+        assert_eq!(results, vec![true, true, true, false]);
     }
 
     #[test]
@@ -3096,6 +3096,46 @@ mod tests {
         let result = result.unwrap();
         // Result should be union of [1] and [2] = [1, 2]
         assert_eq!(buffer_row_count(&executor, &result), 2);
+    }
+
+    #[test]
+    fn test_execute_fixpoint_honors_runtime_iteration_limit() {
+        let mut config = RuntimeConfig::default();
+        config.max_iterations = 1;
+        let mut executor = match create_test_executor_with_config(config) {
+            Some(executor) => executor,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let base_buffer = create_test_buffer(&executor, &[1], "key");
+        executor.store_mut().put("base_rel", base_buffer);
+        executor.register_relation(RelId(1), "base_rel");
+
+        let recursive_buffer = create_test_buffer(&executor, &[1, 2], "key");
+        executor.store_mut().put("recursive_rel", recursive_buffer);
+        executor.register_relation(RelId(4), "recursive_rel");
+
+        let node = RirNode::Fixpoint {
+            scc_id: 7,
+            base: Box::new(RirNode::Scan { rel: RelId(1) }),
+            recursive: Box::new(RirNode::Scan { rel: RelId(4) }),
+            delta_rel: RelId(2),
+            full_rel: RelId(3),
+        };
+
+        let error = match executor.execute_node(&node) {
+            Ok(_) => panic!("fixpoint unexpectedly ignored max_iterations=1"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Fixpoint iteration limit (1) exceeded for SCC 7"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -3954,10 +3994,14 @@ mod tests {
             .last_observations
             .clone();
 
-        let first = executor.replay_adaptive_reoptimization_decision(&observations);
+        let first = executor
+            .replay_adaptive_reoptimization_decision(&observations)
+            .unwrap();
         for _ in 0..100 {
             assert_eq!(
-                executor.replay_adaptive_reoptimization_decision(&observations),
+                executor
+                    .replay_adaptive_reoptimization_decision(&observations)
+                    .unwrap(),
                 first
             );
         }

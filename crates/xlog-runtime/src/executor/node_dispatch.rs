@@ -96,7 +96,7 @@ impl Executor {
     /// # Errors
     /// Returns an error if the node execution fails
     pub fn execute_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
-        if !self.common_subexpression_enabled() || !Self::is_common_subexpression_cacheable(node) {
+        if !self.common_subexpression_enabled()? || !Self::is_common_subexpression_cacheable(node) {
             return self.execute_node_uncached(node);
         }
 
@@ -215,6 +215,7 @@ impl Executor {
                 {
                     return Ok(fused);
                 }
+                self.record_wcoj_groupby_fallback(input);
                 let input_buf = self.execute_node(input)?;
                 let input_rows = input_buf.num_rows();
                 let start = self.profiler.start_op();
@@ -313,6 +314,7 @@ impl Executor {
             // dispatch-eligible bodies before reaching here; this
             // arm is the safety net for everyone else.
             RirNode::MultiWayJoin { fallback, .. } | RirNode::ChainJoin { fallback, .. } => {
+                self.record_wcoj_body_fallback(node);
                 self.execute_node(fallback)
             }
         }
@@ -351,7 +353,10 @@ impl Executor {
     /// Execute a Join node
     ///
     /// Delegates to the kernel provider's hash_join_v2 which supports all join types natively.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "join dispatch keeps the two inputs, key sets, join semantics, and optional relation identities explicit"
+    )]
     fn execute_join(
         &mut self,
         left: &CudaBuffer,
@@ -411,7 +416,7 @@ impl Executor {
         // relation scan and has become "hot" in runtime
         // statistics. Only runs if nested-loop dispatch did not
         // dispatch.
-        if out.is_none() && self.config.resolved_persistent_hash_indexes() {
+        if out.is_none() && self.config.resolved_persistent_hash_indexes()? {
             if let Some(build_rel) = right_rel {
                 let build_heat = self
                     .stats
@@ -463,7 +468,7 @@ impl Executor {
                         } else if should_index {
                             let background_build = self
                                 .config
-                                .resolved_persistent_hash_index_background_build();
+                                .resolved_persistent_hash_index_background_build()?;
                             if background_build {
                                 self.join_index_cache.record_background_build_request();
                             }
@@ -603,7 +608,10 @@ impl Executor {
         self.provider.diff_gpu(left, right)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "tensor-masked join dispatch keeps the registered mask, relation catalog, output identity, and projection contract explicit"
+    )]
     fn execute_tensor_masked_join(
         &mut self,
         mask_name: &str,

@@ -3,84 +3,112 @@
 use xlog_core::{Result, XlogError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Stable index of a node in a [`PirGraph`].
 pub struct PirNodeId(u32);
 
 impl PirNodeId {
+    /// Constructs an identifier from its serialized integer representation.
     pub fn from_u32(id: u32) -> Self {
         Self(id)
     }
 
+    /// Returns the serialized integer representation.
     pub fn as_u32(self) -> u32 {
         self.0
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Identifier of an independent probabilistic leaf.
 pub struct LeafId(u32);
 
 impl LeafId {
+    /// Constructs a leaf identifier.
     pub fn new(id: u32) -> Self {
         Self(id)
     }
 
+    /// Returns the underlying integer identifier.
     pub fn as_u32(self) -> u32 {
         self.0
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Identifier of a mutually exclusive probabilistic choice.
 pub struct ChoiceVarId(u32);
 
 impl ChoiceVarId {
+    /// Constructs a choice-variable identifier.
     pub fn new(id: u32) -> Self {
         Self(id)
     }
 
+    /// Returns the underlying integer identifier.
     pub fn as_u32(self) -> u32 {
         self.0
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// A node in the probabilistic intermediate representation.
 pub enum PirNode {
+    /// Boolean constant.
     Const(bool),
+    /// Positive probabilistic literal.
     Lit {
+        /// Referenced probabilistic leaf.
         leaf: LeafId,
     },
+    /// Negated probabilistic literal with complementary weight.
     NegLit {
+        /// Referenced probabilistic leaf.
         leaf: LeafId,
-    }, // Negated leaf: weight (1-p, p)
+    },
+    /// Conjunction of child nodes.
     And {
+        /// Conjunct node identifiers.
         children: Vec<PirNodeId>,
     },
+    /// Disjunction of child nodes.
     Or {
+        /// Disjunct node identifiers.
         children: Vec<PirNodeId>,
     },
+    /// Binary branch on an exclusive-choice variable.
     Decision {
+        /// Variable controlling the branch.
         var: ChoiceVarId,
+        /// Child selected when the variable is false.
         child_false: PirNodeId,
+        /// Child selected when the variable is true.
         child_true: PirNodeId,
     },
 }
 
 #[derive(Debug, Default, Clone)]
+/// Arena-backed directed acyclic graph of probabilistic expressions.
 pub struct PirGraph {
     nodes: Vec<PirNode>,
 }
 
 impl PirGraph {
+    /// Creates an empty graph.
     pub fn new() -> Self {
         Self { nodes: Vec::new() }
     }
 
+    /// Returns the number of nodes in the graph.
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
+    /// Returns whether the graph contains no nodes.
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
+    /// Returns all nodes in identifier order.
     pub fn nodes(&self) -> &[PirNode] {
         &self.nodes
     }
@@ -89,6 +117,7 @@ impl PirGraph {
         &mut self.nodes
     }
 
+    /// Returns a node by identifier, or `None` when the identifier is invalid.
     pub fn node(&self, id: PirNodeId) -> Option<&PirNode> {
         self.nodes.get(id.0 as usize)
     }
@@ -99,30 +128,37 @@ impl PirGraph {
         id
     }
 
+    /// Appends a true constant and returns its identifier.
     pub fn const_true(&mut self) -> PirNodeId {
         self.push_node(PirNode::Const(true))
     }
 
+    /// Appends a false constant and returns its identifier.
     pub fn const_false(&mut self) -> PirNodeId {
         self.push_node(PirNode::Const(false))
     }
 
+    /// Appends a positive leaf literal and returns its node identifier.
     pub fn lit(&mut self, leaf: LeafId) -> PirNodeId {
         self.push_node(PirNode::Lit { leaf })
     }
 
+    /// Appends a negated leaf literal and returns its node identifier.
     pub fn neg_lit(&mut self, leaf: LeafId) -> PirNodeId {
         self.push_node(PirNode::NegLit { leaf })
     }
 
+    /// Appends a conjunction and returns its node identifier.
     pub fn and(&mut self, children: Vec<PirNodeId>) -> PirNodeId {
         self.push_node(PirNode::And { children })
     }
 
+    /// Appends a disjunction and returns its node identifier.
     pub fn or(&mut self, children: Vec<PirNodeId>) -> PirNodeId {
         self.push_node(PirNode::Or { children })
     }
 
+    /// Appends a binary choice node and returns its identifier.
     pub fn decision(
         &mut self,
         var: ChoiceVarId,
@@ -136,6 +172,7 @@ impl PirGraph {
         })
     }
 
+    /// Groups nodes reachable from `roots` into dependency-first evaluation levels.
     pub fn levelize(&self, roots: &[PirNodeId]) -> Result<Vec<Vec<PirNodeId>>> {
         use std::collections::{HashMap, HashSet};
 

@@ -101,7 +101,7 @@ fn test_warp_size_operations(ctx: &TestContext) -> TestResult {
 
         // Also test filter at warp boundaries
         let mask: Vec<u8> = (0..size).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect();
-        let expected_count = (size + 1) / 2;
+        let expected_count = size.div_ceil(2);
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
             Ok(f) => f,
@@ -718,15 +718,15 @@ fn test_multi_warp_coordination(ctx: &TestContext) -> TestResult {
         // Original: keys[i] = size-1-i, vals[i] = i
         // After sort by key: sorted_keys[j] = j, so original row was (size-1-j, size-1-j)
         // Therefore sorted_vals[j] = size-1-j
-        for i in 0..size {
+        for (i, &actual) in sorted_vals.iter().take(size).enumerate() {
             let expected_val = (size - 1 - i) as u32;
-            if sorted_vals[i] != expected_val {
+            if actual != expected_val {
                 return TestResult::error(
                     "test_multi_warp_coordination",
                     start.elapsed(),
                     format!(
                         "Size {}: sorted_vals[{}] = {}, expected {}",
-                        size, i, sorted_vals[i], expected_val
+                        size, i, actual, expected_val
                     ),
                 );
             }

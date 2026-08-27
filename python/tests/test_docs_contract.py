@@ -87,12 +87,6 @@ def test_docs_workflow_generates_reference_outputs_and_exports() -> None:
     assert ".site-rustdoc/generated/rust" in script
     assert "docs/generated/rust" not in script
 
-    cuda_build = read("crates/xlog-cuda/build.rs")
-    assert "XLOG_RUSTDOC_NO_CUDA" in cuda_build
-    assert "DOCS_RS" in cuda_build
-    assert "write_empty_embedded_kernel_data" in cuda_build
-
-
 def test_rust_api_page_links_to_generated_crate_roots() -> None:
     rust_page = read("docs/reference/rust.mdx")
     assert "generated/rust/index.html" in rust_page
@@ -184,6 +178,65 @@ def test_home_page_omits_local_generated_html_notice() -> None:
     assert "make docs when Rust and Doxygen dependencies are available" not in home
 
 
+def test_runtime_docs_match_provider_owned_and_automatic_resident_contract() -> None:
+    environment = read("docs/reference/environment-variables.mdx")
+    device_runtime = read("docs/architecture/device-runtime.mdx")
+    residency = read("docs/core-concepts/gpu-residency.mdx")
+    rust_api = read("docs/reference/rust.mdx")
+    epistemic_examples = read("examples/epistemic/README.md")
+
+    for retired in [
+        "XLOG_USE_DEVICE_RUNTIME",
+        "XLOG_USE_RESIDENT_RECURSION",
+        "runtime singleton",
+        "default legacy",
+        "traits (`KernelProvider`)",
+    ]:
+        assert retired not in "\n".join(
+            [environment, device_runtime, rust_api, epistemic_examples]
+        )
+
+    assert "XLOG_DISABLE_RESIDENT_RECURSION" in environment
+    assert "XLOG_REQUIRE_RESIDENT_RECURSION" in environment
+    assert "automatic" in environment.lower()
+    assert "one device handle" in device_runtime
+    assert "one runtime" in device_runtime
+    assert "one memory manager" in device_runtime
+    assert "one final pinned receipt" in residency
+
+
+def test_whitepaper_names_measured_boundaries_and_active_optimizer() -> None:
+    paper = "\n".join(
+        read(path)
+        for path in [
+            "paper/main.tex",
+            "paper/sections/00_abstract.tex",
+            "paper/sections/01_introduction.tex",
+            "paper/sections/02_architecture.tex",
+            "paper/sections/04_gpu_datalog.tex",
+            "paper/sections/05_probabilistic.tex",
+            "paper/sections/11_related_work.tex",
+            "paper/sections/13_conclusion.tex",
+        ]
+    )
+
+    for retired in [
+        "Universal GPU-Native",
+        "universal GPU-native",
+        "kernel-provider trait",
+        "device-side trap",
+        "solver never reads its status back to the host",
+        "join ordering uses dynamic programming up to ten relations",
+        "full symbolic spectrum GPU-resident",
+        "whole symbolic side",
+    ]:
+        assert retired not in paper
+
+    assert "final smoothed circuit" in paper
+    assert "bounded status and error scalars" in paper
+    assert "general dynamic-programming join ordering is not active" in paper
+
+
 def test_internal_agent_workspace_paths_are_local_only() -> None:
     ignored = read(".gitignore")
     for path in [
@@ -195,15 +248,44 @@ def test_internal_agent_workspace_paths_are_local_only() -> None:
         "scripts/repro/",
     ]:
         assert path in ignored
-    tracked = subprocess.run(
-        ["git", "ls-files", "--", "AGENTS.md", "CLAUDE.md", "JCODEMUNCH.md",
-         "LEAN-CTX.md", "docs-internal", "scripts/repro"],
+    tracked_local = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--",
+            "JCODEMUNCH.md",
+            "LEAN-CTX.md",
+            "docs-internal",
+            "scripts/repro",
+        ],
         cwd=ROOT,
         text=True,
         capture_output=True,
         check=True,
     ).stdout.strip()
-    assert tracked == "", f"internal-only paths must not be tracked: {tracked}"
+    assert tracked_local == "", f"internal-only paths must not be tracked: {tracked_local}"
+
+    tracked_governance = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "CONTRIBUTING.md",
+            "ENGINEERING.md",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.splitlines()
+    assert tracked_governance == [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        "ENGINEERING.md",
+    ]
 
 
 def test_github_docs_workflow_deploys_docs_dist_only_from_main_docs_site_changes() -> None:

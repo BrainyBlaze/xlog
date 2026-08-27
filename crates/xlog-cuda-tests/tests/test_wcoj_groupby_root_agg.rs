@@ -15,13 +15,10 @@ use std::sync::Arc;
 use cudarc::driver::sys;
 
 use xlog_core::{AggOp, MemoryBudget, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamPool};
 use xlog_cuda::memory::{CudaBuffer, CudaColumn};
 use xlog_cuda::wcoj_metadata::{WcojRootAggValue, WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaKernelProvider, GpuMemoryManager};
 
 struct DiscardSink;
 impl LoggingSink for DiscardSink {
@@ -37,30 +34,16 @@ struct Fixture {
 }
 
 fn make_fixture() -> Option<Fixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(512 * 1024 * 1024))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 512 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(512 * 1024 * 1024),
-        runtime,
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let _device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some(Fixture {
         memory,
         provider,
@@ -145,8 +128,10 @@ fn download_u32_column(
     col: usize,
 ) -> Vec<u32> {
     download_column_bytes(memory, buffer, col, 4)
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect()
 }
 
@@ -156,8 +141,10 @@ fn download_u64_column(
     col: usize,
 ) -> Vec<u64> {
     download_column_bytes(memory, buffer, col, 8)
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect()
 }
 
@@ -558,11 +545,10 @@ fn wcoj_triangle_groupby_root_agg_measurement_fused_vs_unfused() {
         )
     };
 
-    let cases: Vec<(
-        &str,
-        AggOp,
-        (Vec<(u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32)>),
-    )> = vec![
+    type Rows = Vec<(u32, u32)>;
+    type TriangleRelations = (Rows, Rows, Rows);
+    type BenchCase = (&'static str, AggOp, TriangleRelations);
+    let cases: Vec<BenchCase> = vec![
         ("sum_z_hub_10k_z16", AggOp::Sum, hub(10_000, 16)),
         ("sum_z_hub_50k_z16", AggOp::Sum, hub(50_000, 16)),
         ("min_z_hub_10k_z16", AggOp::Min, hub(10_000, 16)),

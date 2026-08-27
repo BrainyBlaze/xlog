@@ -301,7 +301,7 @@ fn test_operation_dependencies(ctx: &TestContext) -> TestResult {
 
     // Verify step 4 - all values should be in [500, 800)
     for (i, &v) in step4_data.iter().enumerate() {
-        if v < 500 || v >= 800 {
+        if !(500..800).contains(&v) {
             return TestResult::error(
                 "test_operation_dependencies",
                 start.elapsed(),
@@ -348,7 +348,7 @@ fn test_operation_dependencies(ctx: &TestContext) -> TestResult {
     let mut expected: Vec<u32> = data
         .iter()
         .copied()
-        .filter(|&v| v >= 500 && v < 800)
+        .filter(|&v| (500..800).contains(&v))
         .collect();
     expected.sort();
 

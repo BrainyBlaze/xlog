@@ -127,6 +127,17 @@ pub(crate) struct RelationSnapshot {
     metadata: Option<Arc<RelationMetadata>>,
 }
 
+pub(crate) struct RelationReplacementRequest<'a, 'py> {
+    pub(crate) relation: &'a str,
+    pub(crate) arguments: &'a [LogicArgumentSchema],
+    pub(crate) schema: &'a Schema,
+    pub(crate) provider: &'a Arc<CudaKernelProvider>,
+    pub(crate) relation_buffer: &'a CudaBuffer,
+    pub(crate) roles: &'a Bound<'py, PyAny>,
+    pub(crate) facts: &'a Bound<'py, PyAny>,
+    pub(crate) row_count: usize,
+}
+
 #[pyclass(frozen, module = "pyxlog._native")]
 pub struct RelationEvidence {
     snapshot: RelationSnapshot,
@@ -148,15 +159,18 @@ impl RelationEvidence {
 impl RelationMetadataStore {
     pub(crate) fn prepare_replacement(
         &self,
-        relation: &str,
-        arguments: &[LogicArgumentSchema],
-        schema: &Schema,
-        provider: &Arc<CudaKernelProvider>,
-        relation_buffer: &CudaBuffer,
-        roles: &Bound<'_, PyAny>,
-        facts: &Bound<'_, PyAny>,
-        row_count: usize,
+        request: RelationReplacementRequest<'_, '_>,
     ) -> PyResult<(Self, RelationSnapshot)> {
+        let RelationReplacementRequest {
+            relation,
+            arguments,
+            schema,
+            provider,
+            relation_buffer,
+            roles,
+            facts,
+            row_count,
+        } = request;
         require_positive_metadata_arity(relation, schema)?;
         validate_argument_contract(relation, arguments, schema)?;
 
@@ -1745,7 +1759,7 @@ fn require_python_int(value: &Bound<'_, PyAny>, context: &str) -> PyResult<()> {
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
     let mut bytes = Vec::with_capacity(value.len() / 2);
     let raw = value.as_bytes();
-    for pair in raw.chunks_exact(2) {
+    for pair in raw.as_chunks::<2>().0 {
         let high = hex_digit(pair[0])?;
         let low = hex_digit(pair[1])?;
         bytes.push((high << 4) | low);

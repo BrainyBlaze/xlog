@@ -137,7 +137,10 @@ pub enum SccFixpointError {
 /// Returns a [`RefRelationStore`] whose keys are exactly the
 /// keys of `rules`, each mapped to the converged relation. Set
 /// semantics: rows sorted lexicographically, deduplicated.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the public typed diagnostic preserves its structured rule-evaluation source without a second heap allocation"
+)]
 pub fn evaluate_scc_fixpoint(
     rules: &BTreeMap<String, Vec<Rule>>,
     base_relations: &RefRelationStore,

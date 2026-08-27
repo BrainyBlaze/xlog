@@ -1,35 +1,26 @@
 //! Integration tests for ILP TensorMaskedJoin execution.
 //!
 //! These tests require a CUDA device to run.
-//! Covers RFC T3.1 (identity mask), T3.2 (empty mask), T3.3 (no mask noop).
-
-#![allow(clippy::arc_with_non_send_sync)]
+//! Covers identity masks, empty masks, and execution without a mask.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use xlog_core::{MemoryBudget, RelId, ScalarType, Schema};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
 use xlog_logic::{parse_program, Compiler};
 use xlog_runtime::{read_device_row_count, Executor};
 
 fn setup() -> Option<(Arc<CudaKernelProvider>, Compiler)> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
-            return None;
-        }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1024 * 1024 * 1024),
-    ));
-    let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
+    let provider = Arc::new(
+        CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+            .build()
+            .ok()?,
+    );
     let compiler = Compiler::new();
     Some((provider, compiler))
 }
 
-/// Helper: full relation setup per RD-15 + fact loading per RD-26.
+/// Registers relation storage and loads compiled base facts.
 ///
 /// Registers all relations, creates empty buffers for all schemas, then
 /// loads base facts. Also creates empty buffers for any relations in

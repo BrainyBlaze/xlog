@@ -39,26 +39,6 @@ REQUIRED_FEATURES = [
 PROJECT_TERM_PARTS = [("mista", "ber")]
 
 
-def runtime_consumers_evidence_dir() -> Path:
-    matches = []
-    for path in sorted((ROOT / "docs-internal" / "evidence").iterdir()):
-        summary_path = path / "validation_summary.json"
-        if not summary_path.exists() or not (path / "README.md").exists():
-            continue
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        if (
-            summary.get("consumer_certification_status") == "PASS"
-            and summary.get("feature_coverage_source") == "behavior_probes"
-            and summary.get("example_count") == len(EXAMPLES)
-        ):
-            matches.append(path)
-    assert len(matches) == 1
-    return matches[0]
-
-
-EVIDENCE = runtime_consumers_evidence_dir()
-
-
 def _load_expected(name: str) -> dict:
     return json.loads((SUITE / name / "expected.json").read_text(encoding="utf-8"))
 
@@ -133,36 +113,6 @@ def test_runtime_consumer_validator_reuses_existing_compatibility_gates() -> Non
         "pyxlog_persistent_index_session_reuse",
     ]:
         assert needle in source
-
-
-def test_runtime_consumer_evidence_records_feature_coverage_and_reuse_audit() -> None:
-    summary_path = EVIDENCE / "validation_summary.json"
-    assert (EVIDENCE / "README.md").exists()
-    assert summary_path.exists()
-
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    assert summary["status"] == "PASS"
-    assert summary["example_execution_status"] == "PASS"
-    assert summary["consumer_certification_status"] == "PASS"
-    assert summary["feature_coverage_source"] == "behavior_probes"
-    assert summary["consumer_proof_gaps"] == []
-    assert summary["example_count"] == len(EXAMPLES)
-
-    for probes in summary["feature_coverage"].values():
-        assert probes
-
-    assert summary["behavior_probes"]
-    assert all(probe["status"] == "PASS" for probe in summary["behavior_probes"].values())
-    compatibility_statuses = [
-        gate["status"] for gate in summary["compatibility_gates"].values()
-    ]
-    assert compatibility_statuses.count("PASS") >= 4
-    assert (
-        summary["compatibility_gates"]["pyxlog_persistent_index_session_reuse"]["status"]
-        == "PASS"
-    )
-    assert summary["production_path_reuse"]["status"] == "PASS"
-    assert summary["reuse_audit"]["status"] == "PASS"
 
 
 def test_runtime_validator_accepts_absolute_and_relative_output_paths(monkeypatch, tmp_path) -> None:

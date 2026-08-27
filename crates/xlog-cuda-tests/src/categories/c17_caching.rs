@@ -129,7 +129,7 @@ fn test_cache_line_access(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let expected_count = (size + 1) / 2;
+        let expected_count = size.div_ceil(2);
         if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_cache_line_access",
@@ -300,7 +300,7 @@ fn test_cache_reuse(ctx: &TestContext) -> TestResult {
 
     // Test filter cache reuse
     let mask: Vec<u8> = (0..SIZE).map(|i| if i % 3 == 0 { 1 } else { 0 }).collect();
-    let expected_count = (SIZE + 2) / 3;
+    let expected_count = SIZE.div_ceil(3);
 
     for i in 0..ITERATIONS {
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
@@ -560,7 +560,7 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let expected_count = (LARGE_SIZE + 3) / 4;
+    let expected_count = LARGE_SIZE.div_ceil(4);
     if ctx.device_row_count(&filtered) != expected_count as u64 {
         return TestResult::error(
             "test_cache_thrashing",
@@ -635,14 +635,14 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
     };
 
     // Verify sorted
-    for i in 0..seq_result.len() {
-        if seq_result[i] != i as u32 {
+    for (i, &actual) in seq_result.iter().enumerate() {
+        if actual != i as u32 {
             return TestResult::error(
                 "test_memory_locality",
                 start.elapsed(),
                 format!(
                     "Sequential sort incorrect at index {}: expected {}, got {}",
-                    i, i, seq_result[i]
+                    i, i, actual
                 ),
             );
         }
@@ -688,14 +688,14 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
     };
 
     // Verify sorted
-    for i in 0..rev_result.len() {
-        if rev_result[i] != i as u32 {
+    for (i, &actual) in rev_result.iter().enumerate() {
+        if actual != i as u32 {
             return TestResult::error(
                 "test_memory_locality",
                 start.elapsed(),
                 format!(
                     "Reverse sort incorrect at index {}: expected {}, got {}",
-                    i, i, rev_result[i]
+                    i, i, actual
                 ),
             );
         }
@@ -799,7 +799,7 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let expected_alt = (SIZE + 1) / 2;
+    let expected_alt = SIZE.div_ceil(2);
     if ctx.device_row_count(&filtered_alt) != expected_alt as u64 {
         return TestResult::error(
             "test_memory_locality",
@@ -827,7 +827,7 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let expected_sparse = (SIZE + 99) / 100;
+    let expected_sparse = SIZE.div_ceil(100);
     if ctx.device_row_count(&filtered_sparse) != expected_sparse as u64 {
         return TestResult::error(
             "test_memory_locality",

@@ -8,33 +8,20 @@
 //! This is the primary correctness safety net for the fused backward kernel
 //! (xgcf_backward_all_levels_cached).
 
-#![allow(clippy::arc_with_non_send_sync)]
-
 use std::sync::Arc;
 
 use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
 use xlog_prob::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig};
 use xlog_prob::gpu::GpuXgcf;
 use xlog_prob::xgcf::{Xgcf, XgcfNodeType};
 
 fn try_provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping test: CUDA device unavailable: {}", e);
-            return None;
-        }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1 << 30),
-    ));
-    match CudaKernelProvider::new(device, memory) {
+    match CudaProviderBuilder::new(0, MemoryBudget::with_limit(1 << 30)).build() {
         Ok(p) => Some(Arc::new(p)),
         Err(e) => {
-            eprintln!("Skipping test: kernel provider failed: {}", e);
+            eprintln!("Skipping test: CUDA provider unavailable: {e}");
             None
         }
     }

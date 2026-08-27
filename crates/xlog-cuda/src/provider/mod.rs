@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use std::ffi::c_void;
-use xlog_core::{Result, Schema, XlogError};
+use xlog_core::{resolve_bool, Result, Schema, XlogError};
 
 use crate::{
     cuda_compat::{
@@ -25,6 +25,7 @@ use crate::{
 static NEXT_PROVIDER_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 mod arithmetic;
+mod builder;
 mod filter;
 mod fj;
 mod fj_delta;
@@ -35,6 +36,7 @@ mod ilp_exact;
 mod ilp_exact_nary;
 mod io;
 mod kernel_loading;
+pub use builder::CudaProviderBuilder;
 pub mod kernel_paths;
 mod launch_safe;
 mod probabilistic;
@@ -60,10 +62,8 @@ pub struct PtxLoadProfile {
     pub ptx_fallback: u32,
 }
 
-fn warmup_profiling_enabled() -> bool {
-    std::env::var("XLOG_WARMUP_PROFILE")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+fn warmup_profiling_enabled() -> Result<bool> {
+    resolve_bool(None, "XLOG_WARMUP_PROFILE", false)
 }
 
 /// Detect device compute capability as a two-digit number (e.g. 75, 80, 120).
@@ -333,7 +333,7 @@ impl<'a, T> DevicePtr<T> for RawCudaView<'a, T> {
 }
 
 impl<'a, T> RawCudaView<'a, T> {
-    pub fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
+    pub(crate) fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
         &self.ptr
     }
 }
@@ -1128,13 +1128,10 @@ impl JoinIndexV2 {
 ///
 /// # Example
 /// ```ignore
-/// use std::sync::Arc;
-/// use xlog_cuda::{CudaDevice, GpuMemoryManager, CudaKernelProvider};
+/// use xlog_cuda::CudaProviderBuilder;
 /// use xlog_core::MemoryBudget;
 ///
-/// let device = Arc::new(CudaDevice::new(0)?);
-/// let memory = Arc::new(GpuMemoryManager::new(device.clone(), MemoryBudget::default()));
-/// let provider = CudaKernelProvider::new(device, memory)?;
+/// let provider = CudaProviderBuilder::new(0, MemoryBudget::default()).build()?;
 /// ```
 pub struct CudaKernelProvider {
     /// Process-local identity retained by prepared resident schedules.
@@ -1312,28 +1309,40 @@ impl HostTransferTracker {
 }
 
 impl CudaKernelProvider {
-    /// Create a new CUDA kernel provider
-    ///
-    /// Loads all kernel modules into the CUDA device.
-    /// Prefers cubin for the detected SM arch, falls back to portable PTX (sm_75+).
-    ///
-    /// # Arguments
-    /// * `device` - The CUDA device to load modules into
-    /// * `memory` - The GPU memory manager for kernel allocations
-    ///
-    /// # Errors
-    /// Returns `XlogError::Kernel` if PTX loading fails
-    ///
-    /// # Example
-    /// ```ignore
-    /// let device = Arc::new(CudaDevice::new(0)?);
-    /// let memory = Arc::new(GpuMemoryManager::new(device.clone(), MemoryBudget::default()));
-    /// let provider = CudaKernelProvider::new(device, memory)?;
-    /// ```
-    pub fn new(device: Arc<CudaDevice>, memory: Arc<GpuMemoryManager>) -> Result<Self> {
-        let profiling = warmup_profiling_enabled();
-        let ptx_load_profile = Self::load_all_kernel_modules(&device, profiling)?;
+    fn from_runtime_parts(device: Arc<CudaDevice>, memory: Arc<GpuMemoryManager>) -> Result<Self> {
+        let runtime = memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "canonical CUDA provider requires a memory manager with an owned runtime"
+                    .to_string(),
+            )
+        })?;
+        if !Arc::ptr_eq(&device, memory.device()) || !Arc::ptr_eq(&device, runtime.device()) {
+            return Err(XlogError::Kernel(
+                "canonical CUDA provider device, memory manager, and runtime must share the exact CUDA device handle"
+                    .to_string(),
+            ));
+        }
+        let device_ordinal = u32::try_from(device.ordinal()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "CUDA device ordinal {} is not representable as u32",
+                device.ordinal()
+            ))
+        })?;
+        if runtime.device_ordinal() != device_ordinal {
+            return Err(XlogError::Kernel(format!(
+                "canonical CUDA provider device ordinal mismatch: device={device_ordinal} runtime={}",
+                runtime.device_ordinal()
+            )));
+        }
+        if !runtime.supports_block_use_tracking() {
+            return Err(XlogError::Kernel(
+                "canonical CUDA provider requires asynchronous cross-stream block-use tracking"
+                    .to_string(),
+            ));
+        }
 
+        let profiling = warmup_profiling_enabled()?;
+        let ptx_load_profile = Self::load_all_kernel_modules(&device, profiling)?;
         Ok(Self::from_loaded_device(device, memory, ptx_load_profile))
     }
 
@@ -1374,123 +1383,17 @@ impl CudaKernelProvider {
         }
     }
 
-    /// Construct a provider whose `GpuMemoryManager` must already
-    /// have a v0.6 [`crate::device_runtime::XlogDeviceRuntime`]
-    /// attached via [`GpuMemoryManager::with_runtime`].
-    ///
-    /// Equivalent to [`Self::new`] in every respect — same kernel
-    /// loading, same field initialization — but **rejects** managers
-    /// that lack a runtime. This guards against the misconfiguration
-    /// in which a caller asks for runtime-routed provider semantics
-    /// (by calling `with_runtime`) but supplies a legacy manager
-    /// built via [`GpuMemoryManager::new`]; without the check, the
-    /// resulting provider would silently keep using the cudarc
-    /// default allocator and the runtime budget/logging stack would
-    /// never observe the allocations the caller expected to be
-    /// routed through it.
-    ///
-    /// Note: a runtime-routed manager passed to [`Self::new`] still
-    /// routes correctly — `alloc::<T>` and `alloc_raw` consult
-    /// `memory.runtime()` regardless of which provider constructor
-    /// was used. `with_runtime` exists for callers that want the
-    /// requirement enforced at construction time, not for
-    /// correctness of the routing itself.
-    ///
-    /// This is the **opt-in** runtime entry point for providers.
-    /// `Self::new` continues to accept managers without a runtime
-    /// (the legacy default) and remains the production constructor
-    /// until the runtime stack is certified end-to-end.
-    ///
-    /// # Errors
-    /// Returns `XlogError::Kernel` if `memory.runtime()` is `None`,
-    /// or anything `Self::new` would return.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let device = Arc::new(CudaDevice::new(0)?);
-    /// let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-    ///     Arc::clone(&device),
-    ///     0,
-    ///     Arc::new(StreamPool::with_defaults(Arc::clone(&device))),
-    ///     Box::new(AsyncCudaResource::new(/* ... */)),
-    /// ));
-    /// let memory = Arc::new(GpuMemoryManager::with_runtime(
-    ///     Arc::clone(&device),
-    ///     MemoryBudget::default(),
-    ///     runtime,
-    /// ));
-    /// let provider = CudaKernelProvider::with_runtime(device, memory)?;
-    /// ```
-    pub fn with_runtime(device: Arc<CudaDevice>, memory: Arc<GpuMemoryManager>) -> Result<Self> {
-        if memory.runtime().is_none() {
-            return Err(XlogError::Kernel(
-                "CudaKernelProvider::with_runtime requires a GpuMemoryManager built via \
-                 GpuMemoryManager::with_runtime; got a manager with no runtime attached"
-                    .to_string(),
-            ));
-        }
-        Self::new(device, memory)
+    /// Parse one boolean environment variable with the shared strict contract.
+    fn env_flag(name: &str) -> Result<bool> {
+        resolve_bool(None, name, false)
     }
 
-    /// Create a provider-local runtime allocation view over this provider's
-    /// already-loaded CUDA device.
-    ///
-    /// Unlike [`Self::with_runtime`], this method deliberately does not reload
-    /// PTX modules. Replacing a module can invalidate functions or graphs held
-    /// by the original provider. The supplied manager and attached runtime must
-    /// therefore share this exact [`CudaDevice`] handle and ordinal.
-    pub fn with_runtime_memory_view(&self, memory: Arc<GpuMemoryManager>) -> Result<Self> {
-        let runtime = memory.runtime().ok_or_else(|| {
-            XlogError::Kernel(
-                "CudaKernelProvider::with_runtime_memory_view requires a GpuMemoryManager with an attached runtime"
-                    .to_string(),
-            )
-        })?;
-        if !Arc::ptr_eq(&self.device, memory.device()) {
-            return Err(XlogError::Kernel(
-                "CudaKernelProvider::with_runtime_memory_view requires the memory manager to share the provider's exact CUDA device handle"
-                    .to_string(),
-            ));
+    fn any_env_flags(names: &[&str]) -> Result<bool> {
+        let mut enabled = false;
+        for name in names {
+            enabled |= Self::env_flag(name)?;
         }
-        if !Arc::ptr_eq(&self.device, runtime.device()) {
-            return Err(XlogError::Kernel(
-                "CudaKernelProvider::with_runtime_memory_view requires the runtime to share the provider's exact CUDA device handle"
-                    .to_string(),
-            ));
-        }
-        let device_ordinal = u32::try_from(self.device.ordinal()).map_err(|_| {
-            XlogError::Kernel(format!(
-                "CUDA device ordinal {} is not representable as u32",
-                self.device.ordinal()
-            ))
-        })?;
-        if runtime.device_ordinal() != device_ordinal {
-            return Err(XlogError::Kernel(format!(
-                "CudaKernelProvider::with_runtime_memory_view device ordinal mismatch: provider={} runtime={}",
-                device_ordinal,
-                runtime.device_ordinal()
-            )));
-        }
-        if !runtime.supports_block_use_tracking() {
-            return Err(XlogError::Kernel(
-                "CudaKernelProvider::with_runtime_memory_view requires a runtime with cross-stream block-use tracking"
-                    .to_string(),
-            ));
-        }
-
-        Ok(Self::from_loaded_device(
-            Arc::clone(&self.device),
-            memory,
-            None,
-        ))
-    }
-
-    /// Internal: parse a "boolean" env var. Empty / unset / `"0"`
-    /// → false; any other value → true.
-    fn env_flag(name: &str) -> bool {
-        std::env::var(name)
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false)
+        Ok(enabled)
     }
 
     /// Whether the recorded filter dispatch is enabled via env.
@@ -1504,8 +1407,8 @@ impl CudaKernelProvider {
     /// opt-in for real callers; the existing legacy paths remain
     /// the production default until the runtime stack is
     /// certified end-to-end.
-    pub(crate) fn use_recorded_filters_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_FILTERS") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_filters_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_FILTERS", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the recorded sort dispatch is enabled via env.
@@ -1514,16 +1417,16 @@ impl CudaKernelProvider {
     /// to U32 / Symbol keys only — the public
     /// `sort()` dispatcher checks both this env flag AND key
     /// type compatibility before routing.
-    pub(crate) fn use_recorded_sort_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_SORT") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_sort_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_SORT", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the recorded full-row dedup dispatch is enabled
     /// via env. Reads `XLOG_USE_RECORDED_DEDUP` or the umbrella
     /// `XLOG_USE_RECORDED_OPS`. `dedup_full_row_recorded` is
     /// narrow to all-U32 / Symbol columns.
-    pub(crate) fn use_recorded_dedup_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_DEDUP") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_dedup_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_DEDUP", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the recorded GroupBy dispatch is enabled via
@@ -1531,8 +1434,8 @@ impl CudaKernelProvider {
     /// `XLOG_USE_RECORDED_OPS`. `groupby_multi_agg_recorded`
     /// supports U32 / Symbol keys + Count / Sum / Min / Max
     /// aggs only.
-    pub(crate) fn use_recorded_groupby_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_GROUPBY") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_groupby_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_GROUPBY", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the recorded hash-join dispatch is enabled via
@@ -1542,8 +1445,8 @@ impl CudaKernelProvider {
     /// types (Inner / Semi / Anti / LeftOuter); the only
     /// hard constraint inherited from `pack_keys` is `≤4`
     /// key columns.
-    pub(crate) fn use_recorded_hash_join_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_HASH_JOIN") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_hash_join_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_HASH_JOIN", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the recorded CSM (count-scan-materialize)
@@ -1553,8 +1456,8 @@ impl CudaKernelProvider {
     /// recorded path has already been selected, and only for
     /// `JoinType::Inner` / `JoinType::LeftOuter` where a CSM
     /// implementation exists. `Semi` / `Anti` are not affected.
-    pub(crate) fn use_recorded_csm_env() -> bool {
-        Self::env_flag("XLOG_USE_RECORDED_CSM") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    pub(crate) fn use_recorded_csm_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_RECORDED_CSM", "XLOG_USE_RECORDED_OPS"])
     }
 
     /// Whether the bounded CSM CUDA Graph path is enabled.
@@ -1562,8 +1465,8 @@ impl CudaKernelProvider {
     /// This is narrower than `XLOG_USE_RECORDED_CSM`: callers must first select
     /// the recorded CSM hash-join path, then opt into graph capture/replay with
     /// `XLOG_USE_CSM_CUDA_GRAPH=1` (or the broader `XLOG_USE_CUDA_GRAPHS=1`).
-    pub(crate) fn use_csm_cuda_graph_env() -> bool {
-        Self::env_flag("XLOG_USE_CSM_CUDA_GRAPH") || Self::env_flag("XLOG_USE_CUDA_GRAPHS")
+    pub(crate) fn use_csm_cuda_graph_env() -> Result<bool> {
+        Self::any_env_flags(&["XLOG_USE_CSM_CUDA_GRAPH", "XLOG_USE_CUDA_GRAPHS"])
     }
 
     /// Test/diagnostic-only telemetry: number of times the recorded
@@ -1655,20 +1558,6 @@ impl CudaKernelProvider {
             .lock()
             .ok()
             .and_then(|mut g| g.take())
-    }
-
-    /// Internal: store the phase timings produced by a triangle
-    /// dispatch. Overwrites any prior unread slot — the report
-    /// binary is expected to read after every `execute_plan`.
-    #[cfg(feature = "wcoj-phase-timing")]
-    #[allow(dead_code)]
-    pub(crate) fn put_wcoj_triangle_phase_timing(
-        &self,
-        timing: crate::wcoj_phase_timing::WcojTrianglePhaseTiming,
-    ) {
-        if let Ok(mut g) = self.last_triangle_phase_timing.lock() {
-            *g = Some(timing);
-        }
     }
 
     /// Number of times `wcoj_layout_*_recorded` short-circuited
@@ -3090,14 +2979,57 @@ impl CudaKernelProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device_runtime::{
-        AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LoggingResource, NullSink,
-        StreamPool, XlogDeviceRuntime,
-    };
+    use crate::device_runtime::{NullSink, XlogDeviceRuntime};
     use xlog_core::{AggOp, MemoryBudget, ScalarType};
 
     fn has_cuda_device() -> bool {
         CudaDevice::new(0).is_ok()
+    }
+
+    struct ProviderEnvRestore {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ProviderEnvRestore {
+        fn capture(name: &'static str) -> Self {
+            Self {
+                name,
+                previous: std::env::var_os(name),
+            }
+        }
+    }
+
+    impl Drop for ProviderEnvRestore {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(self.name, value),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn provider_boolean_environment_uses_strict_shared_semantics() {
+        const NAME: &str = "XLOG_CUDA_TEST_BOOLEAN";
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        let _restore = ProviderEnvRestore::capture(NAME);
+
+        unsafe {
+            std::env::set_var(NAME, "yes");
+        }
+        assert!(CudaKernelProvider::env_flag(NAME).unwrap());
+
+        unsafe {
+            std::env::set_var(NAME, "invalid");
+        }
+        assert!(matches!(
+            CudaKernelProvider::env_flag(NAME),
+            Err(XlogError::Configuration { ref name, .. }) if name == NAME
+        ));
     }
 
     #[test]
@@ -3238,11 +3170,8 @@ mod tests {
             return;
         }
 
-        let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-
-        let provider = CudaKernelProvider::new(device.clone(), memory.clone());
+        let provider = crate::CudaProviderBuilder::new(0, budget).build();
         assert!(
             provider.is_ok(),
             "Failed to create kernel provider: {:?}",
@@ -3250,8 +3179,7 @@ mod tests {
         );
 
         let provider = provider.unwrap();
-        assert!(Arc::ptr_eq(provider.device(), &device));
-        assert!(Arc::ptr_eq(provider.memory(), &memory));
+        assert!(Arc::ptr_eq(provider.device(), provider.memory().device()));
     }
 
     #[test]
@@ -3261,15 +3189,13 @@ mod tests {
             return;
         }
 
-        let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-
-        let _provider =
-            CudaKernelProvider::new(device.clone(), memory).expect("Failed to create provider");
+        let provider = crate::CudaProviderBuilder::new(0, budget)
+            .build()
+            .expect("Failed to create provider");
 
         // Verify all kernel functions can be retrieved
-        let inner = device.inner();
+        let inner = provider.device().inner();
 
         // Join kernels
         let build_fn = inner.get_func(JOIN_MODULE, join_kernels::HASH_JOIN_BUILD);
@@ -3379,41 +3305,21 @@ mod tests {
 
     // Helper function to create test provider
     fn create_test_provider() -> Option<CudaKernelProvider> {
-        if !has_cuda_device() {
-            return None;
-        }
-        let device = Arc::new(CudaDevice::new(0).ok()?);
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        CudaKernelProvider::new(device, memory).ok()
+        crate::CudaProviderBuilder::new(0, budget).build().ok()
     }
 
     fn create_test_provider_with_runtime() -> Option<(CudaKernelProvider, Arc<XlogDeviceRuntime>)> {
         if !has_cuda_device() {
             return None;
         }
-        let device = Arc::new(CudaDevice::new(0).ok()?);
-        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
         let sink = Arc::new(NullSink::new());
-        let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-            AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-        );
-        let logging: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(LoggingResource::new(async_resource, sink));
-        let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(GlobalDeviceBudget::new(logging, 1024 * 1024 * 1024));
-        let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-            Arc::clone(&device),
-            0,
-            pool,
-            budget,
-        ));
-        let memory = Arc::new(GpuMemoryManager::with_runtime(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(1024 * 1024 * 1024),
-            Arc::clone(&runtime),
-        ));
-        let provider = CudaKernelProvider::with_runtime(device, memory).ok()?;
+        let provider =
+            crate::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+                .with_logging_sink(sink)
+                .build()
+                .ok()?;
+        let runtime = Arc::clone(provider.memory().runtime()?);
         Some((provider, runtime))
     }
 
@@ -3502,7 +3408,9 @@ mod tests {
             .dtoh_sync_copy_into(buffer.column(col).unwrap(), &mut bytes)
             .expect("dtoh");
         bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }
@@ -4320,13 +4228,8 @@ mod tests {
 
     /// Helper to create a test provider for arithmetic tests
     fn create_arith_test_provider() -> Option<CudaKernelProvider> {
-        if !has_cuda_device() {
-            return None;
-        }
-        let device = Arc::new(CudaDevice::new(0).ok()?);
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        CudaKernelProvider::new(device, memory).ok()
+        crate::CudaProviderBuilder::new(0, budget).build().ok()
     }
 
     /// Helper to create an i64 buffer for arithmetic tests

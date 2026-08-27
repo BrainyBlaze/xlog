@@ -12,11 +12,12 @@
 
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs
 on the GPU, and every training iteration pays a PCIe round-trip that dominates wall-clock time
-at scale. XLOG closes that gap: one compiler and one CUDA runtime span four reasoning
-paradigms — deterministic Datalog, exact and approximate probabilistic inference,
-epistemic reasoning, and differentiable neural-symbolic training — with SAT/MaxSAT
-verification available as a shared solver service and zero tracked host–device transfers
-in production data planes.
+at scale. XLOG closes that gap with a shared compiler and provider-owned CUDA runtime
+services supporting four reasoning paradigms — deterministic Datalog, exact and approximate
+probabilistic inference, epistemic reasoning, and differentiable neural-symbolic training —
+with SAT/MaxSAT verification available as a shared solver service. Transfer-free claims are
+route-specific: the certified resident recursive core and resident Monte Carlo sampled core
+record zero tracked host–device transfers and return one bounded terminal receipt.
 
 Implemented in Rust with custom CUDA kernels, XLOG caches compiled circuits across training
 iterations and exposes GPU-resident results as zero-copy DLPack and Arrow C Device
@@ -37,7 +38,7 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 - **User-defined functions, modules and imports, stratified aggregation, and integrity constraints**, so programs decompose cleanly instead of collapsing into flat rule lists.
 - **One syntax for four paradigms:** deterministic rules, probabilistic facts and annotated disjunctions, epistemic operators, and neural predicate declarations (`nn/k`) share the same typed language.
 - **Shared solver services:** SAT/MaxSAT features and verification use the GPU-resident `GpuCnf` representation and CDCL service rather than defining another reasoning paradigm.
-- **GPU-resident semantics:** relational operators, circuit evaluation, and verification paths run on the device instead of bouncing through the host.
+- **CUDA-backed semantics:** relational operators, circuit evaluation, and verification paths use device-resident data planes, with host orchestration and bounded control reads documented per route.
 - **A runtime inside your training loop, not a service:** CUDA-backed DLPack producers provide
   zero-copy transient inputs, while DLPack capsules and the Arrow C Device interface expose
   zero-copy device views of query results and gradients; Arrow IPC handles host-side interchange.
@@ -111,7 +112,7 @@ magic sets, probabilistic aggregates, approximate inference, epistemic reasoning
 | **Neural-symbolic training** | Neural predicates (`nn/k`), PyTorch autograd integration, circuit caching across iterations, term embeddings, joint neural + symbolic rule-weight training |
 | **Rule induction** | Differentiable ILP with sparse GPU masks, deterministic mode, promotion pipeline, holdout validation, and bounded exact induction (`xlog-induce`) with top-K CUDA scoring |
 | **GPU execution** | Custom CUDA kernels for hash joins, radix sort, filter, dedup, union, difference, group-by; worst-case-optimal joins; delta coalescing; runtime CSE; adaptive re-optimization; persistent hash-index reuse |
-| **Float semantics** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
+| **Float semantics** | Deterministic IEEE 754 total ordering for `f32`/`f64`, including signed zeros and the sign and payload ordering of NaNs |
 | **Diagnostics & provenance** | Rule and fact provenance, proof traces, planner telemetry, host-transfer audits, module-boundary diagnostics, `--stats` per-stratum timing and memory accounting |
 | **Interop** | CUDA-backed DLPack producers and capsules, Arrow C Device interface (zero-copy transient/device views; owned device snapshots for persistent Python relations), Arrow IPC (host serialization), PyTorch, JAX, cuDF, Python bindings (`pyxlog`) |
 

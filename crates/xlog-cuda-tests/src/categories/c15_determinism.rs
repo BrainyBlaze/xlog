@@ -158,16 +158,7 @@ fn run_widened_frontier_replay(
 /// CUDA certification suite.
 fn test_widened_frontier_replay_representative(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
-    let provider = match CudaKernelProvider::new(ctx.device.clone(), ctx.memory.clone()) {
-        Ok(p) => Arc::new(p),
-        Err(e) => {
-            return TestResult::error(
-                "test_widened_frontier_replay_representative",
-                start.elapsed(),
-                format!("provider init failed: {}", e),
-            )
-        }
-    };
+    let provider = Arc::clone(&ctx.provider);
     let first = match run_widened_frontier_replay(Arc::clone(&provider)) {
         Ok(snapshot) => snapshot,
         Err(e) => {

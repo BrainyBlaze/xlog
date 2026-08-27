@@ -74,7 +74,7 @@ impl super::CudaKernelProvider {
         // Sum / Min / Max aggs + ≤4 key columns. Mismatch
         // (any other key type, LogSumExp, or >4 keys) falls
         // through to the legacy path.
-        if Self::use_recorded_groupby_env()
+        if Self::use_recorded_groupby_env()?
             && !key_cols.is_empty()
             && !aggs.is_empty()
             && key_cols.len() <= 4

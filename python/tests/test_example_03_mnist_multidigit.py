@@ -9,6 +9,7 @@ from neural_test_env import runtime_env
 
 RUNTIME_ENV = runtime_env()
 TRAIN_SCRIPT = Path("examples/neural/03_mnist_multidigit/train.py")
+PROGRAM = Path("examples/neural/03_mnist_multidigit/program.xlog")
 
 if not TRAIN_SCRIPT.exists():
     pytest.skip(f"Missing example script: {TRAIN_SCRIPT}", allow_module_level=True)
@@ -30,3 +31,10 @@ def test_mnist_multidigit_ci_mode():
     else:
         assert result.returncode != 0
         assert "SVHN data missing" in (result.stderr + result.stdout)
+
+
+def test_mnist_multidigit_program_compiles_with_neural_digit_types():
+    import pyxlog
+
+    program = pyxlog.Program.compile(PROGRAM.read_text(encoding="utf-8"))
+    assert program is not None

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use xlog_core::{symbol, MemoryBudget, Result, ScalarType, XlogError};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
 use xlog_gpu::logic::normalize_program_for_execution;
 use xlog_logic::ground_term_encoding::append_ground_term_bytes;
 use xlog_logic::{
@@ -214,27 +214,6 @@ fn authored_constraint_descriptors(
         .collect()
 }
 
-#[cfg(test)]
-mod authored_constraint_identity_tests {
-    use super::*;
-
-    #[test]
-    fn reduced_constraint_descriptors_use_authored_identity_not_local_position() {
-        let mut program = parse_program(":- p(0).\n:- p(1).\n").expect("parse constraints");
-        program
-            .prepare_authored_constraint_identity_at_root()
-            .expect("prepare authored identities");
-        program.constraints.remove(0);
-
-        let descriptors = authored_constraint_descriptors(&program)
-            .expect("describe prepared reduced constraints");
-        assert_eq!(descriptors.len(), 1);
-        assert_eq!(descriptors[0].0, 1);
-        assert_eq!(descriptors[0].1, "__xlog_constraint_1");
-        assert_eq!(descriptors[0].2, ":- p(1).");
-    }
-}
-
 fn decode_column_to_strings(
     provider: &CudaKernelProvider,
     buf: &xlog_cuda::CudaBuffer,
@@ -260,12 +239,12 @@ fn decode_column_to_strings(
     let mut out = Vec::with_capacity(num_rows);
     match typ {
         ScalarType::U32 => {
-            for chunk in bytes.chunks_exact(4) {
+            for chunk in bytes.as_chunks::<4>().0 {
                 out.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string());
             }
         }
         ScalarType::Symbol => {
-            for chunk in bytes.chunks_exact(4) {
+            for chunk in bytes.as_chunks::<4>().0 {
                 let id = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 // Avoid crashing the example runner when a relation contains a non-interned symbol ID.
                 // Keep output printable while preserving the raw identifier for debugging.
@@ -274,17 +253,17 @@ fn decode_column_to_strings(
             }
         }
         ScalarType::I32 => {
-            for chunk in bytes.chunks_exact(4) {
+            for chunk in bytes.as_chunks::<4>().0 {
                 out.push(i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string());
             }
         }
         ScalarType::F32 => {
-            for chunk in bytes.chunks_exact(4) {
+            for chunk in bytes.as_chunks::<4>().0 {
                 out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string());
             }
         }
         ScalarType::U64 => {
-            for chunk in bytes.chunks_exact(8) {
+            for chunk in bytes.as_chunks::<8>().0 {
                 out.push(
                     u64::from_le_bytes([
                         chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
@@ -295,7 +274,7 @@ fn decode_column_to_strings(
             }
         }
         ScalarType::I64 => {
-            for chunk in bytes.chunks_exact(8) {
+            for chunk in bytes.as_chunks::<8>().0 {
                 out.push(
                     i64::from_le_bytes([
                         chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
@@ -306,7 +285,7 @@ fn decode_column_to_strings(
             }
         }
         ScalarType::F64 => {
-            for chunk in bytes.chunks_exact(8) {
+            for chunk in bytes.as_chunks::<8>().0 {
                 out.push(
                     f64::from_le_bytes([
                         chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
@@ -355,12 +334,8 @@ fn main() -> Result<()> {
     let mut compiler = Compiler::new();
     let plan = compiler.compile_program(&program)?;
 
-    let device = Arc::new(CudaDevice::new(device_id).map_err(|e| {
-        XlogError::Execution(format!("Failed to open CUDA device {}: {}", device_id, e))
-    })?);
     let budget = MemoryBudget::with_limit((memory_mb as u64) * 1024 * 1024);
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    let provider = Arc::new(CudaKernelProvider::new(device, memory)?);
+    let provider = Arc::new(CudaProviderBuilder::new(device_id, budget).build()?);
 
     let mut executor = Executor::new(provider.clone());
 
@@ -486,4 +461,25 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod authored_constraint_identity_tests {
+    use super::*;
+
+    #[test]
+    fn reduced_constraint_descriptors_use_authored_identity_not_local_position() {
+        let mut program = parse_program(":- p(0).\n:- p(1).\n").expect("parse constraints");
+        program
+            .prepare_authored_constraint_identity_at_root()
+            .expect("prepare authored identities");
+        program.constraints.remove(0);
+
+        let descriptors = authored_constraint_descriptors(&program)
+            .expect("describe prepared reduced constraints");
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].0, 1);
+        assert_eq!(descriptors[0].1, "__xlog_constraint_1");
+        assert_eq!(descriptors[0].2, ":- p(1).");
+    }
 }

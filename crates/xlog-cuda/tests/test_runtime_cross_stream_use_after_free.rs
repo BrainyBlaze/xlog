@@ -1,7 +1,4 @@
-// crates/xlog-cuda/tests/test_runtime_cross_stream_use_after_free.rs
-//! Failing-by-design reproducer for the v0.6 stream/lifetime-safety
-//! bug class identified by A4 (see
-//! `docs/plans/2026-04-28-v0.6-stream-lifetime-prerequisite.md`).
+//! Regression for cross-stream allocation lifetime safety.
 //!
 //! Bug class
 //! ---------
@@ -19,8 +16,8 @@
 //! contract: it launches kernels on streams other than the slice's
 //! `alloc_stream`, then drops the slice, then re-allocates. The
 //! mempool can reuse the address while the cross-stream work is
-//! still in flight, silently corrupting the new allocation. A4
-//! showed this as `mask len > row cap`, arithmetic value-mixing,
+//! still in flight, silently corrupting the new allocation. The
+//! observed failures included `mask len > row cap`, arithmetic value-mixing,
 //! missing Datalog derivations, and SIGSEGV under shared-runtime
 //! parallel use.
 //!
@@ -82,7 +79,10 @@ use xlog_cuda::CudaDevice;
 const BYTES: usize = 4096;
 
 /// Async HtoD on a specific raw stream handle.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "fixture fields retain CUDA device and runtime ownership across asynchronous stream assertions"
+)]
 unsafe fn htod_async(stream: sys::CUstream, dst: u64, src: &[u8]) {
     let res = sys::cuMemcpyHtoDAsync_v2(dst, src.as_ptr() as *const _, src.len(), stream);
     assert_eq!(

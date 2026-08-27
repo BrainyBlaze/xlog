@@ -12,18 +12,16 @@
 use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::CudaKernelProvider;
 use xlog_prob::compilation::{encode_cnf_gpu, GpuPirGraph, GpuPirRoots};
 use xlog_prob::pir::PirNodeId;
 use xlog_prob::provenance::extract_from_source;
 
 fn try_provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(2 * 1024 * 1024 * 1024),
-    ));
-    CudaKernelProvider::new(device, memory).ok().map(Arc::new)
+    xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(2 * 1024 * 1024 * 1024))
+        .build()
+        .ok()
+        .map(Arc::new)
 }
 
 /// Near-complete probabilistic digraph on 1..=n (i<j edges), reach(1,n)

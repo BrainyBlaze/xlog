@@ -4,10 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use xlog_core::{RelId, Result, ScalarType, Schema, XlogError};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
-};
+use xlog_core::{resolve_bool, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaColumn, CudaKernelProvider};
 use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
 use xlog_logic::ast::{PredColumn, PredDecl, TypeRef};
@@ -39,22 +36,16 @@ use xlog_runtime::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResidentSelectionMode {
+    Auto,
     Disabled,
-    Prefer,
     Require,
 }
 
 impl ResidentSelectionMode {
     fn from_env() -> Result<Self> {
-        let enabled = |name: &str| {
-            std::env::var(name)
-                .map(|value| !value.is_empty() && value != "0")
-                .unwrap_or(false)
-        };
-        let disabled = enabled("XLOG_DISABLE_RESIDENT_RECURSION");
-        let required = enabled("XLOG_REQUIRE_RESIDENT_RECURSION");
-        let preferred = enabled("XLOG_USE_RESIDENT_RECURSION");
-        if u8::from(disabled) + u8::from(required) + u8::from(preferred) > 1 {
+        let disabled = resolve_bool(None, "XLOG_DISABLE_RESIDENT_RECURSION", false)?;
+        let required = resolve_bool(None, "XLOG_REQUIRE_RESIDENT_RECURSION", false)?;
+        if disabled && required {
             return Err(XlogError::Execution(
                 "resident execution environment flags are mutually exclusive".to_string(),
             ));
@@ -63,14 +54,12 @@ impl ResidentSelectionMode {
             Self::Disabled
         } else if required {
             Self::Require
-        } else if preferred {
-            Self::Prefer
         } else {
-            Self::Disabled
+            Self::Auto
         })
     }
 
-    fn requested(self) -> bool {
+    fn enabled(self) -> bool {
         self != Self::Disabled
     }
 }
@@ -264,6 +253,7 @@ impl ResidentLatencyDiagnostic {
     }
 }
 
+#[cfg(test)]
 fn resident_latency_diagnostic_line(
     diagnostic: Option<&ResidentLatencyDiagnostic>,
     total_ns: u64,
@@ -288,8 +278,8 @@ where
     ])
 }
 
-fn resident_latency_diagnostics_enabled() -> bool {
-    std::env::var(RESIDENT_LATENCY_DIAGNOSTICS_ENV).as_deref() == Ok("1")
+fn resident_latency_diagnostics_enabled() -> Result<bool> {
+    resolve_bool(None, RESIDENT_LATENCY_DIAGNOSTICS_ENV, false)
 }
 
 fn resident_latency_elapsed_ns(started: Option<std::time::Instant>) -> u64 {
@@ -424,6 +414,7 @@ impl LogicSessionRuntime {
             factorized_delta_dispatch_count: self.executor.factorized_delta_dispatch_count(),
             wcoj_groupby_fusion_dispatch_count: self.executor.wcoj_groupby_fusion_dispatch_count(),
             wcoj_error_decline_count: self.executor.wcoj_error_decline_count(),
+            wcoj_fallback: self.executor.wcoj_fallback_stats(),
         }
     }
 }
@@ -441,6 +432,8 @@ pub struct WcojDispatchStats {
     pub wcoj_groupby_fusion_dispatch_count: u64,
     /// WCOJ pipeline errors that declined to the binary-join fallback.
     pub wcoj_error_decline_count: u64,
+    /// Actual fallbacks classified by the route that was attempted.
+    pub wcoj_fallback: xlog_runtime::WcojFallbackStats,
 }
 
 /// Planner-grade telemetry for a persistent-session relation delta update.
@@ -1529,7 +1522,7 @@ impl LogicProgram {
         } else {
             None
         };
-        if resident_mode.requested() {
+        if resident_mode.enabled() {
             if resident_mode == ResidentSelectionMode::Require {
                 return Err(XlogError::Execution(
                     "resident conditional-graph execution was required, but complete-store evaluation requires the existing GPU path"
@@ -1611,7 +1604,7 @@ impl LogicProgram {
         } else {
             None
         };
-        if resident_mode.requested() {
+        if resident_mode.enabled() {
             if resident_mode == ResidentSelectionMode::Require {
                 return Err(XlogError::Execution(
                     "resident conditional-graph execution was required, but persistent session evaluation requires the existing GPU path"
@@ -2075,7 +2068,7 @@ impl LogicProgram {
     ) -> Result<LogicEvalResult> {
         match mode {
             ResidentSelectionMode::Disabled => Ok(result),
-            ResidentSelectionMode::Prefer => {
+            ResidentSelectionMode::Auto => {
                 if let Some(stats) = result.stats.as_mut() {
                     stats.resident_graph = Some(ResidentGraphExecutionStats::declined(
                         ResidentGraphDeclineReason::NonOrdinaryPlan,
@@ -2180,7 +2173,7 @@ impl LogicProgram {
         mode: ResidentSelectionMode,
     ) -> Result<LogicEvalResult> {
         let mut latency_diagnostic =
-            resident_latency_diagnostics_enabled().then(ResidentLatencyDiagnostic::new);
+            resident_latency_diagnostics_enabled()?.then(ResidentLatencyDiagnostic::new);
         let total_started = latency_diagnostic
             .as_ref()
             .map(|_| std::time::Instant::now());
@@ -2289,72 +2282,27 @@ impl LogicProgram {
             }
         }
 
-        let caller_has_runtime = provider.memory().runtime().is_some();
-        let resident_provider = match Self::resident_provider_view(&provider) {
-            Ok(provider) => provider,
-            Err(reason) => {
-                return self.evaluate_existing_gpu_after_resident_decline(
-                    provider,
-                    inputs,
-                    profiling,
-                    ordinary_plan,
-                    mode,
-                    reason,
-                )
-            }
-        };
-        let runtime = Arc::clone(
-            resident_provider
-                .memory()
-                .runtime()
-                .expect("resident provider view was validated with a runtime"),
-        );
+        let runtime = Arc::clone(provider.memory().runtime().ok_or_else(|| {
+            XlogError::Execution(
+                "internal invariant violated: CUDA provider has no owned runtime".into(),
+            )
+        })?);
+        if !Arc::ptr_eq(provider.device(), provider.memory().device())
+            || !Arc::ptr_eq(provider.device(), runtime.device())
+            || !runtime.supports_block_use_tracking()
+        {
+            return Err(XlogError::Execution(
+                "internal invariant violated: CUDA provider runtime ownership graph is inconsistent"
+                    .into(),
+            ));
+        }
+        let resident_provider = provider;
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.runtime_bytes[0] = runtime.bytes_outstanding();
             diagnostic.manager_bytes[0] = resident_provider.memory().allocated_bytes();
         }
 
-        let resident_inputs = if caller_has_runtime {
-            inputs
-        } else {
-            let mut migrated = HashMap::with_capacity(inputs.len());
-            let migration = inputs.iter().try_for_each(|(name, buffer)| {
-                resident_provider
-                    .clone_buffer(buffer)
-                    .map(|clone| migrated.insert(name.clone(), clone))
-                    .map(|_| ())
-            });
-            if let Err(error) = migration {
-                drop(migrated);
-                resident_provider.device().synchronize().map_err(|cleanup| {
-                        XlogError::Kernel(format!(
-                            "resident input migration failed ({error}); cleanup synchronization failed: {cleanup}"
-                        ))
-                    })?;
-                runtime.reap_pending().map_err(|cleanup| {
-                    XlogError::Kernel(format!(
-                        "resident input migration failed ({error}); cleanup reap failed: {cleanup}"
-                    ))
-                })?;
-                return self.evaluate_existing_gpu_after_resident_decline(
-                    provider,
-                    inputs,
-                    profiling,
-                    ordinary_plan,
-                    mode,
-                    ResidentGraphDeclineReason::WorkspaceUnbounded {
-                        detail: format!("input migration to the async runtime failed: {error}"),
-                    },
-                );
-            }
-            resident_provider.device().synchronize().map_err(|error| {
-                XlogError::Kernel(format!(
-                    "resident input migration synchronization failed: {error}"
-                ))
-            })?;
-            drop(inputs);
-            migrated
-        };
+        let resident_inputs = inputs;
 
         let mut canonical_replacements = HashMap::new();
         let canonicalization = resident_inputs.iter().try_for_each(|(name, buffer)| {
@@ -2449,7 +2397,7 @@ impl LogicProgram {
                     .reap_pending()
                     .map_err(|error| XlogError::Kernel(error.to_string()))?;
                 return match mode {
-                        ResidentSelectionMode::Prefer => {
+                        ResidentSelectionMode::Auto => {
                             executor.execute_plan(ordinary_plan)?;
                             let mut result = self.finish_ordinary_evaluation(
                                 &resident_provider,
@@ -2726,7 +2674,7 @@ impl LogicProgram {
             ResidentSelectionMode::Require => Err(XlogError::Execution(format!(
                 "resident conditional-graph execution was required but declined: {reason:?}"
             ))),
-            ResidentSelectionMode::Prefer | ResidentSelectionMode::Disabled => {
+            ResidentSelectionMode::Auto | ResidentSelectionMode::Disabled => {
                 let mut executor = self.prepare_executor(&provider, inputs, profiling)?;
                 executor.execute_plan(plan)?;
                 let mut result =
@@ -2749,63 +2697,6 @@ impl LogicProgram {
                         if slice.memory_manager_ptr_value() == expected_manager
                 )
             })
-    }
-
-    fn resident_provider_view(
-        provider: &Arc<CudaKernelProvider>,
-    ) -> std::result::Result<Arc<CudaKernelProvider>, ResidentGraphDeclineReason> {
-        let decline =
-            |detail: String| ResidentGraphDeclineReason::ConditionalGraphUnavailable { detail };
-        if !Arc::ptr_eq(provider.device(), provider.memory().device()) {
-            return Err(decline(
-                "provider and memory manager do not share the same CUDA device handle".into(),
-            ));
-        }
-        if let Some(runtime) = provider.memory().runtime() {
-            if !Arc::ptr_eq(provider.device(), runtime.device())
-                || !runtime.supports_block_use_tracking()
-            {
-                return Err(decline(
-                    "the caller runtime cannot track resident cross-stream block uses".into(),
-                ));
-            }
-            return Ok(Arc::clone(provider));
-        }
-
-        let device = Arc::clone(provider.device());
-        let device_ordinal = u32::try_from(device.ordinal()).map_err(|_| {
-            decline(format!(
-                "CUDA device ordinal {} is not representable as u32",
-                device.ordinal()
-            ))
-        })?;
-        let budget_limit =
-            usize::try_from(provider.memory().budget_limit_bytes()).map_err(|_| {
-                decline("the caller memory budget is not representable as usize".into())
-            })?;
-        let stream_pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-        let asynchronous: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(AsyncCudaResource::new(
-                Arc::clone(&device),
-                device_ordinal,
-                Arc::clone(&stream_pool),
-            ));
-        let resource: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(GlobalDeviceBudget::new(asynchronous, budget_limit));
-        let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-            Arc::clone(&device),
-            device_ordinal,
-            stream_pool,
-            resource,
-        ));
-        let overlay = provider
-            .memory()
-            .with_runtime_overlay(runtime)
-            .map_err(|error| decline(error.to_string()))?;
-        provider
-            .with_runtime_memory_view(overlay)
-            .map(Arc::new)
-            .map_err(|error| decline(error.to_string()))
     }
 
     fn resident_execution_error(error: ResidentGraphExecutionError) -> XlogError {
@@ -2941,30 +2832,12 @@ impl LogicProgram {
             executor.register_relation(*rel_id, name);
         }
 
-        let arity_qualified_predicates = if self.epistemic_provenance.is_some() {
-            epistemic_extensional_multi_arity_predicates(&self.program)
-        } else {
-            predicate_arities(&self.program)
-                .into_iter()
-                .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
-                .collect()
-        };
-        let inline_fact_relations = self
-            .program
-            .facts()
-            .map(|fact| {
-                let predicate = fact.head.predicate.as_str();
-                if arity_qualified_predicates.contains(predicate) {
-                    arity_qualified_name(predicate, fact.head.terms.len())
-                } else {
-                    predicate.to_string()
-                }
-            })
-            .collect::<BTreeSet<_>>();
+        let arity_qualified_predicates = self.arity_qualified_fact_predicates();
+        let fact_rows = self.fact_rows_by_relation(&arity_qualified_predicates);
 
         for (name, schema) in &self.schemas {
             let is_derived_placeholder = derived_relations.is_some_and(|set| set.contains(name))
-                && !inline_fact_relations.contains(name);
+                && !fact_rows.contains_key(name);
             if is_derived_placeholder {
                 continue;
             }
@@ -2986,7 +2859,7 @@ impl LogicProgram {
             executor.store_mut().put(&name, buffer);
         }
 
-        self.load_facts(provider, &mut executor)?;
+        self.load_grouped_facts_into_store(provider, executor.store_mut(), fact_rows)?;
         Ok(executor)
     }
 
@@ -3035,11 +2908,13 @@ impl LogicProgram {
         Ok(executor)
     }
 
+    #[cfg(test)]
     fn resident_certified_plan(&self) -> Result<Arc<ResidentGraphCertifiedPlan>> {
         let plan = self.ordinary_plan("resident route certification")?;
         self.resident_certified_plan_for_plan(plan)
     }
 
+    #[cfg(test)]
     fn resident_certified_plan_with_outcome(
         &self,
     ) -> Result<(Arc<ResidentGraphCertifiedPlan>, bool, bool)> {
@@ -3185,7 +3060,7 @@ impl LogicProgram {
             "caller input",
         )?;
         let resident_mode = ResidentSelectionMode::from_env()?;
-        if matches!(&self.plan, LogicExecutionPlan::Ordinary(_)) && resident_mode.requested() {
+        if matches!(&self.plan, LogicExecutionPlan::Ordinary(_)) && resident_mode.enabled() {
             return self.evaluate_ordinary_with_resident_mode(
                 provider,
                 inputs,
@@ -3336,51 +3211,6 @@ impl LogicProgram {
         Ok(true)
     }
 
-    fn executor_from_relation_store(
-        &self,
-        provider: Arc<CudaKernelProvider>,
-        relation_store: &RelationStore,
-        profiling: bool,
-    ) -> Result<Executor> {
-        let mut executor = Executor::new(provider.clone());
-        executor.set_profiling(profiling);
-        for (name, rel_id) in &self.rel_ids {
-            executor.register_relation(*rel_id, name);
-        }
-
-        for (name, schema) in &self.schemas {
-            executor
-                .store_mut()
-                .put(name, provider.create_empty_buffer(schema.clone())?);
-        }
-
-        for name in relation_store.names() {
-            let buffer = relation_store.get(name).ok_or_else(|| {
-                XlogError::Execution(format!(
-                    "Persistent relation {} disappeared during evaluation",
-                    name
-                ))
-            })?;
-            let schema = self.schemas.get(name).ok_or_else(|| {
-                XlogError::Execution(format!(
-                    "Persistent relation {} not declared in program schemas",
-                    name
-                ))
-            })?;
-            ensure_schema_type_compatible(schema, buffer.schema()).map_err(|e| {
-                XlogError::Execution(format!(
-                    "Persistent relation {} schema mismatch: {}",
-                    name, e
-                ))
-            })?;
-            executor
-                .store_mut()
-                .put(name, provider.clone_buffer(buffer)?);
-        }
-
-        Ok(executor)
-    }
-
     fn clone_relation_store(
         &self,
         provider: &Arc<CudaKernelProvider>,
@@ -3511,8 +3341,35 @@ impl LogicProgram {
         })
     }
 
-    fn load_facts(&self, provider: &CudaKernelProvider, executor: &mut Executor) -> Result<()> {
-        self.load_facts_into_store(provider, executor.store_mut())
+    fn arity_qualified_fact_predicates(&self) -> BTreeSet<String> {
+        if self.epistemic_provenance.is_some() {
+            epistemic_extensional_multi_arity_predicates(&self.program)
+        } else {
+            predicate_arities(&self.program)
+                .into_iter()
+                .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
+                .collect()
+        }
+    }
+
+    fn fact_rows_by_relation<'program>(
+        &'program self,
+        arity_qualified_predicates: &BTreeSet<String>,
+    ) -> HashMap<String, Vec<&'program [Term]>> {
+        let mut rows_by_pred = HashMap::new();
+        for fact in self.program.facts() {
+            let predicate = fact.head.predicate.as_str();
+            let relation = if arity_qualified_predicates.contains(predicate) {
+                arity_qualified_name(predicate, fact.head.terms.len())
+            } else {
+                predicate.to_string()
+            };
+            rows_by_pred
+                .entry(relation)
+                .or_insert_with(Vec::new)
+                .push(fact.head.terms.as_slice());
+        }
+        rows_by_pred
     }
 
     fn load_facts_into_store(
@@ -3520,26 +3377,17 @@ impl LogicProgram {
         provider: &CudaKernelProvider,
         store: &mut RelationStore,
     ) -> Result<()> {
-        let arity_qualified_predicates = if self.epistemic_provenance.is_some() {
-            epistemic_extensional_multi_arity_predicates(&self.program)
-        } else {
-            predicate_arities(&self.program)
-                .into_iter()
-                .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
-                .collect()
-        };
-        let mut rows_by_pred: HashMap<String, Vec<&[Term]>> = HashMap::new();
-        for fact in self.program.facts() {
-            let pred = fact.head.predicate.as_str();
-            let arity = fact.head.terms.len();
-            let key = if arity_qualified_predicates.contains(pred) {
-                arity_qualified_name(pred, arity)
-            } else {
-                pred.to_string()
-            };
-            rows_by_pred.entry(key).or_default().push(&fact.head.terms);
-        }
+        let arity_qualified_predicates = self.arity_qualified_fact_predicates();
+        let rows_by_pred = self.fact_rows_by_relation(&arity_qualified_predicates);
+        self.load_grouped_facts_into_store(provider, store, rows_by_pred)
+    }
 
+    fn load_grouped_facts_into_store(
+        &self,
+        provider: &CudaKernelProvider,
+        store: &mut RelationStore,
+        rows_by_pred: HashMap<String, Vec<&[Term]>>,
+    ) -> Result<()> {
         for (pred, rows) in rows_by_pred {
             let schema = self.schemas.get(pred.as_str()).ok_or_else(|| {
                 XlogError::Execution(format!(
@@ -4254,6 +4102,9 @@ fn collect_iterative_execution_stats(stats: &mut Option<ExecutionStats>, executo
     combined.wcoj_error_decline_count = combined
         .wcoj_error_decline_count
         .saturating_add(pass.wcoj_error_decline_count);
+    combined
+        .wcoj_fallback
+        .saturating_add_assign(pass.wcoj_fallback);
     combined.strata.append(&mut pass.strata);
 }
 
@@ -5958,7 +5809,7 @@ mod tests {
     use std::sync::Arc;
 
     use xlog_core::{symbol, MemoryBudget, ScalarType};
-    use xlog_cuda::{cuda_graph::CudaGraphNodeKind, CudaDevice, GpuMemoryManager};
+    use xlog_cuda::cuda_graph::CudaGraphNodeKind;
     use xlog_ir::RirNode;
     use xlog_runtime::resident_graph::{
         ResidentGraphDeclineReason, ResidentGraphRouteCertificate, ResidentGraphSchemaCatalog,
@@ -5967,12 +5818,10 @@ mod tests {
 
     fn ground_term_encoding_test_provider() -> Option<Arc<CudaKernelProvider>> {
         let provider = (|| -> Result<Arc<CudaKernelProvider>> {
-            let device = Arc::new(CudaDevice::new(0)?);
-            let memory = Arc::new(GpuMemoryManager::new(
-                device.clone(),
-                MemoryBudget::with_limit(256 * 1024 * 1024),
-            ));
-            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+            Ok(Arc::new(
+                xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(256 * 1024 * 1024))
+                    .build()?,
+            ))
         })();
 
         finish_test_provider_setup(
@@ -5983,12 +5832,13 @@ mod tests {
 
     fn pinned_corpus_test_provider() -> Option<Arc<CudaKernelProvider>> {
         let provider = (|| -> Result<Arc<CudaKernelProvider>> {
-            let device = Arc::new(CudaDevice::new(0)?);
-            let memory = Arc::new(GpuMemoryManager::new(
-                device.clone(),
-                MemoryBudget::with_limit(2 * 1024 * 1024 * 1024),
-            ));
-            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+            Ok(Arc::new(
+                xlog_cuda::CudaProviderBuilder::new(
+                    0,
+                    MemoryBudget::with_limit(2 * 1024 * 1024 * 1024),
+                )
+                .build()?,
+            ))
         })();
         finish_test_provider_setup(
             provider,
@@ -5997,9 +5847,8 @@ mod tests {
     }
 
     const PINNED_CORPUS_SHA: &str = "74f2895486737b4caa42229389d309994e7ad3ea";
-    const RESIDENT_ENV_NAMES: [&str; 4] = [
+    const RESIDENT_ENV_NAMES: [&str; 3] = [
         "XLOG_DISABLE_RESIDENT_RECURSION",
-        "XLOG_USE_RESIDENT_RECURSION",
         "XLOG_REQUIRE_RESIDENT_RECURSION",
         RESIDENT_LATENCY_DIAGNOSTICS_ENV,
     ];
@@ -6111,6 +5960,56 @@ mod tests {
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
+    #[test]
+    fn resident_selection_rejects_malformed_boolean_environment() {
+        let _lock = resident_env_lock().lock().unwrap();
+        let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "sometimes")]);
+        assert!(matches!(
+            ResidentSelectionMode::from_env(),
+            Err(XlogError::Configuration { ref name, .. })
+                if name == "XLOG_REQUIRE_RESIDENT_RECURSION"
+        ));
+    }
+
+    #[test]
+    fn resident_selection_defaults_to_auto_and_honors_explicit_policy() {
+        let _lock = resident_env_lock().lock().unwrap();
+
+        let automatic = ResidentEnvGuard::set(&[]);
+        assert_eq!(
+            ResidentSelectionMode::from_env().unwrap(),
+            ResidentSelectionMode::Auto
+        );
+        drop(automatic);
+
+        let disabled = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+        assert_eq!(
+            ResidentSelectionMode::from_env().unwrap(),
+            ResidentSelectionMode::Disabled
+        );
+        drop(disabled);
+
+        let _required = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+        assert_eq!(
+            ResidentSelectionMode::from_env().unwrap(),
+            ResidentSelectionMode::Require
+        );
+    }
+
+    #[test]
+    fn resident_selection_rejects_conflicting_explicit_policy() {
+        let _lock = resident_env_lock().lock().unwrap();
+        let _env = ResidentEnvGuard::set(&[
+            ("XLOG_DISABLE_RESIDENT_RECURSION", "1"),
+            ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+        ]);
+        assert!(matches!(
+            ResidentSelectionMode::from_env(),
+            Err(XlogError::Execution(ref message))
+                if message.contains("mutually exclusive")
+        ));
+    }
+
     fn corpus_program(corpus: &std::path::Path) -> Result<LogicProgram> {
         let entry = corpus.join("scenarios/acceptance/issue1/q01_blind.xlog");
         let source = std::fs::read_to_string(&entry).map_err(|error| {
@@ -6133,42 +6032,18 @@ mod tests {
         ))
     }
 
-    fn scan_schema_descriptor(program: &LogicProgram, rel: RelId) -> String {
-        let schemas = program
-            .rel_ids
-            .iter()
-            .filter(|(_, candidate)| **candidate == rel)
-            .filter_map(|(name, _)| {
-                program
-                    .schemas
-                    .get(name)
-                    .map(|schema| format!("{name}={schema:#?}"))
-            })
-            .collect::<BTreeSet<_>>();
-        assert!(
-            !schemas.is_empty(),
-            "compiled Scan {rel:?} has no schema identity"
-        );
-        schemas.into_iter().collect::<Vec<_>>().join("|")
-    }
-
     struct RouteWalk<'a> {
-        program: &'a LogicProgram,
         scc_index: usize,
         rule_index: usize,
         recursive: bool,
-        descriptors: &'a mut BTreeSet<String>,
+        identities: &'a mut BTreeSet<String>,
     }
 
     impl RouteWalk<'_> {
         fn visit(&mut self, node: &RirNode, path: &str) {
-            let scan_schema = match node {
-                RirNode::Scan { rel } => scan_schema_descriptor(self.program, *rel),
-                _ => String::new(),
-            };
             assert!(
-                self.descriptors.insert(format!(
-                    "scc={};rule={};recursive={};path={path};node={node:#?};scan_schema={scan_schema}",
+                self.identities.insert(format!(
+                    "scc={};rule={};recursive={};path={path}",
                     self.scc_index, self.rule_index, self.recursive
                 )),
                 "route occurrence paths must be unique"
@@ -6216,11 +6091,8 @@ mod tests {
         }
     }
 
-    fn independent_route_descriptors(
-        program: &LogicProgram,
-        plan: &ExecutionPlan,
-    ) -> BTreeSet<String> {
-        let mut descriptors = BTreeSet::new();
+    fn independent_route_identities(plan: &ExecutionPlan) -> BTreeSet<String> {
+        let mut identities = BTreeSet::new();
         for (scc_index, scc) in plan.sccs.iter().enumerate() {
             let rules = plan
                 .rules_by_scc
@@ -6228,26 +6100,25 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing rule vector for SCC {scc_index}"));
             for (rule_index, rule) in rules.iter().enumerate() {
                 RouteWalk {
-                    program,
                     scc_index,
                     rule_index,
                     recursive: scc.is_recursive,
-                    descriptors: &mut descriptors,
+                    identities: &mut identities,
                 }
                 .visit(&rule.body, "primary/root");
                 let rule_identity = format!(
                     "scc={scc_index};rule={rule_index};head={};schema={:#?}",
                     rule.head, rule.meta.schema
                 );
-                descriptors.insert(format!("{rule_identity};implicit=rule_result_union"));
-                descriptors.insert(format!("{rule_identity};implicit=full_row_dedup"));
+                identities.insert(format!("{rule_identity};implicit=rule_result_union"));
+                identities.insert(format!("{rule_identity};implicit=full_row_dedup"));
                 if scc.is_recursive {
-                    descriptors.insert(format!("{rule_identity};implicit=novel_tuple_difference"));
-                    descriptors.insert(format!("{rule_identity};implicit=device_convergence"));
+                    identities.insert(format!("{rule_identity};implicit=novel_tuple_difference"));
+                    identities.insert(format!("{rule_identity};implicit=device_convergence"));
                 }
             }
         }
-        descriptors
+        identities
     }
 
     fn op_count(stats: &ExecutionStats, name: &str) -> usize {
@@ -6287,8 +6158,7 @@ mod tests {
             .queries
             .iter()
             .map(|query| {
-                let row_count = usize::try_from(provider.device_row_count(&query.buffer)?)
-                    .map_err(|_| XlogError::Execution("query row count exceeds usize".into()))?;
+                let row_count = provider.device_row_count(&query.buffer)?;
                 let mut columns = Vec::with_capacity(query.buffer.schema().arity());
                 for index in 0..query.buffer.schema().arity() {
                     let ty = query
@@ -6573,32 +6443,37 @@ mod tests {
     #[test]
     fn resident_dependency_closure_fails_closed_on_missing_duplicate_or_ambiguous_proof(
     ) -> Result<()> {
-        fn plan_structure(
-            plan: &ExecutionPlan,
-        ) -> (
-            Vec<(u32, Vec<String>)>,
-            Vec<(u32, Vec<u32>)>,
-            Vec<Vec<String>>,
-            Vec<(usize, usize, usize)>,
-        ) {
-            (
-                plan.sccs
+        #[derive(Debug, PartialEq, Eq)]
+        struct ResidentPlanStructure {
+            sccs: Vec<(u32, Vec<String>)>,
+            strata: Vec<(u32, Vec<u32>)>,
+            rule_heads: Vec<Vec<String>>,
+            generated_query_rules: Vec<(usize, usize, usize)>,
+        }
+
+        fn plan_structure(plan: &ExecutionPlan) -> ResidentPlanStructure {
+            ResidentPlanStructure {
+                sccs: plan
+                    .sccs
                     .iter()
                     .map(|scc| (scc.id, scc.predicates.clone()))
                     .collect(),
-                plan.strata
+                strata: plan
+                    .strata
                     .iter()
                     .map(|stratum| (stratum.id, stratum.sccs.clone()))
                     .collect(),
-                plan.rules_by_scc
+                rule_heads: plan
+                    .rules_by_scc
                     .iter()
                     .map(|rules| rules.iter().map(|rule| rule.head.clone()).collect())
                     .collect(),
-                plan.generated_query_rules
+                generated_query_rules: plan
+                    .generated_query_rules
                     .iter()
                     .map(|query| (query.query_index, query.scc_index, query.rule_index))
                     .collect(),
-            )
+            }
         }
 
         let program = LogicProgram::compile(
@@ -6716,13 +6591,13 @@ mod tests {
     fn resident_certification_cache_is_ordinary_only_and_caches_declines_without_policy(
     ) -> Result<()> {
         let _env_lock = resident_env_lock().lock().expect("resident env lock");
-        for (name, value) in [
-            ("XLOG_DISABLE_RESIDENT_RECURSION", "1"),
-            ("XLOG_USE_RESIDENT_RECURSION", "1"),
-            ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+        for policy in [
+            &[][..],
+            &[("XLOG_DISABLE_RESIDENT_RECURSION", "1")][..],
+            &[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")][..],
         ] {
             let program = {
-                let _env = ResidentEnvGuard::set(&[(name, value)]);
+                let _env = ResidentEnvGuard::set(policy);
                 LogicProgram::compile(
                     r#"
                         pred input(u32).
@@ -6805,16 +6680,13 @@ mod tests {
         let Some(provider) = pinned_corpus_test_provider() else {
             return Ok(());
         };
-        let resident_provider =
-            LogicProgram::resident_provider_view(&provider).map_err(|reason| {
-                XlogError::Execution(format!("resident provider preflight declined: {reason:?}"))
-            })?;
+        let resident_provider = Arc::clone(&provider);
         let executor =
             program.prepare_resident_executor(&resident_provider, HashMap::new(), false, plan)?;
         let runtime = resident_provider
             .memory()
             .runtime()
-            .expect("resident provider view must own an async runtime");
+            .expect("canonical provider must own an async runtime");
         let graph_before = runtime.conditional_graph_stats();
         let allocated_before = resident_provider.memory().allocated_bytes();
 
@@ -6955,7 +6827,7 @@ mod tests {
                     let RirNode::ChainJoin { fallback, .. } = &rule.body else {
                         return None;
                     };
-                    let (scans, filters) = fallback_scan_filter_counts(fallback);
+                    let (scans, filters) = fallback_scan_filter_counts(fallback.as_ref());
                     Some((
                         scc_index,
                         plan.sccs[scc_index].is_recursive,
@@ -6988,24 +6860,30 @@ mod tests {
             chain_fallbacks.iter().map(|route| route.4).sum::<usize>()
         );
 
-        let expected_routes = independent_route_descriptors(&program, plan);
+        // Prove occurrence completeness independently without duplicating the
+        // certificate's bounded local-node encoding. `matches_plan` and the
+        // resident-graph mutation tests verify that semantic binding.
+        let expected_route_identities = independent_route_identities(plan);
         let certificate = ResidentGraphRouteCertificate::inspect(plan, &schema_catalog(&program))?;
         assert!(certificate.is_supported(), "{:#?}", certificate.declines());
         assert!(certificate.matches_plan(plan)?);
         let mut covered_structural_bindings = BTreeSet::new();
-        let mut covered_physical_routes = BTreeSet::new();
+        let mut covered_physical_route_identities = BTreeSet::new();
         for descriptor in certificate.covered_route_descriptors() {
             if descriptor.starts_with("plan;") {
                 covered_structural_bindings.insert(descriptor.clone());
             } else if descriptor.starts_with("scc=") {
-                covered_physical_routes.insert(descriptor.clone());
+                let identity = descriptor
+                    .split_once(";node=")
+                    .map_or(descriptor.as_str(), |(identity, _)| identity);
+                covered_physical_route_identities.insert(identity.to_owned());
             } else {
                 panic!("unknown resident certificate descriptor class: {descriptor}");
             }
         }
         assert!(!covered_structural_bindings.is_empty());
-        assert!(!covered_physical_routes.is_empty());
-        assert_eq!(covered_physical_routes, expected_routes);
+        assert!(!covered_physical_route_identities.is_empty());
+        assert_eq!(covered_physical_route_identities, expected_route_identities);
 
         let Some(provider) = pinned_corpus_test_provider() else {
             return Ok(());
@@ -7100,9 +6978,13 @@ mod tests {
             "external certificate audits and the disabled-resident baseline must reuse the compile-time certification"
         );
 
-        let mut resident_seconds = Vec::with_capacity(5);
-        let mut device_seconds = Vec::with_capacity(5);
-        for run in 0..5 {
+        const WARMUP_RUNS: usize = 2;
+        const MEASURED_RUNS: usize = 5;
+        let mut warmup_seconds = Vec::with_capacity(WARMUP_RUNS);
+        let mut warmup_device_seconds = Vec::with_capacity(WARMUP_RUNS);
+        let mut resident_seconds = Vec::with_capacity(MEASURED_RUNS);
+        let mut device_seconds = Vec::with_capacity(MEASURED_RUNS);
+        for run in 0..(WARMUP_RUNS + MEASURED_RUNS) {
             let started = std::time::Instant::now();
             let resident = {
                 let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
@@ -7113,7 +6995,12 @@ mod tests {
                 1,
                 "resident corpus run {run} must reuse the single cached certification"
             );
-            resident_seconds.push(started.elapsed().as_secs_f64());
+            let elapsed_seconds = started.elapsed().as_secs_f64();
+            if run < WARMUP_RUNS {
+                warmup_seconds.push(elapsed_seconds);
+            } else {
+                resident_seconds.push(elapsed_seconds);
+            }
             assert_eq!(
                 snapshot_query_results(provider.as_ref(), &resident)?,
                 baseline_snapshot,
@@ -7161,7 +7048,13 @@ mod tests {
             );
             assert!(graph.deferred_profile.device_elapsed_ns > 0);
             assert_eq!(graph.deferred_profile.final_sync_misattributed_ns, 0);
-            device_seconds.push(graph.deferred_profile.device_elapsed_ns as f64 / 1_000_000_000.0);
+            let device_elapsed_seconds =
+                graph.deferred_profile.device_elapsed_ns as f64 / 1_000_000_000.0;
+            if run < WARMUP_RUNS {
+                warmup_device_seconds.push(device_elapsed_seconds);
+            } else {
+                device_seconds.push(device_elapsed_seconds);
+            }
             assert_eq!(graph.core_transfers.tracked_htod_calls, 0);
             assert_eq!(graph.core_transfers.tracked_htod_bytes, 0);
             assert_eq!(graph.core_transfers.tracked_dtoh_calls, 0);
@@ -7195,21 +7088,27 @@ mod tests {
             drop(resident);
         }
         assert_eq!(program.resident_certification_initializations(), 1);
+        assert_eq!(warmup_seconds.len(), WARMUP_RUNS);
+        assert_eq!(resident_seconds.len(), MEASURED_RUNS);
         let compile_plus_first_resident_seconds =
-            compile_and_certification_seconds + resident_seconds[0];
-        let max_seconds = resident_seconds.iter().copied().fold(0.0_f64, f64::max);
+            compile_and_certification_seconds + warmup_seconds[0];
+        let max_seconds = warmup_seconds
+            .iter()
+            .chain(&resident_seconds)
+            .copied()
+            .fold(0.0_f64, f64::max);
         let mut sorted_resident_seconds = resident_seconds.clone();
         let median_seconds = median_seconds(&mut sorted_resident_seconds);
         eprintln!(
-            "resident corpus latency: compile_and_certification_seconds={compile_and_certification_seconds:.6} compile_plus_first_resident_seconds={compile_plus_first_resident_seconds:.6} end_to_end_seconds={resident_seconds:?} device_event_seconds={device_seconds:?} median_end_to_end_seconds={median_seconds:.6} max_end_to_end_seconds={max_seconds:.6}"
+            "resident corpus latency: compile_and_certification_seconds={compile_and_certification_seconds:.6} compile_plus_first_resident_seconds={compile_plus_first_resident_seconds:.6} warmup_end_to_end_seconds={warmup_seconds:?} measured_end_to_end_seconds={resident_seconds:?} warmup_device_event_seconds={warmup_device_seconds:?} measured_device_event_seconds={device_seconds:?} median_measured_end_to_end_seconds={median_seconds:.6} max_all_end_to_end_seconds={max_seconds:.6}"
         );
         assert!(
             median_seconds <= 1.25,
-            "five-run resident corpus median {median_seconds:.6}s exceeds 1.25s: {resident_seconds:?}"
+            "five-run steady-state resident corpus median {median_seconds:.6}s exceeds 1.25s: {resident_seconds:?}"
         );
         assert!(
             max_seconds <= 1.75,
-            "five-run resident corpus max {max_seconds:.6}s exceeds 1.75s: {resident_seconds:?}"
+            "seven-run resident corpus max {max_seconds:.6}s exceeds 1.75s: warmup={warmup_seconds:?} measured={resident_seconds:?}"
         );
         Ok(())
     }
@@ -7309,112 +7208,121 @@ mod tests {
             return Ok(());
         };
 
-        let mut base_seconds = Vec::with_capacity(5);
+        const WARMUP_PAIRS: usize = 2;
+        const MEASURED_PAIRS: usize = 5;
+
+        let mut warmup_base_seconds = Vec::with_capacity(WARMUP_PAIRS);
+        let mut warmup_augmented_seconds = Vec::with_capacity(WARMUP_PAIRS);
+        let mut base_seconds = Vec::with_capacity(MEASURED_PAIRS);
+        let mut augmented_seconds = Vec::with_capacity(MEASURED_PAIRS);
         let mut expected_snapshot = None;
         let mut expected_profile = None;
-        for run in 0..5 {
-            let started = std::time::Instant::now();
-            let result = {
-                let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
-                base_program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+        for pair in 0..(WARMUP_PAIRS + MEASURED_PAIRS) {
+            let augmented_order = if pair % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
             };
-            base_seconds.push(started.elapsed().as_secs_f64());
-            let snapshot = snapshot_query_results(provider.as_ref(), &result)?;
-            if let Some(expected) = &expected_snapshot {
-                assert_eq!(&snapshot, expected, "base resident run {run} drifted");
-            } else {
-                expected_snapshot = Some(snapshot);
-            }
-            let stats = result.stats.as_ref().expect("base resident profile");
-            let graph = stats
-                .resident_graph
-                .as_ref()
-                .expect("base resident graph telemetry");
-            assert_eq!(
-                graph.selection,
-                ResidentGraphSelectionKind::ResidentConditionalGraph
-            );
-            assert_eq!(graph.conditional_graph_launches, 1);
-            assert_eq!(
-                op_count(stats, "scan") as u64,
-                graph.device_scan_invocations
-            );
-            assert_eq!(
-                op_count(stats, "filter") as u64,
-                graph.device_filter_invocations
-            );
-            let profile = (
-                strata_op_profile(stats),
-                graph.device_scan_invocations,
-                graph.device_filter_invocations,
-                graph.semantic_scan_invocations,
-                graph.semantic_filter_invocations,
-                graph.deferred_profile.timed_scan_filter_invocations,
-            );
-            if let Some(expected) = &expected_profile {
-                assert_eq!(&profile, expected, "base resident run {run} op drift");
-            } else {
-                expected_profile = Some(profile);
-            }
-            drop(result);
-        }
+            for augmented in augmented_order {
+                let program = if augmented {
+                    &augmented_program
+                } else {
+                    &base_program
+                };
+                let started = std::time::Instant::now();
+                let result = {
+                    let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+                    program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
+                };
+                let elapsed = started.elapsed().as_secs_f64();
+                match (pair < WARMUP_PAIRS, augmented) {
+                    (true, false) => warmup_base_seconds.push(elapsed),
+                    (true, true) => warmup_augmented_seconds.push(elapsed),
+                    (false, false) => base_seconds.push(elapsed),
+                    (false, true) => augmented_seconds.push(elapsed),
+                }
 
-        let expected_snapshot = expected_snapshot.expect("base resident snapshot");
-        let expected_profile = expected_profile.expect("base resident operation profile");
-        let mut augmented_seconds = Vec::with_capacity(5);
-        for run in 0..5 {
-            let started = std::time::Instant::now();
-            let result = {
-                let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
-                augmented_program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-            };
-            augmented_seconds.push(started.elapsed().as_secs_f64());
-            assert_eq!(
-                snapshot_query_results(provider.as_ref(), &result)?,
-                expected_snapshot,
-                "disconnected family changed query output on run {run}"
-            );
-            let stats = result.stats.as_ref().expect("augmented resident profile");
-            let graph = stats
-                .resident_graph
-                .as_ref()
-                .expect("augmented resident graph telemetry");
-            assert_eq!(
-                graph.selection,
-                ResidentGraphSelectionKind::ResidentConditionalGraph
-            );
-            assert_eq!(graph.conditional_graph_launches, 1);
-            assert_eq!(
-                op_count(stats, "scan") as u64,
-                graph.device_scan_invocations
-            );
-            assert_eq!(
-                op_count(stats, "filter") as u64,
-                graph.device_filter_invocations
-            );
-            assert_eq!(
-                (
+                let sample_kind = if augmented { "augmented" } else { "base" };
+                let snapshot = snapshot_query_results(provider.as_ref(), &result)?;
+                if let Some(expected) = &expected_snapshot {
+                    assert_eq!(
+                        &snapshot, expected,
+                        "{sample_kind} resident pair {pair} changed query output"
+                    );
+                } else {
+                    assert!(
+                        !augmented,
+                        "first resident scaling sample must be the base plan"
+                    );
+                    expected_snapshot = Some(snapshot);
+                }
+
+                let stats = result.stats.as_ref().expect("resident scaling profile");
+                let graph = stats
+                    .resident_graph
+                    .as_ref()
+                    .expect("resident scaling graph telemetry");
+                assert_eq!(
+                    graph.selection,
+                    ResidentGraphSelectionKind::ResidentConditionalGraph
+                );
+                assert_eq!(graph.conditional_graph_launches, 1);
+                assert_eq!(
+                    op_count(stats, "scan") as u64,
+                    graph.device_scan_invocations
+                );
+                assert_eq!(
+                    op_count(stats, "filter") as u64,
+                    graph.device_filter_invocations
+                );
+                let profile = (
                     strata_op_profile(stats),
                     graph.device_scan_invocations,
                     graph.device_filter_invocations,
                     graph.semantic_scan_invocations,
                     graph.semantic_filter_invocations,
                     graph.deferred_profile.timed_scan_filter_invocations,
-                ),
-                expected_profile,
-                "disconnected family changed semantic or device op counts on run {run}"
-            );
-            drop(result);
+                );
+                if let Some(expected) = &expected_profile {
+                    assert_eq!(
+                        &profile, expected,
+                        "{sample_kind} resident pair {pair} changed semantic or device op counts"
+                    );
+                } else {
+                    assert!(
+                        !augmented,
+                        "first resident scaling profile must be the base plan"
+                    );
+                    expected_profile = Some(profile);
+                }
+                drop(result);
+            }
         }
 
-        let base_median = median_seconds(&mut base_seconds);
-        let augmented_median = median_seconds(&mut augmented_seconds);
+        let mut base_median_samples = base_seconds.clone();
+        let mut augmented_median_samples = augmented_seconds.clone();
+        let base_median = median_seconds(&mut base_median_samples);
+        let augmented_median = median_seconds(&mut augmented_median_samples);
+        let paired_deltas = augmented_seconds
+            .iter()
+            .zip(&base_seconds)
+            .map(|(augmented, base)| augmented - base)
+            .collect::<Vec<_>>();
+        let mut paired_delta_samples = paired_deltas.clone();
+        let paired_delta_median = median_seconds(&mut paired_delta_samples);
         let allowed_delta = (base_median * 0.10).max(0.100);
+        eprintln!(
+            "disconnected 4,000-rule resident timings: warmup_base={warmup_base_seconds:?} warmup_augmented={warmup_augmented_seconds:?} measured_base={base_seconds:?} measured_augmented={augmented_seconds:?} paired_deltas={paired_deltas:?} base_median={base_median:.6}s augmented_median={augmented_median:.6}s paired_delta_median={paired_delta_median:.6}s allowed_delta={allowed_delta:.6}s"
+        );
         assert!(
             augmented_median - base_median <= allowed_delta,
             "disconnected 4,000-rule resident median delta {:.6}s exceeds {:.6}s: base={base_seconds:?} augmented={augmented_seconds:?}",
             augmented_median - base_median,
             allowed_delta,
+        );
+        assert!(
+            paired_delta_median <= allowed_delta,
+            "disconnected 4,000-rule resident paired median delta {paired_delta_median:.6}s exceeds {allowed_delta:.6}s: base={base_seconds:?} augmented={augmented_seconds:?} paired={paired_deltas:?}"
         );
         Ok(())
     }
@@ -8164,14 +8072,14 @@ mod tests {
             .get("__xlog_query_0")
             .expect("generated query schema")
             .clone();
-        for (name, value) in [
-            ("XLOG_DISABLE_RESIDENT_RECURSION", "1"),
-            ("XLOG_USE_RESIDENT_RECURSION", "1"),
-            ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+        for policy in [
+            &[][..],
+            &[("XLOG_DISABLE_RESIDENT_RECURSION", "1")][..],
+            &[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")][..],
         ] {
             let input = provider.create_empty_buffer(generated_schema.clone())?;
             let allocations_before = provider.memory().alloc_count();
-            let _env = ResidentEnvGuard::set(&[(name, value)]);
+            let _env = ResidentEnvGuard::set(policy);
             let error = match program.evaluate_with_options(
                 provider.clone(),
                 HashMap::from([("__xlog_query_0".to_string(), input)]),
@@ -8517,7 +8425,6 @@ mod tests {
             )?;
             let store = program.create_relation_store(provider.clone())?;
             let mut session = program.create_session_runtime(provider.clone(), &store, true)?;
-            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
             let (result, _) = program.evaluate_with_session_runtime(provider, &mut session)?;
             let graph = result
                 .stats
@@ -8549,15 +8456,13 @@ mod tests {
             };
             let expected = snapshot_query_results(provider.as_ref(), &baseline)?;
             drop(baseline);
-            let preferred = {
-                let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
-                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-            };
+            let automatic =
+                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
             assert_eq!(
-                snapshot_query_results(provider.as_ref(), &preferred)?,
+                snapshot_query_results(provider.as_ref(), &automatic)?,
                 expected
             );
-            let graph = preferred
+            let graph = automatic
                 .stats
                 .as_ref()
                 .and_then(|stats| stats.resident_graph.as_ref())
@@ -8594,7 +8499,6 @@ mod tests {
             "#,
         )?;
         let seed = program.create_relation_store(provider.clone())?;
-        let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
         let (result, store) =
             program.evaluate_with_relation_store_and_cache(provider.clone(), &seed, true)?;
 
@@ -8660,16 +8564,13 @@ mod tests {
         assert_eq!(program.resident_certification_initializations(), 0);
         drop(baseline);
 
-        let preferred = {
-            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
-            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-        };
-        assert!(preferred.queries.is_empty());
+        let automatic = program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
+        assert!(automatic.queries.is_empty());
         assert_eq!(
-            strata_op_profile(preferred.stats.as_ref().expect("preferred profile")),
+            strata_op_profile(automatic.stats.as_ref().expect("automatic profile")),
             baseline_profile
         );
-        let graph = preferred
+        let graph = automatic
             .stats
             .as_ref()
             .and_then(|stats| stats.resident_graph.as_ref())
@@ -8681,12 +8582,13 @@ mod tests {
         );
         assert_eq!(graph.conditional_graph_launches, 0);
         assert_eq!(program.resident_certification_initializations(), 0);
-        drop(preferred);
+        drop(automatic);
 
-        let required = match {
+        let required_result = {
             let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
             program.evaluate_with_options(provider, HashMap::new(), true)
-        } {
+        };
+        let required = match required_result {
             Ok(_) => panic!("no-query evaluation cannot use the resident partial-result route"),
             Err(error) => error,
         };
@@ -8699,7 +8601,7 @@ mod tests {
     }
 
     #[test]
-    fn preferred_resident_decline_executes_the_untouched_full_plan() -> Result<()> {
+    fn automatic_resident_decline_executes_the_untouched_full_plan() -> Result<()> {
         let _env_lock = resident_env_lock().lock().expect("resident env lock");
         let Some(provider) = ground_term_encoding_test_provider() else {
             return Ok(());
@@ -8725,19 +8627,16 @@ mod tests {
         assert_eq!(op_count(baseline.stats.as_ref().unwrap(), "scan"), 2);
         drop(baseline);
 
-        let preferred = {
-            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
-            program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-        };
+        let automatic = program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
         assert_eq!(
-            snapshot_query_results(provider.as_ref(), &preferred)?,
+            snapshot_query_results(provider.as_ref(), &automatic)?,
             baseline_snapshot
         );
         assert_eq!(
-            strata_op_profile(preferred.stats.as_ref().expect("preferred profile")),
+            strata_op_profile(automatic.stats.as_ref().expect("automatic profile")),
             baseline_profile
         );
-        let graph = preferred
+        let graph = automatic
             .stats
             .as_ref()
             .and_then(|stats| stats.resident_graph.as_ref())
@@ -8773,12 +8672,10 @@ mod tests {
         ];
         for source in programs {
             let program = LogicProgram::compile(source)?;
-            let preferred = {
-                let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
-                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-            };
-            assert_eq!(preferred.queries[0].buffer.cached_row_count(), Some(1));
-            let graph = preferred
+            let automatic =
+                program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
+            assert_eq!(automatic.queries[0].buffer.cached_row_count(), Some(1));
+            let graph = automatic
                 .stats
                 .as_ref()
                 .and_then(|stats| stats.resident_graph.as_ref())
@@ -8786,7 +8683,7 @@ mod tests {
             assert_eq!(graph.selection, ResidentGraphSelectionKind::ExistingGpu);
             assert!(graph.decline.is_some());
             assert_eq!(graph.conditional_graph_launches, 0);
-            drop(preferred);
+            drop(automatic);
 
             let error = {
                 let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
@@ -8820,19 +8717,17 @@ mod tests {
                 ))
             })
             .expect_err("injected certification must fail");
-        let preferred = {
-            let _env = ResidentEnvGuard::set(&[("XLOG_USE_RESIDENT_RECURSION", "1")]);
-            cached_failure.evaluate_with_options(provider.clone(), HashMap::new(), true)?
-        };
-        assert_eq!(preferred.queries[0].buffer.cached_row_count(), Some(1));
-        let decline = preferred
+        let automatic =
+            cached_failure.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
+        assert_eq!(automatic.queries[0].buffer.cached_row_count(), Some(1));
+        let decline = automatic
             .stats
             .as_ref()
             .and_then(|stats| stats.resident_graph.as_ref())
             .and_then(|stats| stats.decline.as_ref())
-            .expect("preferred certification failure must report its decline");
+            .expect("automatic certification failure must report its decline");
         assert!(format!("{decline:?}").contains("deterministic certification failure"));
-        drop(preferred);
+        drop(automatic);
 
         let required = {
             let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
@@ -8858,7 +8753,7 @@ mod tests {
         let Some(provider) = ground_term_encoding_test_provider() else {
             return Ok(());
         };
-        assert!(provider.memory().runtime().is_none());
+        assert!(provider.memory().runtime().is_some());
         let program = LogicProgram::compile(
             r#"
                 pred seed(u32).
@@ -8974,7 +8869,7 @@ mod tests {
         assert!(error.to_string().contains("schema mismatch"));
         assert!(provider.memory().allocated_bytes() <= allocated_before);
         assert_eq!(provider.memory().alloc_count(), 0);
-        assert!(provider.memory().runtime().is_none());
+        assert!(provider.memory().runtime().is_some());
         Ok(())
     }
 
@@ -8992,9 +8887,9 @@ mod tests {
                 ?- output(X).
             "#,
         )?;
-        for selection_env in [
-            "XLOG_USE_RESIDENT_RECURSION",
-            "XLOG_REQUIRE_RESIDENT_RECURSION",
+        for (selection, policy) in [
+            ("automatic", &[][..]),
+            ("required", &[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")][..]),
         ] {
             let mut column = provider.memory().alloc::<u8>(4)?;
             provider
@@ -9016,7 +8911,7 @@ mod tests {
             );
             provider.memory().reset_alloc_count();
             let allocated_before = provider.memory().allocated_bytes();
-            let _env = ResidentEnvGuard::set(&[(selection_env, "1")]);
+            let _env = ResidentEnvGuard::set(policy);
             let error = match program.evaluate_with_options(
                 provider.clone(),
                 HashMap::from([("input".to_string(), input)]),
@@ -9029,11 +8924,11 @@ mod tests {
                 error
                     .to_string()
                     .contains("Logical row count 2 exceeds row capacity 1"),
-                "unexpected error for {selection_env}: {error}"
+                "unexpected error for {selection}: {error}"
             );
             assert!(provider.memory().allocated_bytes() <= allocated_before);
             assert_eq!(provider.memory().alloc_count(), 0);
-            assert!(provider.memory().runtime().is_none());
+            assert!(provider.memory().runtime().is_some());
         }
         Ok(())
     }
@@ -9413,10 +9308,17 @@ mod tests {
         Ok(())
     }
 
+    struct RecursiveDuplicateFactProfile {
+        executable_rule_count: usize,
+        scan_count: usize,
+        union_count: usize,
+        rows: Vec<(u32, u32)>,
+    }
+
     fn recursive_duplicate_fact_profile(
         provider: Arc<CudaKernelProvider>,
         fact_count: usize,
-    ) -> Result<(usize, usize, usize, Vec<(u32, u32)>)> {
+    ) -> Result<RecursiveDuplicateFactProfile> {
         let facts = "edge(1, 2).\n".repeat(fact_count);
         let program = LogicProgram::compile(&format!(
             r#"
@@ -9460,7 +9362,12 @@ mod tests {
         let ys = provider.download_column::<u32>(&result.queries[0].buffer, 1)?;
         let mut rows = xs.into_iter().zip(ys).collect::<Vec<_>>();
         rows.sort_unstable();
-        Ok((executable_rule_count, scan_count, union_count, rows))
+        Ok(RecursiveDuplicateFactProfile {
+            executable_rule_count,
+            scan_count,
+            union_count,
+            rows,
+        })
     }
 
     #[test]
@@ -9471,18 +9378,18 @@ mod tests {
 
         let one_fact = recursive_duplicate_fact_profile(provider.clone(), 1)?;
         let many_facts = recursive_duplicate_fact_profile(provider, 64)?;
-        assert_eq!(one_fact.3, vec![(1, 2)]);
-        assert_eq!(many_facts.3, one_fact.3);
+        assert_eq!(one_fact.rows, vec![(1, 2)]);
+        assert_eq!(many_facts.rows, one_fact.rows);
         assert_eq!(
-            many_facts.0, one_fact.0,
+            many_facts.executable_rule_count, one_fact.executable_rule_count,
             "executable rule count must not scale with source fact count"
         );
         assert_eq!(
-            many_facts.1, one_fact.1,
+            many_facts.scan_count, one_fact.scan_count,
             "executable scan count must not scale with source fact count"
         );
         assert_eq!(
-            many_facts.2, one_fact.2,
+            many_facts.union_count, one_fact.union_count,
             "executable union count must not scale with source fact count"
         );
         Ok(())
@@ -10121,14 +10028,16 @@ mod relation_delta_coalesce_tests {
     use std::sync::Arc;
 
     use xlog_core::{MemoryBudget, ScalarType};
-    use xlog_cuda::{CudaDevice, GpuMemoryManager};
 
     fn test_provider() -> Option<Arc<CudaKernelProvider>> {
         let provider = (|| -> Result<Arc<CudaKernelProvider>> {
-            let device = Arc::new(CudaDevice::new(0)?);
-            let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-            let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+            Ok(Arc::new(
+                xlog_cuda::CudaProviderBuilder::new(
+                    0,
+                    MemoryBudget::with_limit(1024 * 1024 * 1024),
+                )
+                .build()?,
+            ))
         })();
 
         finish_test_provider_setup(
@@ -10373,14 +10282,12 @@ mod relation_delta_preparation_tests {
     use std::sync::Arc;
 
     use xlog_core::{MemoryBudget, ScalarType};
-    use xlog_cuda::{CudaDevice, GpuMemoryManager};
 
     fn test_provider_with_budget(limit: u64) -> Option<Arc<CudaKernelProvider>> {
         let provider = (|| -> Result<Arc<CudaKernelProvider>> {
-            let device = Arc::new(CudaDevice::new(0)?);
-            let budget = MemoryBudget::with_limit(limit);
-            let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-            Ok(Arc::new(CudaKernelProvider::new(device, memory)?))
+            Ok(Arc::new(
+                xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(limit)).build()?,
+            ))
         })();
 
         match provider {

@@ -99,7 +99,7 @@ pub struct IlpExactNaryRequest<'a> {
     /// Concatenated COLUMN-MAJOR u64 relation values: within a
     /// relation, cell (row, position) sits at `cand_value_offset[slot]
     /// + position * cand_rows[slot] + row`. All offsets are u32
-    /// ELEMENT indexes, never bytes.
+    ///   ELEMENT indexes, never bytes.
     pub cand_values: &'a [u64],
     /// Element offset of each relation's first value in `cand_values`.
     pub cand_value_offset: &'a [u32],
@@ -260,10 +260,10 @@ fn validate_batch(
 
 fn validate_request(request: &IlpExactNaryRequest<'_>) -> Result<(u32, u32, u32)> {
     let head_arity = request.head_arity.max(1) as usize;
-    if request.pos_values.len() % head_arity != 0 {
+    if !request.pos_values.len().is_multiple_of(head_arity) {
         return Err(nary_err("pos_values length not a multiple of head_arity"));
     }
-    if request.neg_values.len() % head_arity != 0 {
+    if !request.neg_values.len().is_multiple_of(head_arity) {
         return Err(nary_err("neg_values length not a multiple of head_arity"));
     }
     let num_patterns = validate_batch(
@@ -307,7 +307,6 @@ fn require_u64_columns(buf: &CudaBuffer, label: &str) -> Result<(u32, u32)> {
     let rows = buf
         .cached_row_count()
         .ok_or_else(|| nary_err(format!("{label}: cached_row_count absent")))?;
-    let rows = u32::try_from(rows).map_err(|_| nary_err(format!("{label}: row count")))?;
     Ok((arity, rows))
 }
 
@@ -485,7 +484,10 @@ impl super::CudaKernelProvider {
 
     /// Shared launch core: pack + upload the pattern batch and slot
     /// table, launch, and read back the two count arrays.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the launch core mirrors the fixed n-ary kernel inputs and its explicit output counters"
+    )]
     fn launch_nary(
         &self,
         patterns: &IlpExactNaryPatterns<'_>,
@@ -596,12 +598,10 @@ mod tests {
     //! (see [`make_provider`]); the pod leg runs them for real. All values
     //! are COLUMNAR.
 
-    use std::sync::Arc;
-
     use xlog_core::{MemoryBudget, ScalarType, Schema};
 
     use super::{IlpExactNaryPatterns, IlpExactNaryRequest};
-    use crate::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+    use crate::CudaKernelProvider;
 
     /// Provider fixture for the launcher tests.
     ///
@@ -634,15 +634,10 @@ mod tests {
             None
         }
 
-        let device = match CudaDevice::new(0) {
-            Ok(device) => Arc::new(device),
-            Err(error) => return skip_unless_required("CudaDevice::new", error),
-        };
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        match CudaKernelProvider::new(device, memory) {
+        match crate::CudaProviderBuilder::new(0, budget).build() {
             Ok(provider) => Some(provider),
-            Err(error) => skip_unless_required("CudaKernelProvider::new", error),
+            Err(error) => skip_unless_required("CudaProviderBuilder::build", error),
         }
     }
 

@@ -2,11 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
-};
-use xlog_cuda::memory::GpuMemoryManager;
-use xlog_cuda::{CudaDevice, CudaKernelProvider};
+use xlog_cuda::CudaKernelProvider;
 use xlog_gpu::logic::LogicProgram;
 use xlog_runtime::RelationStore;
 
@@ -48,30 +44,11 @@ fn restore_env(key: &str, old: &Option<String>) {
 }
 
 fn provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let stream_pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
     let budget = MemoryBudget::with_limit(2 * 1024 * 1024 * 1024);
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&stream_pool)),
-    );
-    let budgeted: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(GlobalDeviceBudget::new(
-        async_resource,
-        budget.device_bytes as usize,
-    ));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        stream_pool,
-        budgeted,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        budget,
-        runtime,
-    ));
-    Some(Arc::new(
-        CudaKernelProvider::with_runtime(device, memory).ok()?,
-    ))
+    xlog_cuda::CudaProviderBuilder::new(0, budget)
+        .build()
+        .ok()
+        .map(Arc::new)
 }
 
 fn schema3() -> Schema {

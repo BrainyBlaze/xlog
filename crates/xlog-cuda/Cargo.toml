@@ -26,6 +26,9 @@ cudarc.workspace = true
 libloading.workspace = true
 arrow = { version = "59", default-features = false, features = ["ffi", "ipc"] }
 
+[build-dependencies]
+xlog-core.workspace = true
+
 [dev-dependencies]
 bytemuck = "1.14"
 # v0.6.2 plan→provider cert: tests that the pure-Rust hypergraph
@@ -46,3 +49,6 @@ arrow-device-import = []
 # to keep the hot path zero-overhead. The phase-report binary
 # in xlog-integration enables it for measurement runs only.
 wcoj-phase-timing = []
+
+[lints]
+workspace = true

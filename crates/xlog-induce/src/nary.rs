@@ -283,7 +283,10 @@ pub fn enumerate_patterns(
     Ok(patterns)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recursive body enumeration carries immutable search bounds and mutable frontier/output counters explicitly"
+)]
 fn enumerate_bodies(
     head_arity: u8,
     candidate_arities: &[u8],
@@ -347,7 +350,10 @@ fn enumerate_bodies(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recursive binding enumeration carries immutable search bounds and mutable partial-pattern state explicitly"
+)]
 fn enumerate_bindings(
     head_arity: u8,
     candidate_arities: &[u8],

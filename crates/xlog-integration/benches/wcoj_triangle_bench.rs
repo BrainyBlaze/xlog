@@ -1,9 +1,3 @@
-#![allow(
-    clippy::doc_lazy_continuation,
-    clippy::doc_overindented_list_items,
-    clippy::needless_range_loop
-)]
-
 //! WCOJ triangle benchmark baseline.
 //!
 //! Bench-only — no provider, kernel, or runtime changes. Compares
@@ -13,23 +7,25 @@
 //!
 //! # Default matrix (no env)
 //!
-//! widths × fixtures × sizes × modes =
-//!   {u32, u64} × {uniform, superhub, empty} × {10K, 50K} ×
-//!   {Off, Force, Adaptive}
-//!   + 1 Symbol uniform 10K Force sanity case
-//! = 37 cells.
+//! The default matrix crosses:
+//!
+//! - widths: {u32, u64};
+//! - fixtures: {uniform, superhub, empty};
+//! - sizes: {10K, 50K};
+//! - modes: {Off, Force, Adaptive}.
+//!
+//! It adds one Symbol uniform 10K Force sanity case, for 37 cells.
 //!
 //! Modes:
-//!   * **Off**:      `wcoj_triangle_dispatch=Some(false)`. Binary-
-//!                   join chain only. Baseline for speedup.
-//!   * **Force**:    `wcoj_triangle_dispatch=Some(true)`. WCOJ
-//!                   pipeline always; adaptive model bypassed. The
-//!                   forced WCOJ dispatch path.
-//!   * **Adaptive**: `wcoj_triangle_dispatch_adaptive=Some(true)`,
-//!                   force left None. The default cardinality
-//!                   cost model runs first. Bench cells seed stats
-//!                   to lock the intended route: uniform/empty
-//!                   route to binary; superhub routes to WCOJ.
+//!
+//! - **Off**: `wcoj_triangle_dispatch=Some(false)`. Binary-join chain
+//!   only. Baseline for speedup.
+//! - **Force**: `wcoj_triangle_dispatch=Some(true)`. WCOJ pipeline
+//!   always; adaptive model bypassed. The forced WCOJ dispatch path.
+//! - **Adaptive**: `wcoj_triangle_dispatch_adaptive=Some(true)`, force
+//!   left None. The default cardinality cost model runs first. Bench
+//!   cells seed stats to lock the intended route: uniform/empty route
+//!   to binary; superhub routes to WCOJ.
 //!
 //! `WCOJ_BENCH_FULL=1` adds {100K, 250K} sizes for the same
 //! width/fixture cross-product. The full matrix is intentionally
@@ -332,18 +328,14 @@ const TRIANGLE_SOURCE: &str = "tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z).";
 // reused across cells; matches the xlog-gpu bench convention).
 // ---------------------------------------------------------------
 
-#[allow(dead_code)]
 struct ProviderFixture {
-    device: Arc<CudaDevice>,
+    _device: Arc<CudaDevice>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
 }
 
 fn make_provider(memory_mb: u64) -> Option<ProviderFixture> {
-    use xlog_cuda::device_runtime::{
-        AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-        LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-    };
+    use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError};
 
     struct DiscardSink;
     impl LoggingSink for DiscardSink {
@@ -352,7 +344,6 @@ fn make_provider(memory_mb: u64) -> Option<ProviderFixture> {
         }
     }
 
-    let device = Arc::new(CudaDevice::new(0).ok()?);
     // Bench-only: bump the stream pool cap well above the
     // production default (16). Every (width × fixture × size ×
     // gate) cell builds at least one Executor + correctness-
@@ -366,32 +357,18 @@ fn make_provider(memory_mb: u64) -> Option<ProviderFixture> {
     // (matches CudaKernelProvider::recorded_op_stream's
     // one-stream-per-provider model); the bench just needs
     // headroom for many short-lived Executors.
-    let pool = Arc::new(StreamPool::new(Arc::clone(&device), 1024));
     let budget_bytes: usize = (memory_mb * 1024 * 1024) as usize;
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(budget_bytes as u64))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .with_stream_capacity(1024)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, budget_bytes));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(budget_bytes as u64),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
     Some(ProviderFixture {
-        device,
+        _device: device,
         memory,
         provider,
     })
@@ -405,15 +382,13 @@ fn make_provider(memory_mb: u64) -> Option<ProviderFixture> {
 /// supports more shapes (force-off + adaptive-on, etc.); the
 /// bench measures the three production-relevant ones:
 ///
-///   * `Off`      — `with_wcoj_triangle_dispatch(Some(false))`.
-///                 Binary-join chain only. Baseline.
-///   * `Force`    — `with_wcoj_triangle_dispatch(Some(true))`.
-///                 WCOJ pipeline always; adaptive model bypassed.
-///                 The forced WCOJ dispatch semantic.
-///   * `Adaptive` — `with_wcoj_triangle_dispatch_adaptive(Some(true))`,
-///                 force left `None`. The default cardinality model
-///                 runs and dispatches WCOJ when seeded stats
-///                 estimate a large binary intermediate.
+/// - `Off` — `with_wcoj_triangle_dispatch(Some(false))`. Binary-join
+///   chain only. Baseline.
+/// - `Force` — `with_wcoj_triangle_dispatch(Some(true))`. WCOJ pipeline
+///   always; adaptive model bypassed. The forced WCOJ dispatch semantic.
+/// - `Adaptive` — `with_wcoj_triangle_dispatch_adaptive(Some(true))`,
+///   force left `None`. The default cardinality model runs and dispatches
+///   WCOJ when seeded stats estimate a large binary intermediate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Off,
@@ -500,12 +475,12 @@ fn download_triples_u32(buf: &CudaBuffer) -> BTreeSet<(u64, u64, u64)> {
         return BTreeSet::new();
     }
     let mut bytes = vec![vec![0u8; n * 4]; 3];
-    for col_idx in 0..3 {
+    for (col_idx, column_bytes) in bytes.iter_mut().enumerate() {
         unsafe {
             let res = sys::cuMemcpyDtoH_v2(
-                bytes[col_idx].as_mut_ptr() as *mut _,
+                column_bytes.as_mut_ptr() as *mut _,
                 *buf.column(col_idx).unwrap().device_ptr(),
-                bytes[col_idx].len(),
+                column_bytes.len(),
             );
             assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS);
         }
@@ -527,12 +502,12 @@ fn download_triples_u64(buf: &CudaBuffer) -> BTreeSet<(u64, u64, u64)> {
         return BTreeSet::new();
     }
     let mut bytes = vec![vec![0u8; n * 8]; 3];
-    for col_idx in 0..3 {
+    for (col_idx, column_bytes) in bytes.iter_mut().enumerate() {
         unsafe {
             let res = sys::cuMemcpyDtoH_v2(
-                bytes[col_idx].as_mut_ptr() as *mut _,
+                column_bytes.as_mut_ptr() as *mut _,
                 *buf.column(col_idx).unwrap().device_ptr(),
-                bytes[col_idx].len(),
+                column_bytes.len(),
             );
             assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS);
         }
@@ -759,9 +734,8 @@ fn full_extra_sizes() -> &'static [u32] {
 }
 
 fn full_matrix() -> bool {
-    std::env::var("WCOJ_BENCH_FULL")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    xlog_core::resolve_bool(None, "WCOJ_BENCH_FULL", false)
+        .unwrap_or_else(|error| panic!("invalid WCOJ benchmark configuration: {error}"))
 }
 
 fn run_family(
@@ -869,7 +843,6 @@ fn bench_symbol_sanity(c: &mut Criterion) {
 
 // Re-export `BTreeMap` used in build_executor; keeping it in the
 // import block above would dwarf the one usage here.
-#[allow(dead_code)]
 fn _unused() -> BTreeMap<&'static str, ()> {
     BTreeMap::new()
 }

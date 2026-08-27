@@ -185,7 +185,6 @@ impl super::CudaKernelProvider {
             columns: combined_columns,
             row_cap,
             d_num_rows,
-            schema: _,
             ..
         } = combined;
 
@@ -703,13 +702,17 @@ impl super::CudaKernelProvider {
 
         // Build lookup set from b
         let b_keys_set: std::collections::HashSet<u32> = b_keys_host
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
 
         // Find indices of a rows not in b
         let diff_indices: Vec<usize> = a_keys_host
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .map(|(i, chunk)| {
                 (
@@ -1462,7 +1465,7 @@ impl super::CudaKernelProvider {
         // Env-gated recorded dispatch. `dedup_full_row_recorded`
         // requires every column to be U32 / Symbol;
         // mixed-type schemas fall through to the legacy path.
-        if Self::use_recorded_dedup_env() && input.num_rows() > 1 && input.arity() > 0 {
+        if Self::use_recorded_dedup_env()? && input.num_rows() > 1 && input.arity() > 0 {
             if let Some(launch_stream) = self.recorded_op_stream_or_init() {
                 let recorded_compatible = (0..input.arity()).all(|c| {
                     matches!(
@@ -1586,7 +1589,7 @@ impl super::CudaKernelProvider {
 
         // Step 1: typed multi-column sort. Float columns use total-order
         // normalization; signed integers use sign-flipped unsigned compare.
-        let sorted = if Self::use_csm_cuda_graph_env() && row_count <= SMALL_FULL_ROW_SORT_MAX_ROWS
+        let sorted = if Self::use_csm_cuda_graph_env()? && row_count <= SMALL_FULL_ROW_SORT_MAX_ROWS
         {
             self.small_sort_full_row_deterministic(input, row_count)?
         } else {
@@ -1889,7 +1892,7 @@ impl super::CudaKernelProvider {
         // mirrors `sort_recorded`'s validation:
         // U32 / Symbol key columns only. Other types fall
         // through to the legacy multi-type path.
-        if Self::use_recorded_sort_env() && !key_cols.is_empty() && input.num_rows() > 0 {
+        if Self::use_recorded_sort_env()? && !key_cols.is_empty() && input.num_rows() > 0 {
             if let Some(launch_stream) = self.recorded_op_stream_or_init() {
                 let recorded_compatible = key_cols.iter().all(|&k| {
                     matches!(
@@ -2219,7 +2222,10 @@ impl super::CudaKernelProvider {
         self.apply_permutation_gpu(input, &indices_a)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "radix sorting keeps each caller-owned ping-pong and scan scratch buffer explicit"
+    )]
     fn radix_sort_u32_pairs_with_scratch(
         &self,
         keys_a: &mut crate::memory::TrackedCudaSlice<u32>,
@@ -2962,7 +2968,7 @@ impl super::CudaKernelProvider {
         // constraint inherited by `hash_join_v2_recorded`
         // requires `left_keys.len() <= 4`. Mismatch falls
         // through to the legacy path.
-        if Self::use_recorded_hash_join_env()
+        if Self::use_recorded_hash_join_env()?
             && !left_keys.is_empty()
             && left_keys.len() == right_keys.len()
             && left_keys.len() <= 4
@@ -3782,7 +3788,7 @@ impl super::CudaKernelProvider {
         right: &CudaBuffer,
         right_keys: &[usize],
     ) -> Result<JoinIndexV2> {
-        if Self::use_recorded_hash_join_env()
+        if Self::use_recorded_hash_join_env()?
             && !right_keys.is_empty()
             && right_keys.len() <= 4
             && right.num_rows() > 0
@@ -3878,7 +3884,10 @@ impl super::CudaKernelProvider {
     /// Hash join using a cached build-side join index.
     ///
     /// The `index` must have been built for the same `right` buffer and `right_keys`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the cached join entry accepts both relations, their key projections, join semantics, cache identity, and output bound"
+    )]
     pub fn hash_join_v2_with_index(
         &self,
         left: &CudaBuffer,
@@ -3891,7 +3900,7 @@ impl super::CudaKernelProvider {
     ) -> Result<CudaBuffer> {
         // Env-gated recorded dispatch. Same `≤4 key column`
         // constraint as the non-indexed variant.
-        if Self::use_recorded_hash_join_env()
+        if Self::use_recorded_hash_join_env()?
             && !left_keys.is_empty()
             && left_keys.len() == right_keys.len()
             && left_keys.len() <= 4
@@ -6373,7 +6382,10 @@ impl super::CudaKernelProvider {
     /// `block_sums` allocations created by the inner scan are
     /// recorded directly inside
     /// [`Self::multiblock_scan_u32_view_inplace_on_stream`].
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "recorded radix sorting keeps scratch ownership plus the exact stream and runtime explicit"
+    )]
     fn radix_sort_u32_pairs_with_scratch_on_stream(
         &self,
         keys_a: &mut TrackedCudaSlice<u32>,
@@ -7908,7 +7920,7 @@ impl super::CudaKernelProvider {
         max_output: Option<usize>,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
-        if Self::use_csm_cuda_graph_env() {
+        if Self::use_csm_cuda_graph_env()? {
             if let Some(result) = self
                 .hash_join_inner_v2_count_scan_materialize_cuda_graph_recorded(
                     left,
@@ -8661,7 +8673,10 @@ impl super::CudaKernelProvider {
         Ok(Some(result))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "cached CUDA graph replay must update every input, table, capacity, launch, stream, and runtime binding explicitly"
+    )]
     fn launch_csm_cuda_graph_entry(
         &self,
         entry: &mut CsmCudaGraphEntry,
@@ -9646,7 +9661,10 @@ impl super::CudaKernelProvider {
     /// recorders — dropping the index after the call returns
     /// is correctly serialized through the runtime's
     /// record-all + wait-all event chain.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the indexed recorded inner join exposes both relation/key pairs, cache identity, output bound, and stream"
+    )]
     pub fn hash_join_inner_v2_with_index_count_scan_materialize_recorded(
         &self,
         left: &CudaBuffer,
@@ -10114,7 +10132,10 @@ impl super::CudaKernelProvider {
     ///     `right_keys`.
     ///   * `left_packed.key_bytes` mismatches `index.key_bytes`.
     ///   * Preflight / kernel / commit failures.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the indexed recorded outer join exposes both relation/key pairs, cache identity, output bound, and stream"
+    )]
     pub fn hash_join_left_outer_v2_with_index_count_scan_materialize_recorded(
         &self,
         left: &CudaBuffer,
@@ -10851,7 +10872,10 @@ impl super::CudaKernelProvider {
     /// ≤4 keys, key-type match, row-count caps) are validated
     /// upstream by the public `hash_join_v2_with_limit` and inside
     /// each per-type method.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the recorded join dispatcher keeps both relation/key pairs, semantics, output bound, and stream explicit"
+    )]
     pub fn hash_join_v2_recorded(
         &self,
         left: &CudaBuffer,
@@ -10862,7 +10886,7 @@ impl super::CudaKernelProvider {
         max_output: Option<usize>,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
-        let csm_on = Self::use_recorded_csm_env();
+        let csm_on = Self::use_recorded_csm_env()?;
         match join_type {
             JoinType::Inner => {
                 if csm_on {
@@ -11859,7 +11883,10 @@ impl super::CudaKernelProvider {
     /// through the legacy indexed recorded methods. `Semi` /
     /// `Anti` always route through their existing indexed
     /// recorded methods — no CSM implementation exists for them.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the indexed recorded dispatcher keeps both relation/key pairs, semantics, cache identity, output bound, and stream explicit"
+    )]
     pub fn hash_join_v2_with_index_recorded(
         &self,
         left: &CudaBuffer,
@@ -11971,7 +11998,7 @@ impl super::CudaKernelProvider {
             ));
         }
 
-        let csm_on = Self::use_recorded_csm_env();
+        let csm_on = Self::use_recorded_csm_env()?;
         match join_type {
             JoinType::Inner => {
                 if csm_on {

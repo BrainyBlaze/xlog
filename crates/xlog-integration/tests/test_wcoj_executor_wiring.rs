@@ -51,10 +51,7 @@ use std::sync::Arc;
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamPool, XlogDeviceRuntime};
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::Compiler;
@@ -71,68 +68,31 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)] // device/runtime kept alive via Arc clones for cross-stream lifetimes
 struct RuntimeBackedFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
+    _pool: Arc<StreamPool>,
 }
 
 fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(64 * 1024 * 1024))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeBackedFixture {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
-        pool,
-    })
-}
-
-#[allow(dead_code)]
-struct LegacyFixture {
-    device: Arc<CudaDevice>,
-    memory: Arc<GpuMemoryManager>,
-    provider: Arc<CudaKernelProvider>,
-}
-
-fn make_legacy_fixture() -> Option<LegacyFixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let memory = Arc::new(GpuMemoryManager::new(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).ok()?);
-    Some(LegacyFixture {
-        device,
-        memory,
-        provider,
+        _pool: pool,
     })
 }
 
@@ -461,36 +421,6 @@ fn wiring_gate_on_two_atom_rule_falls_back_silently() {
 // fallback test above already exercises the silent-fallback
 // contract on a non-matching shape; the structural defense
 // covers the recursive case.
-
-#[test]
-fn wiring_gate_on_legacy_manager_falls_back_silently() {
-    // Legacy GpuMemoryManager (no runtime) → recorded WCOJ
-    // primitives can't run; the dispatch hook detects this and
-    // returns Ok(None). Binary-join chain produces the answer.
-    let Some(fix) = make_legacy_fixture() else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let inputs = triangle_fixture();
-    let config = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true));
-    let (executor, counter) = run_program(
-        Arc::clone(&fix.provider),
-        &fix.memory,
-        config,
-        TRIANGLE_SOURCE,
-        &inputs,
-    );
-    assert_eq!(
-        counter, 0,
-        "legacy manager must trigger silent fallback; got counter {counter}"
-    );
-    let buf = executor.store().get("tri").expect("tri present");
-    let rows = download_triples(buf);
-    assert!(
-        !rows.is_empty(),
-        "binary-join chain must produce some triangles"
-    );
-}
 
 // ---------------------------------------------------------------
 // Symbol support — Symbol shares u32's 4-byte physical layout, so

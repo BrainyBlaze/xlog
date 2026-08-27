@@ -217,10 +217,9 @@ fn t2_dedup_bool() {
 // Tier 4 — float-specific pin tests
 //
 // The contract:
-//   * Equality used for sort, mask, and diff membership matches IEEE-754
-//     totalOrder under the project's `f32_to_ordered_u32` /
-//     `f64_to_ordered_u64` normalization. Distinct bit patterns map to
-//     distinct ordered keys.
+//   * Equality used for sort, mask, and diff membership matches the shared
+//     `xlog_core::float_order` and CUDA `totalorder.cuh` mapping. Distinct bit
+//     patterns map to distinct ordered keys.
 //   * Materialization gathers raw bytes from `a`, so NaN payload bits,
 //     signed-zero sign bit, and signed-infinity sign bit are preserved
 //     exactly.

@@ -34,9 +34,9 @@
 //! }
 //! ```
 
-#[allow(missing_docs)] // TODO(v0.6): document GPU CDCL solver methods
+/// GPU-native conflict-driven clause-learning solver implementation.
 mod gpu_cdcl;
-#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
+/// GPU-resident conjunctive-normal-form representation.
 mod gpu_cnf;
 mod instance;
 mod production;

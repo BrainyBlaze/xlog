@@ -25,6 +25,11 @@ def test_logic_session_persists_named_dlpack_relation():
 
     session.put_relation("edge", [left, right])
 
+    # Persistent sessions own a stable snapshot. Later producer writes must not
+    # mutate the stored relation or bypass its version and evidence metadata.
+    left.fill_(9)
+    right.fill_(9)
+
     result = session.evaluate()
     assert len(result.queries) == 1
 
@@ -41,8 +46,10 @@ def test_logic_session_persists_named_dlpack_relation():
     exported_right = torch.from_dlpack(exported[1])
     assert exported_left.device.type == "cuda"
     assert exported_right.device.type == "cuda"
-    assert exported_left.data_ptr() == left.data_ptr()
-    assert exported_right.data_ptr() == right.data_ptr()
+    assert exported_left.tolist() == [1, 2, 3]
+    assert exported_right.tolist() == [2, 3, 4]
+    assert exported_left.data_ptr() != left.data_ptr()
+    assert exported_right.data_ptr() != right.data_ptr()
 
 
 def test_logic_session_replaces_named_relation():

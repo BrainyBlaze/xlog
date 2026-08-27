@@ -1,10 +1,9 @@
-#![allow(clippy::arc_with_non_send_sync)]
 #![cfg(feature = "host-io")]
 
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, XlogError};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::CudaKernelProvider;
 use xlog_prob::compilation::{gpu_d4::compute_free_var_mask_gpu, DeviceRandomVarList};
 use xlog_prob::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 use xlog_prob::kc::ddnnf::DecisionDnnf;
@@ -12,24 +11,12 @@ use xlog_prob::xgcf::{Xgcf, XgcfNodeType};
 use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
 fn try_provider() -> Option<CudaKernelProvider> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
+    match xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+        .build()
+    {
+        Ok(provider) => Some(provider),
         Err(e) => {
             eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
-            return None;
-        }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1024 * 1024 * 1024),
-    ));
-    match CudaKernelProvider::new(device, memory) {
-        Ok(p) => Some(p),
-        Err(e) => {
-            eprintln!(
-                "Skipping test: failed to create CUDA kernel provider: {}",
-                e
-            );
             None
         }
     }

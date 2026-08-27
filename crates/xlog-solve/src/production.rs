@@ -2604,7 +2604,10 @@ impl GpuSolverProductionAdapter {
     ///
     /// This is deliberately bounded to same-device-CNF reuse. The existing GPU proof trace is
     /// valid for the imported solve only when the base CNF buffers are the same.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "accepted-evidence reuse keeps the evidence provider, workspace, and both CNF decision-bound pairs explicit"
+    )]
     pub fn solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result(
         &mut self,
         provider: &CudaKernelProvider,
@@ -2641,7 +2644,10 @@ impl GpuSolverProductionAdapter {
     }
 
     /// Publish and reuse learned clauses once per accepted GPU epistemic candidate.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "multi-candidate reuse adds an accepted-result set to the same explicit source and target CNF contract"
+    )]
     pub fn solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results(
         &mut self,
         provider: &CudaKernelProvider,
@@ -2665,7 +2671,10 @@ impl GpuSolverProductionAdapter {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the internal multi-candidate operation carries the public evidence and source-target reuse contract unchanged"
+    )]
     fn solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results_impl(
         &mut self,
         provider: &CudaKernelProvider,
@@ -2734,7 +2743,10 @@ impl GpuSolverProductionAdapter {
     /// The batch evidence must prove every split component reused the existing
     /// single-plan GPU runtime path before each component is delegated to the
     /// existing multi-candidate learned-clause reuse adapter.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "batch-evidence reuse keeps the accepted batch proof, workspace, and both CNF decision-bound pairs explicit"
+    )]
     pub fn solve_learned_clause_reuse_with_gpu_batch_execution_result(
         &mut self,
         provider: &CudaKernelProvider,
@@ -5345,22 +5357,14 @@ mod tests {
     use std::sync::Arc;
 
     use xlog_core::MemoryBudget;
-    use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+    use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
 
     use super::*;
     use crate::{Clause, Literal};
 
     fn try_provider() -> Option<Arc<CudaKernelProvider>> {
-        let device = match CudaDevice::new(0) {
-            Ok(device) => Arc::new(device),
-            Err(err) => {
-                eprintln!("Skipping test: CUDA runtime unavailable: {err}");
-                return None;
-            }
-        };
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        match CudaKernelProvider::new(device, memory) {
+        match CudaProviderBuilder::new(0, budget).build() {
             Ok(provider) => Some(Arc::new(provider)),
             Err(err) => {
                 eprintln!("Skipping test: failed to create CUDA kernel provider: {err}");
@@ -5381,6 +5385,22 @@ mod tests {
             .htod_sync_copy_into(&[value], &mut slot)
             .expect("upload u32 scalar");
         slot
+    }
+
+    fn assert_raw_gpu_trace_requires_accepted_evidence(trace: GpuSolverProductionTrace) {
+        assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 0);
+        assert_eq!(trace.accepted_gpu_solver_production_path_events, 0);
+        let error = trace
+            .require_production_metric_eligibility()
+            .expect_err("raw GPU solver work must not satisfy production metrics");
+        let XlogError::UnsupportedEpistemicConstruct { construct, context } = error else {
+            panic!("expected accepted-evidence metric rejection, got {error:?}");
+        };
+        assert_eq!(construct, "GPU solver production metric gate");
+        assert_eq!(
+            context,
+            "production solver metrics require accepted GPU candidate evidence"
+        );
     }
 
     #[test]
@@ -5423,7 +5443,7 @@ mod tests {
     }
 
     #[test]
-    fn encoded_weighted_maxsat_search_runs_real_gpu_sat_unsat_candidates() {
+    fn raw_encoded_maxsat_search_runs_gpu_candidates_but_requires_accepted_evidence() {
         let Some(provider) = try_provider() else {
             return;
         };
@@ -5494,13 +5514,11 @@ mod tests {
         assert_eq!(trace.gpu_cdcl_sat_solves, 1);
         assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
         assert_eq!(trace.gpu_maxsat_optima, 1);
-        trace
-            .require_production_metric_eligibility()
-            .expect("MaxSAT production search must not use CPU search");
+        assert_raw_gpu_trace_requires_accepted_evidence(trace);
     }
 
     #[test]
-    fn portfolio_jobs_dispatch_real_gpu_sat_and_encoded_maxsat_paths() {
+    fn raw_portfolio_dispatches_gpu_paths_but_requires_accepted_evidence() {
         let Some(provider) = try_provider() else {
             return;
         };
@@ -5569,13 +5587,11 @@ mod tests {
         assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
         assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 1);
         assert_eq!(trace.gpu_maxsat_optima, 1);
-        trace
-            .require_production_metric_eligibility()
-            .expect("portfolio production search must not use CPU search");
+        assert_raw_gpu_trace_requires_accepted_evidence(trace);
     }
 
     #[test]
-    fn learned_clause_reuse_publishes_and_imports_gpu_workspace_arena() {
+    fn raw_learned_clause_reuse_preserves_gpu_arena_but_requires_accepted_evidence() {
         let Some(provider) = try_provider() else {
             return;
         };
@@ -5638,8 +5654,6 @@ mod tests {
         assert_eq!(trace.gpu_learned_count_buffer_publications, 1);
         assert_eq!(trace.gpu_learned_clause_imports, 1);
         assert_eq!(trace.gpu_learned_clause_reused_solves, 1);
-        trace
-            .require_production_metric_eligibility()
-            .expect("learned-clause production reuse must not use CPU search");
+        assert_raw_gpu_trace_requires_accepted_evidence(trace);
     }
 }

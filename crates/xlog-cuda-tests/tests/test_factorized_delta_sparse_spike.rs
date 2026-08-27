@@ -12,13 +12,10 @@ use std::time::Instant;
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamId};
 use xlog_cuda::memory::{CudaBuffer, CudaColumn};
 use xlog_cuda::provider::FjDeltaCols;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaKernelProvider, GpuMemoryManager};
 
 struct DiscardSink;
 impl LoggingSink for DiscardSink {
@@ -32,31 +29,16 @@ struct Fixture {
     provider: Arc<CudaKernelProvider>,
 }
 
+type BinaryRows = Vec<(u32, u32)>;
+
 fn make_fixture_with_budget(budget_bytes: u64) -> Option<Fixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(budget_bytes))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, budget_bytes as usize));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(budget_bytes),
-        runtime,
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let memory = Arc::clone(provider.memory());
     Some(Fixture { memory, provider })
 }
 
@@ -118,8 +100,10 @@ fn download_set(memory: &Arc<GpuMemoryManager>, buf: &CudaBuffer) -> Vec<(u32, u
             assert_eq!(r, sys::cudaError_enum::CUDA_SUCCESS);
         }
         bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect()
     };
     let (c0, c1) = (col(0), col(1));
@@ -302,7 +286,7 @@ fn median(v: &mut [f64]) -> f64 {
 /// every hub. One semi-naive step then produces |x|*|sink| distinct
 /// novel pairs with multiplicity = #hubs — a witness blowup over a
 /// domain far above 2^16.
-fn hub_fixture(n_x: u32, n_hub: u32, n_sink: u32) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
+fn hub_fixture(n_x: u32, n_hub: u32, n_sink: u32) -> (BinaryRows, BinaryRows) {
     const HUB_BASE: u32 = 1 << 20;
     const SINK_BASE: u32 = 1 << 22;
     let mut edge = Vec::with_capacity((n_hub * n_sink) as usize);

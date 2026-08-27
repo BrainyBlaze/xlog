@@ -396,7 +396,10 @@ impl CudaKernelProvider {
         )
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the recorded free-join transaction keeps validation, allocation, launch recording, and commit in one auditable lifetime scope"
+    )]
     fn free_join_execute_recorded_impl(
         &self,
         inputs: &[&CudaBuffer],

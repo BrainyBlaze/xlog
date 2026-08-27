@@ -1,8 +1,8 @@
 //! Launch / use recorder for runtime-backed buffers.
 //!
-//! Closes the production-side of the cross-stream lifetime gap
-//! identified by A4 *and* the use-after-prior-write hazard
-//! discovered by the multi-threaded sort+hash-join regression.
+//! Closes the production-side cross-stream deallocation and
+//! use-after-prior-write hazards discovered by the multi-threaded
+//! sort-and-hash-join regression.
 //! Code that enqueues kernels or copies on a `launch_stream`
 //! other than the buffer's `alloc_stream` MUST tell the runtime
 //! about the use BEFORE the launch (so prior cross-stream waits
@@ -163,11 +163,6 @@ pub struct LaunchRecorder {
 struct RecordedUse {
     block: BlockId,
     access: Access,
-    /// Site label (e.g., `"read"`, `"write"`, `"read_column"`)
-    /// for diagnostics. Not used at runtime beyond error
-    /// messages.
-    #[allow(dead_code)]
-    label: &'static str,
 }
 
 impl LaunchRecorder {
@@ -280,11 +275,7 @@ impl LaunchRecorder {
             return self;
         }
         if let Some(b) = block {
-            self.uses.push(RecordedUse {
-                block: b,
-                access,
-                label,
-            });
+            self.uses.push(RecordedUse { block: b, access });
             return self;
         }
         if self.mode == RecorderMode::Strict && self.strict_reject.is_none() {
@@ -320,11 +311,13 @@ impl LaunchRecorder {
     /// Crate-internal owner capsules use this when a device pointer table
     /// retains immutable host-side block identities instead of the typed
     /// slices that originally supplied the pointees.
+    #[cfg(test)]
     pub(crate) fn read_device_block(&mut self, block: &DeviceBlock) -> &mut Self {
         self.note("read_device_block", Some(block), Access::Read, false)
     }
 
     /// Record a read through a prevalidated immutable block-identity snapshot.
+    #[cfg(test)]
     pub(crate) fn read_block_identity(&mut self, block: BlockId) -> &mut Self {
         self.note_identity("read_block_identity", Some(block), Access::Read, false)
     }
@@ -899,12 +892,10 @@ mod tests {
             RecordedUse {
                 block: block_a,
                 access: Access::Read,
-                label: "read",
             },
             RecordedUse {
                 block: block_b,
                 access: Access::Write,
-                label: "write",
             },
         ];
         let deduped = dedup_uses(&uses);
@@ -920,12 +911,10 @@ mod tests {
             RecordedUse {
                 block: block_a,
                 access: Access::Read,
-                label: "read",
             },
             RecordedUse {
                 block: block_a,
                 access: Access::Write,
-                label: "write",
             },
         ];
         let collapsed = dedup_uses(&same_id);
@@ -949,12 +938,10 @@ mod tests {
             RecordedUse {
                 block: block_a,
                 access: Access::Read,
-                label: "read",
             },
             RecordedUse {
                 block: block_b,
                 access: Access::Write,
-                label: "write",
             },
         ];
 

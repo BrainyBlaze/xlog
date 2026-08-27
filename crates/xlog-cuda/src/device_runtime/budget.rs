@@ -2,10 +2,9 @@
 //!
 //! Wraps a [`DeviceMemoryResource`] and enforces a single byte limit
 //! across all allocations that flow through it. Designed to be the
-//! per-runtime singleton replacement for the v0.5 per-provider
-//! `GpuMemoryManager` (which had no way to enforce a coherent budget
-//! across parallel tests, multiple providers, or Python callers
-//! sharing one physical GPU).
+//! provider-owned budget layer replacing manager-only accounting,
+//! which could not enforce a coherent limit across allocations that
+//! share one provider runtime.
 //!
 //! # Accounting model
 //!
@@ -61,10 +60,9 @@
 //! `GlobalDeviceBudget` is a normal `DeviceMemoryResource`, so it
 //! plugs into [`XlogDeviceRuntime::with_resource`] and stacks under
 //! / over [`LoggingResource`]. Recommended ordering for production:
-//! `GlobalDeviceBudget(LoggingResource(AsyncCudaResource))`. That
-//! gives the budget atomic accounting, the logger sees the
-//! eventually-applied call (so `OutOfBudget` errors do not get
-//! double-logged), and the underlying allocator is reached last.
+//! `LoggingResource(GlobalDeviceBudget(AsyncCudaResource))`. The budget remains
+//! the sole admission authority, while the outer logger observes both admitted
+//! allocations and typed `OutOfBudget` rejections exactly once.
 //! Tests can stack either way.
 
 use std::sync::Mutex;
@@ -123,6 +121,91 @@ impl GlobalDeviceBudget {
         let state = self.state.lock().expect("GlobalDeviceBudget poisoned");
         self.limit.saturating_sub(state.reserved)
     }
+
+    fn allocate_with_pressure(
+        &self,
+        bytes: usize,
+        reservation_pressure_bytes: usize,
+        stream: StreamId,
+        tag: AllocTag,
+    ) -> ResourceResult<DeviceBlock> {
+        // Admit against both materialized allocations and runtime promises.
+        // Only materialized bytes are added to this decorator's own tally.
+        {
+            let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
+            let current = state
+                .reserved
+                .checked_add(reservation_pressure_bytes)
+                .ok_or_else(|| {
+                    ResourceError::Driver(
+                        "global budget reservation accounting overflow".to_string(),
+                    )
+                })?;
+            let remaining = self.limit.saturating_sub(current);
+            if bytes <= remaining {
+                state.reserved = state.reserved.checked_add(bytes).ok_or_else(|| {
+                    ResourceError::Driver("global budget accounting overflow".to_string())
+                })?;
+                drop(state);
+                return match self.inner.allocate(bytes, stream, tag) {
+                    Ok(block) => Ok(block),
+                    Err(error) => {
+                        let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
+                        state.reserved = state
+                            .reserved
+                            .checked_sub(bytes)
+                            .expect("reserved bytes include the failed allocation");
+                        Err(error)
+                    }
+                };
+            }
+            if bytes > self.limit.saturating_sub(reservation_pressure_bytes) {
+                return Err(ResourceError::OutOfBudget {
+                    requested: bytes,
+                    current,
+                    remaining,
+                    limit: self.limit,
+                });
+            }
+        }
+
+        // A request that could fit after retired asynchronous allocations are
+        // reclaimed gets one reap-and-retry before it is rejected.
+        let _ = self.reap_pending();
+
+        let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
+        let current = state
+            .reserved
+            .checked_add(reservation_pressure_bytes)
+            .ok_or_else(|| {
+                ResourceError::Driver("global budget reservation accounting overflow".to_string())
+            })?;
+        let remaining = self.limit.saturating_sub(current);
+        if bytes > remaining {
+            return Err(ResourceError::OutOfBudget {
+                requested: bytes,
+                current,
+                remaining,
+                limit: self.limit,
+            });
+        }
+        state.reserved = state.reserved.checked_add(bytes).ok_or_else(|| {
+            ResourceError::Driver("global budget accounting overflow".to_string())
+        })?;
+        drop(state);
+
+        match self.inner.allocate(bytes, stream, tag) {
+            Ok(block) => Ok(block),
+            Err(error) => {
+                let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
+                state.reserved = state
+                    .reserved
+                    .checked_sub(bytes)
+                    .expect("reserved bytes include the failed allocation");
+                Err(error)
+            }
+        }
+    }
 }
 
 impl DeviceMemoryResource for GlobalDeviceBudget {
@@ -132,77 +215,17 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
         stream: StreamId,
         tag: AllocTag,
     ) -> ResourceResult<DeviceBlock> {
-        // First-pass reservation attempt under the budget lock.
-        // If the request fits, reserve and forward to the inner
-        // immediately.
-        {
-            let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
-            let remaining = self.limit.saturating_sub(state.reserved);
-            if bytes <= remaining {
-                state.reserved = state.reserved.saturating_add(bytes);
-                drop(state);
-                return match self.inner.allocate(bytes, stream, tag) {
-                    Ok(block) => Ok(block),
-                    Err(e) => {
-                        let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
-                        state.reserved = state.reserved.saturating_sub(bytes);
-                        Err(e)
-                    }
-                };
-            }
-            // Genuinely oversized requests can never fit even
-            // after a reap. Short-circuit before touching the
-            // inner stack so the rejection stays cheap and does
-            // not emit a reap log record.
-            if bytes > self.limit {
-                return Err(ResourceError::OutOfBudget {
-                    requested: bytes,
-                    current: state.reserved,
-                    remaining,
-                    limit: self.limit,
-                });
-            }
-        }
+        self.allocate_with_pressure(bytes, 0, stream, tag)
+    }
 
-        // Second pass: reservation didn't fit. With the
-        // stream-ordered async backend, dropped buffers transit
-        // through `pending_per_stream` until `reap_pending` runs;
-        // their bytes still count against `state.reserved`. Tight
-        // allocate-then-drop loops (cert hardware sustained
-        // tests; recursive Datalog inner loops without explicit
-        // reap) hit this even when the GPU has plenty of free
-        // memory. Drain pending frees once and retry. If the
-        // retry still fails, the budget is genuinely exhausted
-        // and the caller should see `OutOfBudget` as before.
-        //
-        // Reap is performed WITHOUT holding `state` so the inner
-        // resource's own locks can run; reap itself updates
-        // `state.reserved` via `Self::reap_pending` (which takes
-        // the lock) so a concurrent racing allocate sees the
-        // freed bytes.
-        let _ = self.reap_pending();
-
-        let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
-        let remaining = self.limit.saturating_sub(state.reserved);
-        if bytes > remaining {
-            return Err(ResourceError::OutOfBudget {
-                requested: bytes,
-                current: state.reserved,
-                remaining,
-                limit: self.limit,
-            });
-        }
-        state.reserved = state.reserved.saturating_add(bytes);
-        drop(state);
-
-        match self.inner.allocate(bytes, stream, tag) {
-            Ok(block) => Ok(block),
-            Err(e) => {
-                let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
-                state.reserved = state.reserved.saturating_sub(bytes);
-                Err(e)
-            }
-        }
+    fn allocate_with_reservation_pressure(
+        &self,
+        bytes: usize,
+        reservation_pressure_bytes: usize,
+        stream: StreamId,
+        tag: AllocTag,
+    ) -> ResourceResult<DeviceBlock> {
+        self.allocate_with_pressure(bytes, reservation_pressure_bytes, stream, tag)
     }
 
     fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
@@ -471,6 +494,26 @@ mod tests {
         // value (0).
         assert_eq!(budget.reserved_bytes(), 0);
         assert_eq!(budget.remaining(), 1024 * 1024);
+    }
+
+    #[test]
+    fn reservation_pressure_is_included_before_inner_allocation() {
+        let inner = Box::new(AlwaysFailAllocResource::new(0));
+        let budget = GlobalDeviceBudget::new(inner, 1024);
+
+        let error = budget
+            .allocate_with_reservation_pressure(600, 500, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .expect_err("runtime promises must reduce ordinary allocation headroom");
+        assert!(matches!(
+            error,
+            ResourceError::OutOfBudget {
+                requested: 600,
+                current: 500,
+                remaining: 524,
+                limit: 1024,
+            }
+        ));
+        assert_eq!(budget.reserved_bytes(), 0);
     }
 
     #[test]

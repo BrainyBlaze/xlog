@@ -400,28 +400,36 @@ impl super::CudaKernelProvider {
                 )),
                 ScalarType::U32 => {
                     let values: Vec<u32> = bytes
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect();
                     Arc::new(UInt32Array::from(values))
                 }
                 ScalarType::Symbol => {
                     let values: Vec<u32> = bytes
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect();
                     Arc::new(xlog_core::symbol::to_arrow(&values))
                 }
                 ScalarType::I32 => {
                     let values: Vec<i32> = bytes
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect();
                     Arc::new(Int32Array::from(values))
                 }
                 ScalarType::U64 => {
                     let values: Vec<u64> = bytes
-                        .chunks_exact(8)
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
                         .map(|c| {
                             u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
                         })
@@ -430,7 +438,9 @@ impl super::CudaKernelProvider {
                 }
                 ScalarType::I64 => {
                     let values: Vec<i64> = bytes
-                        .chunks_exact(8)
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
                         .map(|c| {
                             i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
                         })
@@ -439,14 +449,18 @@ impl super::CudaKernelProvider {
                 }
                 ScalarType::F32 => {
                     let values: Vec<f32> = bytes
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect();
                     Arc::new(Float32Array::from(values))
                 }
                 ScalarType::F64 => {
                     let values: Vec<f64> = bytes
-                        .chunks_exact(8)
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
                         .map(|c| {
                             f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
                         })
