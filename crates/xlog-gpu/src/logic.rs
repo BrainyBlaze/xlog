@@ -2832,30 +2832,12 @@ impl LogicProgram {
             executor.register_relation(*rel_id, name);
         }
 
-        let arity_qualified_predicates = if self.epistemic_provenance.is_some() {
-            epistemic_extensional_multi_arity_predicates(&self.program)
-        } else {
-            predicate_arities(&self.program)
-                .into_iter()
-                .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
-                .collect()
-        };
-        let inline_fact_relations = self
-            .program
-            .facts()
-            .map(|fact| {
-                let predicate = fact.head.predicate.as_str();
-                if arity_qualified_predicates.contains(predicate) {
-                    arity_qualified_name(predicate, fact.head.terms.len())
-                } else {
-                    predicate.to_string()
-                }
-            })
-            .collect::<BTreeSet<_>>();
+        let arity_qualified_predicates = self.arity_qualified_fact_predicates();
+        let fact_rows = self.fact_rows_by_relation(&arity_qualified_predicates);
 
         for (name, schema) in &self.schemas {
             let is_derived_placeholder = derived_relations.is_some_and(|set| set.contains(name))
-                && !inline_fact_relations.contains(name);
+                && !fact_rows.contains_key(name);
             if is_derived_placeholder {
                 continue;
             }
@@ -2877,7 +2859,7 @@ impl LogicProgram {
             executor.store_mut().put(&name, buffer);
         }
 
-        self.load_facts(provider, &mut executor)?;
+        self.load_grouped_facts_into_store(provider, executor.store_mut(), fact_rows)?;
         Ok(executor)
     }
 
@@ -3359,8 +3341,35 @@ impl LogicProgram {
         })
     }
 
-    fn load_facts(&self, provider: &CudaKernelProvider, executor: &mut Executor) -> Result<()> {
-        self.load_facts_into_store(provider, executor.store_mut())
+    fn arity_qualified_fact_predicates(&self) -> BTreeSet<String> {
+        if self.epistemic_provenance.is_some() {
+            epistemic_extensional_multi_arity_predicates(&self.program)
+        } else {
+            predicate_arities(&self.program)
+                .into_iter()
+                .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
+                .collect()
+        }
+    }
+
+    fn fact_rows_by_relation<'program>(
+        &'program self,
+        arity_qualified_predicates: &BTreeSet<String>,
+    ) -> HashMap<String, Vec<&'program [Term]>> {
+        let mut rows_by_pred = HashMap::new();
+        for fact in self.program.facts() {
+            let predicate = fact.head.predicate.as_str();
+            let relation = if arity_qualified_predicates.contains(predicate) {
+                arity_qualified_name(predicate, fact.head.terms.len())
+            } else {
+                predicate.to_string()
+            };
+            rows_by_pred
+                .entry(relation)
+                .or_insert_with(Vec::new)
+                .push(fact.head.terms.as_slice());
+        }
+        rows_by_pred
     }
 
     fn load_facts_into_store(
@@ -3368,26 +3377,17 @@ impl LogicProgram {
         provider: &CudaKernelProvider,
         store: &mut RelationStore,
     ) -> Result<()> {
-        let arity_qualified_predicates = if self.epistemic_provenance.is_some() {
-            epistemic_extensional_multi_arity_predicates(&self.program)
-        } else {
-            predicate_arities(&self.program)
-                .into_iter()
-                .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
-                .collect()
-        };
-        let mut rows_by_pred: HashMap<String, Vec<&[Term]>> = HashMap::new();
-        for fact in self.program.facts() {
-            let pred = fact.head.predicate.as_str();
-            let arity = fact.head.terms.len();
-            let key = if arity_qualified_predicates.contains(pred) {
-                arity_qualified_name(pred, arity)
-            } else {
-                pred.to_string()
-            };
-            rows_by_pred.entry(key).or_default().push(&fact.head.terms);
-        }
+        let arity_qualified_predicates = self.arity_qualified_fact_predicates();
+        let rows_by_pred = self.fact_rows_by_relation(&arity_qualified_predicates);
+        self.load_grouped_facts_into_store(provider, store, rows_by_pred)
+    }
 
+    fn load_grouped_facts_into_store(
+        &self,
+        provider: &CudaKernelProvider,
+        store: &mut RelationStore,
+        rows_by_pred: HashMap<String, Vec<&[Term]>>,
+    ) -> Result<()> {
         for (pred, rows) in rows_by_pred {
             let schema = self.schemas.get(pred.as_str()).ok_or_else(|| {
                 XlogError::Execution(format!(
