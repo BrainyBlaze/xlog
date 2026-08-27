@@ -249,7 +249,7 @@ run_exact_rust_gate "resident semantic acceptance matrix" 1 \
   logic::tests::resident_semantic_acceptance_matrix -- \
   --ignored --exact --nocapture --test-threads=1
 run_cmd bash scripts/stage_pyxlog_kernels.sh
-run_cmd maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out "$wheel_dir"
+run_cmd python3 scripts/validate_reproducible_pyxlog_wheel.py --out-dir "$wheel_dir"
 run_cmd python3 -m venv --system-site-packages "$python_env_dir"
 python_env="$python_env_dir/bin/python"
 run_cmd "$python_env" -m pip install --force-reinstall --no-deps "$wheel_dir"/pyxlog-*.whl

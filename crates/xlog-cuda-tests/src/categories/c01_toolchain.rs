@@ -8,56 +8,8 @@
 //! - JIT cache behavior under repeated kernel execution
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
-use std::collections::HashSet;
-use std::fs;
 use std::time::Instant;
-use xlog_cuda::{join_kernels, provider::kernel_paths::KernelArtifactLocator, JOIN_MODULE};
-
-fn kernel_locator() -> KernelArtifactLocator {
-    KernelArtifactLocator::from_env()
-}
-
-fn extract_ptx_directive(ptx: &str, directive: &str) -> Option<String> {
-    for line in ptx.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix(directive) {
-            let rest = rest.trim();
-            if rest.is_empty() {
-                continue;
-            }
-            return rest.split_whitespace().next().map(|s| s.to_string());
-        }
-    }
-    None
-}
-
-fn extract_entry_names(ptx: &str) -> Vec<String> {
-    let mut entries = Vec::new();
-    for line in ptx.lines() {
-        let line = line.trim();
-        let line = if let Some(rest) = line.strip_prefix(".visible .entry ") {
-            rest
-        } else if let Some(rest) = line.strip_prefix(".entry ") {
-            rest
-        } else {
-            continue;
-        };
-
-        if let Some((name, _)) = line.split_once('(') {
-            let name = name.trim();
-            if !name.is_empty() {
-                entries.push(name.to_string());
-            }
-        }
-    }
-    entries
-}
-
-fn parse_sm_target(target: &str) -> Option<u32> {
-    let s = target.trim();
-    let sm = s.strip_prefix("sm_")?;
-    sm.parse::<u32>().ok()
-}
+use xlog_cuda::{join_kernels, JOIN_MODULE};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -153,106 +105,21 @@ fn test_compute_capability_check(ctx: &TestContext) -> TestResult {
 
 /// Test 3: Verify all kernel functions can be resolved from the loaded modules.
 ///
-/// This test resolves every generated/staged portable PTX artifact, extracts
-/// all `.entry` points, and verifies that `CudaKernelProvider` loaded each
-/// entry under the expected module name.
+/// This test verifies that `CudaKernelProvider` loaded every canonical kernel
+/// entry under the expected module name. PTX artifact structure and manifest
+/// coverage are validated separately by the `xlog-cuda` PTX validation tests.
 fn test_kernel_function_resolution(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
 
     let device = ctx.device.inner();
-    let locator = kernel_locator();
 
     let mut total_functions = 0;
     let mut resolved_functions = 0;
 
     for spec in xlog_cuda::kernel_manifest_data::KERNEL_MODULES {
-        let (path, is_cubin) = match locator.resolve_module_path(spec.cu_name, 999) {
-            Some(v) => v,
-            None => {
-                return TestResult::error(
-                    "test_kernel_function_resolution",
-                    start.elapsed(),
-                    format!(
-                        "{}: no portable PTX found in XLOG_CUBIN_DIR, package kernels/, or OUT_DIR",
-                        spec.cu_name
-                    ),
-                );
-            }
-        };
-        if is_cubin {
-            return TestResult::error(
-                "test_kernel_function_resolution",
-                start.elapsed(),
-                format!(
-                    "{}: expected portable PTX fallback when resolving module artifacts",
-                    spec.cu_name
-                ),
-            );
-        }
-
-        let filename = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("<unknown>");
         let module_name = spec.module_name;
 
-        let ptx = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                return TestResult::error(
-                    "test_kernel_function_resolution",
-                    start.elapsed(),
-                    format!("Failed to read {}: {}", path.display(), e),
-                );
-            }
-        };
-
-        let address_size = extract_ptx_directive(&ptx, ".address_size").unwrap_or_default();
-        if address_size != "64" {
-            return TestResult::error(
-                "test_kernel_function_resolution",
-                start.elapsed(),
-                format!(
-                    "{}: expected .address_size 64, got '{}'",
-                    filename, address_size
-                ),
-            );
-        }
-
-        let target = extract_ptx_directive(&ptx, ".target").unwrap_or_default();
-        let sm = parse_sm_target(&target).unwrap_or(0);
-        if sm < 70 {
-            return TestResult::error(
-                "test_kernel_function_resolution",
-                start.elapsed(),
-                format!(
-                    "{}: expected .target sm_70 or later, got '{}'",
-                    filename, target
-                ),
-            );
-        }
-
-        let entries = extract_entry_names(&ptx);
-        if entries.is_empty() {
-            return TestResult::error(
-                "test_kernel_function_resolution",
-                start.elapsed(),
-                format!("{}: no .entry kernels found", filename),
-            );
-        }
-
-        let mut seen = HashSet::new();
-        for entry in &entries {
-            if !seen.insert(entry.as_str()) {
-                return TestResult::error(
-                    "test_kernel_function_resolution",
-                    start.elapsed(),
-                    format!("{}: duplicate .entry name {}", filename, entry),
-                );
-            }
-        }
-
-        for entry in &entries {
+        for entry in spec.kernels {
             total_functions += 1;
             if device.get_func(module_name, entry).is_some() {
                 resolved_functions += 1;
@@ -261,8 +128,8 @@ fn test_kernel_function_resolution(ctx: &TestContext) -> TestResult {
                     "test_kernel_function_resolution",
                     start.elapsed(),
                     format!(
-                        "{}: failed to resolve kernel function '{}' from module '{}'",
-                        filename, entry, module_name
+                        "{}: failed to resolve canonical kernel function '{}' from module '{}'",
+                        spec.cu_name, entry, module_name
                     ),
                 );
             }

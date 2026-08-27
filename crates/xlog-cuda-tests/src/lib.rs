@@ -2,6 +2,8 @@
 //!
 //! # Usage
 //! ```bash
+//! bash scripts/stage_pyxlog_kernels.sh
+//!
 //! # Full certification (seconds to minutes; GPU-dependent)
 //! cargo test -p xlog-cuda-tests --test certification_suite --release
 //!
