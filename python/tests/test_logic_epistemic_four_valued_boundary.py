@@ -31,7 +31,7 @@ skip_unless_pyxlog_cuda()
 
 
 def _heads(result):
-    """Map each emitted query result to {relation_name: set(row tuples)}.
+    """Map each query to ``{relation_name: (num_rows, set(row tuples))}``.
 
     Query order is component-ordered, not source-ordered, so index by name.
     """
@@ -133,14 +133,18 @@ known_a(X) :- node(X), know a(X).
 """
 
 
-def test_contested_multiworld_construct_fails_closed():
-    """An even epistemic negation loop (a :- not know b; b :- not know a) is the
-    autoepistemic construct that would make `a` possible-but-not-known (contested /
-    Belnap both). The engine REJECTS it fail-closed with a typed error rather than
-    silently producing a laundered `known_a` row -- the Belnap fence at the pyxlog
-    boundary holds by construction: a contested disposition is never admitted as known."""
-    with pytest.raises(RuntimeError, match="Unsupported epistemic construct"):
-        program = pyxlog.LogicProgram.compile(
-            SOURCE_CONTESTED_COUPLING, device=0, memory_mb=512
-        )
-        program.evaluate()
+def test_contested_multiworld_construct_does_not_launder_known_rows():
+    """A negated-modal cycle runs through the GPU-backed well-founded path.
+
+    Both recursive predicates remain undefined, so neither the possible nor known
+    wrapper may emit a row. In particular, a contested disposition is never
+    laundered into knowledge at the Python boundary.
+    """
+    program = pyxlog.LogicProgram.compile(
+        SOURCE_CONTESTED_COUPLING, device=0, memory_mb=512
+    )
+
+    heads = _heads(program.evaluate())
+
+    assert heads["poss_a"] == (0, set())
+    assert heads["known_a"] == (0, set())
