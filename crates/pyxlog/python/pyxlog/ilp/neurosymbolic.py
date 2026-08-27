@@ -168,6 +168,57 @@ class NeuroSymbolicTrainingResult:
     candidate_train_fit: dict[str, float] | None = None
 
 
+def _restore_callers_torch_runtime_settings(function):
+    """Use the canonical deterministic CUDA setup without leaking caller state."""
+    from functools import wraps
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        import os
+
+        import torch
+
+        from pyxlog.ilp.trainer import _set_deterministic_cuda
+
+        workspace_key = "CUBLAS_WORKSPACE_CONFIG"
+        workspace_config = os.environ.get(workspace_key)
+        deterministic_enabled = torch.are_deterministic_algorithms_enabled()
+        deterministic_warn_only = (
+            torch.is_deterministic_algorithms_warn_only_enabled()
+        )
+        matmul_precision = (
+            torch.get_float32_matmul_precision()
+            if hasattr(torch, "get_float32_matmul_precision")
+            else None
+        )
+        cudnn_benchmark = torch.backends.cudnn.benchmark
+        cudnn_deterministic = (
+            torch.backends.cudnn.deterministic
+            if hasattr(torch.backends.cudnn, "deterministic")
+            else None
+        )
+        try:
+            _set_deterministic_cuda(seed=None)
+            return function(*args, **kwargs)
+        finally:
+            torch.use_deterministic_algorithms(
+                deterministic_enabled,
+                warn_only=deterministic_warn_only,
+            )
+            if matmul_precision is not None:
+                torch.set_float32_matmul_precision(matmul_precision)
+            torch.backends.cudnn.benchmark = cudnn_benchmark
+            if cudnn_deterministic is not None:
+                torch.backends.cudnn.deterministic = cudnn_deterministic
+            if workspace_config is not None:
+                os.environ[workspace_key] = workspace_config
+            else:
+                os.environ.pop(workspace_key, None)
+
+    return wrapped
+
+
+@_restore_callers_torch_runtime_settings
 def train_neurosymbolic_program(
     source: str,
     *,
@@ -246,24 +297,6 @@ def train_neurosymbolic_program(
     import torch
 
     import pyxlog
-
-    # Determinism is an EVIDENCE property here, not a nicety: the join OR accumulates
-    # with index_add, whose default CUDA path is atomic float addition — bitwise
-    # different every run, and the drift amplifies through hundreds of optimizer steps.
-    # When a winning margin sits near select_rule's TIE_TOLERANCE, two identically
-    # seeded runs can disagree on whether a rule was selected at all. The dILP trainer
-    # already runs deterministic (trainer._set_deterministic_cuda); this entry point
-    # mirrors it. Seeding stays the caller's.
-    import os
-
-    # cuBLAS refuses deterministic mode without a fixed workspace; without this, the
-    # first Linear on CUDA raises instead of running. Respect a caller's own setting.
-    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-    torch.use_deterministic_algorithms(True)
-    if hasattr(torch, "set_float32_matmul_precision"):
-        torch.set_float32_matmul_precision("high")
-    if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = False
 
     program_source, rules, train_head, objective = _desugar_source(source)
     if objective != "binary_cross_entropy":
@@ -934,7 +967,10 @@ def _train_joint_mixture(
         program.zero_grad()
         for opt in neural_optims.values():
             opt.zero_grad()
-        p_or = head_prob(training=True).clamp(eps, 1.0 - eps)
+        raw_p_or = head_prob(training=True)
+        bounded_p_or = raw_p_or.clamp(eps, 1.0 - eps)
+        # Keep BCE finite without making an exact 0/1 noisy-OR a dead gradient.
+        p_or = raw_p_or + (bounded_p_or - raw_p_or).detach()
         loss = -(
             targets_t * torch.log(p_or) + (1.0 - targets_t) * torch.log(1.0 - p_or)
         ).mean()
