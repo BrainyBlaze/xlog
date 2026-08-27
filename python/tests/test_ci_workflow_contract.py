@@ -164,12 +164,16 @@ def test_wheel_build_workflows_pin_source_date_to_the_checked_out_commit() -> No
         commands = workflow_build_commands(load_workflow(workflow_name))
         assert commands, workflow_name
         for command in commands:
-            assert 'SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"' in command
+            assert re.search(
+                r'SOURCE_DATE_EPOCH="\$\(git(?: -c safe\.directory="\$GITHUB_WORKSPACE")? '
+                r'show -s --format=%ct HEAD\)"',
+                command,
+            )
             assert "export SOURCE_DATE_EPOCH" in command
             assert "--locked" in command
 
 
-def test_container_wheel_build_uses_bash_for_pipefail() -> None:
+def test_container_wheel_build_uses_bash_and_explicit_safe_workspace() -> None:
     workflow = load_workflow("ci.yml")
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
@@ -185,7 +189,12 @@ def test_container_wheel_build_uses_bash_for_pipefail() -> None:
         and "maturin build" in step["run"]
     ]
     assert len(wheel_steps) == 1
-    assert wheel_steps[0].get("shell") == "bash"
+    wheel_step = wheel_steps[0]
+    assert wheel_step.get("shell") == "bash"
+    command = wheel_step["run"]
+    assert (
+        'git -c safe.directory="$GITHUB_WORKSPACE" show -s --format=%ct HEAD' in command
+    )
 
 
 def test_cuda_change_classification_is_complete_and_deterministic() -> None:

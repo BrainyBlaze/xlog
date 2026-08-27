@@ -292,5 +292,5 @@ jobs:
         run: |
           set -euo pipefail
           export SOURCE_DATE_EPOCH
-          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          SOURCE_DATE_EPOCH="$(git -c safe.directory="$GITHUB_WORKSPACE" show -s --format=%ct HEAD)"
           maturin build -m crates/pyxlog/Cargo.toml --release --locked --compatibility manylinux_2_34 --out dist
