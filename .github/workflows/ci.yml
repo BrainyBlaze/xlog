@@ -288,4 +288,8 @@ jobs:
         run: python3 -m pip install --upgrade pip maturin
 
       - name: Build pyxlog wheel without GPU execution
-        run: maturin build -m crates/pyxlog/Cargo.toml --release --compatibility manylinux_2_34 --out dist
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          maturin build -m crates/pyxlog/Cargo.toml --release --locked --compatibility manylinux_2_34 --out dist

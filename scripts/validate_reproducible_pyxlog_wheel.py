@@ -14,10 +14,36 @@ import zipfile
 from pathlib import Path
 
 
-def build_wheel(repo_root: Path, target_dir: Path, output_dir: Path) -> Path:
+def resolve_source_date_epoch(repo_root: Path) -> str:
+    source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH")
+    if source_date_epoch is None:
+        completed = subprocess.run(
+            ["git", "show", "-s", "--format=%ct", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        source_date_epoch = completed.stdout.strip()
+
+    if not source_date_epoch.isascii() or not source_date_epoch.isdigit():
+        raise RuntimeError(
+            "SOURCE_DATE_EPOCH must be a non-negative integer timestamp, "
+            f"got {source_date_epoch!r}"
+        )
+    return source_date_epoch
+
+
+def build_wheel(
+    repo_root: Path,
+    target_dir: Path,
+    output_dir: Path,
+    source_date_epoch: str,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(target_dir)
+    env["SOURCE_DATE_EPOCH"] = source_date_epoch
     command = [
         "maturin",
         "build",
@@ -102,6 +128,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[1]
+    source_date_epoch = resolve_source_date_epoch(repo_root)
+    print(f"SOURCE_DATE_EPOCH={source_date_epoch}")
     retained_wheels = sorted(args.out_dir.glob("pyxlog-*.whl"))
     if retained_wheels:
         raise RuntimeError(
@@ -114,8 +142,18 @@ def main() -> int:
         second_target = temp_root / "different-location" / "second-build" / "target"
         second_output = temp_root / "second-wheel"
 
-        first_wheel = build_wheel(repo_root, first_target, args.out_dir)
-        second_wheel = build_wheel(repo_root, second_target, second_output)
+        first_wheel = build_wheel(
+            repo_root,
+            first_target,
+            args.out_dir,
+            source_date_epoch,
+        )
+        second_wheel = build_wheel(
+            repo_root,
+            second_target,
+            second_output,
+            source_date_epoch,
+        )
         validate_reproducible_wheels(first_wheel, second_wheel)
 
     return 0

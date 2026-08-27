@@ -152,6 +152,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           wheel_dir="$RUNNER_TEMP/pyxlog-wheel-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$wheel_dir"
           find "$wheel_dir" -maxdepth 1 -type f -name 'pyxlog-*.whl' -delete

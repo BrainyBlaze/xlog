@@ -30,6 +30,25 @@ def job_commands(job: dict[str, object]) -> str:
     )
 
 
+def workflow_build_commands(workflow: dict[str, object]) -> list[str]:
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    commands: list[str] = []
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        steps = job.get("steps", [])
+        assert isinstance(steps, list)
+        commands.extend(
+            step["run"]
+            for step in steps
+            if isinstance(step, dict)
+            and isinstance(step.get("run"), str)
+            and "maturin build" in step["run"]
+        )
+    return commands
+
+
 def assert_unfiltered_required_workflow(workflow: dict[str, object]) -> None:
     triggers = workflow["on"]
     assert isinstance(triggers, dict)
@@ -79,7 +98,9 @@ def test_workspace_validation_runs_cpu_tests_and_compiles_every_target() -> None
     workspace_commands = job_commands(workspace_tests)
     complete_compile = "cargo test --workspace --all-targets --locked --no-run"
     assert complete_compile in workspace_commands
-    assert workspace_commands.count("cargo test --workspace --all-targets --locked") == 1
+    assert (
+        workspace_commands.count("cargo test --workspace --all-targets --locked") == 1
+    )
     for crate in (
         "xlog-core",
         "xlog-ir",
@@ -136,6 +157,16 @@ def test_cuda_workflow_separates_classification_gpu_work_and_aggregate() -> None
     )
     assert gpu_test_paths
     assert all(changes_are_relevant([path]) for path in gpu_test_paths)
+
+
+def test_wheel_build_workflows_pin_source_date_to_the_checked_out_commit() -> None:
+    for workflow_name in ("ci.yml", "cuda-ci.yml", "python-publish.yml"):
+        commands = workflow_build_commands(load_workflow(workflow_name))
+        assert commands, workflow_name
+        for command in commands:
+            assert 'SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"' in command
+            assert "export SOURCE_DATE_EPOCH" in command
+            assert "--locked" in command
 
 
 def test_cuda_change_classification_is_complete_and_deterministic() -> None:
