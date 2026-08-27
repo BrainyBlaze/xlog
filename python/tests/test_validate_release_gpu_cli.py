@@ -30,6 +30,14 @@ def test_validate_release_gpu_dry_run() -> None:
     assert "python3 -m pip install --target" in proc.stdout
     assert "PYTHONNOUSERSITE=1" in proc.stdout
     assert "python3 -m venv --system-site-packages" not in proc.stdout
+    assert (
+        "mc::resident::tests::resident_kernel_nonconvergence_is_authoritative"
+        in proc.stdout
+    )
+    assert (
+        "mc::resident::tests::resident_kernel_sparse_overflow_is_authoritative"
+        in proc.stdout
+    )
     assert "cargo test -p xlog-cuda-tests --test certification_suite" in proc.stdout
     assert "Dry run complete." in proc.stdout
 

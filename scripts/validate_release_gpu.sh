@@ -231,6 +231,14 @@ run_cmd cargo test --locked --release \
   -- \
   --nocapture \
   --test-threads=1
+run_exact_rust_gate "resident Monte Carlo nonconvergence status" 1 \
+  cargo test --locked --release -p xlog-prob --features host-io --lib \
+  mc::resident::tests::resident_kernel_nonconvergence_is_authoritative -- \
+  --ignored --exact --nocapture --test-threads=1
+run_exact_rust_gate "resident Monte Carlo sparse overflow status" 1 \
+  cargo test --locked --release -p xlog-prob --features host-io --lib \
+  mc::resident::tests::resident_kernel_sparse_overflow_is_authoritative -- \
+  --ignored --exact --nocapture --test-threads=1
 run_exact_rust_gate "resident graph runtime module" 22 \
   cargo test --locked --release -p xlog-runtime --lib \
   --features resident-graph-tests \
