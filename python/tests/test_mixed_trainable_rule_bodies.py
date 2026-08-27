@@ -11,17 +11,18 @@ a membership filter on which groundings can fire, contributing no probability
 and no gradient.
 """
 
+import os
+
 import pytest
 
 torch = pytest.importorskip("torch")
-
-import pyxlog.ilp.neurosymbolic as neurosymbolic_module
 
 from pyxlog.ilp.neurosymbolic import (  # noqa: E402
     NeuralBodySpec,
     NeuroSymbolicTrainingConfig,
     _collect_examples,
     _desugar_source,
+    _make_neural_body_head,
     _make_rule_weight_module,
     _TENSOR_SOURCE_NAME,
     evaluate_joint_mixture,
@@ -293,7 +294,9 @@ JOINT_MIXTURE_SOURCE = """
 
 
 @requires_cuda
-def test_joint_training_restores_callers_torch_runtime_settings() -> None:
+def test_joint_training_restores_callers_torch_runtime_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     examples = [
         {
             "inputs": torch.zeros((4, 1), dtype=torch.float32),
@@ -304,13 +307,16 @@ def test_joint_training_restores_callers_torch_runtime_settings() -> None:
     previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     previous_precision = torch.get_float32_matmul_precision()
     previous_benchmark = torch.backends.cudnn.benchmark
+    previous_cudnn_deterministic = torch.backends.cudnn.deterministic
     try:
+        monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
         torch.use_deterministic_algorithms(False)
         torch.set_float32_matmul_precision("highest")
         torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
 
         train_neurosymbolic_program(
-            JOINT_MIXTURE_SOURCE.replace("(i64)", "(u64)"),
+            JOINT_MIXTURE_SOURCE,
             networks={},
             examples=examples,
             config=NeuroSymbolicTrainingConfig(steps=1, learning_rate=0.1),
@@ -319,6 +325,8 @@ def test_joint_training_restores_callers_torch_runtime_settings() -> None:
         assert not torch.are_deterministic_algorithms_enabled()
         assert torch.get_float32_matmul_precision() == "highest"
         assert torch.backends.cudnn.benchmark is True
+        assert torch.backends.cudnn.deterministic is False
+        assert "CUBLAS_WORKSPACE_CONFIG" not in os.environ
     finally:
         torch.use_deterministic_algorithms(
             previous_deterministic,
@@ -326,18 +334,23 @@ def test_joint_training_restores_callers_torch_runtime_settings() -> None:
         )
         torch.set_float32_matmul_precision(previous_precision)
         torch.backends.cudnn.benchmark = previous_benchmark
+        torch.backends.cudnn.deterministic = previous_cudnn_deterministic
 
 
-@requires_cuda
-def test_joint_training_restores_callers_settings_after_failure() -> None:
+def test_joint_training_restores_callers_settings_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     previous_deterministic = torch.are_deterministic_algorithms_enabled()
     previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     previous_precision = torch.get_float32_matmul_precision()
     previous_benchmark = torch.backends.cudnn.benchmark
+    previous_cudnn_deterministic = torch.backends.cudnn.deterministic
     try:
+        monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
         torch.use_deterministic_algorithms(False)
         torch.set_float32_matmul_precision("highest")
         torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
 
         with pytest.raises(ValueError, match="unsupported training objective"):
             train_neurosymbolic_program(
@@ -353,6 +366,8 @@ def test_joint_training_restores_callers_settings_after_failure() -> None:
         assert not torch.are_deterministic_algorithms_enabled()
         assert torch.get_float32_matmul_precision() == "highest"
         assert torch.backends.cudnn.benchmark is True
+        assert torch.backends.cudnn.deterministic is False
+        assert "CUBLAS_WORKSPACE_CONFIG" not in os.environ
     finally:
         torch.use_deterministic_algorithms(
             previous_deterministic,
@@ -360,6 +375,7 @@ def test_joint_training_restores_callers_settings_after_failure() -> None:
         )
         torch.set_float32_matmul_precision(previous_precision)
         torch.backends.cudnn.benchmark = previous_benchmark
+        torch.backends.cudnn.deterministic = previous_cudnn_deterministic
 
 
 @requires_cuda
@@ -540,7 +556,7 @@ def test_neural_body_training_recovers_from_an_all_off_initial_gate(
 ) -> None:
     """A hard-off initial gate must retain a gradient into its neural head."""
 
-    original_make_head = neurosymbolic_module._make_neural_body_head
+    original_make_head = _make_neural_body_head
 
     def make_all_off_head(width: int, head_depth: int, hidden_dim: int):
         head = original_make_head(width, head_depth, hidden_dim)
@@ -551,8 +567,7 @@ def test_neural_body_training_recovers_from_an_all_off_initial_gate(
         return head
 
     monkeypatch.setattr(
-        neurosymbolic_module,
-        "_make_neural_body_head",
+        "pyxlog.ilp.neurosymbolic._make_neural_body_head",
         make_all_off_head,
     )
     source = """
