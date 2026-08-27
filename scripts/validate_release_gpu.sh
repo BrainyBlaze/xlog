@@ -54,6 +54,10 @@ esac
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
+cargo_target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+if [[ "$cargo_target_dir" != /* ]]; then
+  cargo_target_dir="$repo_root/$cargo_target_dir"
+fi
 
 print_cmd() {
   printf '+'
@@ -272,7 +276,7 @@ else
   run_cmd cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture
 fi
 
-run_cmd ./target/release/xlog run examples/xlog/00-basics/01_tc_reachability.xlog
+run_cmd "$cargo_target_dir/release/xlog" run examples/xlog/00-basics/01_tc_reachability.xlog
 
 run_cmd python3 -c 'import pathlib, sys, tarfile; dist = pathlib.Path(sys.argv[1]); archives = sorted(dist.glob("xlog-v*.tar.gz")); assert archives, "no CLI release archive built"; names = tarfile.open(archives[0], "r:gz").getnames(); assert any(name.endswith("/xlog") for name in names), "CLI archive is missing xlog"; assert any("/kernels/" in name for name in names), "CLI archive is missing staged kernels"; print(f"validated CLI archive layout: {archives[0]}")' "$bundle_dir"
 run_cmd python3 -c 'import pathlib, sys, zipfile; dist = pathlib.Path(sys.argv[1]); wheels = sorted(dist.glob("pyxlog-*.whl")); assert wheels, "no pyxlog wheel built"; names = zipfile.ZipFile(wheels[0]).namelist(); assert any(name.startswith("pyxlog/kernels/") for name in names), "wheel is missing staged kernels"; print(f"validated pyxlog wheel layout: {wheels[0]}")' "$wheel_dir"

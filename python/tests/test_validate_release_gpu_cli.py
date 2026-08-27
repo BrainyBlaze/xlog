@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -31,6 +32,24 @@ def test_validate_release_gpu_dry_run() -> None:
     assert "python3 -m venv --system-site-packages" not in proc.stdout
     assert "cargo test -p xlog-cuda-tests --test certification_suite" in proc.stdout
     assert "Dry run complete." in proc.stdout
+
+
+def test_validate_release_gpu_uses_the_configured_cargo_target_directory() -> None:
+    target_dir = "/tmp/xlog-release-validator-target"
+    env = os.environ.copy()
+    env["CARGO_TARGET_DIR"] = target_dir
+
+    proc = subprocess.run(
+        ["bash", "scripts/validate_release_gpu.sh", "--mode", "release", "--dry-run"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert proc.returncode == 0
+    assert f"{target_dir}/release/xlog run" in proc.stdout
+    assert "./target/release/xlog run" not in proc.stdout
 
 
 def test_resident_runtime_gate_count_matches_current_module() -> None:
