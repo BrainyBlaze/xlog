@@ -19,6 +19,7 @@ skip_unless_pyxlog_cuda()
 
 
 _JOIN_WIDTH = 2_048
+_ORDINARY_QUERY_RELATION = "__xlog_query_0"
 _PROB_SOURCE = """
 0.6::observed().
 query(observed()).
@@ -127,7 +128,7 @@ def test_compiled_logic_evaluate_releases_gil(long_logic_program) -> None:
     result = _call_while_observer_waits(long_logic_program.evaluate)
 
     assert len(result.queries) == 1
-    assert result.queries[0].relation_name == "pair"
+    assert result.queries[0].relation_name == _ORDINARY_QUERY_RELATION
 
 
 def test_logic_session_evaluate_releases_gil(long_logic_program) -> None:
@@ -135,7 +136,7 @@ def test_logic_session_evaluate_releases_gil(long_logic_program) -> None:
     result = _call_while_observer_waits(session.evaluate)
 
     assert len(result.queries) == 1
-    assert result.queries[0].relation_name == "pair"
+    assert result.queries[0].relation_name == _ORDINARY_QUERY_RELATION
 
 
 def test_probabilistic_evaluate_releases_gil(long_mc_program) -> None:
