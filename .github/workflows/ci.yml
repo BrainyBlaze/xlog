@@ -288,6 +288,7 @@ jobs:
         run: python3 -m pip install --upgrade pip maturin
 
       - name: Build pyxlog wheel without GPU execution
+        shell: bash
         run: |
           set -euo pipefail
           export SOURCE_DATE_EPOCH

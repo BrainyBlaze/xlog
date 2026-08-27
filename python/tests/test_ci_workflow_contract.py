@@ -169,6 +169,25 @@ def test_wheel_build_workflows_pin_source_date_to_the_checked_out_commit() -> No
             assert "--locked" in command
 
 
+def test_container_wheel_build_uses_bash_for_pipefail() -> None:
+    workflow = load_workflow("ci.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    workspace_tests = jobs["workspace-tests"]
+    assert isinstance(workspace_tests, dict)
+    steps = workspace_tests["steps"]
+    assert isinstance(steps, list)
+    wheel_steps = [
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and isinstance(step.get("run"), str)
+        and "maturin build" in step["run"]
+    ]
+    assert len(wheel_steps) == 1
+    assert wheel_steps[0].get("shell") == "bash"
+
+
 def test_cuda_change_classification_is_complete_and_deterministic() -> None:
     for path in (
         ".github/workflows/cuda-ci.yml",
