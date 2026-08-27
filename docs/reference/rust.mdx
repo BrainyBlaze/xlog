@@ -22,7 +22,7 @@ Every crate in the xlog source tree, with a link to its generated API docs and a
 
 | Crate | Generated API | Responsibility |
 |-------|---------------|----------------|
-| `xlog-core` | [rustdoc](https://xlog.md/generated/rust/xlog_core/index.html) | Shared types (`ScalarType`, `Schema`, `AggOp`), traits (`KernelProvider`), and common errors. |
+| `xlog-core` | [rustdoc](https://xlog.md/generated/rust/xlog_core/index.html) | Shared types (`ScalarType`, `Schema`, `AggOp`), strict configuration parsing, memory budgets, floating-point ordering, and common errors. |
 | `xlog-ir` | [rustdoc](https://xlog.md/generated/rust/xlog_ir/index.html) | Relational intermediate-representation nodes — the query plan xlog builds internally (`RirNode`) — plus expressions (`Expr`) and execution plans. |
 | `xlog-cuda` | [rustdoc](https://xlog.md/generated/rust/xlog_cuda/index.html) | CUDA provider, GPU buffers, PTX embedding (bundling compiled GPU code into the binary), Arrow IPC/C Data interop (exchanging Apache Arrow columnar data with other tools), and DLPack support (a standard for sharing tensors across frameworks). |
 | `xlog-stats` | [rustdoc](https://xlog.md/generated/rust/xlog_stats/index.html) | Runtime and compiler feedback through `StatsManager` and `StatsSnapshot`. |

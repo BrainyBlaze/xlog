@@ -7,18 +7,26 @@ use super::{McProgram, McSamplingMethod};
 /// Why evidence may or may not be forceable to root Bernoulli variables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ForceabilityReason {
+    /// Every evidence literal maps directly to a sampled Bernoulli variable.
     AllForceable,
+    /// At least one evidence literal is derived rather than sampled directly.
     ContainsDerivedEvidence,
+    /// A negated annotated-disjunction head cannot be represented by direct clamping.
     ContainsNegativeAdHeadEvidence,
+    /// The program contains no evidence to clamp.
     NoEvidence,
 }
 
 /// Compiled evidence forcing for the MC sampler.
 #[derive(Debug, Clone)]
 pub struct EvidenceForcing {
+    /// Per-variable flag indicating that the sampler must force the variable.
     pub force_mask: Vec<u8>,
+    /// Per-variable Boolean value used when the corresponding mask entry is set.
     pub forced_value: Vec<u8>,
+    /// Whether all evidence can be enforced by direct variable clamping.
     pub forceable: bool,
+    /// Explanation for the forceability decision.
     pub reason: ForceabilityReason,
 }
 
@@ -51,6 +59,7 @@ impl McProgram {
         Ok((method, forcing))
     }
 
+    /// Compiles program evidence into per-variable sampler constraints.
     pub fn compile_evidence_forcing(&self) -> Result<EvidenceForcing> {
         let num_vars = self.bernoulli_probs.len();
         let mut force_mask = vec![0u8; num_vars];

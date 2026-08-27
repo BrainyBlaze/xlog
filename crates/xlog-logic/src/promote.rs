@@ -313,7 +313,10 @@ fn uf_union(parent: &mut [u8; 6], a: u8, b: u8) {
 ///   * The 3 head columns don't pick 3 distinct equivalence
 ///     classes.
 ///   * Any atom doesn't bind exactly 2 of the 3 head variables.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "triangle inference validates three relation slots and four lowered key vectors without manufacturing an aggregate input type"
+)]
 fn infer_triangle_semantics(
     inner_left_rel: RelId,
     inner_right_rel: RelId,
@@ -1125,7 +1128,10 @@ fn uf_union_8(parent: &mut [u8; 8], a: u8, b: u8) {
 /// from the variable-equivalence graph. Returns
 /// `(rel_wx, rel_xy, rel_yz, rel_zw)` regardless of the
 /// body's positional layout.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "four-cycle inference validates four relation slots and six lowered key vectors as one fixed physical shape"
+)]
 fn infer_4cycle_semantics(
     rel_ll: RelId,
     rel_lr: RelId,
@@ -1436,8 +1442,9 @@ fn uf_union_clique(parent: &mut [usize], a: usize, b: usize) {
 ///
 /// `project_columns` is the outermost Project's column list,
 /// each entry's index translated to a global slot position.
-#[allow(clippy::type_complexity)]
-fn flatten_clique_body(body: &RirNode) -> Option<(Vec<RelId>, Vec<(usize, usize)>, Vec<usize>)> {
+type FlattenedCliqueBody = (Vec<RelId>, Vec<(usize, usize)>, Vec<usize>);
+
+fn flatten_clique_body(body: &RirNode) -> Option<FlattenedCliqueBody> {
     let RirNode::Project { input, columns } = body else {
         return None;
     };
@@ -2123,7 +2130,6 @@ mod tests {
                 slot_vars,
                 output_columns,
                 fallback,
-                var_order: _,
                 ..
             } => {
                 assert_eq!(inputs.len(), 3);
@@ -2182,14 +2188,14 @@ mod tests {
             &StatsManager::new(),
             &CompilerConfig::default(),
         );
-        let first = format!("{:?}", &plan.rules_by_scc[0][0].body);
+        let first = format!("{:?}", plan.rules_by_scc[0][0].body);
         promote_multiway(
             &mut plan,
             &HashMap::new(),
             &StatsManager::new(),
             &CompilerConfig::default(),
         );
-        let second = format!("{:?}", &plan.rules_by_scc[0][0].body);
+        let second = format!("{:?}", plan.rules_by_scc[0][0].body);
         assert_eq!(first, second);
     }
 
@@ -2504,7 +2510,7 @@ mod tests {
             &CompilerConfig::default(),
         );
         assert_eq!(
-            format!("{:?}", &plan.rules_by_scc[0][0].meta),
+            format!("{:?}", plan.rules_by_scc[0][0].meta),
             format!("{:?}", meta_pre),
         );
     }
@@ -2751,7 +2757,6 @@ mod tests {
                 slot_vars,
                 output_columns,
                 fallback,
-                var_order: _,
                 ..
             } => {
                 assert_eq!(inputs.len(), 4);
@@ -2809,14 +2814,14 @@ mod tests {
             &StatsManager::new(),
             &CompilerConfig::default(),
         );
-        let first = format!("{:?}", &plan.rules_by_scc[0][0].body);
+        let first = format!("{:?}", plan.rules_by_scc[0][0].body);
         promote_multiway(
             &mut plan,
             &HashMap::new(),
             &StatsManager::new(),
             &CompilerConfig::default(),
         );
-        let second = format!("{:?}", &plan.rules_by_scc[0][0].body);
+        let second = format!("{:?}", plan.rules_by_scc[0][0].body);
         assert_eq!(first, second);
     }
 

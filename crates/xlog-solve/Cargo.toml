@@ -27,3 +27,6 @@ xlog-ir = { path = "../xlog-ir" }
 [[bench]]
 name = "solver_bench"
 harness = false
+
+[lints]
+workspace = true

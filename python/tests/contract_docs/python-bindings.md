@@ -251,6 +251,12 @@ pyxlog mutation loops. `session.join_index_cache_stats()` returns the retained
 executor's `lookups`, `hits`, `misses`, `builds`, invalidation counters,
 background-build counters, `entries`, and `total_bytes`.
 
+`session.wcoj_dispatch_stats()` separates successful specialized dispatches
+from actual fallbacks. Its `wcoj_fallback` object reports `total` and the
+`chain`, `dedicated_multiway`, `free_join`, `planned_hash`, `factorized_delta`,
+and `groupby_fusion` routes. `wcoj_error_decline_count` counts only pipeline
+errors that declined to a fallback.
+
 #### Relation Change Callbacks
 
 Persistent sessions expose opt-in metadata callbacks for relation delta
@@ -615,8 +621,11 @@ program.neural_hot_loop_diagnostics()["nn4_lineage"]
 ```
 
 The lineage payload contains `checkpoint_hash`, `split_hashes`,
-`calibration_metrics`, `cuda_device`, `influence_audit`, and
-`changed_acceptance` evidence recorded through `record_nn4_influence(...)`.
+`calibration_metrics`, and `cuda_device`. Its `influence_audit` object keeps
+registration metadata under `registration` and copied event snapshots under
+`records`; each event includes the `changed_acceptance` evidence recorded through
+`record_nn4_influence(...)`. Reading named lineage or recording an event for an
+unregistered network is an error.
 
 #### Epistemic evidence -> exact probability
 

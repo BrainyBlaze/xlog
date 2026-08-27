@@ -1,5 +1,4 @@
 // crates/xlog-integration/tests/test_nested_loop_dispatch.rs
-#![allow(clippy::doc_lazy_continuation)]
 
 //! Nested-loop dispatch and parity coverage.
 //!
@@ -15,10 +14,7 @@ use std::sync::Arc;
 use cudarc::driver::sys;
 use xlog_core::RelId;
 use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamPool, XlogDeviceRuntime};
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
 use xlog_ir::{JoinType as IrJoinType, RirNode};
@@ -37,46 +33,31 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct RuntimeBackedFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
+    _pool: Arc<StreamPool>,
 }
 
 fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(64 * 1024 * 1024))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeBackedFixture {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
-        pool,
+        _pool: pool,
     })
 }
 
@@ -223,9 +204,11 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
 /// Datalog program with a single inner binary join. The lowerer
 /// produces a `Join` RIR node followed by a `Project` for the
 /// head's (K, A, B) shape. The join node has:
-///   * `JoinType::Inner`.
-///   * 1 key column (k) on each side.
-///   * U32 key type on each side.
+///
+/// - `JoinType::Inner`.
+/// - 1 key column (k) on each side.
+/// - U32 key type on each side.
+///
 /// Combined with row counts in the eligibility envelope (100×100
 /// = 10_000 ≤ NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000), this
 /// routes through the nested-loop provider entry point.

@@ -881,7 +881,7 @@ execution.
 - [x] A3 / A4 stress reproducer suite (cross-stream lifetime
       stress under parallel forks, fixed and random schedules).
       (Commit `27ec3bd9` —
-      `crates/xlog-integration/tests/test_a3_a4_stress.rs`.)
+`crates/xlog-integration/tests/test_cross_stream_lifetime_stress.rs`.)
       Two workloads (`friends` sort+hash-join sensitive,
       `reach` recursive fixed-point + joins). Stable FNV-1a
       checksum over sorted rows; per-`GraphParams` reference
@@ -943,7 +943,7 @@ blockers later.
   out of scope for v0.6.0.
 
 - **A3 in-process thread-of-N drift on the
-  `test_a3_a4_stress` harness**: 8 threads × 32 iters each
+`test_cross_stream_lifetime_stress` harness**: 8 threads × 32 iters each
   produce ~3% checksum drift across two recursive Datalog
   workloads (friends self-join, reach transitive closure).
   The 5-mode diagnostic matrix (commit `27ec3bd9` plus the
@@ -1746,8 +1746,10 @@ documentation.
 
 ### Validation
 
-- [x] Add `python/tests/test_v088_lwm_source.py` for pyxlog stubs, docs, and
-      Rust/Python source-surface coverage.
+- [x] Verify pyxlog diagnostics through compiled runtime behavior in
+      `python/tests/test_pyxlog_provenance_packer_parity.py`,
+      `python/tests/test_logic_relation_provenance.py`, and
+      `python/tests/test_python_runtime_api.py`.
 - [x] Add `the external world-model provenance architecture record` as the issue-by-
       issue v0.8.8 architecture note.
 

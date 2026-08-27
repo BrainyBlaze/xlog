@@ -183,8 +183,8 @@ def _source(world, co_occurs_tuples, extra_relation=None):
         f"nn({NETWORK}, [Event], Label, [{NEGATIVE_LABEL}, {POSITIVE_LABEL}]) :: "
         f"{NEURAL_PREDICATE}(Event, Label)."
     ]
-    src += [f"pred {r}(i64, i64)." for r in vocab]
-    src.append("pred plastic(i64).")
+    src += [f"pred {r}(u64, u64)." for r in vocab]
+    src.append("pred plastic(u64).")
     for r in vocab:
         src.append(
             f"trainable_rule(cand_{r}, weight=0.0) :: plastic(E) :- "

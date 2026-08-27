@@ -60,7 +60,7 @@ impl super::CudaKernelProvider {
         // when the env var is set AND the manager is runtime-backed
         // AND a launch stream can be acquired from the pool.
         // Default behavior is unchanged (legacy fused / mask+compact).
-        if Self::use_recorded_filters_env() {
+        if Self::use_recorded_filters_env()? {
             if let Some(launch_stream) = self.recorded_op_stream_or_init() {
                 return self.filter_recorded::<T>(input, col, value, op, launch_stream);
             }

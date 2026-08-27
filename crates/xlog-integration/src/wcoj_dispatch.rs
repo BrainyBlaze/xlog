@@ -54,7 +54,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use xlog_core::{Result, ScalarType};
+use xlog_core::{resolve_bool, Result, ScalarType};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::CudaKernelProvider;
@@ -79,9 +79,7 @@ pub fn try_wcoj_triangle_u32_dispatch(
     provider: &CudaKernelProvider,
     launch_stream: StreamId,
 ) -> Result<Option<CudaBuffer>> {
-    let gate = std::env::var(ENV_USE_WCOJ_TRIANGLE_U32)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let gate = resolve_bool(None, ENV_USE_WCOJ_TRIANGLE_U32, false)?;
     try_wcoj_triangle_u32_dispatch_with_gate(gate, rule, inputs, provider, launch_stream)
 }
 

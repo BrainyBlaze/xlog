@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cudarc::driver::{sys::CUevent_flags, CudaEvent};
-use xlog_core::{symbol, RelId, Result, ScalarType, Schema, XlogError};
+use xlog_core::{resolve_bool, symbol, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::cuda_graph::{
     CapturedCudaGraph, ConditionalCudaGraphSequenceBuilder, CudaConditionalGraphUnavailable,
     CudaGraphNodeKind,
@@ -274,16 +274,16 @@ struct ResidentRunOwners {
     // program/domain and every externally owned device allocation.
     graph: CapturedCudaGraph,
     execution_domain: ResidentExecutionDomain,
-    schedule_program: ResidentScheduleDeviceProgram,
+    _schedule_program: ResidentScheduleDeviceProgram,
     recorder: LaunchRecorder,
     relations: Vec<Option<ResidentRelation>>,
     output_indices: Vec<(String, usize)>,
-    filter_scratch: Option<ResidentFilterScratch>,
-    set_workspace: ResidentSetWorkspace,
-    join_workspace: ResidentJoinWorkspace,
-    control: ResidentConvergenceControl,
-    device_trace: ResidentDeviceTrace,
-    schema_winners: ResidentSchemaWinners,
+    _filter_scratch: Option<ResidentFilterScratch>,
+    _set_workspace: ResidentSetWorkspace,
+    _join_workspace: ResidentJoinWorkspace,
+    _control: ResidentConvergenceControl,
+    _device_trace: ResidentDeviceTrace,
+    _schema_winners: ResidentSchemaWinners,
     receipt: ResidentPackedReceipt,
     pinned_receipt: ResidentPinnedReceipt,
     source_epoch: u64,
@@ -322,6 +322,7 @@ enum ResidentRecordedOp {
         filter_delta: u32,
         semantic_guard: Option<ResidentBufferRef>,
     },
+    #[cfg(test)]
     Clear {
         output: usize,
     },
@@ -370,6 +371,7 @@ enum ResidentRecordedOp {
     },
 }
 
+#[cfg(test)]
 fn resident_record_unit_leaf(
     output: usize,
     op_id: u32,
@@ -607,7 +609,10 @@ struct ResidentCompactDescriptorTables {
     project_ranges: Vec<(u32, u32)>,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "schedule sizing accounts for each independently bounded descriptor table before any device allocation"
+)]
 fn resident_compact_schedule_metadata_bytes(
     slot_count: usize,
     op_count: usize,
@@ -817,7 +822,6 @@ fn resident_compact_slot_ref(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resident_lower_compact_regions<'a>(
     logical_regions: Vec<ResidentCompactLogicalRegion>,
     physical_slots: &[ResidentPhysicalSlotPlan],
@@ -1165,6 +1169,7 @@ fn resident_lower_compact_regions<'a>(
                         ));
                     }
                 }
+                #[cfg(test)]
                 ResidentRecordedOp::Clear { .. } => {
                     return Err(XlogError::Execution(
                         "resident compact SSA still contains a Clear operation".into(),
@@ -1214,6 +1219,7 @@ fn resident_lower_compact_regions<'a>(
     })
 }
 
+#[cfg(test)]
 impl ResidentCompactLogicalRegion {
     fn initializes(&self) -> bool {
         self.flags & RESIDENT_SCHEDULE_REGION_INITIALIZE != 0
@@ -1318,6 +1324,7 @@ fn resident_compact_regions(
     Ok(regions)
 }
 
+#[cfg(test)]
 fn coalesce_resident_capture_phases(
     phases: Vec<ResidentCapturePhase>,
 ) -> Vec<ResidentCapturePhase> {
@@ -1898,11 +1905,7 @@ struct ResidentScratchSlotState {
 }
 
 fn resident_schema_layout(schema: &Schema) -> Vec<ScalarType> {
-    schema
-        .columns
-        .iter()
-        .map(|(_, scalar)| scalar.clone())
-        .collect()
+    schema.columns.iter().map(|(_, scalar)| *scalar).collect()
 }
 
 fn resident_private_inputs(op: &ResidentRecordedOp, mut visit: impl FnMut(usize)) {
@@ -1931,21 +1934,23 @@ fn resident_private_inputs(op: &ResidentRecordedOp, mut visit: impl FnMut(usize)
         }
         ResidentRecordedOp::SchemaWinnerMark { contribution, .. } => visit_ref(contribution),
         ResidentRecordedOp::Unit { .. }
-        | ResidentRecordedOp::Clear { .. }
         | ResidentRecordedOp::ChangedReset
         | ResidentRecordedOp::TestStatus(_) => {}
+        #[cfg(test)]
+        ResidentRecordedOp::Clear { .. } => {}
     }
 }
 
 fn resident_private_output(op: &ResidentRecordedOp) -> Option<usize> {
     match op {
         ResidentRecordedOp::Unit { output, .. }
-        | ResidentRecordedOp::Clear { output }
         | ResidentRecordedOp::Filter { output, .. }
         | ResidentRecordedOp::Project { output, .. }
         | ResidentRecordedOp::Union { output, .. }
         | ResidentRecordedOp::Diff { output, .. }
         | ResidentRecordedOp::Join { output, .. } => Some(*output),
+        #[cfg(test)]
+        ResidentRecordedOp::Clear { output } => Some(*output),
         ResidentRecordedOp::Scan { .. }
         | ResidentRecordedOp::TraceDelta { .. }
         | ResidentRecordedOp::ChangedReset
@@ -2381,7 +2386,7 @@ impl<'executor> PreparedResidentGraph<'executor> {
         self.prepare_diagnostic.take()
     }
 
-    #[cfg(feature = "resident-graph-tests")]
+    #[cfg(all(feature = "resident-graph-tests", test))]
     pub(crate) fn invalidate_expected_source_epoch(&mut self) {
         self.owners.source_epoch = self.owners.source_epoch.wrapping_add(1);
     }
@@ -2487,8 +2492,8 @@ impl<'executor> ResidentGraphSynchronized<'executor> {
     pub fn observe_final_receipt(
         mut self,
     ) -> std::result::Result<ObservedResidentGraphReceipt, ResidentGraphExecutionError> {
-        let phase_diagnostics =
-            std::env::var("XLOG_RESIDENT_LATENCY_DIAGNOSTICS").as_deref() == Ok("1");
+        let phase_diagnostics = resolve_bool(None, "XLOG_RESIDENT_LATENCY_DIAGNOSTICS", false)
+            .map_err(runtime_error)?;
         let receipt_d2h_started = phase_diagnostics.then(Instant::now);
         let encoded_len = self.owners.receipt.len_bytes();
         let bytes = self
@@ -3156,7 +3161,7 @@ impl ResidentBuild<'_> {
             .executor
             .provider
             .prepare_resident_set_workspace_in_reservation(set_candidate_capacity, reservation)?;
-        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+        if let Some(diagnostics) = diagnostics.as_mut() {
             let set_ns = resident_prepare_elapsed_ns(
                 set_started.expect("diagnostic timer exists when enabled"),
             );
@@ -3192,7 +3197,7 @@ impl ResidentBuild<'_> {
             .executor
             .provider
             .prepare_resident_convergence_control_in_reservation(reservation)?;
-        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+        if let Some(diagnostics) = diagnostics {
             let control_ns = resident_prepare_elapsed_ns(
                 control_started.expect("diagnostic timer exists when enabled"),
             );
@@ -5057,16 +5062,16 @@ impl Executor {
             stream,
             graph,
             execution_domain,
-            schedule_program,
+            _schedule_program: schedule_program,
             recorder,
             relations: physical.relations,
             output_indices,
-            filter_scratch: physical.filter_scratch,
-            set_workspace: physical.set_workspace,
-            join_workspace: physical.join_workspace,
-            control: physical.control,
-            device_trace,
-            schema_winners,
+            _filter_scratch: physical.filter_scratch,
+            _set_workspace: physical.set_workspace,
+            _join_workspace: physical.join_workspace,
+            _control: physical.control,
+            _device_trace: device_trace,
+            _schema_winners: schema_winners,
             receipt,
             pinned_receipt,
             source_epoch,
@@ -7031,8 +7036,8 @@ mod tests {
 
     #[test]
     fn source_slots_are_deduplicated_sorted_and_distinct_from_private_targets() {
-        let slots = resident_source_slot_map(3, ["zeta", "head", "zeta", "head"].into_iter())
-            .expect("source slots");
+        let slots =
+            resident_source_slot_map(3, ["zeta", "head", "zeta", "head"]).expect("source slots");
 
         assert_eq!(slots.get("head"), Some(&3));
         assert_eq!(slots.get("zeta"), Some(&4));
@@ -7246,7 +7251,7 @@ mod tests {
             regions,
             &slots,
             &assignments,
-            ["source"].into_iter(),
+            ["source"],
             Default::default(),
         )
         .expect("compact descriptors");

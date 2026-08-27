@@ -624,15 +624,15 @@ fn test_shared_mem_size_limits(ctx: &TestContext) -> TestResult {
         // Original: key[i] = size-1-i, val[i] = i
         // Sorted: sorted_keys[j] = j, so original index was size-1-j
         // Therefore sorted_vals[j] = size-1-j
-        for i in 0..size {
+        for (i, &actual) in sorted_vals.iter().take(size).enumerate() {
             let expected_val = (size - 1 - i) as u32;
-            if sorted_vals[i] != expected_val {
+            if actual != expected_val {
                 return TestResult::error(
                     "test_shared_mem_size_limits",
                     start.elapsed(),
                     format!(
                         "Size {}: sorted_vals[{}] = {}, expected {}",
-                        size, i, sorted_vals[i], expected_val
+                        size, i, actual, expected_val
                     ),
                 );
             }

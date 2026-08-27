@@ -4,45 +4,22 @@
 //! A corpus-scale program can carry thousands of rules for one head; folding
 //! them into the head relation one union at a time re-sorts the growing
 //! accumulator per rule and goes quadratic. These tests pin the batched
-//! behavior at the `--stats` op level while asserting the derived rows stay
-//! byte-identical.
+//! behavior in the existing GPU executor's operation profile while asserting
+//! the derived rows stay byte-identical. The resident conditional graph has a
+//! separate physical-operation profile and is covered by its own tests.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use xlog_core::MemoryBudget;
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
-};
-use xlog_cuda::memory::GpuMemoryManager;
-use xlog_cuda::{CudaDevice, CudaKernelProvider};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
 use xlog_gpu::logic::LogicProgram;
 
 fn provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let stream_pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let budget = MemoryBudget::with_limit(2 * 1024 * 1024 * 1024);
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&stream_pool)),
-    );
-    let budgeted: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(GlobalDeviceBudget::new(
-        async_resource,
-        budget.device_bytes as usize,
-    ));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        stream_pool,
-        budgeted,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        budget,
-        runtime,
-    ));
-    Some(Arc::new(
-        CudaKernelProvider::with_runtime(device, memory).ok()?,
-    ))
+    CudaProviderBuilder::new(0, MemoryBudget::with_limit(2 * 1024 * 1024 * 1024))
+        .build()
+        .ok()
+        .map(Arc::new)
 }
 
 /// Both tests build a full device runtime; running them concurrently in one
@@ -52,6 +29,45 @@ fn test_lock() -> MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+}
+
+struct ExistingGpuRouteGuard {
+    disable_resident: Option<std::ffi::OsString>,
+    require_resident: Option<std::ffi::OsString>,
+}
+
+impl ExistingGpuRouteGuard {
+    fn activate() -> Self {
+        let guard = Self {
+            disable_resident: std::env::var_os("XLOG_DISABLE_RESIDENT_RECURSION"),
+            require_resident: std::env::var_os("XLOG_REQUIRE_RESIDENT_RECURSION"),
+        };
+        // SAFETY: every test in this process acquires `test_lock` before
+        // activating the guard, and the guard restores both variables before
+        // releasing that lock.
+        unsafe {
+            std::env::remove_var("XLOG_REQUIRE_RESIDENT_RECURSION");
+            std::env::set_var("XLOG_DISABLE_RESIDENT_RECURSION", "1");
+        }
+        guard
+    }
+}
+
+impl Drop for ExistingGpuRouteGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard is dropped while its caller still holds
+        // `test_lock`, so no test thread can observe a partial restoration.
+        unsafe {
+            match self.disable_resident.take() {
+                Some(value) => std::env::set_var("XLOG_DISABLE_RESIDENT_RECURSION", value),
+                None => std::env::remove_var("XLOG_DISABLE_RESIDENT_RECURSION"),
+            }
+            match self.require_resident.take() {
+                Some(value) => std::env::set_var("XLOG_REQUIRE_RESIDENT_RECURSION", value),
+                None => std::env::remove_var("XLOG_REQUIRE_RESIDENT_RECURSION"),
+            }
+        }
+    }
 }
 
 /// Total (calls, duration_us) per op name across all strata.
@@ -68,8 +84,9 @@ fn op_totals(stats: &xlog_runtime::ExecutionStats) -> HashMap<String, (usize, u6
 }
 
 #[test]
-fn non_recursive_many_rule_head_unions_once() {
+fn existing_gpu_route_batches_non_recursive_same_head_rules_once() {
     let _lock = test_lock();
+    let _route = ExistingGpuRouteGuard::activate();
     let Some(provider) = provider() else {
         eprintln!("CUDA unavailable; skipping");
         return;
@@ -124,8 +141,9 @@ out(X) :- in7(X).
 }
 
 #[test]
-fn recursive_many_rule_head_unions_once_per_pass() {
+fn existing_gpu_route_batches_recursive_same_head_rules_once_per_pass() {
     let _lock = test_lock();
+    let _route = ExistingGpuRouteGuard::activate();
     let Some(provider) = provider() else {
         eprintln!("CUDA unavailable; skipping");
         return;
@@ -236,6 +254,7 @@ path(X, Z) :- path(X, Y), e2(Y, Z).
 #[test]
 fn direct_fact_on_recursive_head_seeds_fixpoint_without_fact_rule() {
     let _lock = test_lock();
+    let _route = ExistingGpuRouteGuard::activate();
     let Some(provider) = provider() else {
         eprintln!("CUDA unavailable; skipping");
         return;

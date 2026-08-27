@@ -3,8 +3,8 @@
 // Demonstrates how NaN (Not a Number) values behave in filter predicates.
 //
 // Key semantics:
-// - Equality (=, !=): IEEE 754 - NaN is not equal to anything, including itself
-// - Ordering (<, <=, >, >=): Total ordering - NaN is greater than all other values
+// - Every comparison uses one total order
+// - Arithmetic-generated NaN is canonical and compares equal to itself
 //
 // Real-world use case: Sensor data with missing/failed readings (NaN from 0/0)
 
@@ -25,17 +25,22 @@ raw_input(6, 35.7, 1.0).    // Normal: 35.7
 // Compute readings (division produces NaN when 0/0)
 sensor_reading(Id, Val) :- raw_input(Id, Num, Denom), Val is Num / Denom.
 
-// Filter out NaN using IEEE equality: NaN != NaN, so V = V is false for NaN
-valid_reading(Id, Val) :- sensor_reading(Id, Val), Val = Val.
+// Validate the producing operation instead of relying on NaN self-inequality.
+valid_reading(Id, Val) :-
+    raw_input(Id, Num, Denom),
+    Denom != 0.0,
+    Val is Num / Denom.
 
-// High temperature: > 25.0
-// IMPORTANT: Under total ordering, NaN > 25.0 is TRUE!
-high_temp(Id, Val) :- sensor_reading(Id, Val), Val > 25.0.
+// High temperature among validated readings.
+high_temp(Id, Val) :- valid_reading(Id, Val), Val > 25.0.
 
-// Detect anomalies: values > 1000 catches NaN (since NaN > everything)
-anomaly(Id, Val) :- sensor_reading(Id, Val), Val > 1000.0.
+// Preserve the fault provenance when classifying invalid readings.
+anomaly(Id, Val) :-
+    raw_input(Id, _, Denom),
+    Denom = 0.0,
+    sensor_reading(Id, Val).
 
 ?- sensor_reading(Id, Val).   // All readings including NaN
 ?- valid_reading(Id, Val).    // Only non-NaN readings
-?- high_temp(Id, Val).        // High temps INCLUDING NaN!
-?- anomaly(Id, Val).          // Just the NaN values
+?- high_temp(Id, Val).        // High temperatures from valid inputs
+?- anomaly(Id, Val).          // Values produced by a zero divisor

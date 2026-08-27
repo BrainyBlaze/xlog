@@ -3268,7 +3268,10 @@ impl EpistemicGpuRuntimeWcojCertification {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "variants borrow the exact typed GPU column owners required by each arity; boxing would add allocation and indirection to every launch"
+)]
 enum TupleSourceLaunch<'a> {
     ArityZero {
         literal_index: u32,
@@ -5200,8 +5203,8 @@ impl Executor {
                     (&constraint_literal_counts).as_kernel_param(),
                     (&constraint_literal_indices).as_kernel_param(),
                     (&workspace.candidate_assumptions).as_kernel_param(),
-                    (&mut workspace.rejection_reasons).as_kernel_param(),
-                    (&mut workspace.constraint_violation_index).as_kernel_param(),
+                    (&workspace.rejection_reasons).as_kernel_param(),
+                    (&workspace.constraint_violation_index).as_kernel_param(),
                 ];
                 func.clone().launch(config, &mut params)
             },
@@ -5363,7 +5366,10 @@ impl Executor {
     }
 
     /// Materialize final query tuples into a device-resident output buffer.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "final tuple materialization passes independently typed source, schema, acceptance, and output contracts to one GPU operation"
+    )]
     pub fn materialize_epistemic_gpu_final_tuples(
         &self,
         workspace: &mut EpistemicGpuWorkspace,
@@ -5398,7 +5404,10 @@ impl Executor {
     /// (`gpu_plan`) is still validated and the joint workspace dimensions are
     /// preserved, so each head is materialized against the SAME accepted world
     /// view. `None` materializes against every binding (the single-head path).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "scoped tuple materialization preserves the public operation's independent GPU inputs plus its accepted-world selector"
+    )]
     fn materialize_epistemic_gpu_final_tuples_scoped(
         &self,
         workspace: &mut EpistemicGpuWorkspace,

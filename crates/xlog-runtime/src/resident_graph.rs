@@ -5,10 +5,10 @@
 //! enqueues CUDA work.  Unsupported shapes remain on the existing executor.
 
 use std::collections::{BTreeSet, HashMap};
-use std::fmt;
+use std::fmt::{self, Write};
 use std::sync::Arc;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "resident-graph-tests"))]
 use std::cell::Cell;
 
 use xlog_core::{RelId, Result, ScalarType, Schema};
@@ -64,11 +64,24 @@ impl ResidentGraphSchemaCatalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResidentGraphDeclineReason {
     /// A scan relation has no compiler schema identity.
-    MissingScanSchema { relation: RelId },
+    MissingScanSchema {
+        /// Relation whose scan lacks a compiler schema identity.
+        relation: RelId,
+    },
     /// A physical node has no resident implementation.
-    UnsupportedNode { path: String, node: &'static str },
+    UnsupportedNode {
+        /// Stable path to the unsupported node within the physical plan.
+        path: String,
+        /// Physical node kind that has no resident implementation.
+        node: &'static str,
+    },
     /// The resident route supports only inner and semi joins.
-    UnsupportedJoin { path: String, join_type: JoinType },
+    UnsupportedJoin {
+        /// Stable path to the unsupported join within the physical plan.
+        path: String,
+        /// Join semantics that the resident route cannot execute.
+        join_type: JoinType,
+    },
     /// The caller requested a complete relation store, which cannot be staged
     /// as a query-only transaction.
     FullStoreRequested,
@@ -76,13 +89,25 @@ pub enum ResidentGraphDeclineReason {
     NonOrdinaryPlan,
     /// A caller input is imported or belongs to a different memory manager, so
     /// its lifetime cannot be bound to this resident transaction.
-    ImportedInputUnsupported { relation: String },
+    ImportedInputUnsupported {
+        /// Imported relation whose ownership cannot join the transaction.
+        relation: String,
+    },
     /// A scanned source lacks a current provider-produced full-row set proof.
-    SourceSetUncertified { relation: String },
+    SourceSetUncertified {
+        /// Source relation without a current full-row set certificate.
+        relation: String,
+    },
     /// The CUDA driver cannot construct a conditional WHILE graph.
-    ConditionalGraphUnavailable { detail: String },
+    ConditionalGraphUnavailable {
+        /// Driver capability failure reported during conditional-graph setup.
+        detail: String,
+    },
     /// Setup cannot reserve a bounded workspace without exceeding the budget.
-    WorkspaceUnbounded { detail: String },
+    WorkspaceUnbounded {
+        /// Workspace bound or reservation failure reported during preflight.
+        detail: String,
+    },
 }
 
 /// Complete prelaunch proof of the physical routes selected for a plan.
@@ -105,6 +130,194 @@ pub struct ResidentGraphCertifiedPlan {
     certificate: ResidentGraphRouteCertificate,
 }
 
+fn append_resident_expression_descriptor(descriptor: &mut String, expression: &Expr) {
+    fn schedule_binary<'a>(pending: &mut Vec<&'a Expr>, left: &'a Expr, right: &'a Expr) {
+        pending.push(right);
+        pending.push(left);
+    }
+
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            Expr::Column(index) => write!(descriptor, "column:{index};").unwrap(),
+            Expr::Const(value) => {
+                descriptor.push_str("constant:");
+                match value {
+                    ConstValue::U32(value) => write!(descriptor, "u32:{value};").unwrap(),
+                    ConstValue::U64(value) => write!(descriptor, "u64:{value};").unwrap(),
+                    ConstValue::I32(value) => write!(descriptor, "i32:{value};").unwrap(),
+                    ConstValue::I64(value) => write!(descriptor, "i64:{value};").unwrap(),
+                    ConstValue::F32(value) => {
+                        write!(descriptor, "f32:{:08x};", value.to_bits()).unwrap()
+                    }
+                    ConstValue::F64(value) => {
+                        write!(descriptor, "f64:{:016x};", value.to_bits()).unwrap()
+                    }
+                    ConstValue::Bool(value) => write!(descriptor, "bool:{value};").unwrap(),
+                    ConstValue::Symbol(value) => {
+                        write!(descriptor, "symbol:{}:", value.len()).unwrap();
+                        descriptor.push_str(value);
+                        descriptor.push(';');
+                    }
+                }
+            }
+            Expr::Compare { left, op, right } => {
+                write!(descriptor, "compare:{op:?};").unwrap();
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::And(items) => {
+                write!(descriptor, "and:{};", items.len()).unwrap();
+                pending.extend(items.iter().rev());
+            }
+            Expr::Or(items) => {
+                write!(descriptor, "or:{};", items.len()).unwrap();
+                pending.extend(items.iter().rev());
+            }
+            Expr::Not(inner) => {
+                descriptor.push_str("not;");
+                pending.push(inner);
+            }
+            Expr::Add(left, right) => {
+                descriptor.push_str("add;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Sub(left, right) => {
+                descriptor.push_str("subtract;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Mul(left, right) => {
+                descriptor.push_str("multiply;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Div(left, right) => {
+                descriptor.push_str("divide;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Mod(left, right) => {
+                descriptor.push_str("modulo;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Abs(inner) => {
+                descriptor.push_str("absolute_value;");
+                pending.push(inner);
+            }
+            Expr::Min(left, right) => {
+                descriptor.push_str("minimum;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Max(left, right) => {
+                descriptor.push_str("maximum;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Pow(left, right) => {
+                descriptor.push_str("power;");
+                schedule_binary(&mut pending, left, right);
+            }
+            Expr::Cast(inner, target) => {
+                write!(descriptor, "cast:{target:?};").unwrap();
+                pending.push(inner);
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                descriptor.push_str("conditional;");
+                pending.push(else_expr);
+                pending.push(then_expr);
+                pending.push(condition);
+            }
+        }
+    }
+}
+
+fn resident_project_columns_descriptor(columns: &[ProjectExpr]) -> String {
+    let mut descriptor = format!("column_count={};", columns.len());
+    for column in columns {
+        match column {
+            ProjectExpr::Column(index) => write!(descriptor, "column:{index};").unwrap(),
+            ProjectExpr::Computed(expression, scalar_type) => {
+                write!(descriptor, "computed:{scalar_type:?};").unwrap();
+                append_resident_expression_descriptor(&mut descriptor, expression);
+            }
+        }
+    }
+    descriptor
+}
+
+fn resident_node_descriptor(node: &RirNode) -> String {
+    match node {
+        RirNode::Unit => "unit".to_owned(),
+        RirNode::Scan { rel } => format!("scan;relation={}", rel.0),
+        RirNode::Filter { predicate, .. } => {
+            let mut descriptor = "filter;predicate=".to_owned();
+            append_resident_expression_descriptor(&mut descriptor, predicate);
+            descriptor
+        }
+        RirNode::Project { columns, .. } => {
+            format!("project;{}", resident_project_columns_descriptor(columns))
+        }
+        RirNode::Join {
+            left_keys,
+            right_keys,
+            join_type,
+            ..
+        } => format!(
+            "join;left_keys={left_keys:?};right_keys={right_keys:?};join_type={join_type:?}"
+        ),
+        RirNode::ChainJoin {
+            left_key,
+            right_key,
+            output_columns,
+            ..
+        } => format!(
+            "chain_join;left_key={left_key};right_key={right_key};output_{}",
+            resident_project_columns_descriptor(output_columns)
+        ),
+        RirNode::GroupBy { key_cols, aggs, .. } => {
+            format!("group_by;key_cols={key_cols:?};aggregates={aggs:?}")
+        }
+        RirNode::Union { inputs } => format!("union;input_count={}", inputs.len()),
+        RirNode::Distinct { key_cols, .. } => format!("distinct;key_cols={key_cols:?}"),
+        RirNode::Diff { .. } => "difference".to_owned(),
+        RirNode::Fixpoint {
+            scc_id,
+            delta_rel,
+            full_rel,
+            ..
+        } => format!(
+            "fixpoint;scc_id={scc_id};delta_relation={};full_relation={}",
+            delta_rel.0, full_rel.0
+        ),
+        RirNode::MultiWayJoin {
+            inputs,
+            slot_vars,
+            output_columns,
+            plan,
+            var_order,
+            ..
+        } => format!(
+            "multi_way_join;input_count={};slot_variables={slot_vars:?};output_{};plan={plan:?};variable_order={var_order:?}",
+            inputs.len(),
+            resident_project_columns_descriptor(output_columns)
+        ),
+        RirNode::TensorMaskedJoin {
+            mask_name,
+            schema_size,
+            left_keys,
+            right_keys,
+            rel_index,
+            head_rel_name,
+            head_rel_id,
+            max_active_rules,
+            head_projection,
+        } => format!(
+            "tensor_masked_join;mask={mask_name:?};schema_size={schema_size};left_keys={left_keys:?};right_keys={right_keys:?};relation_index={rel_index:?};head_relation_name={head_rel_name:?};head_relation_id={};max_active_rules={max_active_rules};head_projection={head_projection:?}",
+            head_rel_id.0
+        ),
+    }
+}
+
 impl ResidentGraphCertifiedPlan {
     /// Inspect and seal one immutable plan allocation.
     pub fn inspect(plan: Arc<ExecutionPlan>, catalog: &ResidentGraphSchemaCatalog) -> Result<Self> {
@@ -123,17 +336,17 @@ impl ResidentGraphCertifiedPlan {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "resident-graph-tests"))]
 thread_local! {
     static RESIDENT_ROUTE_INSPECTION_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "resident-graph-tests"))]
 pub(crate) fn reset_resident_route_inspection_count() {
     RESIDENT_ROUTE_INSPECTION_COUNT.with(|count| count.set(0));
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "resident-graph-tests"))]
 pub(crate) fn resident_route_inspection_count() -> usize {
     RESIDENT_ROUTE_INSPECTION_COUNT.with(Cell::get)
 }
@@ -141,7 +354,7 @@ pub(crate) fn resident_route_inspection_count() -> usize {
 impl ResidentGraphRouteCertificate {
     /// Inspects every explicit and implicit route in deterministic plan order.
     pub fn inspect(plan: &ExecutionPlan, catalog: &ResidentGraphSchemaCatalog) -> Result<Self> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "resident-graph-tests"))]
         RESIDENT_ROUTE_INSPECTION_COUNT.with(|count| count.set(count.get() + 1));
         let mut certificate = Self {
             covered_route_descriptors: BTreeSet::new(),
@@ -201,8 +414,8 @@ impl ResidentGraphRouteCertificate {
             ));
             for (rule_index, rule) in rules.iter().enumerate() {
                 certificate.covered_route_descriptors.insert(format!(
-                    "plan;rules_by_scc={scc_index};rule={rule_index};head={:?};meta={:#?};body={:#?}",
-                    rule.head, rule.meta, rule.body
+                    "plan;rules_by_scc={scc_index};rule={rule_index};head={:?};meta={:?}",
+                    rule.head, rule.meta
                 ));
             }
         }
@@ -331,8 +544,9 @@ impl ResidentGraphRouteCertificate {
             },
             _ => String::new(),
         };
+        let node_descriptor = resident_node_descriptor(node);
         self.covered_route_descriptors.insert(format!(
-            "scc={scc_index};rule={rule_index};recursive={recursive};path={path};node={node:#?};scan_schema={scan_schema}"
+            "scc={scc_index};rule={rule_index};recursive={recursive};path={path};node={node_descriptor};scan_schema={scan_schema}"
         ));
         match node {
             RirNode::Unit | RirNode::Scan { .. } => {}
@@ -547,8 +761,8 @@ impl ResidentGraphRouteCertificate {
                     right,
                     left_keys,
                     right_keys,
-                    join_type,
-                } if matches!(join_type, JoinType::Inner | JoinType::Semi) => {
+                    join_type: JoinType::Inner | JoinType::Semi,
+                } => {
                     let compatible = (|| {
                         let left_schema = node_schema(catalog, left)?;
                         let right_schema = node_schema(catalog, right)?;
@@ -736,20 +950,35 @@ fn stable_descriptor_fingerprint<'a>(descriptors: impl IntoIterator<Item = &'a [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResidentGraphDeviceStatus {
     /// The graph converged and staged output is valid.
-    Success { iterations: u32 },
+    Success {
+        /// Device-observed recursive iterations completed before convergence.
+        iterations: u32,
+    },
     /// The exact configured iteration limit was exhausted.
-    IterationLimit { limit: u32, completed: u32 },
+    IterationLimit {
+        /// Configured maximum recursive iterations.
+        limit: u32,
+        /// Iterations completed when the device stopped the graph.
+        completed: u32,
+    },
     /// An operator's exact output exceeded its reserved row capacity.
     CapacityOverflow {
+        /// Physical operator that exceeded its reserved row count.
         op_id: u32,
+        /// Exact row count required by the operator.
         required: u64,
+        /// Reserved row capacity available to the operator.
         capacity: u64,
     },
     /// A bounded device resource was insufficient.
     ResourceExhausted {
+        /// Physical operator that exhausted the bounded resource.
         op_id: u32,
+        /// Stable name of the exhausted device resource.
         resource: &'static str,
+        /// Exact resource quantity required by the operator.
         required: u64,
+        /// Reserved resource quantity available to the operator.
         capacity: u64,
     },
 }
@@ -760,18 +989,30 @@ pub enum ResidentGraphExecutionError {
     /// A complete prelaunch inspection selected the existing GPU route instead.
     Declined(ResidentGraphDeclineReason),
     /// The exact configured iteration limit was exhausted.
-    IterationLimit { limit: u32, completed: u32 },
+    IterationLimit {
+        /// Configured maximum recursive iterations.
+        limit: u32,
+        /// Iterations completed before the device reported exhaustion.
+        completed: u32,
+    },
     /// An operator's exact output exceeded its reserved row capacity.
     CapacityOverflow {
+        /// Physical operator that exceeded its reserved row count.
         op_id: u32,
+        /// Exact row count required by the operator.
         required: u64,
+        /// Reserved row capacity available to the operator.
         capacity: u64,
     },
     /// A bounded device resource was insufficient.
     ResourceExhausted {
+        /// Physical operator that exhausted the bounded resource.
         op_id: u32,
+        /// Stable name of the exhausted device resource.
         resource: &'static str,
+        /// Exact resource quantity required by the operator.
         required: u64,
+        /// Reserved resource quantity available to the operator.
         capacity: u64,
     },
     /// Setup or execution failed before a valid terminal status existed.
@@ -991,42 +1232,64 @@ pub enum ResidentGraphSelectionKind {
 /// Core-loop host transfer counters.
 #[derive(Debug, Clone, Default)]
 pub struct ResidentGraphCoreTransferStats {
+    /// Host-to-device calls observed by the tracked memory runtime.
     pub tracked_htod_calls: u64,
+    /// Host-to-device bytes observed by the tracked memory runtime.
     pub tracked_htod_bytes: u64,
+    /// Device-to-host calls observed by the tracked memory runtime.
     pub tracked_dtoh_calls: u64,
+    /// Device-to-host bytes observed by the tracked memory runtime.
     pub tracked_dtoh_bytes: u64,
+    /// Device-to-host calls issued through provider metadata operations.
     pub provider_dtoh_calls: u64,
+    /// Metadata device-to-host calls not attributable to the tracked runtime.
     pub untracked_metadata_dtoh_calls: u64,
 }
 
 /// The one bounded observation after the terminal synchronization.
 #[derive(Debug, Clone, Default)]
 pub struct ResidentGraphFinalObservationStats {
+    /// Device-to-host calls used to read the terminal observation.
     pub dtoh_calls: u64,
+    /// Device-to-host bytes used to read the terminal observation.
     pub dtoh_bytes: u64,
+    /// Pinned host receipts used for the terminal observation.
     pub pinned_receipts: u64,
 }
 
 /// CUDA-event timing resolved after the graph completes.
 #[derive(Debug, Clone, Default)]
 pub struct ResidentGraphDeferredProfile {
+    /// Resident scan and filter invocations covered by deferred CUDA timing.
     pub timed_scan_filter_invocations: u64,
+    /// Device elapsed time resolved from CUDA events after completion.
     pub device_elapsed_ns: u64,
+    /// Host synchronization time excluded from device execution timing.
     pub final_sync_misattributed_ns: u64,
 }
 
 /// Truthful telemetry for resident selection, execution, and decline.
 #[derive(Debug, Clone)]
 pub struct ResidentGraphExecutionStats {
+    /// Runtime route selected for the evaluation.
     pub selection: ResidentGraphSelectionKind,
+    /// Preflight decline reason when the existing GPU route was selected.
     pub decline: Option<ResidentGraphDeclineReason>,
+    /// Conditional resident graph launches performed by this evaluation.
     pub conditional_graph_launches: u64,
+    /// Host synchronizations performed to obtain terminal status.
     pub terminal_synchronizations: u64,
+    /// Fixpoint iterations controlled by the host during the core loop.
     pub host_iterations: u64,
+    /// Host allocations performed during the resident core loop.
     pub host_allocations: u64,
+    /// Terminal statuses injected by the host rather than written by a device kernel.
     pub host_status_injections: u64,
+    /// Deterministic device-to-host transfer contract violations.
     pub deterministic_d2h_violations: u64,
+    /// Scan operations dispatched individually by the host.
     pub host_dispatched_scan_ops: u64,
+    /// Filter operations dispatched individually by the host.
     pub host_dispatched_filter_ops: u64,
     /// Physical Scan nodes executed by the resident device graph.
     pub device_scan_invocations: u64,
@@ -1038,9 +1301,13 @@ pub struct ResidentGraphExecutionStats {
     /// Logical Filter count for the selected dependency-closed plan after
     /// excluding recursive variants whose input delta was empty.
     pub semantic_filter_invocations: u64,
+    /// Relation-store mutations staged until terminal success is authoritative.
     pub staged_store_mutations: u64,
+    /// CUDA-event measurements resolved after the graph completes.
     pub deferred_profile: ResidentGraphDeferredProfile,
+    /// Host/device transfers observed inside the resident core loop.
     pub core_transfers: ResidentGraphCoreTransferStats,
+    /// Single bounded terminal observation made after synchronization.
     pub final_observation: ResidentGraphFinalObservationStats,
 }
 
@@ -1086,12 +1353,13 @@ mod tests {
     }
 
     fn rule(head: &str, body: RirNode, columns: &[(&str, ScalarType)]) -> CompiledRule {
-        let mut meta = RirMeta::default();
-        meta.schema = schema(columns);
         CompiledRule {
             head: head.to_owned(),
             body,
-            meta,
+            meta: RirMeta {
+                schema: schema(columns),
+                ..RirMeta::default()
+            },
         }
     }
 
@@ -1202,6 +1470,80 @@ mod tests {
         let certificate = ResidentGraphRouteCertificate::inspect(&plan, &catalog()).unwrap();
         mutate(&mut plan.generated_query_rules[0]);
         assert!(!certificate.matches_plan(&plan).unwrap());
+    }
+
+    #[test]
+    fn resident_node_descriptors_encode_only_local_fields() {
+        let descendant = RirNode::Project {
+            input: Box::new(RirNode::Scan { rel: RelId(9) }),
+            columns: vec![ProjectExpr::Column(0)],
+        };
+        let project = RirNode::Project {
+            input: Box::new(descendant),
+            columns: vec![ProjectExpr::Computed(
+                Expr::Const(ConstValue::U32(7)),
+                ScalarType::U32,
+            )],
+        };
+
+        let descriptor = resident_node_descriptor(&project);
+        assert_eq!(
+            descriptor,
+            "project;column_count=1;computed:U32;constant:u32:7;"
+        );
+        assert!(!descriptor.contains("Scan"));
+        assert!(!descriptor.contains("input"));
+    }
+
+    #[test]
+    fn resident_node_descriptors_distinguish_local_semantics() {
+        let left = resident_node_descriptor(&RirNode::Join {
+            left: Box::new(RirNode::Unit),
+            right: Box::new(RirNode::Unit),
+            left_keys: vec![0],
+            right_keys: vec![1],
+            join_type: JoinType::Inner,
+        });
+        let right = resident_node_descriptor(&RirNode::Join {
+            left: Box::new(RirNode::Unit),
+            right: Box::new(RirNode::Unit),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        });
+        assert_ne!(left, right);
+
+        let negative_zero = resident_node_descriptor(&RirNode::Filter {
+            input: Box::new(RirNode::Unit),
+            predicate: Expr::Const(ConstValue::F64(-0.0)),
+        });
+        let positive_zero = resident_node_descriptor(&RirNode::Filter {
+            input: Box::new(RirNode::Unit),
+            predicate: Expr::Const(ConstValue::F64(0.0)),
+        });
+        assert_ne!(negative_zero, positive_zero);
+    }
+
+    #[test]
+    fn certificate_descriptors_remain_bounded_for_deep_unary_plans() {
+        let mut body = RirNode::Scan { rel: RelId(1) };
+        for _ in 0..128 {
+            body = RirNode::Project {
+                input: Box::new(body),
+                columns: vec![ProjectExpr::Column(0)],
+            };
+        }
+        let mut plan = representative_plan();
+        plan.rules_by_scc[0][0].body = body;
+
+        let certificate = ResidentGraphRouteCertificate::inspect(&plan, &catalog()).unwrap();
+        let largest_descriptor = certificate
+            .covered_route_descriptors
+            .iter()
+            .map(String::len)
+            .max()
+            .unwrap();
+        assert!(largest_descriptor < 8_192, "{largest_descriptor}");
     }
 
     #[test]

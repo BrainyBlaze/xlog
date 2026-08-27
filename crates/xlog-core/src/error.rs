@@ -18,6 +18,17 @@ pub enum XlogError {
     #[error("Domain safety: variable {0} not bound in positive literal")]
     UnsafeVariable(String),
 
+    /// A runtime configuration value was present but malformed.
+    #[error("Invalid configuration {name}={value:?}; expected {expected}")]
+    Configuration {
+        /// Configuration key or environment variable name.
+        name: String,
+        /// Rejected value, or a diagnostic placeholder when it is not Unicode.
+        value: String,
+        /// Human-readable description of the accepted value domain.
+        expected: &'static str,
+    },
+
     /// GPU memory budget exceeded.
     #[error("Resource exhausted: {context}, estimated {estimated_bytes} bytes, budget {budget_bytes} bytes")]
     ResourceExhausted {

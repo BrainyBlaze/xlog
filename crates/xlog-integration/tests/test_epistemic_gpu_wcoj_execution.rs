@@ -3,12 +3,10 @@ use std::sync::Arc;
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, GpuMemoryManager};
+use xlog_gpu::logic::LogicProgram;
 use xlog_ir::{
     EirAtom, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicGpuPlan,
     EpistemicReductionPlan, EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
@@ -70,32 +68,16 @@ fn assert_gpu_guess_slots(result: &EpistemicGpuExecutionResult) {
 }
 
 fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_r: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(AsyncCudaResource::new(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-    ));
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_r,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(64 * 1024 * 1024))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
+    );
+    let _device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let _pool = Arc::clone(runtime.stream_pool());
 
     Some(RuntimeBackedFixture { memory, provider })
 }
@@ -290,8 +272,10 @@ fn download_unary_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec
         );
     }
     bytes
-        .chunks_exact(std::mem::size_of::<u32>())
-        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
         .collect()
 }
 
@@ -314,14 +298,11 @@ fn download_binary_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Ve
             col1.len(),
         );
     }
-    col0.chunks_exact(std::mem::size_of::<u32>())
-        .zip(col1.chunks_exact(std::mem::size_of::<u32>()))
-        .map(|(a, b)| {
-            (
-                u32::from_le_bytes(a.try_into().unwrap()),
-                u32::from_le_bytes(b.try_into().unwrap()),
-            )
-        })
+    col0.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(col1.as_chunks::<4>().0.iter())
+        .map(|(a, b)| (u32::from_le_bytes(*a), u32::from_le_bytes(*b)))
         .collect()
 }
 
@@ -368,14 +349,16 @@ fn download_ternary_u32(
             col2.len(),
         );
     }
-    col0.chunks_exact(std::mem::size_of::<u32>())
-        .zip(col1.chunks_exact(std::mem::size_of::<u32>()))
-        .zip(col2.chunks_exact(std::mem::size_of::<u32>()))
+    col0.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(col1.as_chunks::<4>().0.iter())
+        .zip(col2.as_chunks::<4>().0.iter())
         .map(|((a, b), c)| {
             (
-                u32::from_le_bytes(a.try_into().unwrap()),
-                u32::from_le_bytes(b.try_into().unwrap()),
-                u32::from_le_bytes(c.try_into().unwrap()),
+                u32::from_le_bytes(*a),
+                u32::from_le_bytes(*b),
+                u32::from_le_bytes(*c),
             )
         })
         .collect()
@@ -415,16 +398,18 @@ fn download_quaternary_u32(
             col3.len(),
         );
     }
-    col0.chunks_exact(std::mem::size_of::<u32>())
-        .zip(col1.chunks_exact(std::mem::size_of::<u32>()))
-        .zip(col2.chunks_exact(std::mem::size_of::<u32>()))
-        .zip(col3.chunks_exact(std::mem::size_of::<u32>()))
+    col0.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(col1.as_chunks::<4>().0.iter())
+        .zip(col2.as_chunks::<4>().0.iter())
+        .zip(col3.as_chunks::<4>().0.iter())
         .map(|(((a, b), c), d)| {
             (
-                u32::from_le_bytes(a.try_into().unwrap()),
-                u32::from_le_bytes(b.try_into().unwrap()),
-                u32::from_le_bytes(c.try_into().unwrap()),
-                u32::from_le_bytes(d.try_into().unwrap()),
+                u32::from_le_bytes(*a),
+                u32::from_le_bytes(*b),
+                u32::from_le_bytes(*c),
+                u32::from_le_bytes(*d),
             )
         })
         .collect()
@@ -5543,7 +5528,7 @@ fn accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers(
         Err(err) => err,
     };
     let solver_err = format!("{solver_err}");
-    assert!(solver_err.contains("CPU/host fallback counters"));
+    assert!(solver_err.contains("zero observed hot-path transfers"));
     assert!(solver_err.contains("dtoh_calls=1"));
     assert!(solver_err.contains("htod_calls=1"));
     assert!(solver_err.contains("round_trips=1"));
@@ -5572,7 +5557,7 @@ fn accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers(
         Err(err) => err,
     };
     let prob_err = format!("{prob_err}");
-    assert!(prob_err.contains("CPU/host fallback counters"));
+    assert!(prob_err.contains("zero observed hot-path transfers"));
     assert!(prob_err.contains("dtoh_calls=1"));
     assert!(prob_err.contains("htod_calls=1"));
     assert!(prob_err.contains("round_trips=1"));
@@ -15561,14 +15546,16 @@ fn accepted_gpu_execution_rejects_candidate_capacity_before_generation() {
     };
 
     match err {
-        xlog_core::XlogError::ResourceExhausted {
+        xlog_core::XlogError::CapacityExceeded {
             context,
-            estimated_bytes,
-            budget_bytes,
+            required,
+            limit,
+            unit,
         } => {
             assert_eq!(context, "epistemic GPU execution candidate capacity");
-            assert_eq!(estimated_bytes, 4);
-            assert_eq!(budget_bytes, 2);
+            assert_eq!(required, 4);
+            assert_eq!(limit, 2);
+            assert_eq!(unit, "candidates");
         }
         other => panic!("expected typed GPU candidate-capacity error, got {other:?}"),
     }
@@ -15669,11 +15656,16 @@ fn accepted_gpu_execution_rejects_reduced_constraint_violation() {
     };
 
     match err {
-        xlog_core::XlogError::Execution(message) => {
-            assert!(message.contains("epistemic GPU reduced constraint violation"));
-            assert!(message.contains("__xlog_constraint_"));
+        xlog_core::XlogError::ConstraintViolation {
+            constraint_index,
+            relation_name,
+            witness_rows,
+        } => {
+            assert_eq!(constraint_index, 0);
+            assert_eq!(relation_name, "__xlog_constraint_0");
+            assert_eq!(witness_rows, 1);
         }
-        other => panic!("expected reduced constraint execution error, got {other:?}"),
+        other => panic!("expected typed reduced constraint violation, got {other:?}"),
     }
 }
 
@@ -17612,43 +17604,32 @@ fn rejected_gpu_execution_result_cannot_gate_solver_or_probability() {
     assert_eq!(prob_trace.gpu_exact_query_evaluations, 0);
 }
 
-#[test]
-fn g91_self_supported_possible_reaches_gpu_runtime_path() {
-    let Some(fix) = make_runtime_backed_fixture() else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
+fn execute_nonrecursive_possible_p_evidence(
+    fix: &RuntimeBackedFixture,
+    mode: EirEpistemicMode,
+) -> EpistemicGpuExecutionResult {
+    let mode_directive = match mode {
+        EirEpistemicMode::G91 => "#pragma epistemic_mode = g91",
+        EirEpistemicMode::Faeel => "#pragma epistemic_mode = faeel",
     };
-
-    let program = parse_program(
+    let source = format!(
         r#"
-        #pragma epistemic_mode = g91
+        {mode_directive}
         pred p().
-        p() :- possible p().
-        "#,
-    )
-    .expect("parse G91 self-supported possible fixture");
-    let oracle = run_generate_propagate_test_with_mode(
-        &program,
-        vec![
-            EpistemicInterpretation::new(),
-            EpistemicInterpretation::new().with_possible("p", 0),
-        ],
-        GeneratePropagateTestConfig { max_candidates: 2 },
-        EpistemicMode::G91,
-    )
-    .expect("run G91 compatibility oracle");
+        pred accepted().
+        accepted() :- possible p().
+        "#
+    );
+    let program = parse_program(&source).expect("parse nonrecursive possible-p fixture");
     let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
-        .expect("compile G91 self-supported possible executable");
-
-    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::G91);
+        .expect("compile nonrecursive possible-p executable");
+    assert_eq!(executable.gpu_plan.mode, mode);
 
     let mut executor =
         Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
     for (name, rel_id) in &executable.relation_ids {
         executor.register_relation(*rel_id, name);
     }
-    // The reduced G91 program is an empty-body nullary fact; seed it through
-    // the existing relation buffer path used by production fact loading.
     executor.put_relation("p", upload_nullary(&fix.memory, 1));
 
     let result = executor
@@ -17660,52 +17641,64 @@ fn g91_self_supported_possible_reaches_gpu_runtime_path() {
                 max_models_per_reduction: 1,
             },
         )
-        .expect("execute G91 self-supported possible fixture");
-
-    assert_eq!(
-        result.prepared.preflight.epistemic_mode,
-        EirEpistemicMode::G91
-    );
+        .expect("execute nonrecursive possible-p fixture");
+    assert_eq!(result.prepared.preflight.epistemic_mode, mode);
     assert_eq!(result.prepared.preflight.possible_operator_count, 1);
     assert_eq!(
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(
-        result.semantic_trace.generated_candidates,
-        oracle.trace.generated
-    );
-    assert_eq!(
-        result.semantic_trace.propagated_candidates,
-        oracle.trace.propagated
-    );
-    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
-    assert_eq!(
-        result.semantic_trace.accepted_candidates,
-        oracle.trace.accepted
-    );
-    assert_eq!(
-        result.semantic_trace.accepted_world_views,
-        oracle.trace.accepted_world_views
-    );
-    assert_eq!(
-        result.semantic_trace.rejected_candidates,
-        oracle.trace.rejected
-    );
-    assert_eq!(
-        result.semantic_trace.accepted_candidate_indices,
-        oracle.accepted_candidate_indices
-    );
-    assert_eq!(
-        result.semantic_trace.rejected_candidate_indices,
-        oracle.rejected_candidate_indices
-    );
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     assert_eq!(
         read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
+        1
+    );
+    result
+}
+
+#[test]
+fn g91_self_supported_possible_reaches_gpu_runtime_path() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = g91
+        pred p().
+        p() :- possible p().
+        ?- p().
+        "#;
+    let parsed = parse_program(source).expect("parse G91 self-supported possible fixture");
+    let oracle = run_generate_propagate_test_with_mode(
+        &parsed,
+        vec![
+            EpistemicInterpretation::new(),
+            EpistemicInterpretation::new().with_possible("p", 0),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+        EpistemicMode::G91,
+    )
+    .expect("run G91 compatibility oracle");
+    assert_eq!(oracle.trace.accepted_world_views, 1);
+
+    let program = LogicProgram::compile(source).expect("compile iterative G91 fixture");
+    let plan = program
+        .epistemic_plan_json()
+        .expect("G91 compatibility plan summary");
+    assert!(plan.contains("\"plan_kind\":\"epistemic_g91_compatibility_gpu\""));
+    assert!(plan.contains("\"execution_backend\":\"gpu\""));
+    let result = program
+        .evaluate(Arc::clone(&fix.provider), std::collections::HashMap::new())
+        .expect("execute iterative G91 self-support fixture");
+
+    assert_eq!(result.queries.len(), 1);
+    assert_eq!(result.queries[0].relation_name, "p");
+    assert_eq!(
+        read_device_row_count(&fix.provider, &result.queries[0].buffer).expect("query row count"),
         1,
-        "explicit G91 compatibility should accept and materialize self-supported p()"
+        "iterative G91 compatibility should materialize self-supported p()"
     );
 }
 
@@ -17716,17 +17709,17 @@ fn faeel_independently_founded_self_possible_reaches_gpu_runtime_path() {
         return;
     };
 
-    let program = parse_program(
-        r#"
+    let source = r#"
         pred seed().
         pred p().
+        seed().
         p() :- seed().
         p() :- possible p().
-        "#,
-    )
-    .expect("parse independently founded FAEEL fixture");
+        ?- p().
+        "#;
+    let parsed = parse_program(source).expect("parse independently founded FAEEL fixture");
     let oracle = run_generate_propagate_test(
-        &program,
+        &parsed,
         vec![
             EpistemicInterpretation::new(),
             EpistemicInterpretation::new().with_known("p", 0),
@@ -17734,69 +17727,22 @@ fn faeel_independently_founded_self_possible_reaches_gpu_runtime_path() {
         GeneratePropagateTestConfig { max_candidates: 2 },
     )
     .expect("run independently founded FAEEL oracle");
-    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
-        .expect("compile independently founded FAEEL executable");
+    assert_eq!(oracle.trace.accepted_world_views, 1);
 
-    let mut executor =
-        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
-    for (name, rel_id) in &executable.relation_ids {
-        executor.register_relation(*rel_id, name);
-    }
-    executor.put_relation("seed", upload_nullary(&fix.memory, 1));
-    executor.put_relation("p", upload_nullary(&fix.memory, 0));
-
-    let result = executor
-        .execute_epistemic_gpu_execution(
-            &executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 2,
-                max_worlds: 1,
-                max_models_per_reduction: 1,
-            },
-        )
+    let program = LogicProgram::compile(source).expect("compile iterative FAEEL fixture");
+    let plan = program
+        .epistemic_plan_json()
+        .expect("FAEEL recursive plan summary");
+    assert!(plan.contains("\"execution_backend\":\"gpu\""));
+    assert!(plan.contains("\"fallback_policy\":\"reject_unsupported\""));
+    let result = program
+        .evaluate(Arc::clone(&fix.provider), std::collections::HashMap::new())
         .expect("execute independently founded FAEEL fixture");
 
+    assert_eq!(result.queries.len(), 1);
+    assert_eq!(result.queries[0].relation_name, "p");
     assert_eq!(
-        result.prepared.preflight.epistemic_mode,
-        EirEpistemicMode::Faeel
-    );
-    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
-    assert_eq!(
-        result.model_membership.membership_source,
-        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
-    );
-    assert_eq!(result.semantic_trace.accepted_world_views, 1);
-    assert_eq!(
-        result.semantic_trace.generated_candidates,
-        oracle.trace.generated
-    );
-    assert_eq!(
-        result.semantic_trace.propagated_candidates,
-        oracle.trace.propagated
-    );
-    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
-    assert_eq!(
-        result.semantic_trace.accepted_candidates,
-        oracle.trace.accepted
-    );
-    assert_eq!(
-        result.semantic_trace.accepted_world_views,
-        oracle.trace.accepted_world_views
-    );
-    assert_eq!(
-        result.semantic_trace.rejected_candidates,
-        oracle.trace.rejected
-    );
-    assert_eq!(
-        result.semantic_trace.accepted_candidate_indices,
-        oracle.accepted_candidate_indices
-    );
-    assert_eq!(
-        result.semantic_trace.rejected_candidate_indices,
-        oracle.rejected_candidate_indices
-    );
-    assert_eq!(
-        read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
+        read_device_row_count(&fix.provider, &result.queries[0].buffer).expect("query row count"),
         1,
         "independently founded self-possible FAEEL fixture should materialize p()"
     );
@@ -17809,66 +17755,13 @@ fn accepted_g91_and_faeel_modes_gate_probabilistic_production_trace() {
         return;
     };
 
-    let g91_program = parse_program(
-        r#"
-        #pragma epistemic_mode = g91
-        pred p().
-        p() :- possible p().
-        "#,
-    )
-    .expect("parse G91 self-supported possible fixture");
-    let g91_executable = compile_epistemic_gpu_execution_with_stats_snapshot(&g91_program, None)
-        .expect("compile G91 self-supported possible executable");
-    let mut g91_executor =
-        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
-    for (name, rel_id) in &g91_executable.relation_ids {
-        g91_executor.register_relation(*rel_id, name);
-    }
-    g91_executor.put_relation("p", upload_nullary(&fix.memory, 1));
-    let g91_result = g91_executor
-        .execute_epistemic_gpu_execution(
-            &g91_executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 2,
-                max_worlds: 1,
-                max_models_per_reduction: 1,
-            },
-        )
-        .expect("execute G91 self-supported possible fixture");
+    let g91_result = execute_nonrecursive_possible_p_evidence(&fix, EirEpistemicMode::G91);
     assert_eq!(
         g91_result.prepared.preflight.epistemic_mode,
         EirEpistemicMode::G91
     );
 
-    let faeel_program = parse_program(
-        r#"
-        pred seed().
-        pred p().
-        p() :- seed().
-        p() :- possible p().
-        "#,
-    )
-    .expect("parse independently founded FAEEL fixture");
-    let faeel_executable =
-        compile_epistemic_gpu_execution_with_stats_snapshot(&faeel_program, None)
-            .expect("compile independently founded FAEEL executable");
-    let mut faeel_executor =
-        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
-    for (name, rel_id) in &faeel_executable.relation_ids {
-        faeel_executor.register_relation(*rel_id, name);
-    }
-    faeel_executor.put_relation("seed", upload_nullary(&fix.memory, 1));
-    faeel_executor.put_relation("p", upload_nullary(&fix.memory, 0));
-    let faeel_result = faeel_executor
-        .execute_epistemic_gpu_execution(
-            &faeel_executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 2,
-                max_worlds: 1,
-                max_models_per_reduction: 1,
-            },
-        )
-        .expect("execute independently founded FAEEL fixture");
+    let faeel_result = execute_nonrecursive_possible_p_evidence(&fix, EirEpistemicMode::Faeel);
     assert_eq!(
         faeel_result.prepared.preflight.epistemic_mode,
         EirEpistemicMode::Faeel
@@ -17928,66 +17821,13 @@ fn accepted_g91_and_faeel_modes_gate_solver_production_trace() {
         return;
     };
 
-    let g91_program = parse_program(
-        r#"
-        #pragma epistemic_mode = g91
-        pred p().
-        p() :- possible p().
-        "#,
-    )
-    .expect("parse G91 self-supported possible fixture");
-    let g91_executable = compile_epistemic_gpu_execution_with_stats_snapshot(&g91_program, None)
-        .expect("compile G91 self-supported possible executable");
-    let mut g91_executor =
-        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
-    for (name, rel_id) in &g91_executable.relation_ids {
-        g91_executor.register_relation(*rel_id, name);
-    }
-    g91_executor.put_relation("p", upload_nullary(&fix.memory, 1));
-    let g91_result = g91_executor
-        .execute_epistemic_gpu_execution(
-            &g91_executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 2,
-                max_worlds: 1,
-                max_models_per_reduction: 1,
-            },
-        )
-        .expect("execute G91 self-supported possible fixture");
+    let g91_result = execute_nonrecursive_possible_p_evidence(&fix, EirEpistemicMode::G91);
     assert_eq!(
         g91_result.prepared.preflight.epistemic_mode,
         EirEpistemicMode::G91
     );
 
-    let faeel_program = parse_program(
-        r#"
-        pred seed().
-        pred p().
-        p() :- seed().
-        p() :- possible p().
-        "#,
-    )
-    .expect("parse independently founded FAEEL fixture");
-    let faeel_executable =
-        compile_epistemic_gpu_execution_with_stats_snapshot(&faeel_program, None)
-            .expect("compile independently founded FAEEL executable");
-    let mut faeel_executor =
-        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
-    for (name, rel_id) in &faeel_executable.relation_ids {
-        faeel_executor.register_relation(*rel_id, name);
-    }
-    faeel_executor.put_relation("seed", upload_nullary(&fix.memory, 1));
-    faeel_executor.put_relation("p", upload_nullary(&fix.memory, 0));
-    let faeel_result = faeel_executor
-        .execute_epistemic_gpu_execution(
-            &faeel_executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 2,
-                max_worlds: 1,
-                max_models_per_reduction: 1,
-            },
-        )
-        .expect("execute independently founded FAEEL fixture");
+    let faeel_result = execute_nonrecursive_possible_p_evidence(&fix, EirEpistemicMode::Faeel);
     assert_eq!(
         faeel_result.prepared.preflight.epistemic_mode,
         EirEpistemicMode::Faeel

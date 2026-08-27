@@ -2,31 +2,21 @@
 #![warn(missing_docs)]
 
 mod aggregates;
-#[allow(missing_docs)]
 pub mod cnf;
-#[allow(missing_docs)]
 pub mod compilation;
 mod decision_order;
 pub mod epistemic;
 pub mod epistemic_production;
-#[allow(missing_docs)]
 pub mod exact;
-#[allow(missing_docs)]
 pub mod gpu;
-#[allow(missing_docs)]
+/// Knowledge-compilation circuit representations.
 pub mod kc;
 mod logsumexp;
-#[allow(missing_docs)]
 pub mod mc;
-#[allow(missing_docs)]
 pub mod neural_fast_path;
-#[allow(missing_docs)]
 pub mod pir;
-#[allow(missing_docs)]
 pub mod provenance;
-#[allow(missing_docs)]
 pub mod wfs;
-#[allow(missing_docs)]
 pub mod xgcf;
 
 pub use pir::{ChoiceVarId, LeafId, PirGraph, PirNode, PirNodeId};

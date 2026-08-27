@@ -1,6 +1,6 @@
 # XLOG Whitepaper (LaTeX)
 
-ArXiv-style two-column LaTeX source for the XLOG technical whitepaper: *"XLOG: A Universal GPU-Native Engine for Neurosymbolic Integration"*.
+ArXiv-style two-column LaTeX source for the XLOG technical whitepaper: *"XLOG: A CUDA-Native Engine for Neurosymbolic Integration"*.
 
 The rendered PDF is committed as `main.pdf`; rebuild only when sources change. Generated figure PDFs (`figures/results.pdf`) are not tracked — regenerate before building.
 

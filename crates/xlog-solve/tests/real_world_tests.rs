@@ -17,20 +17,20 @@ mod sudoku {
     use super::*;
 
     /// Total number of variables for 9x9 Sudoku
-    pub const NUM_VARS: u32 = 729;
+    pub(crate) const NUM_VARS: u32 = 729;
 
     #[inline]
-    pub fn var_index(row: usize, col: usize, val: usize) -> u32 {
+    pub(crate) fn var_index(row: usize, col: usize, val: usize) -> u32 {
         (row * 81 + col * 9 + val) as u32
     }
 
     #[inline]
-    pub fn from_var_index(var: u32) -> (usize, usize, usize) {
+    pub(crate) fn from_var_index(var: u32) -> (usize, usize, usize) {
         let var = var as usize;
         (var / 81, (var % 81) / 9, var % 9)
     }
 
-    pub fn encode(grid: &[[u8; 9]; 9]) -> SolveInstance {
+    pub(crate) fn encode(grid: &[[u8; 9]; 9]) -> SolveInstance {
         let mut clauses = Vec::new();
 
         // Each cell has at least one value
@@ -139,7 +139,7 @@ mod sudoku {
         SolveInstance::new(NUM_VARS, clauses)
     }
 
-    pub fn decode(assignment: &[bool]) -> [[u8; 9]; 9] {
+    pub(crate) fn decode(assignment: &[bool]) -> [[u8; 9]; 9] {
         let mut grid = [[0u8; 9]; 9];
         for row in 0..9 {
             for col in 0..9 {
@@ -154,7 +154,7 @@ mod sudoku {
         grid
     }
 
-    pub fn verify(grid: &[[u8; 9]; 9]) -> bool {
+    pub(crate) fn verify(grid: &[[u8; 9]; 9]) -> bool {
         for row_values in grid.iter().take(9) {
             for &cell in row_values.iter().take(9) {
                 if !(1..=9).contains(&cell) {
@@ -298,11 +298,11 @@ mod nqueens {
     use super::*;
 
     #[inline]
-    pub fn var_index(n: usize, row: usize, col: usize) -> u32 {
+    pub(crate) fn var_index(n: usize, row: usize, col: usize) -> u32 {
         (row * n + col) as u32
     }
 
-    pub fn encode(n: usize) -> SolveInstance {
+    pub(crate) fn encode(n: usize) -> SolveInstance {
         let num_vars = (n * n) as u32;
         let mut clauses = Vec::new();
 
@@ -383,7 +383,7 @@ mod nqueens {
         SolveInstance::new(num_vars, clauses)
     }
 
-    pub fn decode(n: usize, assignment: &[bool]) -> Vec<(usize, usize)> {
+    pub(crate) fn decode(n: usize, assignment: &[bool]) -> Vec<(usize, usize)> {
         let mut queens = Vec::new();
         for row in 0..n {
             for col in 0..n {
@@ -395,7 +395,7 @@ mod nqueens {
         queens
     }
 
-    pub fn verify(n: usize, queens: &[(usize, usize)]) -> bool {
+    pub(crate) fn verify(n: usize, queens: &[(usize, usize)]) -> bool {
         if queens.len() != n {
             return false;
         }
@@ -498,29 +498,29 @@ mod job_shop {
     use std::collections::HashMap;
 
     #[derive(Debug, Clone, Copy)]
-    pub struct Operation {
-        pub machine: usize,
-        pub duration: usize,
+    pub(crate) struct Operation {
+        pub(crate) machine: usize,
+        pub(crate) duration: usize,
     }
 
     #[derive(Debug, Clone)]
-    pub struct Job {
-        pub operations: Vec<Operation>,
+    pub(crate) struct Job {
+        pub(crate) operations: Vec<Operation>,
     }
 
     #[derive(Debug, Clone)]
-    pub struct JobShopProblem {
-        pub num_machines: usize,
-        pub jobs: Vec<Job>,
-        pub horizon: usize,
+    pub(crate) struct JobShopProblem {
+        pub(crate) num_machines: usize,
+        pub(crate) jobs: Vec<Job>,
+        pub(crate) horizon: usize,
     }
 
     impl JobShopProblem {
-        pub fn total_operations(&self) -> usize {
+        pub(crate) fn total_operations(&self) -> usize {
             self.jobs.iter().map(|j| j.operations.len()).sum()
         }
 
-        pub fn var_index(&self, job: usize, op: usize, time: usize) -> u32 {
+        pub(crate) fn var_index(&self, job: usize, op: usize, time: usize) -> u32 {
             let mut offset = 0;
             for j in 0..job {
                 offset += self.jobs[j].operations.len() * self.horizon;
@@ -529,12 +529,12 @@ mod job_shop {
             (offset + time) as u32
         }
 
-        pub fn num_vars(&self) -> u32 {
+        pub(crate) fn num_vars(&self) -> u32 {
             (self.total_operations() * self.horizon) as u32
         }
     }
 
-    pub fn encode(problem: &JobShopProblem) -> SolveInstance {
+    pub(crate) fn encode(problem: &JobShopProblem) -> SolveInstance {
         let num_vars = problem.num_vars();
         let mut clauses = Vec::new();
 
@@ -624,9 +624,9 @@ mod job_shop {
         SolveInstance::new(num_vars, clauses)
     }
 
-    pub type Schedule = Vec<(usize, usize, usize)>;
+    pub(crate) type Schedule = Vec<(usize, usize, usize)>;
 
-    pub fn decode(problem: &JobShopProblem, assignment: &[bool]) -> Schedule {
+    pub(crate) fn decode(problem: &JobShopProblem, assignment: &[bool]) -> Schedule {
         let mut schedule = Vec::new();
         for (j, job) in problem.jobs.iter().enumerate() {
             for o in 0..job.operations.len() {
@@ -641,7 +641,7 @@ mod job_shop {
         schedule
     }
 
-    pub fn verify(problem: &JobShopProblem, schedule: &Schedule) -> bool {
+    pub(crate) fn verify(problem: &JobShopProblem, schedule: &Schedule) -> bool {
         let mut start_times: HashMap<(usize, usize), usize> = HashMap::new();
 
         for &(j, o, t) in schedule {
@@ -696,7 +696,7 @@ mod job_shop {
         true
     }
 
-    pub fn simple_problem() -> JobShopProblem {
+    pub(crate) fn simple_problem() -> JobShopProblem {
         JobShopProblem {
             num_machines: 2,
             horizon: 10,
@@ -779,17 +779,17 @@ mod graph_coloring {
     use super::*;
 
     #[derive(Debug, Clone)]
-    pub struct Graph {
-        pub num_vertices: usize,
-        pub edges: Vec<(usize, usize)>,
+    pub(crate) struct Graph {
+        pub(crate) num_vertices: usize,
+        pub(crate) edges: Vec<(usize, usize)>,
     }
 
     #[inline]
-    pub fn var_index(num_colors: usize, vertex: usize, color: usize) -> u32 {
+    pub(crate) fn var_index(num_colors: usize, vertex: usize, color: usize) -> u32 {
         (vertex * num_colors + color) as u32
     }
 
-    pub fn encode(graph: &Graph, num_colors: usize) -> SolveInstance {
+    pub(crate) fn encode(graph: &Graph, num_colors: usize) -> SolveInstance {
         let num_vars = (graph.num_vertices * num_colors) as u32;
         let mut clauses = Vec::new();
 
@@ -823,7 +823,11 @@ mod graph_coloring {
         SolveInstance::new(num_vars, clauses)
     }
 
-    pub fn decode(num_vertices: usize, num_colors: usize, assignment: &[bool]) -> Vec<usize> {
+    pub(crate) fn decode(
+        num_vertices: usize,
+        num_colors: usize,
+        assignment: &[bool],
+    ) -> Vec<usize> {
         let mut coloring = vec![0; num_vertices];
         for v in 0..num_vertices {
             for k in 0..num_colors {
@@ -836,7 +840,7 @@ mod graph_coloring {
         coloring
     }
 
-    pub fn verify(graph: &Graph, coloring: &[usize]) -> bool {
+    pub(crate) fn verify(graph: &Graph, coloring: &[usize]) -> bool {
         if coloring.len() != graph.num_vertices {
             return false;
         }
@@ -850,21 +854,21 @@ mod graph_coloring {
         true
     }
 
-    pub fn triangle() -> Graph {
+    pub(crate) fn triangle() -> Graph {
         Graph {
             num_vertices: 3,
             edges: vec![(0, 1), (1, 2), (2, 0)],
         }
     }
 
-    pub fn square() -> Graph {
+    pub(crate) fn square() -> Graph {
         Graph {
             num_vertices: 4,
             edges: vec![(0, 1), (1, 2), (2, 3), (3, 0)],
         }
     }
 
-    pub fn petersen() -> Graph {
+    pub(crate) fn petersen() -> Graph {
         Graph {
             num_vertices: 10,
             edges: vec![
@@ -974,7 +978,7 @@ mod circuit_sat {
     use super::*;
 
     #[derive(Debug, Clone, Copy)]
-    pub enum Gate {
+    pub(crate) enum Gate {
         Input,
         Not { input: usize },
         And { input1: usize, input2: usize },
@@ -983,14 +987,14 @@ mod circuit_sat {
     }
 
     #[derive(Debug, Clone)]
-    pub struct Circuit {
-        pub gates: Vec<Gate>,
-        pub num_inputs: usize,
-        pub output: usize,
+    pub(crate) struct Circuit {
+        pub(crate) gates: Vec<Gate>,
+        pub(crate) num_inputs: usize,
+        pub(crate) output: usize,
     }
 
     impl Circuit {
-        pub fn new(num_inputs: usize) -> Self {
+        pub(crate) fn new(num_inputs: usize) -> Self {
             let mut gates = Vec::new();
             for _ in 0..num_inputs {
                 gates.push(Gate::Input);
@@ -1002,35 +1006,35 @@ mod circuit_sat {
             }
         }
 
-        pub fn not(&mut self, input: usize) -> usize {
+        pub(crate) fn not(&mut self, input: usize) -> usize {
             let idx = self.gates.len();
             self.gates.push(Gate::Not { input });
             idx
         }
 
-        pub fn and(&mut self, input1: usize, input2: usize) -> usize {
+        pub(crate) fn and(&mut self, input1: usize, input2: usize) -> usize {
             let idx = self.gates.len();
             self.gates.push(Gate::And { input1, input2 });
             idx
         }
 
-        pub fn or(&mut self, input1: usize, input2: usize) -> usize {
+        pub(crate) fn or(&mut self, input1: usize, input2: usize) -> usize {
             let idx = self.gates.len();
             self.gates.push(Gate::Or { input1, input2 });
             idx
         }
 
-        pub fn xor(&mut self, input1: usize, input2: usize) -> usize {
+        pub(crate) fn xor(&mut self, input1: usize, input2: usize) -> usize {
             let idx = self.gates.len();
             self.gates.push(Gate::Xor { input1, input2 });
             idx
         }
 
-        pub fn set_output(&mut self, output: usize) {
+        pub(crate) fn set_output(&mut self, output: usize) {
             self.output = output;
         }
 
-        pub fn evaluate(&self, inputs: &[bool]) -> bool {
+        pub(crate) fn evaluate(&self, inputs: &[bool]) -> bool {
             let mut values = vec![false; self.gates.len()];
 
             for (i, &val) in inputs.iter().enumerate() {
@@ -1051,7 +1055,7 @@ mod circuit_sat {
         }
     }
 
-    pub fn encode(circuit: &Circuit, expected_output: bool) -> SolveInstance {
+    pub(crate) fn encode(circuit: &Circuit, expected_output: bool) -> SolveInstance {
         let num_vars = circuit.gates.len() as u32;
         let mut clauses = Vec::new();
 
@@ -1141,7 +1145,7 @@ mod circuit_sat {
         SolveInstance::new(num_vars, clauses)
     }
 
-    pub fn decode_inputs(circuit: &Circuit, assignment: &[bool]) -> Vec<bool> {
+    pub(crate) fn decode_inputs(circuit: &Circuit, assignment: &[bool]) -> Vec<bool> {
         assignment[..circuit.num_inputs].to_vec()
     }
 }

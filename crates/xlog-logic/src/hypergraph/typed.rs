@@ -145,7 +145,6 @@ pub fn evaluate_rule_typed(
 /// the delegation at the end of this function and so naturally
 /// take precedence over typed-gate failures on rules that survive
 /// the per-rule head-match filter.
-#[allow(clippy::result_large_err)]
 pub fn evaluate_fixpoint_typed(
     rules: &[Rule],
     base_relations: &RefRelationStore,
@@ -240,7 +239,10 @@ pub fn evaluate_fixpoint_typed(
 /// entry-validation errors (predicate-in-base, max-iterations,
 /// schema-indeterminable, head-arity mismatch) are surfaced by
 /// the delegation at the end of this function.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the public typed diagnostic preserves its structured rule-evaluation source without a second heap allocation"
+)]
 pub fn evaluate_scc_fixpoint_typed(
     rules: &BTreeMap<String, Vec<Rule>>,
     base_relations: &RefRelationStore,

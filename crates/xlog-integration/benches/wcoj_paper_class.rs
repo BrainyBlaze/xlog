@@ -1,7 +1,8 @@
 //! Paper-class WCOJ benchmark harness.
 
 mod fixtures {
-    pub mod paper_class;
+    pub(crate) mod benchmark_memory;
+    pub(crate) mod paper_class;
 }
 
 use std::collections::BTreeSet;
@@ -12,20 +13,22 @@ use std::time::{Duration, Instant};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cudarc::driver::result::mem_get_info;
 
+use fixtures::benchmark_memory::{
+    enforce_benchmark_memory_limits, BenchmarkMemoryObservation, PROCESS_VISIBLE_LIMIT_BYTES,
+    PROVIDER_BUDGET_BYTES,
+};
 use fixtures::paper_class::{
     paper_class_expected_fixture_count, paper_class_fixtures, TriangleFixture,
 };
-use xlog_core::{MemoryBudget, ScalarType, Schema};
+use xlog_core::{MemoryBudget, ScalarType, Schema, XlogError};
 use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogAction, LogRecord, LogResult,
-    LoggingResource, LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
+    LogAction, LogRecord, LogResult, LoggingSink, SinkError, StreamId, StreamPool,
+    XlogDeviceRuntime,
 };
 use xlog_cuda::memory::CudaBuffer;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager, JoinType};
 
 const SCALE: u32 = 1024;
-const DEVICE_BUDGET_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const VRAM_GATE_BYTES: u64 = 38 * 1024 * 1024 * 1024;
 const DIRECT_TRIALS: usize = 10;
 const HASH_DIRECT_INNER_ITERS: usize = 40;
 const WCOJ_DIRECT_INNER_ITERS: usize = 20;
@@ -105,12 +108,10 @@ impl CudaMemInfoTracker {
     }
 
     fn sample(&self) {
-        let Ok((free, total)) = mem_get_info() else {
-            return;
-        };
+        let (free, total) = mem_get_info().expect("cudaMemGetInfo during paper-class fixture");
         let free = free as u64;
         let total = total as u64;
-        debug_assert_eq!(
+        assert_eq!(
             self.total, total,
             "CUDA total memory changed during fixture"
         );
@@ -134,37 +135,26 @@ impl CudaMemInfoTracker {
     }
 }
 
-fn make_provider() -> Option<Provider> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::new(Arc::clone(&device), 1024));
-    let launch_stream = pool.acquire().ok()?;
+fn make_provider() -> xlog_core::Result<Provider> {
     let peak = Arc::new(PeakSink::default());
-    let mem_info = Arc::new(CudaMemInfoTracker::new());
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        CudaProviderBuilder::new(0, MemoryBudget::with_limit(PROVIDER_BUDGET_BYTES))
+            .with_stream_capacity(1024)
+            .with_logging_sink(Arc::clone(&peak) as Arc<dyn LoggingSink>)
+            .build()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::clone(&peak) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(GlobalDeviceBudget::new(
-        logging,
-        DEVICE_BUDGET_BYTES as usize,
-    ));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(DEVICE_BUDGET_BYTES),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
-    Some(Provider {
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(
+        memory
+            .runtime()
+            .ok_or_else(|| XlogError::Kernel("paper-class runtime is unavailable".into()))?,
+    );
+    let pool = Arc::clone(runtime.stream_pool());
+    let launch_stream = pool.acquire().map_err(|error| {
+        XlogError::Kernel(format!("acquire paper-class launch stream: {error}"))
+    })?;
+    let mem_info = Arc::new(CudaMemInfoTracker::new());
+    Ok(Provider {
         memory,
         provider,
         runtime,
@@ -360,20 +350,46 @@ fn summarize(samples: &[Duration]) -> (f64, f64) {
     (mean, cv)
 }
 
-fn direct_samples(fixture: &TriangleFixture, use_wcoj: bool) -> Vec<Duration> {
+struct DirectSamples {
+    durations: Vec<Duration>,
+    memory: BenchmarkMemoryObservation,
+}
+
+struct DirectTrialSummary {
+    hash_mean_ns: f64,
+    wcoj_mean_ns: f64,
+    ratio: f64,
+    hash_cv: f64,
+    wcoj_cv: f64,
+    memory: BenchmarkMemoryObservation,
+}
+
+fn memory_observation(prov: &Provider) -> BenchmarkMemoryObservation {
+    BenchmarkMemoryObservation {
+        provider_tracked_peak_bytes: prov.peak.peak_bytes(),
+        process_visible_peak_bytes: prov.mem_info.peak_delta_bytes(),
+    }
+}
+
+fn direct_samples(fixture: &TriangleFixture, use_wcoj: bool) -> DirectSamples {
     let prov = make_provider().expect("make direct-measurement provider");
     let input = upload_fixture(&prov, fixture);
-    let mut samples = Vec::with_capacity(DIRECT_TRIALS);
+    let mut durations = Vec::with_capacity(DIRECT_TRIALS);
     for _ in 0..DIRECT_WARMUP_WINDOWS {
         let _ = measure_window_uploaded(&prov, &input, use_wcoj);
     }
     for _ in 0..DIRECT_TRIALS {
-        samples.push(measure_window_uploaded(&prov, &input, use_wcoj));
+        durations.push(measure_window_uploaded(&prov, &input, use_wcoj));
     }
-    samples
+    settle_runtime(&prov);
+    prov.mem_info.sample();
+    DirectSamples {
+        durations,
+        memory: memory_observation(&prov),
+    }
 }
 
-fn direct_trials(fixture: &TriangleFixture) -> (f64, f64, f64, f64, f64) {
+fn direct_trials(fixture: &TriangleFixture) -> DirectTrialSummary {
     eprintln!(
         "PAPER_CLASS_DIRECT_CONFIG {} trials={DIRECT_TRIALS} hash_inner_iters={HASH_DIRECT_INNER_ITERS} wcoj_inner_iters={WCOJ_DIRECT_INNER_ITERS} warmup_windows={DIRECT_WARMUP_WINDOWS}",
         fixture.name
@@ -381,8 +397,8 @@ fn direct_trials(fixture: &TriangleFixture) -> (f64, f64, f64, f64, f64) {
     let hash = direct_samples(fixture, false);
     let wcoj = direct_samples(fixture, true);
     for trial in 0..DIRECT_TRIALS {
-        let h = hash[trial];
-        let w = wcoj[trial];
+        let h = hash.durations[trial];
+        let w = wcoj.durations[trial];
         eprintln!(
             "PAPER_CLASS_DIRECT_SAMPLE {} trial={} hash_ns={} wcoj_ns={}",
             fixture.name,
@@ -391,10 +407,16 @@ fn direct_trials(fixture: &TriangleFixture) -> (f64, f64, f64, f64, f64) {
             w.as_nanos()
         );
     }
-    let (hash_mean, hash_cv) = summarize(&hash);
-    let (wcoj_mean, wcoj_cv) = summarize(&wcoj);
-    let ratio = hash_mean / wcoj_mean;
-    (hash_mean, wcoj_mean, ratio, hash_cv, wcoj_cv)
+    let (hash_mean_ns, hash_cv) = summarize(&hash.durations);
+    let (wcoj_mean_ns, wcoj_cv) = summarize(&wcoj.durations);
+    DirectTrialSummary {
+        hash_mean_ns,
+        wcoj_mean_ns,
+        ratio: hash_mean_ns / wcoj_mean_ns,
+        hash_cv,
+        wcoj_cv,
+        memory: hash.memory.merge(wcoj.memory),
+    }
 }
 
 fn report_bundle_paths(fixture: &TriangleFixture) {
@@ -411,26 +433,19 @@ fn bench_fixture(
 ) -> f64 {
     let rows = assert_row_equality(prov, fixture);
     report_bundle_paths(fixture);
-    let (hash_mean, wcoj_mean, ratio, hash_cv, wcoj_cv) = direct_trials(fixture);
+    let direct = direct_trials(fixture);
     eprintln!(
-        "PAPER_CLASS_DIRECT_RESULT {} hash_mean_ns={hash_mean:.3} wcoj_mean_ns={wcoj_mean:.3} ratio={ratio:.6} hash_cv={hash_cv:.6} wcoj_cv={wcoj_cv:.6}",
-        fixture.name
-    );
-    eprintln!(
-        "PAPER_CLASS_PEAK_VRAM {} bytes={} gate_bytes={VRAM_GATE_BYTES}",
+        "PAPER_CLASS_DIRECT_RESULT {} hash_mean_ns={:.3} wcoj_mean_ns={:.3} ratio={:.6} hash_cv={:.6} wcoj_cv={:.6}",
         fixture.name,
-        prov.peak.peak_bytes()
-    );
-    eprintln!(
-        "PAPER_CLASS_CUDA_MEM_GET_INFO {} peak_delta_bytes={} gate_bytes={} total_bytes={}",
-        fixture.name,
-        prov.mem_info.peak_delta_bytes(),
-        VRAM_GATE_BYTES,
-        prov.mem_info.total
+        direct.hash_mean_ns,
+        direct.wcoj_mean_ns,
+        direct.ratio,
+        direct.hash_cv,
+        direct.wcoj_cv
     );
     if fixture.recursive {
         eprintln!(
-            "PAPER_CLASS_RECURSIVE_VRAM_GROWTH {} growth=0.000000 gate=0.010000",
+            "PAPER_CLASS_RECURSIVE_FIXTURE {} measured_with_standard_memory_limits=true",
             fixture.name
         );
     }
@@ -454,8 +469,21 @@ fn bench_fixture(
             total
         })
     });
+
+    settle_runtime(prov);
+    prov.mem_info.sample();
+    let memory = direct.memory.merge(memory_observation(prov));
+    eprintln!(
+        "PAPER_CLASS_PEAK_VRAM {} bytes={} gate_bytes={PROVIDER_BUDGET_BYTES}",
+        fixture.name, memory.provider_tracked_peak_bytes
+    );
+    eprintln!(
+        "PAPER_CLASS_CUDA_MEM_GET_INFO {} peak_delta_bytes={} gate_bytes={PROCESS_VISIBLE_LIMIT_BYTES} total_bytes={}",
+        fixture.name, memory.process_visible_peak_bytes, prov.mem_info.total
+    );
+    enforce_benchmark_memory_limits(memory).unwrap_or_else(|violation| panic!("{violation}"));
     eprintln!("PAPER_CLASS_MEASURED_CELL {} rows={rows}", fixture.name);
-    ratio
+    direct.ratio
 }
 
 fn bench_paper_class_wcoj(c: &mut Criterion) {
@@ -469,9 +497,15 @@ fn bench_paper_class_wcoj(c: &mut Criterion) {
     group.sample_size(10);
     let mut product = 1.0;
     for fixture in &fixtures {
-        let Some(prov) = make_provider() else {
-            eprintln!("Skipping wcoj_paper_class: CUDA unavailable");
-            return;
+        let prov = match make_provider() {
+            Ok(prov) => prov,
+            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+                panic!("XLOG_REQUIRE_CUDA=1 but paper-class provider setup failed: {error}")
+            }
+            Err(error) => {
+                eprintln!("Skipping wcoj_paper_class: CUDA unavailable: {error}");
+                return;
+            }
         };
         product *= bench_fixture(&mut group, &prov, fixture).max(f64::MIN_POSITIVE);
     }

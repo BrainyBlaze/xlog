@@ -278,7 +278,7 @@ fn test_repeated_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let expected_count = (SIZE + 1) / 2;
+        let expected_count = SIZE.div_ceil(2);
         if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_repeated_operations",
@@ -459,7 +459,7 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let expected1 = (SIZE + 1) / 2;
+    let expected1 = SIZE.div_ceil(2);
     if ctx.device_row_count(&filtered1) != expected1 as u64 {
         return TestResult::error(
             "test_complex_filter_chains",
@@ -487,7 +487,7 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let expected2 = (expected1 + 3) / 4;
+    let expected2 = expected1.div_ceil(4);
     if ctx.device_row_count(&filtered2) != expected2 as u64 {
         return TestResult::error(
             "test_complex_filter_chains",
@@ -515,7 +515,7 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let expected3 = (expected2 + 4) / 5;
+    let expected3 = expected2.div_ceil(5);
     if ctx.device_row_count(&filtered3) != expected3 as u64 {
         return TestResult::error(
             "test_complex_filter_chains",

@@ -2,11 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, InMemorySink, LogAction,
-    LoggingResource, LoggingSink, StreamPool, XlogDeviceRuntime,
-};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::device_runtime::{InMemorySink, LogAction, LoggingSink, XlogDeviceRuntime};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{ExecutionPlan, GeneratedQueryRuleProvenance};
 use xlog_logic::Compiler;
 
@@ -32,8 +29,15 @@ fn runtime_fixture() -> Option<RuntimeFixture> {
 }
 
 fn runtime_fixture_with_local_budget(local_budget: u64) -> Option<RuntimeFixture> {
-    let device = match CudaDevice::new(0) {
-        Ok(device) => Arc::new(device),
+    let sink = Arc::new(InMemorySink::new());
+    let mut budget = MemoryBudget::default();
+    budget.device_bytes = local_budget;
+    let provider = match xlog_cuda::CudaProviderBuilder::new(0, budget)
+        .with_runtime_budget_limit(RUNTIME_BUDGET as u64)
+        .with_logging_sink(sink.clone() as Arc<dyn LoggingSink>)
+        .build()
+    {
+        Ok(provider) => Arc::new(provider),
         Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
             panic!("XLOG_REQUIRE_CUDA=1 but CUDA setup failed: {error}")
         }
@@ -42,32 +46,11 @@ fn runtime_fixture_with_local_budget(local_budget: u64) -> Option<RuntimeFixture
             return None;
         }
     };
-    let pool = Arc::new(StreamPool::with_defaults(device.clone()));
-    let sink = Arc::new(InMemorySink::new());
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(AsyncCudaResource::new(device.clone(), 0, pool.clone()));
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        sink.clone() as Arc<dyn LoggingSink>,
-    ));
-    let resource: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, RUNTIME_BUDGET));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        device.clone(),
-        0,
-        pool,
-        resource,
-    ));
-    let mut budget = MemoryBudget::default();
-    budget.device_bytes = local_budget;
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        device.clone(),
-        budget,
-        runtime.clone(),
-    ));
-    let provider = Arc::new(
-        CudaKernelProvider::new(device, memory)
-            .unwrap_or_else(|error| panic!("CUDA provider setup failed: {error}")),
+    let runtime = Arc::clone(
+        provider
+            .memory()
+            .runtime()
+            .expect("builder provider owns a runtime"),
     );
     Some(RuntimeFixture {
         provider,
@@ -1354,7 +1337,7 @@ fn schema_equations_accept_stable_collapse_and_acyclic_lineage_but_decline_ambig
             let relation = inherited
                 .executor
                 .store()
-                .get(*name)
+                .get(name)
                 .unwrap_or_else(|| panic!("resident executor did not install {name}"));
             assert_eq!(relation.schema(), schema, "schema mismatch for {name}");
             assert_eq!(

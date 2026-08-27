@@ -32,10 +32,7 @@ use std::sync::Arc;
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamPool, XlogDeviceRuntime};
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::Compiler;
@@ -52,46 +49,31 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct RuntimeFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
+    _pool: Arc<StreamPool>,
 }
 
 fn make_runtime_fixture() -> Option<RuntimeFixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(64 * 1024 * 1024))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeFixture {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
-        pool,
+        _pool: pool,
     })
 }
 
@@ -241,10 +223,8 @@ fn three_relation_fixture() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
 ///     between the two paths (correctness under both).
 ///
 /// `head_arity` selects how many output columns to download.
-#[allow(clippy::too_many_arguments)]
 fn assert_dispatch_policy(
-    provider: Arc<CudaKernelProvider>,
-    memory: &Arc<GpuMemoryManager>,
+    fixture: &RuntimeFixture,
     source: &str,
     inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
     head_predicate: &str,
@@ -252,7 +232,13 @@ fn assert_dispatch_policy(
     expected_dispatched: u64,
     case_label: &str,
 ) {
-    let (exec_off, counter_off) = run_program(Arc::clone(&provider), memory, false, source, inputs);
+    let (exec_off, counter_off) = run_program(
+        Arc::clone(&fixture.provider),
+        &fixture.memory,
+        false,
+        source,
+        inputs,
+    );
     assert_eq!(counter_off, 0, "[{case_label}] gate-off must not dispatch");
     let buf_off = exec_off
         .store()
@@ -261,7 +247,13 @@ fn assert_dispatch_policy(
     let cols_off = download_n_cols(buf_off, head_arity);
     let rows_off = rows_sorted_dedup(&cols_off);
 
-    let (exec_on, counter_on) = run_program(Arc::clone(&provider), memory, true, source, inputs);
+    let (exec_on, counter_on) = run_program(
+        Arc::clone(&fixture.provider),
+        &fixture.memory,
+        true,
+        source,
+        inputs,
+    );
     assert_eq!(
         counter_on, expected_dispatched,
         "[{case_label}] gate-on dispatch count: expected {expected_dispatched}, got {counter_on}"
@@ -294,8 +286,7 @@ fn rir_cert_canonical_triangle_dispatches() {
     };
     let inputs = three_relation_fixture();
     assert_dispatch_policy(
-        Arc::clone(&fix.provider),
-        &fix.memory,
+        &fix,
         "tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z).",
         &inputs,
         "tri",
@@ -339,8 +330,7 @@ fn rir_cert_single_relation_triangle_dispatches() {
         ],
     );
     assert_dispatch_policy(
-        Arc::clone(&fix.provider),
-        &fix.memory,
+        &fix,
         "tri(X, Y, Z) :- e(X, Y), e(Y, Z), e(X, Z).",
         &inputs,
         "tri",
@@ -369,8 +359,7 @@ fn rir_cert_body_order_rotated_falls_back() {
     };
     let inputs = three_relation_fixture();
     assert_dispatch_policy(
-        Arc::clone(&fix.provider),
-        &fix.memory,
+        &fix,
         "tri(X, Y, Z) :- e3(X, Z), e1(X, Y), e2(Y, Z).",
         &inputs,
         "tri",
@@ -399,8 +388,7 @@ fn rir_cert_head_var_order_rotated_falls_back() {
     };
     let inputs = three_relation_fixture();
     assert_dispatch_policy(
-        Arc::clone(&fix.provider),
-        &fix.memory,
+        &fix,
         "permuted(Y, X, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z).",
         &inputs,
         "permuted",
@@ -437,8 +425,7 @@ fn rir_cert_reversed_atom_falls_back() {
     };
     let inputs = three_relation_fixture();
     assert_dispatch_policy(
-        Arc::clone(&fix.provider),
-        &fix.memory,
+        &fix,
         "tri(X, Y, Z) :- e1(Y, X), e2(Y, Z), e3(X, Z).",
         &inputs,
         "tri",
@@ -468,8 +455,7 @@ fn rir_cert_with_comparison_filter_falls_back() {
     };
     let inputs = three_relation_fixture();
     assert_dispatch_policy(
-        Arc::clone(&fix.provider),
-        &fix.memory,
+        &fix,
         "tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z), X < Y.",
         &inputs,
         "tri",
@@ -497,8 +483,7 @@ fn rir_cert_2arity_head_falls_back() {
     };
     let inputs = three_relation_fixture();
     assert_dispatch_policy(
-        Arc::clone(&fix.provider),
-        &fix.memory,
+        &fix,
         "two(X, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z).",
         &inputs,
         "two",

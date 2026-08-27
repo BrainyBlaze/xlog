@@ -5,13 +5,14 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 #[cfg(feature = "host-io")]
 use xlog_core::symbol;
 use xlog_core::{MemoryBudget, RelId, ScalarType, Schema};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{
     CompiledRule, EirAtom, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirTerm,
-    EpistemicExecutablePlan, EpistemicExecutionBackend, EpistemicFallbackPolicy, EpistemicGpuPlan,
-    EpistemicReductionPlan, EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, RirNode, Scc,
-    Stratum,
+    EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
+    EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, RirNode, Scc, Stratum,
 };
+#[cfg(feature = "host-io")]
+use xlog_ir::{EpistemicExecutionBackend, EpistemicFallbackPolicy};
 #[cfg(feature = "host-io")]
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_split_execution,
@@ -65,19 +66,9 @@ fn gpu_exact_test_lock() -> MutexGuard<'static, ()> {
 
 fn try_provider() -> Option<LockedCudaProvider> {
     let guard = gpu_exact_test_lock();
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-            panic!("XLOG_REQUIRE_CUDA=1 but CUDA runtime initialization failed: {e}")
-        }
-        Err(e) => {
-            eprintln!("Skipping test: CUDA runtime unavailable: {e}");
-            return None;
-        }
-    };
-    let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    match CudaKernelProvider::new(device, memory) {
+    match xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+        .build()
+    {
         Ok(p) => Some(LockedCudaProvider {
             _guard: guard,
             provider: Arc::new(p),

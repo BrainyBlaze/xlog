@@ -53,13 +53,7 @@ fn mc_sample_cpu_reference(probs: &[f32], num_samples: usize, seed: u64) -> Vec<
     for tid in 0..(total as u64) {
         let var_idx = (tid % (num_vars as u64)) as usize;
         let p = probs[var_idx];
-        let p_clamped = if p <= 0.0 {
-            0.0
-        } else if p >= 1.0 {
-            1.0
-        } else {
-            p
-        };
+        let p_clamped = p.clamp(0.0, 1.0);
 
         let x = splitmix64(seed ^ tid.wrapping_mul(stride));
         let r = (x >> 32) as u32;

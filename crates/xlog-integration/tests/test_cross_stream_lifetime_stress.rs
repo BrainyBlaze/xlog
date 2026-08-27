@@ -1,34 +1,32 @@
-#![allow(clippy::ptr_arg)]
-
-//! A3 / A4 cross-stream lifetime stress harness.
+//! Cross-stream lifetime stress under in-process parallelism and fork isolation.
 //!
 //! Closes v0.6.0 release blocker #2: the recorded launch
 //! discipline now has a public stress harness that exercises
-//! both **A3** (in-process parallel scheduling against a shared
-//! CUDA primary context — fixed and seeded-random schedules)
-//! and **A4** (fresh subprocess fork per child, cold CUDA
-//! context, bounded iteration loop per child) under
-//! `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1`.
+//! both in-process parallel scheduling against a shared CUDA primary
+//! context (fixed and seeded-random schedules) and fresh subprocess
+//! isolation with a cold CUDA context and bounded iterations. The
+//! provider-owned runtime is invariant; `XLOG_USE_RECORDED_OPS=1`
+//! selects the recorded operator routes under stress.
 //!
 //! # Final gate command
 //!
 //! ```sh
-//! XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 \
-//!     cargo test -p xlog-integration --test test_a3_a4_stress \
+//! XLOG_USE_RECORDED_OPS=1 \
+//!     cargo test -p xlog-integration --test test_cross_stream_lifetime_stress \
 //!     --release -- --test-threads=1 --nocapture
 //! ```
 //!
-//! The harness asserts both env vars are set on parent-mode
-//! entry; running without them surfaces a clear "skipped"
-//! message rather than silently passing on the legacy path.
+//! The harness asserts the recorded-operator switch is enabled on
+//! parent-mode entry; running without it surfaces a clear "skipped"
+//! message rather than exercising a different dispatch route.
 //! `--test-threads=1` is required because the parent
 //! orchestrates its own intra-test parallelism.
 //!
 //! # Pass criteria
 //!
-//!   * Zero failures across all A3 thread × iter combinations.
-//!   * Zero failures across all A4 fork × iter combinations.
-//!   * Final A3 thread runtime `bytes_outstanding == 0` after
+//!   * Zero failures across all in-process thread × iteration combinations.
+//!   * Zero failures across all fork-isolated child × iteration combinations.
+//!   * Final in-process thread runtime `bytes_outstanding == 0` after
 //!     reap (no allocator leaks).
 //!   * No CUDA error / panic / non-zero subprocess exit.
 //!   * Result-set checksums match the per-config reference
@@ -54,7 +52,7 @@
 //! Failure messages report `base_seed`, `worker_id`, `iter`,
 //! `workload`, `graph params`, and the diverging checksum so a
 //! single run can be re-played by re-invoking the harness with
-//! the same `XLOG_A3A4_BASE_SEED` env var.
+//! the same `XLOG_CROSS_STREAM_STRESS_BASE_SEED` environment variable.
 
 use std::collections::HashSet;
 use std::process::Command;
@@ -64,12 +62,9 @@ use std::thread;
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_core::{read_bool_env, MemoryBudget, ScalarType, Schema};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, XlogDeviceRuntime};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
@@ -77,17 +72,17 @@ const TEST_BUDGET_BYTES: usize = 512 * 1024 * 1024;
 
 /// Subprocess-mode env marker. Parent sets this when re-invoking
 /// `current_exe()`; the test entry point branches on it.
-const A4_CHILD_ENV: &str = "XLOG_A3A4_CHILD";
+const FORK_CHILD_ENV: &str = "XLOG_CROSS_STREAM_STRESS_CHILD";
 /// Optional override for the deterministic base seed. Defaults
 /// to `42` when unset; surfaced in every failure message so a
-/// repro run is `XLOG_A3A4_BASE_SEED=<x> cargo test ...`.
-const BASE_SEED_ENV: &str = "XLOG_A3A4_BASE_SEED";
+/// repro run is `XLOG_CROSS_STREAM_STRESS_BASE_SEED=<x> cargo test ...`.
+const BASE_SEED_ENV: &str = "XLOG_CROSS_STREAM_STRESS_BASE_SEED";
 
-const A3_THREADS: usize = 8;
-const A3_ITERS_PER_THREAD: usize = 32;
+const PARALLEL_THREADS: usize = 8;
+const PARALLEL_ITERS_PER_THREAD: usize = 32;
 
-const A4_CHILDREN: usize = 16;
-const A4_ITERS_PER_CHILD: usize = 4;
+const FORK_CHILDREN: usize = 16;
+const FORK_ITERS_PER_CHILD: usize = 4;
 
 // ---------------------------------------------------------------
 // Workload identifiers + parameters.
@@ -131,7 +126,7 @@ impl GraphParams {
     }
 }
 
-/// Fixed schedule used by A3 and A4 to exercise both workloads at
+/// Fixed schedule used by both stress modes to exercise both workloads at
 /// a few sizes. Plus a seeded-random tail picks parameters from
 /// the same domain so the workers visit the same param space the
 /// reference table covers.
@@ -255,11 +250,11 @@ fn build_reach_edges(p: GraphParams) -> Vec<(u32, u32)> {
 // ---------------------------------------------------------------
 // Stable result-set checksum: FNV-1a over sorted, encoded rows.
 // `DefaultHasher` is intentionally avoided — its semantics are
-// not stable across stdlib versions, and A4 forks must agree
+// not stable across stdlib versions, and fork-isolated children must agree
 // even across mildly different toolchain builds.
 // ---------------------------------------------------------------
 
-fn checksum_pairs(pairs: &mut Vec<(u32, u32)>) -> u64 {
+fn checksum_pairs(pairs: &mut [(u32, u32)]) -> u64 {
     pairs.sort();
     let mut h: u64 = 0xcbf29ce484222325;
     for (a, b) in pairs.iter() {
@@ -280,7 +275,7 @@ fn checksum_pairs(pairs: &mut Vec<(u32, u32)>) -> u64 {
 // Runtime-backed executor + provider builder. Locally copied from
 // `real_world_tests.rs` per the design rule: no shared-helper
 // refactor. The fixture is asserted to be active (the parent
-// will not start a stress run on the legacy path).
+// will not start a stress run without the required provider runtime).
 // ---------------------------------------------------------------
 
 struct DiscardSink;
@@ -301,30 +296,16 @@ struct RuntimeFixture {
 }
 
 fn build_runtime_fixture() -> Option<RuntimeFixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(TEST_BUDGET_BYTES as u64))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, TEST_BUDGET_BYTES));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(TEST_BUDGET_BYTES as u64),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let _device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let _pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeFixture {
         provider,
         _runtime: runtime,
@@ -399,16 +380,16 @@ const REACH_PROGRAM: &str = r#"
 /// is still exercised: every fresh fixture allocates against
 /// the same per-process CUDA primary context, the access-aware
 /// prepare/finish code paths run on every kernel launch, and
-/// concurrent threads in A3 hit the context concurrently.
+/// concurrent in-process workers hit the context concurrently.
 /// Sharing one fixture across iters is NOT required for that
 /// property; sharing the CUDA context (which we do) is.
 /// Process-wide mutex serializing the `xlog_logic::Compiler`
 /// step. The compiler's symbol-interning + relation-id table
-/// is process-global; under concurrent A3 thread compile calls
+/// is process-global; under concurrent in-process compile calls
 /// it produces inconsistent rel-id orderings that read out as
 /// per-thread drift in the result-set. Serializing compile is
 /// not a stream-safety concern (it sits above the GPU layer)
-/// and removes the noise so A3 measures what it's there to
+/// and removes the noise so the parallel stress measures what it is meant to
 /// measure.
 fn compile_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -469,7 +450,7 @@ fn run_workload_in(fx: &RuntimeFixture, p: GraphParams) -> Result<u64, String> {
 
 /// Original convenience: build a fresh runtime fixture for one
 /// iter. Equivalent to mode `per_iter` in the diagnostic
-/// matrix. Used by the reference-table builder and A4 children
+/// matrix. Used by the reference-table builder and fork-isolated children
 /// (where per-iter fresh is the desired semantics).
 fn run_workload_once(p: GraphParams) -> Result<u64, String> {
     let fx = build_runtime_fixture()
@@ -477,8 +458,8 @@ fn run_workload_once(p: GraphParams) -> Result<u64, String> {
     run_workload_in(&fx, p)
 }
 
-/// Diagnostic-matrix fixture-mode selector for A3 only. Set via
-/// `XLOG_A3_FIXTURE_MODE` to one of:
+/// Diagnostic-matrix fixture-mode selector for in-process stress. Set via
+/// `XLOG_PARALLEL_STRESS_FIXTURE_MODE` to one of:
 ///   * `per_iter` (default) — every iter builds a fresh runtime
 ///     fixture. Tests cross-runtime-churn under one CUDA primary
 ///     context.
@@ -489,29 +470,29 @@ fn run_workload_once(p: GraphParams) -> Result<u64, String> {
 ///     threads. Isolates whether one runtime under N concurrent
 ///     callers is safe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum A3FixtureMode {
+enum ParallelFixtureMode {
     PerIter,
     PerThread,
     Shared,
 }
 
-impl A3FixtureMode {
+impl ParallelFixtureMode {
     fn from_env() -> Self {
-        match std::env::var("XLOG_A3_FIXTURE_MODE")
+        match std::env::var("XLOG_PARALLEL_STRESS_FIXTURE_MODE")
             .as_deref()
             .map(str::trim)
         {
-            Ok("per_thread") => A3FixtureMode::PerThread,
-            Ok("shared") => A3FixtureMode::Shared,
-            _ => A3FixtureMode::PerIter,
+            Ok("per_thread") => ParallelFixtureMode::PerThread,
+            Ok("shared") => ParallelFixtureMode::Shared,
+            _ => ParallelFixtureMode::PerIter,
         }
     }
 
     fn name(self) -> &'static str {
         match self {
-            A3FixtureMode::PerIter => "per_iter",
-            A3FixtureMode::PerThread => "per_thread",
-            A3FixtureMode::Shared => "shared",
+            ParallelFixtureMode::PerIter => "per_iter",
+            ParallelFixtureMode::PerThread => "per_thread",
+            ParallelFixtureMode::Shared => "shared",
         }
     }
 }
@@ -519,7 +500,7 @@ impl A3FixtureMode {
 // ---------------------------------------------------------------
 // Reference table: per-`GraphParams`, what's the expected
 // checksum? Computed once on the parent against the runtime
-// fixture, then propagated to A4 children via JSON env.
+// fixture, then propagated to fork-isolated children through an environment value.
 // ---------------------------------------------------------------
 
 /// Compute the reference checksum table. With fresh
@@ -536,7 +517,7 @@ fn compute_reference_table(params: &[GraphParams]) -> Result<Vec<(GraphParams, u
 }
 
 // ---------------------------------------------------------------
-// A3 in-process parallel stress.
+// In-process parallel stress.
 // ---------------------------------------------------------------
 
 #[derive(Debug)]
@@ -592,24 +573,24 @@ fn schedule_for_worker(base_seed: u64, worker_id: usize, iters: usize) -> Vec<Gr
     sched
 }
 
-fn run_a3(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure> {
+fn run_parallel(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure> {
     let reference_map: std::collections::HashMap<GraphParams, u64> =
         reference.iter().copied().collect();
     let reference_arc = Arc::new(reference_map);
 
     // Pre-warm CUDA kernel modules in the parent thread before
-    // spawning A3 workers. First-launch module load on the CUDA
+    // spawning parallel workers. First-launch module load on the CUDA
     // primary context is fragile under concurrent attempts.
     for &p in reference.iter().map(|(p, _)| p) {
         let _ = run_workload_once(p);
     }
 
-    let mode = A3FixtureMode::from_env();
-    eprintln!("[A3] fixture mode = {}", mode.name());
+    let mode = ParallelFixtureMode::from_env();
+    eprintln!("[parallel stress] fixture mode = {}", mode.name());
 
     // For `Shared` mode, build the single fixture in the parent
     // and clone its Arcs into each thread.
-    let shared_fixture: Option<Arc<RuntimeFixture>> = if mode == A3FixtureMode::Shared {
+    let shared_fixture: Option<Arc<RuntimeFixture>> = if mode == ParallelFixtureMode::Shared {
         Some(Arc::new(
             build_runtime_fixture().expect("build_runtime_fixture for Shared mode"),
         ))
@@ -621,24 +602,24 @@ fn run_a3(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure
     let pass_counter = Arc::new(AtomicUsize::new(0));
 
     let reference = reference_arc;
-    let mut handles = Vec::with_capacity(A3_THREADS);
-    for tid in 0..A3_THREADS {
+    let mut handles = Vec::with_capacity(PARALLEL_THREADS);
+    for tid in 0..PARALLEL_THREADS {
         let reference = Arc::clone(&reference);
         let failures = Arc::clone(&failures);
         let pass_counter = Arc::clone(&pass_counter);
         let shared = shared_fixture.as_ref().map(Arc::clone);
         handles.push(thread::spawn(move || {
-            let schedule = schedule_for_worker(base_seed, tid, A3_ITERS_PER_THREAD);
+            let schedule = schedule_for_worker(base_seed, tid, PARALLEL_ITERS_PER_THREAD);
 
             // PerThread: each thread builds ONE fixture, reuses
             // for every iter. PerIter / Shared: handled inside
             // the loop.
             let per_thread_fx: Option<RuntimeFixture> = match mode {
-                A3FixtureMode::PerThread => Some(match build_runtime_fixture() {
+                ParallelFixtureMode::PerThread => Some(match build_runtime_fixture() {
                     Some(fx) => fx,
                     None => {
                         failures.lock().unwrap().push(StressFailure {
-                            worker_kind: "A3",
+                            worker_kind: "parallel",
                             worker_id: tid,
                             iter: 0,
                             params: schedule[0],
@@ -653,11 +634,11 @@ fn run_a3(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure
 
             for (it, p) in schedule.iter().enumerate() {
                 let result = match mode {
-                    A3FixtureMode::PerIter => run_workload_once(*p),
-                    A3FixtureMode::PerThread => {
+                    ParallelFixtureMode::PerIter => run_workload_once(*p),
+                    ParallelFixtureMode::PerThread => {
                         run_workload_in(per_thread_fx.as_ref().unwrap(), *p)
                     }
-                    A3FixtureMode::Shared => run_workload_in(shared.as_ref().unwrap(), *p),
+                    ParallelFixtureMode::Shared => run_workload_in(shared.as_ref().unwrap(), *p),
                 };
                 match result {
                     Ok(cs) => {
@@ -667,7 +648,7 @@ fn run_a3(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure
                             .expect("reference must cover all scheduled params");
                         if cs != expected {
                             failures.lock().unwrap().push(StressFailure {
-                                worker_kind: "A3",
+                                worker_kind: "parallel",
                                 worker_id: tid,
                                 iter: it,
                                 params: *p,
@@ -683,7 +664,7 @@ fn run_a3(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure
                     }
                     Err(msg) => {
                         failures.lock().unwrap().push(StressFailure {
-                            worker_kind: "A3",
+                            worker_kind: "parallel",
                             worker_id: tid,
                             iter: it,
                             params: *p,
@@ -697,12 +678,12 @@ fn run_a3(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure
         }));
     }
     for h in handles {
-        h.join().expect("A3 thread join");
+        h.join().expect("parallel stress thread join");
     }
-    let total = A3_THREADS * A3_ITERS_PER_THREAD;
+    let total = PARALLEL_THREADS * PARALLEL_ITERS_PER_THREAD;
     let passed = pass_counter.load(Ordering::Relaxed);
     eprintln!(
-        "[A3] pass={}/{} failures={}",
+        "[parallel stress] pass={}/{} failures={}",
         passed,
         total,
         failures.lock().unwrap().len()
@@ -711,17 +692,18 @@ fn run_a3(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure
 }
 
 // ---------------------------------------------------------------
-// A4 subprocess fork stress.
+// Fork-isolated subprocess stress.
 //
 // Parent serializes the reference table to a single env var
-// (`XLOG_A3A4_REFERENCE`), then spawns N children with
-// `XLOG_A3A4_CHILD=<id>` and `XLOG_A3A4_BASE_SEED=<seed>`.
-// Each child boots cold, runs `A4_ITERS_PER_CHILD` iters of a
+// (`XLOG_CROSS_STREAM_STRESS_REFERENCE`), then spawns N children with
+// `XLOG_CROSS_STREAM_STRESS_CHILD=<id>` and
+// `XLOG_CROSS_STREAM_STRESS_BASE_SEED=<seed>`.
+// Each child boots cold, runs `FORK_ITERS_PER_CHILD` iterations of a
 // per-child seeded schedule, exits 0 on full pass / non-zero on
 // any failure (with a structured failure line on stderr).
 // ---------------------------------------------------------------
 
-const A4_REFERENCE_ENV: &str = "XLOG_A3A4_REFERENCE";
+const FORK_REFERENCE_ENV: &str = "XLOG_CROSS_STREAM_STRESS_REFERENCE";
 
 fn serialize_reference(reference: &[(GraphParams, u64)]) -> String {
     // Tiny, brittle-on-purpose: each tuple as
@@ -768,28 +750,26 @@ fn parse_reference(s: &str) -> Vec<(GraphParams, u64)> {
         .collect()
 }
 
-fn run_a4(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure> {
+fn run_fork_isolated(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure> {
     let exe = std::env::current_exe().expect("current_exe");
     let reference_env = serialize_reference(reference);
     let mut failures: Vec<StressFailure> = Vec::new();
     let mut pass_count = 0usize;
 
-    for child_id in 0..A4_CHILDREN {
+    for child_id in 0..FORK_CHILDREN {
         let mut cmd = Command::new(&exe);
         // Re-invoke the SAME test binary, filtering to a single
-        // tiny test fn (`a4_child_marker`) that branches on the
+        // tiny test fn (`fork_child_marker`) that branches on the
         // child env var. `--exact` + `--nocapture` keep the
         // child output ungated by libtest filtering.
         cmd.arg("--test-threads=1")
             .arg("--exact")
             .arg("--nocapture")
-            .arg("a4_child_marker");
-        cmd.env(A4_CHILD_ENV, child_id.to_string());
+            .arg("fork_child_marker");
+        cmd.env(FORK_CHILD_ENV, child_id.to_string());
         cmd.env(BASE_SEED_ENV, base_seed.to_string());
-        cmd.env(A4_REFERENCE_ENV, &reference_env);
-        // Forward the recorded-runtime env to the child. The
-        // child asserts these are set, same as the parent.
-        cmd.env("XLOG_USE_DEVICE_RUNTIME", "1");
+        cmd.env(FORK_REFERENCE_ENV, &reference_env);
+        // Forward recorded-operator selection to the child.
         cmd.env("XLOG_USE_RECORDED_OPS", "1");
 
         let output = cmd.output();
@@ -801,7 +781,7 @@ fn run_a4(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure
                 let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
                 failures.push(StressFailure {
-                    worker_kind: "A4",
+                    worker_kind: "fork-isolated",
                     worker_id: child_id,
                     iter: 0,
                     params: FIXED_SCHEDULE[0],
@@ -816,7 +796,7 @@ fn run_a4(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure
             }
             Err(e) => {
                 failures.push(StressFailure {
-                    worker_kind: "A4",
+                    worker_kind: "fork-isolated",
                     worker_id: child_id,
                     iter: 0,
                     params: FIXED_SCHEDULE[0],
@@ -827,21 +807,21 @@ fn run_a4(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure
         }
     }
     eprintln!(
-        "[A4] pass={}/{} failures={}",
+        "[fork-isolated stress] pass={}/{} failures={}",
         pass_count,
-        A4_CHILDREN,
+        FORK_CHILDREN,
         failures.len()
     );
     failures
 }
 
-/// Marker test fn the A4 parent re-invokes via subprocess. Acts
+/// Marker test function the fork-isolated parent re-invokes via subprocess. Acts
 /// as the single entry point for child-mode work. When the
 /// child env var is unset, this is a no-op (so a normal
-/// `cargo test` run does not double-execute A4 work).
+/// `cargo test` run does not double-execute fork-isolated work).
 #[test]
-fn a4_child_marker() {
-    let Ok(child_id_s) = std::env::var(A4_CHILD_ENV) else {
+fn fork_child_marker() {
+    let Ok(child_id_s) = std::env::var(FORK_CHILD_ENV) else {
         return;
     };
     let child_id: usize = child_id_s.parse().expect("child id parse");
@@ -849,11 +829,11 @@ fn a4_child_marker() {
         .expect("BASE_SEED_ENV")
         .parse()
         .expect("base_seed parse");
-    let reference_env = std::env::var(A4_REFERENCE_ENV).expect("reference env");
+    let reference_env = std::env::var(FORK_REFERENCE_ENV).expect("reference env");
     let reference: std::collections::HashMap<GraphParams, u64> =
         parse_reference(&reference_env).into_iter().collect();
 
-    let schedule = schedule_for_worker(base_seed, child_id, A4_ITERS_PER_CHILD);
+    let schedule = schedule_for_worker(base_seed, child_id, FORK_ITERS_PER_CHILD);
     for (it, p) in schedule.iter().enumerate() {
         match run_workload_once(*p) {
             Ok(cs) => {
@@ -863,7 +843,7 @@ fn a4_child_marker() {
                     .expect("reference must cover scheduled params");
                 if cs != expected {
                     eprintln!(
-                        "[A4 child {} iter {} {}] checksum drift: got {:#x} expected {:#x}",
+                        "[fork-isolated child {} iter {} {}] checksum drift: got {:#x} expected {:#x}",
                         child_id,
                         it,
                         p.label(),
@@ -875,7 +855,7 @@ fn a4_child_marker() {
             }
             Err(msg) => {
                 eprintln!(
-                    "[A4 child {} iter {} {}] error: {}",
+                    "[fork-isolated child {} iter {} {}] error: {}",
                     child_id,
                     it,
                     p.label(),
@@ -888,7 +868,7 @@ fn a4_child_marker() {
     // Successful child exits via std::process::exit(0) below.
     // libtest would otherwise complete the test fn cleanly,
     // which already implies exit(0); we make it explicit so
-    // future libtest behavior changes don't silently break A4.
+    // future libtest behavior changes do not silently break fork isolation.
     std::process::exit(0);
 }
 
@@ -897,24 +877,9 @@ fn a4_child_marker() {
 // ---------------------------------------------------------------
 
 fn parent_env_check() -> Result<u64, String> {
-    // Diagnostic-mode escape hatch: when set, the harness skips
-    // the recorded-runtime env-var gate so the same binary can
-    // be re-run in modes that explicitly turn one or both env
-    // vars OFF (e.g., to compare drift on the legacy path).
-    let diag = std::env::var("XLOG_A3_DIAGNOSTIC")
-        .ok()
-        .filter(|v| !v.trim().is_empty() && v != "0")
-        .is_some();
-    if !diag {
-        let runtime = std::env::var("XLOG_USE_DEVICE_RUNTIME")
-            .ok()
-            .filter(|v| !v.trim().is_empty() && v != "0")
-            .ok_or_else(|| "XLOG_USE_DEVICE_RUNTIME not set".to_string())?;
-        let recorded = std::env::var("XLOG_USE_RECORDED_OPS")
-            .ok()
-            .filter(|v| !v.trim().is_empty() && v != "0")
-            .ok_or_else(|| "XLOG_USE_RECORDED_OPS not set".to_string())?;
-        let _ = (runtime, recorded);
+    match read_bool_env("XLOG_USE_RECORDED_OPS").map_err(|error| error.to_string())? {
+        Some(true) => {}
+        Some(false) | None => return Err("XLOG_USE_RECORDED_OPS is not enabled".to_string()),
     }
     let base_seed: u64 = std::env::var(BASE_SEED_ENV)
         .ok()
@@ -924,10 +889,10 @@ fn parent_env_check() -> Result<u64, String> {
 }
 
 #[test]
-fn a3_a4_stress() {
-    // If we are running as an A4 child, the marker test fn handles
+fn cross_stream_lifetime_stress() {
+    // If we are running as a fork-isolated child, the marker test handles
     // it; the parent test exits early.
-    if std::env::var(A4_CHILD_ENV).is_ok() {
+    if std::env::var(FORK_CHILD_ENV).is_ok() {
         return;
     }
 
@@ -935,46 +900,49 @@ fn a3_a4_stress() {
         Ok(s) => s,
         Err(why) => {
             eprintln!(
-                "[A3/A4 stress] SKIPPED: {} — gate command is \
-                 `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 \
-                 cargo test -p xlog-integration --test test_a3_a4_stress \
+                "[cross-stream lifetime stress] SKIPPED: {} — gate command is \
+                 `XLOG_USE_RECORDED_OPS=1 \
+                 cargo test -p xlog-integration --test test_cross_stream_lifetime_stress \
                  --release -- --test-threads=1 --nocapture`",
                 why
             );
             return;
         }
     };
-    eprintln!("[A3/A4 stress] base_seed={}", base_seed);
+    eprintln!("[cross-stream lifetime stress] base_seed={}", base_seed);
 
     let all_params = enumerate_all_params();
     eprintln!(
-        "[A3/A4 stress] computing reference for {} param tuples…",
+        "[cross-stream lifetime stress] computing reference for {} parameter tuples…",
         all_params.len()
     );
     let reference = match compute_reference_table(&all_params) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("[A3/A4 stress] reference table failed: {}", e);
+            eprintln!(
+                "[cross-stream lifetime stress] reference table failed: {}",
+                e
+            );
             // No CUDA → skip rather than fail, matching
             // real_world_tests behaviour.
             return;
         }
     };
     eprintln!(
-        "[A3/A4 stress] reference checksums computed (len={})",
+        "[cross-stream lifetime stress] reference checksums computed (len={})",
         reference.len()
     );
 
-    let a3_failures = run_a3(base_seed, &reference);
-    let a4_failures = run_a4(base_seed, &reference);
+    let parallel_failures = run_parallel(base_seed, &reference);
+    let fork_failures = run_fork_isolated(base_seed, &reference);
 
     let mut all = Vec::new();
-    all.extend(a3_failures);
-    all.extend(a4_failures);
+    all.extend(parallel_failures);
+    all.extend(fork_failures);
 
     if !all.is_empty() {
         eprintln!(
-            "\n[A3/A4 stress] FAILURE SUMMARY (first {})",
+            "\n[cross-stream lifetime stress] FAILURE SUMMARY (first {})",
             all.len().min(10)
         );
         for f in all.iter().take(10) {
@@ -999,21 +967,24 @@ fn a3_a4_stress() {
             .filter(|f| f.detail.contains("runtime leak"))
             .count();
         eprintln!(
-            "[A3/A4 stress] symptom tally: stream-misuse={} uaf={} drift={} leak={} other={}",
+            "[cross-stream lifetime stress] symptom tally: stream-misuse={} uaf={} drift={} leak={} other={}",
             stream_misuse,
             uaf,
             drift,
             leak,
             all.len() - stream_misuse - uaf - drift - leak,
         );
-        panic!("A3/A4 stress harness reported {} failures", all.len());
+        panic!(
+            "cross-stream lifetime stress harness reported {} failures",
+            all.len()
+        );
     }
 
     eprintln!(
-        "[A3/A4 stress] PASS — A3: {}/{} A4: {}/{}",
-        A3_THREADS * A3_ITERS_PER_THREAD,
-        A3_THREADS * A3_ITERS_PER_THREAD,
-        A4_CHILDREN,
-        A4_CHILDREN,
+        "[cross-stream lifetime stress] PASS — parallel: {}/{} fork-isolated: {}/{}",
+        PARALLEL_THREADS * PARALLEL_ITERS_PER_THREAD,
+        PARALLEL_THREADS * PARALLEL_ITERS_PER_THREAD,
+        FORK_CHILDREN,
+        FORK_CHILDREN,
     );
 }

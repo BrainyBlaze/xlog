@@ -28,7 +28,11 @@ use pyo3::prelude::*;
 /// TrainingHistory with epoch and batch losses
 #[pyfunction]
 #[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true, max_grad_norm=None, val_queries=None, patience=None))]
-pub fn train_model(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Python training function exposes its documented controls as named arguments"
+)]
+pub(crate) fn train_model(
     py: Python<'_>,
     program: &mut CompiledProgram,
     queries: Vec<String>,
@@ -111,7 +115,11 @@ pub fn train_model(
 /// Loss stays on CUDA device; .item() called once per batch only.
 #[pyfunction]
 #[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true, max_grad_norm=None, val_queries=None, patience=None))]
-pub fn train_model_tensor(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the GPU-native Python training function mirrors the scalar training API"
+)]
+pub(crate) fn train_model_tensor(
     py: Python<'_>,
     program: &mut CompiledProgram,
     queries: Vec<String>,

@@ -3474,7 +3474,10 @@ impl CudaKernelProvider {
     ///   column is not plain U32, the manager has no runtime, the launch
     ///   stream does not resolve, an input is not 2-column U32/Symbol, or
     ///   any kernel launch fails.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the recorded four-cycle aggregate mirrors its four inputs, aggregate selector, work unit, and stream"
+    )]
     pub fn wcoj_4cycle_groupby_root_agg_u32_recorded(
         &self,
         e1: &CudaBuffer,
@@ -4741,7 +4744,10 @@ impl CudaKernelProvider {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "metadata boundary marking mirrors the fixed u32 kernel ABI and its scratch/output owners"
+    )]
     fn mark_metadata_boundaries_u32(
         &self,
         input: &CudaBuffer,
@@ -4829,7 +4835,10 @@ impl CudaKernelProvider {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "metadata boundary marking mirrors the fixed u64 kernel ABI and its scratch/output owners"
+    )]
     fn mark_metadata_boundaries_u64(
         &self,
         input: &CudaBuffer,
@@ -4917,7 +4926,10 @@ impl CudaKernelProvider {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "u32 metadata scattering mirrors the fixed kernel ABI and all device output owners"
+    )]
     fn scatter_metadata_u32(
         &self,
         input: &CudaBuffer,
@@ -5007,7 +5019,10 @@ impl CudaKernelProvider {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "u64 metadata scattering mirrors the fixed kernel ABI and all device output owners"
+    )]
     fn scatter_metadata_u64(
         &self,
         input: &CudaBuffer,

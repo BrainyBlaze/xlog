@@ -2,21 +2,14 @@ use std::sync::Arc;
 
 use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::CudaKernelProvider;
 use xlog_prob::compilation::gpu_pir::{GpuPirGraph, PIR_AND, PIR_LIT, PIR_NEG_LIT, PIR_OR};
 use xlog_prob::pir::{LeafId, PirGraph};
 
 fn try_provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
-            return None;
-        }
-    };
-    let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GiB
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    match CudaKernelProvider::new(device, memory) {
+    match xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+        .build()
+    {
         Ok(p) => Some(Arc::new(p)),
         Err(e) => {
             eprintln!(

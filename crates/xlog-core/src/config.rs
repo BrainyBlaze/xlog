@@ -1,5 +1,7 @@
 //! Configuration types for XLOG runtime
 
+use crate::{resolve_bool, Result};
+
 /// GPU memory budget configuration.
 ///
 /// Use [`MemoryBudget::default()`] or the builder methods ([`MemoryBudget::from_device_memory`],
@@ -80,8 +82,8 @@ pub struct RuntimeConfig {
     /// (`XLOG_USE_WCOJ_TRIANGLE_U32`). `None` (default) consults
     /// the env var; `Some(true)` / `Some(false)` force the
     /// runtime to ignore the env and use the explicit value.
-    /// Test-only knob — production callers should leave this
-    /// `None` and configure via the env var.
+    /// Typed configuration is preferred for production callers that own a
+    /// runtime instance; `None` permits process-level environment configuration.
     pub wcoj_triangle_dispatch: Option<bool>,
     /// Override the stats-backed WCOJ triangle dispatch gate.
     /// `None` uses the production default. `Some(true)` enables
@@ -91,7 +93,7 @@ pub struct RuntimeConfig {
     /// Runtime-local hard stop for WCOJ triangle dispatch.
     /// `Some(true)` pins dispatch off across force and stats mode.
     /// `Some(false)` leaves dispatch available for this runtime.
-    /// `None` uses the production default.
+    /// `None` consults `XLOG_DISABLE_WCOJ_TRIANGLE`; unset defaults to `false`.
     pub wcoj_triangle_dispatch_disabled: Option<bool>,
 
     /// Force gate for the 4-cycle WCOJ dispatch.
@@ -201,7 +203,7 @@ impl RuntimeConfig {
     /// Override the env-driven WCOJ triangle dispatch gate. Pass
     /// `Some(true)` / `Some(false)` to force the runtime to ignore
     /// `XLOG_USE_WCOJ_TRIANGLE_U32`; `None` to consult the env var
-    /// (the production default). Test-only knob.
+    /// (the process-level configuration path).
     pub fn with_wcoj_triangle_dispatch(mut self, override_value: Option<bool>) -> Self {
         self.wcoj_triangle_dispatch = override_value;
         self
@@ -294,35 +296,13 @@ impl RuntimeConfig {
     }
 
     /// Resolve runtime common subexpression elimination by config/env/default.
-    pub fn resolved_common_subexpression_elimination(&self) -> bool {
-        if let Some(enabled) = self.common_subexpression_elimination {
-            return enabled;
-        }
-
-        std::env::var("XLOG_CSE")
-            .map(|raw| {
-                matches!(
-                    raw.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "on" | "yes"
-                )
-            })
-            .unwrap_or(false)
+    pub fn resolved_common_subexpression_elimination(&self) -> Result<bool> {
+        resolve_bool(self.common_subexpression_elimination, "XLOG_CSE", false)
     }
 
     /// Resolve adaptive runtime re-optimization by config/env/default.
-    pub fn resolved_adaptive_reoptimization(&self) -> bool {
-        if let Some(enabled) = self.adaptive_reoptimization {
-            return enabled;
-        }
-
-        std::env::var("XLOG_ADAPTIVE_REOPT")
-            .map(|raw| {
-                matches!(
-                    raw.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "on" | "yes"
-                )
-            })
-            .unwrap_or(false)
+    pub fn resolved_adaptive_reoptimization(&self) -> Result<bool> {
+        resolve_bool(self.adaptive_reoptimization, "XLOG_ADAPTIVE_REOPT", false)
     }
 
     /// Resolve the deterministic mis-plan threshold for adaptive re-optimization.
@@ -340,35 +320,21 @@ impl RuntimeConfig {
     }
 
     /// Resolve persistent hash-index reuse by config/env/default.
-    pub fn resolved_persistent_hash_indexes(&self) -> bool {
-        if let Some(enabled) = self.persistent_hash_indexes {
-            return enabled;
-        }
-
-        std::env::var("XLOG_PERSISTENT_HASH_INDEXES")
-            .map(|raw| {
-                !matches!(
-                    raw.trim().to_ascii_lowercase().as_str(),
-                    "0" | "false" | "off" | "no"
-                )
-            })
-            .unwrap_or(true)
+    pub fn resolved_persistent_hash_indexes(&self) -> Result<bool> {
+        resolve_bool(
+            self.persistent_hash_indexes,
+            "XLOG_PERSISTENT_HASH_INDEXES",
+            true,
+        )
     }
 
     /// Resolve background-build telemetry for persistent hash indexes.
-    pub fn resolved_persistent_hash_index_background_build(&self) -> bool {
-        if let Some(enabled) = self.persistent_hash_index_background_build {
-            return enabled;
-        }
-
-        std::env::var("XLOG_PERSISTENT_HASH_INDEX_BACKGROUND_BUILD")
-            .map(|raw| {
-                matches!(
-                    raw.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "on" | "yes"
-                )
-            })
-            .unwrap_or(false)
+    pub fn resolved_persistent_hash_index_background_build(&self) -> Result<bool> {
+        resolve_bool(
+            self.persistent_hash_index_background_build,
+            "XLOG_PERSISTENT_HASH_INDEX_BACKGROUND_BUILD",
+            false,
+        )
     }
 
     /// Resolve the effective WCOJ cost-model selector.
@@ -397,6 +363,36 @@ fn sanitize_adaptive_reoptimization_ratio(value: f64, fallback: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::XlogError;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvRestore {
+        name: &'static str,
+        value: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn capture(name: &'static str) -> Self {
+            Self {
+                name,
+                value: std::env::var_os(name),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.value.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     #[test]
     fn test_memory_budget_default() {
@@ -410,6 +406,27 @@ mod tests {
         let config = RuntimeConfig::default();
         assert!(config.deterministic);
         assert!(!config.profile);
+    }
+
+    #[test]
+    fn explicit_boolean_config_precedes_invalid_environment() {
+        let _guard = env_lock().lock().unwrap();
+        let _restore = EnvRestore::capture("XLOG_CSE");
+        std::env::set_var("XLOG_CSE", "invalid");
+        let config = RuntimeConfig::default().with_common_subexpression_elimination(Some(false));
+        assert!(!config.resolved_common_subexpression_elimination().unwrap());
+    }
+
+    #[test]
+    fn malformed_boolean_environment_is_a_typed_error() {
+        let _guard = env_lock().lock().unwrap();
+        let _restore = EnvRestore::capture("XLOG_PERSISTENT_HASH_INDEXES");
+        std::env::set_var("XLOG_PERSISTENT_HASH_INDEXES", "sometimes");
+        assert!(matches!(
+            RuntimeConfig::default().resolved_persistent_hash_indexes(),
+            Err(XlogError::Configuration { ref name, .. })
+                if name == "XLOG_PERSISTENT_HASH_INDEXES"
+        ));
     }
 
     #[test]

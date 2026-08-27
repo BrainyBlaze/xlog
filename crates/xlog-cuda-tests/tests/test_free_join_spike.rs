@@ -19,15 +19,10 @@ use std::sync::Arc;
 use cudarc::driver::sys;
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamPool};
 use xlog_cuda::memory::{CudaBuffer, CudaColumn};
 use xlog_cuda::wcoj_metadata::WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT;
-use xlog_cuda::{
-    CudaDevice, CudaKernelProvider, FjNode, FjPlan, FjSubAtom, GpuMemoryManager, JoinType,
-};
+use xlog_cuda::{CudaKernelProvider, FjNode, FjPlan, FjSubAtom, GpuMemoryManager, JoinType};
 
 struct DiscardSink;
 impl LoggingSink for DiscardSink {
@@ -42,31 +37,20 @@ struct Fixture {
     pool: Arc<StreamPool>,
 }
 
+type BinaryRows = Vec<(u32, u32)>;
+type FourBinaryRelations = (BinaryRows, BinaryRows, BinaryRows, BinaryRows);
+
 fn make_fixture_with_budget(budget_bytes: u64) -> Option<Fixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(budget_bytes))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, budget_bytes as usize));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(budget_bytes),
-        runtime,
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let _device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some(Fixture {
         memory,
         provider,
@@ -145,8 +129,10 @@ fn download_u32_column(
         assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS, "dtoh column copy");
     }
     bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect()
 }
 
@@ -583,12 +569,7 @@ fn fj_rejects_unbound_probe_vars() {
 ///   U: 3 b values for the single z* = 7*64 + 3       (|U| = 3)
 /// Left-deep binary intermediates: |R join S| = 100_000,
 /// |R join S join T| = 5_000_000 >> |Q| = 6000.
-fn blowup_chain_fixture() -> (
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-) {
+fn blowup_chain_fixture() -> FourBinaryRelations {
     let mut r = Vec::new();
     for x in 0..2000u32 {
         r.push((0u32, x));
@@ -1046,8 +1027,10 @@ fn download_u64_column(
         assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS, "dtoh column copy");
     }
     bytes
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect()
 }
 
@@ -1307,12 +1290,7 @@ fn fj_count_by_root_matches_oracle() {
 /// single hot z. Expected: count(a) = 100*10*(600 + 9*20) = 780_000
 /// per hub (analytic — the host oracle would be O(10^9) here; the
 /// binary baseline's independently-computed groupby cross-checks it).
-fn count_gate_fixture() -> (
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-    Vec<(u32, u32)>,
-) {
+fn count_gate_fixture() -> FourBinaryRelations {
     let mut r = Vec::new();
     for a in 0..10u32 {
         for i in 0..100u32 {

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Barrier, Mutex, MutexGuard, OnceLock};
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, CudaProviderBuilder};
 use xlog_logic::epistemic::compile_epistemic_gpu_execution;
 use xlog_logic::parse_program;
 use xlog_prob::epistemic::AcceptedWorldViewEvidence;
@@ -75,21 +75,7 @@ fn try_provider() -> Option<LockedCudaProvider> {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let device = match CudaDevice::new(0) {
-        Ok(device) => Arc::new(device),
-        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
-        }
-        Err(error) => {
-            eprintln!("Skipping test: CUDA unavailable: {error}");
-            return None;
-        }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1024 * 1024 * 1024),
-    ));
-    match CudaKernelProvider::new(device, memory) {
+    match CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024)).build() {
         Ok(provider) => Some(LockedCudaProvider {
             _guard: guard,
             provider: Arc::new(provider),

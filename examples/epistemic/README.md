@@ -21,7 +21,7 @@ cargo run -q -p xlog-cli -- run examples/epistemic/06-eir-candidate-enumeration.
 cargo run -q -p xlog-cli -- run examples/epistemic/09-joint-multi-epistemic.xlog
 cargo run -q -p xlog-cli -- run examples/epistemic/12-bound-variable-splitting.xlog
 # validate all of them through xlog run (requires CUDA):
-XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_run_epistemic_examples
+cargo test -p xlog-cli --test run_cli_tests test_xlog_run_epistemic_examples
 ```
 
 | Example | Fixture path | Showcases |

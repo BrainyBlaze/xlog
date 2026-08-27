@@ -1,25 +1,20 @@
 use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig};
 use xlog_prob::gpu::GpuXgcf;
 use xlog_prob::xgcf::{Xgcf, XgcfNodeType};
 
 #[test]
 fn gpu_eval_device_only_matches_cached_eval() {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
-            return;
-        }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1 << 30),
-    ));
-    let provider = Arc::new(CudaKernelProvider::new(device, memory).expect("provider"));
+    let provider =
+        match xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1 << 30)).build() {
+            Ok(provider) => Arc::new(provider),
+            Err(e) => {
+                eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
+                return;
+            }
+        };
 
     let circuit = Xgcf {
         node_type: vec![XgcfNodeType::Lit],

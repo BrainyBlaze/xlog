@@ -68,7 +68,7 @@ fn test_edge_case_sizes(ctx: &TestContext) -> TestResult {
 
         // Create alternating mask: 1, 0, 1, 0, ... (keeps even indices)
         let mask: Vec<u8> = (0..size).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect();
-        let expected_count = (size + 1) / 2; // Ceiling division for odd sizes
+        let expected_count = size.div_ceil(2); // Ceiling division for odd sizes
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
             Ok(f) => f,
@@ -217,14 +217,14 @@ fn test_off_by_one_filter(ctx: &TestContext) -> TestResult {
         }
 
         // Verify all included elements are present (0 to size-2)
-        for i in 0..(size - 1) {
-            if filtered_data[i] != i as u32 {
+        for (i, &actual) in filtered_data.iter().take(size - 1).enumerate() {
+            if actual != i as u32 {
                 return TestResult::error(
                     "test_off_by_one_filter",
                     start.elapsed(),
                     format!(
                         "Size {}: filtered[{}] = {}, expected {}",
-                        size, i, filtered_data[i], i
+                        size, i, actual, i
                     ),
                 );
             }
@@ -344,15 +344,15 @@ fn test_off_by_one_sort(ctx: &TestContext) -> TestResult {
         // Original: key[i] = size-1-i, val[i] = i*10
         // After sort by key: sorted_keys[j] = j, so original index was size-1-j
         // Therefore sorted_vals[j] = (size-1-j)*10
-        for i in 0..size {
+        for (i, &actual) in sorted_vals.iter().take(size).enumerate() {
             let expected_val = ((size - 1 - i) * 10) as u32;
-            if sorted_vals[i] != expected_val {
+            if actual != expected_val {
                 return TestResult::error(
                     "test_off_by_one_sort",
                     start.elapsed(),
                     format!(
                         "Size {}: sorted_vals[{}] = {}, expected {}",
-                        size, i, sorted_vals[i], expected_val
+                        size, i, actual, expected_val
                     ),
                 );
             }
@@ -834,7 +834,7 @@ fn test_multi_column_strides(ctx: &TestContext) -> TestResult {
         );
 
         // Test with different sizes
-        for size in [100, 256, 1000] {
+        for size in [100usize, 256, 1000] {
             // Create columns: col[c][i] = c * 1000 + i
             let columns: Vec<Vec<u32>> = (0..num_cols)
                 .map(|c| (0..size).map(|i| (c * 1000 + i) as u32).collect())
@@ -861,7 +861,7 @@ fn test_multi_column_strides(ctx: &TestContext) -> TestResult {
 
             // Apply alternating mask (filter every other row)
             let mask: Vec<u8> = (0..size).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect();
-            let expected_count = (size + 1) / 2;
+            let expected_count = size.div_ceil(2);
 
             let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
                 Ok(f) => f,

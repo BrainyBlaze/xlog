@@ -7,6 +7,19 @@ All notable changes to this project are documented in this file.
 ### Changed
 
 - *(gpu)* [**breaking**] bind reusable materialized stores and retained session runtimes to the exact compiled `LogicProgram`. Cached evaluation and relation-delta cache parameters now use the opaque `LogicMaterializedStore` returned by `evaluate_with_relation_store_and_cache` or `evaluate_with_session_runtime`; use `as_relation_store` for read-only result inspection. Raw `RelationStore` values remain supported as authoritative input stores but can no longer be supplied as trusted derived caches.
+- *(runtime)* expose actual WCOJ-family fallback executions by attempted route, separately from pipeline-error declines.
+- *(configuration)* apply one strict boolean parser to production environment switches in runtime, build, diagnostics, benchmarks, solver tracing, and Python bindings.
+- *(python)* define `trainable_rule` and `train` as Python training-document declarations lowered through the native XLOG compiler, distinct from native `learnable(mask)` rules.
+
+### Fixed
+
+- *(runtime)* encode each resident-route certificate node from its local fields once, avoiding repeated recursive plan formatting for deep unary plans while preserving exact expression constants and route identity.
+- *(runtime)* preserve nullary schemas when initializing mutually recursive predicates.
+- *(runtime)* serialize execution statistics through a JSON encoder so diagnostic text and operation names are escaped correctly.
+- *(runtime)* honor `RuntimeConfig.max_iterations` in every fixpoint execution path.
+- *(cuda)* compose lifecycle logging outside the shared byte budget so rejected allocations remain observable.
+- *(python)* release the GIL during exact, Monte Carlo, device, compiled-logic, and retained-session evaluation.
+- *(python)* preserve registered neural-network lineage metadata alongside defensively copied influence records and reject records for unregistered networks.
 
 ## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.11.0...xlog-cli-v0.12.0) - 2026-08-06
 
@@ -3135,7 +3148,7 @@ unchanged; the new path is opt-in via
   --release` passes **206/206**; legacy default still passes
   206/206.
 - **A3/A4 cross-stream lifetime stress harness**
-  (`crates/xlog-integration/tests/test_a3_a4_stress.rs`,
+(`crates/xlog-integration/tests/test_cross_stream_lifetime_stress.rs`,
   `27ec3bd9` + `a01b51fa`). Two workloads (`friends`
   sort+hash-join sensitive, `reach` recursive fixed-point +
   joins). Stable FNV-1a checksums, fixed schedule + seeded
@@ -3213,7 +3226,7 @@ unchanged; the new path is opt-in via
 ### Known Issues (not release blockers)
 
 - **A3 in-process thread-of-N drift on
-  `test_a3_a4_stress`**: 8 threads × 32 iters produce ~3%
+`test_cross_stream_lifetime_stress`**: 8 threads × 32 iters produce ~3%
   checksum drift on recursive Datalog workloads. The 5-mode
   diagnostic matrix demonstrates this is **NOT v0.6.0
   stream-safety regression** — drift fires identically on the

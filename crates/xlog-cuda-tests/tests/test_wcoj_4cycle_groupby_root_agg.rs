@@ -14,13 +14,10 @@ use std::sync::Arc;
 use cudarc::driver::sys;
 
 use xlog_core::{AggOp, MemoryBudget, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamPool};
 use xlog_cuda::memory::{CudaBuffer, CudaColumn};
 use xlog_cuda::wcoj_metadata::{Wcoj4CycleRootAggValue, WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaKernelProvider, GpuMemoryManager};
 
 struct DiscardSink;
 impl LoggingSink for DiscardSink {
@@ -36,30 +33,16 @@ struct Fixture {
 }
 
 fn make_fixture() -> Option<Fixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(512 * 1024 * 1024))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 512 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(512 * 1024 * 1024),
-        runtime,
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let _device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some(Fixture {
         memory,
         provider,
@@ -144,8 +127,10 @@ fn download_u32_column(
     col: usize,
 ) -> Vec<u32> {
     download_column_bytes(memory, buffer, col, 4)
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect()
 }
 
@@ -155,8 +140,10 @@ fn download_u64_column(
     col: usize,
 ) -> Vec<u64> {
     download_column_bytes(memory, buffer, col, 8)
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect()
 }
 
@@ -287,13 +274,11 @@ fn value_col(value: Wcoj4CycleRootAggValue) -> usize {
 fn baseline_buffer(
     fix: &Fixture,
     stream: xlog_cuda::device_runtime::StreamId,
-    e1: &CudaBuffer,
-    e2: &CudaBuffer,
-    e3: &CudaBuffer,
-    e4: &CudaBuffer,
+    edges: [&CudaBuffer; 4],
     agg_op: AggOp,
     value: Wcoj4CycleRootAggValue,
 ) -> CudaBuffer {
+    let [e1, e2, e3, e4] = edges;
     let quads = fix
         .provider
         .wcoj_4cycle_hg_u32_recorded(e1, e2, e3, e4, WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT, stream)
@@ -306,13 +291,11 @@ fn baseline_buffer(
 fn fused_buffer(
     fix: &Fixture,
     stream: xlog_cuda::device_runtime::StreamId,
-    e1: &CudaBuffer,
-    e2: &CudaBuffer,
-    e3: &CudaBuffer,
-    e4: &CudaBuffer,
+    edges: [&CudaBuffer; 4],
     agg_op: AggOp,
     value: Wcoj4CycleRootAggValue,
 ) -> CudaBuffer {
+    let [e1, e2, e3, e4] = edges;
     fix.provider
         .wcoj_4cycle_groupby_root_agg_u32_recorded(
             e1,
@@ -356,13 +339,13 @@ fn run_case(
     ] {
         // Sum (U64 output).
         let expected = oracle_sums(e1_rows, e2_rows, e3_rows, e4_rows, value);
-        let baseline = baseline_buffer(&fix, stream, &e1, &e2, &e3, &e4, AggOp::Sum, value);
+        let baseline = baseline_buffer(&fix, stream, [&e1, &e2, &e3, &e4], AggOp::Sum, value);
         assert_eq!(
             download_groups_u64(&fix.memory, &baseline),
             expected,
             "{name}/{value:?}: unfused sum baseline vs oracle"
         );
-        let fused = fused_buffer(&fix, stream, &e1, &e2, &e3, &e4, AggOp::Sum, value);
+        let fused = fused_buffer(&fix, stream, [&e1, &e2, &e3, &e4], AggOp::Sum, value);
         assert_eq!(
             download_groups_u64(&fix.memory, &fused),
             expected,
@@ -371,13 +354,13 @@ fn run_case(
 
         // Min (U32 output).
         let expected = oracle_mins(e1_rows, e2_rows, e3_rows, e4_rows, value);
-        let baseline = baseline_buffer(&fix, stream, &e1, &e2, &e3, &e4, AggOp::Min, value);
+        let baseline = baseline_buffer(&fix, stream, [&e1, &e2, &e3, &e4], AggOp::Min, value);
         assert_eq!(
             download_groups_u32(&fix.memory, &baseline),
             expected,
             "{name}/{value:?}: unfused min baseline vs oracle"
         );
-        let fused = fused_buffer(&fix, stream, &e1, &e2, &e3, &e4, AggOp::Min, value);
+        let fused = fused_buffer(&fix, stream, [&e1, &e2, &e3, &e4], AggOp::Min, value);
         assert_eq!(
             download_groups_u32(&fix.memory, &fused),
             expected,
@@ -386,13 +369,13 @@ fn run_case(
 
         // Max (U32 output).
         let expected = oracle_maxs(e1_rows, e2_rows, e3_rows, e4_rows, value);
-        let baseline = baseline_buffer(&fix, stream, &e1, &e2, &e3, &e4, AggOp::Max, value);
+        let baseline = baseline_buffer(&fix, stream, [&e1, &e2, &e3, &e4], AggOp::Max, value);
         assert_eq!(
             download_groups_u32(&fix.memory, &baseline),
             expected,
             "{name}/{value:?}: unfused max baseline vs oracle"
         );
-        let fused = fused_buffer(&fix, stream, &e1, &e2, &e3, &e4, AggOp::Max, value);
+        let fused = fused_buffer(&fix, stream, [&e1, &e2, &e3, &e4], AggOp::Max, value);
         assert_eq!(
             download_groups_u32(&fix.memory, &fused),
             expected,
@@ -475,10 +458,7 @@ fn cycle4_groupby_root_agg_bag_semantics_duplicate_projected_values() {
     let fused = fused_buffer(
         &fix,
         stream,
-        &e1_b,
-        &e2_b,
-        &e3_b,
-        &e4_b,
+        [&e1_b, &e2_b, &e3_b, &e4_b],
         AggOp::Sum,
         Wcoj4CycleRootAggValue::Z,
     );
@@ -515,10 +495,7 @@ fn cycle4_groupby_root_agg_empty_intersection_roots_are_absent() {
         let fused = fused_buffer(
             &fix,
             stream,
-            &e1_b,
-            &e2_b,
-            &e3_b,
-            &e4_b,
+            [&e1_b, &e2_b, &e3_b, &e4_b],
             agg,
             Wcoj4CycleRootAggValue::Z,
         );
@@ -555,10 +532,7 @@ fn cycle4_groupby_root_agg_sum_zero_valued_groups_are_present() {
     let fused = fused_buffer(
         &fix,
         stream,
-        &e1_b,
-        &e2_b,
-        &e3_b,
-        &e4_b,
+        [&e1_b, &e2_b, &e3_b, &e4_b],
         AggOp::Sum,
         Wcoj4CycleRootAggValue::X,
     );
@@ -707,13 +681,13 @@ fn wcoj_4cycle_groupby_root_agg_measurement_fused_vs_unfused() {
         match agg {
             AggOp::Sum => {
                 let expected = oracle_sums(&e1_rows, &e2_rows, &e3_rows, &e4_rows, value);
-                let warm = fused_buffer(&fix, stream, &e1, &e2, &e3, &e4, agg, value);
+                let warm = fused_buffer(&fix, stream, [&e1, &e2, &e3, &e4], agg, value);
                 assert_eq!(
                     download_groups_u64(&fix.memory, &warm),
                     expected,
                     "{agg:?}: fused parity"
                 );
-                let base = baseline_buffer(&fix, stream, &e1, &e2, &e3, &e4, agg, value);
+                let base = baseline_buffer(&fix, stream, [&e1, &e2, &e3, &e4], agg, value);
                 assert_eq!(
                     download_groups_u64(&fix.memory, &base),
                     expected,
@@ -725,13 +699,13 @@ fn wcoj_4cycle_groupby_root_agg_measurement_fused_vs_unfused() {
                     AggOp::Min => oracle_mins(&e1_rows, &e2_rows, &e3_rows, &e4_rows, value),
                     _ => oracle_maxs(&e1_rows, &e2_rows, &e3_rows, &e4_rows, value),
                 };
-                let warm = fused_buffer(&fix, stream, &e1, &e2, &e3, &e4, agg, value);
+                let warm = fused_buffer(&fix, stream, [&e1, &e2, &e3, &e4], agg, value);
                 assert_eq!(
                     download_groups_u32(&fix.memory, &warm),
                     expected,
                     "{agg:?}: fused parity"
                 );
-                let base = baseline_buffer(&fix, stream, &e1, &e2, &e3, &e4, agg, value);
+                let base = baseline_buffer(&fix, stream, [&e1, &e2, &e3, &e4], agg, value);
                 assert_eq!(
                     download_groups_u32(&fix.memory, &base),
                     expected,
@@ -744,13 +718,13 @@ fn wcoj_4cycle_groupby_root_agg_measurement_fused_vs_unfused() {
         let mut fused_ms = Vec::with_capacity(REPS);
         for _ in 0..REPS {
             let t = std::time::Instant::now();
-            let base = baseline_buffer(&fix, stream, &e1, &e2, &e3, &e4, agg, value);
+            let base = baseline_buffer(&fix, stream, [&e1, &e2, &e3, &e4], agg, value);
             fix.provider.device().inner().synchronize().expect("sync");
             unfused_ms.push(t.elapsed().as_secs_f64() * 1e3);
             drop(base);
 
             let t = std::time::Instant::now();
-            let fused = fused_buffer(&fix, stream, &e1, &e2, &e3, &e4, agg, value);
+            let fused = fused_buffer(&fix, stream, [&e1, &e2, &e3, &e4], agg, value);
             fix.provider.device().inner().synchronize().expect("sync");
             fused_ms.push(t.elapsed().as_secs_f64() * 1e3);
             drop(fused);

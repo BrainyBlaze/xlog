@@ -251,7 +251,7 @@ impl TinyXgcfDevice {
             return Ok(());
         }
         let block_size = 256u32;
-        let num_blocks = (num_level_nodes + block_size - 1) / block_size;
+        let num_blocks = num_level_nodes.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -304,7 +304,7 @@ impl TinyXgcfDevice {
                 level_u32.as_kernel_param(),
                 (&self.d_var_log_true).as_kernel_param(),
                 (&self.d_var_log_false).as_kernel_param(),
-                (&mut self.d_values).as_kernel_param(),
+                (&self.d_values).as_kernel_param(),
             ];
             Self::launch_level_cached(&self.forward_fn, len, &mut params)?;
         }
@@ -374,7 +374,7 @@ impl TinyXgcfDevice {
                 (&self.d_var_log_true).as_kernel_param(),
                 (&self.d_var_log_false).as_kernel_param(),
                 (&self.d_values).as_kernel_param(),
-                (&mut self.d_adj).as_kernel_param(),
+                (&self.d_adj).as_kernel_param(),
             ];
             Self::launch_level_cached(&self.backward_propagate_fn, len, &mut params)?;
         }
@@ -393,8 +393,8 @@ impl TinyXgcfDevice {
                 (&self.d_var_log_false).as_kernel_param(),
                 (&self.d_values).as_kernel_param(),
                 (&self.d_adj).as_kernel_param(),
-                (&mut self.d_grad_true).as_kernel_param(),
-                (&mut self.d_grad_false).as_kernel_param(),
+                (&self.d_grad_true).as_kernel_param(),
+                (&self.d_grad_false).as_kernel_param(),
             ];
             Self::launch_level_cached(&self.backward_decision_grad_fn, len, &mut params)?;
         }
@@ -408,8 +408,8 @@ impl TinyXgcfDevice {
                 (&self.d_level_offsets).as_kernel_param(),
                 level_u32.as_kernel_param(),
                 (&self.d_adj).as_kernel_param(),
-                (&mut self.d_grad_true).as_kernel_param(),
-                (&mut self.d_grad_false).as_kernel_param(),
+                (&self.d_grad_true).as_kernel_param(),
+                (&self.d_grad_false).as_kernel_param(),
             ];
             Self::launch_level_cached(&self.backward_lit_grad_fn, len, &mut params)?;
         }
@@ -543,7 +543,7 @@ fn launch_level(
         })?;
 
     let block_size = 256u32;
-    let num_blocks = (num_level_nodes + block_size - 1) / block_size;
+    let num_blocks = num_level_nodes.div_ceil(block_size);
     let config = LaunchConfig {
         grid_dim: (num_blocks, 1, 1),
         block_dim: (block_size, 1, 1),
@@ -653,7 +653,7 @@ pub fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<V
             level_u32.as_kernel_param(),
             (&d_var_log_true).as_kernel_param(),
             (&d_var_log_false).as_kernel_param(),
-            (&mut d_values).as_kernel_param(),
+            (&d_values).as_kernel_param(),
         ];
         launch_level(ctx, circuit_kernels::XGCF_FORWARD_LEVEL, len, &mut params)?;
     }
@@ -743,7 +743,7 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
             level_u32.as_kernel_param(),
             (&d_var_log_true).as_kernel_param(),
             (&d_var_log_false).as_kernel_param(),
-            (&mut d_values).as_kernel_param(),
+            (&d_values).as_kernel_param(),
         ];
         launch_level(ctx, circuit_kernels::XGCF_FORWARD_LEVEL, len, &mut params)?;
     }
@@ -785,7 +785,7 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
             (&d_var_log_true).as_kernel_param(),
             (&d_var_log_false).as_kernel_param(),
             (&d_values).as_kernel_param(),
-            (&mut d_adj).as_kernel_param(),
+            (&d_adj).as_kernel_param(),
         ];
         launch_level(
             ctx,
@@ -809,8 +809,8 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
             (&d_var_log_false).as_kernel_param(),
             (&d_values).as_kernel_param(),
             (&d_adj).as_kernel_param(),
-            (&mut d_grad_true).as_kernel_param(),
-            (&mut d_grad_false).as_kernel_param(),
+            (&d_grad_true).as_kernel_param(),
+            (&d_grad_false).as_kernel_param(),
         ];
         launch_level(
             ctx,
@@ -829,8 +829,8 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
             (&d_level_offsets).as_kernel_param(),
             level_u32.as_kernel_param(),
             (&d_adj).as_kernel_param(),
-            (&mut d_grad_true).as_kernel_param(),
-            (&mut d_grad_false).as_kernel_param(),
+            (&d_grad_true).as_kernel_param(),
+            (&d_grad_false).as_kernel_param(),
         ];
         launch_level(
             ctx,
@@ -1118,9 +1118,7 @@ pub fn gen_large_or_circuit(num_vars: usize) -> TinyXgcfSpec {
 
     let grad_per_lit = 1.0 / num_vars as f64;
     let mut expected_grad_true = vec![0.0; num_vars + 1];
-    for i in 1..=num_vars {
-        expected_grad_true[i] = grad_per_lit;
-    }
+    expected_grad_true[1..].fill(grad_per_lit);
     let expected_grad_false = vec![0.0; num_vars + 1];
 
     TinyXgcfSpec {
@@ -1153,10 +1151,8 @@ pub fn gen_deep_chain_circuit(depth: usize) -> TinyXgcfSpec {
     let num_vars = 1;
     let root = depth as u32;
 
-    let mut node_type = vec![LIT];
-    for _ in 0..depth {
-        node_type.push(AND);
-    }
+    let mut node_type = vec![AND; num_nodes];
+    node_type[0] = LIT;
 
     let mut child_offsets: Vec<u32> = vec![0];
     let mut child_indices: Vec<u32> = vec![];

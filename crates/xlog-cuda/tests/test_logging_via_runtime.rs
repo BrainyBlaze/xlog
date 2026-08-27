@@ -20,21 +20,31 @@
 
 use std::sync::Arc;
 
+use xlog_core::MemoryBudget;
 use xlog_cuda::device_runtime::{
-    AllocTag, AsyncCudaResource, DeviceMemoryResource, InMemorySink, LogAction, LogResult,
-    LoggingResource, LoggingSink, StreamId, StreamPool, XlogDeviceRuntime,
+    AllocTag, InMemorySink, LogAction, LogResult, LoggingSink, StreamId,
 };
-use xlog_cuda::CudaDevice;
+use xlog_cuda::CudaProviderBuilder;
 
 #[test]
 fn logging_resource_composed_through_runtime_records_full_lifecycle() {
-    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
+    let sink: Arc<InMemorySink> = Arc::new(InMemorySink::new());
+    let logging_sink: Arc<dyn LoggingSink> = sink.clone();
+    let provider = match CudaProviderBuilder::new(0, MemoryBudget::with_limit(1024 * 1024 * 1024))
+        .with_logging_sink(logging_sink)
+        .build()
+    {
+        Ok(provider) => provider,
+        Err(error) => {
+            eprintln!("Skipping: canonical CUDA provider unavailable: {error}");
+            return;
+        }
     };
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-
-    let stream_id = match pool.acquire() {
+    let runtime = provider
+        .memory()
+        .runtime()
+        .expect("canonical provider must own a runtime");
+    let stream_id = match runtime.stream_pool().acquire() {
         Ok(id) => id,
         Err(e) => {
             eprintln!("Skipping: StreamPool::acquire failed: {}", e);
@@ -42,20 +52,6 @@ fn logging_resource_composed_through_runtime_records_full_lifecycle() {
         }
     };
     assert_ne!(stream_id, StreamId::DEFAULT);
-
-    let sink: Arc<InMemorySink> = Arc::new(InMemorySink::new());
-    let inner: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(AsyncCudaResource::new(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-    ));
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        inner,
-        sink.clone() as Arc<dyn LoggingSink>,
-    ));
-
-    let runtime =
-        XlogDeviceRuntime::with_resource(Arc::clone(&device), 0, Arc::clone(&pool), logging);
 
     // Sequence: alloc(A) → alloc(B) → dealloc(A) → dealloc(B) → reap.
     let block_a = runtime

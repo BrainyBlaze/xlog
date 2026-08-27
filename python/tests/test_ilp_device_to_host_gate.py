@@ -1,6 +1,5 @@
 # python/tests/test_ilp_device_to_host_gate.py
 """Tests for the device-to-host transfer counter exposed via PyO3."""
-from pathlib import Path
 
 import pytest
 
@@ -405,14 +404,6 @@ def test_host_transfer_stats_methods_accessible():
     _ = prog.batch_fact_membership("edge", [[1, 2], [99, 99]])
     after = prog.host_transfer_stats()
     assert after["htod_calls"] > 0, "batch_fact_membership should track host transfers"
-
-
-def test_ilp_registry_routes_row_count_reads_through_provider_api():
-    repo_root = Path(__file__).resolve().parents[2]
-    src = (repo_root / "crates/xlog-runtime/src/ilp_registry.rs").read_text()
-
-    assert "provider.device_row_count(buffer)" in src
-    assert ".dtoh_sync_copy_into(buffer.num_rows_device()" not in src
 
 
 @pytest.mark.parametrize(

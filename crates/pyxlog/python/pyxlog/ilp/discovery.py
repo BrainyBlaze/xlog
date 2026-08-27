@@ -188,8 +188,8 @@ def build_join_candidates(
         f"nn({NETWORK}, [Event], Label, [{NEGATIVE_LABEL}, {POSITIVE_LABEL}]) :: "
         f"{NEURAL_PREDICATE}(Event, Label).",
     ]
-    lines += [f"pred {relation}(i64, i64)." for relation in vocabulary]
-    lines.append(f"pred {head}(i64).")
+    lines += [f"pred {relation}(u64, u64)." for relation in vocabulary]
+    lines.append(f"pred {head}(u64).")
 
     ids: list[str] = []
     for relation in vocabulary:

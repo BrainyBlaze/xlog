@@ -250,9 +250,6 @@ impl ResourceBudgetSnapshot {
 ///     telemetry decorator over any inner resource.
 ///   * [`crate::device_runtime::budget::GlobalDeviceBudget`] —
 ///     per-runtime byte-limit decorator over any inner resource.
-///   * `PoolResource` — performance tier; v0.7+ (not implemented).
-///   * `DebugGuardResource` — canary/poison/quarantine; v0.7+
-///     (not implemented).
 ///
 /// Implementations must be thread-safe. The runtime composes resources
 /// via decoration (each resource wraps an inner `Box<dyn
@@ -266,6 +263,28 @@ pub trait DeviceMemoryResource: Send + Sync {
         stream: StreamId,
         tag: AllocTag,
     ) -> ResourceResult<DeviceBlock>;
+
+    /// Allocate while accounting for bytes promised by the runtime but not yet
+    /// materialized through this resource stack.
+    ///
+    /// Budget decorators must include the reservation pressure in their
+    /// admission decision. Telemetry decorators must forward this call so they
+    /// observe both successful allocations and admission failures. Resources
+    /// without a declarative budget may use the ordinary allocation path.
+    fn allocate_with_reservation_pressure(
+        &self,
+        bytes: usize,
+        reservation_pressure_bytes: usize,
+        stream: StreamId,
+        tag: AllocTag,
+    ) -> ResourceResult<DeviceBlock> {
+        if reservation_pressure_bytes != 0 && self.budget_snapshot().is_some() {
+            return Err(ResourceError::Driver(
+                "budgeted resource does not implement reservation-aware allocation".to_string(),
+            ));
+        }
+        self.allocate(bytes, stream, tag)
+    }
 
     /// Return `block` to the resource. After this call the block's
     /// state is [`BlockState::Retired`] (or [`BlockState::Quarantined`]

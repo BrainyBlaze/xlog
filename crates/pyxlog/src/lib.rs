@@ -1,11 +1,4 @@
 //! Python bindings for XLOG via PyO3.
-#![allow(missing_docs)] // PyO3 #[pyclass] / #[pymethods] generate pub items without docs
-#![allow(
-    clippy::large_enum_variant,
-    clippy::needless_range_loop,
-    clippy::too_many_arguments,
-    clippy::type_complexity
-)]
 
 use std::collections::{HashMap, HashSet};
 use std::os::raw::{c_char, c_void};
@@ -16,14 +9,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use xlog_core::{MemoryBudget, Schema};
-use xlog_cuda::{
-    device_runtime::{
-        AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
-    },
-    CudaBuffer, CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager,
-};
 #[cfg(feature = "arrow-device-import")]
 use xlog_cuda::{ArrowDeviceArray, ArrowDeviceArrayOwned};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, CudaProviderBuilder, DlpackManagedTensor};
 use xlog_gpu::logic as gpu_logic;
 use xlog_logic::ast::ProbEngine;
 use xlog_neural::{NetworkRegistry, TensorSourceRegistry};
@@ -219,29 +207,11 @@ pub(crate) fn arrow_device_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ArrowDevi
 }
 
 pub(crate) fn provider_from_config(config: GpuConfig) -> xlog_core::Result<CudaKernelProvider> {
-    let device = Arc::new(CudaDevice::new(config.device_ordinal)?);
-    let stream_pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(AsyncCudaResource::new(
-            Arc::clone(&device),
-            config.device_ordinal as u32,
-            Arc::clone(&stream_pool),
-        ));
-    let budget_limit = usize::try_from(config.memory_bytes).unwrap_or(usize::MAX);
-    let budgeted: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(async_resource, budget_limit));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        config.device_ordinal as u32,
-        stream_pool,
-        budgeted,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        device.clone(),
+    CudaProviderBuilder::new(
+        config.device_ordinal,
         MemoryBudget::with_limit(config.memory_bytes),
-        runtime,
-    ));
-    CudaKernelProvider::with_runtime(device, memory)
+    )
+    .build()
 }
 
 pub(crate) fn enforce_call_memory_limit(

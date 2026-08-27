@@ -1418,8 +1418,9 @@ fn test_xlog_run_compound_modal_key_reports_typed_epistemic_diagnostic() {
     // elements) are accepted and flattened onto the GPU. What stays rejected is a
     // genuinely unbounded structured key: a `cons` `[H | T]` whose tail length is
     // not statically fixed has no finite, typed GPU key-column set. It must FAIL
-    // CLOSED with a precise FINITENESS
-    // (resource) diagnostic, NOT a blanket "unsupported construct".
+    // CLOSED with the precise typed unsupported-construct diagnostic. It is
+    // not byte-memory or fixed-capacity exhaustion: no finite required size
+    // exists for an unbounded tail.
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
         Err(_) => {
@@ -1433,14 +1434,13 @@ fn test_xlog_run_compound_modal_key_reports_typed_epistemic_diagnostic() {
         !ok,
         "unbounded-cons modal-key example must fail closed, stdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    // Honest finiteness/resource bound, NOT "UnsupportedEpistemicConstruct".
     assert!(
-        stderr.contains("ResourceExhausted"),
-        "unbounded structured key must fail with a finiteness/resource diagnostic:\n{stderr}"
+        stderr.contains("UnsupportedEpistemicConstruct"),
+        "unbounded structured key must fail with a typed epistemic diagnostic:\n{stderr}"
     );
     assert!(
-        !stderr.contains("UnsupportedEpistemicConstruct"),
-        "rejection must be a precise finiteness bound, not a blanket unsupported construct:\n{stderr}"
+        !stderr.contains("ResourceExhausted") && !stderr.contains("CapacityExceeded"),
+        "an unbounded type shape must not be reported as exhausted memory or capacity:\n{stderr}"
     );
     assert!(
         stderr.contains("cons") && stderr.contains("tail length is not statically fixed"),

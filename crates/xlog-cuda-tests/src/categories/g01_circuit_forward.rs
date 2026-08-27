@@ -562,15 +562,15 @@ fn test_forward_parallel_same_level(ctx: &TestContext) -> TestResult {
 
     // Verify all 1000 literals have the same value (0.5.ln())
     let expected_lit_val = 0.5_f64.ln();
-    for i in 0..num_lits {
-        let diff = (values[i] - expected_lit_val).abs();
+    for (i, &actual) in values.iter().take(num_lits).enumerate() {
+        let diff = (actual - expected_lit_val).abs();
         if diff > 1e-10 {
             return TestResult::error(
                 "test_forward_parallel_same_level",
                 start.elapsed(),
                 format!(
                     "Literal {} should have value {}, got {} (diff={})",
-                    i, expected_lit_val, values[i], diff
+                    i, expected_lit_val, actual, diff
                 ),
             );
         }

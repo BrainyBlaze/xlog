@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::CudaKernelProvider;
 use xlog_prob::compilation::gpu_cache::{GpuCacheLookup, GpuCircuitCache, GpuCircuitCacheConfig};
 
 fn read_u32(
@@ -24,18 +24,14 @@ fn compile_needed_host(handle: &GpuCacheLookup) -> bool {
 
 #[test]
 fn gpu_cache_hit_miss_and_eviction() {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
-            return;
-        }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1 << 30),
-    ));
-    let provider = Arc::new(CudaKernelProvider::new(device, memory).expect("provider"));
+    let provider =
+        match xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(1 << 30)).build() {
+            Ok(provider) => Arc::new(provider),
+            Err(e) => {
+                eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
+                return;
+            }
+        };
 
     let config = {
         let mut config = GpuCircuitCacheConfig::default();

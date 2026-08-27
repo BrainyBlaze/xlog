@@ -31,6 +31,10 @@ pub const RESIDENT_SCHEDULE_SLOT_PERMANENT: u32 = 2;
 pub const RESIDENT_SCHEDULE_SLOT_DEFINED: u32 = 4;
 const SOURCE_SLOT: u32 = RESIDENT_SCHEDULE_SLOT_SOURCE;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "allocation validation compares the complete recorded allocation identity against its expected runtime, stream, and device fields"
+)]
 fn validate_runtime_allocation_fields(
     manager_id: usize,
     allocation_ptr: u64,
@@ -422,7 +426,9 @@ fn decode_test_status(op: &ResidentOpDescriptor) -> Result<ResidentTerminalStatu
     })
 }
 
-fn decode_trace_delta(op: &ResidentOpDescriptor) -> Result<(u32, u32, Option<(u32, u32)>)> {
+type ResidentTraceDelta = (u32, u32, Option<(u32, u32)>);
+
+fn decode_trace_delta(op: &ResidentOpDescriptor) -> Result<ResidentTraceDelta> {
     let has_semantic_guard = op.flags & RESIDENT_SCHEDULE_TRACE_SEMANTIC_GUARD != 0;
     if op.kind != OP_TRACE_DELTA
         || op.flags & !RESIDENT_SCHEDULE_TRACE_SEMANTIC_GUARD != 0
@@ -732,7 +738,6 @@ pub struct ResidentScheduleExternalBindings<'a> {
 }
 
 impl<'a> ResidentScheduleExternalBindings<'a> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         filter_scratch: Option<&'a ResidentFilterScratch>,
         set_workspace: &'a ResidentSetWorkspace,
@@ -1247,6 +1252,7 @@ fn reset_slot_flags(flags: u32) -> u32 {
     }
 }
 
+#[cfg(test)]
 fn reset_slot_state_for_region(flags: u32, generation: u32, count: u32) -> (u32, u32, u32) {
     let fixed = flags & (RESIDENT_SCHEDULE_SLOT_SOURCE | RESIDENT_SCHEDULE_SLOT_PERMANENT) != 0;
     (
@@ -1717,6 +1723,7 @@ fn build_generation_metadata(
     Ok(metadata)
 }
 
+#[cfg(test)]
 fn generation_baseline_count_from_metadata(
     generation_metadata_count: u32,
     schema_winner_count: u32,
@@ -1767,7 +1774,10 @@ struct ResidentScheduleRequirements {
     join_right_capacity: u32,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "schedule validation receives every descriptor table and capacity needed to certify fixed graph bindings"
+)]
 fn validate_schedule_program(
     slots: &[ResidentRelationSlot],
     slot_types: &[Vec<ScalarType>],
@@ -2343,7 +2353,10 @@ impl CudaKernelProvider {
     }
 
     /// Validate, allocate, and upload every descriptor before graph capture.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "schedule preparation keeps slots, descriptors, output contract, limits, seeds, and external owners explicit"
+    )]
     pub fn prepare_resident_schedule<'a>(
         &self,
         mut relations: Vec<ResidentScheduleRelation<'a>>,
@@ -2663,7 +2676,10 @@ impl CudaKernelProvider {
     /// Materialize only compact scheduler metadata from the enclosing runtime's
     /// already-admitted reservation. All relation, workspace, control, trace,
     /// schema-winner, receipt, graph, and lifecycle owners remain external.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "in-reservation preparation keeps the admitted budget plus every fixed graph owner explicit"
+    )]
     pub fn prepare_resident_schedule_program_in_reservation<'a>(
         &self,
         domain: &ResidentExecutionDomain,
@@ -3240,10 +3256,8 @@ impl CudaKernelProvider {
                 .expect("four bytes checked"),
         );
         let mut counts = Vec::new();
-        for chunk in bytes[status_bytes + 4..].chunks_exact(4) {
-            counts.push(u32::from_ne_bytes(
-                chunk.try_into().expect("four-byte chunk"),
-            ));
+        for chunk in bytes[status_bytes + 4..].as_chunks::<4>().0 {
+            counts.push(u32::from_ne_bytes(*chunk));
         }
         finalize_schedule_output_counts(
             self,
@@ -3266,16 +3280,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use cudarc::driver::{CudaStream, LaunchConfig};
+    use cudarc::driver::CudaStream;
     use xlog_core::MemoryBudget;
 
-    use crate::cuda_compat::LaunchAsync;
     use crate::cuda_graph::{CapturedCudaGraph, CudaGraphNodeKind};
-    use crate::device::CudaFunction;
-    use crate::device_runtime::{
-        AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LoggingResource, NullSink,
-        StreamPool, XlogDeviceRuntime,
-    };
+    use crate::device_runtime::XlogDeviceRuntime;
     use crate::memory::GpuMemoryManager;
     use crate::provider::resident_filter_project::{
         ResidentFilterComparison, ResidentFilterOperand, ResidentProjectExpr, ResidentScalar,
@@ -3284,69 +3293,19 @@ mod tests {
         ResidentJoinKind, ResidentResourceCode, ResidentTerminalCode,
     };
     use crate::provider::CompareOp;
-    use crate::{CudaBuffer, CudaColumn, CudaDevice, CudaKernelProvider, DlpackManagedTensor};
+    use crate::{CudaBuffer, CudaColumn, CudaKernelProvider, DlpackManagedTensor};
     use xlog_core::{ScalarType, Schema, XlogError};
 
-    fn cuda_test_device() -> Option<Arc<CudaDevice>> {
-        match CudaDevice::new(0) {
-            Ok(device) => Some(Arc::new(device)),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA device initialization failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping resident schedule CUDA test: {error}");
-                None
-            }
-        }
-    }
-
     fn provider() -> Option<CudaKernelProvider> {
-        let device = cuda_test_device()?;
-        let memory = Arc::new(GpuMemoryManager::new(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(512 * 1024 * 1024),
-        ));
-        match CudaKernelProvider::new(device, memory) {
+        match crate::CudaProviderBuilder::new(0, MemoryBudget::with_limit(512 * 1024 * 1024))
+            .build()
+        {
             Ok(provider) => Some(provider),
             Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
                 panic!("XLOG_REQUIRE_CUDA=1 but resident schedule setup failed: {error}")
             }
             Err(error) => {
                 eprintln!("Skipping resident schedule CUDA test: {error}");
-                None
-            }
-        }
-    }
-
-    fn runtime_provider() -> Option<CudaKernelProvider> {
-        let device = cuda_test_device()?;
-        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-        let sink = Arc::new(NullSink::new());
-        let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-            AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-        );
-        let logging: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(LoggingResource::new(async_resource, sink));
-        let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(GlobalDeviceBudget::new(logging, 512 * 1024 * 1024));
-        let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-            Arc::clone(&device),
-            0,
-            pool,
-            budget,
-        ));
-        let memory = Arc::new(GpuMemoryManager::with_runtime(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(512 * 1024 * 1024),
-            runtime,
-        ));
-        match CudaKernelProvider::with_runtime(device, memory) {
-            Ok(provider) => Some(provider),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but resident schedule runtime setup failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping resident schedule runtime CUDA test: {error}");
                 None
             }
         }
@@ -3918,18 +3877,6 @@ mod tests {
         (receipt, kinds, stored)
     }
 
-    #[allow(dead_code)]
-    unsafe fn selected_stream_cooperative_launch_is_available(
-        function: CudaFunction,
-        stream: &CudaStream,
-        config: LaunchConfig,
-        params: &mut Vec<*mut std::ffi::c_void>,
-    ) {
-        function
-            .launch_cooperative_on_stream(stream, config, params)
-            .expect("selected-stream cooperative launch");
-    }
-
     #[test]
     fn schedule_wire_abi_has_exact_sizes_alignments_and_offsets() {
         assert_eq!(size_of::<super::ResidentScheduleOpKind>(), 4);
@@ -4074,9 +4021,11 @@ mod tests {
     #[test]
     fn flattened_filter_and_project_descriptors_are_fully_validated() {
         let slot = |widths: &[u32], schema_tag| {
-            let mut relation = super::ResidentRelationView::default();
-            relation.arity = widths.len() as u32;
-            relation.capacity = 4;
+            let mut relation = super::ResidentRelationView {
+                arity: widths.len() as u32,
+                capacity: 4,
+                ..Default::default()
+            };
             relation.widths[..widths.len()].copy_from_slice(widths);
             super::ResidentRelationSlot {
                 relation,
@@ -4221,9 +4170,11 @@ mod tests {
 
     #[test]
     fn shared_validator_rejects_writing_alias_and_accepts_scan_identity() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.arity = 1;
-        relation.capacity = 4;
+        let mut relation = super::ResidentRelationView {
+            arity: 1,
+            capacity: 4,
+            ..Default::default()
+        };
         relation.widths[0] = 4;
         let slots = [super::ResidentRelationSlot {
             relation,
@@ -4288,8 +4239,10 @@ mod tests {
 
     #[test]
     fn shared_validator_rejects_writes_to_immutable_source_slots() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.capacity = 1;
+        let relation = super::ResidentRelationView {
+            capacity: 1,
+            ..Default::default()
+        };
         let slots = [super::ResidentRelationSlot {
             relation,
             generation: 3,
@@ -4335,9 +4288,11 @@ mod tests {
 
     #[test]
     fn shared_validator_rejects_unknown_relation_slot_flags() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.arity = 1;
-        relation.capacity = 1;
+        let mut relation = super::ResidentRelationView {
+            arity: 1,
+            capacity: 1,
+            ..Default::default()
+        };
         relation.widths[0] = 4;
         let slots = [super::ResidentRelationSlot {
             relation,
@@ -4381,8 +4336,10 @@ mod tests {
 
     #[test]
     fn shared_validator_simulates_scratch_definedness_and_generation_transitions() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.capacity = 1;
+        let relation = super::ResidentRelationView {
+            capacity: 1,
+            ..Default::default()
+        };
         let slots = [super::ResidentRelationSlot {
             relation,
             generation: 4,
@@ -4459,9 +4416,11 @@ mod tests {
 
     #[test]
     fn shared_validator_rejects_physical_slots_outside_their_region_scope() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.arity = 1;
-        relation.capacity = 1;
+        let mut relation = super::ResidentRelationView {
+            arity: 1,
+            capacity: 1,
+            ..Default::default()
+        };
         relation.widths[0] = 4;
         let slots = [
             super::ResidentRelationSlot {
@@ -4527,9 +4486,11 @@ mod tests {
 
     #[test]
     fn shared_validator_requires_recursive_novelty_and_accepts_final_delta_copy_marker() {
-        let mut relation = super::ResidentRelationView::default();
-        relation.arity = 1;
-        relation.capacity = 1;
+        let mut relation = super::ResidentRelationView {
+            arity: 1,
+            capacity: 1,
+            ..Default::default()
+        };
         relation.widths[0] = 4;
         let slots = [
             super::ResidentRelationSlot {
@@ -5631,21 +5592,22 @@ mod tests {
 
     #[test]
     fn device_program_construction_consumes_the_runtime_reservation_and_external_bindings() {
-        let _prepare: for<'a> fn(
-            &super::CudaKernelProvider,
-            &super::ResidentExecutionDomain,
-            &[super::ResidentScheduleSlotBinding<'a>],
-            &[super::ResidentOpDescriptor],
-            &[super::ResidentWaveDescriptor],
-            &[super::ResidentRegionDescriptor],
-            &[u32],
-            &[super::ResidentFilterComparisonDescriptor],
-            &[super::ResidentProjectExpressionDescriptor],
-            &[u32],
-            super::ResidentScheduleExternalBindings<'a>,
-            &mut crate::memory::GpuMemoryReservation,
-        )
-            -> xlog_core::Result<super::ResidentScheduleDeviceProgram> =
+        type PrepareResidentProgram =
+            for<'a> fn(
+                &super::CudaKernelProvider,
+                &super::ResidentExecutionDomain,
+                &[super::ResidentScheduleSlotBinding<'a>],
+                &[super::ResidentOpDescriptor],
+                &[super::ResidentWaveDescriptor],
+                &[super::ResidentRegionDescriptor],
+                &[u32],
+                &[super::ResidentFilterComparisonDescriptor],
+                &[super::ResidentProjectExpressionDescriptor],
+                &[u32],
+                super::ResidentScheduleExternalBindings<'a>,
+                &mut crate::memory::GpuMemoryReservation,
+            ) -> xlog_core::Result<super::ResidentScheduleDeviceProgram>;
+        let _prepare: PrepareResidentProgram =
             super::CudaKernelProvider::prepare_resident_schedule_program_in_reservation;
     }
 
@@ -6221,7 +6183,7 @@ mod tests {
 
     #[test]
     fn preparation_rejects_cross_slot_shared_runtime_allocation_alias() {
-        let Some(provider) = runtime_provider() else {
+        let Some(provider) = provider() else {
             return;
         };
         let relation_schema = schema("shared_storage", &[ScalarType::U32]);

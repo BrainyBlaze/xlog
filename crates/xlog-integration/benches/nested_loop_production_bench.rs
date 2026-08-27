@@ -1,5 +1,3 @@
-#![allow(clippy::type_complexity)]
-
 //! Nested-loop production-kernel benchmark versus hash join on the production
 //! eligibility envelope.
 //!
@@ -37,12 +35,9 @@ use std::time::{Duration, Instant};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError};
 use xlog_cuda::memory::CudaBuffer;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager, JoinType};
 
 // ---------------------------------------------------------------
 // Provider setup.
@@ -56,45 +51,20 @@ impl LoggingSink for DiscardSink {
 }
 
 struct Provider {
-    _device: Arc<CudaDevice>,
-    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    _pool: Arc<StreamPool>,
 }
 
 fn make_provider() -> Option<Provider> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::new(Arc::clone(&device), 1024));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        CudaProviderBuilder::new(0, MemoryBudget::with_limit(8 * 1024 * 1024 * 1024))
+            .with_stream_capacity(1024)
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 8 * 1024 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(8 * 1024 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
-    Some(Provider {
-        _device: device,
-        _runtime: runtime,
-        memory,
-        provider,
-        _pool: pool,
-    })
+    let memory = Arc::clone(provider.memory());
+    Some(Provider { memory, provider })
 }
 
 // ---------------------------------------------------------------
@@ -181,12 +151,15 @@ const ABOVE_THRESHOLD_MATRIX: &[(u32, u32)] = &[
 /// `N/2` matches (50% match rate). E.g., L=R=100 → 50 matches;
 /// L=R=2000 → 1000 matches; matches the parity-check counts in
 /// the bench output (50 / 250 / 500 / 1000).
-fn fixture_3col(num_left: u32, num_right: u32) -> (Vec<(u32, u32, u32)>, Vec<(u32, u32, u32)>) {
-    let left: Vec<(u32, u32, u32)> = (0..num_left)
+type Row3 = (u32, u32, u32);
+type JoinFixture = (Vec<Row3>, Vec<Row3>);
+
+fn fixture_3col(num_left: u32, num_right: u32) -> JoinFixture {
+    let left: Vec<Row3> = (0..num_left)
         .map(|i| (i, 1_000_000 + i, 2_000_000 + i))
         .collect();
     let offset = num_left / 2;
-    let right: Vec<(u32, u32, u32)> = (offset..offset.saturating_add(num_right))
+    let right: Vec<Row3> = (offset..offset.saturating_add(num_right))
         .map(|i| (i, 3_000_000 + i, 4_000_000 + i))
         .collect();
     (left, right)

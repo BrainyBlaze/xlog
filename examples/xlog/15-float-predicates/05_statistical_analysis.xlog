@@ -27,10 +27,10 @@ experiment(3, 2, 2.5).
 experiment(3, 3, 1.9).
 experiment(3, 4, 2.3).
 
-// Filter to valid trials (exclude NaN/Inf if any)
+// Filter to the application's finite measurement domain. Under the total order
+// these bounds exclude infinities and both signed NaN regions.
 valid_trial(Run, Trial, Val) :-
     experiment(Run, Trial, Val),
-    Val = Val,                    // Not NaN (V = V is false for NaN)
     Val > -1000000.0,            // Not -Inf
     Val < 1000000.0.             // Not +Inf
 

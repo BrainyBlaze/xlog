@@ -24,3 +24,6 @@ serial_test = "3.0"
 [[bench]]
 name = "logic_bench"
 harness = false
+
+[lints]
+workspace = true

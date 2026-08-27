@@ -35,7 +35,7 @@ requires_cuda = pytest.mark.skipif(
 MIXED_BODY_SOURCE = """
     allowed(0).
     allowed(2).
-    pred allowed(i64).
+    pred allowed(u64).
     nn(root_net, [Case], Label, [negative, positive]) :: neural_root(Case, Label).
     trainable_rule(rule_mixed, weight=0.0) :: root_case(Case) :-
         neural_root(Case, positive), allowed(Case).
@@ -102,8 +102,8 @@ def test_derived_hard_condition_fails_loud_not_silent() -> None:
     source = """
         base(0).
         base(2).
-        pred base(i64).
-        pred contested(i64).
+        pred base(u64).
+        pred contested(u64).
         contested(X) :- base(X).
         nn(root_net, [Case], Label, [negative, positive]) :: neural_root(Case, Label).
         trainable_rule(rule_mixed, weight=0.0) :: root_case(Case) :-
@@ -282,7 +282,7 @@ def test_training_loop_has_no_tracked_host_transfers() -> None:
 JOINT_MIXTURE_SOURCE = """
     supp(0). supp(2). supp(1). refut(0). refut(2). refut(3).
     only_a(0). only_a(1). only_a(3). only_b(1). only_b(2). only_b(3).
-    pred supp(i64). pred refut(i64). pred only_a(i64). pred only_b(i64).
+    pred supp(u64). pred refut(u64). pred only_a(u64). pred only_b(u64).
     trainable_rule(cand_correct, weight=0.0) :: target(C) :- supp(C), refut(C).
     trainable_rule(cand_a, weight=0.0) :: target(C) :- only_a(C).
     trainable_rule(cand_b, weight=0.0) :: target(C) :- only_b(C).
@@ -377,7 +377,7 @@ def test_evaluate_joint_mixture_generalizes_on_held_out_split() -> None:
     # join (supp INT refut); id 1 has NO supporting facts at all.
     held_out_source = """
         supp(0). refut(0).
-        pred supp(i64). pred refut(i64). pred only_a(i64). pred only_b(i64).
+        pred supp(u64). pred refut(u64). pred only_a(u64). pred only_b(u64).
         trainable_rule(cand_correct, weight=0.0) :: target(C) :- supp(C), refut(C).
         trainable_rule(cand_a, weight=0.0) :: target(C) :- only_a(C).
         trainable_rule(cand_b, weight=0.0) :: target(C) :- only_b(C).
@@ -406,7 +406,7 @@ def test_evaluate_joint_mixture_per_candidate_read_discriminates_train_tie() -> 
     — which is exactly why the admission gate passes only the winner's weight."""
     held_out_source = """
         rel_a(0). rel_b(0). rel_a(1). rel_c(1).
-        pred rel_a(i64). pred rel_b(i64). pred rel_c(i64).
+        pred rel_a(u64). pred rel_b(u64). pred rel_c(u64).
         trainable_rule(cand_true, weight=0.0) :: target(C) :- rel_a(C), rel_b(C).
         trainable_rule(cand_spur, weight=0.0) :: target(C) :- rel_a(C), rel_c(C).
         train(target, binary_cross_entropy).
@@ -437,7 +437,7 @@ def test_evaluate_joint_mixture_per_candidate_read_discriminates_train_tie() -> 
 # only a learned predicate over entity features phi(x) (fragility) separates them.
 _NEURAL_BODY_SOURCE = """
     dropped(0). dropped(1). dropped(2).
-    pred dropped(i64). pred breaks(i64).
+    pred dropped(u64). pred breaks(u64).
     trainable_rule(cand_rel, weight=0.0) :: breaks(C) :- dropped(C).
     trainable_rule(cand_neural, weight=0.0) :: breaks(C) :- dropped(C).
     train(breaks, binary_cross_entropy).
@@ -493,7 +493,7 @@ def test_neural_body_held_out_generalizes_and_keeps_vigilance() -> None:
     result = _train_fragility()
     held_out_source = """
         dropped(0). dropped(1).
-        pred dropped(i64). pred breaks(i64).
+        pred dropped(u64). pred breaks(u64).
         trainable_rule(cand_rel, weight=0.0) :: breaks(C) :- dropped(C).
         trainable_rule(cand_neural, weight=0.0) :: breaks(C) :- dropped(C).
         train(breaks, binary_cross_entropy).
@@ -534,7 +534,7 @@ def test_neural_body_graded_admission_read_emits_decomposed_evidence() -> None:
     result = _train_fragility()
     held_out_source = """
         dropped(0). dropped(1).
-        pred dropped(i64). pred breaks(i64).
+        pred dropped(u64). pred breaks(u64).
         trainable_rule(cand_rel, weight=0.0) :: breaks(C) :- dropped(C).
         trainable_rule(cand_neural, weight=0.0) :: breaks(C) :- dropped(C).
         train(breaks, binary_cross_entropy).
@@ -593,7 +593,7 @@ def test_set_relative_admission_routes_within_set_norm_and_desaturates() -> None
     result = _train_fragility()
     held_out_source = """
         dropped(0). dropped(1).
-        pred dropped(i64). pred breaks(i64).
+        pred dropped(u64). pred breaks(u64).
         trainable_rule(cand_rel, weight=0.0) :: breaks(C) :- dropped(C).
         trainable_rule(cand_neural, weight=0.0) :: breaks(C) :- dropped(C).
         train(breaks, binary_cross_entropy).
@@ -624,7 +624,7 @@ def test_set_relative_admission_routes_within_set_norm_and_desaturates() -> None
 # channel (binding axis = world-step axis, masses from a fact's version chain).
 GRADED_MASS_SOURCE = """
     a(0). a(1). a(2). b(0). b(1). b(2).
-    pred a(i64). pred b(i64).
+    pred a(u64). pred b(u64).
     trainable_rule(cand_a, weight=2.0) :: target(C) :- a(C).
     trainable_rule(cand_b, weight=2.0) :: target(C) :- b(C).
     train(target, binary_cross_entropy).
@@ -689,7 +689,7 @@ def test_graded_candidate_masses_reject_bad_inputs() -> None:
         )
     single_rule = """
         a(0). a(1). a(2).
-        pred a(i64).
+        pred a(u64).
         trainable_rule(cand_a, weight=2.0) :: target(C) :- a(C).
         train(target, binary_cross_entropy).
     """

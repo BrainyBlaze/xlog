@@ -447,12 +447,13 @@ class LogicRelationSession:
         """Return persistent hash-index cache telemetry for this session."""
         ...
 
-    def wcoj_dispatch_stats(self) -> dict[str, int]:
+    def wcoj_dispatch_stats(self) -> dict[str, Any]:
         """Multiway/Free-Join dispatch telemetry for this session.
 
         Keys: ``free_join_dispatch_count``,
         ``factorized_delta_dispatch_count``,
-        ``wcoj_groupby_fusion_dispatch_count``, ``wcoj_error_decline_count``.
+        ``wcoj_groupby_fusion_dispatch_count``, ``wcoj_error_decline_count``,
+        and nested ``wcoj_fallback`` route counts plus ``total``.
         Counters accumulate across evaluates within this session.
         """
         ...
@@ -824,7 +825,8 @@ class CompiledProgram:
 
     # Top-level pyxlog wraps register_network with nn/4 lineage metadata:
     # checkpoint_hash, split_hashes, calibration_metrics, cuda_device,
-    # influence_audit, nn4_lineage, record_nn4_influence, changed_acceptance.
+    # influence_audit {registration, records}, nn4_lineage,
+    # record_nn4_influence, changed_acceptance.
 
     def register_embedding(
         self,

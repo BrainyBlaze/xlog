@@ -27,6 +27,8 @@ pub use executor::{
     EpistemicGpuWorldViewValidationTrace, Executor, RelationDelta,
 };
 pub use ilp_registry::{read_device_row_count, IlpRegistry, IlpTagEntry, IlpTaggedResult};
-pub use profiler::{ExecutionStats, MeasureGuard, OpStats, Profiler, StratumStats};
+pub use profiler::{
+    ExecutionStats, MeasureGuard, OpStats, Profiler, StratumStats, WcojFallbackStats,
+};
 pub use relation::RelationStore;
 pub use statistics::{JoinStats, JoinStrategy, QueryStatistics};

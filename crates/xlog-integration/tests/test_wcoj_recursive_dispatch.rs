@@ -1,5 +1,4 @@
 // crates/xlog-integration/tests/test_wcoj_recursive_dispatch.rs
-#![allow(clippy::doc_lazy_continuation)]
 
 //! Recursive-SCC WCOJ dispatch coverage.
 //!
@@ -44,10 +43,7 @@ use std::sync::Arc;
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamPool, XlogDeviceRuntime};
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::Compiler;
@@ -64,46 +60,31 @@ impl LoggingSink for DiscardSink {
     }
 }
 
-#[allow(dead_code)]
 struct RuntimeBackedFixture {
-    device: Arc<CudaDevice>,
-    runtime: Arc<XlogDeviceRuntime>,
+    _device: Arc<CudaDevice>,
+    _runtime: Arc<XlogDeviceRuntime>,
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
-    pool: Arc<StreamPool>,
+    _pool: Arc<StreamPool>,
 }
 
 fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let provider = Arc::new(
+        xlog_cuda::CudaProviderBuilder::new(0, MemoryBudget::with_limit(64 * 1024 * 1024))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let device = Arc::clone(provider.device());
+    let memory = Arc::clone(provider.memory());
+    let runtime = Arc::clone(memory.runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some(RuntimeBackedFixture {
-        device,
-        runtime,
+        _device: device,
+        _runtime: runtime,
         memory,
         provider,
-        pool,
+        _pool: pool,
     })
 }
 
@@ -837,8 +818,10 @@ fn linear_recursive_4cycle_dispatches_on_seeding_and_per_variant() {
 /// (`r1`, `r2`) are recursive — they receive feedback from `cyc`
 /// via SHIFTED projections so iter 1 produces non-empty deltas
 /// for BOTH:
-///   * `r1(W, X) :- cyc(Y, W, X, Z)` — extracts cyc cols 1,2.
-///   * `r2(A, B) :- cyc(W, X, A, B)` — extracts cyc cols 2,3.
+///
+/// - `r1(W, X) :- cyc(Y, W, X, Z)` — extracts cyc cols 1,2.
+/// - `r2(A, B) :- cyc(W, X, A, B)` — extracts cyc cols 2,3.
+///
 /// The other two atoms (`r3`, `r4`) are extensional. Under
 /// semi-naive occurrence semantics, the occurrence-aware recursive
 /// promoter admits this body because the recursive Scans target
@@ -847,12 +830,13 @@ fn linear_recursive_4cycle_dispatches_on_seeding_and_per_variant() {
 /// occurrence with a non-empty delta and dispatches WCOJ on each.
 ///
 /// Counter dynamics:
-///   * Seeding pass (`recursive.rs:331-347`): cyc rule fires
-///     once on its full body — counter += 1.
-///   * Iteration 1 (`recursive.rs:455-540`): both `r1_init` and
-///     `r2_init` are non-empty AND the shifted projections of
-///     the seeded `cyc` rows lie outside the initial r1/r2, so
-///     two variants fire — counter += 2.
+///
+/// - Seeding pass (`recursive.rs:331-347`): cyc rule fires
+///   once on its full body — counter += 1.
+/// - Iteration 1 (`recursive.rs:455-540`): both `r1_init` and
+///   `r2_init` are non-empty AND the shifted projections of
+///   the seeded `cyc` rows lie outside the initial r1/r2, so
+///   two variants fire — counter += 2.
 ///
 /// Total: counter `>= 2` (in fact `== 3` for this fixture).
 const MULTIREC_4CYCLE: &str = r#"

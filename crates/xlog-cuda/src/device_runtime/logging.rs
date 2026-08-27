@@ -328,6 +328,33 @@ impl LoggingResource {
             self.dropped_records.fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    fn record_allocation(
+        &self,
+        bytes: usize,
+        stream: StreamId,
+        tag: AllocTag,
+        result: ResourceResult<DeviceBlock>,
+    ) -> ResourceResult<DeviceBlock> {
+        let (ptr, generation, recorded_bytes) = match &result {
+            Ok(block) => (Some(block.ptr), Some(block.generation), Some(block.bytes)),
+            Err(_) => (None, None, Some(bytes)),
+        };
+        self.emit(LogRecord {
+            action: LogAction::Allocate,
+            device_ordinal: self.inner.device_ordinal(),
+            stream_id: Some(stream),
+            ptr,
+            bytes: recorded_bytes,
+            tag: Some(tag),
+            generation,
+            thread_id: current_thread_id_u64(),
+            order_counter: next_order_counter(),
+            timestamp_nanos: now_nanos(),
+            result: LogResult::from_result(&result),
+        });
+        result
+    }
 }
 
 impl DeviceMemoryResource for LoggingResource {
@@ -338,24 +365,23 @@ impl DeviceMemoryResource for LoggingResource {
         tag: AllocTag,
     ) -> ResourceResult<DeviceBlock> {
         let result = self.inner.allocate(bytes, stream, tag);
-        let (ptr, gen, recorded_bytes) = match &result {
-            Ok(b) => (Some(b.ptr), Some(b.generation), Some(b.bytes)),
-            Err(_) => (None, None, Some(bytes)),
-        };
-        self.emit(LogRecord {
-            action: LogAction::Allocate,
-            device_ordinal: self.inner.device_ordinal(),
-            stream_id: Some(stream),
-            ptr,
-            bytes: recorded_bytes,
-            tag: Some(tag),
-            generation: gen,
-            thread_id: current_thread_id_u64(),
-            order_counter: next_order_counter(),
-            timestamp_nanos: now_nanos(),
-            result: LogResult::from_result(&result),
-        });
-        result
+        self.record_allocation(bytes, stream, tag, result)
+    }
+
+    fn allocate_with_reservation_pressure(
+        &self,
+        bytes: usize,
+        reservation_pressure_bytes: usize,
+        stream: StreamId,
+        tag: AllocTag,
+    ) -> ResourceResult<DeviceBlock> {
+        let result = self.inner.allocate_with_reservation_pressure(
+            bytes,
+            reservation_pressure_bytes,
+            stream,
+            tag,
+        );
+        self.record_allocation(bytes, stream, tag, result)
     }
 
     fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {

@@ -154,7 +154,9 @@ class TestBatchedProgramStructure:
                 digit(FirstDigitInput, FirstDigitValue),
                 digit(SecondDigitInput, SecondDigitValue),
                 digit(ThirdDigitInput, ThirdDigitValue),
-                NumberValue is FirstDigitValue * 100 + SecondDigitValue * 10 + ThirdDigitValue.
+                NumberValue is FirstDigitValue * cast(100, u64)
+                    + SecondDigitValue * cast(10, u64)
+                    + ThirdDigitValue.
         """)
 
         # This would need 3 digit classifications - perfect for batching
@@ -164,16 +166,18 @@ class TestBatchedProgramStructure:
         """Test sequence labeling program structure."""
         program = pyxlog.Program.compile("""
             nn(tagger, [Token], TokenTag, [noun, verb, adj]) :: tag(Token, TokenTag).
+            pred valid_transition(u64, u64).
             valid_sequence(FirstToken, SecondToken, ThirdToken) :-
                 tag(FirstToken, FirstTokenTag),
                 tag(SecondToken, SecondTokenTag),
                 tag(ThirdToken, ThirdTokenTag),
                 valid_transition(FirstTokenTag, SecondTokenTag),
                 valid_transition(SecondTokenTag, ThirdTokenTag).
-            valid_transition(noun, verb).
-            valid_transition(verb, noun).
-            valid_transition(adj, noun).
+            valid_transition(0, 1).
+            valid_transition(1, 0).
+            valid_transition(2, 0).
         """)
 
-        # Sequence of 3 tags - 3 neural calls batched together
+        # Label IDs follow the declaration order: noun=0, verb=1, adj=2.
+        # A sequence of three tags produces three neural calls to batch.
         assert "tagger" in program.declared_network_names()

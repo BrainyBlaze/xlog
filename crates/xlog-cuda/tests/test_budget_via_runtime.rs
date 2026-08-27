@@ -5,54 +5,41 @@
 //!
 //! This is the production-recommended stack:
 //!
-//!   GlobalDeviceBudget
-//!     -> LoggingResource(InMemorySink)
+//!   LoggingResource(InMemorySink)
+//!     -> GlobalDeviceBudget
 //!         -> AsyncCudaResource
 //!
 //! It exercises:
 //!
 //!   * Successful alloc/dealloc/reap through the full stack.
-//!   * Budget enforcement at the outermost decorator: an over-limit allocation
-//!     reports exact current, requested, remaining, and limit values
-//!     without ever calling into the logger or the underlying
-//!     resource.
+//!   * Budget enforcement reports exact current, requested, remaining, and
+//!     limit values without calling the underlying allocator.
 //!   * Async pending-free behavior end-to-end: dealloc keeps the
 //!     budget reserved until reap_pending drains.
-//!   * Logging records reflect the budget's view: an `OutOfBudget`
-//!     rejection at the top of the stack does not propagate down
-//!     to the inner, so the logger does not see those calls. (In
-//!     this stack ordering, the logger sits *inside* the budget so
-//!     it only records work that actually reached it.)
+//!   * The outer logger records admitted operations and typed `OutOfBudget`
+//!     rejections exactly once.
 //!
 //! Skips when CUDA is unavailable.
 
 use std::sync::Arc;
 
+use xlog_core::MemoryBudget;
 use xlog_cuda::device_runtime::{
-    AllocTag, AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, InMemorySink, LogAction,
-    LogResult, LoggingResource, LoggingSink, ResourceError, StreamId, StreamPool,
+    AllocTag, InMemorySink, LogAction, LogResult, LoggingSink, ResourceError, StreamId, StreamPool,
     XlogDeviceRuntime,
 };
-use xlog_cuda::CudaDevice;
+use xlog_cuda::CudaProviderBuilder;
 
 const LIMIT: usize = 16 * 1024;
 
-fn build_runtime() -> Option<(XlogDeviceRuntime, Arc<InMemorySink>, Arc<StreamPool>)> {
-    let device = CudaDevice::new(0).ok().map(Arc::new)?;
-    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+fn build_runtime() -> Option<(Arc<XlogDeviceRuntime>, Arc<InMemorySink>, Arc<StreamPool>)> {
     let sink: Arc<InMemorySink> = Arc::new(InMemorySink::new());
-
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
-    );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        sink.clone() as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, LIMIT));
-    let runtime =
-        XlogDeviceRuntime::with_resource(Arc::clone(&device), 0, Arc::clone(&pool), budget);
+    let provider = CudaProviderBuilder::new(0, MemoryBudget::with_limit(LIMIT as u64))
+        .with_logging_sink(sink.clone() as Arc<dyn LoggingSink>)
+        .build()
+        .ok()?;
+    let runtime = Arc::clone(provider.memory().runtime()?);
+    let pool = Arc::clone(runtime.stream_pool());
     Some((runtime, sink, pool))
 }
 
@@ -92,7 +79,7 @@ fn budget_logging_async_stack_full_lifecycle() {
 }
 
 #[test]
-fn budget_rejects_over_limit_without_calling_inner() {
+fn budget_rejects_over_limit_before_allocator_and_logs_typed_result() {
     let Some((runtime, sink, _pool)) = build_runtime() else {
         return;
     };
@@ -112,14 +99,21 @@ fn budget_rejects_over_limit_without_calling_inner() {
         err
     );
 
-    // The logger sits *inside* the budget, so an OutOfBudget
-    // rejection at the top short-circuits before reaching the
-    // logger — there must be zero records.
-    assert_eq!(
-        sink.len(),
-        0,
-        "OutOfBudget at the top of the stack must not reach the inner logger"
-    );
+    let records = sink.snapshot();
+    assert_eq!(records.len(), 1, "the rejected request must be logged once");
+    let record = &records[0];
+    assert_eq!(record.action, LogAction::Allocate);
+    assert_eq!(record.bytes, Some(LIMIT + 1));
+    assert_eq!(record.tag, Some(AllocTag("budget-rt-too-big")));
+    assert!(record.ptr.is_none());
+    assert!(record.generation.is_none());
+    assert!(matches!(
+        record.result,
+        LogResult::Err {
+            kind: "OutOfBudget",
+            ..
+        }
+    ));
     assert_eq!(runtime.bytes_outstanding(), 0);
 }
 

@@ -123,7 +123,8 @@ The exact engine (`exact_ddnnf`) computes the true probability by turning your
 program into a circuit and then adding up the probability of every world in which
 the query holds. Turning a program into a circuit like this is called **knowledge
 compilation**; adding up those world probabilities is **weighted model counting**.
-The whole path runs on the GPU:
+The data plane runs on the GPU, while compilation and level-by-level evaluation are
+host-orchestrated:
 
 <Frame caption="The exact path compiles provenance to CNF, then to a verified GPU Decision-DNNF, then to the XGCF circuit; the circuit is compiled once and evaluated many times, with gradients flowing back through it.">
   <img className="block dark:hidden" src="/assets/diagrams/knowledge-compilation-light.svg" alt="Exact inference pipeline: PIR provenance to CNF (Tseitin), to GPU Decision-DNNF (compile plus CDCL verify), to the XGCF circuit format, to weighted model counting; the compile stages run once and gradients flow backward through XGCF." />
@@ -143,9 +144,11 @@ The whole path runs on the GPU:
   </Step>
   <Step title="Decision-DNNF">
     A GPU compiler turns the `CNF` into a Decision-DNNF circuit — a circuit form
-    whose worlds can be counted exactly in a single pass. A GPU SAT solver (using
-    `CDCL`, the standard conflict-driven clause-learning algorithm) then checks
-    that the circuit is logically equivalent to the formula before it is trusted.
+    whose worlds can be counted exactly in a single pass. XLOG smooths the circuit,
+    then certifies that final smoothed circuit before caching or evaluating it. A GPU
+    SAT solver (using `CDCL`, the standard conflict-driven clause-learning algorithm)
+    checks logical equivalence to the formula; bounded status and error scalars are
+    observed on the host, while the proof trace is checked on the GPU.
   </Step>
   <Step title="Weighted model counting">
     The verified circuit — XLOG's GPU circuit format, `XGCF` — is evaluated in
@@ -195,6 +198,13 @@ Methods with `conditioned` in their name translate accepted assumptions into
 probabilistic `evidence(...)` clauses, so they can change the returned probabilities;
 the other accepted-evidence methods use the world view as an admission gate without
 modifying the probabilistic model.
+
+This accepted-world-view axis is available for direct and split-batch GPU execution
+evidence. It covers caller-owned incremental circuits, source and parsed-program
+compilation, conditioned and unconditioned evaluation, gradient evaluation, and PIR/CNF
+encoding. Every entry point passes through the same evidence validation and transactional
+trace accounting; batch methods apply that contract independently to each accepted world
+view rather than bypassing it through a separate implementation.
 
 The policy-key migration also changes every epistemic `plan_id`: the identifier is
 the hash of the canonical plan summary, so removing the old fallback keys and adding
@@ -290,8 +300,13 @@ bounds:
 | Universe (bounded domain) | `<= 65536` |
 | Domain size | `<= 256` |
 
-A program that would exceed this memory budget stops with a `ResourceExhausted`
-error before any allocation. There is no fallback to a larger, host-sized path.
+Exceeding a structural, domain, sample, or other fixed-count capacity stops with
+`CapacityExceeded`, including the name of the exhausted unit. Exceeding the configured
+byte budget stops with `ResourceExhausted` before the failing allocation. Reaching a
+bounded fixpoint's iteration limit without convergence stops with
+`ConvergenceFailure`. These conditions are distinct so callers do not mistake a count
+limit or nonconvergence for VRAM exhaustion. There is no larger host-sized execution
+path.
 
 The engine also rejects — with a typed error — any program that uses negation,
 aggregates, or annotated disjunctions. In every one of these cases it refuses
@@ -309,19 +324,20 @@ evidence — treat them as a reference check, not a production result.
 This section is for readers who need to reason about where computation runs and
 what the engines promise. You do not need it to write a probabilistic program.
 
-**Monte Carlo — zero host traffic.** For the sampled region, the megakernel keeps
+**Monte Carlo — certified sampled core.** For the sampled region, the megakernel keeps
 all work on the GPU. It performs `0` tracked host-to-device transfers, `0` tracked
 device-to-host transfers, and `0` untracked metadata reads. This holds constant
-whether you draw `128` samples or `1024`; the host reads back only the final
-estimate.
+whether you draw `128` samples or `1024`. After the single launch and synchronization,
+one pinned terminal receipt transfers authoritative convergence status, counts, and
+trace metadata. A nonconverged receipt is an error even if partial counters exist.
 
 **Exact engine — GPU-accelerated, host-orchestrated.** The exact engine runs on
 the GPU but is driven from a host loop: the forward evaluation launches one kernel
-per circuit level. No per-level data is read back — the circuit and its
-intermediate values stay on the device, and only `O(1)` scalars (the log-partition
-value and per-query gradients) return to the host after evaluation. It therefore
-does **not** offer the single-launch, fully device-resident guarantee that the
-Monte Carlo engine does.
+per circuit level. No per-level data is read back — the circuit and its intermediate
+values stay on the device. Device-result APIs retain requested result and gradient
+buffers on the GPU; host-convenience APIs copy the result fields the caller requests.
+The exact route also observes bounded solver status and error scalars. It therefore
+does **not** offer the single-launch sampled-core guarantee of the Monte Carlo engine.
 
 **No CPU Decision-DNNF compiler.** Production exact inference is always the GPU
 compiler and verifier described above. XLOG never bundles a CPU d-DNNF compiler and

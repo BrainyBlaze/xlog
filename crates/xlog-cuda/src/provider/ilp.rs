@@ -924,7 +924,10 @@ impl super::CudaKernelProvider {
     /// - `cand_value`: actual candidate index to write into `coo_cand`
     ///
     /// This keeps COO assembly fully on device, eliminating the mask D2H transfer.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the launch surface mirrors the fixed COO-fill kernel ABI and keeps every device buffer explicit"
+    )]
     pub fn ilp_coo_fill_from_mask_launch(
         &self,
         mask: &TrackedCudaSlice<u8>,

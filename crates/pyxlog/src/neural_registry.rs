@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use xlog_logic::ast::{Atom, NeuralLabel, Program, Term};
 
 #[derive(Debug, Clone)]
-pub struct NeuralPredicateInfo {
+pub(crate) struct NeuralPredicateInfo {
     pub predicate: String,
     pub network: String,
     pub predicate_terms: Vec<Term>,
@@ -15,12 +15,12 @@ pub struct NeuralPredicateInfo {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct NeuralPredicateRegistry {
+pub(crate) struct NeuralPredicateRegistry {
     by_predicate: HashMap<String, Vec<NeuralPredicateInfo>>,
 }
 
 impl NeuralPredicateRegistry {
-    pub fn from_ast(ast: &Program) -> Result<Self, String> {
+    pub(crate) fn from_ast(ast: &Program) -> Result<Self, String> {
         let mut registry = NeuralPredicateRegistry::default();
         for np in &ast.neural_predicates {
             let predicate = np.predicate.predicate.clone();
@@ -158,7 +158,7 @@ impl NeuralPredicateRegistry {
         Ok(registry)
     }
 
-    pub fn get(&self, predicate: &str) -> Option<&Vec<NeuralPredicateInfo>> {
+    pub(crate) fn get(&self, predicate: &str) -> Option<&Vec<NeuralPredicateInfo>> {
         self.by_predicate.get(predicate)
     }
 
@@ -167,11 +167,11 @@ impl NeuralPredicateRegistry {
     /// Used to validate a caller-supplied network `arity` at registration
     /// time against every predicate declaration bound to that network name
     /// (a network name is not unique to one predicate).
-    pub fn infos(&self) -> impl Iterator<Item = &NeuralPredicateInfo> {
+    pub(crate) fn infos(&self) -> impl Iterator<Item = &NeuralPredicateInfo> {
         self.by_predicate.values().flatten()
     }
 
-    pub fn resolve_atom(&self, atom: &Atom) -> Result<&NeuralPredicateInfo, String> {
+    pub(crate) fn resolve_atom(&self, atom: &Atom) -> Result<&NeuralPredicateInfo, String> {
         let infos = self
             .by_predicate
             .get(&atom.predicate)

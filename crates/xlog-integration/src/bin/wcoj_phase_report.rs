@@ -26,12 +26,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
-};
+use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError};
 use xlog_cuda::memory::CudaBuffer;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager};
 use xlog_logic::Compiler;
 use xlog_runtime::executor::wcoj_phase_timing::WcojDispatchPhaseTiming;
 use xlog_runtime::Executor;
@@ -198,31 +195,14 @@ struct Fix {
 }
 
 fn make_fix() -> Option<Fix> {
-    let device = Arc::new(CudaDevice::new(0).ok()?);
-    let pool = Arc::new(StreamPool::new(Arc::clone(&device), 1024));
-    let limit_bytes: usize = 8 * 1024 * 1024 * 1024;
-    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
-        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    let limit_bytes = 8 * 1024 * 1024 * 1024_u64;
+    let provider = Arc::new(
+        CudaProviderBuilder::new(0, MemoryBudget::with_limit(limit_bytes))
+            .with_logging_sink(Arc::new(DiscardSink) as Arc<dyn LoggingSink>)
+            .build()
+            .ok()?,
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
-    ));
-    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, limit_bytes));
-    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
-        Arc::clone(&device),
-        0,
-        Arc::clone(&pool),
-        budget,
-    ));
-    let memory = Arc::new(GpuMemoryManager::with_runtime(
-        Arc::clone(&device),
-        MemoryBudget::with_limit(limit_bytes as u64),
-        Arc::clone(&runtime),
-    ));
-    let provider =
-        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let memory = Arc::clone(provider.memory());
     Some(Fix { memory, provider })
 }
 
@@ -616,7 +596,7 @@ fn main() {
     println!("---\n");
     println!("## Cross-cell verdict\n");
     let mut counts = BTreeMap::<String, u32>::new();
-    for (_, v) in verdicts.iter() {
+    for v in verdicts.values() {
         *counts.entry(format!("{v:?}")).or_insert(0) += 1;
     }
     for (k, v) in &counts {

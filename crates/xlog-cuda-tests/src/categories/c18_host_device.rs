@@ -324,7 +324,7 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let expected_filtered = (LARGE_SIZE + 9) / 10;
+    let expected_filtered = LARGE_SIZE.div_ceil(10);
     if ctx.device_row_count(&filtered) != expected_filtered as u64 {
         return TestResult::error(
             "test_large_transfer",
@@ -483,14 +483,14 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
                 }
             };
 
-            for j in 0..result.len() {
-                if result[j] != j as u32 {
+            for (j, &actual) in result.iter().enumerate() {
+                if actual != j as u32 {
                     return TestResult::error(
                         "test_repeated_transfer",
                         start.elapsed(),
                         format!(
                             "Operation {}: incorrect at index {}: expected {}, got {}",
-                            i, j, j, result[j]
+                            i, j, j, actual
                         ),
                     );
                 }
@@ -545,7 +545,7 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let expected_count = (SMALL_SIZE + 1) / 2;
+        let expected_count = SMALL_SIZE.div_ceil(2);
         if result.len() != expected_count {
             return TestResult::error(
                 "test_repeated_transfer",
@@ -888,7 +888,7 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let expected = (per_buffer_size + 1) / 2;
+        let expected = per_buffer_size.div_ceil(2);
         if ctx.device_row_count(&filtered) != expected as u64 {
             return TestResult::error(
                 "test_memory_budget_limits",

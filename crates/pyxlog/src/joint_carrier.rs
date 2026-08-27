@@ -57,7 +57,7 @@ struct CarrierState {
 
 /// Session handle over the device-resident joint constraint carrier.
 #[pyclass(unsendable)]
-pub struct JointConstraintCarrier {
+pub(crate) struct JointConstraintCarrier {
     state: Mutex<CarrierState>,
 }
 

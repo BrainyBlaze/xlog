@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 
 use crate::{LaunchAsync, LaunchConfig};
-use xlog_core::{Result, ScalarType, XlogError};
+use xlog_core::{resolve_bool, Result, ScalarType, XlogError};
 
 use super::{ilp_exact_kernels, RawCudaView, ILP_EXACT_MODULE};
 use crate::memory::{CudaBuffer, TrackedCudaSlice};
@@ -58,14 +58,8 @@ impl ExactPairLayout {
     }
 }
 
-fn ilp_exact_chain_smem_enabled() -> bool {
-    match std::env::var(ENV_ILP_EXACT_CHAIN_SMEM) {
-        Ok(value) => !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        ),
-        Err(_) => true,
-    }
+fn ilp_exact_chain_smem_enabled() -> Result<bool> {
+    resolve_bool(None, ENV_ILP_EXACT_CHAIN_SMEM, true)
 }
 
 fn chain_smem_shared_bytes(layout: ExactPairLayout) -> u32 {
@@ -185,7 +179,7 @@ impl super::CudaKernelProvider {
             })?;
 
         let mut selected = Vec::new();
-        for chunk in words.chunks_exact(ILP_EXACT_TOPK_FIELDS) {
+        for chunk in words.as_chunks::<ILP_EXACT_TOPK_FIELDS>().0 {
             if chunk[3] == 0 {
                 continue;
             }
@@ -323,8 +317,8 @@ impl super::CudaKernelProvider {
 
         // ── Launch ────────────────────────────────────────────────────────
         let max_candidate_rows = cand_rows.iter().copied().max().unwrap_or(0);
-        let chain_smem_enabled =
-            ilp_exact_chain_smem_enabled() && max_candidate_rows >= ilp_exact_chain_smem_min_rows();
+        let chain_smem_enabled = ilp_exact_chain_smem_enabled()?
+            && max_candidate_rows >= ilp_exact_chain_smem_min_rows();
         let shared_mem_bytes = if chain_smem_enabled {
             chain_smem_shared_bytes(layout)
         } else {
@@ -522,17 +516,13 @@ mod tests {
     //! fixture uses C=2 candidate relations so the expected flat output
     //! (4 × C × C = 16 slots per count array) is tractable to enumerate.
 
-    use std::sync::Arc;
-
     use xlog_core::{MemoryBudget, ScalarType, Schema};
 
-    use crate::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+    use crate::{CudaKernelProvider, CudaProviderBuilder};
 
     fn make_provider() -> Option<CudaKernelProvider> {
-        let device = Arc::new(CudaDevice::new(0).ok()?);
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-        CudaKernelProvider::new(device, memory).ok()
+        CudaProviderBuilder::new(0, budget).build().ok()
     }
 
     /// Build a `(u64, u64)` pair buffer from parallel host-side column arrays.

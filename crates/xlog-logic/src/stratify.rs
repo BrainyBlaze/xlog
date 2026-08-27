@@ -123,68 +123,73 @@ pub fn build_dependency_graph(program: &Program) -> DependencyGraph {
 /// Find strongly connected components using Tarjan's algorithm
 /// Returns SCCs in reverse topological order (dependencies first)
 fn find_sccs(graph: &DependencyGraph) -> Vec<Vec<String>> {
-    let mut index_counter = 0;
-    let mut stack = Vec::new();
-    let mut indices: HashMap<String, usize> = HashMap::new();
-    let mut lowlinks: HashMap<String, usize> = HashMap::new();
-    let mut on_stack: HashSet<String> = HashSet::new();
-    let mut sccs: Vec<Vec<String>> = Vec::new();
+    struct TarjanState<'a> {
+        graph: &'a DependencyGraph,
+        next_index: usize,
+        stack: Vec<String>,
+        indices: HashMap<String, usize>,
+        lowlinks: HashMap<String, usize>,
+        on_stack: HashSet<String>,
+        components: Vec<Vec<String>>,
+    }
 
-    #[allow(clippy::too_many_arguments)]
-    fn strongconnect(
-        v: &str,
-        graph: &DependencyGraph,
-        index_counter: &mut usize,
-        stack: &mut Vec<String>,
-        indices: &mut HashMap<String, usize>,
-        lowlinks: &mut HashMap<String, usize>,
-        on_stack: &mut HashSet<String>,
-        sccs: &mut Vec<Vec<String>>,
-    ) {
-        indices.insert(v.to_string(), *index_counter);
-        lowlinks.insert(v.to_string(), *index_counter);
-        *index_counter += 1;
-        stack.push(v.to_string());
-        on_stack.insert(v.to_string());
+    impl TarjanState<'_> {
+        fn strongconnect(&mut self, vertex: &str) {
+            self.indices.insert(vertex.to_string(), self.next_index);
+            self.lowlinks.insert(vertex.to_string(), self.next_index);
+            self.next_index += 1;
+            self.stack.push(vertex.to_string());
+            self.on_stack.insert(vertex.to_string());
 
-        for edge in graph.outgoing(v) {
-            let w = &edge.to;
-            if !indices.contains_key(w) {
-                strongconnect(
-                    w,
-                    graph,
-                    index_counter,
-                    stack,
-                    indices,
-                    lowlinks,
-                    on_stack,
-                    sccs,
-                );
-                let low_v = *lowlinks.get(v).unwrap();
-                let low_w = *lowlinks.get(w).unwrap();
-                lowlinks.insert(v.to_string(), low_v.min(low_w));
-            } else if on_stack.contains(w) {
-                let low_v = *lowlinks.get(v).unwrap();
-                let idx_w = *indices.get(w).unwrap();
-                lowlinks.insert(v.to_string(), low_v.min(idx_w));
-            }
-        }
-
-        let low_v = *lowlinks.get(v).unwrap();
-        let idx_v = *indices.get(v).unwrap();
-        if low_v == idx_v {
-            let mut scc = Vec::new();
-            loop {
-                let w = stack.pop().unwrap();
-                on_stack.remove(&w);
-                scc.push(w.clone());
-                if w == v {
-                    break;
+            let successors: Vec<String> = self
+                .graph
+                .outgoing(vertex)
+                .iter()
+                .map(|edge| edge.to.clone())
+                .collect();
+            for successor in successors {
+                if !self.indices.contains_key(&successor) {
+                    self.strongconnect(&successor);
+                    let low_vertex = self.lowlinks[vertex];
+                    let low_successor = self.lowlinks[&successor];
+                    self.lowlinks
+                        .insert(vertex.to_string(), low_vertex.min(low_successor));
+                } else if self.on_stack.contains(&successor) {
+                    let low_vertex = self.lowlinks[vertex];
+                    let successor_index = self.indices[&successor];
+                    self.lowlinks
+                        .insert(vertex.to_string(), low_vertex.min(successor_index));
                 }
             }
-            sccs.push(scc);
+
+            if self.lowlinks[vertex] == self.indices[vertex] {
+                let mut component = Vec::new();
+                loop {
+                    let member = self
+                        .stack
+                        .pop()
+                        .expect("the current Tarjan root remains on the traversal stack");
+                    self.on_stack.remove(&member);
+                    let is_root = member == vertex;
+                    component.push(member);
+                    if is_root {
+                        break;
+                    }
+                }
+                self.components.push(component);
+            }
         }
     }
+
+    let mut state = TarjanState {
+        graph,
+        next_index: 0,
+        stack: Vec::new(),
+        indices: HashMap::new(),
+        lowlinks: HashMap::new(),
+        on_stack: HashSet::new(),
+        components: Vec::new(),
+    };
 
     // Deterministic visit order: `predicates` is a HashSet, whose iteration
     // order varies per process and used to make SCC ids (and every downstream
@@ -192,21 +197,12 @@ fn find_sccs(graph: &DependencyGraph) -> Vec<Vec<String>> {
     let mut preds_sorted: Vec<&String> = graph.predicates.iter().collect();
     preds_sorted.sort();
     for pred in preds_sorted {
-        if !indices.contains_key(pred) {
-            strongconnect(
-                pred,
-                graph,
-                &mut index_counter,
-                &mut stack,
-                &mut indices,
-                &mut lowlinks,
-                &mut on_stack,
-                &mut sccs,
-            );
+        if !state.indices.contains_key(pred) {
+            state.strongconnect(pred);
         }
     }
 
-    sccs
+    state.components
 }
 
 /// Check for cycles through negation/aggregation in an SCC

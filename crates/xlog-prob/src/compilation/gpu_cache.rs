@@ -84,6 +84,7 @@ fn cache_grid_dim_for_u64_count(context: &str, count: u64, block_dim: u32) -> Re
         .map_err(|_| XlogError::Compilation(format!("{context}: GPU cache grid exceeds u32")))
 }
 
+/// Fixed-capacity device-resident cache of compiled circuits and evaluation state.
 pub struct GpuCircuitCache {
     provider: Arc<CudaKernelProvider>,
     table_size: u32,
@@ -124,6 +125,7 @@ pub struct GpuCircuitCache {
     has_free_var_mask: Vec<bool>,
 }
 
+/// Device-resident result of a cache lookup or slot claim.
 pub struct GpuCacheLookup {
     provider: Arc<CudaKernelProvider>,
     slot: TrackedCudaSlice<u32>,
@@ -131,18 +133,22 @@ pub struct GpuCacheLookup {
 }
 
 impl GpuCacheLookup {
+    /// Returns the selected cache slot as a device scalar.
     pub fn slot_device(&self) -> &TrackedCudaSlice<u32> {
         &self.slot
     }
 
+    /// Returns the device flag indicating whether the slot requires compilation.
     pub fn compile_needed_device(&self) -> &TrackedCudaSlice<u32> {
         &self.compile_needed
     }
 
+    /// Returns the CUDA provider that owns the lookup buffers.
     pub fn provider(&self) -> &Arc<CudaKernelProvider> {
         &self.provider
     }
 
+    /// Resolves device metadata and converts this lookup into a cache handle.
     pub fn into_handle(self) -> Result<GpuCircuitCacheHandle> {
         let slot_host_vec: Vec<u32> = self
             .provider
@@ -163,6 +169,7 @@ impl GpuCacheLookup {
     }
 }
 
+/// Host-resolved handle to one claimed GPU circuit-cache slot.
 pub struct GpuCircuitCacheHandle {
     provider: Arc<CudaKernelProvider>,
     slot: TrackedCudaSlice<u32>,
@@ -175,30 +182,37 @@ pub struct GpuCircuitCacheHandle {
 }
 
 impl GpuCircuitCacheHandle {
+    /// Returns the selected cache slot as a device scalar.
     pub fn slot_device(&self) -> &TrackedCudaSlice<u32> {
         &self.slot
     }
 
+    /// Returns the device flag indicating whether the slot requires compilation.
     pub fn compile_needed_device(&self) -> &TrackedCudaSlice<u32> {
         &self.compile_needed
     }
 
+    /// Returns the CUDA provider that owns the handle buffers.
     pub fn provider(&self) -> &Arc<CudaKernelProvider> {
         &self.provider
     }
 
+    /// Returns the materialized circuit node count.
     pub fn num_nodes(&self) -> u32 {
         self.num_nodes
     }
 
+    /// Returns the materialized circuit level count.
     pub fn num_levels(&self) -> u32 {
         self.num_levels
     }
 
+    /// Returns the materialized circuit root node.
     pub fn root(&self) -> u32 {
         self.root
     }
 
+    /// Returns the largest DIMACS variable in the materialized circuit.
     pub fn max_var(&self) -> u32 {
         self.max_var
     }
@@ -249,6 +263,7 @@ pub fn hash_cnf_gpu(
 }
 
 impl GpuCircuitCache {
+    /// Returns the CUDA provider that owns all cache allocations.
     pub fn provider(&self) -> &Arc<CudaKernelProvider> {
         &self.provider
     }
@@ -264,34 +279,42 @@ impl GpuCircuitCache {
         (&mut self.var_log_true, &mut self.var_log_false)
     }
 
+    /// Returns the device gradients for true variable log weights.
     pub fn grad_true(&self) -> &TrackedCudaSlice<f64> {
         &self.grad_true
     }
 
+    /// Returns the device gradients for false variable log weights.
     pub fn grad_false(&self) -> &TrackedCudaSlice<f64> {
         &self.grad_false
     }
 
+    /// Returns the device circuit-value workspace.
     pub fn values(&self) -> &TrackedCudaSlice<f64> {
         &self.values
     }
 
+    /// Returns the device scalar containing the active node count.
     pub fn meta_num_nodes_device(&self) -> &TrackedCudaSlice<u32> {
         &self.meta_num_nodes
     }
 
+    /// Returns the device scalar containing the active level count.
     pub fn meta_num_levels_device(&self) -> &TrackedCudaSlice<u32> {
         &self.meta_num_levels
     }
 
+    /// Returns the device scalar containing the active root node.
     pub fn meta_root_device(&self) -> &TrackedCudaSlice<u32> {
         &self.meta_root
     }
 
+    /// Returns the device scalar containing the active maximum variable.
     pub fn meta_max_var_device(&self) -> &TrackedCudaSlice<u32> {
         &self.meta_max_var
     }
 
+    /// Returns the number of circuit slots allocated by the cache.
     pub fn num_slots(&self) -> u32 {
         self.num_slots
     }
@@ -389,7 +412,10 @@ impl GpuCircuitCache {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "fused batched evaluation keeps the circuit handle, paired weight tables, four output workspaces, and batch size explicit"
+    )]
     pub(crate) fn eval_grads_inplace_fused_batched(
         &mut self,
         handle: &GpuCircuitCacheHandle,
@@ -646,6 +672,7 @@ impl GpuCircuitCache {
         Ok(())
     }
 
+    /// Allocates an empty circuit cache with the requested fixed capacities.
     pub fn new(provider: &Arc<CudaKernelProvider>, config: GpuCircuitCacheConfig) -> Result<Self> {
         if config.num_slots == 0 {
             return Err(XlogError::Compilation(
@@ -887,6 +914,7 @@ impl GpuCircuitCache {
         })
     }
 
+    /// Finds or claims a slot for a host-resident cache key.
     pub fn lookup_or_insert(&mut self, key: u64) -> Result<GpuCacheLookup> {
         let memory = self.provider.memory();
         let mut key_device = memory.alloc::<u64>(1)?;
@@ -945,11 +973,13 @@ impl GpuCircuitCache {
         })
     }
 
+    /// Finds or claims a slot and resolves it into a host-visible handle.
     pub fn claim_slot(&mut self, key: u64) -> Result<GpuCircuitCacheHandle> {
         let lookup = self.lookup_or_insert(key)?;
         lookup.into_handle()
     }
 
+    /// Copies a compiled device circuit and its authoritative metadata into a claimed slot.
     pub fn store_from_xgcf(
         &mut self,
         handle: &mut GpuCircuitCacheHandle,
@@ -1372,6 +1402,7 @@ impl GpuCircuitCache {
         Ok(())
     }
 
+    /// Initializes the log-weight tables for a claimed slot.
     pub fn store_weights(
         &mut self,
         handle: &GpuCircuitCacheHandle,
@@ -1453,6 +1484,7 @@ impl GpuCircuitCache {
         Ok(())
     }
 
+    /// Replaces log-weight tables for an already materialized slot.
     pub fn overwrite_weights(
         &mut self,
         handle: &GpuCircuitCacheHandle,
@@ -1540,6 +1572,7 @@ impl GpuCircuitCache {
         Ok(())
     }
 
+    /// Stores the free-variable mask associated with a compiled slot.
     pub fn store_free_var_mask(
         &mut self,
         handle: &GpuCircuitCacheHandle,

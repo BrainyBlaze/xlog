@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use xlog_core::{AggOp, MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{
-    CudaBuffer, CudaDevice, CudaKernelProvider, GpuDevicePool, GpuMemoryManager,
+    CudaBuffer, CudaDevice, CudaKernelProvider, CudaProviderBuilder, GpuDevicePool,
     MultiGpuMemoryManager,
 };
 
@@ -25,11 +25,11 @@ fn main() {
     println!("✓ CUDA devices detected: {}", device_count);
 
     // Create device and provider
-    let device = Arc::new(CudaDevice::new(0).expect("Failed to create CUDA device"));
     let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget.clone()));
-    let provider = CudaKernelProvider::new(device.clone(), memory.clone())
+    let provider = CudaProviderBuilder::new(0, budget.clone())
+        .build()
         .expect("Failed to create kernel provider");
+    let memory = Arc::clone(provider.memory());
     println!("✓ CUDA kernel provider initialized");
 
     // Test 1: Buffer creation with all types

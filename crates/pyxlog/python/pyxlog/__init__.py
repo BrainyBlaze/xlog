@@ -409,15 +409,44 @@ def _compiled_program_register_network_with_lineage(
     return result
 
 
+def _copy_nn4_influence_record(record: dict[str, Any]) -> dict[str, Any]:
+    copied = dict(record)
+    copied["evidence"] = dict(record.get("evidence", {}))
+    return copied
+
+
+def _copy_nn4_lineage(lineage: dict[str, Any]) -> dict[str, Any]:
+    copied = dict(lineage)
+    copied["split_hashes"] = dict(lineage.get("split_hashes", {}))
+    copied["calibration_metrics"] = dict(lineage.get("calibration_metrics", {}))
+    copied["influence_audit"] = dict(lineage.get("influence_audit", {}))
+    return copied
+
+
+def _lineage_with_influence_records(
+    lineage: dict[str, Any], records: list[dict[str, Any]]
+) -> dict[str, Any]:
+    result = _copy_nn4_lineage(lineage)
+    result["influence_audit"] = {
+        "registration": dict(result.get("influence_audit", {})),
+        "records": [_copy_nn4_influence_record(record) for record in records],
+    }
+    return result
+
+
 def _compiled_program_nn4_lineage(self: Any, name: str | None = None) -> dict[str, Any]:
     records = _NN4_LINEAGE.get(id(self), {})
     influence = _NN4_INFLUENCE.get(id(self), {})
     if name is not None:
-        lineage = dict(records.get(name, {}))
-        lineage["influence_audit"] = influence.get(name, [])
-        return lineage
+        if name not in records:
+            raise ValueError(f"network {name!r} has no registered nn/4 lineage")
+        return _lineage_with_influence_records(
+            records[name], influence.get(name, [])
+        )
     return {
-        network: {**dict(lineage), "influence_audit": influence.get(network, [])}
+        network: _lineage_with_influence_records(
+            lineage, influence.get(network, [])
+        )
         for network, lineage in records.items()
     }
 
@@ -432,6 +461,8 @@ def _compiled_program_record_nn4_influence(
     after: Any = None,
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if name not in _NN4_LINEAGE.get(id(self), {}):
+        raise ValueError(f"network {name!r} has no registered nn/4 lineage")
     record = {
         "query": query,
         "changed_acceptance": bool(changed_acceptance),
@@ -440,7 +471,7 @@ def _compiled_program_record_nn4_influence(
         "evidence": dict(evidence or {}),
     }
     _NN4_INFLUENCE.setdefault(id(self), {}).setdefault(name, []).append(record)
-    return dict(record)
+    return _copy_nn4_influence_record(record)
 
 
 def _compiled_program_neural_hot_loop_diagnostics(self: Any) -> dict[str, Any]:

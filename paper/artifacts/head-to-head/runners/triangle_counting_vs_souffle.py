@@ -31,9 +31,6 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Iterable, Mapping, Sequence
 
-import pyarrow as pa
-import pyarrow.ipc as ipc
-
 
 DEFAULT_CASES = (
     ("h30_e150000", 30, 150_000),
@@ -178,6 +175,9 @@ def generate_hub_skewed_edges(
 
 
 def write_inputs(case_dir: Path, edges: Sequence[tuple[int, int]]) -> tuple[Path, Path]:
+    import pyarrow as pa
+    import pyarrow.ipc as ipc
+
     arrow_path = case_dir / "edge.arrow"
     facts_path = case_dir / "edge.facts"
     table = pa.table(
@@ -230,6 +230,8 @@ def triangle_count_summary(rows: Iterable[tuple[int, int]]) -> dict[str, Any]:
 
 
 def read_xlog_counts(path: Path) -> dict[str, Any]:
+    import pyarrow.ipc as ipc
+
     with path.open("rb") as source:
         table = ipc.open_stream(source).read_all()
     if table.num_columns != 2:
@@ -747,6 +749,8 @@ def main() -> int:
     if args.self_test:
         self_test()
         return 0
+    import pyarrow as pa
+
     if (
         args.repetitions <= 0
         or args.memory_mb <= 0

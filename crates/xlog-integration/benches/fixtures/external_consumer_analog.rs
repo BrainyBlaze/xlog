@@ -16,7 +16,7 @@ fn sorted_pairs(rows: BTreeSet<(u32, u32)>) -> Vec<(u32, u32)> {
     rows.into_iter().collect()
 }
 
-pub fn external_consumer_analog(scale: u32) -> TriangleFixture {
+pub(crate) fn external_consumer_analog(scale: u32) -> TriangleFixture {
     let scale = scale.max(32);
     let hot_middle = (scale / 16).clamp(16, 64);
     let output_band = (scale / 16).clamp(32, 64);

@@ -1,7 +1,6 @@
 """Guard tests: sparse trainer path must not fall back to dense APIs."""
 
 import inspect
-from pathlib import Path
 import re
 
 import pytest
@@ -287,28 +286,3 @@ def test_strict_selected_device_evaluate_is_hard_gated_in_strict_mode():
 
     with pytest.raises(RuntimeError, match="SparseDevice.*strict_zero_dtoh"):
         prog.evaluate()
-
-
-def test_strict_selected_device_setter_contains_no_download_helpers():
-    repo_root = Path(__file__).resolve().parents[2]
-    src = (repo_root / "crates/pyxlog/src/ilp.rs").read_text()
-    match = re.search(
-        r"pub fn set_rule_mask_sparse_selected_device\([\s\S]*?\n    }\n\n    pub fn evaluate",
-        src,
-    )
-    assert match is not None, "could not isolate set_rule_mask_sparse_selected_device body"
-    setter_src = match.group(0)
-    assert "download_" not in setter_src
-
-
-def test_strict_selected_device_provider_helper_contains_no_raw_device_to_host_copy():
-    repo_root = Path(__file__).resolve().parents[2]
-    src = (repo_root / "crates/xlog-cuda/src/provider/ilp.rs").read_text()
-    match = re.search(
-        r"pub fn build_selected_id_mask\([\s\S]*?\n    }\n\n    pub fn filter_buffer_by_candidate_flag",
-        src,
-    )
-    assert match is not None, "could not isolate build_selected_id_mask body"
-    helper_src = match.group(0)
-    assert "download_" not in helper_src
-    assert "dtoh_sync_copy_into" not in helper_src

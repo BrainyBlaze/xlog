@@ -550,7 +550,7 @@ impl CudaKernelProvider {
         let comparison_count = u32::try_from(encoded.len()).map_err(|_| {
             XlogError::Kernel("resident filter comparison count exceeds u32".into())
         })?;
-        let mut device_comparisons = match reservation.as_deref_mut() {
+        let mut device_comparisons = match reservation.as_mut() {
             Some(reservation) => {
                 reservation.alloc::<ResidentFilterComparisonDescriptor>(encoded.len().max(1))?
             }
@@ -603,7 +603,7 @@ impl CudaKernelProvider {
             Some(reservation) => reservation.alloc::<u32>(block_count as usize)?,
             None => self.memory().alloc::<u32>(block_count as usize)?,
         };
-        let block_offsets = match reservation.as_deref_mut() {
+        let block_offsets = match reservation.as_mut() {
             Some(reservation) => reservation.alloc::<u32>(block_count as usize)?,
             None => self.memory().alloc::<u32>(block_count as usize)?,
         };
@@ -685,7 +685,7 @@ impl CudaKernelProvider {
         let expression_count = u32::try_from(encoded.len()).map_err(|_| {
             XlogError::Kernel("resident projection expression count exceeds u32".into())
         })?;
-        let mut device_descriptors = match reservation.as_deref_mut() {
+        let mut device_descriptors = match reservation.as_mut() {
             Some(reservation) => {
                 reservation.alloc::<ResidentProjectDescriptor>(encoded.len().max(1))?
             }
@@ -706,7 +706,6 @@ impl CudaKernelProvider {
     }
 
     /// Enqueue a stable, fixed-address filter pipeline on the caller's stream.
-    #[allow(clippy::too_many_arguments)]
     pub fn record_resident_filter_on_stream(
         &self,
         input: &CudaBuffer,
@@ -735,7 +734,10 @@ impl CudaKernelProvider {
     }
 
     /// Record a filter using immutable per-op descriptors and shared mutable scratch.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "descriptor-backed resident filtering keeps immutable descriptors and mutable scratch owners explicit"
+    )]
     pub fn record_resident_filter_with_scratch_on_stream(
         &self,
         input: &CudaBuffer,
@@ -769,7 +771,10 @@ impl CudaKernelProvider {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the shared resident filter launch core receives every already-validated buffer and stream binding explicitly"
+    )]
     fn record_resident_filter_parts_on_stream(
         &self,
         input: &CudaBuffer,
@@ -919,7 +924,6 @@ impl CudaKernelProvider {
     }
 
     /// Enqueue count propagation plus direct column/constant projection.
-    #[allow(clippy::too_many_arguments)]
     pub fn record_resident_project_on_stream(
         &self,
         input: &CudaBuffer,
@@ -1014,7 +1018,7 @@ mod tests {
     };
     use crate::{
         cuda_graph::CapturedCudaGraph, device_runtime::StreamPool, provider::CompareOp, CudaBuffer,
-        CudaDevice, CudaKernelProvider, CudaStream, GpuMemoryManager,
+        CudaKernelProvider, CudaStream,
     };
     use xlog_core::{MemoryBudget, Result, ScalarType, Schema};
 
@@ -1027,21 +1031,9 @@ mod tests {
     }
 
     fn provider() -> Option<CudaKernelProvider> {
-        let device = match CudaDevice::new(0) {
-            Ok(device) => Arc::new(device),
-            Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
-                panic!("XLOG_REQUIRE_CUDA=1 but CUDA device initialization failed: {error}")
-            }
-            Err(error) => {
-                eprintln!("Skipping resident filter CUDA test: {error}");
-                return None;
-            }
-        };
-        let memory = Arc::new(GpuMemoryManager::new(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(512 * 1024 * 1024),
-        ));
-        match CudaKernelProvider::new(device, memory) {
+        match crate::CudaProviderBuilder::new(0, MemoryBudget::with_limit(512 * 1024 * 1024))
+            .build()
+        {
             Ok(provider) => Some(provider),
             Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
                 panic!("XLOG_REQUIRE_CUDA=1 but resident filter provider setup failed: {error}")

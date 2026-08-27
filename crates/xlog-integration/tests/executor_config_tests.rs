@@ -1,27 +1,16 @@
-#![allow(clippy::arc_with_non_send_sync)]
 use std::sync::Arc;
 
 use xlog_core::{symbol, MemoryBudget, RuntimeConfig, ScalarType, Schema};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, CudaProviderBuilder};
 use xlog_ir::{CompareOp, ConstValue, Expr};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
-fn has_cuda_device() -> bool {
-    CudaDevice::new(0).is_ok()
-}
-
 fn create_executor_with_config(
     config: RuntimeConfig,
 ) -> Option<(Executor, Arc<CudaKernelProvider>)> {
-    if !has_cuda_device() {
-        return None;
-    }
-
-    let device = Arc::new(CudaDevice::new(0).ok()?);
     let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
+    let provider = Arc::new(CudaProviderBuilder::new(0, budget).build().ok()?);
     let executor = Executor::new_with_config(provider.clone(), config);
 
     Some((executor, provider))
