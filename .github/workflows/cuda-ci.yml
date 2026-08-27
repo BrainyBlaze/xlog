@@ -94,7 +94,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Cargo test (release)
-        run: cargo test --workspace --all-targets --release
+        run: RUST_TEST_THREADS=1 cargo test --workspace --all-targets --release
 
   python-wheel-gpu:
     name: python-wheel-gpu

@@ -110,9 +110,11 @@ def test_cuda_workflow_separates_classification_gpu_work_and_aggregate() -> None
     classifier = jobs["cuda-changes"]
     gpu_job = jobs["python-wheel-gpu"]
     aggregate = jobs["python-wheel"]
+    rust_tests = jobs["rust-tests"]
     assert isinstance(classifier, dict)
     assert isinstance(gpu_job, dict)
     assert isinstance(aggregate, dict)
+    assert isinstance(rust_tests, dict)
     classifier_command = job_commands(classifier)
     assert "git diff --no-renames --name-only -z" in classifier_command
     assert "scripts/cuda_ci.py classify --null" in classifier_command
@@ -122,6 +124,12 @@ def test_cuda_workflow_separates_classification_gpu_work_and_aggregate() -> None
     assert aggregate["needs"] == ["cuda-changes", "python-wheel-gpu"]
     assert "always()" in aggregate["if"]
     assert "scripts/cuda_ci.py aggregate" in job_commands(aggregate)
+    rust_test_commands = job_commands(rust_tests)
+    assert (
+        "RUST_TEST_THREADS=1 cargo test --workspace --all-targets --release"
+        in rust_test_commands
+    )
+    assert "-- --test-threads=1" not in rust_test_commands
 
     gpu_test_paths = set(
         re.findall(r"python/tests/[A-Za-z0-9_./-]+\.py", job_commands(gpu_job))
