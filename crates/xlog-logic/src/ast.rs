@@ -950,6 +950,14 @@ pub struct Program {
     pub directives: Directives,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ProgramMergeReport {
+    pub domains: Vec<usize>,
+    pub predicates: Vec<usize>,
+    pub functions: Vec<usize>,
+    pub rules: Vec<usize>,
+}
+
 impl Program {
     /// Create an empty program.
     pub fn new() -> Self {
@@ -1115,7 +1123,17 @@ impl Program {
         other: &Program,
         imported_items: Option<&std::collections::HashSet<String>>,
     ) {
+        self.merge_from_with_report(other, imported_items);
+    }
+
+    pub(crate) fn merge_from_with_report(
+        &mut self,
+        other: &Program,
+        imported_items: Option<&std::collections::HashSet<String>>,
+    ) -> ProgramMergeReport {
         use std::collections::HashSet;
+
+        let mut report = ProgramMergeReport::default();
 
         // Track which predicates are private in the source
         let private_preds: HashSet<&str> = other
@@ -1133,7 +1151,7 @@ impl Program {
             .collect();
 
         // Merge predicate declarations (only public ones)
-        for pred in &other.predicates {
+        for (source_index, pred) in other.predicates.iter().enumerate() {
             if pred.is_private {
                 continue;
             }
@@ -1146,11 +1164,12 @@ impl Program {
             // Avoid duplicate declarations
             if !self.predicates.iter().any(|p| p.name == pred.name) {
                 self.predicates.push(pred.clone());
+                report.predicates.push(source_index);
             }
         }
 
         // Merge functions (only public ones)
-        for func in &other.functions {
+        for (source_index, func) in other.functions.iter().enumerate() {
             if func.is_private {
                 continue;
             }
@@ -1162,11 +1181,12 @@ impl Program {
             // Avoid duplicate functions
             if !self.functions.iter().any(|f| f.name == func.name) {
                 self.functions.push(func.clone());
+                report.functions.push(source_index);
             }
         }
 
         // Merge rules (facts and rules for public predicates)
-        for rule in &other.rules {
+        for (source_index, rule) in other.rules.iter().enumerate() {
             // Skip if the head predicate is private
             if private_preds.contains(rule.head.predicate.as_str()) {
                 continue;
@@ -1179,15 +1199,19 @@ impl Program {
             }
             if !self.rules.iter().any(|existing| existing == rule) {
                 self.rules.push(rule.clone());
+                report.rules.push(source_index);
             }
         }
 
         // Merge domains
-        for domain in &other.domains {
+        for (source_index, domain) in other.domains.iter().enumerate() {
             if !self.domains.iter().any(|d| d.name == domain.name) {
                 self.domains.push(domain.clone());
+                report.domains.push(source_index);
             }
         }
+
+        report
     }
 }
 
