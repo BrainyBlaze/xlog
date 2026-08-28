@@ -246,6 +246,36 @@ def test_cuda_host_io_library_gate_executes_device_only_tests() -> None:
     assert "-- --include-ignored --nocapture --test-threads=1" in command
 
 
+def test_cuda_workflow_uploads_the_generated_contract_report() -> None:
+    workflow = load_workflow("cuda-ci.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    gpu_job = jobs["python-wheel-gpu"]
+    assert isinstance(gpu_job, dict)
+    steps = gpu_job["steps"]
+    assert isinstance(steps, list)
+
+    generated_report = "test-results/installed-pyxlog-contracts.xml"
+    test_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and isinstance(step.get("run"), str)
+        and "--junitxml=" in step["run"]
+    )
+    assert f"--junitxml={generated_report}" in test_step["run"]
+
+    upload_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Upload installed pyxlog contract report"
+    )
+    assert upload_step["if"] == "always()"
+    assert upload_step["with"]["path"] == generated_report
+    assert upload_step["with"]["if-no-files-found"] == "error"
+
+
 def test_wheel_build_workflows_pin_source_date_to_the_checked_out_commit() -> None:
     for workflow_name in ("ci.yml", "cuda-ci.yml", "python-publish.yml"):
         commands = workflow_build_commands(load_workflow(workflow_name))

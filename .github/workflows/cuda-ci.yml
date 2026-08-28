@@ -528,13 +528,13 @@ jobs:
           assert mc_oracle_res.ci_high is not None
           assert mc_oracle_res.samples == 20000
           PY
-      - name: Upload provenance test report
+      - name: Upload installed pyxlog contract report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: relation-provenance-test-report
-          path: test-results/relation-provenance.xml
-          if-no-files-found: warn
+          name: installed-pyxlog-contract-report
+          path: test-results/installed-pyxlog-contracts.xml
+          if-no-files-found: error
 
   python-wheel:
     name: python-wheel
