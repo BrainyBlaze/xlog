@@ -405,7 +405,7 @@ jobs:
           set -euo pipefail
           result_file="$RUNNER_TEMP/xlog-prob-host-io-lib-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
           cargo test --locked --release -p xlog-prob --features host-io --lib \
-            -- --nocapture --test-threads=1 2>&1 | tee "$result_file"
+            -- --include-ignored --nocapture --test-threads=1 2>&1 | tee "$result_file"
           python - "$result_file" <<'PY'
           import pathlib
           import re
