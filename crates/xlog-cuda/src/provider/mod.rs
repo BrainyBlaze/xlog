@@ -83,11 +83,6 @@ pub(crate) fn detect_compute_capability(device: &Arc<CudaDevice>) -> Result<u32>
     Ok((major as u32) * 10 + (minor as u32))
 }
 
-#[cfg(test)]
-fn resolve_module_path(name: &str, cc: u32) -> Option<(std::path::PathBuf, bool)> {
-    kernel_paths::KernelArtifactLocator::from_env().resolve_module_path(name, cc)
-}
-
 #[derive(Debug)]
 pub(crate) enum KernelModuleSource {
     File { path: PathBuf, is_cubin: bool },
@@ -3089,29 +3084,6 @@ mod tests {
         assert!(is_cubin);
 
         let _ = fs::remove_dir_all(PathBuf::from(&root));
-    }
-
-    #[test]
-    fn test_module_resolution_finds_portable_ptx() {
-        // Verify resolve_module_path finds portable PTX for all modules.
-        // Uses a dummy cc (999) so cubin won't match — only portable PTX.
-        for name in crate::kernel_manifest_data::KERNEL_CU_NAMES {
-            let result = resolve_module_path(name, 999);
-            assert!(
-                result.is_some(),
-                "resolve_module_path({name}, 999) should find portable PTX"
-            );
-            let (path, is_cubin) = result.unwrap();
-            assert!(
-                !is_cubin,
-                "{name}: expected portable PTX fallback, got cubin"
-            );
-            assert!(
-                path.to_str().unwrap().ends_with(".portable.ptx"),
-                "{name}: path should end with .portable.ptx, got {:?}",
-                path
-            );
-        }
     }
 
     #[test]

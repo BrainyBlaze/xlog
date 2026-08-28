@@ -25,8 +25,10 @@ RELEVANT_PATH_PATTERNS = (
     "python/tests/test_relation_callbacks_runtime.py",
     "python/tests/test_relation_provenance_contract.py",
     "python/tests/test_relation_provenance_public_api.py",
+    "python/constraints-build.txt",
     "scripts/cuda_ci.py",
     "scripts/validate_release_gpu.sh",
+    "scripts/validate_reproducible_pyxlog_wheel.py",
 )
 
 
@@ -107,7 +109,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    classify = subparsers.add_parser("classify", help="classify changed paths from stdin")
+    classify = subparsers.add_parser(
+        "classify", help="classify changed paths from stdin"
+    )
     classify.add_argument(
         "--null",
         action="store_true",

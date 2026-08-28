@@ -54,6 +54,10 @@ esac
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
+cargo_target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+if [[ "$cargo_target_dir" != /* ]]; then
+  cargo_target_dir="$repo_root/$cargo_target_dir"
+fi
 
 print_cmd() {
   printf '+'
@@ -168,9 +172,9 @@ fi
 
 wheel_dir="${TMPDIR:-/tmp}/xlog-wheel-validation"
 bundle_dir="${TMPDIR:-/tmp}/xlog-cli-validation"
-python_env_dir="${TMPDIR:-/tmp}/xlog-python-validation-env"
+python_install_dir="${TMPDIR:-/tmp}/xlog-python-wheel-site"
 
-rm -rf "$wheel_dir" "$bundle_dir" "$python_env_dir"
+rm -rf "$wheel_dir" "$bundle_dir" "$python_install_dir"
 mkdir -p "$wheel_dir" "$bundle_dir"
 
 cd "$repo_root"
@@ -227,6 +231,14 @@ run_cmd cargo test --locked --release \
   -- \
   --nocapture \
   --test-threads=1
+run_exact_rust_gate "resident Monte Carlo nonconvergence status" 1 \
+  cargo test --locked --release -p xlog-prob --features host-io --lib \
+  mc::resident::tests::resident_kernel_nonconvergence_is_authoritative -- \
+  --ignored --exact --nocapture --test-threads=1
+run_exact_rust_gate "resident Monte Carlo sparse overflow status" 1 \
+  cargo test --locked --release -p xlog-prob --features host-io --lib \
+  mc::resident::tests::resident_kernel_sparse_overflow_is_authoritative -- \
+  --ignored --exact --nocapture --test-threads=1
 run_exact_rust_gate "resident graph runtime module" 22 \
   cargo test --locked --release -p xlog-runtime --lib \
   --features resident-graph-tests \
@@ -249,12 +261,19 @@ run_exact_rust_gate "resident semantic acceptance matrix" 1 \
   logic::tests::resident_semantic_acceptance_matrix -- \
   --ignored --exact --nocapture --test-threads=1
 run_cmd bash scripts/stage_pyxlog_kernels.sh
-run_cmd maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out "$wheel_dir"
-run_cmd python3 -m venv --system-site-packages "$python_env_dir"
-python_env="$python_env_dir/bin/python"
-run_cmd "$python_env" -m pip install --force-reinstall --no-deps "$wheel_dir"/pyxlog-*.whl
-run_cmd "$python_env" -c 'import pathlib, pyxlog, pytest, torch; assert torch.cuda.is_available(), "PyTorch cannot access CUDA"; native_path = pathlib.Path(pyxlog._native.__file__).resolve(); print(f"validated wheel import: native={native_path} torch={torch.__version__} cuda={torch.version.cuda} gpu={torch.cuda.get_device_name(0)} pytest={pytest.__version__}")'
-run_cmd "$python_env" -m pytest -q \
+run_cmd python3 scripts/validate_reproducible_pyxlog_wheel.py \
+  --out-dir "$wheel_dir" \
+  --compatibility manylinux_2_34
+run_cmd python3 -m pip install --target "$python_install_dir" --no-deps "$wheel_dir"/pyxlog-*.whl
+run_cmd env \
+  PYTHONPATH="$python_install_dir" \
+  PYTHONNOUSERSITE=1 \
+  XLOG_PYTHON_INSTALL_ROOT="$python_install_dir" \
+  python3 -c 'import os, pathlib, pyxlog, pytest, torch; assert torch.cuda.is_available(), "PyTorch cannot access CUDA"; install_root = pathlib.Path(os.environ["XLOG_PYTHON_INSTALL_ROOT"]).resolve(); package_path = pathlib.Path(pyxlog.__file__).resolve(); native_path = pathlib.Path(pyxlog._native.__file__).resolve(); package_path.relative_to(install_root); native_path.relative_to(install_root); print(f"validated wheel import: package={package_path} native={native_path} torch={torch.__version__} cuda={torch.version.cuda} gpu={torch.cuda.get_device_name(0)} pytest={pytest.__version__}")'
+run_cmd env \
+  PYTHONPATH="$python_install_dir" \
+  PYTHONNOUSERSITE=1 \
+  python3 -m pytest -q \
   python/tests/test_logic_relation_provenance.py \
   python/tests/test_relation_provenance_contract.py \
   python/tests/test_relation_provenance_public_api.py \
@@ -267,7 +286,7 @@ else
   run_cmd cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture
 fi
 
-run_cmd ./target/release/xlog run examples/xlog/00-basics/01_tc_reachability.xlog
+run_cmd "$cargo_target_dir/release/xlog" run examples/xlog/00-basics/01_tc_reachability.xlog
 
 run_cmd python3 -c 'import pathlib, sys, tarfile; dist = pathlib.Path(sys.argv[1]); archives = sorted(dist.glob("xlog-v*.tar.gz")); assert archives, "no CLI release archive built"; names = tarfile.open(archives[0], "r:gz").getnames(); assert any(name.endswith("/xlog") for name in names), "CLI archive is missing xlog"; assert any("/kernels/" in name for name in names), "CLI archive is missing staged kernels"; print(f"validated CLI archive layout: {archives[0]}")' "$bundle_dir"
 run_cmd python3 -c 'import pathlib, sys, zipfile; dist = pathlib.Path(sys.argv[1]); wheels = sorted(dist.glob("pyxlog-*.whl")); assert wheels, "no pyxlog wheel built"; names = zipfile.ZipFile(wheels[0]).namelist(); assert any(name.startswith("pyxlog/kernels/") for name in names), "wheel is missing staged kernels"; print(f"validated pyxlog wheel layout: {wheels[0]}")' "$wheel_dir"

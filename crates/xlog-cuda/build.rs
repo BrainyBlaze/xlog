@@ -172,6 +172,13 @@ fn push_wcoj_register_cap(args: &mut Vec<String>, name: &str) {
     }
 }
 
+fn push_reproducible_nvcc_seed(args: &mut Vec<String>, name: &str) {
+    // NVCC otherwise assigns process-dependent suffixes to internal PTX symbols.
+    // A distinct stable seed per CUDA source keeps both PTX and cubin output
+    // independent of build directory and invocation order.
+    args.push(format!("--frandom-seed=xlog-{name}"));
+}
+
 fn main() {
     let manifest_dir =
         env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo");
@@ -252,6 +259,7 @@ fn main() {
                 .expect("kernel source path must be valid UTF-8")
                 .to_string(),
         ];
+        push_reproducible_nvcc_seed(&mut args, name);
         push_wcoj_register_cap(&mut args, name);
         let status = Command::new(&nvcc)
             .args(&args)
@@ -317,6 +325,7 @@ fn main() {
                         .expect("kernel source path must be valid UTF-8")
                         .to_string(),
                 ];
+                push_reproducible_nvcc_seed(&mut args, name);
                 push_wcoj_register_cap(&mut args, name);
                 let status = Command::new(&nvcc)
                     .args(&args)

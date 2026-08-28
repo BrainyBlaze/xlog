@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::path::PathBuf;
 
 use cudarc::nvrtc::Ptx;
 use xlog_cuda::{provider::kernel_paths::KernelArtifactLocator, CudaDevice};
@@ -41,7 +42,11 @@ fn extract_entry_names(ptx: &str) -> Vec<String> {
 }
 
 fn kernel_locator() -> KernelArtifactLocator {
-    KernelArtifactLocator::from_env()
+    KernelArtifactLocator::new(
+        std::env::var_os("XLOG_CUBIN_DIR").map(PathBuf::from),
+        None,
+        Some(PathBuf::from(env!("OUT_DIR"))),
+    )
 }
 
 #[test]
@@ -61,7 +66,7 @@ fn validate_all_ptx_files_load_and_resolve_all_entry_points() {
             .resolve_module_path(spec.cu_name, 999)
             .unwrap_or_else(|| {
                 panic!(
-                    "{}: no portable PTX found in XLOG_CUBIN_DIR, package kernels/, or OUT_DIR",
+                    "{}: no portable PTX found in XLOG_CUBIN_DIR or the test build output",
                     spec.cu_name
                 )
             });

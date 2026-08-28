@@ -11,6 +11,7 @@ from scripts.cuda_ci import changes_are_relevant, evaluate_python_wheel_gate
 
 
 ROOT = Path(__file__).resolve().parents[2]
+MATURIN_CONSTRAINT = "python/constraints-build.txt"
 
 
 def load_workflow(name: str) -> dict[str, object]:
@@ -28,6 +29,32 @@ def job_commands(job: dict[str, object]) -> str:
         for step in steps
         if isinstance(step, dict) and isinstance(step.get("run"), str)
     )
+
+
+def workflow_run_commands(workflow: dict[str, object]) -> list[str]:
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    commands: list[str] = []
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        steps = job.get("steps", [])
+        assert isinstance(steps, list)
+        commands.extend(
+            step["run"]
+            for step in steps
+            if isinstance(step, dict) and isinstance(step.get("run"), str)
+        )
+    return commands
+
+
+def workflow_build_commands(workflow: dict[str, object]) -> list[str]:
+    return [
+        command
+        for command in workflow_run_commands(workflow)
+        if "maturin build" in command
+        or "validate_reproducible_pyxlog_wheel.py" in command
+    ]
 
 
 def assert_unfiltered_required_workflow(workflow: dict[str, object]) -> None:
@@ -79,7 +106,9 @@ def test_workspace_validation_runs_cpu_tests_and_compiles_every_target() -> None
     workspace_commands = job_commands(workspace_tests)
     complete_compile = "cargo test --workspace --all-targets --locked --no-run"
     assert complete_compile in workspace_commands
-    assert workspace_commands.count("cargo test --workspace --all-targets --locked") == 1
+    assert (
+        workspace_commands.count("cargo test --workspace --all-targets --locked") == 1
+    )
     for crate in (
         "xlog-core",
         "xlog-ir",
@@ -110,9 +139,11 @@ def test_cuda_workflow_separates_classification_gpu_work_and_aggregate() -> None
     classifier = jobs["cuda-changes"]
     gpu_job = jobs["python-wheel-gpu"]
     aggregate = jobs["python-wheel"]
+    rust_tests = jobs["rust-tests"]
     assert isinstance(classifier, dict)
     assert isinstance(gpu_job, dict)
     assert isinstance(aggregate, dict)
+    assert isinstance(rust_tests, dict)
     classifier_command = job_commands(classifier)
     assert "git diff --no-renames --name-only -z" in classifier_command
     assert "scripts/cuda_ci.py classify --null" in classifier_command
@@ -122,12 +153,216 @@ def test_cuda_workflow_separates_classification_gpu_work_and_aggregate() -> None
     assert aggregate["needs"] == ["cuda-changes", "python-wheel-gpu"]
     assert "always()" in aggregate["if"]
     assert "scripts/cuda_ci.py aggregate" in job_commands(aggregate)
+    rust_test_commands = job_commands(rust_tests)
+    assert (
+        "RUST_TEST_THREADS=1 cargo test --workspace --all-targets --release"
+        in rust_test_commands
+    )
+    assert "-- --test-threads=1" not in rust_test_commands
 
     gpu_test_paths = set(
         re.findall(r"python/tests/[A-Za-z0-9_./-]+\.py", job_commands(gpu_job))
     )
     assert gpu_test_paths
     assert all(changes_are_relevant([path]) for path in gpu_test_paths)
+
+
+def test_cuda_workflow_authenticates_the_exact_private_acceptance_corpus() -> None:
+    workflow = load_workflow("cuda-ci.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    gpu_job = jobs["python-wheel-gpu"]
+    assert isinstance(gpu_job, dict)
+    job_env = gpu_job["env"]
+    assert isinstance(job_env, dict)
+    assert re.fullmatch(r"[0-9a-f]{40}", job_env["PINNED_CORPUS_SHA"])
+    assert job_env["PINNED_CORPUS_ROOT"] == (
+        "${{ github.workspace }}/.ci/pinned-resident-corpus"
+    )
+
+    steps = gpu_job["steps"]
+    assert isinstance(steps, list)
+    require_token = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Require pinned corpus automation token"
+    )
+    assert require_token["env"] == {
+        "PINNED_CORPUS_TOKEN": "${{ secrets.RELEASE_PLZ_GITHUB_TOKEN }}"
+    }
+    assert '[[ -n "$PINNED_CORPUS_TOKEN" ]]' in require_token["run"]
+
+    corpus_checkout = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Check out pinned resident acceptance corpus"
+    )
+    assert corpus_checkout["uses"] == (
+        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"
+    )
+    assert corpus_checkout["with"] == {
+        "repository": "BrainyBlaze/mistaber-xlog",
+        "ref": "${{ env.PINNED_CORPUS_SHA }}",
+        "token": "${{ secrets.RELEASE_PLZ_GITHUB_TOKEN }}",
+        "persist-credentials": "false",
+        "path": ".ci/pinned-resident-corpus",
+        "fetch-depth": "1",
+        "submodules": "recursive",
+    }
+
+    acceptance_gate = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Run exact resident graph CUDA acceptance gates"
+    )
+    command = acceptance_gate["run"]
+    assert 'corpus_root="$PINNED_CORPUS_ROOT"' in command
+    assert 'git -C "$corpus_root" rev-parse HEAD' in command
+    assert "PINNED_CORPUS_URL" not in command
+    assert "git fetch" not in command
+
+
+def test_cuda_host_io_library_gate_executes_device_only_tests() -> None:
+    workflow = load_workflow("cuda-ci.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    gpu_job = jobs["python-wheel-gpu"]
+    assert isinstance(gpu_job, dict)
+    steps = gpu_job["steps"]
+    assert isinstance(steps, list)
+    library_gate = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Run host-IO probabilistic library tests without skips"
+    )
+    command = library_gate["run"]
+    assert (
+        "cargo test --locked --release -p xlog-prob --features host-io --lib" in command
+    )
+    assert "-- --include-ignored --nocapture --test-threads=1" in command
+
+
+def test_cuda_workflow_uploads_the_generated_contract_report() -> None:
+    workflow = load_workflow("cuda-ci.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    gpu_job = jobs["python-wheel-gpu"]
+    assert isinstance(gpu_job, dict)
+    steps = gpu_job["steps"]
+    assert isinstance(steps, list)
+
+    generated_report = "test-results/installed-pyxlog-contracts.xml"
+    test_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and isinstance(step.get("run"), str)
+        and "--junitxml=" in step["run"]
+    )
+    assert f"--junitxml={generated_report}" in test_step["run"]
+
+    upload_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Upload installed pyxlog contract report"
+    )
+    assert upload_step["if"] == "always()"
+    assert upload_step["with"]["path"] == generated_report
+    assert upload_step["with"]["if-no-files-found"] == "error"
+
+
+def test_wheel_build_workflows_pin_source_date_to_the_checked_out_commit() -> None:
+    for workflow_name in ("ci.yml", "cuda-ci.yml", "python-publish.yml"):
+        commands = workflow_build_commands(load_workflow(workflow_name))
+        assert commands, workflow_name
+        for command in commands:
+            assert re.search(
+                r'SOURCE_DATE_EPOCH="\$\(git -c safe\.directory="\$GITHUB_WORKSPACE" '
+                r'show -s --format=%ct HEAD\)"',
+                command,
+            )
+            assert "export SOURCE_DATE_EPOCH" in command
+            if "maturin build" in command:
+                assert "--locked" in command
+            else:
+                validator = (
+                    ROOT / "scripts" / "validate_reproducible_pyxlog_wheel.py"
+                ).read_text(encoding="utf-8")
+                assert '"--locked"' in validator
+
+
+def test_cuda_and_publish_wheels_run_the_two_build_reproducibility_gate() -> None:
+    cases = (
+        ("cuda-ci.yml", "python-wheel-gpu", None),
+        ("python-publish.yml", "build-wheel", '--python "$PYTHON_BIN"'),
+    )
+    for workflow_name, job_name, interpreter_argument in cases:
+        workflow = load_workflow(workflow_name)
+        jobs = workflow["jobs"]
+        assert isinstance(jobs, dict)
+        job = jobs[job_name]
+        assert isinstance(job, dict)
+        command = job_commands(job)
+        assert command.count("scripts/validate_reproducible_pyxlog_wheel.py") == 1
+        assert "--compatibility manylinux_2_34" in command
+        if interpreter_argument is not None:
+            assert interpreter_argument in command
+
+    release_validator = (ROOT / "scripts" / "validate_release_gpu.sh").read_text(
+        encoding="utf-8"
+    )
+    assert release_validator.count("scripts/validate_reproducible_pyxlog_wheel.py") == 1
+    assert "--compatibility manylinux_2_34" in release_validator
+
+
+def test_every_ci_maturin_install_uses_the_canonical_exact_constraint() -> None:
+    constraint = (ROOT / MATURIN_CONSTRAINT).read_text(encoding="utf-8").strip()
+    assert constraint == "maturin==1.14.1"
+    pyproject = (ROOT / "crates" / "pyxlog" / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert 'requires = ["maturin==1.14.1"]' in pyproject
+
+    install_commands: list[str] = []
+    for workflow_name in ("ci.yml", "cuda-ci.yml", "python-publish.yml"):
+        workflow = load_workflow(workflow_name)
+        install_commands.extend(
+            command
+            for command in workflow_run_commands(workflow)
+            if "pip install" in command and "maturin" in command
+        )
+
+    assert install_commands
+    assert all(f"-c {MATURIN_CONSTRAINT}" in command for command in install_commands)
+
+
+def test_container_wheel_build_uses_bash_and_explicit_safe_workspace() -> None:
+    workflow = load_workflow("ci.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    workspace_tests = jobs["workspace-tests"]
+    assert isinstance(workspace_tests, dict)
+    steps = workspace_tests["steps"]
+    assert isinstance(steps, list)
+    wheel_steps = [
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and isinstance(step.get("run"), str)
+        and "maturin build" in step["run"]
+    ]
+    assert len(wheel_steps) == 1
+    wheel_step = wheel_steps[0]
+    assert wheel_step.get("shell") == "bash"
+    command = wheel_step["run"]
+    assert (
+        'git -c safe.directory="$GITHUB_WORKSPACE" show -s --format=%ct HEAD' in command
+    )
 
 
 def test_cuda_change_classification_is_complete_and_deterministic() -> None:
@@ -137,8 +372,10 @@ def test_cuda_change_classification_is_complete_and_deterministic() -> None:
         "crates/xlog-prob/src/mc/resident.rs",
         "python/tests/conftest.py",
         "python/tests/test_pyxlog_conditioned_reuse.py",
+        "python/constraints-build.txt",
         "scripts/cuda_ci.py",
         "scripts/validate_release_gpu.sh",
+        "scripts/validate_reproducible_pyxlog_wheel.py",
     ):
         assert changes_are_relevant([path]), path
 
