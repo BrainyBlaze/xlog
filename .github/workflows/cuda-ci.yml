@@ -108,6 +108,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: [self-hosted, linux, x64, cuda]
     timeout-minutes: 90
+    env:
+      PINNED_CORPUS_SHA: 74f2895486737b4caa42229389d309994e7ad3ea
+      PINNED_CORPUS_ROOT: ${{ github.workspace }}/.ci/pinned-resident-corpus
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -207,11 +210,28 @@ jobs:
           PY
       - name: Run membership-mask transfer tests
         run: cargo test -p xlog-cuda --test test_membership_mask --release -- --nocapture
-      - name: Run exact resident graph CUDA acceptance gates
+      - name: Require pinned corpus automation token
         shell: bash
         env:
-          PINNED_CORPUS_SHA: 74f2895486737b4caa42229389d309994e7ad3ea
-          PINNED_CORPUS_URL: https://github.com/BrainyBlaze/mistaber-xlog.git
+          PINNED_CORPUS_TOKEN: ${{ secrets.RELEASE_PLZ_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$PINNED_CORPUS_TOKEN" ]] || {
+            echo "RELEASE_PLZ_GITHUB_TOKEN must be able to read the pinned acceptance corpus" >&2
+            exit 1
+          }
+      - name: Check out pinned resident acceptance corpus
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: BrainyBlaze/mistaber-xlog
+          ref: ${{ env.PINNED_CORPUS_SHA }}
+          token: ${{ secrets.RELEASE_PLZ_GITHUB_TOKEN }}
+          persist-credentials: false
+          path: .ci/pinned-resident-corpus
+          fetch-depth: 1
+          submodules: recursive
+      - name: Run exact resident graph CUDA acceptance gates
+        shell: bash
         run: |
           set -euo pipefail
           scratch_dir=$(mktemp -d "${RUNNER_TEMP:?}/xlog-pinned-corpus.XXXXXX")
@@ -304,15 +324,9 @@ jobs:
             executor::resident_graph_tests -- \
             --nocapture --test-threads=1
 
-          corpus_root="$scratch_dir/pinned-corpus"
-          git init --quiet "$corpus_root"
-          git -C "$corpus_root" remote add origin "$PINNED_CORPUS_URL"
-          git -C "$corpus_root" fetch --quiet --depth=1 --no-tags origin "$PINNED_CORPUS_SHA"
-          test "$(git -C "$corpus_root" rev-parse 'FETCH_HEAD^{commit}')" = "$PINNED_CORPUS_SHA"
-          git -C "$corpus_root" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+          corpus_root="$PINNED_CORPUS_ROOT"
+          test -d "$corpus_root/.git"
           test "$(git -C "$corpus_root" rev-parse HEAD)" = "$PINNED_CORPUS_SHA"
-          git -C "$corpus_root" submodule sync --quiet --recursive
-          git -C "$corpus_root" submodule update --init --recursive --depth=1
 
           test -z "$(git -C "$corpus_root" status --porcelain=v1 --untracked-files=all)"
           git -C "$corpus_root" diff --quiet --no-ext-diff --submodule=diff

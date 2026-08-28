@@ -167,6 +167,64 @@ def test_cuda_workflow_separates_classification_gpu_work_and_aggregate() -> None
     assert all(changes_are_relevant([path]) for path in gpu_test_paths)
 
 
+def test_cuda_workflow_authenticates_the_exact_private_acceptance_corpus() -> None:
+    workflow = load_workflow("cuda-ci.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    gpu_job = jobs["python-wheel-gpu"]
+    assert isinstance(gpu_job, dict)
+    job_env = gpu_job["env"]
+    assert isinstance(job_env, dict)
+    assert re.fullmatch(r"[0-9a-f]{40}", job_env["PINNED_CORPUS_SHA"])
+    assert job_env["PINNED_CORPUS_ROOT"] == (
+        "${{ github.workspace }}/.ci/pinned-resident-corpus"
+    )
+
+    steps = gpu_job["steps"]
+    assert isinstance(steps, list)
+    require_token = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Require pinned corpus automation token"
+    )
+    assert require_token["env"] == {
+        "PINNED_CORPUS_TOKEN": "${{ secrets.RELEASE_PLZ_GITHUB_TOKEN }}"
+    }
+    assert '[[ -n "$PINNED_CORPUS_TOKEN" ]]' in require_token["run"]
+
+    corpus_checkout = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Check out pinned resident acceptance corpus"
+    )
+    assert corpus_checkout["uses"] == (
+        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"
+    )
+    assert corpus_checkout["with"] == {
+        "repository": "BrainyBlaze/mistaber-xlog",
+        "ref": "${{ env.PINNED_CORPUS_SHA }}",
+        "token": "${{ secrets.RELEASE_PLZ_GITHUB_TOKEN }}",
+        "persist-credentials": "false",
+        "path": ".ci/pinned-resident-corpus",
+        "fetch-depth": "1",
+        "submodules": "recursive",
+    }
+
+    acceptance_gate = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Run exact resident graph CUDA acceptance gates"
+    )
+    command = acceptance_gate["run"]
+    assert 'corpus_root="$PINNED_CORPUS_ROOT"' in command
+    assert 'git -C "$corpus_root" rev-parse HEAD' in command
+    assert "PINNED_CORPUS_URL" not in command
+    assert "git fetch" not in command
+
+
 def test_wheel_build_workflows_pin_source_date_to_the_checked_out_commit() -> None:
     for workflow_name in ("ci.yml", "cuda-ci.yml", "python-publish.yml"):
         commands = workflow_build_commands(load_workflow(workflow_name))
