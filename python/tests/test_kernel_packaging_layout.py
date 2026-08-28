@@ -176,6 +176,9 @@ def test_pyxlog_pyproject_includes_generated_kernels_in_wheel() -> None:
     assert 'include = [' in pyproject
     assert 'path = "pyxlog/kernels/*"' in pyproject
     assert 'format = "wheel"' in pyproject
+    assert '"**/__pycache__"' in pyproject
+    assert '"**/*.pyc"' in pyproject
+    assert '"**/*.pyo"' in pyproject
 
 
 def test_pyxlog_kernel_path_helper_prefers_packaged_kernels() -> None:

@@ -66,6 +66,7 @@ def write_wheel(
         "pyxlog/_native.cpython-311-x86_64-linux-gnu.so",
     ),
     package_bytes: bytes = b"package",
+    extra_members: dict[str, bytes] | None = None,
     archive_timestamp: tuple[int, int, int, int, int, int] = (2024, 1, 1, 0, 0, 0),
     corrupt_record: bool = False,
 ) -> None:
@@ -78,6 +79,7 @@ def write_wheel(
         ).encode("utf-8"),
     }
     members.update({name: b"native-library" for name in native_members})
+    members.update(extra_members or {})
     record = record_bytes(members)
     if corrupt_record:
         members["pyxlog/__init__.py"] = b"changed-after-record-generation"
@@ -274,6 +276,24 @@ def test_wheel_integrity_rejects_stale_record_hash(tmp_path: Path) -> None:
     write_wheel(wheel, corrupt_record=True)
 
     with pytest.raises(RuntimeError, match="RECORD hash"):
+        validator.validate_wheel_integrity(wheel, SOURCE_DATE_EPOCH)
+
+
+@pytest.mark.parametrize(
+    "bytecode_path",
+    [
+        "pyxlog/__pycache__/module.cpython-311.pyc",
+        "pyxlog/module.pyc",
+        "pyxlog/module.pyo",
+    ],
+)
+def test_wheel_integrity_rejects_python_bytecode(
+    tmp_path: Path, bytecode_path: str
+) -> None:
+    wheel = tmp_path / "python-bytecode.whl"
+    write_wheel(wheel, extra_members={bytecode_path: b"generated-bytecode"})
+
+    with pytest.raises(RuntimeError, match="Python bytecode"):
         validator.validate_wheel_integrity(wheel, SOURCE_DATE_EPOCH)
 
 

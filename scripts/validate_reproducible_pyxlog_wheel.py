@@ -252,8 +252,22 @@ def _validate_record(wheel: Path, members: dict[str, bytes]) -> None:
             )
 
 
+def _validate_no_python_bytecode(wheel: Path, members: dict[str, bytes]) -> None:
+    bytecode_paths = sorted(
+        name
+        for name in members
+        if "__pycache__" in name.split("/") or name.endswith((".pyc", ".pyo"))
+    )
+    if bytecode_paths:
+        raise RuntimeError(
+            f"wheel contains generated Python bytecode: {wheel}: "
+            + ", ".join(bytecode_paths)
+        )
+
+
 def validate_wheel_integrity(wheel: Path, source_date_epoch: str) -> None:
     members = _wheel_members(wheel)
+    _validate_no_python_bytecode(wheel, members)
     _validate_cyclonedx_sbom(wheel, members, source_date_epoch)
     _validate_record(wheel, members)
 
