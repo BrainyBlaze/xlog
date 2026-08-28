@@ -11,6 +11,7 @@ from scripts.cuda_ci import changes_are_relevant, evaluate_python_wheel_gate
 
 
 ROOT = Path(__file__).resolve().parents[2]
+MATURIN_CONSTRAINT = "python/constraints-build.txt"
 
 
 def load_workflow(name: str) -> dict[str, object]:
@@ -30,7 +31,7 @@ def job_commands(job: dict[str, object]) -> str:
     )
 
 
-def workflow_build_commands(workflow: dict[str, object]) -> list[str]:
+def workflow_run_commands(workflow: dict[str, object]) -> list[str]:
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
     commands: list[str] = []
@@ -42,11 +43,18 @@ def workflow_build_commands(workflow: dict[str, object]) -> list[str]:
         commands.extend(
             step["run"]
             for step in steps
-            if isinstance(step, dict)
-            and isinstance(step.get("run"), str)
-            and "maturin build" in step["run"]
+            if isinstance(step, dict) and isinstance(step.get("run"), str)
         )
     return commands
+
+
+def workflow_build_commands(workflow: dict[str, object]) -> list[str]:
+    return [
+        command
+        for command in workflow_run_commands(workflow)
+        if "maturin build" in command
+        or "validate_reproducible_pyxlog_wheel.py" in command
+    ]
 
 
 def assert_unfiltered_required_workflow(workflow: dict[str, object]) -> None:
@@ -165,12 +173,63 @@ def test_wheel_build_workflows_pin_source_date_to_the_checked_out_commit() -> No
         assert commands, workflow_name
         for command in commands:
             assert re.search(
-                r'SOURCE_DATE_EPOCH="\$\(git(?: -c safe\.directory="\$GITHUB_WORKSPACE")? '
+                r'SOURCE_DATE_EPOCH="\$\(git -c safe\.directory="\$GITHUB_WORKSPACE" '
                 r'show -s --format=%ct HEAD\)"',
                 command,
             )
             assert "export SOURCE_DATE_EPOCH" in command
-            assert "--locked" in command
+            if "maturin build" in command:
+                assert "--locked" in command
+            else:
+                validator = (
+                    ROOT / "scripts" / "validate_reproducible_pyxlog_wheel.py"
+                ).read_text(encoding="utf-8")
+                assert '"--locked"' in validator
+
+
+def test_cuda_and_publish_wheels_run_the_two_build_reproducibility_gate() -> None:
+    cases = (
+        ("cuda-ci.yml", "python-wheel-gpu", None),
+        ("python-publish.yml", "build-wheel", '--python "$PYTHON_BIN"'),
+    )
+    for workflow_name, job_name, interpreter_argument in cases:
+        workflow = load_workflow(workflow_name)
+        jobs = workflow["jobs"]
+        assert isinstance(jobs, dict)
+        job = jobs[job_name]
+        assert isinstance(job, dict)
+        command = job_commands(job)
+        assert command.count("scripts/validate_reproducible_pyxlog_wheel.py") == 1
+        assert "--compatibility manylinux_2_34" in command
+        if interpreter_argument is not None:
+            assert interpreter_argument in command
+
+    release_validator = (ROOT / "scripts" / "validate_release_gpu.sh").read_text(
+        encoding="utf-8"
+    )
+    assert release_validator.count("scripts/validate_reproducible_pyxlog_wheel.py") == 1
+    assert "--compatibility manylinux_2_34" in release_validator
+
+
+def test_every_ci_maturin_install_uses_the_canonical_exact_constraint() -> None:
+    constraint = (ROOT / MATURIN_CONSTRAINT).read_text(encoding="utf-8").strip()
+    assert constraint == "maturin==1.14.1"
+    pyproject = (ROOT / "crates" / "pyxlog" / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert 'requires = ["maturin==1.14.1"]' in pyproject
+
+    install_commands: list[str] = []
+    for workflow_name in ("ci.yml", "cuda-ci.yml", "python-publish.yml"):
+        workflow = load_workflow(workflow_name)
+        install_commands.extend(
+            command
+            for command in workflow_run_commands(workflow)
+            if "pip install" in command and "maturin" in command
+        )
+
+    assert install_commands
+    assert all(f"-c {MATURIN_CONSTRAINT}" in command for command in install_commands)
 
 
 def test_container_wheel_build_uses_bash_and_explicit_safe_workspace() -> None:
@@ -204,8 +263,10 @@ def test_cuda_change_classification_is_complete_and_deterministic() -> None:
         "crates/xlog-prob/src/mc/resident.rs",
         "python/tests/conftest.py",
         "python/tests/test_pyxlog_conditioned_reuse.py",
+        "python/constraints-build.txt",
         "scripts/cuda_ci.py",
         "scripts/validate_release_gpu.sh",
+        "scripts/validate_reproducible_pyxlog_wheel.py",
     ):
         assert changes_are_relevant([path]), path
 

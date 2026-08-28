@@ -87,17 +87,20 @@ jobs:
 
       - name: Install maturin
         run: |
-          "$PYTHON_BIN" -m pip install --upgrade pip maturin
+          "$PYTHON_BIN" -m pip install --upgrade pip -c python/constraints-build.txt maturin
 
       - name: Stage pyxlog kernels
         run: bash scripts/stage_pyxlog_kernels.sh
 
-      - name: Build wheel
+      - name: Build and reproduce wheel
         run: |
           set -euo pipefail
           export SOURCE_DATE_EPOCH
-          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
-          maturin build -m crates/pyxlog/Cargo.toml --release --locked --compatibility manylinux_2_34 --out dist -i "$PYTHON_BIN"
+          SOURCE_DATE_EPOCH="$(git -c safe.directory="$GITHUB_WORKSPACE" show -s --format=%ct HEAD)"
+          python3 scripts/validate_reproducible_pyxlog_wheel.py \
+            --out-dir dist \
+            --compatibility manylinux_2_34 \
+            --python "$PYTHON_BIN"
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -132,7 +135,7 @@ jobs:
         run: bash scripts/install_rust_toolchain.sh --toolchain stable
 
       - name: Install maturin
-        run: python3 -m pip install --upgrade pip maturin
+        run: python3 -m pip install --upgrade pip -c python/constraints-build.txt maturin
 
       - name: Build source distribution
         run: maturin sdist -m crates/pyxlog/Cargo.toml --out dist

@@ -166,7 +166,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Install maturin
-        run: python -m pip install --upgrade pip maturin
+        run: python -m pip install --upgrade pip -c python/constraints-build.txt maturin
 
       - name: Validate doctor help
         run: python scripts/xlog_doctor.py --help
@@ -285,7 +285,7 @@ jobs:
         run: cargo build --locked --release -p xlog-cli --features host-io
 
       - name: Install maturin
-        run: python3 -m pip install --upgrade pip maturin
+        run: python3 -m pip install --upgrade pip -c python/constraints-build.txt maturin
 
       - name: Build pyxlog wheel without GPU execution
         shell: bash
