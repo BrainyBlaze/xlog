@@ -233,7 +233,7 @@ Evidence:  из последних 60 коммитов `origin/main` пять н
            `3919424f` (2026-08-18, 54 файла, +38 159/−487, «execute dependency-closed plans in
            one resident graph»), `3321371f` (+2 454/−595) и его merge `af9c71bd`,
            `0dbd006e` (`perf(cuda)!`, 25 файлов), `deb4cd0e`.
-           Все пять и только они авторизованы идентичностью `levi770 <levi@brainyblaze.com>`;
+           Все пять и только они авторизованы идентичностью одной и той же локальной git-идентичностью (не `noreply`-идентичностью GitHub);
            остальные 55 — под noreply-идентичностями GitHub, то есть прошли через PR.
            Команда: `git log --format="%h|%p|%s" -60 origin/main`.
 Verified:  confirmed — я прогнал перечисление и сверил авторов и размеры сам.
