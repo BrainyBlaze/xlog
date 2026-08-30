@@ -61,6 +61,14 @@ substitute for the requested implementation.
 - Failures must be explicit, typed, and actionable. Never silently fall back to a less
   capable backend, stale result, default configuration, host path, or approximate
   behavior.
+- Selecting a different route that returns the identical result is not a fallback in that
+  sense. It may be invisible to the caller, but it must be counted. The WCOJ dispatcher is
+  the worked example: a real layout or kernel failure goes through
+  `wcoj_decline_on_error`, which counts it, logs it, and raises instead under
+  `XLOG_WCOJ_STRICT`; a structural decline — gate off, shape mismatch, missing buffer —
+  returns `Ok(None)` and the post-optimizer binary-join tree runs verbatim over the same
+  rows. That second kind is deliberate and is capped rather than driven to zero, so the
+  class cannot grow unobserved: see `python/tests/test_structural_debt_ceilings.py`.
 - Do not add legacy branches or compatibility shims. When replacing an internal path,
   migrate its callers and remove the obsolete path in the same change. A public API
   migration that genuinely requires a transition is separate, explicitly approved
@@ -75,6 +83,12 @@ substitute for the requested implementation.
   mapping where applicable.
 - Do not merge commented-out code, required behavior left as `TODO` or `FIXME`, knowingly
   unreachable paths, unused public functions, or incomplete migrations.
+- That rule is not yet met everywhere, and the gap is measured rather than implied: 126
+  `pub fn` under `crates/*/src` have no reference anywhere in workspace Rust source, and
+  `crates/xlog-cuda-tests/src/harness/validators.rs` is 709 lines of them. `pub` in a
+  library crate suppresses `dead_code`, so no lint reports this. The count is held at its
+  2026-08-30 value by `python/tests/test_structural_debt_ceilings.py`: a new unreferenced
+  public function fails CI, and lowering the ceiling is an ordinary pull request.
 - Do not defer correctness, safety, cleanup, documentation, or required validation as
   technical debt. If the proper solution cannot fit the approved scope, stop and obtain
   a scope decision instead of landing a temporary substitute.
