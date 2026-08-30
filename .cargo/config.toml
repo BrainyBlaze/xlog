@@ -1,2 +1,26 @@
-[build]
-rustc-wrapper = "scripts/rustc-wrapper.sh"
+# Intentionally empty of build overrides.
+#
+# `build.rustc-wrapper` used to point at `scripts/rustc-wrapper.sh`, which
+# LD_PRELOADs `tools/exdev-shim` to emulate cross-directory rename() on
+# sandboxed filesystems that return EXDEV. Cargo has no per-platform form of
+# that key — `build.rustc-wrapper` applies to every host — so setting it here
+# made `cargo` unusable on Windows and macOS, where the shell script cannot be
+# executed at all, before any compilation:
+#
+#   error: could not execute process `scripts/rustc-wrapper.sh` (never executed)
+#   Caused by: %1 is not a valid Win32 application. (os error 193)
+#
+# CI never saw it because its runners are Linux.
+#
+# The shim is a property of one build environment, not of the project, so it
+# lives in that environment instead of in shared configuration. Enable it where
+# it is actually needed:
+#
+#   export RUSTC_WRAPPER="$PWD/scripts/rustc-wrapper.sh"
+#
+# Use an absolute path: cargo resolves a relative RUSTC_WRAPPER against the
+# current directory, not the workspace root, so the bare relative form only
+# works when cargo is invoked from the repository root.
+#
+# `scripts/rustc-wrapper.sh` and `tools/exdev-shim/` are unchanged and still
+# work when invoked that way.

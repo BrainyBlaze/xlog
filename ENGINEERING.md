@@ -61,6 +61,18 @@ substitute for the requested implementation.
 - Failures must be explicit, typed, and actionable. Never silently fall back to a less
   capable backend, stale result, default configuration, host path, or approximate
   behavior.
+- Selecting a different route that returns the identical result is not a fallback in that
+  sense, and may be invisible to the caller. The WCOJ dispatcher is the worked example,
+  and its two kinds of decline have different standing. A real layout or kernel failure
+  goes through `wcoj_decline_on_error`, which increments a counter, logs, and raises
+  instead under `XLOG_WCOJ_STRICT` — that one is observable at runtime. A structural
+  decline — gate off, shape mismatch, missing buffer — returns `Ok(None)`, the
+  post-optimizer binary-join tree runs verbatim over the same rows, and **nothing observes
+  it at runtime at all**. Its only check is a source-level cap in
+  `python/tests/test_structural_debt_ceilings.py`, which stops the class growing but tells
+  an operator nothing during a run. Adding a structural decline is therefore allowed and
+  bounded; adding one that changes the answer is not allowed by the rule above, and no
+  cap makes it so.
 - Do not add legacy branches or compatibility shims. When replacing an internal path,
   migrate its callers and remove the obsolete path in the same change. A public API
   migration that genuinely requires a transition is separate, explicitly approved
@@ -75,6 +87,15 @@ substitute for the requested implementation.
   mapping where applicable.
 - Do not merge commented-out code, required behavior left as `TODO` or `FIXME`, knowingly
   unreachable paths, unused public functions, or incomplete migrations.
+- That rule is not yet met everywhere, and the gap is measured rather than implied: 105
+  `pub fn` outside `crates/pyxlog` have no reference anywhere in workspace Rust source,
+  and `crates/xlog-cuda-tests/src/harness/validators.rs` is 709 lines of them. `pub` in a
+  library crate suppresses `dead_code`, so no lint reports this. `crates/pyxlog` is
+  excluded on purpose: a `#[pymethods] pub fn` is reached from Python and never from
+  Rust, so the same measurement would call 21 live entry points dead. The count is held
+  at its 2026-08-30 value by `python/tests/test_structural_debt_ceilings.py`: a new
+  unreferenced public function fails CI, and lowering the ceiling is an ordinary pull
+  request. It bounds a class; it is not a list of items proven safe to delete.
 - Do not defer correctness, safety, cleanup, documentation, or required validation as
   technical debt. If the proper solution cannot fit the approved scope, stop and obtain
   a scope decision instead of landing a temporary substitute.
