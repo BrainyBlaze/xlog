@@ -356,6 +356,27 @@ fn dlpack_is_cuda(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
     Ok(managed.dl_tensor.device.device_type == xlog_cuda::dlpack::K_DLCUDA)
 }
 
+#[pyfunction]
+fn intern_symbols(symbols: Vec<String>) -> Vec<u32> {
+    symbols
+        .iter()
+        .map(|symbol| xlog_core::symbol::intern(symbol))
+        .collect()
+}
+
+#[pyfunction]
+fn resolve_symbols(symbol_ids: Vec<u32>) -> PyResult<Vec<String>> {
+    symbol_ids
+        .into_iter()
+        .enumerate()
+        .map(|(index, symbol_id)| {
+            xlog_core::symbol::resolve_checked(symbol_id).ok_or_else(|| {
+                PyValueError::new_err(format!("unknown symbol ID {symbol_id} at index {index}"))
+            })
+        })
+        .collect()
+}
+
 #[pyclass(name = "DifferentiableProofTraceMap")]
 pub struct PyDifferentiableProofTraceMap {
     inner: xlog_logic::DifferentiableProofTraceMap,
@@ -856,6 +877,8 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(training::train_model_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(dlpack::dlpack_roundtrip, m)?)?;
     m.add_function(wrap_pyfunction!(dlpack_is_cuda, m)?)?;
+    m.add_function(wrap_pyfunction!(intern_symbols, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_symbols, m)?)?;
     #[cfg(feature = "arrow-device-import")]
     m.add_function(wrap_pyfunction!(dlpack::export_arrow_device, m)?)?;
     #[cfg(feature = "arrow-device-import")]

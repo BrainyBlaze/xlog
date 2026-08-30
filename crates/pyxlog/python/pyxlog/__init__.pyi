@@ -48,6 +48,8 @@ from pyxlog._native import (
     # DLPack / Arrow utilities
     dlpack_roundtrip as dlpack_roundtrip,
     dlpack_is_cuda as dlpack_is_cuda,
+    intern_symbols as intern_symbols,
+    resolve_symbols as resolve_symbols,
 )
 
 # Arrow imports are feature-gated; expose them for type checkers but they may
