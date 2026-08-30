@@ -9,6 +9,7 @@ importable from Python.
 
 from __future__ import annotations
 
+from os import PathLike
 from typing import Any, Literal, Optional, Sequence, TypedDict, Union
 
 # ---------------------------------------------------------------------------
@@ -16,6 +17,8 @@ from typing import Any, Literal, Optional, Sequence, TypedDict, Union
 # ---------------------------------------------------------------------------
 
 __version__: str
+
+_Path = Union[str, PathLike[str]]
 
 # ---------------------------------------------------------------------------
 # Native relation provenance
@@ -172,6 +175,16 @@ class LogicProgram:
         device: int = 0,
         memory_mb: int = 32768,
     ) -> CompiledLogicProgram: ...
+
+    @staticmethod
+    def compile_file(
+        entrypoint: _Path,
+        module_paths: Sequence[_Path] = (),
+        device: int = 0,
+        memory_mb: int = 32768,
+    ) -> CompiledLogicProgram:
+        """Compile an entry file and its complete transitive module closure."""
+        ...
 
 class CompiledLogicProgram:
     """A compiled GPU-resident Datalog program ready to evaluate."""
