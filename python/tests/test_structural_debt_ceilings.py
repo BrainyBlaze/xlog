@@ -26,10 +26,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-# Measured on main @ 404e9219, 2026-08-30. Raise only with a recorded reason.
-UNREFERENCED_PUBLIC_FUNCTION_CEILING = 126
+# Measured by these tests on main @ 404e9219, 2026-08-30 — not by a grep over a
+# different file set. Raise only with a recorded reason.
+UNREFERENCED_PUBLIC_FUNCTION_CEILING = 105
 WCOJ_SILENT_DECLINE_CEILING = 185
-DISTINCT_XLOG_ENV_NAME_CEILING = 115
+DISTINCT_XLOG_ENV_NAME_CEILING = 107
 
 _PUBLIC_FN = re.compile(r"\bpub fn ([a-z_][a-z_0-9]*)")
 _IDENTIFIER = re.compile(r"\b[a-z_][a-z_0-9]*\b")
@@ -55,12 +56,24 @@ def test_unreferenced_public_functions_do_not_grow() -> None:
     `dead_code` because the item is reachable from outside the crate in
     principle, whether or not anything reaches it in fact.
 
-    Token-level, so it would miss a call assembled by a macro. Every candidate
-    chased by hand so far has been genuinely unreferenced; treat a sudden drop
-    with the same suspicion as a rise.
+    Two limits worth knowing before trusting the number. It is token-level, so a
+    name merely mentioned in a comment counts as a reference and the ceiling can
+    be lowered without deleting anything — it bounds a class, it does not prove
+    each member dead. And `crates/pyxlog` is excluded outright: a
+    `#[pymethods] pub fn` is called from Python, never from Rust, so the metric
+    is meaningless there.
+
+    Every candidate chased by hand outside pyxlog has been genuinely
+    unreferenced; treat a sudden drop with the same suspicion as a rise.
     """
     declared: set[str] = set()
     for path in _rust_sources_under("crates/*/src/**/*.rs"):
+        if "/pyxlog/" in path.as_posix():
+            # pyo3 bindings: the only callers of a `#[pymethods] pub fn` are in
+            # Python, so "appears once in Rust source" says nothing about them.
+            # Counting them made 21 live entry points look dead and made adding
+            # an ordinary binding fail this test.
+            continue
         declared.update(_PUBLIC_FN.findall(_read(path)))
 
     occurrences: dict[str, int] = {}
@@ -75,8 +88,9 @@ def test_unreferenced_public_functions_do_not_grow() -> None:
     assert len(unreferenced) <= UNREFERENCED_PUBLIC_FUNCTION_CEILING, (
         f"unreferenced public functions rose to {len(unreferenced)}, ceiling is "
         f"{UNREFERENCED_PUBLIC_FUNCTION_CEILING}. A new public API needs a wired "
-        f"consumer (ENGINEERING.md). Newly unreferenced or newly added: "
-        f"{unreferenced}"
+        f"consumer (ENGINEERING.md). The full list is long and mostly pre-existing; "
+        f"compare against the ceiling commit to find what this change added. "
+        f"First 15 alphabetically: {unreferenced[:15]}"
     )
 
 

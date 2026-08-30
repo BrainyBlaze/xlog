@@ -16,7 +16,11 @@
 # lives in that environment instead of in shared configuration. Enable it where
 # it is actually needed:
 #
-#   export RUSTC_WRAPPER=scripts/rustc-wrapper.sh
+#   export RUSTC_WRAPPER="$PWD/scripts/rustc-wrapper.sh"
+#
+# Use an absolute path: cargo resolves a relative RUSTC_WRAPPER against the
+# current directory, not the workspace root, so the bare relative form only
+# works when cargo is invoked from the repository root.
 #
 # `scripts/rustc-wrapper.sh` and `tools/exdev-shim/` are unchanged and still
 # work when invoked that way.
