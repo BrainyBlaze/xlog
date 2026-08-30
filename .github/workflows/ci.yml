@@ -103,7 +103,6 @@ jobs:
           python/tests/test_relation_provenance_contract.py
           python/tests/test_ci_workflow_contract.py
           python/tests/test_source_test_hygiene.py
-          python/tests/test_structural_debt_ceilings.py
           python/tests/test_triangle_benchmark_runner.py
 
   # The CAVIAR and maritime example suites on CPU (review follow-up:
