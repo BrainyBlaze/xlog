@@ -621,7 +621,15 @@ jobs:
   report-scheduled-failure:
     name: report-scheduled-failure
     needs: [rust-tests, python-wheel]
-    if: ${{ failure() && github.event_name == 'schedule' }}
+    # Anything but success, not `failure()`. A job no self-hosted runner picks up
+    # stays queued for 24 hours and is then cancelled, and `failure()` excludes
+    # a cancellation — so the one outcome that means "the nightly did not run at
+    # all" would have reported nothing. `always()` is what lets this job run
+    # after a cancelled dependency.
+    if: >-
+      ${{ always() && github.event_name == 'schedule' &&
+      (needs.rust-tests.result != 'success' ||
+      needs.python-wheel.result != 'success') }}
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -630,16 +638,22 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TITLE: "cuda-ci: nightly full workspace test run is failing"
+          TITLE: "cuda-ci: nightly full workspace test run is not green"
+          RUST_TESTS_RESULT: ${{ needs.rust-tests.result }}
+          WHEEL_RESULT: ${{ needs.python-wheel.result }}
         run: |
           set -euo pipefail
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          # `cancelled` here usually means no self-hosted CUDA runner accepted the
+          # job within GitHub's 24-hour queue limit, which reads very differently
+          # from a test failure. Report the outcome rather than assuming one.
+          outcome="rust-tests: $RUST_TESTS_RESULT, python-wheel: $WHEEL_RESULT"
           existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
             --search "$TITLE in:title" --json number --jq '.[0].number // empty')"
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" \
-              --body "Still failing on \`$TARGET_SHA\`: $run_url"
+              --body "Still not green on \`$TARGET_SHA\` ($outcome): $run_url"
           else
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
-              --body "\`cargo test --workspace --all-targets --release\` failed on \`$TARGET_SHA\`: $run_url"
+              --body "The nightly run of \`cargo test --workspace --all-targets --release\` did not succeed on \`$TARGET_SHA\` ($outcome): $run_url"
           fi

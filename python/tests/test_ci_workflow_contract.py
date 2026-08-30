@@ -208,11 +208,18 @@ def test_the_rust_suite_runs_nightly_and_a_device_slice_gates_every_pull_request
     assert "-p xlog-cuda" in slice_command
     assert "-p xlog-gpu" in slice_command
 
-    # A nightly failure nobody is told about is a cron job, not a gate.
+    # A nightly failure nobody is told about is a cron job, not a gate. The
+    # condition must be "not success", not `failure()`: a job no self-hosted
+    # runner accepts is cancelled after GitHub's 24-hour queue limit, and
+    # `failure()` excludes a cancellation — so the outcome meaning "the nightly
+    # never ran at all" is exactly the one that would have gone unreported.
     report = jobs["report-scheduled-failure"]
     assert isinstance(report, dict)
     assert report["permissions"]["issues"] == "write"
-    assert "failure()" in report["if"]
+    assert "always()" in report["if"]
+    assert "failure()" not in report["if"]
+    for dependency in ("rust-tests", "python-wheel"):
+        assert f"needs.{dependency}.result != 'success'" in report["if"]
     assert "github.event_name == 'schedule'" in report["if"]
     assert "gh issue create" in job_commands(report)
 
