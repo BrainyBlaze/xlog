@@ -7,6 +7,7 @@ use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
+use xlog_core::{symbol, ScalarType};
 use xlog_cuda::DlpackManagedTensor;
 use xlog_gpu::logic as gpu_logic;
 use xlog_logic::ast::ProbEngine;
@@ -279,6 +280,12 @@ impl LogicRelationSession {
     ) -> PyResult<()> {
         let schema = self.relation_replacement_schema(&name)?;
         let buffer = self.detached_relation_replacement_buffer(&name, schema, dlpack_columns)?;
+        self.commit_relation_replacement(name, buffer, RelationReplacementMetadata::Clear)
+    }
+
+    pub fn put_relation_rows(&mut self, name: String, rows: Vec<Vec<String>>) -> PyResult<()> {
+        let schema = self.relation_replacement_schema(&name)?.clone();
+        let buffer = self.lexical_relation_buffer(&name, &schema, rows)?;
         self.commit_relation_replacement(name, buffer, RelationReplacementMetadata::Clear)
     }
 
@@ -833,6 +840,20 @@ impl LogicRelationSession {
         export_buffer_columns(py, &self.provider, buffer)
     }
 
+    pub fn export_relation_rows(&self, name: &str) -> PyResult<Vec<Vec<String>>> {
+        let buffer = self
+            .evaluation_store
+            .as_ref()
+            .and_then(|store| store.as_relation_store().get(name))
+            .or_else(|| self.relation_store.get(name))
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "Relation '{name}' is unavailable for lexical export"
+                ))
+            })?;
+        lexical_relation_rows(&self.provider, buffer)
+    }
+
     pub fn export_relation_with_provenance(
         &mut self,
         py: Python<'_>,
@@ -949,6 +970,55 @@ impl LogicRelationSession {
         )?;
         self.provider
             .from_dlpack_tensors_with_schema(schema.clone(), tensors)
+            .map_err(types::xlog_err)
+    }
+
+    fn lexical_relation_buffer(
+        &self,
+        name: &str,
+        schema: &xlog_core::Schema,
+        rows: Vec<Vec<String>>,
+    ) -> PyResult<xlog_cuda::CudaBuffer> {
+        if rows.iter().any(|row| row.len() != schema.arity()) {
+            return Err(PyValueError::new_err(format!(
+                "Relation {name} lexical row arity differs from compiled arity {}",
+                schema.arity()
+            )));
+        }
+        if schema.arity() == 0 {
+            let row_count = u32::try_from(rows.len()).map_err(|_| {
+                PyValueError::new_err(format!("Relation {name} row count exceeds u32::MAX"))
+            })?;
+            return self
+                .provider
+                .create_zero_arity_buffer(schema.clone(), row_count)
+                .map_err(types::xlog_err);
+        }
+        let mut columns = schema
+            .columns
+            .iter()
+            .map(|_| Vec::<u8>::new())
+            .collect::<Vec<_>>();
+        for (row_index, row) in rows.iter().enumerate() {
+            for (column_index, value) in row.iter().enumerate() {
+                let scalar_type = schema.column_type(column_index).ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "Relation {name} column {column_index} schema disappeared"
+                    ))
+                })?;
+                append_lexical_scalar(
+                    &mut columns[column_index],
+                    value,
+                    scalar_type,
+                    name,
+                    row_index,
+                    column_index,
+                )?;
+            }
+        }
+        let slices = columns.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        self.provider
+            .create_buffer_from_slices(&slices, schema.clone())
             .map_err(types::xlog_err)
     }
 
@@ -1383,6 +1453,158 @@ fn export_buffer_columns(
         tensors.push(dlpack_capsule_from_tensor(py, tensor)?);
     }
     Ok(tensors)
+}
+
+fn lexical_parse_error(
+    relation: &str,
+    row_index: usize,
+    column_index: usize,
+    scalar_type: ScalarType,
+    value: &str,
+) -> PyErr {
+    PyValueError::new_err(format!(
+        "Relation {relation} row {row_index} column {column_index} value {value:?} is not valid {scalar_type:?}"
+    ))
+}
+
+fn append_lexical_scalar(
+    output: &mut Vec<u8>,
+    value: &str,
+    scalar_type: ScalarType,
+    relation: &str,
+    row_index: usize,
+    column_index: usize,
+) -> PyResult<()> {
+    macro_rules! parse_scalar {
+        ($target:ty) => {{
+            let parsed = value.parse::<$target>().map_err(|_| {
+                lexical_parse_error(relation, row_index, column_index, scalar_type, value)
+            })?;
+            output.extend_from_slice(&parsed.to_le_bytes());
+        }};
+    }
+    match scalar_type {
+        ScalarType::U32 => parse_scalar!(u32),
+        ScalarType::U64 => parse_scalar!(u64),
+        ScalarType::I32 => parse_scalar!(i32),
+        ScalarType::I64 => parse_scalar!(i64),
+        ScalarType::F32 => {
+            let parsed = value.parse::<f32>().map_err(|_| {
+                lexical_parse_error(relation, row_index, column_index, scalar_type, value)
+            })?;
+            if !parsed.is_finite() {
+                return Err(lexical_parse_error(
+                    relation,
+                    row_index,
+                    column_index,
+                    scalar_type,
+                    value,
+                ));
+            }
+            output.extend_from_slice(&parsed.to_le_bytes());
+        }
+        ScalarType::F64 => {
+            let parsed = value.parse::<f64>().map_err(|_| {
+                lexical_parse_error(relation, row_index, column_index, scalar_type, value)
+            })?;
+            if !parsed.is_finite() {
+                return Err(lexical_parse_error(
+                    relation,
+                    row_index,
+                    column_index,
+                    scalar_type,
+                    value,
+                ));
+            }
+            output.extend_from_slice(&parsed.to_le_bytes());
+        }
+        ScalarType::Bool => match value {
+            "true" => output.push(1),
+            "false" => output.push(0),
+            _ => {
+                return Err(lexical_parse_error(
+                    relation,
+                    row_index,
+                    column_index,
+                    scalar_type,
+                    value,
+                ))
+            }
+        },
+        ScalarType::Symbol => output.extend_from_slice(&symbol::intern(value).to_le_bytes()),
+    }
+    Ok(())
+}
+
+fn lexical_relation_rows(
+    provider: &Arc<xlog_cuda::CudaKernelProvider>,
+    buffer: &xlog_cuda::CudaBuffer,
+) -> PyResult<Vec<Vec<String>>> {
+    let row_count = provider
+        .validated_logical_row_count(buffer)
+        .map_err(types::xlog_err)?;
+    let mut rows = vec![Vec::with_capacity(buffer.arity()); row_count];
+    for column_index in 0..buffer.arity() {
+        let scalar_type = buffer.schema().column_type(column_index).ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "Relation export column {column_index} schema disappeared"
+            ))
+        })?;
+        let values: Vec<String> = match scalar_type {
+            ScalarType::U32 => provider
+                .download_column::<u32>(buffer, column_index)
+                .map(|values| values.into_iter().map(|value| value.to_string()).collect()),
+            ScalarType::U64 => provider
+                .download_column::<u64>(buffer, column_index)
+                .map(|values| values.into_iter().map(|value| value.to_string()).collect()),
+            ScalarType::I32 => provider
+                .download_column::<i32>(buffer, column_index)
+                .map(|values| values.into_iter().map(|value| value.to_string()).collect()),
+            ScalarType::I64 => provider
+                .download_column::<i64>(buffer, column_index)
+                .map(|values| values.into_iter().map(|value| value.to_string()).collect()),
+            ScalarType::F32 => provider
+                .download_column::<f32>(buffer, column_index)
+                .map(|values| values.into_iter().map(|value| value.to_string()).collect()),
+            ScalarType::F64 => provider
+                .download_column::<f64>(buffer, column_index)
+                .map(|values| values.into_iter().map(|value| value.to_string()).collect()),
+            ScalarType::Bool => {
+                provider
+                    .download_column::<bool>(buffer, column_index)
+                    .map(|values| {
+                        values
+                            .into_iter()
+                            .map(|value| if value { "true" } else { "false" }.to_string())
+                            .collect()
+                    })
+            }
+            ScalarType::Symbol => provider
+                .download_column::<u32>(buffer, column_index)
+                .and_then(|values| {
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            symbol::resolve_checked(value).ok_or_else(|| {
+                                xlog_core::XlogError::Execution(format!(
+                                    "Relation export contains unknown symbol ID {value}"
+                                ))
+                            })
+                        })
+                        .collect()
+                }),
+        }
+        .map_err(types::xlog_err)?;
+        if values.len() != row_count {
+            return Err(PyRuntimeError::new_err(format!(
+                "Relation export column {column_index} row count changed"
+            )));
+        }
+        for (row, value) in rows.iter_mut().zip(values) {
+            row.push(value);
+        }
+    }
+    Ok(rows)
 }
 
 fn pack_logic_result_with_provider(
