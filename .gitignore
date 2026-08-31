@@ -96,3 +96,8 @@ crates/pyxlog/python/pyxlog/*.so
 
 .codex
 docs/*.zip
+
+# Local agent-tooling telemetry. Written outside this repository and appended
+# to while a checkout sits idle, which made every working tree accumulate an
+# uncommitted change to a tracked file.
+artifact_gate.jsonl
