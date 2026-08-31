@@ -32,10 +32,18 @@ from statistics import median
 from typing import Any, Iterable, Mapping, Sequence
 
 
+# The first three are the sizes the published artifact used, kept unchanged so the
+# new measurements stay comparable with the numbers already in the paper. The two
+# larger ones exist because those three were bounded by a 24 GB card: the
+# enumerate arm peaked at 15,247 MB against an 18 GB provider budget, so the
+# largest published point was a memory limit rather than a property of the
+# workload. On 80 GB there is room to ask what happens past it.
 DEFAULT_CASES = (
     ("h30_e150000", 30, 150_000),
     ("h50_e300000", 50, 300_000),
     ("h80_e500000", 80, 500_000),
+    ("h120_e800000", 120, 800_000),
+    ("h160_e1200000", 160, 1_200_000),
 )
 TIME_BIN = Path("/usr/bin/time")
 XLOG_SOURCE = """\
