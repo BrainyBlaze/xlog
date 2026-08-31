@@ -167,6 +167,68 @@ def test_cuda_workflow_separates_classification_gpu_work_and_aggregate() -> None
     assert all(changes_are_relevant([path]) for path in gpu_test_paths)
 
 
+def test_the_rust_suite_runs_nightly_and_a_device_slice_gates_every_pull_request() -> (
+    None
+):
+    """The Rust suite must reach main under an automatic gate, not a memory.
+
+    `rust-tests` runs `cargo test --workspace --all-targets --release`, and it
+    used to run under `workflow_dispatch` alone: that is not a gate, it is a
+    button somebody has to remember. The suite is too long to put on a pull
+    request, so it splits in two — the whole workspace nightly against main,
+    and the two crates whose purpose is the device on every pull request from
+    this repository.
+    """
+    workflow = load_workflow("cuda-ci.yml")
+    triggers = workflow["on"]
+    assert isinstance(triggers, dict)
+    schedule = triggers["schedule"]
+    assert isinstance(schedule, list)
+    assert schedule
+    for entry in schedule:
+        assert re.fullmatch(r"[-0-9*/, ]+", entry["cron"])
+
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    rust_tests = jobs["rust-tests"]
+    assert isinstance(rust_tests, dict)
+    assert "github.event_name == 'schedule'" in rust_tests["if"]
+
+    device_slice = jobs["cuda-slice"]
+    assert isinstance(device_slice, dict)
+    assert device_slice["runs-on"] == ["self-hosted", "linux", "x64", "cuda"]
+    assert "github.event_name == 'pull_request'" in device_slice["if"]
+    assert "head.repo.full_name == github.repository" in device_slice["if"]
+    # Deliberately not gated on the change classifier. A filter that decides
+    # which pull requests get GPU coverage leaves whatever it misses unchecked,
+    # which is how a broken test reached main in the first place.
+    assert "needs" not in device_slice
+    slice_command = job_commands(device_slice)
+    assert "cargo test --all-targets --release" in slice_command
+    assert "-p xlog-cuda" in slice_command
+    assert "-p xlog-gpu" in slice_command
+
+    # A nightly failure nobody is told about is a cron job, not a gate. The
+    # condition must be "not success", not `failure()`: a job no self-hosted
+    # runner accepts is cancelled after GitHub's 24-hour queue limit, and
+    # `failure()` excludes a cancellation — so the outcome meaning "the nightly
+    # never ran at all" is exactly the one that would have gone unreported.
+    report = jobs["report-scheduled-failure"]
+    assert isinstance(report, dict)
+    assert report["permissions"]["issues"] == "write"
+    assert "always()" in report["if"]
+    assert "failure()" not in report["if"]
+    for dependency in ("rust-tests", "python-wheel"):
+        assert f"needs.{dependency}.result != 'success'" in report["if"]
+    assert "github.event_name == 'schedule'" in report["if"]
+    assert "gh issue create" in job_commands(report)
+
+    # A push to main must not cancel a nightly run that is already under way.
+    concurrency = workflow["concurrency"]
+    assert isinstance(concurrency, dict)
+    assert "github.event_name" in concurrency["group"]
+
+
 def test_cuda_workflow_authenticates_the_exact_private_acceptance_corpus() -> None:
     workflow = load_workflow("cuda-ci.yml")
     jobs = workflow["jobs"]

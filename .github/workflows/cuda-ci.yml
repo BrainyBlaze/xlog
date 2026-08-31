@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The full workspace test suite is too long to run on every pull request, so
+  # it runs here every night against main. Before this it ran under
+  # workflow_dispatch alone, which means it ran only when a human remembered:
+  # a regression once sat on main until an external run happened to find it.
+  schedule:
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       reviewed_sha:
@@ -16,7 +22,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: cuda-ci-${{ github.ref }}
+  # The event name is part of the group so that a push to main cannot cancel a
+  # nightly full test run that is already an hour in. Pull-request runs still
+  # supersede their own earlier commits, which is the behaviour this key exists
+  # for.
+  group: cuda-ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -46,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
-            workflow_dispatch)
+            workflow_dispatch|schedule)
               relevant=true
               ;;
             pull_request)
@@ -74,8 +84,9 @@ jobs:
 
   rust-tests:
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      github.ref == 'refs/heads/main'
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main')
     runs-on: [self-hosted, linux, x64, cuda]
     timeout-minutes: 120
     steps:
@@ -96,6 +107,43 @@ jobs:
       - name: Cargo test (release)
         run: RUST_TEST_THREADS=1 cargo test --workspace --all-targets --release
 
+  # The device-facing slice of the Rust suite, on every pull request from this
+  # repository. `rust-tests` above covers the whole workspace but takes up to
+  # two hours, so it runs nightly; this job is the part that must not reach main
+  # unverified — the two crates whose entire purpose is the GPU, including the
+  # certification suite in `xlog-gpu/tests`.
+  #
+  # It carries no path filter on purpose. A filter deciding which pull requests
+  # get GPU coverage is the same mechanism that let a broken test sit on main:
+  # whatever the filter misses is exactly what nobody checks. On a warm
+  # self-hosted runner a documentation-only pull request rebuilds nothing.
+  cuda-slice:
+    name: cuda-slice
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, cuda]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+      - name: Verify the exact checked-out commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "TARGET_SHA must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Cargo test (device crates, release)
+        run: >-
+          RUST_TEST_THREADS=1 cargo test --all-targets --release
+          -p xlog-cuda -p xlog-gpu
+
   python-wheel-gpu:
     name: python-wheel-gpu
     needs: cuda-changes
@@ -103,6 +151,7 @@ jobs:
       needs.cuda-changes.result == 'success' &&
       needs.cuda-changes.outputs.relevant == 'true' &&
       (github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository))
@@ -564,3 +613,47 @@ jobs:
             --relevant "$RELEVANT" \
             --classification-result "$CLASSIFICATION_RESULT" \
             --gpu-result "$GPU_RESULT"
+
+  # A nightly run whose failure reaches nobody is a cron job, not a gate. The
+  # scheduled full test run therefore reports into an issue: it comments on the
+  # open one if a previous night already failed, so a long breakage is one
+  # thread rather than a new issue every morning.
+  report-scheduled-failure:
+    name: report-scheduled-failure
+    needs: [rust-tests, python-wheel]
+    # Anything but success, not `failure()`. A job no self-hosted runner picks up
+    # stays queued for 24 hours and is then cancelled, and `failure()` excludes
+    # a cancellation — so the one outcome that means "the nightly did not run at
+    # all" would have reported nothing. `always()` is what lets this job run
+    # after a cancelled dependency.
+    if: >-
+      ${{ always() && github.event_name == 'schedule' &&
+      (needs.rust-tests.result != 'success' ||
+      needs.python-wheel.result != 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the nightly failure issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "cuda-ci: nightly full workspace test run is not green"
+          RUST_TESTS_RESULT: ${{ needs.rust-tests.result }}
+          WHEEL_RESULT: ${{ needs.python-wheel.result }}
+        run: |
+          set -euo pipefail
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          # `cancelled` here usually means no self-hosted CUDA runner accepted the
+          # job within GitHub's 24-hour queue limit, which reads very differently
+          # from a test failure. Report the outcome rather than assuming one.
+          outcome="rust-tests: $RUST_TESTS_RESULT, python-wheel: $WHEEL_RESULT"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$TITLE in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" \
+              --body "Still not green on \`$TARGET_SHA\` ($outcome): $run_url"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+              --body "The nightly run of \`cargo test --workspace --all-targets --release\` did not succeed on \`$TARGET_SHA\` ($outcome): $run_url"
+          fi

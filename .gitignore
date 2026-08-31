@@ -96,3 +96,19 @@ crates/pyxlog/python/pyxlog/*.so
 
 .codex
 docs/*.zip
+
+# Local agent-tooling telemetry. Written outside this repository and appended
+# to while a checkout sits idle, which made every working tree accumulate an
+# uncommitted change to a tracked file.
+artifact_gate.jsonl
+
+# Internal working artifacts: audit ledgers, remediation plans, handoffs,
+# generated reports and scratch worktrees. Findings live outside this
+# repository, one issue per finding, and a release tree carries none of them.
+# Named here so an ordinary `git add -A` cannot put them back.
+/.analysis/
+/wt-*/
+/clippy-report.txt
+/*-handoff-*.md
+/docs/architecture-debt.md
+/docs/xlog-*debt*.md
