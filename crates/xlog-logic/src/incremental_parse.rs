@@ -280,7 +280,7 @@ fn split_statements(source: &str) -> Vec<StatementUnit> {
             continue;
         }
 
-        if ch == '.' && !is_decimal_point(source, idx) {
+        if ch == '.' && !is_decimal_point(source, idx) && !is_univ_operator_dot(source, idx) {
             push_statement(source, &line_starts, start, idx + ch.len_utf8(), &mut out);
             start = idx + ch.len_utf8();
         }
@@ -295,6 +295,12 @@ fn split_statements(source: &str) -> Vec<StatementUnit> {
     }
     push_statement(source, &line_starts, start, source.len(), &mut out);
     out
+}
+
+fn is_univ_operator_dot(source: &str, index: usize) -> bool {
+    let bytes = source.as_bytes();
+    (index > 0 && index + 1 < bytes.len() && bytes[index - 1] == b'=' && bytes[index + 1] == b'.')
+        || (index > 1 && bytes[index - 2] == b'=' && bytes[index - 1] == b'.')
 }
 
 fn push_statement(

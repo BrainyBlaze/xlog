@@ -24,6 +24,16 @@ fn splits_statement_units_with_stable_spans() {
 }
 
 #[test]
+fn univ_operator_dots_do_not_terminate_a_statement() {
+    let source = "decomposed(X) :- X =.. [pair, foo, 2].\nnext(ok).\n";
+    let units = ParserSession::split_statements(source);
+
+    assert_eq!(units.len(), 2);
+    assert_eq!(units[0].text, "decomposed(X) :- X =.. [pair, foo, 2].");
+    assert_eq!(units[1].text, "next(ok).");
+}
+
+#[test]
 fn reuses_unchanged_statement_parses_after_single_edit() {
     let mut session = ParserSession::new();
     let path = Path::new("synthetic/main.xlog");
