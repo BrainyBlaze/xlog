@@ -1,5 +1,26 @@
 //! Module resolution for XLOG programs.
 
+mod extraction;
+mod manifest;
+
+pub use extraction::{
+    AggregateOperator, ComparisonOperator, EpistemicOperator, ExecutableAnnotatedDisjunction,
+    ExecutableArithmeticExpression, ExecutableAtom, ExecutableBodyLiteral, ExecutableConstraint,
+    ExecutableDomain, ExecutableEvidence, ExecutableFunction, ExecutableFunctionBody,
+    ExecutableFunctionParameter, ExecutableLearnableRule, ExecutableNeuralLabel,
+    ExecutableNeuralPredicate, ExecutablePredicateColumn, ExecutableProbabilisticFact,
+    ExecutableProbabilisticQuery, ExecutableProbability, ExecutableProgram, ExecutableQuery,
+    ExecutableRelation, ExecutableRelationDefinition, ExecutableRelationDefinitionKind,
+    ExecutableRule, ExecutableScalarType, ExecutableScc, ExecutableTerm, ExecutableTypeReference,
+    ExecutableWeightedAtom, RelationDependency, RelationDependencyKind,
+    RelationDependencyProducerKind, ResolvedProgramExtraction, ResolvedProgramExtractionError,
+};
+pub use manifest::{
+    ResolvedConstructCount, ResolvedImportManifest, ResolvedModuleManifest,
+    ResolvedProgramManifest, ResolvedProgramManifestError, ResolvedSourceObject,
+    ResolvedSourceObjectKind, ResolvedSourceObjectProvenance, ResolvedSourceSpan,
+};
+
 use crate::ast::{
     ArithExpr, BodyLiteral, DomainDecl, FuncBody, PredDecl, Program, Rule, Term, TypeRef,
 };
@@ -269,6 +290,8 @@ pub struct ModuleResolver {
     search_paths: Vec<PathBuf>,
     /// Loaded modules keyed by canonical source-file identity.
     loaded: HashMap<PathBuf, LoadedModule>,
+    /// Exact UTF-8 source bytes parsed for each canonical loaded module.
+    loaded_source_texts: HashMap<PathBuf, String>,
     /// Logical path spellings mapped to their resolved source files. Bare
     /// aliases retain first-load lookup behavior for public inspection APIs;
     /// resolved programs use contextual paths that identify each import edge.
@@ -280,6 +303,8 @@ pub struct ModuleResolver {
     entry: Option<LoadedModule>,
     /// Canonical source identity and resolved import edges for the entry file.
     entry_source: Option<PathBuf>,
+    /// Exact UTF-8 source bytes parsed for the entry file.
+    entry_source_text: Option<String>,
     entry_resolved_imports: Vec<ResolvedImport>,
     /// Source identity of the most recent public `load_module` root.
     root_module: Option<PathBuf>,
@@ -297,10 +322,12 @@ impl ModuleResolver {
         Self {
             search_paths,
             loaded: HashMap::new(),
+            loaded_source_texts: HashMap::new(),
             module_aliases: HashMap::new(),
             resolved_imports: HashMap::new(),
             entry: None,
             entry_source: None,
+            entry_source_text: None,
             entry_resolved_imports: Vec::new(),
             root_module: None,
             loading: Vec::new(),
@@ -474,6 +501,7 @@ impl ModuleResolver {
         let (source, _) = self.load_module_resolved(base_dir, None, module_path)?;
         self.entry = None;
         self.entry_source = None;
+        self.entry_source_text = None;
         self.entry_resolved_imports.clear();
         self.root_module = Some(source.clone());
         Ok(self.loaded.get(&source).expect("module was just resolved"))
@@ -496,7 +524,8 @@ impl ModuleResolver {
             .to_string();
         let module_path = vec![module_name.clone()];
 
-        let module = Self::parse_module_file(&module_path, entry_file.to_path_buf())?;
+        let (module, source_text) =
+            Self::parse_module_file(&module_path, entry_file.to_path_buf())?;
         let entry_source = Self::source_identity(entry_file)?;
         let module_dir = module.source_file.parent().unwrap_or(base_dir);
         self.loading
@@ -518,6 +547,7 @@ impl ModuleResolver {
         let resolved_imports = resolved_imports?;
         self.entry_module = None;
         self.entry_source = Some(entry_source);
+        self.entry_source_text = Some(source_text);
         self.entry_resolved_imports = resolved_imports;
         self.root_module = None;
         self.entry = Some(module);
@@ -579,7 +609,7 @@ impl ModuleResolver {
         self.loading.push((source.clone(), contextual_path.clone()));
 
         let loaded = (|| {
-            let module = Self::parse_module_file(&contextual_path, source_file)?;
+            let (module, source_text) = Self::parse_module_file(&contextual_path, source_file)?;
             // Canonical aliases share one module identity and therefore one
             // deterministic dependency closure. Resolve nested imports beside
             // the canonical source instead of whichever alias loaded first.
@@ -597,17 +627,18 @@ impl ModuleResolver {
                     imports: import.imports.clone(),
                 });
             }
-            Ok((module, resolved_imports))
+            Ok((module, source_text, resolved_imports))
         })();
 
         self.loading.pop();
-        let (module, resolved_imports) = loaded?;
+        let (module, source_text, resolved_imports) = loaded?;
         let primary_path = module.path.clone();
 
         self.record_module_alias(declared_path, &source);
         self.record_module_alias(&contextual_path, &source);
         self.resolved_imports
             .insert(source.clone(), resolved_imports);
+        self.loaded_source_texts.insert(source.clone(), source_text);
         self.loaded.insert(source.clone(), module);
         Ok((source, primary_path))
     }
@@ -615,7 +646,7 @@ impl ModuleResolver {
     fn parse_module_file(
         module_path: &[String],
         source_file: PathBuf,
-    ) -> Result<LoadedModule, ModuleError> {
+    ) -> Result<(LoadedModule, String), ModuleError> {
         let source = fs::read_to_string(&source_file).map_err(|error| ModuleError::ParseError {
             path: source_file.clone(),
             message: error.to_string(),
@@ -626,13 +657,16 @@ impl ModuleResolver {
         })?;
         let (exports, function_exports) = Self::extract_exports(&program);
 
-        Ok(LoadedModule {
-            path: module_path.to_vec(),
-            source_file,
-            exports,
-            function_exports,
-            program,
-        })
+        Ok((
+            LoadedModule {
+                path: module_path.to_vec(),
+                source_file,
+                exports,
+                function_exports,
+                program,
+            },
+            source,
+        ))
     }
 
     /// Check if a predicate can be imported from a module
@@ -1776,12 +1810,16 @@ impl ModuleResolver {
         }
     }
 
-    fn merge_import_group(
+    fn merge_import_group_with_report<F>(
         &self,
         program: &mut Program,
         imports: &[ResolvedImport],
         merged_imports: &mut HashSet<ImportMergeKey>,
-    ) -> Result<(), ModuleError> {
+        on_merge: &mut F,
+    ) -> Result<(), ModuleError>
+    where
+        F: FnMut(&Path, &crate::ast::ProgramMergeReport),
+    {
         for group in Self::combined_import_selections(imports) {
             let loaded_module =
                 self.loaded
@@ -1792,7 +1830,7 @@ impl ModuleResolver {
                     })?;
             let nested_imports = self.imports_for_source(&group.source);
 
-            self.merge_import_group(program, nested_imports, merged_imports)?;
+            self.merge_import_group_with_report(program, nested_imports, merged_imports, on_merge)?;
 
             let imported_scope = self.import_scope_from_imports(nested_imports)?;
             Self::validate_supported_import_content(&loaded_module.program, &group.module_path)?;
@@ -1804,10 +1842,21 @@ impl ModuleResolver {
             )?;
             let merge_key = Self::import_merge_key(&group.source, group.imported_items.as_ref());
             if merged_imports.insert(merge_key) {
-                program.merge_from(&loaded_module.program, group.imported_items.as_ref());
+                let report = program
+                    .merge_from_with_report(&loaded_module.program, group.imported_items.as_ref());
+                on_merge(&group.source, &report);
             }
         }
         Ok(())
+    }
+
+    fn merge_import_group(
+        &self,
+        program: &mut Program,
+        imports: &[ResolvedImport],
+        merged_imports: &mut HashSet<ImportMergeKey>,
+    ) -> Result<(), ModuleError> {
+        self.merge_import_group_with_report(program, imports, merged_imports, &mut |_, _| {})
     }
 
     /// Merge supported deterministic content from every resolved import.

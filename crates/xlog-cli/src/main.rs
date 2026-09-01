@@ -48,6 +48,8 @@ enum Command {
     Run(RunArgs),
     Prob(ProbArgs),
     Explain(ExplainArgs),
+    Extract(ResolvedProgramArgs),
+    Manifest(ResolvedProgramArgs),
     Repl(ReplArgs),
     Watch(WatchArgs),
 }
@@ -143,6 +145,17 @@ struct ExplainArgs {
 }
 
 #[derive(Parser)]
+struct ResolvedProgramArgs {
+    source: PathBuf,
+    /// Root used to emit portable source-relative module paths
+    #[arg(long)]
+    source_root: PathBuf,
+    /// Additional directories to search for modules (colon-separated)
+    #[arg(long, value_delimiter = ':')]
+    module_path: Vec<PathBuf>,
+}
+
+#[derive(Parser)]
 struct ReplArgs {
     /// Additional directories to search for modules (colon-separated)
     #[arg(long, value_delimiter = ':')]
@@ -206,9 +219,36 @@ fn main() -> Result<()> {
         Command::Run(args) => run_deterministic(args),
         Command::Prob(args) => run_probabilistic(args),
         Command::Explain(args) => explain(args),
+        Command::Extract(args) => extract(args),
+        Command::Manifest(args) => manifest(args),
         Command::Repl(args) => repl(args),
         Command::Watch(args) => watch(args),
     }
+}
+
+fn extract(args: ResolvedProgramArgs) -> Result<()> {
+    let resolver = load_modules(&args.source, args.module_path)
+        .map_err(|error| XlogError::Execution(format!("Module resolution failed: {error}")))?;
+    let extraction = resolver
+        .resolved_program_extraction(&args.source_root)
+        .map_err(|error| XlogError::Execution(format!("Program extraction failed: {error}")))?;
+    let json = serde_json::to_string_pretty(&extraction).map_err(|error| {
+        XlogError::Execution(format!("Extraction serialization failed: {error}"))
+    })?;
+    println!("{json}");
+    Ok(())
+}
+
+fn manifest(args: ResolvedProgramArgs) -> Result<()> {
+    let resolver = load_modules(&args.source, args.module_path)
+        .map_err(|error| XlogError::Execution(format!("Module resolution failed: {error}")))?;
+    let manifest = resolver
+        .resolved_program_manifest(&args.source_root)
+        .map_err(|error| XlogError::Execution(format!("Manifest construction failed: {error}")))?;
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| XlogError::Execution(format!("Manifest serialization failed: {error}")))?;
+    println!("{json}");
+    Ok(())
 }
 
 fn explain(args: ExplainArgs) -> Result<()> {
