@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,9 +7,11 @@ use std::time::Duration;
 
 use arrow::csv::WriterBuilder;
 use arrow::util::pretty::pretty_format_batches;
-use xlog_core::{symbol, MemoryBudget, Result, XlogError};
+use xlog_core::{symbol, MemoryBudget, Result, ScalarType, XlogError};
 use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
-use xlog_gpu::logic::{normalize_program_for_execution, LogicProgram};
+use xlog_gpu::logic::{
+    download_logic_rows, normalize_program_for_execution, LogicProgram, LogicScalarValue,
+};
 use xlog_ir::{EirBodyLiteral, EirTerm};
 use xlog_logic::ast::{BodyLiteral, ProbEngine, Program};
 use xlog_logic::compile::load_modules;
@@ -61,6 +63,9 @@ struct RunArgs {
     input: Vec<String>,
     #[arg(long, value_enum, default_value = "pretty")]
     output: OutputFormat,
+    /// Export these completed runtime relations with `--output json`.
+    #[arg(long = "materialize-relation")]
+    materialize_relation: Vec<String>,
     #[arg(long)]
     output_dir: Option<PathBuf>,
     /// Show execution statistics (timing, memory usage)
@@ -170,6 +175,7 @@ enum OutputFormat {
     Pretty,
     Csv,
     Arrow,
+    Json,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -1167,6 +1173,16 @@ fn parse_inputs(inputs: &[String]) -> Result<HashMap<String, PathBuf>> {
 }
 
 fn run_deterministic(args: RunArgs) -> Result<()> {
+    if !args.materialize_relation.is_empty() && !matches!(args.output, OutputFormat::Json) {
+        return Err(XlogError::Execution(
+            "--materialize-relation requires --output json".to_string(),
+        ));
+    }
+    if matches!(args.output, OutputFormat::Json) && args.output_dir.is_some() {
+        return Err(XlogError::Execution(
+            "--output-dir is not supported with --output json".to_string(),
+        ));
+    }
     if args.wcoj {
         // Force the WCOJ dispatch gates (default RuntimeConfig consults these
         // env vars; see xlog_core::RuntimeConfig::wcoj_triangle_dispatch).
@@ -1196,7 +1212,23 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
         inputs.insert(name, buf);
     }
 
-    let result = program.evaluate_with_options(provider.clone(), inputs, args.stats)?;
+    let (result, materialized_store) = if matches!(args.output, OutputFormat::Json) {
+        let mut relation_store = program.create_relation_store(provider.clone())?;
+        for (name, buffer) in inputs {
+            relation_store.put(&name, buffer);
+        }
+        let (result, materialized_store) = program.evaluate_with_relation_store_and_cache(
+            provider.clone(),
+            &relation_store,
+            args.stats,
+        )?;
+        (result, Some(materialized_store))
+    } else {
+        (
+            program.evaluate_with_options(provider.clone(), inputs, args.stats)?,
+            None,
+        )
+    };
 
     // Dump the compiled epistemic execution plan after a successful GPU run, so
     // the JSON corresponds to a real accepted hot-path execution.
@@ -1220,13 +1252,23 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
         }
     }
 
-    // Emit query results
-    emit_logic_results(
-        provider.as_ref(),
-        &result.queries,
-        args.output,
-        args.output_dir.as_deref(),
-    )?;
+    // Emit query results and, for the structured route, requested completed
+    // runtime relations from the same evaluated store.
+    if let Some(materialized_store) = materialized_store.as_ref() {
+        emit_deterministic_json(
+            provider.as_ref(),
+            &result.queries,
+            materialized_store.as_relation_store(),
+            &args.materialize_relation,
+        )?;
+    } else {
+        emit_logic_results(
+            provider.as_ref(),
+            &result.queries,
+            args.output,
+            args.output_dir.as_deref(),
+        )?;
+    }
 
     // Emit stats if requested
     if args.stats {
@@ -1389,9 +1431,126 @@ fn emit_logic_results(
                 provider.write_arrow_ipc_stream_file(&q.buffer, &path)?;
                 println!("wrote {}", path.display());
             }
+            OutputFormat::Json => {
+                unreachable!("JSON output is emitted from the materialized store")
+            }
         }
     }
     Ok(())
+}
+
+fn emit_deterministic_json(
+    provider: &CudaKernelProvider,
+    queries: &[xlog_gpu::logic::LogicQueryResult],
+    materialized_store: &xlog_runtime::RelationStore,
+    requested_relations: &[String],
+) -> Result<()> {
+    let queries = queries
+        .iter()
+        .map(|query| {
+            Ok(serde_json::json!({
+                "relation_name": query.relation_name,
+                "columns": query.columns,
+                "scalar_types": scalar_type_labels(&query.buffer)?,
+                "rows": logic_rows_json(provider, &query.buffer)?,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let relation_names = requested_relations.iter().cloned().collect::<BTreeSet<_>>();
+    let materialized_relations = relation_names
+        .into_iter()
+        .map(|relation_name| {
+            let buffer = materialized_store.get(&relation_name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "requested materialized relation '{relation_name}' is not present in the completed runtime store"
+                ))
+            })?;
+            Ok(serde_json::json!({
+                "relation_name": relation_name,
+                "scalar_types": scalar_type_labels(buffer)?,
+                "rows": logic_rows_json(provider, buffer)?,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let payload = serde_json::json!({
+        "schema_version": "xlog.deterministic-run.v1",
+        "execution_engine": "xlog-gpu",
+        "fixpoint_state": "complete",
+        "materialization_transfer": "post_fixpoint_d2h",
+        "queries": queries,
+        "materialized_relations": materialized_relations,
+    });
+    let output = serde_json::to_string(&payload).map_err(|error| {
+        XlogError::Execution(format!(
+            "failed to serialize deterministic run JSON: {error}"
+        ))
+    })?;
+    println!("{output}");
+    Ok(())
+}
+
+fn scalar_type_labels(buffer: &xlog_cuda::CudaBuffer) -> Result<Vec<&'static str>> {
+    (0..buffer.schema().arity())
+        .map(|column_index| {
+            buffer
+                .schema()
+                .column_type(column_index)
+                .map(scalar_type_label)
+                .ok_or_else(|| {
+                    XlogError::Execution(format!(
+                        "relation schema is missing scalar type for column {column_index}"
+                    ))
+                })
+        })
+        .collect()
+}
+
+fn scalar_type_label(scalar_type: ScalarType) -> &'static str {
+    match scalar_type {
+        ScalarType::U32 => "u32",
+        ScalarType::U64 => "u64",
+        ScalarType::I32 => "i32",
+        ScalarType::I64 => "i64",
+        ScalarType::F32 => "f32",
+        ScalarType::F64 => "f64",
+        ScalarType::Bool => "bool",
+        ScalarType::Symbol => "symbol",
+    }
+}
+
+fn logic_rows_json(
+    provider: &CudaKernelProvider,
+    buffer: &xlog_cuda::CudaBuffer,
+) -> Result<Vec<Vec<serde_json::Value>>> {
+    download_logic_rows(provider, buffer)?
+        .into_iter()
+        .map(|row| row.into_iter().map(logic_scalar_json).collect())
+        .collect()
+}
+
+fn logic_scalar_json(value: LogicScalarValue) -> Result<serde_json::Value> {
+    match value {
+        LogicScalarValue::U32(value) => Ok(serde_json::json!(value)),
+        LogicScalarValue::U64(value) => Ok(serde_json::json!(value)),
+        LogicScalarValue::I32(value) => Ok(serde_json::json!(value)),
+        LogicScalarValue::I64(value) => Ok(serde_json::json!(value)),
+        LogicScalarValue::F32(value) => finite_json_number(f64::from(value), "f32"),
+        LogicScalarValue::F64(value) => finite_json_number(value, "f64"),
+        LogicScalarValue::Bool(value) => Ok(serde_json::json!(value)),
+        LogicScalarValue::Symbol(value) => Ok(serde_json::json!(value)),
+    }
+}
+
+fn finite_json_number(value: f64, scalar_type: &str) -> Result<serde_json::Value> {
+    serde_json::Number::from_f64(value)
+        .map(serde_json::Value::Number)
+        .ok_or_else(|| {
+            XlogError::Execution(format!(
+                "cannot serialize non-finite {scalar_type} relation value {value}"
+            ))
+        })
 }
 
 #[cfg(feature = "host-io")]
@@ -1657,6 +1816,7 @@ fn emit_batch(
                 .map_err(|e| XlogError::Execution(format!("Arrow write file failed: {}", e)))?;
             println!("wrote {}", path.display());
         }
+        OutputFormat::Json => unreachable!("probabilistic JSON is emitted before batch output"),
     }
     Ok(())
 }

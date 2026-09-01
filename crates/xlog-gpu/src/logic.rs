@@ -1,11 +1,12 @@
 //! GPU-accelerated evaluation of compiled Datalog programs.
 
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use xlog_core::{resolve_bool, RelId, Result, ScalarType, Schema, XlogError};
+use xlog_core::{resolve_bool, symbol, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaColumn, CudaKernelProvider};
 use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
 use xlog_logic::ast::{PredColumn, PredDecl, TypeRef};
@@ -304,6 +305,162 @@ pub struct LogicQueryResult {
     pub sort_labels: Vec<String>,
     /// GPU-resident column buffer with the result tuples.
     pub buffer: CudaBuffer,
+}
+
+/// A typed scalar downloaded from a completed GPU relation.
+///
+/// This representation is intentionally independent of Arrow so runtime
+/// consumers can serialize exact relation rows without losing XLOG's logical
+/// scalar types. Symbol IDs are resolved through the process symbol table and
+/// invalid IDs fail closed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LogicScalarValue {
+    /// Unsigned 32-bit integer.
+    U32(u32),
+    /// Unsigned 64-bit integer.
+    U64(u64),
+    /// Signed 32-bit integer.
+    I32(i32),
+    /// Signed 64-bit integer.
+    I64(i64),
+    /// 32-bit IEEE 754 floating-point value.
+    F32(f32),
+    /// 64-bit IEEE 754 floating-point value.
+    F64(f64),
+    /// Boolean value.
+    Bool(bool),
+    /// Resolved dictionary-encoded symbol.
+    Symbol(String),
+}
+
+enum DownloadedLogicColumn {
+    U32(Vec<u32>),
+    U64(Vec<u64>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+    Bool(Vec<bool>),
+    Symbol(Vec<String>),
+}
+
+impl DownloadedLogicColumn {
+    fn value(&self, row: usize) -> LogicScalarValue {
+        match self {
+            Self::U32(values) => LogicScalarValue::U32(values[row]),
+            Self::U64(values) => LogicScalarValue::U64(values[row]),
+            Self::I32(values) => LogicScalarValue::I32(values[row]),
+            Self::I64(values) => LogicScalarValue::I64(values[row]),
+            Self::F32(values) => LogicScalarValue::F32(values[row]),
+            Self::F64(values) => LogicScalarValue::F64(values[row]),
+            Self::Bool(values) => LogicScalarValue::Bool(values[row]),
+            Self::Symbol(values) => LogicScalarValue::Symbol(values[row].clone()),
+        }
+    }
+}
+
+/// Download a completed GPU relation into deterministic typed rows.
+///
+/// The GPU remains the source of truth for evaluation. This function performs
+/// an explicit post-run D2H export for external evidence consumers; it is not
+/// part of the resident evaluation hot loop.
+pub fn download_logic_rows(
+    provider: &CudaKernelProvider,
+    buffer: &CudaBuffer,
+) -> Result<Vec<Vec<LogicScalarValue>>> {
+    let row_count = provider.validated_logical_row_count(buffer)?;
+    let schema = buffer.schema();
+    if schema.arity() == 0 {
+        return Ok(vec![Vec::new(); row_count]);
+    }
+
+    let mut columns = Vec::with_capacity(schema.arity());
+    for column_index in 0..schema.arity() {
+        let scalar_type = schema.column_type(column_index).ok_or_else(|| {
+            XlogError::Execution(format!(
+                "relation schema is missing scalar type for column {column_index}"
+            ))
+        })?;
+        let column = match scalar_type {
+            ScalarType::U32 => {
+                DownloadedLogicColumn::U32(provider.download_column(buffer, column_index)?)
+            }
+            ScalarType::U64 => {
+                DownloadedLogicColumn::U64(provider.download_column(buffer, column_index)?)
+            }
+            ScalarType::I32 => {
+                DownloadedLogicColumn::I32(provider.download_column(buffer, column_index)?)
+            }
+            ScalarType::I64 => {
+                DownloadedLogicColumn::I64(provider.download_column(buffer, column_index)?)
+            }
+            ScalarType::F32 => {
+                DownloadedLogicColumn::F32(provider.download_column(buffer, column_index)?)
+            }
+            ScalarType::F64 => {
+                DownloadedLogicColumn::F64(provider.download_column(buffer, column_index)?)
+            }
+            ScalarType::Bool => {
+                DownloadedLogicColumn::Bool(provider.download_column(buffer, column_index)?)
+            }
+            ScalarType::Symbol => {
+                let ids: Vec<u32> = provider.download_column(buffer, column_index)?;
+                let values = ids
+                    .into_iter()
+                    .map(|id| {
+                        symbol::resolve_checked(id).ok_or_else(|| {
+                            XlogError::Execution(format!(
+                                "relation column {column_index} contains unknown symbol ID {id}"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                DownloadedLogicColumn::Symbol(values)
+            }
+        };
+        columns.push(column);
+    }
+
+    let mut rows = (0..row_count)
+        .map(|row| columns.iter().map(|column| column.value(row)).collect())
+        .collect::<Vec<Vec<LogicScalarValue>>>();
+    rows.sort_by(|left, right| compare_logic_rows(left, right));
+    Ok(rows)
+}
+
+fn compare_logic_rows(left: &[LogicScalarValue], right: &[LogicScalarValue]) -> CmpOrdering {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| compare_logic_values(left, right))
+        .find(|ordering| *ordering != CmpOrdering::Equal)
+        .unwrap_or_else(|| left.len().cmp(&right.len()))
+}
+
+fn compare_logic_values(left: &LogicScalarValue, right: &LogicScalarValue) -> CmpOrdering {
+    match (left, right) {
+        (LogicScalarValue::U32(left), LogicScalarValue::U32(right)) => left.cmp(right),
+        (LogicScalarValue::U64(left), LogicScalarValue::U64(right)) => left.cmp(right),
+        (LogicScalarValue::I32(left), LogicScalarValue::I32(right)) => left.cmp(right),
+        (LogicScalarValue::I64(left), LogicScalarValue::I64(right)) => left.cmp(right),
+        (LogicScalarValue::F32(left), LogicScalarValue::F32(right)) => left.total_cmp(right),
+        (LogicScalarValue::F64(left), LogicScalarValue::F64(right)) => left.total_cmp(right),
+        (LogicScalarValue::Bool(left), LogicScalarValue::Bool(right)) => left.cmp(right),
+        (LogicScalarValue::Symbol(left), LogicScalarValue::Symbol(right)) => left.cmp(right),
+        _ => logic_value_rank(left).cmp(&logic_value_rank(right)),
+    }
+}
+
+fn logic_value_rank(value: &LogicScalarValue) -> u8 {
+    match value {
+        LogicScalarValue::U32(_) => 0,
+        LogicScalarValue::U64(_) => 1,
+        LogicScalarValue::I32(_) => 2,
+        LogicScalarValue::I64(_) => 3,
+        LogicScalarValue::F32(_) => 4,
+        LogicScalarValue::F64(_) => 5,
+        LogicScalarValue::Bool(_) => 6,
+        LogicScalarValue::Symbol(_) => 7,
+    }
 }
 
 /// Result of evaluating an entire Datalog program.
