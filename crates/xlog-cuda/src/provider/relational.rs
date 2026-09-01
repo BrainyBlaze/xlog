@@ -8302,6 +8302,27 @@ impl super::CudaKernelProvider {
             XlogError::Kernel(format!("csm inner: sync (post-materialize) failed: {}", e))
         })?;
 
+        // Step 6b: read the truncation flag the kernels have always raised and
+        // nobody has ever read. It is set when the scan total exceeded the
+        // capacity bound, or when the materialize pass had to suppress a write.
+        // Either way the relation about to be gathered is incomplete, and
+        // returning it is indistinguishable from returning a correct answer --
+        // which is how an incomplete join reached a benchmark artifact as a real
+        // number, with a different wrong value on every repetition.
+        //
+        // A caller that asked to be truncated via `max_output` gets what it
+        // asked for; `requested < total` is exactly that case. Anyone else gets
+        // an error. `fj_delta_sparse` already reads its own overflow flag and
+        // declines rather than emit a partial result; this is the same contract
+        // for the hash join.
+        if requested == total && self.dtoh_scalar_untracked::<u8>(&d_overflow, 0)? != 0 {
+            return Err(XlogError::Kernel(format!(
+                "csm inner: join output truncated at {} rows (left_rows={}, \
+                 right_rows={}); refusing to return an incomplete relation",
+                output_capacity, num_left, num_right
+            )));
+        }
+
         // Step 7: gather both sides on launch_stream.
         let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
         for col_idx in 0..left.columns.len() {
