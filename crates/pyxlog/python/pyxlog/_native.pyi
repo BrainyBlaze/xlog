@@ -1538,6 +1538,14 @@ def dlpack_is_cuda(tensor: Any) -> bool:
     """Return True when a DLPack capsule is backed by CUDA memory."""
     ...
 
+def intern_symbols(symbols: list[str]) -> list[int]:
+    """Intern strings in XLOG's canonical registry and return their IDs."""
+    ...
+
+def resolve_symbols(symbol_ids: list[int]) -> list[str]:
+    """Resolve canonical symbol IDs, rejecting any unknown identifier."""
+    ...
+
 # The following two functions are only present when pyxlog is compiled with
 # ``--features arrow-device-import``.  They are included here unconditionally
 # so that type checkers can reference them; at runtime they may be absent.
