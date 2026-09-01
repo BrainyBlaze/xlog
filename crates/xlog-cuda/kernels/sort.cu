@@ -279,8 +279,16 @@ extern "C" __global__ void apply_permutation_bytes(
     }
     if (gid < actual) {
         uint32_t src_idx = permutation[gid];
+        // 64-bit byte offsets. A row index times an element width is a BYTE
+        // count, and it passes 2^32 once the column reaches 4 GiB -- 2^30 rows
+        // for a 4-byte column. Computed in uint32_t it wraps, and because this
+        // kernel writes at the computed address the wrapped rows land on top of
+        // live ones: the result is silently wrong, and differently wrong on
+        // every launch. Same idiom as `keys_equal` in join.cu.
+        const uint64_t dst = (uint64_t)gid * elem_size;
+        const uint64_t src = (uint64_t)src_idx * elem_size;
         for (uint32_t b = 0; b < elem_size; b++) {
-            output[gid * elem_size + b] = input[src_idx * elem_size + b];
+            output[dst + b] = input[src + b];
         }
     }
 }
