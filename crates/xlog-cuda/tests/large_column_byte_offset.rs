@@ -44,7 +44,10 @@ fn compaction_reads_past_four_gibibytes() {
     let require = std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1");
 
     let Some(provider) = large_budget_provider() else {
-        assert!(!require, "XLOG_REQUIRE_CUDA=1 but no CUDA provider was available");
+        assert!(
+            !require,
+            "XLOG_REQUIRE_CUDA=1 but no CUDA provider was available"
+        );
         eprintln!("Skipping: no CUDA device");
         return;
     };
