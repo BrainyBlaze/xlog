@@ -348,6 +348,10 @@ class LogicRelationSession:
         """Snapshot DLPack columns into a persistent session relation."""
         ...
 
+    def put_relation_rows(self, name: str, rows: Sequence[Sequence[str]]) -> None:
+        """Parse typed lexical rows and upload them into a persistent relation."""
+        ...
+
     def put_relation_with_provenance(
         self,
         name: str,
@@ -510,6 +514,10 @@ class LogicRelationSession:
 
     def export_relation(self, name: str) -> list[Any]:
         """Export the named relation as a list of DLPack column capsules."""
+        ...
+
+    def export_relation_rows(self, name: str) -> list[list[str]]:
+        """Download one stored or materialized relation as typed lexical rows."""
         ...
 
     def export_relation_with_provenance(
