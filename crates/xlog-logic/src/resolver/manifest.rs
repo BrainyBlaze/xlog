@@ -195,7 +195,7 @@ pub enum ResolvedProgramManifestError {
         /// Canonical module-resolution diagnostic.
         message: String,
     },
-    /// The declared source root could not be canonicalized.
+    /// The declared source root is missing, inaccessible, or not a directory.
     SourceRoot {
         /// Supplied source-root path.
         path: PathBuf,
@@ -283,7 +283,7 @@ impl fmt::Display for ResolvedProgramManifestError {
             }
             Self::SourceRoot { path, message } => write!(
                 formatter,
-                "failed to canonicalize source root '{}': {message}",
+                "invalid source root '{}': {message}",
                 path.display()
             ),
             Self::SourceOutsideRoot { path, source_root } => write!(
@@ -393,6 +393,12 @@ impl ModuleResolver {
                 message: error.to_string(),
             }
         })?;
+        if !source_root.is_dir() {
+            return Err(ResolvedProgramManifestError::SourceRoot {
+                path: source_root,
+                message: "path is not a directory".to_string(),
+            });
+        }
         let entry = self
             .entry
             .as_ref()

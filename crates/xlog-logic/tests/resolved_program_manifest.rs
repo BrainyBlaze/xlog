@@ -200,6 +200,24 @@ fn resolved_program_manifest_rejects_a_module_outside_the_declared_source_root()
 }
 
 #[test]
+fn resolved_program_manifest_rejects_a_source_root_that_is_not_a_directory() {
+    let fixture = TempDir::new().expect("create fixture directory");
+    let entry = fixture.path().join("main.xlog");
+    fs::write(&entry, "pred answer(symbol).\nanswer(ok).\n").expect("write entry module");
+
+    let resolver = load_modules(&entry, vec![]).expect("resolve entry module");
+    let error = resolver
+        .resolved_program_manifest(&entry)
+        .expect_err("manifest must reject a file as its source root");
+
+    assert!(matches!(
+        error,
+        ResolvedProgramManifestError::SourceRoot { .. }
+    ));
+    assert!(error.to_string().contains("not a directory"));
+}
+
+#[test]
 fn resolved_program_manifest_rejects_an_invalid_resolved_import_surface() {
     let fixture = TempDir::new().expect("create fixture directory");
     fs::write(fixture.path().join("library.xlog"), "known(1).\n").expect("write library module");
