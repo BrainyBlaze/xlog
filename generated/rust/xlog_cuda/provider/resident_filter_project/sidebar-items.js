@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ResidentFilterOperand","ResidentProjectExpr","ResidentScalar"],"fn":["resident_filter_descriptor_device_bytes","resident_filter_scratch_device_bytes","resident_project_descriptor_device_bytes"],"struct":["ResidentFilterComparison","ResidentFilterDescriptorWorkspace","ResidentFilterScratch","ResidentFilterWorkspace","ResidentProjectWorkspace"]};

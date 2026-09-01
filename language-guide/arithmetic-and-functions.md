@@ -1,0 +1,224 @@
+# Arithmetic and functions
+
+Compute values with `is`, arithmetic, and built-in functions, then package reusable calculations and relational lookups into user-defined functions.
+
+Rules join and filter data, but real programs also need to **compute** — an area from a
+width and height, a score from a weight, a running transform. XLOG does this with the
+`is` expression, a small set of operators and built-in functions, and user-defined
+functions when you want to name and reuse a computation.
+
+## Binding a result with `is`
+
+The `is` expression evaluates an arithmetic expression and binds the result to a
+variable:
+
+```xlog
+area(W, H, Z) :- rect(W, H), Z is W * H.
+```
+
+Read `Z is W * H` as "let `Z` be `W * H`". The variable on the left must be **fresh** —
+unbound at that point in the body. The engine evaluates the right-hand side using
+values already bound (here `W` and `H`, supplied by `rect`), then binds the fresh `Z`.
+
+You know it worked when the computed value shows up bound in the results: with a
+`rect(3, 4)` fact, running this program derives `area(3, 4, 12)`.
+
+<Warning>
+`is` binds; it does not test. The left side must be a new variable. To *compare* an
+already-bound value against a computed one, use a comparison operator (`==`, `<`, `>=`,
+…) instead — those are covered in [Facts and rules](/language-guide/facts-and-rules).
+Every variable read on the right of `is` must already be bound earlier in the body, or
+the program is rejected at compile time.
+</Warning>
+
+## Operators and precedence
+
+Five binary operators are available: `+`, `-`, `*`, `/`, and `%` (remainder). They
+follow ordinary arithmetic precedence — `*`, `/`, and `%` bind tighter than `+` and `-`
+— so:
+
+```xlog
+result(X, Y, Z, R) :- v(X, Y, Z), R is X + Y * Z.
+```
+
+computes `Y * Z` first, then adds `X`. Use parentheses to override the default grouping:
+
+```xlog
+result(X, Y, Z, R) :- v(X, Y, Z), R is (X + Y) * Z.
+```
+
+### Operands must share a type
+
+A binary operator requires both operands to have the **same** type. You cannot add an
+`i64` to an `f64` directly, or a `u32` to an `i32` — there is no implicit promotion.
+When operand types differ, convert one explicitly with `cast` (below).
+
+## The five built-in functions
+
+XLOG provides exactly five built-in functions. There are no others:
+
+| Function | Meaning |
+|---|---|
+| `abs(X)` | Absolute value of `X` |
+| `min(X, Y)` | The smaller of `X` and `Y` |
+| `max(X, Y)` | The larger of `X` and `Y` |
+| `pow(X, Y)` | `X` raised to the power `Y` — **always returns `f64`** |
+| `cast(X, type)` | Convert `X` to another scalar type |
+
+`pow` always yields an `f64`, whatever its operands are, because exponentiation is
+inherently a floating-point operation. `cast` takes a type name as its second argument
+and is how you bridge the same-type rule for operators:
+
+```xlog
+scaled(X, Y) :- v(X), Y is pow(X, 2).
+promoted(X, Z) :- ints(X), Z is cast(X, f64).
+```
+
+## Numeric edge cases
+
+Arithmetic on real hardware has boundaries, and XLOG's are defined rather than
+undefined:
+
+- **Division by zero.** Integer division by zero yields the largest value of the
+  operand's **own** type — not one fixed constant. The sentinel therefore depends on the
+  column you divide: `2147483647` for `i32`, `9223372036854775807` for `i64`,
+  `4294967295` for `u32`, and `18446744073709551615` for `u64`. Float division by zero
+  follows IEEE-754: `0.0 / 0.0` is `NaN`, and any other numerator over `0.0` is `+Inf`
+  or `-Inf`.
+- **Remainder by zero.** Integer `X % 0` yields `0` — an ordinary-looking value that you
+  cannot tell apart from a genuine zero remainder. Float `X % 0.0` yields `NaN`.
+- **Integer overflow** wraps around (two's-complement), rather than trapping.
+
+### Floating-point comparisons and selection
+
+Every float bit pattern participates in one total order for `=`, `!=`, `<`,
+`<=`, `>`, and `>=`, as well as `min` and `max`. Negative NaNs sort below
+negative infinity; negative zero sorts below positive zero; positive NaNs sort
+above positive infinity. NaN sign, signaling state, and payload remain part of
+the order.
+
+Equality follows the same order rather than IEEE arithmetic equality. Two
+floats are equal only when their bit patterns are identical. Thus `-0.0 = 0.0`
+is false, while a NaN is equal to the same NaN bit pattern. NaNs produced by
+XLOG arithmetic use one canonical positive quiet-NaN representation.
+
+Do not use `V != V` as a NaN test. Validate the operation that produces the
+value, or constrain the accepted numeric domain. For example, guard a divisor
+before division:
+
+```xlog
+ratio(Id, R) :- input(Id, Num, Denom), Denom != 0.0, R is Num / Denom.
+```
+
+None of these raise an error mid-evaluation — the engine keeps running and produces the
+defined sentinel. That means a divisor column containing a stray `0`, or an overflowing
+product, silently seeds these values into your results. Because the integer
+division-by-zero sentinel is type-dependent, do not test for one hard-coded number
+downstream. The idiomatic guard is to **filter the bad inputs out** in the body before
+computing:
+
+```xlog
+ratio(X, Y, R) :- pair(X, Y), Y != 0, R is X / Y.
+```
+
+<Note>
+Float literals must be written with **both** an integer and a fractional part: `1.0`,
+not `1.`; `0.5`, not `.5`. Scientific notation such as `1e9` is not part of the literal
+grammar either. Write the digits out on both sides of the decimal point.
+</Note>
+
+## User-defined functions
+
+When a calculation or relational lookup recurs, name it. A function declaration is
+`func`, a name, a parameter list, an optional return type, and a body:
+
+```xlog
+func abs_diff(X: f64, Y: f64) -> f64 = if X < Y then Y - X else X - Y.
+```
+
+Parameters may carry `: type` annotations, and the return type follows `->`. The body
+above is a **conditional**: `if cond then A else B` chooses between two arithmetic
+expressions based on a comparison. Bodies can also be plain arithmetic:
+
+```xlog
+func square(X: f64) -> f64 = X * X.
+```
+
+A predicate-bodied function derives its result through relational literals:
+
+```xlog
+func get_parent(Child) = Parent :- parent(Child, Parent).
+
+parent_of_one(Parent) :- Parent is get_parent(1).
+```
+
+Predicate-bodied calls are supported in `is` expressions in ordinary rules and
+constraints. At each call site, XLOG inserts the function's relational body immediately
+before the original `is` binding. Calls within one arithmetic expression expand from
+left to right. Every non-parameter result and body-local variable receives a fresh name
+for each invocation, so it cannot capture a caller variable or a local from another
+call. Nested function calls use the same expansion rules.
+
+The relational body may match zero, one, or many rows. Each match contributes a caller
+row, so function notation does not impose scalar uniqueness on a predicate-bodied call.
+Ordinary set semantics still deduplicates identical projected caller tuples when
+different body witnesses derive the same tuple.
+
+Arguments substituted into predicate-body term positions must already be variables or
+numeric literals. Bind a compound arithmetic argument first, then pass the bound variable:
+
+```xlog
+shifted_parent(Start, Parent) :-
+    seed(Start),
+    Key is Start + 1,
+    Parent is get_parent(Key).
+```
+
+Passing `Start + 1` directly where `Child` becomes a term in `parent(Child, Parent)` is
+rejected. A predicate-bodied call in a conditional result branch is also rejected,
+because moving its relational body outside the selected branch would change the rule's
+meaning.
+
+Add the `private` modifier to keep a function local to its module — it will not be
+exported when another file does `use`:
+
+```xlog
+private func helper(X: i64) -> i64 = X + 1.
+```
+
+### Expansion limits
+
+Production compilation registers function declarations in source order, then expands
+only functions reached from calls in ordinary rules or constraints. Unused definitions
+whose bodies are recursive, call an undefined function, or share a name with a predicate
+do not block this demand-driven path. Duplicate function declarations are still rejected.
+
+Every call-site expansion is bounded by `#pragma max_recursion_depth`. When expansion
+tries to enter another user-defined call while already at that depth, it reports
+`error[E0504]`. Function normalization expands both conditional branches before
+execution; it does not evaluate a data-dependent base case while expanding. A reachable
+cycle therefore reaches `E0504` instead of acting as a runtime loop, whether its source
+is wholly unguarded or includes a conditional branch that looks like a base case.
+
+Rust callers that need to audit every declaration can use
+`FunctionRegistry::from_program`. This strict validation walks definitions and their
+callees in source order. It rejects a wholly unguarded recursive strongly connected
+component (SCC) with `error[E0502]`; an SCC passes that check when at least one member has
+a conditional body. Passing strict validation does not make expansion data-dependent, so
+a used guarded cycle can still reach `E0504`.
+
+### Calling a function
+
+Call a function on the right side of `is`, where an arithmetic expression is allowed.
+The left side must be a fresh variable:
+
+```xlog
+gap(A, B, D) :- span(A, B), D is abs_diff(A, B).
+```
+
+Here `span` binds `A` and `B`, the function call computes the difference, and `is`
+binds the fresh variable `D`.
+
+<Card title="Aggregation" icon="sigma" href="/language-guide/aggregation">
+  Collapse many rows into one — count, sum, min, max, and logsumexp in a rule head.
+</Card>

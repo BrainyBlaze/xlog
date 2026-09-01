@@ -1,0 +1,134 @@
+# Modules
+
+Split an XLOG program across files, import predicates and functions by path, and control what each module exposes with private and domain.
+
+An XLOG source file is a **module**. Larger programs are assembled by importing modules
+into one another, so you can keep predicates, functions, and domain aliases where they
+belong and pull in only what a given file needs. The entry file is loaded from the exact
+path passed to the CLI, regardless of its extension. A `use` path resolves to a `.xlog`
+file.
+
+## Importing
+
+Bring another module into scope with `use`, giving its path. The `/` character is the path
+separator between path segments:
+
+```xlog
+use utils/math.
+```
+
+To import only specific names, list them in braces after `::`:
+
+```xlog
+use utils/math::{abs_diff, clamp}.
+```
+
+The selective form imports the named predicates and functions. Domain aliases from the
+module are also merged. If an imported rule or function needs another public item from
+the same module, include that dependency in the list as well. Selections from repeated
+`use` declarations for the same module are combined before its exports are merged. If
+separate resolved import branches contribute public facts or rules to the same predicate,
+their clauses are merged into one relation. This also applies when selective imports name
+that predicate in more than one module. Resolution checks schemas separately. Predicate
+declarations that participate in the merge are compared under `error[E0408]`. When no
+participating declaration supplies a schema, inferred clause-head column types contributed
+by different source programs—either the entry program and a selected import, or two selected
+imports—are compared by predicate name and arity. Head constants, head variables typed by
+ordinary body atoms or built-in arithmetic bindings, and aggregate result types supply
+evidence; unanchored variables do not. Resolution propagates known types through rule chains.
+Conflicting types are rejected with `error[E0412]`. If a contributing clause's built-in
+arithmetic or aggregate evidence is itself ill-typed, resolution reports `error[E0413]` with
+the source module and file. For import schema validation, different arities remain distinct
+predicate signatures.
+
+Functions have one body. If separate import branches define the same function, or a
+module or entry file redefines an imported function, resolution rejects the conflict with
+`error[E0402]`; use selective imports so that only one function definition is visible. An
+imported module that defines a function name more than once while exporting that name is
+rejected with `error[E0410]`.
+
+Each `use` is resolved in the context of the file that contains it. In the entry file,
+resolution first checks the entry path's directory. Within an imported module, it first
+checks that module's canonical source directory. Configured module search paths follow in
+both cases. Two files reached through the same written path remain distinct source
+modules, while different paths that resolve to the same canonical source file are merged
+only once.
+
+The entry program and imported modules may repeat compatible predicate declarations,
+including a declaration for facts supplied at runtime. Every declaration in the entry
+program and every public declaration selected by the resolved imports participates in
+compatibility checking. If participating declarations with one name differ in arity,
+column names, or resolved types, resolution rejects them with `error[E0408]` instead of
+retaining whichever schema happened to merge first. Private declarations in imported
+modules and public declarations omitted by a selective import are not merged and do not
+participate in this comparison.
+Every declaration of one predicate within an imported module must also use the same
+visibility. Mixing public and `private` declarations is rejected with `error[E0411]`
+instead of exporting a predicate without its rules.
+
+## Visibility
+
+Predicates and functions are **public by default**, which makes them eligible for import.
+Mark a declaration `private` to hide it, so it stays internal to its own module and never
+leaks across a `use`:
+
+```xlog
+private pred scratch(u32).
+
+private func normalize(X: f64) -> f64 = X / total().
+```
+
+Both `pred` and `func` accept the `private` modifier. Private items can be used within the
+file that declares them, but they are never merged into an importing program. An exported
+rule or function therefore cannot depend on a private item. It also cannot depend on a
+public item omitted by a selective import. Module resolution rejects either case with
+`error[E0406]` instead of compiling an incomplete definition. A selective import that
+names an item the module does not export fails with `error[E0404]`.
+
+## Domain aliases
+
+A `domain` declaration names a reusable type. Write `domain name : type.` to introduce an
+alias you can then use anywhere a type is expected:
+
+```xlog
+domain node : u32.
+
+pred edge(src: node, dst: node).
+```
+
+Here `node` stands for `u32`, so the intent of each column is visible at a glance and a
+later change to the underlying type is made in one place.
+
+One domain alias name must resolve to one scalar type throughout the entry program and its
+import closure. Conflicting declarations are rejected with `error[E0409]`.
+
+## Importable program content
+
+Imports merge public deterministic predicate and function declarations, deterministic
+facts and rules for those predicates, and domain aliases. The import closure is resolved
+transitively before compilation.
+
+The following constructs belong in the entry file and cause `error[E0405]` when they
+appear in an imported module:
+
+- probabilistic facts;
+- annotated disjunctions;
+- evidence statements;
+- integrity constraints;
+- neural predicate declarations;
+- learnable rule templates.
+
+Queries, probabilistic queries, and compiler pragmas are also entry-file-scoped. Queries
+from imported modules are not merged. Imported pragmas follow the warning behavior below.
+
+## Pragma scoping
+
+`#pragma` directives are honored only in the **entry file** — the file passed to
+`xlog run`, `xlog prob`, or `xlog explain`. A pragma inside an imported module is ignored at
+merge time, and the CLI emits `warning[W0510]` naming the module and the dropped
+directive. Restate the pragma in the entry file if the program needs it. See
+[Pragmas apply only in the entry file](/language-guide/pragmas#pragmas-apply-only-in-the-entry-file).
+
+<Card title="Pragmas" icon="sliders" href="/language-guide/pragmas">
+  Set compiler and engine behavior from inside a program with `#pragma` directives.
+</Card>

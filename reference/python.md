@@ -1,0 +1,1746 @@
+# Python API (pyxlog)
+
+Reference for the pyxlog Python bindings: deterministic and probabilistic program APIs, DLPack interop, neural-symbolic training, and ILP rule learning.
+
+`pyxlog` lets you compile and run XLOG programs from Python and exchange CUDA
+tensors with PyTorch, CuPy, JAX, and TensorFlow through DLPack. Transient inputs
+and query-result handoffs share device allocations; persistent relation imports
+and stored-relation exports make device-to-device ownership copies so session
+state cannot be mutated through an external tensor.
+
+<Note>
+Always `import pyxlog`, never `pyxlog._native`. The package has two layers: a native
+PyO3 extension (`pyxlog._native`) and a pure-Python wrapper that re-exports it and adds
+convenience methods. Some documented methods — including `evaluate_async`,
+`evaluate_stream`, the relation callbacks, temporal provenance, and the `nn/4` lineage
+helpers — live only on the wrapped classes. Importing from `pyxlog._native` directly
+will make those methods appear missing.
+</Note>
+
+## Overview
+
+The `pyxlog` Python module provides:
+
+- Deterministic (ordinary, non-probabilistic) Datalog execution via `LogicProgram`
+- Probabilistic inference (facts and rules carry probabilities) via `Program`
+- Term embedding registration and lookup via `register_embedding` / `forward_embedding`
+- Differentiable inductive logic programming (ILP) — learning Datalog rules from
+  labeled examples — via `pyxlog.ilp`
+- Reusable diagnostics for downstream applications ("external consumers"):
+  learned-rule inventories, audits of the tight GPU inner loop ("hot loop"), and
+  grouped transfer metrics
+- DLPack GPU tensor exchange, with zero-copy transient inputs and query-result
+  handoffs plus owned persistent relation storage
+- Optional, experimental Apache Arrow C Device interop (enabled by a build feature)
+- Runtime introspection surfaces ("living-world diagnostics"): rule provenance,
+  proof traces, incremental relation-change ("delta") debugging, temporal relation
+  metadata, native whole-fact relation evidence, and neural hot-loop audits
+
+Convenience outputs that must be read on the host CPU (probabilities, gradients,
+confidence intervals) are behind a `host-io` Cargo build feature. Keeping them
+optional lets device-result code keep result buffers out of host memory. Individual
+routes can still observe bounded status or terminal-summary data; their documented
+transfer measurements, not the final tensor's device field alone, establish residency.
+For the full map of runtime introspection surfaces, see
+[Living-World Diagnostics](/guides/diagnostics).
+
+## Installation
+
+To install a published wheel:
+
+```bash
+pip install pyxlog
+```
+
+On import, `pyxlog` checks for bundled CUDA kernel artifacts under
+`pyxlog/kernels/` and, when present, exports that directory to
+`XLOG_CUBIN_DIR` automatically. Any pilot script, probe harness, or artifact
+replay that runs outside the packaged wheel layout should set
+`XLOG_CUBIN_DIR` explicitly before importing `pyxlog`, for example:
+
+```bash
+export XLOG_CUBIN_DIR=/path/to/xlog/crates/pyxlog/python/pyxlog/kernels
+python your_probe.py
+```
+
+This matters most for cold-start execution on saved inputs: without
+`XLOG_CUBIN_DIR`, startup can fail if the active install does not contain
+`pyxlog/kernels/`.
+
+For local development or an API present in this checkout but absent from the
+selected wheel:
+
+```bash
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python --user
+```
+
+Use the Python executable from the downstream project, not necessarily the
+Python from the xlog checkout. The helper stages generated CUDA artifacts,
+builds a wheel for that interpreter with `maturin build -i`, installs the wheel
+with the same interpreter's `pip`, and verifies that the installed package has
+`pyxlog/kernels/`. Generated `.ptx` and `.cubin` files remain build artifacts
+and are not tracked in git.
+
+### Build Features
+
+Build features are compile-time flags that turn optional API surfaces on:
+
+- `host-io`: enable host-read convenience APIs (e.g. `CompiledProgram.evaluate(...)`)
+- `arrow-device-import`: enable experimental Arrow C Device export/import helpers
+
+Example:
+
+```bash
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python \
+  --features extension-module,host-io,arrow-device-import
+```
+
+## Package Details
+
+| Attribute | Value |
+|-----------|-------|
+| Package name | `pyxlog` |
+| Build system | PyO3 + maturin |
+| Platform | Linux x86_64 + CUDA only |
+| Interop | DLPack capsules (framework-agnostic) |
+
+## API Reference
+
+### LogicProgram (Deterministic)
+
+Compiles and runs an ordinary (non-probabilistic) Datalog program on the GPU and
+returns each query's answer as DLPack columns (one tensor per column).
+
+```python
+import pyxlog
+import torch
+
+# Compile a deterministic program
+program = pyxlog.LogicProgram.compile("""
+    pred edge(u32, u32).
+    pred reach(u32, u32).
+
+    edge(1, 2). edge(2, 3). edge(3, 4).
+
+    reach(X, Y) :- edge(X, Y).
+    reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+    ?- reach(1, N).
+""")
+
+# Execute and get results
+result = program.evaluate()
+
+# Results are a list of query outputs (relations) with per-column DLPack tensors
+for q in result.queries:
+    print(q.relation_name, q.columns, q.num_rows, q.is_true)
+    cols = [torch.from_dlpack(t) for t in q.tensors]
+    print(cols)
+```
+
+#### Supplying Input Relations (DLPack)
+
+`CompiledLogicProgram.evaluate(dlpack_inputs=...)` accepts a dict mapping relation name to a
+sequence of DLPack columns.
+
+```python
+import pyxlog
+import torch
+
+program = pyxlog.LogicProgram.compile("""
+    pred edge(u32, u32).
+    pred reach(u32, u32).
+    reach(X, Y) :- edge(X, Y).
+    ?- reach(1, N).
+""")
+
+# Two 1D columns, not a 2D tensor.
+edge_a = torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32)
+edge_b = torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32)
+
+result = program.evaluate(dlpack_inputs={"edge": [edge_a, edge_b]})
+```
+
+#### Persistent Named Relations (DLPack)
+
+For repeated evaluation with long-lived GPU relations, create a persistent session instead of
+re-supplying `dlpack_inputs` on every call.
+
+```python
+import pyxlog
+import torch
+
+program = pyxlog.LogicProgram.compile("""
+    pred edge(i32, i32).
+    pred reach(i32, i32).
+    reach(X, Y) :- edge(X, Y).
+    ?- reach(X, Y).
+""")
+
+session = program.session()
+
+edge_a = torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32)
+edge_b = torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32)
+
+session.put_relation("edge", [edge_a, edge_b])   # register or replace
+result = session.evaluate()                      # reuse stored relations
+exported = session.export_relation("edge")       # DLPack columns
+
+session.remove_relation("edge")
+session.clear_relations()
+```
+
+The persistent session path is additive:
+
+- `evaluate(dlpack_inputs=...)` remains the stateless one-shot API
+- `session()` exposes a mutable named relation store with schema-checked DLPack import/export
+
+#### Persistent Relation Deltas
+
+A delta is an incremental change to a relation — rows to add or remove — applied
+without recomputing the whole program. Persistent sessions accept DLPack-backed
+deltas so a caller can update its data in a loop.
+
+`insert_relation(...)`, `delete_relation(...)`, and `apply_relation_delta(...)`
+update the session's stored relations through the runtime's incremental-recompute
+path (`RelationDelta` / `apply_deltas_and_recompute`). Updates that only insert
+rows into a mutually-recursive relation group (a strongly connected component, or
+SCC) reuse previously computed output where the plan allows. Updates that delete
+rows clear and recompute the affected groups so results stay correct.
+
+```python
+session.put_relation("edge", [row_id, parent_id])
+session.evaluate()
+
+delta = session.insert_relation("edge", [new_row_id, new_parent_id])
+result = session.evaluate()          # returns the delta-updated cached store
+print(session.delta_stats(), delta)
+
+session.apply_relation_delta(
+    "edge",
+    insert_columns=[added_row_id, added_parent_id],
+    delete_columns=[removed_row_id, removed_parent_id],
+)
+
+session.apply_relation_delta_batch([
+    {"name": "edge", "insert_columns": [row_a, parent_a]},
+    {"name": "edge", "delete_columns": [row_b, parent_b]},
+])
+
+debug = session.apply_relation_delta_debug(
+    [{"name": "edge", "insert_columns": [row_c, parent_c]}],
+    check_equivalence=True,
+)
+```
+
+The delta stats dictionary contains `changed_relations`, `insert_rows`,
+`delete_rows`, `affected_sccs`, `recomputed_sccs`, `incremental_sccs`,
+`input_delta_count`, `coalesced_insert_rows`, `coalesced_delete_rows`, and
+`canceled_rows`. Delta debug output also includes
+`changed_relation_names`, `equivalent_to_full_recompute`, `debug_trace`, and
+nested `planner_telemetry`. Planner telemetry reports `cache_reused`,
+`fallback_decision`, affected/recomputed/incremental SCC counts,
+`estimated_delta_speedup`, `measured_delta_speedup`, and `planner_advice`.
+`equivalent_to_full_recompute` is `None` unless the caller opts into
+`check_equivalence=True`.
+
+Batch updates merge repeated changes to the same relation before the runtime
+recomputes, using device-resident set operations. Update dictionaries reject
+unknown keys before any relation is changed. A batch whose inserts and deletes
+cancel completely is a semantic no-op: `changed_relations` is `0`, no runtime
+version or callback generation advances, and no callback fires for the canceled
+relation. Callback and diagnostic code must not copy relation rows down to the
+host.
+
+If a delta operation fails before commit but after preparation takes ownership
+of cached derived state, the authoritative relation rows and evidence remain
+unchanged, but XLOG discards the derived cache and retained runtime. The next
+`evaluate()` rebuilds them. This makes failure recovery safe at the cost of
+losing cache-hit and incremental-planner continuity for that attempt.
+
+Calling `put_relation`, `remove_relation`, or `clear_relations` directly
+invalidates the cached runtime store. The next `evaluate()` then does a full plan
+run before later deltas can reuse it.
+
+Persistent sessions keep their runtime executor across `evaluate()` and
+delta recompute calls, so persistent hash indexes can be reused through public
+pyxlog mutation loops. `session.join_index_cache_stats()` returns the retained
+executor's `lookups`, `hits`, `misses`, `builds`, invalidation counters,
+background-build counters, `entries`, and `total_bytes`.
+
+`session.wcoj_dispatch_stats()` separates successful specialized dispatches
+from actual fallbacks. Its `wcoj_fallback` object reports `total` and the
+`chain`, `dedicated_multiway`, `free_join`, `planned_hash`, `factorized_delta`,
+and `groupby_fusion` routes. `wcoj_error_decline_count` is narrower: it counts
+pipeline errors that declined to a fallback, not ordinary eligibility or cost
+decisions.
+
+#### Relation Change Callbacks
+
+Persistent sessions expose opt-in metadata callbacks for relation delta
+commits:
+
+```python
+def register_relation_callback(callback) -> int: ...
+def unregister_relation_callback(callback_id: int) -> bool: ...
+
+events = []
+callback_id = session.register_relation_callback(events.append)
+session.apply_relation_delta_batch([
+    {"name": "edge", "insert_columns": [row_a, parent_a]},
+])
+session.unregister_relation_callback(callback_id)
+```
+
+Callbacks fire only after a delta commit succeeds. A failed or rolled-back
+delta does not invoke registered callbacks. The callback payload is a
+metadata-only dictionary with `relation`, `generation`, `input_delta_count`,
+`insert_rows`, `delete_rows`, `has_deletes`, `coalesced_insert_rows`,
+`coalesced_delete_rows`, `canceled_rows`, `affected_sccs`,
+`recomputed_sccs`, `incremental_sccs`, and nested `telemetry`.
+
+Callbacks are invoked synchronously while the pyxlog method holds the Python
+GIL. Registration order is callback order, and relation events are emitted in
+the caller's update order after duplicate relation names are coalesced. This
+ordering is deterministic: a regression fixture confirms that 100 repeated runs
+produce identical callback sequences. Relations whose net batch update cancels
+completely are omitted from mixed-batch callback sequences and do not consume a
+generation number. Building a callback payload does not export DLPack tensors or
+download relation data rows; use explicit `evaluate()` or `export_relation()`
+when you actually need the rows materialized.
+
+#### Rule, proof, temporal, and relation provenance
+
+Compiled logic/probabilistic programs and sessions can report where their results
+came from (provenance):
+
+```python
+def rule_provenance() -> list[dict]: ...
+def proof_traces() -> list[dict]: ...
+```
+
+`rule_provenance()` returns stable `rule_id`, `source_kind`,
+`generation_trace_hash`, `support_relation_ids`, and
+`counterexample_relation_ids` fields. `proof_traces()` returns each query's
+answer relation, deriving rule ids, source facts, and rejected alternatives.
+
+Temporal stream loads can keep provenance metadata next to the relation:
+
+```python
+session.put_temporal_relation(
+    "stream_row",
+    columns,
+    timestamp_column="event_ts",
+    dataset_id="hf-live",
+    row_hashes=row_hashes,
+    field_hashes=field_hashes,
+    uncertainty=uncertainty,
+    stream_id="camera-a",
+    order_column="seq",
+    source="hf://dataset/split",
+    process_boundary="observation_process",
+    temporal_order=["seq"],
+)
+session.temporal_provenance("stream_row")
+
+pyxlog.put_temporal_relation(
+    session,
+    "stream_row_copy",
+    columns,
+    timestamp_column="event_ts",
+    dataset_id="hf-live",
+    row_hashes=row_hashes,
+    field_hashes=field_hashes,
+    uncertainty=uncertainty,
+    stream_id="camera-a",
+    order_column="seq",
+    source="hf://dataset/split",
+    process_boundary="observation_process",
+    temporal_order=["seq"],
+)
+pyxlog.temporal_provenance(session, "stream_row_copy")
+```
+
+The temporal metadata shape preserves `timestamp_column`, `dataset_id`,
+`row_hashes`, `field_hashes`, `uncertainty`, `stream_id`, `source`,
+`order_column`, `process_boundary`, and `temporal_order`. Temporal metadata is a
+Python helper facility; it is separate from the native whole-fact evidence API
+below.
+
+Native relation evidence binds ordered semantic roles and provenance records to
+complete facts of any positive arity. The role order must match the compiled
+predicate argument order, and each fact is identified by all of its cells:
+
+<Warning>
+**Breaking in 0.12.0.** Five relation APIs changed shape, so code written against
+0.11.0 needs edits:
+
+- `put_relation_with_provenance` is now native and requires keyword-only `roles=`
+  and `facts=`. The old `source_path`, `source_hash`, `row_hashes`,
+  `accepted_count`, and `decision_counts` keyword arguments are gone, and the
+  call returns a native snapshot instead of that flat sidecar dictionary.
+- `evidence()` returns `{program_hash, relations}` and raises `KeyError` for a
+  name it does not hold, instead of returning `{}`.
+- `relation(name)` returns a frozen native `RelationEvidence` and raises
+  `KeyError` for an unstored relation, instead of a wrapper whose `provenance()`
+  returned `{}`.
+- `RelationEvidence` is an immutable native class. The old
+  `RelationEvidence(session, name)` constructor no longer exists.
+- `apply_relation_delta_batch` and `apply_relation_delta_debug` reject unknown
+  keys in an update dictionary that they previously ignored. Both route through
+  the same parser, so both raise `ValueError` where 0.11.0 silently dropped the
+  extra key.
+
+See [Migrating from Python-side relation evidence](#migrating-from-python-side-relation-evidence)
+for the field-by-field mapping.
+</Warning>
+
+```python
+program = pyxlog.LogicProgram.compile("""
+    domain party: u32.
+    domain asset: u32.
+    pred transfer(giver: party, receiver: party, asset: asset, event_time: i64).
+""")
+session = program.session()
+
+snapshot = session.put_relation_with_provenance(
+    "transfer",
+    [giver, receiver, asset, event_time],
+    roles=[
+        {"name": "giver", "sort": "party", "type": "u32"},
+        {"name": "receiver", "sort": "party", "type": "u32"},
+        {"name": "asset", "sort": "asset", "type": "u32"},
+        {"name": "event_time", "type": "i64"},
+    ],
+    facts=[{
+        "tuple": [10, 20, 7, 1_700_000_000],
+        "provenance": [
+            {
+                "source": "extractor-output",
+                "document": "document-42",
+                "span": {"start": 18, "end": 41},
+                "content_hash": "sha256:...",
+                "kind": "assertion",
+                "polarity": "positive",
+            },
+            {"source": "manual-review", "kind": "confirmation"},
+        ],
+    }],
+)
+same_snapshot = session.relation("transfer").provenance()
+all_evidence = session.evidence()
+```
+
+Each role input requires `name`; optional `sort` and `type` fields, when present,
+must match the compiled schema. Returned snapshots resolve all three fields.
+Source-named predicate arguments require their compiled names. Positional
+arguments accept application-defined role names on the first metadata-bearing
+load, then enforce that role contract on later metadata-bearing replacements and
+manifest imports. A plain `put_relation`, a manifest import with
+`metadata_present=False`, `remove_relation`, or `clear_relations` removes that
+positional role contract. A later metadata-bearing load may then register new
+positional names. Source-named arguments always remain bound to their compiled
+names.
+
+A fact supplies exactly one of `tuple` or `cells`. `tuple` is the convenient
+Python representation. `cells` is a sequence of exact
+`{"type": ..., "hex": ...}` values for bit-preserving values such as NaNs and
+signed zero. Provenance records may contain `source`, `document`, `span`,
+`content_hash`, `kind`, and `polarity`; at least one field must be non-null. Two
+different records for the same complete tuple remain distinct. Replacement rows
+retain their stored multiplicity, so `row_count` includes duplicate rows. Evidence
+is keyed by the distinct complete typed tuple rather than by row offset: duplicate
+stored rows share one fact entry, repeated fact entries merge their records, exact
+duplicate records collapse, and facts and records are returned in deterministic
+canonical order.
+
+Evidence follows the native relation lifecycle atomically:
+
+- `put_relation_with_provenance` replaces both rows and evidence;
+- plain `put_relation` replaces the rows and clears old evidence and any
+  positional role contract;
+- `insert_relation(..., facts=...)` and
+  `apply_relation_delta(..., insert_facts=...)` add evidence for inserted facts;
+- batch and debug updates accept `insert_facts` in each update dictionary;
+- deleting a complete fact deletes its evidence, and coalesced or canceled batch
+  updates cannot leave stale evidence; and
+- metadata-free manifest replacement, `remove_relation`, and `clear_relations`
+  remove the matching evidence and positional role contract.
+
+Insert evidence has stricter preconditions than a metadata-free insert. `facts`
+or `insert_facts` requires insert columns for the same update, a positive-arity
+relation, and a role contract previously registered by a metadata-bearing
+replacement or manifest import. Every annotated fact must occur in that specific
+insert buffer; being present only in the session's existing rows is not enough.
+Passing an empty `facts=[]` or `insert_facts=[]` still opts into these contract
+checks, although it performs no membership-mask transfer. Duplicate or already
+stored inserted rows may add distinct provenance records when the annotated fact
+is present in the insert buffer.
+
+All role, type, arity, evidence-tuple membership, and batch validation completes
+before mutation. A validation or pre-commit preparation failure leaves relation
+rows, evidence, delta statistics, callback generations, and callbacks unchanged.
+Nullary relations support plain `put_relation`, metadata-free inserts, deletes,
+deltas, evaluation, `relation`, and `evidence`. They reject
+`put_relation_with_provenance`, every `put_relation_from_manifest` and
+`export_relation_with_provenance` call, and any insert, combined delta, batch, or
+debug update that supplies `facts` or `insert_facts` (including an empty list).
+
+Persistent replacement methods take a device-to-device snapshot of imported
+DLPack columns before committing them. Mutating a retained producer tensor after
+`put_relation`, `put_relation_with_provenance`, or
+`put_relation_from_manifest` therefore cannot change stored rows behind the
+session's versions, callbacks, or evidence. This is an owned GPU snapshot, not a
+zero-copy persistent import. Transient `evaluate(dlpack_inputs=...)` inputs and
+the handoff of query-result buffers to a DLPack consumer remain zero-copy.
+
+For each tensor-like input, XLOG calls `__dlpack_device__()` exactly once. Only
+CUDA device memory (`kDLCUDA`) is accepted; another device raises `BufferError`
+before XLOG requests or consumes a capsule. XLOG then calls
+`__dlpack__(stream=1)` exactly once so the CUDA producer orders pending work
+before consumption on the legacy default stream. If the producer rejects that
+stream argument, the exception propagates; XLOG does not retry without a stream.
+Raw capsules bypass both protocol calls. The caller must create each capsule for
+stream `1` or synchronize its producer first, and must pass it to only one
+consumer. The native importer still validates the capsule's device header.
+
+**Breaking in 0.12.0.** This device gate is new, and it applies to every pyxlog
+entry point that accepts a `__dlpack__` object. A CPU tensor that previously
+travelled some distance into XLOG before failing now raises `BufferError`
+immediately, at import.
+
+Membership is checked as complete tuples on the GPU. For a non-empty evidence
+set, the runtime downloads one boolean membership mask in a single transfer—one
+byte per distinct fact—not the relation rows. Role-only metadata and
+metadata-free manifests need no membership transfer. Use
+`set_strict_deterministic_d2h(True)` to reject even this deterministic mask
+transfer; `deterministic_d2h_violation_count()` reports rejected attempts, and a
+rejection is atomic.
+
+`relation(name)` returns a frozen native `RelationEvidence` captured at that
+call. Later session changes do not alter it, and each `provenance()` call returns
+fresh Python dictionaries and lists whose mutation cannot change the captured
+snapshot. `evidence(name=None)` returns a deterministic `program_hash` and a
+`relations` mapping of packed snapshot dictionaries. With `evidence(name)`, XLOG
+still computes `program_hash` over every stored relation in the session and only
+then filters the returned `relations` mapping to `name`; named and unfiltered
+reads therefore share the same hash at the same session state. These are native
+session snapshots, not Python package sidecar records.
+
+Invalid role, whole-fact provenance, insert-evidence, or manifest input raises
+`pyxlog.RelationMetadataError`, a `ValueError` subclass. Looking up an unstored
+relation with `relation(name)` or `evidence(name)` raises `KeyError`. Without
+`pyxlog._native`, the package-level `RelationMetadataError` and
+`RelationEvidence` names remain importable. The fallback metadata error still
+subclasses `ValueError`; constructing the fallback `RelationEvidence` raises
+`RuntimeError` because it has no native snapshot. Native evidence instances and
+all session operations require the extension. Source builds that compile the
+extension expose this API; for a packaged build, determine availability from that
+release's notes.
+
+#### Provenance manifest round trips
+
+Use the paired DLPack-and-manifest API to reconstruct rows and native evidence in
+another compatible session:
+
+```python
+exported = session.export_relation_with_provenance("transfer")
+
+fresh = program.session()
+restored = fresh.put_relation_from_manifest(
+    "transfer",
+    exported["columns"],
+    exported["manifest"],
+)
+```
+
+The manifest is the exact `xlog.relation-provenance` version `1` shape. Its
+required top-level fields are `format`, `version`, `predicate`, `row_count`,
+`metadata_present`, `roles`, and `facts`. `predicate` contains `name`, `arity`,
+and the compiled `schema_sha256`. Manifest facts contain `identity`, exact
+`cells`, and fixed-shape `provenance` records; they intentionally omit the
+friendly `tuple`. Every dictionary level rejects missing or unknown fields.
+`version`, `arity`, and `row_count` must be non-negative Python integers, not
+booleans, and `metadata_present` must be an actual Python `bool`. If it is false,
+both `roles` and `facts` must be empty and importing the manifest resets any
+registered positional role contract.
+
+Each exact cell contains only `type` and `hex`. Its type must match the compiled
+column, and its lowercase hexadecimal value must encode exactly that scalar
+type's little-endian byte width; a boolean cell is exactly `00` or `01`. Manifest
+provenance records contain all six fields (`source`, `document`, `span`,
+`content_hash`, `kind`, and `polarity`), using `None` for absent values. A
+non-null span contains exactly `start` and `end`; both are non-negative Python
+integers rather than booleans, both must be representable as `u64`, and
+`start <= end`.
+
+The schema fingerprint includes the predicate name and arity plus every compiled
+column's name, scalar type, and optional source-domain sort. A fact identity
+includes the predicate name and arity plus each cell's type code, byte length,
+and exact bytes; it does not include provenance records. Both hashes use
+domain-separated SHA-256 inputs. Fact identity is independent of row position
+and role labels, and import recomputes both hashes instead of trusting the
+supplied strings.
+
+Import validates static manifest structure, compiled schema identity, and column
+count before consuming a DLPack capsule. Once column import starts, all supplied
+capsules are consumed before dtype, equal-column-length, manifest row-count, and
+whole-fact membership validation completes. A failure at any of those stages
+still leaves the target relation and evidence unchanged, but the spent source
+capsules cannot be reused. Successful import consumes every column once.
+Fact and record order and exact duplicates are normalized deterministically.
+The DLPack columns are process-local, single-consumer ownership objects; the
+manifest may be serialized as data, but it does not contain the relation columns
+and is not a cross-process persistence format. Keep the exported columns alive
+until import consumes them. For portable storage, use a host-serialized relation
+format and treat native manifest reconstruction as a separate in-process
+operation.
+
+#### Migrating from Python-side relation evidence
+
+The native API replaces the earlier Python helper contract. The old
+`relation_schema`, `source_path`, `source_hash`, `row_hashes`, `field_hashes`,
+`accepted_count`, `rejected_count`, `output_path`, `output_hash`, and
+`decision_counts` keyword arguments are not accepted by
+`put_relation_with_provenance`. Pass ordered `roles` and complete `facts`
+instead. A per-fact source location can map to a record's `source` or `document`,
+and a per-fact source digest can map to `content_hash`; XLOG derives exact fact
+identities from the typed cells. Row/field hash collections, output locations and
+hashes, and aggregate acceptance, rejection, and decision counters remain
+application-level data rather than native whole-fact evidence. The returned
+snapshot and `evidence()` payload contain native roles and facts, and unknown
+named reads raise `KeyError` instead of returning an empty sidecar record.
+
+#### Runtime controls and diagnostics
+
+Long-running callers can submit logic or probabilistic evaluations to a
+background Python worker with `evaluate_async(...)`. The returned
+`AsyncEvaluation` is awaitable and also exposes `done()`, `cancel()`,
+`exception()`, and `result(timeout=None)` for synchronous orchestration.
+
+```python
+handle = session.evaluate_async(memory_mb=512)
+result = handle.result(timeout=30)
+```
+
+Large logic outputs can be consumed as DLPack-compatible CUDA tensor chunks:
+
+```python
+for chunk in session.evaluate_stream(memory_mb=512, chunk_rows=1024):
+    cols = chunk.tensors  # torch CUDA tensor views, DLPack-compatible
+    print(chunk.relation_name, chunk.offset, chunk.num_rows, cols)
+```
+
+The same chunking is available from an already materialized result:
+
+```python
+result = session.evaluate()
+for chunk in result.iter_query_chunks(chunk_rows=1024):
+    ...
+```
+
+Per-call `memory_mb` is accepted by `CompiledLogicProgram.evaluate`,
+`LogicRelationSession.evaluate`, `CompiledProgram.evaluate`, and
+`CompiledProgram.evaluate_device`. A zero limit raises `ValueError`; a limit
+below the provider's current tracked allocation raises `MemoryError` before the
+evaluation starts. The provider-level compile-time budget remains the hard GPU
+allocator budget.
+
+Runtime progress and diagnostics are exposed as stable dictionaries:
+
+```python
+session.progress_stats()
+session.memory_stats()
+session.host_transfer_stats()
+session.cuda_graph_stats()
+
+program.progress_stats()
+program.memory_stats()
+program.host_transfer_stats()
+program.cuda_graph_stats()
+def neural_hot_loop_diagnostics() -> dict: ...
+program.neural_hot_loop_diagnostics()
+```
+
+`memory_stats()` reports `allocated_bytes`, `memory_limit_bytes`,
+`peak_memory_bytes`, and `status`. `peak_memory_bytes` is the high-water mark of
+successful reservations recorded by the shared provider's memory manager. It
+spans the provider lifetime (or the window after an explicit quiescent reset),
+so it is not reset between evaluations or executors that reuse that provider.
+It is not physical/NVML usage, and direct CUDA allocations that bypass the
+manager are not included. CUDA Graph stats report
+`csm_cuda_graph_captures`, `csm_cuda_graph_launches`,
+`csm_cuda_graph_fallbacks`, and `csm_cuda_graph_cache_hits`. If an environment
+cannot supply a given diagnostic, it reports an explicit unavailable status or
+error rather than a fabricated zero.
+
+`neural_hot_loop_diagnostics()` is the single audit surface for the neural inner
+loop. (`nn/4` is a neural predicate declared with four arguments — the
+classification form, which carries a list of output labels.) It reports
+`post_load_dtoh_bytes`, `post_load_htod_bytes`,
+`control_plane_bytes_per_iteration`, `scalar_sync_checks`, nested
+`cuda_graph`, and nested `circuit_cache` diagnostics from the same runtime API.
+When this runtime cannot yet provide a separate control-plane or scalar-sync
+counter, the corresponding value is `None` and a `*_status` field explains why.
+The top-level `pyxlog` wrapper also carries `nn/4` training lineage:
+
+```python
+program.register_network(
+    "mnist_net",
+    net,
+    optimizer,
+    checkpoint_hash="sha256:...",
+    split_hashes={"train": "sha256:...", "validation": "sha256:..."},
+    calibration_metrics={"ece": 0.03},
+    cuda_device=0,
+    influence_audit={"calibration_set": "heldout-a"},
+)
+program.record_nn4_influence(
+    "mnist_net",
+    query="addition(0, 1, 1)",
+    changed_acceptance=True,
+    before=False,
+    after=True,
+)
+program.nn4_lineage()
+program.neural_hot_loop_diagnostics()["nn4_lineage"]
+```
+
+The lineage payload contains `checkpoint_hash`, `split_hashes`,
+`calibration_metrics`, and `cuda_device`. Its `influence_audit` object keeps
+registration metadata under `registration` and copied event snapshots under
+`records`; each event includes the `changed_acceptance` evidence recorded through
+`record_nn4_influence(...)`. Reading named lineage or recording an event for an
+unregistered network is an error.
+
+`register_network` also accepts three keyword-only arguments that record and
+check the network's typed signature. All three are available since 0.11.0:
+
+```python
+program.register_network(
+    "mnist_net",
+    net,
+    optimizer,
+    arity=2,
+    arg_sorts=[3, 9],
+    artifact_hash="sha256:...",
+)
+```
+
+- `arity=` is the declared argument count. XLOG validates it against every `nn/4`
+  declaration bound to that network name in the program rather than trusting it;
+  a disagreement raises `ValueError`.
+- `arg_sorts=` is a sequence of integer sort ids, one per argument. It requires
+  `arity` and must have exactly that length. A `bool` element is rejected
+  outright — Python's `bool` is an `int` subclass, so `True` would otherwise be
+  read as sort id `1`.
+- `artifact_hash=` records the checkpoint identity.
+
+`program.network_metadata("mnist_net")` reads that back, together with what the
+program itself declares:
+
+```python
+program.network_metadata("mnist_net")
+# {"arity": ..., "arg_sorts": [...], "artifact_hash": ...,
+#  "declared": [{"predicate": ..., "predicate_arity": ..., "input_arity": ..., "labels": [...]}]}
+```
+
+It covers classification networks only. A name declared as an embedding is
+refused, because embeddings carry no registration metadata. Available since
+0.11.0.
+
+#### Epistemic evidence -> exact probability
+
+`CompiledLogicProgram.evaluate_conditioned(prob_source)` runs a compiled epistemic
+program (`know` / `possible`) on the GPU and conditions an exact probabilistic query
+on its accepted world view. Only facts declared in the epistemic program's own
+source feed that world view.
+
+**Limitation:** unlike `evaluate`, this method does not accept `dlpack_inputs`.
+Caller-supplied input relations are NOT consulted. If the epistemic program depends
+on a relation that would normally be supplied at call time via
+`evaluate(dlpack_inputs=...)`, that relation is empty here, no world view is
+accepted, and `evaluate_conditioned` **raises `RuntimeError`**:
+
+```
+RuntimeError: Unsupported epistemic construct: accepted GPU world-view evidence
+(probabilistic evidence requires non-empty accepted GPU final output)
+```
+
+It does **not** fall back to the unconditioned prior. This is fail-closed by
+design: a conditioned query that silently became unconditioned would return a
+plausible number with nothing in the result marking it as unconditioned, which is
+exactly the failure the trace counters exist to prevent. To probe for the state
+without catching an exception, call `epistemic_evidence()` first -- it reports
+`accepted_world_views == 0` and does not raise.
+
+```python
+import pyxlog
+
+known = pyxlog.LogicProgram.compile("""
+pred fact().
+pred accepted().
+
+fact().
+
+accepted() :- know fact().
+""")
+
+result = known.evaluate_conditioned("0.6::fact().\nquery(fact()).\n")
+result.log_z_e                                       # ln(0.6) ~= -0.5108256, log P(evidence)
+result.trace["gpu_conditioned_evidence_facts"]        # >= 1 when evidence conditioned the circuit
+result.trace["gpu_conditioned_know_evidence_facts"]   # the `know` share of that total
+result.trace["accepted_gpu_production_path_events"]   # positive observed GPU work
+result.trace["gpu_exact_query_evaluations"]            # positive GPU exact execution evidence
+```
+
+When the circuit structure stays fixed and only independent fact priors change,
+prepare it once and reuse the returned handle:
+
+```python
+prepared = known.prepare_conditioned(
+    "0.5::target().\n0.6::fact().\nquery(target()).\nquery(fact()).\n"
+)
+target_var = next(
+    var for var, info in enumerate(prepared.prob_var_map())
+    if info.get("atom") == "target()"
+)
+
+for prior in (0.5, 0.9, 0.1):
+    prepared.set_fact_probabilities({target_var: prior})
+    result = prepared.evaluate()
+    assert result.trace["gpu_exact_source_compiles"] == 0
+    assert result.trace["gpu_exact_program_compiles"] == 0
+    assert result.trace["gpu_conditioned_circuit_reuses"] == 1
+    assert result.trace["gpu_conditioned_circuit_materializations"] == 1
+    assert (
+        result.trace["gpu_conditioned_circuit_preparation_compiles"]
+        + result.trace["gpu_conditioned_circuit_disk_cache_restores"]
+        + result.trace["gpu_conditioned_circuit_gpu_cache_hits"]
+    ) == 1
+```
+
+`gpu_conditioned_circuit_preparation_compiles` counts actual GPU circuit
+compiler invocations owned by that prepared handle: it is `1` after a fresh
+compile and `0` after a verified disk-cache restoration or GPU-cache hit. The
+three origin counters above are mutually exclusive for the handle's single
+materialization. Every later evaluation reports zero source/program compile
+deltas.
+
+For an independent lifetime-reuse check, compare the
+`gpu_conditioned_circuit_generation` and `gpu_conditioned_circuit_cache_slot`
+trace pair across evaluations. It is derived from the retained exact state and
+cache handle and must remain unchanged as priors are updated. The generation is
+opaque and process-local; do not persist it or compare it between processes.
+These reuse keys are present on every `EpistemicEvalResult`. Results returned
+directly by `evaluate_conditioned()` carry zeroes for the reuse fields;
+`gpu_conditioned_circuit_generation == 0` is the sentinel that no prepared
+circuit identity is attached. A prepared evaluation always reports a positive
+generation.
+
+`set_fact_probabilities()` validates the complete mapping before one serialized
+state change. Each variable id is its `prob_var_map()` list index. Index `0` is
+unused padding with `kind == "other"`, not a mutable variable id, and only
+entries with `kind == "fact"` are mutable. Annotated-disjunction choices,
+compiler-introduced entries, Monte Carlo and count-lift programs, non-finite
+probabilities, and values outside `[0, 1]` are rejected without a partial update.
+When a mutable fact is itself fixed by accepted evidence, changing its prior keeps
+the evidence assignment fixed and changes the evidence likelihood (`log_z_e`),
+matching a fresh conditioned compilation at the new prior.
+Evaluations and setters on the same prepared handle serialize. Coordinate access
+at a higher level when an application needs an update and its following evaluation
+to behave as one larger transaction.
+
+Waiting for the prepared handle's shared native state, including in
+`prob_var_map()`, releases the Python GIL. The Python dictionaries are constructed
+only after the native metadata snapshot completes. A failed device write is rolled
+back before `set_fact_probabilities()` returns. If that rollback also fails, the
+prepared circuit is permanently invalidated: every later evaluation, gradient,
+metadata read, or setter through that handle or any clone fails closed rather than
+using potentially partial device weights.
+
+On a CUDA device, conditioning `0.6::fact(). query(fact()).` on `know fact()` raises
+`P(fact())` from the unconditioned `0.6` to the exact `1.0`: the epistemic layer
+already accepted `fact()` into its world view before the probabilistic query ran, so
+`result.log_z_e` is `ln(0.6)`, not `0.0`.
+
+`result.log_z_e` is log P(evidence): the exact log-probability of the conditioned
+evidence under the probabilistic program's distribution, computed by weighted model
+counting over the compiled circuit, not the log-evidence of the whole query program.
+Query probabilities are `exp(log_z_eq - log_z_e)`. When the conditioned atoms are
+independent root facts it coincides with the log of the product of their priors --
+measured on GPU, one known atom at prior 0.6 gives `log_z_e == ln(0.6)` and two known
+atoms each at prior 0.5 give `log_z_e == ln(0.25)` -- but that is the independent-root
+special case, not the definition. Evidence on a derived atom (`0.6::a(). b() :- a().`
+with `know b()` gives `ln(0.6)` though `b` has no prior), on atoms sharing an ancestor,
+or negated evidence all depart from the product form.
+
+**Trace invariant.** Conditioning reached the GPU exact path when
+`gpu_conditioned_evidence_facts` -- the total the engine itself validates -- is
+non-zero. A direct result also requires the GPU exact, PIR/CNF, and
+knowledge-compilation event counters to be positive; a prepared result instead requires
+the prepared-circuit reuse counter to be positive, reports one materialization, and
+identifies exactly one compile/cache origin. The four evidence classes
+(`gpu_conditioned_know_evidence_facts`, `gpu_conditioned_possible_evidence_facts`,
+`gpu_conditioned_not_known_evidence_facts`,
+`gpu_conditioned_not_possible_evidence_facts`) decompose that total; a `possible`-only
+or negated-evidence program conditions correctly with the `know` class at `0`, so
+check the total rather than the `know` class alone.
+
+`EpistemicEvalResult` carries `atoms`, `prob` and `log_prob` (DLPack capsules, like
+`EvalResult`), `log_z_e`, and `trace`. `CompiledLogicProgram.epistemic_evidence()`
+runs the same epistemic program and returns an `EpistemicEvidence` with the
+accepted-world-view counters alone (`epistemic_mode`, `know_operator_count`,
+`possible_operator_count`, `accepted_candidates`, `rejected_candidates`,
+`accepted_world_views`, `final_output_rows`), without touching the probabilistic
+tier. Like `evaluate_conditioned`, it only ever sees facts declared in the
+program's own source -- but a program that depends on a caller-supplied relation
+reports `accepted_world_views == 0` (with `accepted_candidates` and
+`final_output_rows` at `0`) here rather than raising. `know_operator_count` and
+`possible_operator_count` are plan-level censuses and stay non-zero even then, so the
+state to check is the accepted/consumed family, not "every counter".
+
+**Which plans are accepted.** Only single-component epistemic plans are supported;
+split, stratified and WFS plans raise instead of being silently reduced. Both
+epistemic modes reach this surface: FAEEL programs and non-recursive
+`#pragma epistemic_mode = g91` programs both lower to a single-component epistemic
+plan and condition normally. `epistemic_evidence().epistemic_mode` names the mode, and
+the trace's `accepted_faeel_world_view_evidence_consumed` /
+`accepted_g91_world_view_evidence_consumed` pair says which one supplied the evidence.
+Only the *recursive* G91 shapes -- positive `possible` cycles that need tuple-level
+compatibility -- compile to a dedicated G91-compatibility plan and are rejected at
+planning.
+
+Rejection also covers one case that reads like a false negative: an admissible
+recursive modal program such as `reach(X, Z) :- reach(X, Y), know link(Y, Z).` is
+reduced to ordinary recursion at compile time (the `ordinary_recursive_modal_reduction`
+provenance class). The reduction erases the world-view machinery, so there is no
+accepted world view left to condition on and the program is rejected as "ordinary"
+despite being full of `know`. That is deliberate, not a compiler bug. A real CUDA
+device is required.
+
+### Program (Probabilistic)
+
+Compiles and runs a probabilistic Datalog program — facts and rules annotated
+with probabilities, such as `0.3::rain` — and computes query probabilities. The
+`prob_engine` argument selects the inference method: `"exact_ddnnf"` compiles the
+program to a Boolean circuit (a deterministic, decomposable negation normal form,
+or d-DNNF) that makes exact probability and gradient computation tractable, while
+`"mc"` estimates probabilities by Monte Carlo sampling.
+
+```python
+import pyxlog
+
+# Compile with exact inference
+program = pyxlog.Program.compile("""
+    0.3::rain.
+    0.7::sprinkler.
+
+    wet :- rain.
+    wet :- sprinkler.
+
+    evidence(sprinkler, false).
+    query(wet).
+""", prob_engine="exact_ddnnf")
+
+```
+
+#### Host Outputs (Requires `host-io`)
+
+When built with `--features host-io`, you can call `CompiledProgram.evaluate(...)` to get host-derived
+probability outputs as device tensors (DLPack):
+
+```python
+result = program.evaluate()
+import torch
+prob = torch.from_dlpack(result.prob)       # f64 CUDA tensor, shape [num_queries]
+log_prob = torch.from_dlpack(result.log_prob)
+print(list(zip(result.atoms, prob.tolist())))  # host read for printing
+
+# If you need a single host scalar (e.g., for logging), read it explicitly:
+p0 = float(prob[0].item())  # host read
+print(f"P(wet | not sprinkler) = {p0}")
+
+# With gradients (exact engine only; per-query grad vectors are DLPack too)
+result = program.evaluate(return_grads=True)
+grad_true0 = torch.from_dlpack(result.grad_true[0])   # f64 CUDA tensor, shape [num_vars]
+grad_false0 = torch.from_dlpack(result.grad_false[0]) # f64 CUDA tensor, shape [num_vars]
+```
+
+#### Monte Carlo Inference (Device-Only)
+
+For device-result workflows, prefer `CompiledProgram.evaluate_device(...)`: result
+buffers stay on the GPU, while the runtime may still observe its bounded terminal
+status and convergence summary.
+The optional `samples`, `seed`, `confidence`, `sampling_method`, and
+`max_nonmonotone_iterations` arguments override the corresponding source pragmas only
+when supplied. When an argument is omitted, Python uses `#pragma prob_samples`,
+`prob_seed`, `prob_confidence`, `prob_method`, or
+`prob_max_nonmonotone_iterations`; if neither layer supplies a value, the documented
+language default applies. This is the same source-then-explicit-override precedence as
+the CLI. Supplying any of these Monte Carlo options, or `allow_cpu_oracle=True`, to an
+exact-engine `evaluate(...)` call is an error; the binding does not silently ignore them.
+
+```python
+program = pyxlog.Program.compile(source, prob_engine="mc")
+
+device_result = program.evaluate_device(
+    samples=10000,
+    seed=42,
+    confidence=0.95,
+)
+
+import torch
+query_counts = torch.from_dlpack(device_result.query_counts)       # int32 CUDA tensor, shape [num_queries]
+evidence_count = torch.from_dlpack(device_result.evidence_count)   # int32 CUDA tensor, shape [1]
+print(device_result.total_samples, device_result.seed, device_result.confidence)
+```
+
+#### Monte Carlo Inference (Host Outputs, Requires `host-io`)
+
+When built with `--features host-io`, `CompiledProgram.evaluate(...)` computes probabilities and
+confidence intervals and uploads them as device tensors (DLPack):
+
+```python
+program = pyxlog.Program.compile(source, prob_engine="mc")
+
+result = program.evaluate(
+    samples=10000,
+    seed=42,
+    confidence=0.95
+)
+
+import torch
+prob = torch.from_dlpack(result.prob)
+stderr = torch.from_dlpack(result.stderr)
+ci_low = torch.from_dlpack(result.ci_low)
+ci_high = torch.from_dlpack(result.ci_high)
+print(f"P(query) = {float(prob[0].item())} ± {float(stderr[0].item())}")  # host reads
+print(f"95% CI: [{float(ci_low[0].item())}, {float(ci_high[0].item())}]") # host reads
+```
+
+### Experimental Arrow C Device Interop (Feature `arrow-device-import`)
+
+These helpers bridge XLOG's DLPack columns to Apache Arrow's C Device interface —
+a standard for sharing columnar data that already lives on a device (GPU) —
+without host copies. When built with `--features arrow-device-import`, `pyxlog`
+exposes:
+
+- `pyxlog.export_arrow_device(...) -> PyCapsule` (name `arrow_device_array`)
+- `pyxlog.import_arrow_device(...) -> (dlpack_tensors, names, num_rows)`
+
+This is experimental and currently rejects nulls; import does not yet support bit-packed
+`Bool`.
+
+### JointConstraintCarrier (joint constraint solving)
+
+`pyxlog.JointConstraintCarrier` picks one label per entity subject to pairwise
+constraints, entirely on the GPU. Its result buffers are handed back as DLPack
+capsules, so a caller never copies them to the host. Available since 0.11.0.
+
+```python
+import pyxlog
+
+carrier = pyxlog.JointConstraintCarrier(
+    device=0,
+    entities=1024,
+    domain_lanes=4,
+    candidates=16,
+    labels=8,
+    fuel_limit=1_000_000,
+)
+carrier.register_schema(catalog_sha, pyxlog.SOLVER_ABI_IDENTITY)
+carrier.bind_signatures(head_masks, tail_masks)
+
+carrier.solve_label_feasibility(abstain_label=7)
+carrier.solve_label_map_top2()
+carrier.solve_components_exact(comp_offsets, comp_indices)
+
+buffer = carrier.export_buffer("map_results") # zero-copy DLPack capsule
+print(carrier.fuel_spent)                     # property, not a call
+```
+
+- `register_schema(catalog_sha, solver_identity)` must be given
+  `pyxlog.SOLVER_ABI_IDENTITY` — a module-level string naming the solver ABI this
+  build speaks — so a carrier cannot be driven by a mismatched client.
+- `bind_signatures(head_masks, tail_masks)` must run before any solve.
+- `note_producer_stream(...)` and `note_consumer_stream(...)` perform the CUDA
+  stream handoff when the buffers cross into or out of another library's stream.
+- `fuel_spent` is a read-only property reporting how much of `fuel_limit` the
+  solves consumed.
+
+Every precondition is enforced, not assumed: a violated one raises
+`pyxlog.CarrierRefused`, and running out of `fuel_limit` raises
+`pyxlog.SolverResourceExhausted`. See [Error Handling](#error-handling).
+
+## Term Embeddings
+
+The `register_embedding` / `forward_embedding` API enables explicit PyTorch-side embedding training
+through the logic program. Embedding predicates use the label-free `nn/3`
+declaration form (a neural predicate declared with three arguments and no output
+label list).
+
+### Embedding Registration
+
+```python
+program = pyxlog.Program.compile("""
+    nn(entity_embed, [X], E) :: embed(X, E).
+""")
+
+# Trainable nn.Embedding — autograd graph preserved
+embedding = torch.nn.Embedding(100, 64).cuda()
+program.register_embedding("entity_embed", embedding, trainable=True)
+
+# Frozen torch.Tensor — detached at registration, no gradient flow
+weights = torch.randn(100, 64).cuda()
+program.register_embedding("entity_embed", weights, trainable=False)
+```
+
+### Forward Lookup
+
+```python
+# Returns [n, dim] tensor on same device as embedding
+vectors = program.forward_embedding("entity_embed", [0, 5, 42])
+
+# For trainable nn.Embedding: vectors.requires_grad == True
+# For frozen torch.Tensor: vectors.requires_grad == False
+```
+
+### Cross-Registration Validation
+
+- Embedding declarations (`nn/3`, no labels) reject `register_network()` — error directs to `register_embedding()`
+- Classification declarations (`nn/4`, with labels) reject `register_embedding()` — error directs to `register_network()`
+- Same network name as both embedding and classification → compile-time error
+
+### Constraints
+
+- `trainable=True` requires `nn.Embedding`; raw `torch.Tensor` with `trainable=True` raises `ValueError`
+- Raw tensors with `requires_grad=True` are detached at registration (frozen contract enforced)
+- Integer IDs only (symbol/string lookup keys deferred)
+- Optimizer ownership is user-managed; classification-network optimizer helpers
+  do not cover embeddings
+- Inference through rules (dot/cosine evaluation, grounded query API) is
+  deferred to future embedding-rule integration
+
+---
+
+## Training Loop API (Neural-Symbolic)
+
+For neural-symbolic training with neural predicates (`nn/k` — a predicate backed
+by a neural network), `Program` exposes loss computation, optimizer stepping,
+gradient clipping, learning-rate control, and batched training loops, in addition
+to the single-query `forward_backward*` helpers.
+
+### Loss computation
+
+The `nll_loss*` helpers compute a negative log-likelihood (NLL) loss — the
+standard training objective that penalizes low predicted probability for the
+target answer.
+
+```python
+loss = program.nll_loss("addition(0, 1, 7)")
+loss = program.nll_loss_batch(queries)
+loss = program.nll_loss_mean(queries)
+
+loss_t = program.nll_loss_tensor("addition(0, 1, 7)")
+batch_t = program.nll_loss_batch_tensor(queries)
+avg_loss = program.evaluate_loss(queries)
+```
+
+### External Consumer Bridge Helpers
+
+These helpers keep a four-valued evidence model (Belnap logic) in the Python/ML
+layer: each candidate carries separate `pro` (evidence for), `contra` (evidence
+against), and `quarantine` (held-out) scores. The GPU structural kernels never see
+those channels. The helper surfaces operate on PyTorch tensors and preserve
+autograd unless the caller explicitly detaches inputs.
+
+```python
+top = program.deterministic_topk(scores, k=4)
+stats = program.neural_cache_stats()
+
+terms = program.belnap_loss(
+    pro=pro_scores,
+    contra=contra_scores,
+    quarantine=quarantine_scores,
+    pro_reward=1.0,
+    contra_penalty=2.0,
+    quarantine_penalty=0.5,
+)
+
+semantic = program.semantic_loss_tensor(violations, weight=1.5)
+mse = program.mse_loss_tensor(pred, target)
+info = program.infoloss_tensor(prob)
+```
+
+`deterministic_topk(...)` resolves ties by lower input index. `neural_cache_stats()`
+reports circuit-cache size, hit/miss counters, template compile count,
+query-signature cache size, and registered-network cache/top-k/deterministic
+configuration. `belnap_loss(...)` returns a dictionary containing `loss`,
+`pro_reward`, `contra_penalty`, `quarantine_penalty`, `cfr_regret_proxy`, and
+the formula string.
+
+Registered-network output modes reuse the existing `register_network(..., k=N,
+det=True)` configuration. `forward_backward_tensor(...)`,
+`forward_backward(...)`, and batched neural-query training apply the configured
+stable top-k or deterministic top-1 mode before NLL loss and cached circuit
+probability import. Deterministic mode picks a single hard top-1 value on the
+forward pass, then routes gradients straight through the selected probability on
+the backward pass (a straight-through estimator, so the discrete choice still
+trains).
+
+### Optimizer and scheduler control
+
+```python
+program.zero_grad()
+program.optimizer_step()
+program.clip_grad_norms(max_norm=1.0)
+
+program.scheduler_step()
+program.scheduler_step(network_name="mnist_net")
+
+lr = program.get_lr("mnist_net")
+program.set_lr("mnist_net", 1e-4)
+```
+
+### Batched training epoch
+
+```python
+stats = program.train_epoch(queries, batch_size=32, max_grad_norm=1.0)
+stats = program.train_epoch_tensor(queries, batch_size=32, max_grad_norm=1.0)
+```
+
+### Profiling
+
+```python
+profile = program.warmup_breakdown()
+```
+
+---
+
+## ILP Training (dILP Beta)
+
+The `pyxlog.ilp` subpackage provides differentiable ILP (Inductive Logic
+Programming): it learns Datalog rules from labeled positive and negative examples
+by gradient descent, treating rule choice as something that can be optimized like
+neural weights. This surface is beta.
+
+### Training API
+
+```python
+from pyxlog.ilp import train_only, train_and_promote, TrainConfig, LearnedArtifact
+
+# Define a learnable program
+source = """
+    edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5).
+    learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+"""
+pos = [("reach", [1, 3]), ("reach", [2, 4])]
+neg = [("reach", [1, 1])]
+
+# Configure training
+config = TrainConfig(
+    step_budget_per_attempt=150,   # steps per attempt
+    max_attempts=5,                # multi-start attempts
+    tau_start=2.0,                 # initial temperature
+    tau_floor=0.05,                # minimum temperature
+    seed=42,                       # reproducibility
+)
+
+# Train only (no promotion gates)
+result = train_only(source, "W", pos, neg, config)
+assert result.converged
+print(result.discovered_rule)      # e.g., "reach(X,Y) :- edge(X,Z), edge(Z,Y)."
+
+# Train and promote (with gates)
+config = TrainConfig(check_ambiguity=True, max_novel_rate=0.05)
+promotion = train_and_promote(source, "W", pos, neg, config)
+print(promotion.status)            # PromotionStatus.PROMOTED
+```
+
+### Artifact Persistence
+
+```python
+# Save learned artifact
+result.artifact.save("artifact.json")
+
+# Load with hash verification
+loaded = LearnedArtifact.load("artifact.json", verify_hash=True)
+print(loaded.discovered_rule)
+print(loaded.logits)
+```
+
+### TrainConfig Fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `step_budget_per_attempt` | 150 | Max gradient steps per attempt |
+| `max_attempts` | 5 | Multi-start attempts |
+| `tau_start` | 2.0 | Initial Gumbel-softmax temperature |
+| `tau_floor` | 0.05 | Minimum temperature |
+| `allow_recursive_candidates` | False | Enable body-references-head candidates |
+| `check_ambiguity` | False | Run ambiguity scan on convergence |
+| `max_novel_rate` | 0.0 | Max fraction of novel (non-example) derivations |
+| `debug_dense_mask` | False | Force dense mask backend (for parity testing) |
+| `seed` | None | Random seed for reproducibility |
+| `device` | 0 | CUDA device index |
+| `memory_mb` | 512 | GPU memory limit |
+
+The temperature fields (`tau_start`, `tau_floor`) control a Gumbel-softmax
+relaxation — a technique that makes discrete rule choices differentiable so they
+can be trained by gradient descent. Training starts hot (`tau_start`, soft and
+exploratory) and anneals toward `tau_floor` (sharp, near-discrete).
+
+### Result Types
+
+```python
+# TrainResult
+result.converged          # bool
+result.discovered_rule    # str | None
+result.attempt_count      # int
+result.total_steps        # int
+result.precision          # float
+result.recall             # float
+result.holdout_f1         # float | None
+result.artifact           # LearnedArtifact
+
+# PromotionResult
+promotion.status          # PromotionStatus (PROMOTED, GATE_FAILED, etc.)
+promotion.gates           # list[GateResult]
+promotion.novel_count     # int | None
+promotion.novel_rate      # float | None
+promotion.committed_source # str | None
+promotion.rule_inventory  # RuleInventory | None
+```
+
+### External Consumer Diagnostics
+
+These helpers package the ILP audit surface for downstream applications ("external
+consumers") as reusable pyxlog utilities:
+
+```python
+from pyxlog.ilp.neurosymbolic import (
+    NeuroSymbolicTrainingConfig,
+    train_neurosymbolic_program,
+)
+from pyxlog.runtime_audit import CudaExecutionAudit
+from pyxlog.transfer_diagnostics import PredictionRecord, compute_transfer_diagnostics
+
+trained = train_neurosymbolic_program(
+    source,
+    networks={"ranker": model},
+    examples=rows,
+    config=NeuroSymbolicTrainingConfig(steps=16),
+)
+inventory = trained.learned_rule_inventory
+
+with CudaExecutionAudit(forbid_host_materialization=True) as audit:
+    scores = model(batch)
+    audit.record_nn4_scores("ranker", scores, device_resident=True)
+
+diagnostics = compute_transfer_diagnostics(
+    [PredictionRecord(domain="d0", variant="clean", y_true=1, y_pred=1)],
+    required_domains=("d0",),
+    required_variants=("clean",),
+)
+assert diagnostics.passed
+```
+
+A `NeuralBodySpec` carries an opt-in `train_phi_gradient` flag, default `False`.
+Left at the default, the entity features φ(x) are detached on the training
+upload, and the uploaded values are byte-identical to earlier releases. Set it to
+`True` to leave φ(x) attached, so gradients flow back into whatever produced the
+features (backbone coupling). Only the autograd linkage changes — never the
+values that are uploaded. Available since 0.12.0.
+
+`train_and_promote(...)` accepts transfer-audit metadata through
+`training_fold`, `held_out_domains`, `base_kernel_checksum_before`, and
+`base_kernel_checksum_after`. The returned `PromotionResult.rule_inventory`
+records those values with selected and rejected clauses, scores, and gate
+outcomes.
+
+### Device Query APIs
+
+For GPU-native ILP workflows, `CompiledIlpProgram` exposes device-resident query
+helpers (results stay on the GPU) alongside the existing host-returning helpers:
+
+```python
+import torch
+
+prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=512)
+
+# Device membership: bool CUDA tensor, one row per queried fact.
+mask = torch.from_dlpack(
+    prog.batch_fact_membership_device("edge", [[1, 2], [9, 9], [2, 3]])
+)
+assert mask.device.type == "cuda"
+assert mask.dtype == torch.bool
+
+# Device tagged credit: CSR-style CUDA outputs.
+credit = prog.batch_tagged_credit_device("reach", [[1, 3], [2, 4]])
+row_offsets = torch.from_dlpack(credit.fact_row_offsets)   # int32 CUDA tensor
+entry_indices = torch.from_dlpack(credit.entry_indices)    # int32 CUDA tensor
+entry_i = torch.from_dlpack(credit.entry_i)                # int32 CUDA tensor
+entry_j = torch.from_dlpack(credit.entry_j)                # int32 CUDA tensor
+entry_k = torch.from_dlpack(credit.entry_k)                # int32 CUDA tensor
+```
+
+Contract notes (CSR here means compressed sparse row — a compact layout that
+stores per-row offsets plus a flat list of entries):
+
+- `batch_fact_membership()` and `batch_tagged_credit()` remain available for host-materialized Python outputs
+- `batch_fact_membership_device()` returns a DLPack bool tensor on CUDA
+- `batch_tagged_credit_device()` returns CSR-style device outputs:
+  `fact_row_offsets`, `entry_indices`, `entry_i`, `entry_j`, `entry_k`
+- The device query path avoids semantic-loop device-to-host transfers; inspect
+  `host_transfer_stats()` / `reset_host_transfer_stats()` when enforcing that contract in tests
+- Unsigned metadata/count tensors are exported as DLPack `int32` for broad framework compatibility
+
+### Bounded Exact Induction API
+
+Bounded exact induction searches a bounded space of candidate rules and scores
+each one exactly on the GPU, rather than optimizing rule choice by gradient
+descent. `pyxlog.ilp.induce_exact(..., backend="native")` is the GPU-native
+scorer. The public entry point returns an `ExactInductionResult` containing
+`ScoredCandidate` rows grouped by join shape (topology): `chain`, `star`,
+`fanout`, then `fanin`.
+
+```python
+from pyxlog.ilp import induce_exact
+
+result = induce_exact(
+    prog,
+    head_relation="p_A",
+    candidate_relations=["p_B", "p_C", "p_D"],
+    positive_arg0=pos_a0,
+    positive_arg1=pos_a1,
+    negative_arg0=neg_a0,
+    negative_arg1=neg_a1,
+    k_per_topology=2,
+    deterministic=True,
+    backend="native",
+)
+```
+
+The native backend scores each topology independently in one batched CUDA
+pass. The Python reference can be used for parity checks with
+`backend="python", strict_per_topology=True`; leaving `strict_per_topology`
+at its default preserves legacy prototype behavior and is not semantically
+equivalent to native scoring.
+
+Exact induction accepts pair relations whose two columns share one of these
+scalar types: `u64`, `u32`, or `symbol`. Generated `ilp_exact.portable.ptx` and
+`.cubin` files are packaged build artifacts, not checked-in source files.
+
+### Sparse Mask APIs
+
+A rule mask selects which candidate rules are active during training. Sparse mask
+setters let you pass only the selected candidates instead of a full dense vector.
+`CompiledIlpProgram` exposes two:
+
+- `set_rule_mask_sparse(name, candidate_ids, soft_probs, budget, allow_recursive=False)`
+  is the legacy compatibility path. Rust receives the full candidate soft-probability vector and
+  ranks it internally.
+- `set_rule_mask_sparse_selected(name, selected_candidate_ids, selected_soft_probs, allow_recursive=False)`
+  is the preferred inner-loop path. Python/Torch performs ranking on CUDA, then Rust consumes only
+  the selected subset and preserves that order as the sparse active-rule list.
+
+Prefer the selected-candidate path when you need zero device-to-host transfer on
+the provider side during mask setup.
+
+### GPU-Native Contract
+
+For Python consumers that need an auditable GPU-native ILP inner loop, the intended contract is:
+
+- Zero provider-tracked device-to-host transfer inside the semantic loop:
+  `set_rule_mask_sparse_selected(...)`,
+  `batch_fact_membership_device(...)`,
+  `batch_tagged_credit_device(...)`,
+  and `compute_ilp_loss_grad_gpu(...)`
+- Metadata/control-plane reads may still occur behind public runtime/provider helpers such as
+  cached row-count access; these are not relation-column materializations
+- Compatibility paths that are not suitable for a strict GPU-native inner loop:
+  `set_rule_mask_sparse(...)`,
+  `batch_fact_membership(...)`,
+  `batch_tagged_credit(...)`,
+  and any host-output API gated behind `host-io`
+- Use `host_transfer_stats()` / `reset_host_transfer_stats()` to audit the provider-tracked
+  transfer behavior of the chosen path
+
+---
+
+## DLPack integration
+
+XLOG accepts CUDA-backed DLPack producer objects and returns single-consumer
+capsules. Transient input imports and framework wrapping of query-result capsules
+are zero-copy. Persistent relation replacement takes an owned device-to-device
+snapshot, and stored-relation export leaves a device-to-device clone in the
+session before transferring the exported allocation. Compatible CUDA-backed
+producers include:
+
+- PyTorch
+- CuPy
+- JAX
+- TensorFlow
+- Any CUDA-backed DLPack-compatible library
+
+### Input via DLPack
+
+```python
+import torch
+import pyxlog
+
+# Create GPU columns
+edge_a = torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32)
+edge_b = torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32)
+
+# Pass as input (relation name -> sequence of columns)
+program = pyxlog.LogicProgram.compile(source)
+result = program.evaluate(dlpack_inputs={"edge": [edge_a, edge_b]})
+```
+
+### Output via DLPack
+
+```python
+result = program.evaluate()
+
+# Convert to PyTorch
+import torch
+for q in result.queries:
+    cols = [torch.from_dlpack(t) for t in q.tensors]
+
+# Convert to CuPy
+import cupy
+for q in result.queries:
+    cols = [cupy.from_dlpack(t) for t in q.tensors]
+```
+
+### dlpack_roundtrip helper
+
+`dlpack_roundtrip` sends a CUDA tensor into XLOG and returns it as a fresh DLPack
+capsule — a quick way to verify zero-copy interop end to end. All three arguments are
+required:
+
+```python
+import torch
+from pyxlog import dlpack_roundtrip
+
+tensor = torch.arange(8, dtype=torch.int32, device="cuda")
+capsule = dlpack_roundtrip(tensor, device=0, memory_mb=1024)
+restored = torch.from_dlpack(capsule)
+assert torch.equal(tensor, restored)
+```
+
+## Compile Options
+
+### LogicProgram.compile()
+
+```python
+program = pyxlog.LogicProgram.compile(
+    source,                    # str: Datalog source code
+    device=0,                  # int: CUDA device index
+    memory_mb=32768,          # int: GPU memory limit in megabytes
+)
+```
+
+### Program.compile() (Probabilistic)
+
+```python
+program = pyxlog.Program.compile(
+    source,                    # str: Probabilistic Datalog source
+    prob_engine=None,          # Optional[str]: explicit "exact_ddnnf"/"mc" override;
+                               # otherwise use #pragma prob_engine, then exact_ddnnf
+    device=0,                  # int: CUDA device index
+    memory_mb=32768,          # int: GPU memory limit in megabytes
+)
+```
+
+## Result Objects
+
+### Deterministic Results
+
+```python
+result = program.evaluate()
+
+result.queries             # list[LogicQueryResult]
+result.queries[0].tensors  # list[PyCapsule] (DLPack), one per column
+result.queries[0].columns  # list[str]
+result.queries[0].num_rows # int
+result.queries[0].is_true  # bool
+```
+
+### Probabilistic Results
+
+```python
+result = program.evaluate()  # requires host-io
+result.atoms         # list[str]: query atoms (stringified)
+result.prob          # PyCapsule: DLPack f64 vector of probabilities (len = num_queries)
+result.log_prob      # PyCapsule: DLPack f64 vector of log-probabilities (len = num_queries)
+result.num_vars      # int: number of CNF variables in the compiled program
+result.log_z_e       # Optional[float]: exact log-evidence log Z_E (None for Monte Carlo)
+
+# Exact-only, independent of return_grads: what each CNF variable stands for.
+# Length equals result.num_vars, i.e. the encoder's variable capacity, so entry i lines up
+# with grad_true/grad_false position i when return_grads=True. Index 0 and every slot that
+# holds no assigned variable are padding ("other"); the length is NOT a count of random vars.
+# "choice" entries carry both "probs" (the disjunction's declared, marginal probabilities —
+# display context only) and "prob" (the conditional Bernoulli parameter actually assigned to
+# this variable's weight; use prob*(1-prob), not probs[choice_index]*(1-probs[choice_index]),
+# as the grad_true/grad_false Jacobian). Raises ValueError for MC programs and for exact
+# programs compiled through the GPU count-lift fast path (no CNF encoding is built there).
+program.prob_var_map() # list[dict]: {"kind": "fact"|"choice"|"other", ...} per CNF variable
+
+# Exact-only (when return_grads=True):
+result.grad_true     # Optional[list[PyCapsule]]: per-query DLPack f64 vector (len = num_vars)
+result.grad_false    # Optional[list[PyCapsule]]: per-query DLPack f64 vector (len = num_vars)
+
+# Monte Carlo only:
+result.stderr        # Optional[PyCapsule]: DLPack f64 vector (len = num_queries)
+result.ci_low        # Optional[PyCapsule]: DLPack f64 vector (len = num_queries)
+result.ci_high       # Optional[PyCapsule]: DLPack f64 vector (len = num_queries)
+result.samples       # Optional[int]
+result.evidence_samples # Optional[int]
+result.seed          # Optional[int]
+result.confidence    # Optional[float]
+```
+
+### Device-Only MC Results
+
+```python
+device_result = program.evaluate_device(...)
+device_result.query_counts    # PyCapsule: DLPack int32 vector (len = num_queries)
+device_result.evidence_count  # PyCapsule: DLPack int32 vector (len = 1)
+device_result.total_samples   # int
+device_result.seed            # int
+device_result.confidence      # float
+```
+
+## Error Handling
+
+Python exceptions are raised for errors:
+
+```python
+try:
+    session.put_relation_with_provenance(
+        "transfer", columns, roles=roles, facts=facts
+    )
+except pyxlog.RelationMetadataError as e:
+    print(f"Relation metadata rejected: {e}")
+except KeyError as e:
+    print(f"Stored relation not found: {e}")
+except ValueError as e:
+    print(f"Invalid input: {e}")
+except RuntimeError as e:
+    print(f"XLOG error: {e}")
+```
+
+`relation(name)` and `evidence(name)` use `KeyError` for an unstored relation.
+`export_relation_with_provenance(name)` uses `ValueError` for the same condition.
+
+The joint-constraint carrier raises two exceptions of its own, both
+`RuntimeError` subclasses, available since 0.11.0:
+
+- `pyxlog.CarrierRefused` — every typed refusal: a schema or ABI mismatch, a
+  zero-capacity dimension, use before `register_schema`, rebinding already-bound
+  signature masks, a signature-mask shape mismatch, solving before
+  `bind_signatures`, running the top-two stage before feasibility has solved, a
+  malformed component plan, an out-of-range abstain label index, or an
+  unavailable joint-solve kernel.
+- `pyxlog.SolverResourceExhausted` — a solve used up its `fuel_limit`, with the
+  message `solver fuel exhausted: spent {fuel_spent} of {fuel_limit} node
+  expansions`. The fuel meter lives in the carrier session, so a retry reproduces
+  the identical refusal instead of making partial progress; build a new carrier
+  with a larger `fuel_limit`.
+
+## Memory Management
+
+- An unconsumed output capsule owns its exported GPU buffer and releases it when
+  garbage collected.
+- A framework conversion such as `torch.from_dlpack(capsule)` consumes that
+  capsule exactly once and takes over its managed-tensor ownership.
+- Passing a CUDA tensor object lets XLOG request a fresh capsule through the
+  producer protocol. Do not manufacture or reuse raw input capsules unless you
+  also satisfy the stream-ordering and single-consumer contract.
+- Persistent relation replacement and stored-relation export use owned
+  device-to-device copies rather than mutable views of session storage.
+
+## Thread Safety
+
+- `compile()` is thread-safe
+- `evaluate()` is NOT thread-safe on the same program instance
+- Use separate program instances for concurrent execution
+
+## Examples
+
+### Integration with PyTorch
+
+```python
+import torch
+import pyxlog
+
+# Neural-symbolic training loop:
+# - neural predicate outputs (CUDA tensors) are imported via DLPack
+# - XLOG computes NLL gradients on GPU and calls output.backward(grad) internally
+
+source = """
+nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+addition(X, Y, Z) :- digit(X, LeftDigit), digit(Y, RightDigit), Z is LeftDigit + RightDigit.
+"""
+program = pyxlog.Program.compile(source, prob_engine="exact_ddnnf")
+
+net = torch.nn.Sequential(
+    torch.nn.Flatten(),
+    torch.nn.Linear(28 * 28, 10),
+    torch.nn.Softmax(dim=-1),
+).cuda()
+optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+program.register_network("mnist_net", net, optimizer)
+
+images = torch.randn(128, 1, 28, 28, device="cuda")
+program.add_tensor_source("train", images)
+
+program.zero_grad()
+loss = program.forward_backward_tensor("addition(0, 1, 7)")  # CUDA scalar tensor (no host reads required)
+program.optimizer_step()
+
+# Optional host read for logging:
+print(float(loss.item()))
+```
+
+### Batch Processing
+
+```python
+# Process multiple inputs
+for batch in data_loader:
+    edge_rows = batch["edges"].to(device="cuda")
+    edge_src = edge_rows[:, 0].contiguous()
+    edge_dst = edge_rows[:, 1].contiguous()
+    results = program.evaluate(dlpack_inputs={
+        "edge": [edge_src, edge_dst],
+    })
+    # Process results...
+```
+
+## Limitations
+
+- Linux x86_64 + CUDA only
+- Source builds that compile the PyO3 extension expose the documented native
+  API. For prebuilt packages, use the release notes for that package version to
+  determine which surfaces it contains.
+- Pure-Python helper modules can import without `pyxlog._native`, but
+  native-backed compile, evaluate, and session APIs still require the extension.
+  `RelationEvidence` and `RelationMetadataError` remain importable for annotations
+  and exception handling in source-only mode. The fallback
+  `RelationMetadataError` is a `ValueError` subclass, while constructing fallback
+  `RelationEvidence` raises `RuntimeError` because its state is native-owned.
+
+## See Also
+
+- [Living-World Diagnostics](/guides/diagnostics) — Rule
+  provenance, proof traces, delta debug, temporal metadata, and nn/4 hot-loop
+  audit surface
+- [dILP Training Architecture](/neural/rule-learning) — System design, mask backends, promotion pipeline
+- [Data Interoperability](/guides/interop) — DLPack and Arrow details
+- [Probabilistic Tier](/probabilistic/engines) — Inference engine details
+- [CLI Reference](/reference/cli) — Command-line alternative

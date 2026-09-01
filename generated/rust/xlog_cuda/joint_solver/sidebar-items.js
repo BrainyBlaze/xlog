@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SOLVER_ABI_IDENTITY"],"enum":["Feasibility","SolveStrategy","SolverError"],"struct":["Component","ConstraintGraph","FuelMeter"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BINARY_FALLBACK_KEY_LIMIT","WCOJ_ELIGIBLE_KEY_LIMIT","WCOJ_SUPPORTED_KEY_TYPES"],"enum":["Boundary","Eligibility","ExecutorContext"],"fn":["analyze","analyze_typed","is_eligible"]};

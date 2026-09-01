@@ -1,0 +1,279 @@
+# CLI reference
+
+Every xlog subcommand and flag, with input and output formats, environment variables, and exit codes.
+
+The `xlog` binary runs, inspects, and watches XLOG programs. It has five subcommands:
+`run` and `prob` execute programs; `explain`, `repl`, and `watch` support development.
+An unsupported subcommand fails explicitly rather than falling back to another mode.
+
+<Note>
+Host-readable output from `xlog prob` requires the CLI to be built with the `host-io`
+feature. Without it, `xlog prob` fails closed — it stops with a message telling you to
+rebuild, rather than silently continuing. This keeps code paths that are meant to stay
+on the GPU from accidentally copying results back to the host (CPU) machine.
+</Note>
+
+## Installation
+
+```bash
+cargo install xlog-cli --features host-io
+```
+
+This requires Rust, Cargo, the CUDA Toolkit 13.x, and `nvcc` at install time. The
+installed binary embeds portable PTX for every runtime kernel. (PTX is NVIDIA's
+portable GPU assembly; it is compiled to your specific device when a kernel is loaded.)
+Because the PTX is embedded, the binary needs no separate `kernels/` directory next to
+it. If `XLOG_CUBIN_DIR` or a binary-adjacent `kernels/` directory is present, xlog
+prefers those pre-built artifacts before falling back to the embedded PTX.
+
+To build from a workspace checkout instead:
+
+```bash
+cargo build --release -p xlog-cli --features host-io
+# binary at target/release/xlog
+```
+
+## xlog run
+
+Execute a deterministic program — one with a single definite answer, no probabilities.
+
+```bash
+xlog run [OPTIONS] <FILE>
+```
+
+In the table below, an *EDB relation* is an input table of facts the program reads (as
+opposed to facts it derives). An *Arrow IPC file* is a file in Apache Arrow's columnar
+format, used to exchange tables between tools.
+
+| Option | Description | Default |
+|---|---|---|
+| `--input <REL>=<PATH>` | Load an Arrow IPC file as an EDB relation. Repeatable. | — |
+| `--output <FORMAT>` | `pretty`, `csv`, or `arrow`. | `pretty` |
+| `--output-dir <DIR>` | Directory for Arrow output files (with `--output arrow`). | — |
+| `--device <N>` | CUDA device index. | `0` |
+| `--memory-mb <MB>` | GPU memory budget in mebibytes. | `1024` |
+| `--stats` | Emit per-stratum timing and memory statistics to stderr, followed by a `WCOJ dispatch:` line carrying the triangle, 4-cycle, group-by-fusion, Free Join, and factorized-delta dispatch counts, the number of fallbacks actually executed, and the separate pipeline-error count. Successful chain dispatches also produce a `chain fallback equivalents:` line with the number of scan and filter operations in the equivalent embedded fallback. Under `--stats-format json`, `peak_memory_mb` remains an integer formed by flooring the provider-lifetime manager reservation high-water in bytes to whole MiB; it is not physical/NVML usage and excludes direct allocations that bypass the manager. The dispatch counts appear in a `wcoj` object. `error_decline` counts pipeline errors only; `fallback` contains `total` plus route-level `chain`, `dedicated_multiway`, `free_join`, `planned_hash`, `factorized_delta`, and `groupby_fusion` counts recorded where the ordinary path actually runs. The logical work avoided by successful chain dispatches remains in `chain_fallback_scan_equivalents` and `chain_fallback_filter_equivalents`. | off |
+| `--stats-format <FORMAT>` | `human` or `json` (written to stderr). | `human` |
+| `--module-path <DIR[:DIR...]>` | Extra module search paths. | — |
+| `--epistemic-plan-json <PATH>` | Write the compiled epistemic execution plan as JSON. The plan describes how the program reasons about what it knows and does not know. | — |
+| `--wcoj` | Turn on the worst-case-optimal join routes (triangle and 4-cycle) for eligible multiway rules. A worst-case-optimal join computes a multi-way graph pattern — a triangle, a 4-cycle — in one step instead of joining two relations at a time, so it never builds the large intermediate table a binary-join chain would on a skewed cyclic query. Combine with `--stats` to confirm a route actually fired. | off |
+
+The operations in `strata[*].ops` describe work that actually executed, including physical scan and filter counts. The chain fallback-equivalent counters are logical comparison metadata: they increase only when the specialized chain join and its projection both succeed, and they are not added to `strata[*].ops`. For resident-graph runs, the `resident_graph` object exposes `device_scan_invocations` and `device_filter_invocations` as physical GPU work. Its `semantic_scan_invocations` and `semantic_filter_invocations` describe the selected dependency-closed logical plan, including successful chain fallback equivalents and excluding recursive variants whose input delta was empty. They are not counts for unreachable rules in the full authored plan; resident `strata[*].ops` continues to use the physical device counts.
+
+```bash
+xlog run examples/xlog/00-basics/01_tc_reachability.xlog
+xlog run --input edge=graph.arrow program.xlog
+xlog run --output arrow --output-dir ./results program.xlog
+xlog run --device 1 --memory-mb 2048 --stats program.xlog
+xlog run triangles.xlog --wcoj --stats
+```
+
+**Confirming `--wcoj`.** The flag only opens the route; whether a kernel fires
+depends on the rule shape. With `--wcoj` set, xlog prints
+`WCOJ dispatch gates set (triangle + 4-cycle); run with --stats to confirm a kernel fired`
+on stderr as it starts. If you also pass `--stats` and at least one route fired,
+it then prints a `WCOJ kernels dispatched: ...` line with the per-route counts.
+If nothing fired, it prints instead:
+
+```text
+WARNING: --wcoj set but no WCOJ kernel dispatched (declines <n>); the run fell back to binary joins
+```
+
+`<n>` is a live count of the routes that were entered and then declined on an
+error, so it is often non-zero on exactly the runs that print this warning. Both
+lines carry it; only the `dispatched` line means a kernel fired.
+
+The answer is the same either way — only the execution route differs.
+
+## xlog prob
+
+Execute a probabilistic program — one whose facts carry probabilities, so answers come
+back with a probability rather than a plain yes/no.
+
+```bash
+xlog prob [OPTIONS] <SOURCE>
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--prob-engine <ENGINE>` | `exact_ddnnf` or `mc`. | resolved from the entry file's `#pragma prob_engine` |
+| `--samples <N>` | Monte Carlo sample count (`mc` only). | from the entry file's `#pragma prob_samples` |
+| `--seed <N>` | Random seed (`mc` only). | from the entry file's `#pragma prob_seed` |
+| `--confidence <LEVEL>` | Confidence level for MC intervals. | `0.95` |
+| `--prob-method <METHOD>` | `rejection` or `evidence_clamping` (`mc` only). | from the entry file's directives |
+| `--prob-max-nonmonotone-iterations <N>` | Cap on non-monotone iterations — passes where adding facts can retract earlier conclusions (from negation) and so may not settle on their own. Alias: `--max-nonmonotone-iterations`. | `1024` |
+| `--allow-cpu-oracle` | Permit the labeled CPU oracle when the GPU-resident MC engine rejects a program. Fail-closed when unset. | off |
+| `--output <FORMAT>` | `pretty`, `csv`, `arrow`, or `json`. | `pretty` |
+| `--output-dir <DIR>` | Directory for Arrow output files. | — |
+| `--device <N>` | CUDA device index. | `0` |
+| `--memory-mb <MB>` | GPU memory budget in mebibytes. | `1024` |
+| `--module-path <DIR[:DIR...]>` | Extra module search paths. | — |
+
+`xlog prob` loads the entry file from the exact path supplied, then resolves its
+direct and transitive `use` imports before compiling either engine. Imported module
+paths resolve to `.xlog` files. Public deterministic facts and rules from resolved
+modules participate in probabilistic derivations; a missing module is an error.
+
+Program-level probabilistic constructs are entry-file-scoped. An imported module
+that contains probabilistic facts, annotated disjunctions, evidence, integrity
+constraints, neural predicate declarations, or learnable rule templates is rejected
+with `error[E0405]`. An exported rule or function that depends on a private item, or
+on an item omitted by a selective import, is rejected with `error[E0406]`. Put the
+program-level constructs in the entry file and include every public dependency in a
+selective import. See [Modules](/language-guide/modules) for the full import contract.
+
+<Note>
+Pragmas apply only when declared in the entry file. If an imported module declares a
+`#pragma`, `xlog run`, `xlog prob`, and `xlog explain` print `warning[W0510]` on
+stderr naming the module and the dropped directive once per source file, then ignore
+the pragma; the exit code is unaffected. See
+[Pragmas](/language-guide/pragmas#pragmas-apply-only-in-the-entry-file).
+</Note>
+
+Two engines compute the probabilities. The exact engine (`exact_ddnnf`) compiles the
+program to a compact Boolean form that lets it count probabilities exactly. The Monte
+Carlo engine (`mc`) estimates them instead by running many random samples. The two do
+not share sampling options — `--samples` and `--seed` apply only to `mc`.
+
+<Warning>
+The production Monte Carlo engine runs entirely on the GPU and rejects programs it
+cannot run on the device (for example, ones using negation or aggregates), rather than
+silently degrading. Passing `--allow-cpu-oracle` lets a rejected program fall back to a
+labeled CPU oracle — a reference implementation that runs on the CPU. Its result is
+tagged `mc_engine: "cpu-oracle"` and is never treated as GPU-native evidence. Without
+the flag, a rejected program fails.
+</Warning>
+
+```bash
+xlog prob examples/prob/01-wet-conditioning.xlog --prob-engine exact_ddnnf
+xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
+xlog prob program.xlog --prob-engine mc --confidence 0.99 --output json
+```
+
+## xlog explain
+
+Inspect how a source file compiles, and see its diagnostics, without running it on the
+GPU.
+
+Explain resolves imports and completes execution normalization before it runs
+stratification, rewrite, compiler, optimizer, WCOJ, aggregate, epistemic, or
+generated-row analysis. Source provenance and proof traces remain source-formatted.
+
+```bash
+xlog explain [OPTIONS] <SOURCE>
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--format <FORMAT>` | `text`, `json`, or `dot`. | `text` |
+| `--module-path <DIR[:DIR...]>` | Extra module search paths. | — |
+
+`text` prints compact sections for the following, in order:
+
+- **parse and AST summaries** — statement-cache statistics and source-program counts;
+- **stratification** — status and number of evaluation layers;
+- **RIR compilation** — relational intermediate representation status and strongly connected component count;
+- **optimizer** — status and estimated peak memory;
+- **WCOJ reporting** — whether worst-case-optimal join reporting was available for the compiled program;
+- **epistemic lowering** — status of the epistemic intermediate form, GPU plan, and executable plan;
+- **magic-set rewrites** — status, adorned predicates, generated predicates, and decline reasons;
+- **aggregate lifting** — status and per-aggregate input summary when present;
+- **rule provenance** — stable rule identifiers, source or generated origin, and support relations;
+- **proof traces** — source rules, facts, and rejected alternatives associated with each query;
+- **generated-rule diagnostics** — whether per-row acceptance diagnostics are
+  available and how many generated rules they cover.
+
+`json` emits full `rule_provenance`, `proof_traces`, and `generated_rule_diagnostics`
+arrays. The generated-rule array has sibling `generated_rule_diagnostics_status` and
+`generated_rule_diagnostics_reason` fields. When execution normalization fails,
+analyses that require normalized input report `not_available` with the normalization
+error as their reason; their result collections remain empty. For schema compatibility,
+the magic-set section represents the same condition as `declined` and carries the
+normalization error in `declined_reasons`. `dot` prints a magic-set summary graph
+with rewrite status, generated/adorned predicates, and decline reasons when the
+rewrite was not attempted.
+
+```bash
+xlog explain program.xlog
+xlog explain --format json program.xlog
+```
+
+For the shared generated-rule diagnostics model, see [Diagnostics and provenance](/guides/diagnostics).
+
+## xlog repl
+
+Read a program from standard input, parse it, and print a summary.
+
+```bash
+xlog repl [OPTIONS]
+```
+
+| Option | Description |
+|---|---|
+| `--module-path <DIR[:DIR...]>` | Extra module search paths. |
+
+<Note>
+`repl` reads all of standard input to end-of-file, parses it once, and prints a
+parse and cache summary. It does not run normalization or compilation, is not an
+interactive line-by-line session, and does not evaluate queries.
+</Note>
+
+## xlog watch
+
+Re-read and re-check a source file at a fixed interval.
+
+```bash
+xlog watch [OPTIONS] <SOURCE>
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--debounce-ms <MS>` | Interval between re-reads. | `250` |
+| `--explain` | Print explain output on each pass. | off |
+| `--module-path <DIR[:DIR...]>` | Extra module search paths used by `--explain`. | — |
+| `--once` | Run a single pass and exit. | off |
+
+`watch` re-reads the file on each interval; it is not driven by filesystem events.
+With `--explain`, it resolves sibling and `--module-path` imports again on every
+pass before building the report.
+
+## Input and output
+
+**Arrow IPC input.** `--input <REL>=<PATH>` binds an Arrow IPC file to an EDB relation
+(an input table of facts the program reads). The file's column count must match the
+predicate's arity and its column types must be compatible with the declared types.
+
+**Output formats.** `pretty` renders human-readable tables (the default). `csv` writes
+comma-separated rows. `arrow` writes one Arrow IPC file per query into `--output-dir`.
+`xlog prob` additionally supports `json`.
+
+## Environment variables
+
+The CLI reads no environment variables of its own, but it does *write* two:
+`xlog run --wcoj` sets `XLOG_USE_WCOJ_TRIANGLE_U32=1` and `XLOG_USE_WCOJ_4CYCLE=1`
+for the process before compiling, so the flag and that pair of variables are
+equivalent. The commonly relevant variables
+affecting the layers beneath it are listed below; see
+[Environment variables](/reference/environment-variables) for the full runtime
+index.
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `XLOG_CUBIN_DIR` | kernel loader | Directory of pre-built CUDA artifacts, preferred over the embedded PTX (portable GPU assembly). |
+| `CUDA_VISIBLE_DEVICES` | CUDA driver | Restricts which GPUs are visible. |
+| `XLOG_UNION_CHUNK_BYTES` | runtime | Byte budget per chunk for the multiway union that merges same-head rule outputs. Default 1 GiB. |
+
+## Exit codes
+
+`xlog` returns `0` when a command completes and `1` when command processing fails,
+including input, parsing, import-resolution, compilation, execution, I/O, and memory
+budget failures. `xlog explain` is report-oriented: after a program has been parsed and
+its imports resolved, normalization or compiler failures are recorded as unavailable
+report sections and the command still returns `0`. Command-line usage and argument
+errors are reported by the argument parser with exit code `2`.
+
+## See also
+
+- [GPU execution](/architecture/gpu-execution) — how programs run on the device
+- [Probabilistic engines](/probabilistic/engines) — exact and Monte Carlo inference
+- [Arrow, DLPack, and cuDF interop](/guides/interop) — data exchange formats
