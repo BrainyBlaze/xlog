@@ -823,8 +823,13 @@ extern "C" __global__ void compact_bytes_by_mask(
 
     if (mask[gid]) {
         uint32_t out_idx = prefix_sum[gid];
+        // 64-bit byte offsets -- see the same note in sort.cu's
+        // apply_permutation_bytes. `index * elem_size` is a byte count and
+        // wraps at 2^32, which for a 4-byte column is 2^30 rows.
+        const uint64_t dst = (uint64_t)out_idx * elem_size;
+        const uint64_t src = (uint64_t)gid * elem_size;
         for (uint32_t b = 0; b < elem_size; b++) {
-            output[out_idx * elem_size + b] = input[gid * elem_size + b];
+            output[dst + b] = input[src + b];
         }
     }
 }
