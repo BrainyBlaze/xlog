@@ -58,10 +58,27 @@ mixed within a comparison.
 
 `runners/residency_sweep.py` and `runners/verify_sweep.py` are the exact
 scripts for the two xlog-only isolations (run with `python -u` on a
-CUDA-enabled `pyxlog` build; the residency script needs `torch`). The neural
-and probabilistic head-to-head runs were orchestrated by ephemeral on-pod
-scripts. The deterministic comparison now has a committed runner:
-`runners/triangle_counting_vs_souffle.py`.
+CUDA-enabled `pyxlog` build; the residency script needs `torch`). Every
+head-to-head comparison now has a committed runner:
+`runners/triangle_counting_vs_souffle.py`,
+`runners/triangle_counting_moderate_skew_vs_souffle.py`,
+`runners/exact_inference_vs_problog2.py` and
+`runners/mnist_addition_vs_scallop.py`.
+
+The published numbers in the last three files were **not** produced by those
+runners — they came from ephemeral on-pod scripts that were never committed, so
+the runners reconstruct the protocol from the artifact and from the committed
+harnesses rather than reproduce the original invocation. Each one records what
+it had to choose, and every one of them refuses a dirty checkout and carries
+`--self-test`. Two consequences worth stating plainly:
+
+- the moderate-skew generator parameters are **not** recorded in the published
+  artifact — only the edge counts — so its runner writes the hub fraction it
+  used, and a re-run is a new measurement of the same class rather than a
+  repeat of the old one;
+- the MNIST seeds are likewise unrecorded; the runner defaults to the
+  repository's `DEFAULT_SEEDS`, which are the seeds the committed Scallop
+  baseline results were produced with.
 
 - **Exact vs ProbLog2** — `pyxlog.Program.compile(src)` on the five programs
   (a conditioned wet/sprinkler net and `reach_chain_{5,10,15,20}`), timed
@@ -71,7 +88,13 @@ scripts. The deterministic comparison now has a committed runner:
   `pyxlog` neural predicate `nn(net,[X],Y,[0..9])::digit(X,Y)` +
   `addition(A,B,S):-digit(A,X),digit(B,Y),S is X+Y` vs Scallop
   `difftopbottomkclauses` (k=3); held-out addition accuracy on the 10k MNIST
-  test. See `scripts/track_a_runner.py` for the closest committed harness.
+  test. `runners/mnist_addition_vs_scallop.py` drives both committed harnesses
+  — `examples/neural/01_minimal/train.py` and
+  `examples/neural/baseline/scallop/mnist_addition.py` — once per (protocol,
+  seed, side) and aggregates. It records `epoch_timing_source`: when the
+  training history carries no per-epoch times, `train.py` divides the total
+  evenly, and the first-epoch / steady-epoch split is then an approximation
+  rather than a measurement.
 - **Triangle counting vs Soufflé** — build the release CLI, install PyArrow
   and Soufflé, then run:
 
