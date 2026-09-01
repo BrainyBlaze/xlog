@@ -1,6 +1,7 @@
 //! GPU-accelerated evaluation of compiled Datalog programs.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -930,6 +931,21 @@ impl LogicProgram {
     pub fn compile(source: &str) -> Result<Self> {
         let program = xlog_logic::parse_program(source)?;
         Self::compile_program(program)
+    }
+
+    /// Compile an entry file and its complete transitive module closure.
+    pub fn compile_file(entry_file: &Path, search_paths: Vec<PathBuf>) -> Result<Self> {
+        let resolver = xlog_logic::compile::load_modules(entry_file, search_paths)
+            .map_err(|error| XlogError::Compilation(error.to_string()))?;
+        let entry_program = resolver
+            .entry()
+            .ok_or_else(|| XlogError::Compilation("module resolver has no entry program".into()))?
+            .program
+            .clone();
+        let merged = resolver
+            .merge_imports(entry_program)
+            .map_err(|error| XlogError::Compilation(error.to_string()))?;
+        Self::compile_program(merged)
     }
 
     /// Compile an already parsed program into a GPU-executable program.

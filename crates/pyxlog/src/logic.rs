@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -142,22 +143,48 @@ impl LogicProgram {
     #[staticmethod]
     #[pyo3(signature = (source, device=0, memory_mb=32768))]
     pub fn compile(source: &str, device: usize, memory_mb: u64) -> PyResult<CompiledLogicProgram> {
-        if memory_mb == 0 {
-            return Err(PyValueError::new_err("memory_mb must be > 0"));
-        }
-
-        let mut config = GpuConfig::default();
-        config.device_ordinal = device;
-        config.memory_bytes = memory_mb * 1024 * 1024;
-
+        require_logic_memory_budget(memory_mb)?;
         let program = gpu_logic::LogicProgram::compile(source).map_err(types::xlog_err)?;
-        let provider = provider_from_config(config).map_err(types::xlog_err)?;
-
-        Ok(CompiledLogicProgram {
-            program: Arc::new(program),
-            provider: Arc::new(provider),
-        })
+        compiled_logic_program(program, device, memory_mb)
     }
+
+    #[staticmethod]
+    #[pyo3(signature = (entrypoint, module_paths=Vec::new(), device=0, memory_mb=32768))]
+    pub fn compile_file(
+        entrypoint: PathBuf,
+        module_paths: Vec<PathBuf>,
+        device: usize,
+        memory_mb: u64,
+    ) -> PyResult<CompiledLogicProgram> {
+        require_logic_memory_budget(memory_mb)?;
+        let program = gpu_logic::LogicProgram::compile_file(&entrypoint, module_paths)
+            .map_err(types::xlog_err)?;
+        compiled_logic_program(program, device, memory_mb)
+    }
+}
+
+fn require_logic_memory_budget(memory_mb: u64) -> PyResult<()> {
+    if memory_mb == 0 {
+        return Err(PyValueError::new_err("memory_mb must be > 0"));
+    }
+    Ok(())
+}
+
+fn compiled_logic_program(
+    program: gpu_logic::LogicProgram,
+    device: usize,
+    memory_mb: u64,
+) -> PyResult<CompiledLogicProgram> {
+    let mut config = GpuConfig::default();
+    config.device_ordinal = device;
+    config.memory_bytes = memory_mb * 1024 * 1024;
+
+    let provider = provider_from_config(config).map_err(types::xlog_err)?;
+
+    Ok(CompiledLogicProgram {
+        program: Arc::new(program),
+        provider: Arc::new(provider),
+    })
 }
 
 #[pymethods]
