@@ -1,14 +1,71 @@
 {
   "benchmark": "verify_vs_compile_isolation",
-  "hardware": "RunPod RTX 3090 (ephemeral, driver 580)",
-  "note": "Cold circuit compile split into D4-compile vs on-GPU CDCL equivalence-verify via program.warmup_breakdown() under XLOG_WARMUP_PROFILE=1. Linear probabilistic reachability chains (0.5::edge(i,i+1) + transitive path), fresh process per point so every compile is a real cache miss. n>=50 exceeds a CUDA grid-dimension limit on this CNF and is out of range.",
-  "metric": "seconds per cold-compile stage; verify_pct_of_cold = verify / (d4_compile + verify + smooth + cache_store + cnf_hash + free_var_mask)",
+  "claim": "Of a cold circuit compile, what fraction is the on-GPU CDCL equivalence verification rather than the d-DNNF compile.",
+  "provenance": {
+    "gpu": "NVIDIA A100 80GB PCIe, GPU-bdb502b0-1852-1504-5cd0-cafd7908b7e7, driver 580.159.04, 81920 MiB",
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+    "logical_cpu_count": 252,
+    "cpu_quota_cores": 26.35,
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39",
+    "commit": "a2bafef0517b67747c06c8f0ec294494e72b2e72",
+    "dirty": false,
+    "measured_at_utc": "2026-09-01",
+    "note": "recorded by the run that produced this file. The previous version of this artifact was a bare list of numbers with no hardware, commit or date at all"
+  },
+  "protocol": {
+    "programs": "linear probabilistic reachability chains (0.5::edge(i,i+1) plus transitive path), fresh process per point so every compile is a real cache miss",
+    "instrumentation": "program.warmup_breakdown() under XLOG_WARMUP_PROFILE=1",
+    "metric": "verify_pct_of_cold = verify / (d4_compile + verify + smooth + cache_store + cnf_hash + free_var_mask)",
+    "out_of_range": "n >= 50 exceeds a CUDA grid-dimension limit on this CNF; reproduced on this run and left out of range"
+  },
   "results": [
-    {"n": 5,  "d4_compile_ms": 0.0,   "verify_ms": 251.034, "cold_ms": 251.044, "verify_pct_of_cold": 100.0},
-    {"n": 10, "d4_compile_ms": 0.0,   "verify_ms": 244.681, "cold_ms": 244.692, "verify_pct_of_cold": 100.0},
-    {"n": 15, "d4_compile_ms": 0.0,   "verify_ms": 253.031, "cold_ms": 253.044, "verify_pct_of_cold": 100.0},
-    {"n": 20, "d4_compile_ms": 0.0,   "verify_ms": 260.984, "cold_ms": 260.999, "verify_pct_of_cold": 100.0},
-    {"n": 30, "d4_compile_ms": 0.0,   "verify_ms": 300.295, "cold_ms": 300.312, "verify_pct_of_cold": 100.0},
-    {"n": 40, "d4_compile_ms": 17.237, "verify_ms": 507.555, "cold_ms": 527.422, "verify_pct_of_cold": 96.2}
+    {
+      "n": 5,
+      "d4_compile_ms": 4.377,
+      "verify_ms": 531.033,
+      "cold_ms": 537.593,
+      "verify_pct_of_cold": 98.8,
+      "gpu_cache_hit": false
+    },
+    {
+      "n": 10,
+      "d4_compile_ms": 1.162,
+      "verify_ms": 420.365,
+      "cold_ms": 423.629,
+      "verify_pct_of_cold": 99.2,
+      "gpu_cache_hit": false
+    },
+    {
+      "n": 15,
+      "d4_compile_ms": 1.47,
+      "verify_ms": 543.918,
+      "cold_ms": 547.553,
+      "verify_pct_of_cold": 99.3,
+      "gpu_cache_hit": false
+    },
+    {
+      "n": 20,
+      "d4_compile_ms": 2.037,
+      "verify_ms": 780.17,
+      "cold_ms": 784.621,
+      "verify_pct_of_cold": 99.4,
+      "gpu_cache_hit": false
+    },
+    {
+      "n": 30,
+      "d4_compile_ms": 6.711,
+      "verify_ms": 1578.942,
+      "cold_ms": 1589.823,
+      "verify_pct_of_cold": 99.3,
+      "gpu_cache_hit": false
+    },
+    {
+      "n": 40,
+      "d4_compile_ms": 11.742,
+      "verify_ms": 2633.465,
+      "cold_ms": 2649.555,
+      "verify_pct_of_cold": 99.4,
+      "gpu_cache_hit": false
+    }
   ]
 }

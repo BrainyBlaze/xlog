@@ -1,6 +1,138 @@
 {
+  "schema_version": 1,
   "benchmark": "probabilistic_exact_xlog_vs_problog",
-  "hardware": "RunPod RTX 4090 (ephemeral)",
+  "generated_at_utc": "2026-09-02T10:59:39.642769+00:00",
+  "repository": {
+    "path": "/workspace/xlog",
+    "commit": "ebf6c91f98bf8948721f9976566af930a3151b25",
+    "commit_probe": {
+      "command": "git rev-parse HEAD",
+      "status": "ok",
+      "output": "ebf6c91f98bf8948721f9976566af930a3151b25"
+    },
+    "dirty": false,
+    "dirty_entries": [],
+    "allow_dirty": false,
+    "remote": "https://github.com/BrainyBlaze/xlog.git",
+    "remote_probe": {
+      "command": "git remote get-url origin",
+      "status": "ok",
+      "output": "https://github.com/BrainyBlaze/xlog.git"
+    }
+  },
+  "runner": {
+    "path": "paper/artifacts/head-to-head/runners/exact_inference_vs_problog2.py",
+    "absolute_path": "/workspace/xlog/paper/artifacts/head-to-head/runners/exact_inference_vs_problog2.py",
+    "sha256": "b3ef174a3ab02e8643ed7e499111ba1903c478aa25580944f31579ade08f8f97",
+    "argv": [
+      "paper/artifacts/head-to-head/runners/exact_inference_vs_problog2.py",
+      "--repetitions",
+      "3",
+      "--output",
+      "/workspace/results/41_exact_inference_vs_problog2.json"
+    ]
+  },
+  "hardware": {
+    "gpu": {
+      "command": "nvidia-smi --query-gpu=name,uuid,driver_version,memory.total --format=csv,noheader,nounits",
+      "status": "ok",
+      "output": "NVIDIA A100-SXM4-80GB, GPU-17e020b0-7bbe-d835-af19-881e511f9a2a, 580.126.16, 81920"
+    },
+    "cpu": {
+      "source": "/proc/cpuinfo",
+      "status": "ok",
+      "model": "AMD EPYC 7742 64-Core Processor"
+    },
+    "logical_cpu_count": 128,
+    "cpu_quota_cores": 13.6,
+    "cpu_quota_sources": {
+      "cgroup_v2": {
+        "path": "/sys/fs/cgroup/cpu.max",
+        "raw": "1360000 100000",
+        "status": "ok",
+        "cores": 13.6
+      },
+      "cgroup_v1": {
+        "quota": {
+          "path": "/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
+          "status": "absent"
+        },
+        "period": {
+          "path": "/sys/fs/cgroup/cpu/cpu.cfs_period_us",
+          "status": "absent"
+        },
+        "status": "absent"
+      }
+    },
+    "host_memory": {
+      "status": "ok",
+      "bytes": 2151618105344
+    },
+    "platform": "Linux-6.8.0-100-generic-x86_64-with-glibc2.39"
+  },
+  "software": {
+    "python": "3.12.3",
+    "python_executable": "/usr/bin/python3",
+    "pyxlog": {
+      "version": "0.12.0",
+      "file": "/usr/local/lib/python3.12/dist-packages/pyxlog/__init__.py"
+    },
+    "torch": {
+      "version": "2.9.1+cu130",
+      "cuda": "13.0"
+    },
+    "nvidia_smi": {
+      "command": "nvidia-smi --version",
+      "status": "ok",
+      "output": "NVIDIA-SMI version  : 580.126.16\nNVML version        : 580.126\nDRIVER version      : 580.126.16\nCUDA Version        : 13.0"
+    },
+    "problog_module": {
+      "status": "ok",
+      "version": "2.2.10",
+      "file": "/usr/local/lib/python3.12/dist-packages/problog/__init__.py",
+      "evaluatable": "type"
+    },
+    "problog_binary": {
+      "requested": "problog",
+      "resolved": "/usr/local/bin/problog",
+      "version": {
+        "command": "/usr/local/bin/problog --version",
+        "status": "ok",
+        "output": "2.2.10"
+      }
+    }
+  },
+  "protocol": {
+    "programs": [
+      "wet_conditioning",
+      "reach_chain_5",
+      "reach_chain_10",
+      "reach_chain_15",
+      "reach_chain_20"
+    ],
+    "cases_run": [
+      "wet_conditioning",
+      "reach_chain_5",
+      "reach_chain_10",
+      "reach_chain_15",
+      "reach_chain_20"
+    ],
+    "repetitions": 3,
+    "reported_time": "median of the per-repetition end-to-end wall time; xlog = Program.compile + evaluate in one process, ProbLog = get_evaluatable().create_from(...).evaluate() in the same process",
+    "problog_mode": "module",
+    "xlog_device": 0,
+    "xlog_memory_mb": 32768,
+    "correctness_gate": "max |p - analytic| over the queries of a program, computed on unrounded probabilities",
+    "tolerance": 0.0001,
+    "analytic_answers": {
+      "wet_conditioning": "P(rain|wet)=0.7/0.76, P(sprinkler|wet)=0.2/0.76",
+      "reach_chain_n": "0.5^(n-1)"
+    },
+    "wet_program_source": "examples/prob/01-wet-conditioning.xlog",
+    "timeout_s": 900,
+    "circuit_cache_dir": null,
+    "failed_arm_policy": "a failed arm is recorded as a failure and never replaced by another execution path"
+  },
   "comparison_acceptable": true,
   "results": [
     {
@@ -9,7 +141,31 @@
         0.263158,
         0.921053
       ],
+      "expected_by_query": [
+        {
+          "xlog_atom": "rain()",
+          "problog_term": "rain",
+          "expected": 0.9210526315789473
+        },
+        {
+          "xlog_atom": "sprinkler()",
+          "problog_term": "sprinkler",
+          "expected": 0.2631578947368421
+        }
+      ],
       "xlog": {
+        "repetitions_requested": 3,
+        "times": [
+          2.1135,
+          0.8516,
+          0.227
+        ],
+        "times_raw": [
+          2.1134883649647236,
+          0.8515843460336328,
+          0.22699912916868925
+        ],
+        "median_sec": 0.8516,
         "atoms": [
           "rain()",
           "sprinkler()"
@@ -18,160 +174,298 @@
           0.921053,
           0.263158
         ],
-        "median_sec": 0.2547,
-        "times": [
-          0.5268,
-          0.2547,
-          0.2521
+        "probs_raw": [
+          0.9210526315789475,
+          0.2631578947368422
         ]
       },
       "xlog_max_abs_err": 0.0,
       "problog": {
+        "repetitions_requested": 3,
+        "mode": "module",
+        "times": [
+          0.0106,
+          0.0085,
+          0.008
+        ],
+        "times_raw": [
+          0.010591486934572458,
+          0.008501773700118065,
+          0.007959343958646059
+        ],
+        "median_sec": 0.0085,
         "probs": {
           "sprinkler": 0.263158,
           "rain": 0.921053
         },
-        "median_sec": 0.0136,
-        "times": [
-          0.0173,
-          0.0136,
-          0.0136
-        ]
+        "probs_raw": {
+          "sprinkler": 0.2631578947368421,
+          "rain": 0.9210526315789473
+        }
       },
-      "problog_max_abs_err": 0.0
+      "problog_max_abs_err": 0.0,
+      "case_acceptable": true,
+      "sources": {
+        "xlog_sha256": "1cea22f42dd2cc065e6ec4d51b3b1f3d5df9377827eaa3bea54822180d313cc4",
+        "problog_sha256": "a9fc1e75baf8c478aba7e3ef12799c16989434a648702c290ab8147d4345969a"
+      }
     },
     {
       "name": "reach_chain_5",
       "expected": [
         0.0625
       ],
+      "expected_by_query": [
+        {
+          "xlog_atom": "reach(1,5)",
+          "problog_term": "reach(1,5)",
+          "expected": 0.0625
+        }
+      ],
       "xlog": {
+        "repetitions_requested": 3,
+        "times": [
+          1.0182,
+          0.8665,
+          0.8593
+        ],
+        "times_raw": [
+          1.0181947690434754,
+          0.8664601072669029,
+          0.8592591499909759
+        ],
+        "median_sec": 0.8665,
         "atoms": [
           "reach(1, 5)"
         ],
         "probs": [
           0.0625
         ],
-        "median_sec": 0.2516,
-        "times": [
-          0.2516,
-          0.2516,
-          0.2524
+        "probs_raw": [
+          0.0625
         ]
       },
       "xlog_max_abs_err": 0.0,
       "problog": {
+        "repetitions_requested": 3,
+        "mode": "module",
+        "times": [
+          0.0111,
+          0.0097,
+          0.0092
+        ],
+        "times_raw": [
+          0.01112703187391162,
+          0.009681592229753733,
+          0.009177695028483868
+        ],
+        "median_sec": 0.0097,
         "probs": {
           "reach(1,5)": 0.0625
         },
-        "median_sec": 0.0158,
-        "times": [
-          0.018,
-          0.0158,
-          0.0155
-        ]
+        "probs_raw": {
+          "reach(1,5)": 0.0625
+        }
       },
-      "problog_max_abs_err": 0.0
+      "problog_max_abs_err": 0.0,
+      "case_acceptable": true,
+      "sources": {
+        "xlog_sha256": "e0d15c31be50ad5898a69409b421ff3f3db7478221cda40260b46636416efcb1",
+        "problog_sha256": "e0d15c31be50ad5898a69409b421ff3f3db7478221cda40260b46636416efcb1"
+      }
     },
     {
       "name": "reach_chain_10",
       "expected": [
         0.001953
       ],
+      "expected_by_query": [
+        {
+          "xlog_atom": "reach(1,10)",
+          "problog_term": "reach(1,10)",
+          "expected": 0.001953125
+        }
+      ],
       "xlog": {
+        "repetitions_requested": 3,
+        "times": [
+          0.4427,
+          0.7932,
+          0.8268
+        ],
+        "times_raw": [
+          0.4426530138589442,
+          0.7932404680177569,
+          0.8267756961286068
+        ],
+        "median_sec": 0.7932,
         "atoms": [
           "reach(1, 10)"
         ],
         "probs": [
           0.001953
         ],
-        "median_sec": 0.2539,
-        "times": [
-          0.2539,
-          0.2532,
-          0.2539
+        "probs_raw": [
+          0.0019531250000000017
         ]
       },
       "xlog_max_abs_err": 0.0,
       "problog": {
+        "repetitions_requested": 3,
+        "mode": "module",
+        "times": [
+          0.0136,
+          0.0107,
+          0.0123
+        ],
+        "times_raw": [
+          0.013606555294245481,
+          0.010695945005863905,
+          0.012262535281479359
+        ],
+        "median_sec": 0.0123,
         "probs": {
           "reach(1,10)": 0.001953
         },
-        "median_sec": 0.0194,
-        "times": [
-          0.0205,
-          0.0189,
-          0.0194
-        ]
+        "probs_raw": {
+          "reach(1,10)": 0.001953125
+        }
       },
-      "problog_max_abs_err": 0.0
+      "problog_max_abs_err": 0.0,
+      "case_acceptable": true,
+      "sources": {
+        "xlog_sha256": "e025be6a0e1b89dc4f6d949b688aa015d719d58ea7253872f2e4332e74bbf2a3",
+        "problog_sha256": "e025be6a0e1b89dc4f6d949b688aa015d719d58ea7253872f2e4332e74bbf2a3"
+      }
     },
     {
       "name": "reach_chain_15",
       "expected": [
         6.1e-05
       ],
+      "expected_by_query": [
+        {
+          "xlog_atom": "reach(1,15)",
+          "problog_term": "reach(1,15)",
+          "expected": 6.103515625e-05
+        }
+      ],
       "xlog": {
+        "repetitions_requested": 3,
+        "times": [
+          1.1092,
+          0.2191,
+          0.859
+        ],
+        "times_raw": [
+          1.109240485355258,
+          0.21906170714646578,
+          0.8589590010233223
+        ],
+        "median_sec": 0.859,
         "atoms": [
           "reach(1, 15)"
         ],
         "probs": [
           6.1e-05
         ],
-        "median_sec": 0.2565,
-        "times": [
-          0.2565,
-          0.2562,
-          0.2578
+        "probs_raw": [
+          6.103515625000003e-05
         ]
       },
       "xlog_max_abs_err": 0.0,
       "problog": {
+        "repetitions_requested": 3,
+        "mode": "module",
+        "times": [
+          0.0163,
+          0.0154,
+          0.0134
+        ],
+        "times_raw": [
+          0.01632764609530568,
+          0.015416747890412807,
+          0.013352892827242613
+        ],
+        "median_sec": 0.0154,
         "probs": {
           "reach(1,15)": 6.1e-05
         },
-        "median_sec": 0.0224,
-        "times": [
-          0.0244,
-          0.0224,
-          0.0224
-        ]
+        "probs_raw": {
+          "reach(1,15)": 6.103515625000003e-05
+        }
       },
-      "problog_max_abs_err": 0.0
+      "problog_max_abs_err": 0.0,
+      "case_acceptable": true,
+      "sources": {
+        "xlog_sha256": "8d23b6765effaca1fd157b585ec390ee6c770617ab20453840a6829bd56aad32",
+        "problog_sha256": "8d23b6765effaca1fd157b585ec390ee6c770617ab20453840a6829bd56aad32"
+      }
     },
     {
       "name": "reach_chain_20",
       "expected": [
         2e-06
       ],
+      "expected_by_query": [
+        {
+          "xlog_atom": "reach(1,20)",
+          "problog_term": "reach(1,20)",
+          "expected": 1.9073486328125e-06
+        }
+      ],
       "xlog": {
+        "repetitions_requested": 3,
+        "times": [
+          2.0589,
+          0.2277,
+          0.8404
+        ],
+        "times_raw": [
+          2.0588987660594285,
+          0.22774529503658414,
+          0.8403605902567506
+        ],
+        "median_sec": 0.8404,
         "atoms": [
           "reach(1, 20)"
         ],
         "probs": [
           2e-06
         ],
-        "median_sec": 0.262,
-        "times": [
-          0.262,
-          0.2619,
-          0.2646
+        "probs_raw": [
+          1.9073486328125e-06
         ]
       },
       "xlog_max_abs_err": 0.0,
       "problog": {
+        "repetitions_requested": 3,
+        "mode": "module",
+        "times": [
+          0.0207,
+          0.0181,
+          0.0186
+        ],
+        "times_raw": [
+          0.020685268566012383,
+          0.018141895066946745,
+          0.01859056716784835
+        ],
+        "median_sec": 0.0186,
         "probs": {
           "reach(1,20)": 2e-06
         },
-        "median_sec": 0.0277,
-        "times": [
-          0.0293,
-          0.0277,
-          0.0272
-        ]
+        "probs_raw": {
+          "reach(1,20)": 1.9073486328125e-06
+        }
       },
-      "problog_max_abs_err": 0.0
+      "problog_max_abs_err": 0.0,
+      "case_acceptable": true,
+      "sources": {
+        "xlog_sha256": "db60493979f6d40a9484c113ff6e3c4462d5483bb6fa4044f9955fec6bef1cc5",
+        "problog_sha256": "db60493979f6d40a9484c113ff6e3c4462d5483bb6fa4044f9955fec6bef1cc5"
+      }
     }
   ],
-  "note": "xlog GPU-native verified KC vs ProbLog2 CPU (D4/c2d). Timing=full inference (compile+evaluate), median of 3. Correctness gate: probs match analytic expected within 1e-4."
+  "note": "xlog GPU-native verified KC vs ProbLog2 CPU (D4/c2d). Timing=full inference (compile+evaluate), median of --repetitions. Correctness gate: probs match analytic expected within --tolerance."
 }

@@ -1,61 +1,75 @@
 {
   "schema_version": 3,
   "benchmark": "per_root_triangle_counting",
-  "generated_at_utc": "2026-08-26T09:53:34.783756+00:00",
+  "generated_at_utc": [
+    "2026-09-01T19:43:28.722818+00:00",
+    "2026-09-01T19:43:51.952989+00:00",
+    "2026-09-01T19:44:19.037280+00:00",
+    "2026-09-01T19:44:52.517796+00:00",
+    "2026-09-01T19:45:35.335701+00:00"
+  ],
   "repository": {
-    "commit": "d05a68b9938958ab5e92af5ea2f0bc31c8e97edf",
+    "commit": "a2bafef0517b67747c06c8f0ec294494e72b2e72",
     "dirty": false,
     "remote": "https://github.com/BrainyBlaze/xlog.git"
   },
   "runner": {
     "path": "paper/artifacts/head-to-head/runners/triangle_counting_vs_souffle.py",
-    "sha256": "97e3d53d64e8674e7d0347878f34f621ff55a300a461eff74738dccf9221d39f",
+    "sha256": "097378e9897b71cca5e70b47e43afd0072b2882f7cfa61759ffa312afa85be31",
     "argv": [
       "paper/artifacts/head-to-head/runners/triangle_counting_vs_souffle.py",
       "--xlog-bin",
       "target/release/xlog",
       "--souffle-bin",
-      "/usr/local/bin/souffle",
+      "/usr/bin/souffle",
       "--nvcc-bin",
       "/usr/local/cuda/bin/nvcc",
       "--souffle-jobs",
-      "8",
+      "26",
+      "--memory-mb",
+      "65536",
+      "--repetitions",
+      "3",
+      "--timeout-s",
+      "3600",
+      "--case",
+      "h30_e150000",
       "--output",
-      "paper/artifacts/head-to-head/triangle_counting_vs_souffle.json"
+      "/workspace/results/20_triangle_h30_e150000.json"
     ]
   },
   "hardware": {
     "gpu": [
-      "NVIDIA A40, GPU-af77f2c4-2141-344c-86ea-5041b7f43256, 580.126.09, 46068"
+      "NVIDIA A100 80GB PCIe, GPU-bdb502b0-1852-1504-5cd0-cafd7908b7e7, 580.159.04, 81920"
     ],
-    "cpu": "Intel(R) Xeon(R) Gold 6342 CPU @ 2.80GHz",
-    "logical_cpu_count": 96,
-    "cpu_quota_cores": 7.65,
-    "host_memory_bytes": 540644204544,
-    "platform": "Linux-6.8.0-52-generic-x86_64-with-glibc2.39"
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+    "logical_cpu_count": 252,
+    "cpu_quota_cores": 26.35,
+    "host_memory_bytes": 1014068322304,
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
   },
   "software": {
     "python": "3.12.3",
     "pyarrow": "25.0.1",
     "xlog": {
       "path": "'{repo}/target/release/xlog'",
-      "sha256": "ae026d1dfc76809e9f93569ca7090e430071db2d938b4b7a3116bf5faaa02da4",
+      "sha256": "559125a39c453cb0033d3697326bca830f30b4ff5c1d3664dbf9ba29eb163371",
       "version": {
-        "command": "/workspace/xlog-final-d05a68b99/target/release/xlog --version",
+        "command": "/workspace/xlog/target/release/xlog --version",
         "output": "xlog-cli 0.12.0"
       }
     },
     "souffle": {
-      "path": "/usr/local/bin/souffle",
-      "sha256": "1c99c1a9272b0549c3097b3700ce71b093a937efe6327d40590a0b9d7abb9ea7",
+      "path": "/usr/bin/souffle",
+      "sha256": "e8e4d8bff0b8377d2d42ae30886121a61061ec0c8bb948f1f5129e09aecfa9a1",
       "version": {
-        "command": "/usr/local/bin/souffle --version",
+        "command": "/usr/bin/souffle --version",
         "output": "----------------------------------------------------------------------------\nVersion: 2.5 (2.5)\nWord size: 64 bits\nOptions enabled: ffi openmp ncurses sqlite zlib\n----------------------------------------------------------------------------\nCopyright (c) 2016-25 The Souffle Developers.\nCopyright (c) 2013-16 Oracle and/or its affiliates.\nAll rights reserved.\n============================================================================"
       }
     },
     "nvcc": {
-      "command": "/usr/local/cuda-12.8/bin/nvcc --version",
-      "output": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Fri_Feb_21_20:23:50_PST_2025\nCuda compilation tools, release 12.8, V12.8.93\nBuild cuda_12.8.r12.8/compiler.35583870_0"
+      "command": "/usr/local/cuda-13.0/bin/nvcc --version",
+      "output": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:58:59_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0"
     },
     "host_cxx": {
       "command": "/usr/bin/x86_64-linux-gnu-g++-13 --version",
@@ -68,11 +82,11 @@
     "repetitions": 3,
     "reported_time": "median per-execution full-process wall time from GNU time; one-time native engine builds are excluded",
     "souffle_mode": "standalone C++ executable generated once per case with --dl-program; compilation is recorded separately",
-    "souffle_jobs": 8,
+    "souffle_jobs": 26,
     "process_memory": "maximum resident set size from GNU time",
     "xlog_memory": "provider allocation high-water from --stats-format json",
-    "xlog_memory_budget_mb": 18432,
-    "timeout_s": 900,
+    "xlog_memory_budget_mb": 65536,
+    "timeout_s": 3600,
     "fused_env": {
       "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset"
     },
@@ -82,7 +96,6 @@
     "xlog_source_sha256": "f1bf0c89706a55e38b9203f810ec62c4e596057cf7918fefd6cdf36a4dab0dfa",
     "souffle_source_sha256": "bfa72cef2a557c4e77b1e5ef9dd2be7a7a16cbb79173a62e7550bfa30ad76049"
   },
-  "core_comparison_acceptable": true,
   "comparison_acceptable": true,
   "results": [
     {
@@ -103,18 +116,27 @@
         "runs": [
           {
             "repetition": 1,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h30_e150000/xlog-fused-1' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h30_e150000/xlog-fused-1' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.54,
-            "process_max_rss_kb": 136024,
-            "engine_total_ms": 21,
+            "wall_s": 0.65,
+            "process_max_rss_kb": 147312,
+            "engine_total_ms": 25,
             "engine_peak_mb": 85,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 1,
@@ -126,18 +148,27 @@
           },
           {
             "repetition": 2,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h30_e150000/xlog-fused-2' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h30_e150000/xlog-fused-2' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.43,
-            "process_max_rss_kb": 136756,
-            "engine_total_ms": 21,
+            "wall_s": 0.54,
+            "process_max_rss_kb": 147248,
+            "engine_total_ms": 26,
             "engine_peak_mb": 85,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 1,
@@ -149,18 +180,27 @@
           },
           {
             "repetition": 3,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h30_e150000/xlog-fused-3' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h30_e150000/xlog-fused-3' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.34,
-            "process_max_rss_kb": 134212,
-            "engine_total_ms": 22,
+            "wall_s": 0.58,
+            "process_max_rss_kb": 145280,
+            "engine_total_ms": 24,
             "engine_peak_mb": 85,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 1,
@@ -171,14 +211,14 @@
             "relation_sha256": "4c3d8da36a9ebd6a58c469b14b65ec4fc5dda0a4cb490dd0cca2080d92af0ea8"
           }
         ],
-        "wall_s": 0.43,
-        "process_max_rss_kb": 136756,
+        "wall_s": 0.58,
+        "process_max_rss_kb": 147312,
         "roots": 3030,
         "total_triangles": 3652985,
         "relation_sha256": "4c3d8da36a9ebd6a58c469b14b65ec4fc5dda0a4cb490dd0cca2080d92af0ea8",
-        "compute_ms": 21,
+        "compute_ms": 25,
         "peak_mb": 85,
-        "budget_mb": 18432
+        "budget_mb": 65536
       },
       "enum_then_count": {
         "complete": true,
@@ -187,18 +227,27 @@
         "runs": [
           {
             "repetition": 1,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h30_e150000/xlog-enum-1' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h30_e150000/xlog-enum-1' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.6,
-            "process_max_rss_kb": 135976,
-            "engine_total_ms": 287,
+            "wall_s": 0.79,
+            "process_max_rss_kb": 147188,
+            "engine_total_ms": 144,
             "engine_peak_mb": 3287,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 0,
@@ -210,18 +259,27 @@
           },
           {
             "repetition": 2,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h30_e150000/xlog-enum-2' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h30_e150000/xlog-enum-2' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.72,
-            "process_max_rss_kb": 135232,
-            "engine_total_ms": 396,
+            "wall_s": 0.73,
+            "process_max_rss_kb": 147192,
+            "engine_total_ms": 164,
             "engine_peak_mb": 3287,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 0,
@@ -233,18 +291,27 @@
           },
           {
             "repetition": 3,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h30_e150000/xlog-enum-3' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h30_e150000/triangle_count.xlog' --input 'edge={workdir}/h30_e150000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h30_e150000/xlog-enum-3' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.75,
-            "process_max_rss_kb": 136068,
-            "engine_total_ms": 241,
+            "wall_s": 0.79,
+            "process_max_rss_kb": 147308,
+            "engine_total_ms": 251,
             "engine_peak_mb": 3287,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 0,
@@ -255,21 +322,21 @@
             "relation_sha256": "4c3d8da36a9ebd6a58c469b14b65ec4fc5dda0a4cb490dd0cca2080d92af0ea8"
           }
         ],
-        "wall_s": 0.72,
-        "process_max_rss_kb": 136068,
+        "wall_s": 0.79,
+        "process_max_rss_kb": 147308,
         "roots": 3030,
         "total_triangles": 3652985,
         "relation_sha256": "4c3d8da36a9ebd6a58c469b14b65ec4fc5dda0a4cb490dd0cca2080d92af0ea8",
-        "compute_ms": 287,
+        "compute_ms": 164,
         "peak_mb": 3287,
-        "budget_mb": 18432
+        "budget_mb": 65536
       },
       "souffle_compile": {
-        "command": "/usr/local/bin/souffle --jobs=8 '--dl-program={workdir}/h30_e150000/triangle_count_souffle' '{workdir}/h30_e150000/triangle_count.dl'",
+        "command": "/usr/bin/souffle --jobs=26 '--dl-program={workdir}/h30_e150000/triangle_count_souffle' '{workdir}/h30_e150000/triangle_count.dl'",
         "returncode": 0,
-        "wall_s": 12.56,
-        "process_max_rss_kb": 448684,
-        "executable_sha256": "51ae25862bea308dc05800d6a880534bae956ffcd99e57610dd28c4e77fde8c1"
+        "wall_s": 13.56,
+        "process_max_rss_kb": 448132,
+        "executable_sha256": "11403c448adf67b51dc3503708ad57cd5bca83d2d0ea1a9f4117e57393a05f3b"
       },
       "souffle": {
         "complete": true,
@@ -278,37 +345,37 @@
         "runs": [
           {
             "repetition": 1,
-            "command": "'{workdir}/h30_e150000/triangle_count_souffle' --jobs=8 -F '{workdir}/h30_e150000' -D '{workdir}/h30_e150000/souffle-1'",
+            "command": "'{workdir}/h30_e150000/triangle_count_souffle' --jobs=26 -F '{workdir}/h30_e150000' -D '{workdir}/h30_e150000/souffle-1'",
             "returncode": 0,
-            "wall_s": 1.02,
-            "process_max_rss_kb": 109896,
+            "wall_s": 0.5,
+            "process_max_rss_kb": 84672,
             "roots": 3030,
             "total_triangles": 3652985,
             "relation_sha256": "4c3d8da36a9ebd6a58c469b14b65ec4fc5dda0a4cb490dd0cca2080d92af0ea8"
           },
           {
             "repetition": 2,
-            "command": "'{workdir}/h30_e150000/triangle_count_souffle' --jobs=8 -F '{workdir}/h30_e150000' -D '{workdir}/h30_e150000/souffle-2'",
+            "command": "'{workdir}/h30_e150000/triangle_count_souffle' --jobs=26 -F '{workdir}/h30_e150000' -D '{workdir}/h30_e150000/souffle-2'",
             "returncode": 0,
-            "wall_s": 1.02,
-            "process_max_rss_kb": 107556,
+            "wall_s": 0.51,
+            "process_max_rss_kb": 86696,
             "roots": 3030,
             "total_triangles": 3652985,
             "relation_sha256": "4c3d8da36a9ebd6a58c469b14b65ec4fc5dda0a4cb490dd0cca2080d92af0ea8"
           },
           {
             "repetition": 3,
-            "command": "'{workdir}/h30_e150000/triangle_count_souffle' --jobs=8 -F '{workdir}/h30_e150000' -D '{workdir}/h30_e150000/souffle-3'",
+            "command": "'{workdir}/h30_e150000/triangle_count_souffle' --jobs=26 -F '{workdir}/h30_e150000' -D '{workdir}/h30_e150000/souffle-3'",
             "returncode": 0,
-            "wall_s": 1.06,
-            "process_max_rss_kb": 109120,
+            "wall_s": 0.52,
+            "process_max_rss_kb": 84672,
             "roots": 3030,
             "total_triangles": 3652985,
             "relation_sha256": "4c3d8da36a9ebd6a58c469b14b65ec4fc5dda0a4cb490dd0cca2080d92af0ea8"
           }
         ],
-        "wall_s": 1.02,
-        "process_max_rss_kb": 109896,
+        "wall_s": 0.51,
+        "process_max_rss_kb": 86696,
         "roots": 3030,
         "total_triangles": 3652985,
         "relation_sha256": "4c3d8da36a9ebd6a58c469b14b65ec4fc5dda0a4cb490dd0cca2080d92af0ea8"
@@ -316,8 +383,8 @@
       "fused_vs_souffle_counts_match": true,
       "enum_vs_souffle_counts_match": true,
       "comparison_acceptable": true,
-      "souffle_over_fused": 2.37,
-      "enum_over_fused": 1.67
+      "souffle_over_fused": 0.88,
+      "enum_over_fused": 1.36
     },
     {
       "case": "h50_e300000",
@@ -337,18 +404,27 @@
         "runs": [
           {
             "repetition": 1,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h50_e300000/xlog-fused-1' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h50_e300000/xlog-fused-1' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.5,
-            "process_max_rss_kb": 138268,
-            "engine_total_ms": 25,
+            "wall_s": 0.66,
+            "process_max_rss_kb": 151284,
+            "engine_total_ms": 30,
             "engine_peak_mb": 204,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 1,
@@ -360,18 +436,27 @@
           },
           {
             "repetition": 2,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h50_e300000/xlog-fused-2' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h50_e300000/xlog-fused-2' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.37,
-            "process_max_rss_kb": 138312,
+            "wall_s": 0.57,
+            "process_max_rss_kb": 149276,
             "engine_total_ms": 25,
             "engine_peak_mb": 204,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 1,
@@ -383,18 +468,27 @@
           },
           {
             "repetition": 3,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h50_e300000/xlog-fused-3' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h50_e300000/xlog-fused-3' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.36,
-            "process_max_rss_kb": 138352,
-            "engine_total_ms": 25,
+            "wall_s": 0.54,
+            "process_max_rss_kb": 149276,
+            "engine_total_ms": 32,
             "engine_peak_mb": 204,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 1,
@@ -405,14 +499,14 @@
             "relation_sha256": "27aca081d83fb44a43a568c57aa6b62f69dfcc3a000ce2146e19277a261f0388"
           }
         ],
-        "wall_s": 0.37,
-        "process_max_rss_kb": 138352,
+        "wall_s": 0.57,
+        "process_max_rss_kb": 151284,
         "roots": 5050,
         "total_triangles": 7514094,
         "relation_sha256": "27aca081d83fb44a43a568c57aa6b62f69dfcc3a000ce2146e19277a261f0388",
-        "compute_ms": 25,
+        "compute_ms": 30,
         "peak_mb": 204,
-        "budget_mb": 18432
+        "budget_mb": 65536
       },
       "enum_then_count": {
         "complete": true,
@@ -421,18 +515,27 @@
         "runs": [
           {
             "repetition": 1,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h50_e300000/xlog-enum-1' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h50_e300000/xlog-enum-1' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 1.05,
-            "process_max_rss_kb": 136612,
-            "engine_total_ms": 574,
+            "wall_s": 0.95,
+            "process_max_rss_kb": 151308,
+            "engine_total_ms": 358,
             "engine_peak_mb": 8403,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 0,
@@ -444,18 +547,27 @@
           },
           {
             "repetition": 2,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h50_e300000/xlog-enum-2' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h50_e300000/xlog-enum-2' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 1.02,
-            "process_max_rss_kb": 137544,
-            "engine_total_ms": 564,
+            "wall_s": 0.99,
+            "process_max_rss_kb": 151296,
+            "engine_total_ms": 472,
             "engine_peak_mb": 8403,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 0,
@@ -467,18 +579,27 @@
           },
           {
             "repetition": 3,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h50_e300000/xlog-enum-3' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h50_e300000/triangle_count.xlog' --input 'edge={workdir}/h50_e300000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h50_e300000/xlog-enum-3' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 1.11,
-            "process_max_rss_kb": 137548,
-            "engine_total_ms": 626,
+            "wall_s": 0.94,
+            "process_max_rss_kb": 151240,
+            "engine_total_ms": 311,
             "engine_peak_mb": 8403,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 0,
@@ -489,21 +610,21 @@
             "relation_sha256": "27aca081d83fb44a43a568c57aa6b62f69dfcc3a000ce2146e19277a261f0388"
           }
         ],
-        "wall_s": 1.05,
-        "process_max_rss_kb": 137548,
+        "wall_s": 0.95,
+        "process_max_rss_kb": 151308,
         "roots": 5050,
         "total_triangles": 7514094,
         "relation_sha256": "27aca081d83fb44a43a568c57aa6b62f69dfcc3a000ce2146e19277a261f0388",
-        "compute_ms": 574,
+        "compute_ms": 358,
         "peak_mb": 8403,
-        "budget_mb": 18432
+        "budget_mb": 65536
       },
       "souffle_compile": {
-        "command": "/usr/local/bin/souffle --jobs=8 '--dl-program={workdir}/h50_e300000/triangle_count_souffle' '{workdir}/h50_e300000/triangle_count.dl'",
+        "command": "/usr/bin/souffle --jobs=26 '--dl-program={workdir}/h50_e300000/triangle_count_souffle' '{workdir}/h50_e300000/triangle_count.dl'",
         "returncode": 0,
-        "wall_s": 13.1,
-        "process_max_rss_kb": 449496,
-        "executable_sha256": "5fe5c3a93faeb728aa34963b872d34453212821bb1a852c2fcbfa5150c5ae67e"
+        "wall_s": 13.16,
+        "process_max_rss_kb": 448200,
+        "executable_sha256": "633dcea61b7024112394d87b2de0efab407a854bb142e67c5e750d257b53facd"
       },
       "souffle": {
         "complete": true,
@@ -512,37 +633,37 @@
         "runs": [
           {
             "repetition": 1,
-            "command": "'{workdir}/h50_e300000/triangle_count_souffle' --jobs=8 -F '{workdir}/h50_e300000' -D '{workdir}/h50_e300000/souffle-1'",
+            "command": "'{workdir}/h50_e300000/triangle_count_souffle' --jobs=26 -F '{workdir}/h50_e300000' -D '{workdir}/h50_e300000/souffle-1'",
             "returncode": 0,
-            "wall_s": 2.95,
-            "process_max_rss_kb": 219692,
+            "wall_s": 1.11,
+            "process_max_rss_kb": 201620,
             "roots": 5050,
             "total_triangles": 7514094,
             "relation_sha256": "27aca081d83fb44a43a568c57aa6b62f69dfcc3a000ce2146e19277a261f0388"
           },
           {
             "repetition": 2,
-            "command": "'{workdir}/h50_e300000/triangle_count_souffle' --jobs=8 -F '{workdir}/h50_e300000' -D '{workdir}/h50_e300000/souffle-2'",
+            "command": "'{workdir}/h50_e300000/triangle_count_souffle' --jobs=26 -F '{workdir}/h50_e300000' -D '{workdir}/h50_e300000/souffle-2'",
             "returncode": 0,
-            "wall_s": 2.91,
-            "process_max_rss_kb": 222000,
+            "wall_s": 1.24,
+            "process_max_rss_kb": 199588,
             "roots": 5050,
             "total_triangles": 7514094,
             "relation_sha256": "27aca081d83fb44a43a568c57aa6b62f69dfcc3a000ce2146e19277a261f0388"
           },
           {
             "repetition": 3,
-            "command": "'{workdir}/h50_e300000/triangle_count_souffle' --jobs=8 -F '{workdir}/h50_e300000' -D '{workdir}/h50_e300000/souffle-3'",
+            "command": "'{workdir}/h50_e300000/triangle_count_souffle' --jobs=26 -F '{workdir}/h50_e300000' -D '{workdir}/h50_e300000/souffle-3'",
             "returncode": 0,
-            "wall_s": 2.94,
-            "process_max_rss_kb": 220432,
+            "wall_s": 1.12,
+            "process_max_rss_kb": 201632,
             "roots": 5050,
             "total_triangles": 7514094,
             "relation_sha256": "27aca081d83fb44a43a568c57aa6b62f69dfcc3a000ce2146e19277a261f0388"
           }
         ],
-        "wall_s": 2.94,
-        "process_max_rss_kb": 222000,
+        "wall_s": 1.12,
+        "process_max_rss_kb": 201632,
         "roots": 5050,
         "total_triangles": 7514094,
         "relation_sha256": "27aca081d83fb44a43a568c57aa6b62f69dfcc3a000ce2146e19277a261f0388"
@@ -550,8 +671,8 @@
       "fused_vs_souffle_counts_match": true,
       "enum_vs_souffle_counts_match": true,
       "comparison_acceptable": true,
-      "souffle_over_fused": 7.95,
-      "enum_over_fused": 2.84
+      "souffle_over_fused": 1.96,
+      "enum_over_fused": 1.67
     },
     {
       "case": "h80_e500000",
@@ -571,18 +692,27 @@
         "runs": [
           {
             "repetition": 1,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h80_e500000/xlog-fused-1' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h80_e500000/xlog-fused-1' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.51,
-            "process_max_rss_kb": 142136,
-            "engine_total_ms": 58,
+            "wall_s": 0.68,
+            "process_max_rss_kb": 151296,
+            "engine_total_ms": 40,
             "engine_peak_mb": 359,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 1,
@@ -594,18 +724,27 @@
           },
           {
             "repetition": 2,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h80_e500000/xlog-fused-2' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h80_e500000/xlog-fused-2' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.36,
-            "process_max_rss_kb": 141360,
-            "engine_total_ms": 32,
+            "wall_s": 0.66,
+            "process_max_rss_kb": 155244,
+            "engine_total_ms": 31,
             "engine_peak_mb": 359,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 1,
@@ -617,18 +756,27 @@
           },
           {
             "repetition": 3,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h80_e500000/xlog-fused-3' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h80_e500000/xlog-fused-3' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 0.45,
-            "process_max_rss_kb": 142092,
-            "engine_total_ms": 43,
+            "wall_s": 0.66,
+            "process_max_rss_kb": 155272,
+            "engine_total_ms": 47,
             "engine_peak_mb": 359,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 1,
@@ -639,14 +787,14 @@
             "relation_sha256": "bd10e015ba73d3de41d5a377d33cf815b48ce66ea88e09e65d584c67c0c8138e"
           }
         ],
-        "wall_s": 0.45,
-        "process_max_rss_kb": 142136,
+        "wall_s": 0.66,
+        "process_max_rss_kb": 155272,
         "roots": 8080,
         "total_triangles": 9387205,
         "relation_sha256": "bd10e015ba73d3de41d5a377d33cf815b48ce66ea88e09e65d584c67c0c8138e",
-        "compute_ms": 43,
+        "compute_ms": 40,
         "peak_mb": 359,
-        "budget_mb": 18432
+        "budget_mb": 65536
       },
       "enum_then_count": {
         "complete": true,
@@ -655,18 +803,27 @@
         "runs": [
           {
             "repetition": 1,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h80_e500000/xlog-enum-1' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h80_e500000/xlog-enum-1' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 1.53,
-            "process_max_rss_kb": 142176,
-            "engine_total_ms": 1210,
+            "wall_s": 1.1,
+            "process_max_rss_kb": 151308,
+            "engine_total_ms": 576,
             "engine_peak_mb": 15247,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 0,
@@ -678,18 +835,27 @@
           },
           {
             "repetition": 2,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h80_e500000/xlog-enum-2' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h80_e500000/xlog-enum-2' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 1.55,
-            "process_max_rss_kb": 140524,
-            "engine_total_ms": 1047,
+            "wall_s": 1.26,
+            "process_max_rss_kb": 153288,
+            "engine_total_ms": 620,
             "engine_peak_mb": 15247,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 0,
@@ -701,18 +867,27 @@
           },
           {
             "repetition": 3,
-            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 18432 --output arrow --output-dir '{workdir}/h80_e500000/xlog-enum-3' --stats --stats-format json",
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h80_e500000/triangle_count.xlog' --input 'edge={workdir}/h80_e500000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h80_e500000/xlog-enum-3' --stats --stats-format json",
             "returncode": 0,
-            "wall_s": 1.53,
-            "process_max_rss_kb": 141360,
-            "engine_total_ms": 1188,
+            "wall_s": 1.17,
+            "process_max_rss_kb": 153336,
+            "engine_total_ms": 661,
             "engine_peak_mb": 15247,
-            "engine_budget_mb": 18432,
+            "engine_budget_mb": 65536,
             "wcoj_dispatch": {
               "chain_fallback_filter_equivalents": 0,
               "chain_fallback_scan_equivalents": 0,
               "error_decline": 0,
               "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
               "four_cycle_dispatch": 0,
               "free_join_dispatch": 0,
               "groupby_fusion_dispatch": 0,
@@ -723,21 +898,21 @@
             "relation_sha256": "bd10e015ba73d3de41d5a377d33cf815b48ce66ea88e09e65d584c67c0c8138e"
           }
         ],
-        "wall_s": 1.53,
-        "process_max_rss_kb": 142176,
+        "wall_s": 1.17,
+        "process_max_rss_kb": 153336,
         "roots": 8080,
         "total_triangles": 9387205,
         "relation_sha256": "bd10e015ba73d3de41d5a377d33cf815b48ce66ea88e09e65d584c67c0c8138e",
-        "compute_ms": 1188,
+        "compute_ms": 620,
         "peak_mb": 15247,
-        "budget_mb": 18432
+        "budget_mb": 65536
       },
       "souffle_compile": {
-        "command": "/usr/local/bin/souffle --jobs=8 '--dl-program={workdir}/h80_e500000/triangle_count_souffle' '{workdir}/h80_e500000/triangle_count.dl'",
+        "command": "/usr/bin/souffle --jobs=26 '--dl-program={workdir}/h80_e500000/triangle_count_souffle' '{workdir}/h80_e500000/triangle_count.dl'",
         "returncode": 0,
-        "wall_s": 12.18,
-        "process_max_rss_kb": 448608,
-        "executable_sha256": "7344073d7c6d6c55b9d30841602d79101bd5286d64a93212bd9b4050766ffc33"
+        "wall_s": 13.05,
+        "process_max_rss_kb": 448228,
+        "executable_sha256": "05208a209a070eb9e86431370b75a3dfbc6298977752e55f20c497da491b4113"
       },
       "souffle": {
         "complete": true,
@@ -746,37 +921,37 @@
         "runs": [
           {
             "repetition": 1,
-            "command": "'{workdir}/h80_e500000/triangle_count_souffle' --jobs=8 -F '{workdir}/h80_e500000' -D '{workdir}/h80_e500000/souffle-1'",
+            "command": "'{workdir}/h80_e500000/triangle_count_souffle' --jobs=26 -F '{workdir}/h80_e500000' -D '{workdir}/h80_e500000/souffle-1'",
             "returncode": 0,
-            "wall_s": 3.97,
-            "process_max_rss_kb": 280356,
+            "wall_s": 1.8,
+            "process_max_rss_kb": 256052,
             "roots": 8080,
             "total_triangles": 9387205,
             "relation_sha256": "bd10e015ba73d3de41d5a377d33cf815b48ce66ea88e09e65d584c67c0c8138e"
           },
           {
             "repetition": 2,
-            "command": "'{workdir}/h80_e500000/triangle_count_souffle' --jobs=8 -F '{workdir}/h80_e500000' -D '{workdir}/h80_e500000/souffle-2'",
+            "command": "'{workdir}/h80_e500000/triangle_count_souffle' --jobs=26 -F '{workdir}/h80_e500000' -D '{workdir}/h80_e500000/souffle-2'",
             "returncode": 0,
-            "wall_s": 4.05,
-            "process_max_rss_kb": 281124,
+            "wall_s": 1.71,
+            "process_max_rss_kb": 256032,
             "roots": 8080,
             "total_triangles": 9387205,
             "relation_sha256": "bd10e015ba73d3de41d5a377d33cf815b48ce66ea88e09e65d584c67c0c8138e"
           },
           {
             "repetition": 3,
-            "command": "'{workdir}/h80_e500000/triangle_count_souffle' --jobs=8 -F '{workdir}/h80_e500000' -D '{workdir}/h80_e500000/souffle-3'",
+            "command": "'{workdir}/h80_e500000/triangle_count_souffle' --jobs=26 -F '{workdir}/h80_e500000' -D '{workdir}/h80_e500000/souffle-3'",
             "returncode": 0,
-            "wall_s": 4.17,
-            "process_max_rss_kb": 279608,
+            "wall_s": 1.67,
+            "process_max_rss_kb": 258048,
             "roots": 8080,
             "total_triangles": 9387205,
             "relation_sha256": "bd10e015ba73d3de41d5a377d33cf815b48ce66ea88e09e65d584c67c0c8138e"
           }
         ],
-        "wall_s": 4.05,
-        "process_max_rss_kb": 281124,
+        "wall_s": 1.71,
+        "process_max_rss_kb": 258048,
         "roots": 8080,
         "total_triangles": 9387205,
         "relation_sha256": "bd10e015ba73d3de41d5a377d33cf815b48ce66ea88e09e65d584c67c0c8138e"
@@ -784,8 +959,711 @@
       "fused_vs_souffle_counts_match": true,
       "enum_vs_souffle_counts_match": true,
       "comparison_acceptable": true,
-      "souffle_over_fused": 9.0,
-      "enum_over_fused": 3.4
+      "souffle_over_fused": 2.59,
+      "enum_over_fused": 1.77
+    },
+    {
+      "case": "h120_e800000",
+      "hubs": 120,
+      "nodes": 12120,
+      "edges": 800000,
+      "seed": 141061184,
+      "input": {
+        "arrow_sha256": "dde87e9e48c271c9ff6b989ecb037f988e706a8b698c9ba6edc03ed5ff9fa4dd",
+        "souffle_facts_sha256": "0b845ca2e77d3d5e000198f7f0df9a07abba4cd8573017fe3279fa79a43d3ed6",
+        "edge_relation_sha256": "0b845ca2e77d3d5e000198f7f0df9a07abba4cd8573017fe3279fa79a43d3ed6"
+      },
+      "fused_wcoj": {
+        "complete": true,
+        "successful_repetitions": 3,
+        "requested_repetitions": 3,
+        "runs": [
+          {
+            "repetition": 1,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h120_e800000/triangle_count.xlog' --input 'edge={workdir}/h120_e800000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h120_e800000/xlog-fused-1' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 0.64,
+            "process_max_rss_kb": 161360,
+            "engine_total_ms": 36,
+            "engine_peak_mb": 618,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 1,
+              "triangle_dispatch": 0
+            },
+            "roots": 12120,
+            "total_triangles": 12268199,
+            "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0"
+          },
+          {
+            "repetition": 2,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h120_e800000/triangle_count.xlog' --input 'edge={workdir}/h120_e800000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h120_e800000/xlog-fused-2' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 0.67,
+            "process_max_rss_kb": 159348,
+            "engine_total_ms": 36,
+            "engine_peak_mb": 618,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 1,
+              "triangle_dispatch": 0
+            },
+            "roots": 12120,
+            "total_triangles": 12268199,
+            "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0"
+          },
+          {
+            "repetition": 3,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h120_e800000/triangle_count.xlog' --input 'edge={workdir}/h120_e800000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h120_e800000/xlog-fused-3' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 0.62,
+            "process_max_rss_kb": 160768,
+            "engine_total_ms": 35,
+            "engine_peak_mb": 618,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 1,
+              "triangle_dispatch": 0
+            },
+            "roots": 12120,
+            "total_triangles": 12268199,
+            "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0"
+          }
+        ],
+        "wall_s": 0.64,
+        "process_max_rss_kb": 161360,
+        "roots": 12120,
+        "total_triangles": 12268199,
+        "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0",
+        "compute_ms": 36,
+        "peak_mb": 618,
+        "budget_mb": 65536
+      },
+      "enum_then_count": {
+        "complete": true,
+        "successful_repetitions": 3,
+        "requested_repetitions": 3,
+        "runs": [
+          {
+            "repetition": 1,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h120_e800000/triangle_count.xlog' --input 'edge={workdir}/h120_e800000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h120_e800000/xlog-enum-1' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 1.74,
+            "process_max_rss_kb": 161324,
+            "engine_total_ms": 1049,
+            "engine_peak_mb": 26497,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 0,
+              "triangle_dispatch": 0
+            },
+            "roots": 12120,
+            "total_triangles": 12268199,
+            "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0"
+          },
+          {
+            "repetition": 2,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h120_e800000/triangle_count.xlog' --input 'edge={workdir}/h120_e800000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h120_e800000/xlog-enum-2' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 1.74,
+            "process_max_rss_kb": 161408,
+            "engine_total_ms": 1061,
+            "engine_peak_mb": 26497,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 0,
+              "triangle_dispatch": 0
+            },
+            "roots": 12120,
+            "total_triangles": 12268199,
+            "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0"
+          },
+          {
+            "repetition": 3,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h120_e800000/triangle_count.xlog' --input 'edge={workdir}/h120_e800000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h120_e800000/xlog-enum-3' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 1.55,
+            "process_max_rss_kb": 159332,
+            "engine_total_ms": 891,
+            "engine_peak_mb": 26497,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 0,
+              "triangle_dispatch": 0
+            },
+            "roots": 12120,
+            "total_triangles": 12268199,
+            "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0"
+          }
+        ],
+        "wall_s": 1.74,
+        "process_max_rss_kb": 161408,
+        "roots": 12120,
+        "total_triangles": 12268199,
+        "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0",
+        "compute_ms": 1049,
+        "peak_mb": 26497,
+        "budget_mb": 65536
+      },
+      "souffle_compile": {
+        "command": "/usr/bin/souffle --jobs=26 '--dl-program={workdir}/h120_e800000/triangle_count_souffle' '{workdir}/h120_e800000/triangle_count.dl'",
+        "returncode": 0,
+        "wall_s": 13.25,
+        "process_max_rss_kb": 448240,
+        "executable_sha256": "39ad574d6283068c32809e795e063995a416f3f2bcc3b8f6e3b8ad7d3c40fce2"
+      },
+      "souffle": {
+        "complete": true,
+        "successful_repetitions": 3,
+        "requested_repetitions": 3,
+        "runs": [
+          {
+            "repetition": 1,
+            "command": "'{workdir}/h120_e800000/triangle_count_souffle' --jobs=26 -F '{workdir}/h120_e800000' -D '{workdir}/h120_e800000/souffle-1'",
+            "returncode": 0,
+            "wall_s": 2.48,
+            "process_max_rss_kb": 340704,
+            "roots": 12120,
+            "total_triangles": 12268199,
+            "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0"
+          },
+          {
+            "repetition": 2,
+            "command": "'{workdir}/h120_e800000/triangle_count_souffle' --jobs=26 -F '{workdir}/h120_e800000' -D '{workdir}/h120_e800000/souffle-2'",
+            "returncode": 0,
+            "wall_s": 2.55,
+            "process_max_rss_kb": 342720,
+            "roots": 12120,
+            "total_triangles": 12268199,
+            "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0"
+          },
+          {
+            "repetition": 3,
+            "command": "'{workdir}/h120_e800000/triangle_count_souffle' --jobs=26 -F '{workdir}/h120_e800000' -D '{workdir}/h120_e800000/souffle-3'",
+            "returncode": 0,
+            "wall_s": 2.45,
+            "process_max_rss_kb": 338696,
+            "roots": 12120,
+            "total_triangles": 12268199,
+            "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0"
+          }
+        ],
+        "wall_s": 2.48,
+        "process_max_rss_kb": 342720,
+        "roots": 12120,
+        "total_triangles": 12268199,
+        "relation_sha256": "0bb6bdd11e7d538e0ddac9e17144a9dd77acbc88eaa6eba1cf393de1d1834fc0"
+      },
+      "fused_vs_souffle_counts_match": true,
+      "enum_vs_souffle_counts_match": true,
+      "comparison_acceptable": true,
+      "souffle_over_fused": 3.88,
+      "enum_over_fused": 2.72
+    },
+    {
+      "case": "h160_e1200000",
+      "hubs": 160,
+      "nodes": 16160,
+      "edges": 1200000,
+      "seed": 181461304,
+      "input": {
+        "arrow_sha256": "0b69746b2c88ccc7aa74c32f8135404320687ac2c2644a62f485c7b2373e10e1",
+        "souffle_facts_sha256": "598b07bfbfa2c9cb9f6f6ef31968ca878b9d80e1f3e8cc54aa0d760b9caeb70b",
+        "edge_relation_sha256": "598b07bfbfa2c9cb9f6f6ef31968ca878b9d80e1f3e8cc54aa0d760b9caeb70b"
+      },
+      "fused_wcoj": {
+        "complete": true,
+        "successful_repetitions": 3,
+        "requested_repetitions": 3,
+        "runs": [
+          {
+            "repetition": 1,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h160_e1200000/triangle_count.xlog' --input 'edge={workdir}/h160_e1200000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h160_e1200000/xlog-fused-1' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 0.79,
+            "process_max_rss_kb": 164788,
+            "engine_total_ms": 110,
+            "engine_peak_mb": 1033,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 1,
+              "triangle_dispatch": 0
+            },
+            "roots": 16160,
+            "total_triangles": 17843346,
+            "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c"
+          },
+          {
+            "repetition": 2,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h160_e1200000/triangle_count.xlog' --input 'edge={workdir}/h160_e1200000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h160_e1200000/xlog-fused-2' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 0.68,
+            "process_max_rss_kb": 164680,
+            "engine_total_ms": 43,
+            "engine_peak_mb": 1033,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 1,
+              "triangle_dispatch": 0
+            },
+            "roots": 16160,
+            "total_triangles": 17843346,
+            "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c"
+          },
+          {
+            "repetition": 3,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h160_e1200000/triangle_count.xlog' --input 'edge={workdir}/h160_e1200000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h160_e1200000/xlog-fused-3' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 0.67,
+            "process_max_rss_kb": 164568,
+            "engine_total_ms": 43,
+            "engine_peak_mb": 1033,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 0,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 0
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 1,
+              "triangle_dispatch": 0
+            },
+            "roots": 16160,
+            "total_triangles": 17843346,
+            "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c"
+          }
+        ],
+        "wall_s": 0.68,
+        "process_max_rss_kb": 164788,
+        "roots": 16160,
+        "total_triangles": 17843346,
+        "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c",
+        "compute_ms": 43,
+        "peak_mb": 1033,
+        "budget_mb": 65536
+      },
+      "enum_then_count": {
+        "complete": true,
+        "successful_repetitions": 3,
+        "requested_repetitions": 3,
+        "runs": [
+          {
+            "repetition": 1,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h160_e1200000/triangle_count.xlog' --input 'edge={workdir}/h160_e1200000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h160_e1200000/xlog-enum-1' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 2.37,
+            "process_max_rss_kb": 166596,
+            "engine_total_ms": 1699,
+            "engine_peak_mb": 44979,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 0,
+              "triangle_dispatch": 0
+            },
+            "roots": 16160,
+            "total_triangles": 17843346,
+            "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c"
+          },
+          {
+            "repetition": 2,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h160_e1200000/triangle_count.xlog' --input 'edge={workdir}/h160_e1200000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h160_e1200000/xlog-enum-2' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 2.33,
+            "process_max_rss_kb": 164436,
+            "engine_total_ms": 1670,
+            "engine_peak_mb": 44979,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 0,
+              "triangle_dispatch": 0
+            },
+            "roots": 16160,
+            "total_triangles": 17843346,
+            "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c"
+          },
+          {
+            "repetition": 3,
+            "command": "'{repo}/target/release/xlog' run '{workdir}/h160_e1200000/triangle_count.xlog' --input 'edge={workdir}/h160_e1200000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/h160_e1200000/xlog-enum-3' --stats --stats-format json",
+            "returncode": 0,
+            "wall_s": 2.46,
+            "process_max_rss_kb": 168584,
+            "engine_total_ms": 1886,
+            "engine_peak_mb": 44979,
+            "engine_budget_mb": 65536,
+            "wcoj_dispatch": {
+              "chain_fallback_filter_equivalents": 0,
+              "chain_fallback_scan_equivalents": 0,
+              "error_decline": 0,
+              "factorized_delta_dispatch": 0,
+              "fallback": {
+                "chain": 0,
+                "dedicated_multiway": 1,
+                "factorized_delta": 0,
+                "free_join": 0,
+                "groupby_fusion": 0,
+                "planned_hash": 0,
+                "total": 1
+              },
+              "four_cycle_dispatch": 0,
+              "free_join_dispatch": 0,
+              "groupby_fusion_dispatch": 0,
+              "triangle_dispatch": 0
+            },
+            "roots": 16160,
+            "total_triangles": 17843346,
+            "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c"
+          }
+        ],
+        "wall_s": 2.37,
+        "process_max_rss_kb": 168584,
+        "roots": 16160,
+        "total_triangles": 17843346,
+        "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c",
+        "compute_ms": 1699,
+        "peak_mb": 44979,
+        "budget_mb": 65536
+      },
+      "souffle_compile": {
+        "command": "/usr/bin/souffle --jobs=26 '--dl-program={workdir}/h160_e1200000/triangle_count_souffle' '{workdir}/h160_e1200000/triangle_count.dl'",
+        "returncode": 0,
+        "wall_s": 13.39,
+        "process_max_rss_kb": 448240,
+        "executable_sha256": "e28907960e7bd800883adff767de7cc7729bfdcbc037ba2b8cb2f8fdc2fdc7de"
+      },
+      "souffle": {
+        "complete": true,
+        "successful_repetitions": 3,
+        "requested_repetitions": 3,
+        "runs": [
+          {
+            "repetition": 1,
+            "command": "'{workdir}/h160_e1200000/triangle_count_souffle' --jobs=26 -F '{workdir}/h160_e1200000' -D '{workdir}/h160_e1200000/souffle-1'",
+            "returncode": 0,
+            "wall_s": 3.77,
+            "process_max_rss_kb": 508044,
+            "roots": 16160,
+            "total_triangles": 17843346,
+            "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c"
+          },
+          {
+            "repetition": 2,
+            "command": "'{workdir}/h160_e1200000/triangle_count_souffle' --jobs=26 -F '{workdir}/h160_e1200000' -D '{workdir}/h160_e1200000/souffle-2'",
+            "returncode": 0,
+            "wall_s": 3.73,
+            "process_max_rss_kb": 506016,
+            "roots": 16160,
+            "total_triangles": 17843346,
+            "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c"
+          },
+          {
+            "repetition": 3,
+            "command": "'{workdir}/h160_e1200000/triangle_count_souffle' --jobs=26 -F '{workdir}/h160_e1200000' -D '{workdir}/h160_e1200000/souffle-3'",
+            "returncode": 0,
+            "wall_s": 3.9,
+            "process_max_rss_kb": 510048,
+            "roots": 16160,
+            "total_triangles": 17843346,
+            "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c"
+          }
+        ],
+        "wall_s": 3.77,
+        "process_max_rss_kb": 510048,
+        "roots": 16160,
+        "total_triangles": 17843346,
+        "relation_sha256": "7ac8baf149293de4f91da325088d6c2ca1281c7038927e3823042a65d0609b7c"
+      },
+      "fused_vs_souffle_counts_match": true,
+      "enum_vs_souffle_counts_match": true,
+      "comparison_acceptable": true,
+      "souffle_over_fused": 5.54,
+      "enum_over_fused": 3.49
+    }
+  ],
+  "merged_from": [
+    {
+      "case": "h30_e150000",
+      "generated_at_utc": "2026-09-01T19:43:28.722818+00:00",
+      "argv": [
+        "paper/artifacts/head-to-head/runners/triangle_counting_vs_souffle.py",
+        "--xlog-bin",
+        "target/release/xlog",
+        "--souffle-bin",
+        "/usr/bin/souffle",
+        "--nvcc-bin",
+        "/usr/local/cuda/bin/nvcc",
+        "--souffle-jobs",
+        "26",
+        "--memory-mb",
+        "65536",
+        "--repetitions",
+        "3",
+        "--timeout-s",
+        "3600",
+        "--case",
+        "h30_e150000",
+        "--output",
+        "/workspace/results/20_triangle_h30_e150000.json"
+      ]
+    },
+    {
+      "case": "h50_e300000",
+      "generated_at_utc": "2026-09-01T19:43:51.952989+00:00",
+      "argv": [
+        "paper/artifacts/head-to-head/runners/triangle_counting_vs_souffle.py",
+        "--xlog-bin",
+        "target/release/xlog",
+        "--souffle-bin",
+        "/usr/bin/souffle",
+        "--nvcc-bin",
+        "/usr/local/cuda/bin/nvcc",
+        "--souffle-jobs",
+        "26",
+        "--memory-mb",
+        "65536",
+        "--repetitions",
+        "3",
+        "--timeout-s",
+        "3600",
+        "--case",
+        "h50_e300000",
+        "--output",
+        "/workspace/results/20_triangle_h50_e300000.json"
+      ]
+    },
+    {
+      "case": "h80_e500000",
+      "generated_at_utc": "2026-09-01T19:44:19.037280+00:00",
+      "argv": [
+        "paper/artifacts/head-to-head/runners/triangle_counting_vs_souffle.py",
+        "--xlog-bin",
+        "target/release/xlog",
+        "--souffle-bin",
+        "/usr/bin/souffle",
+        "--nvcc-bin",
+        "/usr/local/cuda/bin/nvcc",
+        "--souffle-jobs",
+        "26",
+        "--memory-mb",
+        "65536",
+        "--repetitions",
+        "3",
+        "--timeout-s",
+        "3600",
+        "--case",
+        "h80_e500000",
+        "--output",
+        "/workspace/results/20_triangle_h80_e500000.json"
+      ]
+    },
+    {
+      "case": "h120_e800000",
+      "generated_at_utc": "2026-09-01T19:44:52.517796+00:00",
+      "argv": [
+        "paper/artifacts/head-to-head/runners/triangle_counting_vs_souffle.py",
+        "--xlog-bin",
+        "target/release/xlog",
+        "--souffle-bin",
+        "/usr/bin/souffle",
+        "--nvcc-bin",
+        "/usr/local/cuda/bin/nvcc",
+        "--souffle-jobs",
+        "26",
+        "--memory-mb",
+        "65536",
+        "--repetitions",
+        "3",
+        "--timeout-s",
+        "3600",
+        "--case",
+        "h120_e800000",
+        "--output",
+        "/workspace/results/20_triangle_h120_e800000.json"
+      ]
+    },
+    {
+      "case": "h160_e1200000",
+      "generated_at_utc": "2026-09-01T19:45:35.335701+00:00",
+      "argv": [
+        "paper/artifacts/head-to-head/runners/triangle_counting_vs_souffle.py",
+        "--xlog-bin",
+        "target/release/xlog",
+        "--souffle-bin",
+        "/usr/bin/souffle",
+        "--nvcc-bin",
+        "/usr/local/cuda/bin/nvcc",
+        "--souffle-jobs",
+        "26",
+        "--memory-mb",
+        "65536",
+        "--repetitions",
+        "3",
+        "--timeout-s",
+        "3600",
+        "--case",
+        "h160_e1200000",
+        "--output",
+        "/workspace/results/20_triangle_h160_e1200000.json"
+      ]
     }
   ]
 }

@@ -1,102 +1,1798 @@
 {
+  "schema_version": 4,
   "benchmark": "triangle_wcoj_bulk_edb",
-  "hardware": "RunPod RTX 4090 (ephemeral)",
+  "generated_at_utc": [
+    "2026-09-02T19:10:22.371675+00:00",
+    "2026-09-02T19:10:34.619651+00:00",
+    "2026-09-02T19:10:49.670006+00:00",
+    "2026-09-02T19:11:15.446599+00:00"
+  ],
   "note": "edges bulk-loaded via --input Arrow IPC (EDB), NOT inline facts. xlog compute=total_ms; souffle compute=exe run.",
+  "repository": {
+    "commit": "ebf6c91f98bf8948721f9976566af930a3151b25",
+    "dirty": false,
+    "remote": "https://github.com/BrainyBlaze/xlog.git"
+  },
+  "runner": {
+    "path": "paper/artifacts/head-to-head/runners/triangle_counting_moderate_skew_vs_souffle.py",
+    "inside_repository": true,
+    "sha256": "0a456cabd4584f2e560e154fa13ae855f6c3e8f75994953a51cbcc1c416981e6",
+    "argv": [
+      "paper/artifacts/head-to-head/runners/triangle_counting_moderate_skew_vs_souffle.py",
+      "--xlog-bin",
+      "target/release/xlog",
+      "--souffle-bin",
+      "/usr/bin/souffle",
+      "--nvcc-bin",
+      "/usr/local/cuda/bin/nvcc",
+      "--souffle-jobs",
+      "54",
+      "--memory-mb",
+      "65536",
+      "--repetitions",
+      "3",
+      "--timeout-s",
+      "3600",
+      "--case",
+      "tri_40000",
+      "--output",
+      "/workspace/results/50_moderate_skew_tri_40000.json"
+    ]
+  },
+  "hardware": {
+    "gpu": {
+      "command": "nvidia-smi --query-gpu=name,uuid,driver_version,memory.total --format=csv,noheader,nounits",
+      "status": "OK",
+      "gpus": [
+        "NVIDIA L40S, GPU-89df4ab6-a12a-2e1f-cb01-90490f7544a3, 580.159.03, 46068",
+        "NVIDIA L40S, GPU-34e4a79d-c574-5bb7-f9b4-11118ac53f76, 580.159.03, 46068"
+      ]
+    },
+    "cpu": "AMD EPYC 9554 64-Core Processor",
+    "logical_cpu_count": 256,
+    "cpu_quota_cores": {
+      "v2": 54.4,
+      "v1": "UNAVAILABLE: /sys/fs/cgroup/cpu/cpu.cfs_{quota,period}_us are absent"
+    },
+    "platform": "Linux-6.8.0-117-generic-x86_64-with-glibc2.39",
+    "host_memory_bytes": 1081798832128
+  },
+  "software": {
+    "python": "3.12.3",
+    "pyarrow": "25.0.1",
+    "xlog": {
+      "path": "'{repo}/target/release/xlog'",
+      "sha256": "559125a39c453cb0033d3697326bca830f30b4ff5c1d3664dbf9ba29eb163371",
+      "version": {
+        "command": "/workspace/xlog/target/release/xlog --version",
+        "status": "OK",
+        "output": "xlog-cli 0.12.0"
+      }
+    },
+    "souffle": {
+      "path": "/usr/bin/souffle",
+      "sha256": "e8e4d8bff0b8377d2d42ae30886121a61061ec0c8bb948f1f5129e09aecfa9a1",
+      "version": {
+        "command": "/usr/bin/souffle --version",
+        "status": "OK",
+        "output": "----------------------------------------------------------------------------\nVersion: 2.5 (2.5)\nWord size: 64 bits\nOptions enabled: ffi openmp ncurses sqlite zlib\n----------------------------------------------------------------------------\nCopyright (c) 2016-25 The Souffle Developers.\nCopyright (c) 2013-16 Oracle and/or its affiliates.\nAll rights reserved.\n============================================================================"
+      }
+    },
+    "nvcc": {
+      "command": "/usr/local/cuda/bin/nvcc --version",
+      "status": "OK",
+      "output": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:58:59_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0"
+    },
+    "host_cxx": {
+      "command": "c++ --version",
+      "status": "OK",
+      "output": "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+    }
+  },
+  "protocol": {
+    "query": "whole-triangle enumeration on both sides: xlog `rows` and Souffle `count` are the same quantity and are gated on an identical relation sha256, not only on equal cardinality",
+    "graph_generator": "seeded unique directed edges; a proposal is hub-incident with probability --hub-edge-fraction (source-hub and target-hub equally likely), otherwise both endpoints are uniform over the non-hub nodes; self loops rejected, duplicates absorbed, result sorted",
+    "node_count": "hubs * --nodes-per-hub",
+    "hub_edge_fraction": 0.25,
+    "nodes_per_hub": 101,
+    "heavy_skew_companion_hub_edge_fraction": 0.8,
+    "edb_loading": "--input edge=<Arrow IPC stream file>; no inline facts",
+    "repetitions": 3,
+    "reported_time": "compute_ms is the XLOG engine total_ms from --stats-format json (median over repetitions); compute_s is the Souffle executable's full-process wall time from GNU time (median); wall_s is the full-process wall time of the XLOG invocation",
+    "ratios": "wcoj_vs_binary = xlog_binary.compute_ms / xlog_wcoj.compute_ms; souffle_over_wcoj = souffle.compute_s / (xlog_wcoj.compute_ms / 1000)",
+    "arm_routing": "route is taken from the --stats wcoj dispatch counters, never from rc=0: xlog_wcoj requires a nonzero sum over ['triangle_dispatch', 'four_cycle_dispatch', 'groupby_fusion_dispatch', 'free_join_dispatch', 'factorized_delta_dispatch'], xlog_binary requires zero",
+    "wcoj_env": {
+      "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+      "XLOG_USE_WCOJ_4CYCLE": "unset",
+      "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+      "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+      "XLOG_DISABLE_FREE_JOIN": "unset",
+      "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+      "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+    },
+    "binary_env": {
+      "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+      "XLOG_USE_WCOJ_4CYCLE": "unset",
+      "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+      "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+      "XLOG_DISABLE_FREE_JOIN": "1",
+      "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+      "XLOG_WCOJ_CHAIN_ENABLE": "0"
+    },
+    "wcoj_cli_flag": "--wcoj (xlog_wcoj arm only)",
+    "souffle_mode": "standalone C++ executable generated once per case with --dl-program; compilation is recorded separately and excluded from compute_s",
+    "souffle_jobs": 54,
+    "process_memory": "maximum resident set size from GNU time",
+    "xlog_memory": "provider allocation high-water from --stats-format json",
+    "xlog_memory_budget_mb": 65536,
+    "timeout_s": 3600,
+    "seed": 20260824,
+    "xlog_source_sha256": "859d19caaeb3693874b4691cf37e45b4caad5f652ac050ad40e8483f070d8b4b",
+    "souffle_source_sha256": "594cec520754cba043bacfe88fabc9a569bbfcedf32b571fd94d9121b0eb605b",
+    "unrecoverable_from_published_artifact": [
+      "generator parameters: the published file records only edge counts, so hubs, nodes_per_hub and hub_edge_fraction here are a choice of this runner, not a recovered protocol",
+      "the exact XLOG and Souffle rule text behind the published rows",
+      "how the published xlog_binary arm was pinned to binary joins; this runner uses the documented kill switches because adaptive triangle dispatch is default-on and omitting --wcoj is not sufficient",
+      "whether the published run enforced a per-repetition relation-hash gate or only compared cardinalities",
+      "the published --memory-mb budget, souffle --jobs, repetition count and seed"
+    ]
+  },
   "comparison_acceptable": true,
+  "counts_comparison_acceptable": true,
   "results": [
     {
       "case": "tri_40000",
       "edges": 40000,
+      "generator": {
+        "hubs": 27,
+        "nodes": 2727,
+        "nodes_per_hub": 101,
+        "requested_hub_edge_fraction": 0.25,
+        "realized_hub_incident_fraction": 0.244875,
+        "seed": 47300905,
+        "unique_directed_edges": 40000
+      },
+      "input": {
+        "arrow_sha256": "8ab774692b763425e97d947ea938089e932745c9492706d124f42d7b894164af",
+        "souffle_facts_sha256": "7051f9045ada40e77c3ae2e0eb08873fcb23610b3f22faa4a14436accd2f7bc1",
+        "edge_relation_sha256": "7051f9045ada40e77c3ae2e0eb08873fcb23610b3f22faa4a14436accd2f7bc1"
+      },
       "xlog_wcoj": {
-        "compute_ms": 7,
-        "rows": 15789,
-        "wall_s": 0.39,
+        "compute_ms": 4,
+        "rows": 15166,
+        "wall_s": 0.41,
         "rc": 0,
         "err": null
       },
       "xlog_binary": {
-        "compute_ms": 9,
-        "rows": 15789,
-        "wall_s": 0.39,
+        "compute_ms": 8,
+        "rows": 15166,
+        "wall_s": 0.42,
         "rc": 0,
         "err": null
       },
       "souffle": {
-        "compute_s": 0.055,
-        "count": 15789,
-        "rc": 0
+        "compute_s": 0.02,
+        "count": 15166,
+        "rc": 0,
+        "err": null
       },
       "counts_match": true,
-      "wcoj_vs_binary": 1.29,
-      "souffle_over_wcoj": 7.86
+      "wcoj_vs_souffle_counts_match": true,
+      "binary_vs_souffle_counts_match": true,
+      "wcoj_vs_binary": 2.0,
+      "souffle_over_wcoj": 5.0,
+      "comparison_acceptable": true,
+      "detail": {
+        "xlog_wcoj": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_40000/triangle.xlog' --input 'edge={workdir}/tri_40000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_40000/xlog_wcoj-1' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 6.71,
+              "process_max_rss_kb": 310212,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 4,
+              "engine_peak_mb": 7,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 15166,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 15166,
+              "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e"
+            },
+            {
+              "repetition": 2,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_40000/triangle.xlog' --input 'edge={workdir}/tri_40000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_40000/xlog_wcoj-2' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 0.41,
+              "process_max_rss_kb": 137244,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 4,
+              "engine_peak_mb": 7,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 15166,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 15166,
+              "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e"
+            },
+            {
+              "repetition": 3,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_40000/triangle.xlog' --input 'edge={workdir}/tri_40000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_40000/xlog_wcoj-3' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 0.41,
+              "process_max_rss_kb": 137276,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 4,
+              "engine_peak_mb": 7,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 15166,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 15166,
+              "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e"
+            }
+          ],
+          "wall_s": 0.41,
+          "process_max_rss_kb": 310212,
+          "rows": 15166,
+          "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e",
+          "compute_ms": 4,
+          "peak_mb": 7,
+          "budget_mb": 65536,
+          "wcoj_dispatch_total": 1
+        },
+        "xlog_binary": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_40000/triangle.xlog' --input 'edge={workdir}/tri_40000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_40000/xlog_binary-1' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.43,
+              "process_max_rss_kb": 137220,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 8,
+              "engine_peak_mb": 44,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 15166,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 15166,
+              "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e"
+            },
+            {
+              "repetition": 2,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_40000/triangle.xlog' --input 'edge={workdir}/tri_40000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_40000/xlog_binary-2' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.42,
+              "process_max_rss_kb": 137252,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 8,
+              "engine_peak_mb": 44,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 15166,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 15166,
+              "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e"
+            },
+            {
+              "repetition": 3,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_40000/triangle.xlog' --input 'edge={workdir}/tri_40000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_40000/xlog_binary-3' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.4,
+              "process_max_rss_kb": 137256,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 8,
+              "engine_peak_mb": 44,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 15166,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 15166,
+              "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e"
+            }
+          ],
+          "wall_s": 0.42,
+          "process_max_rss_kb": 137256,
+          "rows": 15166,
+          "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e",
+          "compute_ms": 8,
+          "peak_mb": 44,
+          "budget_mb": 65536,
+          "wcoj_dispatch_total": 0
+        },
+        "souffle": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_40000/triangle_souffle' --jobs=54 -F '{workdir}/tri_40000' -D '{workdir}/tri_40000/souffle-1'",
+              "returncode": 0,
+              "wall_s": 0.02,
+              "process_max_rss_kb": 4108,
+              "rows": 15166,
+              "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e"
+            },
+            {
+              "repetition": 2,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_40000/triangle_souffle' --jobs=54 -F '{workdir}/tri_40000' -D '{workdir}/tri_40000/souffle-2'",
+              "returncode": 0,
+              "wall_s": 0.02,
+              "process_max_rss_kb": 4096,
+              "rows": 15166,
+              "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e"
+            },
+            {
+              "repetition": 3,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_40000/triangle_souffle' --jobs=54 -F '{workdir}/tri_40000' -D '{workdir}/tri_40000/souffle-3'",
+              "returncode": 0,
+              "wall_s": 0.02,
+              "process_max_rss_kb": 4108,
+              "rows": 15166,
+              "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e"
+            }
+          ],
+          "wall_s": 0.02,
+          "process_max_rss_kb": 4108,
+          "rows": 15166,
+          "relation_sha256": "764be6c479e426e6b27d0b2152e47304a956d4b135176657a5b51882a6deb66e"
+        },
+        "souffle_compile": {
+          "command": "/usr/bin/souffle --jobs=54 '--dl-program={workdir}/tri_40000/triangle_souffle' '{workdir}/tri_40000/triangle.dl'",
+          "returncode": 0,
+          "wall_s": 8.41,
+          "process_max_rss_kb": 448576,
+          "executable_sha256": "b95d224b8c6532e71c2b45c9a2613c688cbdd7616f51d6c3d9dacba97283332a"
+        }
+      }
     },
     {
       "case": "tri_100000",
       "edges": 100000,
+      "generator": {
+        "hubs": 40,
+        "nodes": 4040,
+        "nodes_per_hub": 101,
+        "requested_hub_edge_fraction": 0.25,
+        "realized_hub_incident_fraction": 0.24476,
+        "seed": 60360944,
+        "unique_directed_edges": 100000
+      },
+      "input": {
+        "arrow_sha256": "edc0c1db7985500876f814cd3fe0b51df7e914202f9fb91e8579132bbddfc819",
+        "souffle_facts_sha256": "e2deb7e7746ac3be3d16ebd503a5c0938b30666794f2eaadf23a616d0bf8d8a8",
+        "edge_relation_sha256": "e2deb7e7746ac3be3d16ebd503a5c0938b30666794f2eaadf23a616d0bf8d8a8"
+      },
       "xlog_wcoj": {
-        "compute_ms": 22,
-        "rows": 74318,
-        "wall_s": 0.55,
+        "compute_ms": 11,
+        "rows": 76770,
+        "wall_s": 0.42,
         "rc": 0,
         "err": null
       },
       "xlog_binary": {
-        "compute_ms": 25,
-        "rows": 74318,
-        "wall_s": 0.6,
+        "compute_ms": 26,
+        "rows": 76770,
+        "wall_s": 0.44,
         "rc": 0,
         "err": null
       },
       "souffle": {
-        "compute_s": 0.155,
-        "count": 74318,
-        "rc": 0
+        "compute_s": 0.04,
+        "count": 76770,
+        "rc": 0,
+        "err": null
       },
       "counts_match": true,
-      "wcoj_vs_binary": 1.14,
-      "souffle_over_wcoj": 7.05
+      "wcoj_vs_souffle_counts_match": true,
+      "binary_vs_souffle_counts_match": true,
+      "wcoj_vs_binary": 2.36,
+      "souffle_over_wcoj": 3.64,
+      "comparison_acceptable": true,
+      "detail": {
+        "xlog_wcoj": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_100000/triangle.xlog' --input 'edge={workdir}/tri_100000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_100000/xlog_wcoj-1' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 0.46,
+              "process_max_rss_kb": 139284,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 11,
+              "engine_peak_mb": 30,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 76770,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 76770,
+              "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31"
+            },
+            {
+              "repetition": 2,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_100000/triangle.xlog' --input 'edge={workdir}/tri_100000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_100000/xlog_wcoj-2' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 0.42,
+              "process_max_rss_kb": 141324,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 11,
+              "engine_peak_mb": 30,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 76770,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 76770,
+              "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31"
+            },
+            {
+              "repetition": 3,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_100000/triangle.xlog' --input 'edge={workdir}/tri_100000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_100000/xlog_wcoj-3' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 0.4,
+              "process_max_rss_kb": 139296,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 11,
+              "engine_peak_mb": 30,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 76770,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 76770,
+              "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31"
+            }
+          ],
+          "wall_s": 0.42,
+          "process_max_rss_kb": 141324,
+          "rows": 76770,
+          "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31",
+          "compute_ms": 11,
+          "peak_mb": 30,
+          "budget_mb": 65536,
+          "wcoj_dispatch_total": 1
+        },
+        "xlog_binary": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_100000/triangle.xlog' --input 'edge={workdir}/tri_100000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_100000/xlog_binary-1' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.44,
+              "process_max_rss_kb": 139292,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 26,
+              "engine_peak_mb": 183,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 76770,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 76770,
+              "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31"
+            },
+            {
+              "repetition": 2,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_100000/triangle.xlog' --input 'edge={workdir}/tri_100000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_100000/xlog_binary-2' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.44,
+              "process_max_rss_kb": 139284,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 26,
+              "engine_peak_mb": 183,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 76770,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 76770,
+              "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31"
+            },
+            {
+              "repetition": 3,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_100000/triangle.xlog' --input 'edge={workdir}/tri_100000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_100000/xlog_binary-3' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.43,
+              "process_max_rss_kb": 139308,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 26,
+              "engine_peak_mb": 183,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 76770,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 76770,
+              "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31"
+            }
+          ],
+          "wall_s": 0.44,
+          "process_max_rss_kb": 139308,
+          "rows": 76770,
+          "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31",
+          "compute_ms": 26,
+          "peak_mb": 183,
+          "budget_mb": 65536,
+          "wcoj_dispatch_total": 0
+        },
+        "souffle": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_100000/triangle_souffle' --jobs=54 -F '{workdir}/tri_100000' -D '{workdir}/tri_100000/souffle-1'",
+              "returncode": 0,
+              "wall_s": 0.04,
+              "process_max_rss_kb": 6144,
+              "rows": 76770,
+              "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31"
+            },
+            {
+              "repetition": 2,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_100000/triangle_souffle' --jobs=54 -F '{workdir}/tri_100000' -D '{workdir}/tri_100000/souffle-2'",
+              "returncode": 0,
+              "wall_s": 0.04,
+              "process_max_rss_kb": 6148,
+              "rows": 76770,
+              "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31"
+            },
+            {
+              "repetition": 3,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_100000/triangle_souffle' --jobs=54 -F '{workdir}/tri_100000' -D '{workdir}/tri_100000/souffle-3'",
+              "returncode": 0,
+              "wall_s": 0.04,
+              "process_max_rss_kb": 6156,
+              "rows": 76770,
+              "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31"
+            }
+          ],
+          "wall_s": 0.04,
+          "process_max_rss_kb": 6156,
+          "rows": 76770,
+          "relation_sha256": "d3ec26fe9dc3a94c44d84c4dd8650c4d8d0c34979d740067ca453caba3eaca31"
+        },
+        "souffle_compile": {
+          "command": "/usr/bin/souffle --jobs=54 '--dl-program={workdir}/tri_100000/triangle_souffle' '{workdir}/tri_100000/triangle.dl'",
+          "returncode": 0,
+          "wall_s": 8.3,
+          "process_max_rss_kb": 446520,
+          "executable_sha256": "a871b97b42b1b338e3d4b23bdb1aec3a1ae8a05abaf1c66b63a34ff5d64b18db"
+        }
+      }
     },
     {
       "case": "tri_200000",
       "edges": 200000,
+      "generator": {
+        "hubs": 50,
+        "nodes": 5050,
+        "nodes_per_hub": 101,
+        "requested_hub_edge_fraction": 0.25,
+        "realized_hub_incident_fraction": 0.240495,
+        "seed": 70460974,
+        "unique_directed_edges": 200000
+      },
+      "input": {
+        "arrow_sha256": "9df77e503391b8a5fb7644fe5e90eb84dc6d1d81706a80616eab081c73832176",
+        "souffle_facts_sha256": "720a8e01cf4b58634c79d5eb57081a22c4031069853de770fdf30101e9caf6fb",
+        "edge_relation_sha256": "720a8e01cf4b58634c79d5eb57081a22c4031069853de770fdf30101e9caf6fb"
+      },
       "xlog_wcoj": {
-        "compute_ms": 24,
-        "rows": 303611,
-        "wall_s": 1.36,
+        "compute_ms": 12,
+        "rows": 298247,
+        "wall_s": 0.43,
         "rc": 0,
         "err": null
       },
       "xlog_binary": {
-        "skipped": "binary blowup"
+        "compute_ms": 44,
+        "rows": 298247,
+        "wall_s": 0.47,
+        "rc": 0,
+        "err": null
       },
       "souffle": {
-        "compute_s": 0.443,
-        "count": 303611,
-        "rc": 0
+        "compute_s": 0.1,
+        "count": 298247,
+        "rc": 0,
+        "err": null
       },
       "counts_match": true,
-      "souffle_over_wcoj": 18.46
+      "wcoj_vs_souffle_counts_match": true,
+      "binary_vs_souffle_counts_match": true,
+      "wcoj_vs_binary": 3.67,
+      "souffle_over_wcoj": 8.33,
+      "comparison_acceptable": true,
+      "detail": {
+        "xlog_wcoj": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_200000/triangle.xlog' --input 'edge={workdir}/tri_200000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_200000/xlog_wcoj-1' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 0.47,
+              "process_max_rss_kb": 149528,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 12,
+              "engine_peak_mb": 91,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 298247,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 298247,
+              "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9"
+            },
+            {
+              "repetition": 2,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_200000/triangle.xlog' --input 'edge={workdir}/tri_200000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_200000/xlog_wcoj-2' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 0.41,
+              "process_max_rss_kb": 149516,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 12,
+              "engine_peak_mb": 91,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 298247,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 298247,
+              "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9"
+            },
+            {
+              "repetition": 3,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_200000/triangle.xlog' --input 'edge={workdir}/tri_200000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_200000/xlog_wcoj-3' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 0.43,
+              "process_max_rss_kb": 149536,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 12,
+              "engine_peak_mb": 91,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 298247,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 298247,
+              "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9"
+            }
+          ],
+          "wall_s": 0.43,
+          "process_max_rss_kb": 149536,
+          "rows": 298247,
+          "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9",
+          "compute_ms": 12,
+          "peak_mb": 91,
+          "budget_mb": 65536,
+          "wcoj_dispatch_total": 1
+        },
+        "xlog_binary": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_200000/triangle.xlog' --input 'edge={workdir}/tri_200000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_200000/xlog_binary-1' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.47,
+              "process_max_rss_kb": 149568,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 44,
+              "engine_peak_mb": 569,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 298247,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 298247,
+              "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9"
+            },
+            {
+              "repetition": 2,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_200000/triangle.xlog' --input 'edge={workdir}/tri_200000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_200000/xlog_binary-2' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.47,
+              "process_max_rss_kb": 149508,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 44,
+              "engine_peak_mb": 569,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 298247,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 298247,
+              "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9"
+            },
+            {
+              "repetition": 3,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_200000/triangle.xlog' --input 'edge={workdir}/tri_200000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_200000/xlog_binary-3' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.45,
+              "process_max_rss_kb": 149520,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 44,
+              "engine_peak_mb": 569,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 298247,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 298247,
+              "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9"
+            }
+          ],
+          "wall_s": 0.47,
+          "process_max_rss_kb": 149568,
+          "rows": 298247,
+          "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9",
+          "compute_ms": 44,
+          "peak_mb": 569,
+          "budget_mb": 65536,
+          "wcoj_dispatch_total": 0
+        },
+        "souffle": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_200000/triangle_souffle' --jobs=54 -F '{workdir}/tri_200000' -D '{workdir}/tri_200000/souffle-1'",
+              "returncode": 0,
+              "wall_s": 0.1,
+              "process_max_rss_kb": 8192,
+              "rows": 298247,
+              "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9"
+            },
+            {
+              "repetition": 2,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_200000/triangle_souffle' --jobs=54 -F '{workdir}/tri_200000' -D '{workdir}/tri_200000/souffle-2'",
+              "returncode": 0,
+              "wall_s": 0.09,
+              "process_max_rss_kb": 8192,
+              "rows": 298247,
+              "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9"
+            },
+            {
+              "repetition": 3,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_200000/triangle_souffle' --jobs=54 -F '{workdir}/tri_200000' -D '{workdir}/tri_200000/souffle-3'",
+              "returncode": 0,
+              "wall_s": 0.1,
+              "process_max_rss_kb": 8192,
+              "rows": 298247,
+              "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9"
+            }
+          ],
+          "wall_s": 0.1,
+          "process_max_rss_kb": 8192,
+          "rows": 298247,
+          "relation_sha256": "41f2b8c3c1b1a64cde1c19a543d4dd2e1704d2689ee4999e7a3d671fc65b09c9"
+        },
+        "souffle_compile": {
+          "command": "/usr/bin/souffle --jobs=54 '--dl-program={workdir}/tri_200000/triangle_souffle' '{workdir}/tri_200000/triangle.dl'",
+          "returncode": 0,
+          "wall_s": 8.35,
+          "process_max_rss_kb": 448588,
+          "executable_sha256": "4b3fc9888a4dc5654ab7d04bbcb0a11c8c13cb52f926f54b5ba9795e3b2c5a6b"
+        }
+      }
     },
     {
       "case": "tri_400000",
       "edges": 400000,
+      "generator": {
+        "hubs": 62,
+        "nodes": 6262,
+        "nodes_per_hub": 101,
+        "requested_hub_edge_fraction": 0.25,
+        "realized_hub_incident_fraction": 0.23829,
+        "seed": 82661010,
+        "unique_directed_edges": 400000
+      },
+      "input": {
+        "arrow_sha256": "6a26d38788e53316df5e9b02c337e048c17d1051648de33671ac37ede0d29bf7",
+        "souffle_facts_sha256": "264a0916e375bd7095a865cb3d68ba2b0200558df29de8882dcfc8bae6821821",
+        "edge_relation_sha256": "264a0916e375bd7095a865cb3d68ba2b0200558df29de8882dcfc8bae6821821"
+      },
       "xlog_wcoj": {
-        "compute_ms": 36,
-        "rows": 1268731,
-        "wall_s": 4.48,
+        "compute_ms": 20,
+        "rows": 1202029,
+        "wall_s": 0.49,
         "rc": 0,
         "err": null
       },
       "xlog_binary": {
-        "skipped": "binary blowup"
+        "compute_ms": 99,
+        "rows": 1202029,
+        "wall_s": 0.56,
+        "rc": 0,
+        "err": null
       },
       "souffle": {
-        "compute_s": 1.363,
-        "count": 1268731,
-        "rc": 0
+        "compute_s": 0.27,
+        "count": 1202029,
+        "rc": 0,
+        "err": null
       },
       "counts_match": true,
-      "souffle_over_wcoj": 37.86
+      "wcoj_vs_souffle_counts_match": true,
+      "binary_vs_souffle_counts_match": true,
+      "wcoj_vs_binary": 4.95,
+      "souffle_over_wcoj": 13.5,
+      "comparison_acceptable": true,
+      "detail": {
+        "xlog_wcoj": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_400000/triangle.xlog' --input 'edge={workdir}/tri_400000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_400000/xlog_wcoj-1' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 0.49,
+              "process_max_rss_kb": 183928,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 20,
+              "engine_peak_mb": 287,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 1202029,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 1202029,
+              "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6"
+            },
+            {
+              "repetition": 2,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_400000/triangle.xlog' --input 'edge={workdir}/tri_400000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_400000/xlog_wcoj-2' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 0.48,
+              "process_max_rss_kb": 183656,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 19,
+              "engine_peak_mb": 287,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 1202029,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 1202029,
+              "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6"
+            },
+            {
+              "repetition": 3,
+              "arm": "xlog_wcoj",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_400000/triangle.xlog' --input 'edge={workdir}/tri_400000/edge.arrow' --wcoj --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_400000/xlog_wcoj-3' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "unset",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "unset",
+                "XLOG_DISABLE_FREE_JOIN": "unset",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "unset",
+                "XLOG_WCOJ_CHAIN_ENABLE": "unset"
+              },
+              "returncode": 0,
+              "wall_s": 0.49,
+              "process_max_rss_kb": 183568,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 0,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 0
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 1
+              },
+              "wcoj_dispatch_total": 1,
+              "engine_total_ms": 20,
+              "engine_peak_mb": 287,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 1202029,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 1202029,
+              "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6"
+            }
+          ],
+          "wall_s": 0.49,
+          "process_max_rss_kb": 183928,
+          "rows": 1202029,
+          "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6",
+          "compute_ms": 20,
+          "peak_mb": 287,
+          "budget_mb": 65536,
+          "wcoj_dispatch_total": 1
+        },
+        "xlog_binary": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_400000/triangle.xlog' --input 'edge={workdir}/tri_400000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_400000/xlog_binary-1' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.54,
+              "process_max_rss_kb": 184284,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 99,
+              "engine_peak_mb": 1807,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 1202029,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 1202029,
+              "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6"
+            },
+            {
+              "repetition": 2,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_400000/triangle.xlog' --input 'edge={workdir}/tri_400000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_400000/xlog_binary-2' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.57,
+              "process_max_rss_kb": 183616,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 99,
+              "engine_peak_mb": 1807,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 1202029,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 1202029,
+              "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6"
+            },
+            {
+              "repetition": 3,
+              "arm": "xlog_binary",
+              "command": "'{repo}/target/release/xlog' run '{workdir}/tri_400000/triangle.xlog' --input 'edge={workdir}/tri_400000/edge.arrow' --memory-mb 65536 --output arrow --output-dir '{workdir}/tri_400000/xlog_binary-3' --stats --stats-format json",
+              "env_overrides": {
+                "XLOG_USE_WCOJ_TRIANGLE_U32": "unset",
+                "XLOG_USE_WCOJ_4CYCLE": "unset",
+                "XLOG_DISABLE_WCOJ_TRIANGLE": "1",
+                "XLOG_DISABLE_WCOJ_GROUPBY_FUSION": "1",
+                "XLOG_DISABLE_FREE_JOIN": "1",
+                "XLOG_DISABLE_FACTORIZED_DELTA": "1",
+                "XLOG_WCOJ_CHAIN_ENABLE": "0"
+              },
+              "returncode": 0,
+              "wall_s": 0.56,
+              "process_max_rss_kb": 184592,
+              "wcoj_dispatch": {
+                "chain_fallback_filter_equivalents": 0,
+                "chain_fallback_scan_equivalents": 0,
+                "error_decline": 0,
+                "factorized_delta_dispatch": 0,
+                "fallback": {
+                  "chain": 0,
+                  "dedicated_multiway": 1,
+                  "factorized_delta": 0,
+                  "free_join": 0,
+                  "groupby_fusion": 0,
+                  "planned_hash": 0,
+                  "total": 1
+                },
+                "four_cycle_dispatch": 0,
+                "free_join_dispatch": 0,
+                "groupby_fusion_dispatch": 0,
+                "triangle_dispatch": 0
+              },
+              "wcoj_dispatch_total": 0,
+              "engine_total_ms": 114,
+              "engine_peak_mb": 1807,
+              "engine_budget_mb": 65536,
+              "engine_output_rows": 1202029,
+              "stats_output_rows_equals_query_rows": true,
+              "rows": 1202029,
+              "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6"
+            }
+          ],
+          "wall_s": 0.56,
+          "process_max_rss_kb": 184592,
+          "rows": 1202029,
+          "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6",
+          "compute_ms": 99,
+          "peak_mb": 1807,
+          "budget_mb": 65536,
+          "wcoj_dispatch_total": 0
+        },
+        "souffle": {
+          "complete": true,
+          "successful_repetitions": 3,
+          "requested_repetitions": 3,
+          "runs": [
+            {
+              "repetition": 1,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_400000/triangle_souffle' --jobs=54 -F '{workdir}/tri_400000' -D '{workdir}/tri_400000/souffle-1'",
+              "returncode": 0,
+              "wall_s": 0.26,
+              "process_max_rss_kb": 12288,
+              "rows": 1202029,
+              "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6"
+            },
+            {
+              "repetition": 2,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_400000/triangle_souffle' --jobs=54 -F '{workdir}/tri_400000' -D '{workdir}/tri_400000/souffle-2'",
+              "returncode": 0,
+              "wall_s": 0.27,
+              "process_max_rss_kb": 12288,
+              "rows": 1202029,
+              "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6"
+            },
+            {
+              "repetition": 3,
+              "arm": "souffle",
+              "command": "'{workdir}/tri_400000/triangle_souffle' --jobs=54 -F '{workdir}/tri_400000' -D '{workdir}/tri_400000/souffle-3'",
+              "returncode": 0,
+              "wall_s": 0.27,
+              "process_max_rss_kb": 12300,
+              "rows": 1202029,
+              "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6"
+            }
+          ],
+          "wall_s": 0.27,
+          "process_max_rss_kb": 12300,
+          "rows": 1202029,
+          "relation_sha256": "10f5d8d1b99f80b27813af53eca1caf10796dec6e2b3405fab6e4735b1cf2bb6"
+        },
+        "souffle_compile": {
+          "command": "/usr/bin/souffle --jobs=54 '--dl-program={workdir}/tri_400000/triangle_souffle' '{workdir}/tri_400000/triangle.dl'",
+          "returncode": 0,
+          "wall_s": 8.33,
+          "process_max_rss_kb": 449404,
+          "executable_sha256": "da3feebd9bf5a6eea863b7d72894f9c9eb24e23038ca2188fda6fbf5f2e0e86d"
+        }
+      }
+    }
+  ],
+  "merged_from": [
+    {
+      "case": "tri_40000",
+      "generated_at_utc": "2026-09-02T19:10:22.371675+00:00",
+      "argv": [
+        "paper/artifacts/head-to-head/runners/triangle_counting_moderate_skew_vs_souffle.py",
+        "--xlog-bin",
+        "target/release/xlog",
+        "--souffle-bin",
+        "/usr/bin/souffle",
+        "--nvcc-bin",
+        "/usr/local/cuda/bin/nvcc",
+        "--souffle-jobs",
+        "54",
+        "--memory-mb",
+        "65536",
+        "--repetitions",
+        "3",
+        "--timeout-s",
+        "3600",
+        "--case",
+        "tri_40000",
+        "--output",
+        "/workspace/results/50_moderate_skew_tri_40000.json"
+      ]
+    },
+    {
+      "case": "tri_100000",
+      "generated_at_utc": "2026-09-02T19:10:34.619651+00:00",
+      "argv": [
+        "paper/artifacts/head-to-head/runners/triangle_counting_moderate_skew_vs_souffle.py",
+        "--xlog-bin",
+        "target/release/xlog",
+        "--souffle-bin",
+        "/usr/bin/souffle",
+        "--nvcc-bin",
+        "/usr/local/cuda/bin/nvcc",
+        "--souffle-jobs",
+        "54",
+        "--memory-mb",
+        "65536",
+        "--repetitions",
+        "3",
+        "--timeout-s",
+        "3600",
+        "--case",
+        "tri_100000",
+        "--output",
+        "/workspace/results/50_moderate_skew_tri_100000.json"
+      ]
+    },
+    {
+      "case": "tri_200000",
+      "generated_at_utc": "2026-09-02T19:10:49.670006+00:00",
+      "argv": [
+        "paper/artifacts/head-to-head/runners/triangle_counting_moderate_skew_vs_souffle.py",
+        "--xlog-bin",
+        "target/release/xlog",
+        "--souffle-bin",
+        "/usr/bin/souffle",
+        "--nvcc-bin",
+        "/usr/local/cuda/bin/nvcc",
+        "--souffle-jobs",
+        "54",
+        "--memory-mb",
+        "65536",
+        "--repetitions",
+        "3",
+        "--timeout-s",
+        "3600",
+        "--case",
+        "tri_200000",
+        "--output",
+        "/workspace/results/50_moderate_skew_tri_200000.json"
+      ]
+    },
+    {
+      "case": "tri_400000",
+      "generated_at_utc": "2026-09-02T19:11:15.446599+00:00",
+      "argv": [
+        "paper/artifacts/head-to-head/runners/triangle_counting_moderate_skew_vs_souffle.py",
+        "--xlog-bin",
+        "target/release/xlog",
+        "--souffle-bin",
+        "/usr/bin/souffle",
+        "--nvcc-bin",
+        "/usr/local/cuda/bin/nvcc",
+        "--souffle-jobs",
+        "54",
+        "--memory-mb",
+        "65536",
+        "--repetitions",
+        "3",
+        "--timeout-s",
+        "3600",
+        "--case",
+        "tri_400000",
+        "--output",
+        "/workspace/results/50_moderate_skew_tri_400000.json"
+      ]
     }
   ]
 }

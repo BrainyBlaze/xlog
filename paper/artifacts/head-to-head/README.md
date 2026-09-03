@@ -1,121 +1,140 @@
 # Head-to-head and overhead-isolation artifacts
 
 Benchmark artifacts backing the head-to-head and overhead-isolation claims in
-`sections/10_evaluation.tex`. These were collected on **ephemeral cloud GPUs**
-(RunPod), separate from the single-system ablations in the rest of the
-Evaluation section, which run on the development RTX PRO 3000. Each artifact
-records its own hardware, protocol, and per-cell measurements; hardware is not
-mixed within a comparison.
+`sections/10_evaluation.tex`. All seven were re-measured on **ephemeral cloud
+GPUs** (RunPod) between 2026-09-01 and 2026-09-03, each by the committed runner
+next to it. Every artifact records its own hardware, protocol and per-cell
+measurements; hardware is not mixed within a comparison.
 
-| File | Comparison | Hardware | `comparison_acceptable` |
-|------|-----------|----------|--------------------------|
-| `mnist_addition_vs_scallop.json` | Neural: MNIST addition, xlog vs Scallop | RTX 3090 | **true** |
-| `exact_inference_vs_problog2.json` | Probabilistic: exact inference, xlog vs ProbLog2 | RTX 4090 | **true** |
-| `triangle_counting_vs_souffle.json` | Deterministic: fused WCOJ triangle counting vs Soufflé (skewed) | A40 pod; 7.65-core CPU quota | **true** |
-| `triangle_counting_moderate_skew_vs_souffle.json` | Deterministic: WCOJ vs binary vs Soufflé, moderate skew | RTX 4090 | **true** |
-| `residency_ablation.json` | xlog-only: forced host round-trip, single query | RTX 3090 | n/a (single-system) |
-| `residency_scale_ablation.json` | xlog-only: forced host round-trip vs handoff count, batched | RTX 3090 | n/a (single-system) |
-| `verify_overhead_isolation.json` | xlog-only: CDCL-verify vs D4-compile split | RTX 3090 | n/a (single-system) |
+| File | Comparison | Hardware | CPU quota | `comparison_acceptable` |
+|------|-----------|----------|-----------|--------------------------|
+| `mnist_addition_vs_scallop.json` | Neural: MNIST addition, xlog vs Scallop | L40S | 13.6 cores | **true** |
+| `exact_inference_vs_problog2.json` | Probabilistic: exact inference, xlog vs ProbLog2 | A100-SXM4 80GB | 13.6 cores | **true** |
+| `triangle_counting_vs_souffle.json` | Deterministic: fused WCOJ triangle counting vs Soufflé (heavy skew) | A100 80GB PCIe | 26.35 cores | **true** |
+| `triangle_counting_moderate_skew_vs_souffle.json` | Deterministic: WCOJ vs binary vs Soufflé, moderate skew | 2x L40S | 54.4 cores | **true** |
+| `residency_ablation.json` | xlog-only: forced host round-trip, single query | A100 80GB PCIe | 26.35 cores | n/a (single-system) |
+| `residency_scale_ablation.json` | xlog-only: forced host round-trip vs handoff count | A100 80GB PCIe | 26.35 cores | n/a (single-system) |
+| `verify_overhead_isolation.json` | xlog-only: CDCL-verify vs D4-compile split | A100 80GB PCIe | 26.35 cores | n/a (single-system) |
+
+The engine is the same build in all of them: the runners were added on top of
+`a2bafef0` and touch no file under `crates/`, so the differences between rows
+are hardware, recorded per artifact, and not product versions.
+
+**The CPU quota is part of the result, not a footnote.** It is what the Soufflé
+baseline gets, and it varies by which host RunPod hands out. The earlier
+published run gave Soufflé 7.65 cores; these give it 26.35 and 54.4.
 
 ## Protocol notes
 
-- **MNIST vs Scallop** — identical MNISTNet / data / metric / seeds. Two
-  protocols: the whitepaper 512-image/5-epoch setting (both near-chance,
-  under-trained) and a stronger 20k-image/5-epoch setting (both ~95%). Held-out
-  addition accuracy is measured on the 10k MNIST test set. 3 seeds at 20k.
+- **Triangle counting vs Soufflé** — fused-WCOJ count (A), enumerate-then-count
+  (B) and Soufflé count (C) on hub-skewed graphs, five sizes. All three arms
+  complete at every size and agree on the per-root counts, gated on the sha256
+  of the relation rather than on equal cardinality. Soufflé-over-fused is
+  `0.88x`, `1.96x`, `2.59x`, `3.88x`, `5.54x` from 150k to 1.2M edges — **at the
+  smallest size Soufflé is faster than xlog**, and the ratio only becomes a
+  speed-up from 300k edges on. What grows monotonically is the ratio itself, so
+  the defensible claim is the scaling, not any single cell. The memory split is
+  the wider gap: fused counting peaks at 85/204/359/618/1,033 MB of provider
+  allocations against 3,287/8,403/15,247/26,497/44,979 MB for the enumerate arm.
+- **Triangle counting, moderate skew** — the companion at a hub-edge fraction of
+  0.25 rather than 0.8. Fused WCOJ over xlog's own binary join is `2.00x`,
+  `2.36x`, `3.67x`, `4.95x` across 40k--400k edges. Note that the binary arm
+  **runs to completion at every size here**, including the two the previous
+  artifact recorded as `"skipped": "binary blowup"`; the WCOJ advantage in this
+  file is therefore measured against a baseline that finished, not inferred from
+  one that gave up.
 - **Exact inference vs ProbLog2** — 5 programs; correctness gate: query
   probabilities match the analytic answer within 1e-4 (both engines reach 0
-  error). Timing is full inference (compile + evaluate), median of 3.
-- **Triangle counting vs Soufflé** — fused-WCOJ count (A), enumerate-then-count
-  (B), and Soufflé count (C) on hub-skewed graphs. All three arms complete and
-  produce identical per-root counts at every size, so both
-  `core_comparison_acceptable` and `comparison_acceptable` are `true`. The
-  enumerate arm peaks at 3,287 MB, 8,403 MB and 15,247 MB of provider
-  allocations, while fused counting uses 85 MB, 204 MB and 359 MB.
-  Soufflé-to-fused-XLOG execution-time ratios are 2.37x, 7.95x and 9.00x on
-  these three heavy-skew cases; the separate moderate-skew artifact remains the
-  lower-bound companion and does not support a universal Datalog speed claim.
-- **Residency ablation** — same pipeline with vs without
+  error). Timing is full inference (compile + evaluate), median of 3, both
+  engines in-process. xlog is slower than ProbLog2 on these tiny programs, as it
+  was in the previous artifact: the comparison is about exactness, not speed.
+- **MNIST vs Scallop** — identical MNISTNet, data, metric and seeds, with the
+  two harnesses driven on separate interpreters (`--scallop-python`), because
+  the published `scallopy` wheel is cp310-only. Two protocols: the whitepaper
+  512-image/5-epoch setting (both near-chance, under-trained) and a stronger
+  20k-image/5-epoch setting (both ~95%). **Accuracy is reportable; the timing
+  columns are not, yet** — see `paper_usage` in the artifact. Scallop's steady
+  epoch is not monotone in CPU cores (31.79 s at 13.6 cores, 54.99 s at 27.2 on
+  the same card and the same wheel), so the epoch ratio moves with the host
+  rather than with either engine.
+- **Residency ablation** — same pipeline with and without
   `XLOG_FORCE_HOST_ROUNDTRIP`; the on-minus-off per-iteration delta is the
   transfer cost residency eliminates. The single-query file measures 2 handoffs
-  (near-noise). The `_scale` file sweeps the batched path (2--512 handoffs per
-  step) and is the one to cite: per-handoff round-trip is ~40--56 us; the
-  round-trip's share of a step is within noise below ~16 handoffs
-  (queries=4 even measures -8.9%), reaches ~10% at the standard batch-64
-  MNIST step (7.2 ms of 72 ms), and measures 8.6% at queries=256 — the
-  batch-64 point is the peak share in this sweep, not a monotone climb. `runners/residency_sweep.py`
-  is the single-query runner; the scale runner is `runners/residency_scale.py`.
+  and reports 2.7% and 2.5% for 4 and 10 labels. The `_scale` file sweeps the
+  batched path (2--512 handoffs) and is the one to cite: per-handoff round-trip
+  is 61--176 us, and the round-trip's share of a step climbs from 2.7% at one
+  query to 16.1% at 64 and 15.5% at 256. The earlier artifact's negative cells
+  (-8.9%, -257 us per handoff) do not appear in this run.
 - **Verify-overhead isolation** — `program.warmup_breakdown()` under
   `XLOG_WARMUP_PROFILE=1` splits the cold compile into D4-compile and on-GPU
-  CDCL equivalence-verify.
-- **Triangle counting, moderate skew** — the companion to the skewed run: on
-  moderate hub skew the GPU binary join does not blow up, so fused WCOJ is only
-  `1.1`--`1.5x` over xlog's own binary join (both correct vs Soufflé). This is
-  the honest lower end of the WCOJ range; the memory win appears only under
-  heavy skew.
+  CDCL equivalence-verify. Verify is 98.8--99.4% of the cold compile across
+  n=5..40, and `d4_compile_ms` is non-zero at every point, unlike the earlier
+  record. `n >= 50` still exceeds a CUDA grid-dimension limit on this CNF and is
+  out of range; that limit was reproduced on this run rather than carried over.
+
+## A note on file shape
+
+`residency_ablation.json`, `residency_scale_ablation.json` and
+`verify_overhead_isolation.json` used to be a bare list of numbers with no
+hardware, commit or date. They are now objects with a `provenance` block and the
+same rows under `results`. Nothing parses these files programmatically; the
+change exists so that a reader can tell what machine produced a row.
 
 ## Reproduction
 
-`runners/residency_sweep.py` and `runners/verify_sweep.py` are the exact
-scripts for the two xlog-only isolations (run with `python -u` on a
-CUDA-enabled `pyxlog` build; the residency script needs `torch`). Every
-head-to-head comparison now has a committed runner:
-`runners/triangle_counting_vs_souffle.py`,
-`runners/triangle_counting_moderate_skew_vs_souffle.py`,
-`runners/exact_inference_vs_problog2.py` and
-`runners/mnist_addition_vs_scallop.py`.
+Every comparison in this directory now has a committed runner, and **the numbers
+in these files were produced by those runners** — that was not true of the
+previous set, which came from ephemeral on-pod scripts that were never
+committed. The runners refuse a dirty checkout, carry `--self-test`, and record
+the commit, input and binary hashes, normalized commands, software and hardware
+versions, per-repetition failures and the correctness gates.
 
-The published numbers in the last three files were **not** produced by those
-runners — they came from ephemeral on-pod scripts that were never committed, so
-the runners reconstruct the protocol from the artifact and from the committed
-harnesses rather than reproduce the original invocation. Each one records what
-it had to choose, and every one of them refuses a dirty checkout and carries
-`--self-test`. Two consequences worth stating plainly:
+- `runners/triangle_counting_vs_souffle.py`
+- `runners/triangle_counting_moderate_skew_vs_souffle.py`
+- `runners/exact_inference_vs_problog2.py`
+- `runners/mnist_addition_vs_scallop.py`
+- `runners/residency_sweep.py`, `runners/residency_scale.py`,
+  `runners/verify_sweep.py` for the three xlog-only isolations (run with
+  `python -u` on a CUDA-enabled `pyxlog` build; the residency scripts need
+  `torch`).
 
-- the moderate-skew generator parameters are **not** recorded in the published
-  artifact — only the edge counts — so its runner writes the hub fraction it
-  used, and a re-run is a new measurement of the same class rather than a
-  repeat of the old one;
-- the MNIST seeds are likewise unrecorded; the runner defaults to the
-  repository's `DEFAULT_SEEDS`, which are the seeds the committed Scallop
-  baseline results were produced with.
+Two limits of that reconstruction are worth stating plainly, because they mean a
+re-run is not always a repeat:
 
-- **Exact vs ProbLog2** — `pyxlog.Program.compile(src)` on the five programs
-  (a conditioned wet/sprinkler net and `reach_chain_{5,10,15,20}`), timed
-  end-to-end (compile+evaluate), vs `problog` on the matched programs; gate:
-  probabilities within `1e-4` of the analytic answer.
-- **MNIST addition vs Scallop** — identical MNISTNet, batch 64, lr 1e-3;
-  `pyxlog` neural predicate `nn(net,[X],Y,[0..9])::digit(X,Y)` +
-  `addition(A,B,S):-digit(A,X),digit(B,Y),S is X+Y` vs Scallop
-  `difftopbottomkclauses` (k=3); held-out addition accuracy on the 10k MNIST
-  test. `runners/mnist_addition_vs_scallop.py` drives both committed harnesses
-  — `examples/neural/01_minimal/train.py` and
-  `examples/neural/baseline/scallop/mnist_addition.py` — once per (protocol,
-  seed, side) and aggregates. It records `epoch_timing_source`: when the
-  training history carries no per-epoch times, `train.py` divides the total
-  evenly, and the first-epoch / steady-epoch split is then an approximation
-  rather than a measurement.
-- **Triangle counting vs Soufflé** — build the release CLI, install PyArrow
-  and Soufflé, then run:
+- the **moderate-skew generator parameters** were never recorded in the
+  published artifact — only the edge counts — so its runner writes the hub
+  fraction it used (0.25) and this file is a new measurement of the same class
+  rather than a repeat of the old one. The triangle counts differ from the
+  earlier artifact for that reason and not because the engine changed;
+- the **MNIST seeds** were likewise unrecorded; the runner uses the repository's
+  `DEFAULT_SEEDS`, which are the seeds the committed Scallop baseline results
+  were produced with.
 
-  ```bash
-  cargo build --release --locked -p xlog-cli
-  python -u paper/artifacts/head-to-head/runners/triangle_counting_vs_souffle.py \
-    --xlog-bin target/release/xlog \
-    --souffle-bin souffle \
-    --nvcc-bin /usr/local/cuda/bin/nvcc \
-    --souffle-jobs 8 \
-    --output paper/artifacts/head-to-head/triangle_counting_vs_souffle.json
-  ```
+Triangle counting, end to end:
 
-  The runner refuses a dirty checkout by default. It generates the skewed graph
-  once per case, writes the identical relation to Arrow IPC and Soufflé facts,
-  compiles one standalone Soufflé executable per case, and then runs fused WCOJ,
-  enumerate-then-count, and that executable three times. One-time native builds
-  are excluded from execution medians; each Soufflé compile is recorded
-  separately. The published run used eight Soufflé jobs on a pod whose cgroup
-  quota was 7.65 CPU cores. The artifact also records the exact commit, runner
-  and input hashes, normalized commands, software and hardware versions, process
-  RSS, XLOG's provider allocation high-water, WCOJ dispatch counters,
-  per-repetition failures, and separate fused/Soufflé and all-arm correctness
-  gates. No failed arm is replaced with a different execution path.
+```bash
+cargo build --release --locked -p xlog-cli
+python -u paper/artifacts/head-to-head/runners/triangle_counting_vs_souffle.py \
+  --xlog-bin target/release/xlog \
+  --souffle-bin "$(command -v souffle)" \
+  --nvcc-bin /usr/local/cuda/bin/nvcc \
+  --souffle-jobs "$(nproc)" \
+  --memory-mb 65536 \
+  --output paper/artifacts/head-to-head/triangle_counting_vs_souffle.json
+```
+
+Pass the machine's real core count to `--souffle-jobs`; a constant either
+starves the baseline or oversubscribes it. The runner generates the skewed graph
+once per case, writes the identical relation to Arrow IPC and to Soufflé facts,
+compiles one standalone Soufflé executable per case, and runs each arm three
+times. One-time native builds are excluded from execution medians and each
+Soufflé compile is recorded separately. No failed arm is replaced with a
+different execution path.
+
+MNIST needs the baseline's own wheel rather than a source build: `scallopy`
+0.2.4 does not compile against a current Rust toolchain, and the published cp310
+wheel is the supported way in. Install it into a Python 3.10 of its own and
+point the runner at that interpreter with `--scallop-python`; the xlog arm stays
+on the interpreter that has `pyxlog`. Do not pass `--data-dir` unless both arms
+get the same root — its default is already the directory the Scallop harness
+reads.
