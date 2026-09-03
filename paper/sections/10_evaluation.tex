@@ -1,10 +1,10 @@
 \section{Evaluation}\label{sec:eval}
 
-This section reports measurements for xlog's deterministic, probabilistic, and neural-symbolic subsystems. The subsystem measurements in \Cref{sec:wcoj-eval,sec:cache-eval,sec:runtime-eval} are \emph{single-system ablations of xlog against its own baselines} on development hardware. \Cref{sec:h2h} then adds controlled head-to-head comparisons against external engines (Scallop, ProbLog2, Soufflé), \Cref{sec:ec-eval} tabulates the Event-Calculus rule-induction runs of \Cref{sec:ecinduction} beside the figures published for the same benchmark and states why the maritime runs of \Cref{sec:maritime} are not tabulated beside theirs, and \Cref{sec:overhead} isolates xlog's two design costs, verification and residency, from ordinary GPU acceleration. \Cref{sec:noquant} describes three further runtime capabilities for which no timing is claimed.
+This section reports measurements for xlog's deterministic, probabilistic, and neural-symbolic subsystems. The subsystem measurements in \Cref{sec:wcoj-eval,sec:cache-eval,sec:runtime-eval} are \emph{single-system ablations of xlog against its own baselines}: the first two on development hardware, the runtime-optimization pair on a cloud GPU that the artifact names. \Cref{sec:h2h} then adds controlled head-to-head comparisons against external engines (Scallop, ProbLog2, Soufflé), \Cref{sec:ec-eval} tabulates the Event-Calculus rule-induction runs of \Cref{sec:ecinduction} beside the figures published for the same benchmark and states why the maritime runs of \Cref{sec:maritime} are not tabulated beside theirs, and \Cref{sec:overhead} isolates xlog's two design costs, verification and residency, from ordinary GPU acceleration. \Cref{sec:noquant} describes three further runtime capabilities for which no timing is claimed.
 
 \subsection{Methodology}
 
-The subsystem ablations were collected on an NVIDIA RTX PRO 3000 (Blackwell, 12\,GB VRAM, compute capability 12.0). The head-to-head comparisons of \Cref{sec:h2h} and the overhead isolations of \Cref{sec:overhead} ran on cloud GPUs, as stated with each, and the neural Event-Calculus runs of \Cref{sec:ec-eval} on an NVIDIA A40. The relational searches of \Cref{sec:ec-eval} and \Cref{sec:maritime} are deterministic CPU procedures whose results do not depend on the host; the weight trainings beside them run on CPU as well. Rust crates are built in release mode; CUDA modules are staged cubin-first with PTX fallback and explicit JIT warm-up; Python components use \texttt{pyxlog} with CUDA-enabled PyTorch. The benchmark harness uses Criterion.rs with the settings in \Cref{tab:stat-protocol}, and GPU measurements include warm-up to amortize kernel-module loading and CUDA context setup.
+The subsystem ablations were collected on an NVIDIA RTX PRO 3000 (Blackwell, 12\,GB VRAM, compute capability 12.0). The head-to-head comparisons of \Cref{sec:h2h}, the overhead isolations of \Cref{sec:overhead} and the runtime-optimization ablations of \Cref{sec:runtime-eval} ran on cloud GPUs, as stated with each, and the neural Event-Calculus runs of \Cref{sec:ec-eval} on an NVIDIA A40. Each cloud artifact records its own device, driver and CPU quota; where a number here differs from an earlier version of the same artifact, that is the machine and not the engine, which is one build throughout. The relational searches of \Cref{sec:ec-eval} and \Cref{sec:maritime} are deterministic CPU procedures whose results do not depend on the host; the weight trainings beside them run on CPU as well. Rust crates are built in release mode; CUDA modules are staged cubin-first with PTX fallback and explicit JIT warm-up; Python components use \texttt{pyxlog} with CUDA-enabled PyTorch. The benchmark harness uses Criterion.rs with the settings in \Cref{tab:stat-protocol}, and GPU measurements include warm-up to amortize kernel-module loading and CUDA context setup.
 
 Per-run measurement data is distributed with the paper for the head-to-head comparisons and overhead isolations, the circuit-cache ablation, the runtime-optimization ablations of \Cref{sec:runtime-eval}, and every rule-induction run of \Cref{sec:ecinduction,sec:maritime}. Each other figure below is stated together with the fixture, protocol and aggregation that produced it.
 
@@ -95,7 +95,7 @@ The ablation is a separate experiment from the full run: its uncached arm recomp
 
 \subsection{Head-to-head comparisons}\label{sec:h2h}
 
-\Cref{tab:h2h} reports controlled comparisons against external engines, one per reasoning mode, on cloud GPUs (RTX 3090/4090), with matched programs, data and metrics. xlog wins where its GPU-resident, bounded-memory design is the point, and does not where a mature CPU compiler is already fast enough on small inputs.
+\Cref{tab:h2h} reports controlled comparisons against external engines, one per reasoning mode, on cloud GPUs (A100 80GB and L40S), with matched programs, data and metrics. Each artifact records the pod's CPU quota alongside its GPU, because that quota is what the CPU baselines are given: $26.35$ cores for Soufflé here, against $7.65$ in the previous measurement of the same comparison. xlog wins where its GPU-resident, bounded-memory design is the point, and does not where a mature CPU compiler is already fast enough on small inputs.
 
 \begin{table*}[htbp]
   \centering
@@ -108,30 +108,30 @@ The ablation is a separate experiment from the full run: its uncached arm recomp
     \midrule
     Neural: MNIST addition; 20\,000 training images, 5 epochs, 3 seeds, held-out on the 10k test set
       & Scallop
-      & acc $0.955 \pm 0.003$; steady epoch $8.71 \pm 0.09$\,s; $108.5$\,s over 5 epochs
-      & acc $0.950 \pm 0.006$; steady epoch $24.35 \pm 0.51$\,s; $122.7$\,s over 5 epochs
-      & $\mathbf{2.80\times}$ faster per epoch \\
+      & acc $0.9561 \pm 0.0008$
+      & acc $0.9468 \pm 0.0104$
+      & accuracy parity; no timing claim \\
     \addlinespace
     Probabilistic: exact inference on five small programs
       & ProbLog2
-      & $0$ error; per query flat at ${\approx}0.25$\,s
-      & $0$ error; per query $0.014$--$0.028$\,s
-      & $9$--$19\times$ \emph{slower} \\
+      & $0$ error; per query flat at $0.79$--$0.87$\,s
+      & $0$ error; per query $0.0085$--$0.0186$\,s
+      & $45$--$100\times$ \emph{slower} \\
     \addlinespace
-    Deterministic: triangle counting on hub-skewed graphs of $3.65$M, $7.51$M and $9.39$M triangles
-      & Soufflé (standalone compiled mode, 8 jobs)
-      & counts match at every size; $0.43$, $0.37$ and $0.45$\,s; peak device allocations $85$, $204$ and $359$\,MB
-      & $1.02$, $2.94$ and $4.05$\,s; one-time per-case compilation recorded separately
-      & Soufflé/xlog: $\mathbf{2.37\times}$, $\mathbf{7.95\times}$, $\mathbf{9.00\times}$ \\
+    Deterministic: triangle counting on hub-skewed graphs of $3.65$M to $17.84$M triangles
+      & Soufflé (standalone compiled mode, 26 jobs)
+      & counts match at every size; $0.58$, $0.57$, $0.66$, $0.64$ and $0.68$\,s; peak device allocations $85$ to $1{,}033$\,MB
+      & $0.51$, $1.12$, $1.71$, $2.48$ and $3.77$\,s; one-time per-case compilation recorded separately
+      & Soufflé/xlog: $0.88\times$, $1.96\times$, $2.59\times$, $3.88\times$, $\mathbf{5.54\times}$ \\
     \bottomrule
   \end{tabularx}
 \end{table*}
 
-\textbf{Neural-symbolic: MNIST addition vs.\ Scallop.} With identical MNISTNet, data, metric and seeds, xlog and Scallop reach comparable held-out accuracy, and xlog runs a steady epoch $2.80\times$ faster and finishes ahead end to end once the one-time D4 compilation amortizes. The two systems reach that accuracy by different routes: Scallop scores each fact through a bounded set of proof clauses, while xlog evaluates the exact weighted model count of the compiled circuit on every step. The advantage is time and residency, not accuracy.
+\textbf{Neural-symbolic: MNIST addition vs.\ Scallop.} With identical MNISTNet, data, metric and seeds, xlog and Scallop reach comparable held-out accuracy: $0.9561 \pm 0.0008$ against $0.9468 \pm 0.0104$ on the 20k protocol, and both near chance on the under-trained 512-image protocol. The two systems reach that accuracy by different routes: Scallop scores each fact through a bounded set of proof clauses, while xlog evaluates the exact weighted model count of the compiled circuit on every step. \emph{We make no per-epoch speed claim on this comparison.} Scallop's steady epoch is not monotone in the pod's CPU quota --- $31.79$\,s at $13.6$ cores and $54.99$\,s at $27.2$ on the same card, the same wheel and the same seeds --- so an xlog/Scallop epoch ratio measured on any one host reports that host as much as either engine. Establishing the ratio needs that curve, not another point on it; the accuracies above are unaffected by it.
 
-\textbf{Probabilistic: exact inference vs.\ ProbLog2.} On five programs (a conditioned Bayesian fragment and probabilistic reach chains) xlog's exact query probabilities match the analytic answers to zero error, identical to ProbLog2 (correctness gate $|\Delta| < 10^{-4}$). On timing, however, xlog is \emph{not} competitive on these small programs. Its per-query time is flat, a fixed GPU launch plus a per-call D4 compile and CDCL verify, while ProbLog2's mature CPU compiler runs each query $9$--$19\times$ faster. We therefore make no exact-inference \emph{speed} claim; the probabilistic contribution is correctness-equivalent inference with a CUDA-resident circuit data plane and certification of the final smoothed circuit. The host orchestrates the route and observes bounded solver control state, and its fixed costs amortize only at scale or under repeated evaluation.
+\textbf{Probabilistic: exact inference vs.\ ProbLog2.} On five programs (a conditioned Bayesian fragment and probabilistic reach chains) xlog's exact query probabilities match the analytic answers to zero error, identical to ProbLog2 (correctness gate $|\Delta| < 10^{-4}$). On timing, however, xlog is \emph{not} competitive on these small programs. Its per-query time is flat, a fixed GPU launch plus a per-call D4 compile and CDCL verify, while ProbLog2's mature CPU compiler runs each query $45$--$100\times$ faster. We therefore make no exact-inference \emph{speed} claim; the probabilistic contribution is correctness-equivalent inference with a CUDA-resident circuit data plane and certification of the final smoothed circuit. The host orchestrates the route and observes bounded solver control state, and its fixed costs amortize only at scale or under repeated evaluation.
 
-\textbf{Deterministic: WCOJ triangle counting vs.\ Soufflé.} On hub-skewed graphs, xlog's fused worst-case-optimal triangle counting, xlog's enumerate-then-count diagnostic, and Soufflé produce the same per-root triangle totals at every size. The comparison uses the median of three full-process executions after one-time native builds: a standalone Soufflé executable is generated once per case with eight jobs, and its $12.18$--$13.10$\,s compilation is recorded separately. Relative to fused xlog execution, compiled Soufflé is $2.37\times$, $7.95\times$ and $9.00\times$ slower on the three measured cases. Fused counting never materializes the triangles and its peak device allocations are $85$, $204$ and $359$\,MB, while enumerate-then-count peaks at $3{,}287$, $8{,}403$ and $15{,}247$\,MB. All arms complete, both cross-system count checks pass, and the all-arm comparison gate is therefore true. This supports bounded intermediates on these skewed, large-intermediate workloads, not a universal Datalog speed claim: native compilation time is excluded from the execution medians, the measurements are hardware-specific, and on moderate skew the advantage over xlog's own binary join is only $1.1$--$1.5\times$.
+\textbf{Deterministic: WCOJ triangle counting vs.\ Soufflé.} On hub-skewed graphs, xlog's fused worst-case-optimal triangle counting, xlog's enumerate-then-count diagnostic, and Soufflé produce the same per-root triangle totals at every size. The comparison uses the median of three full-process executions after one-time native builds: a standalone Soufflé executable is generated once per case with twenty-six jobs, matching the pod's CPU quota, and its $13.05$--$13.56$\,s compilation is recorded separately. \emph{The claim here is the scaling, not any single cell.} Relative to fused xlog execution, compiled Soufflé is $0.88\times$, $1.96\times$, $2.59\times$, $3.88\times$ and $5.54\times$ across $150$k to $1.2$M edges: on the smallest graph Soufflé is the faster of the two, and xlog only overtakes it from $300$k edges on. What holds monotonically is that the ratio grows with the input, because xlog's execution time is nearly flat ($0.57$--$0.68$\,s) while Soufflé's grows linearly ($0.51$--$3.77$\,s). Fused counting never materializes the triangles and its peak device allocations are $85$ to $1{,}033$\,MB, while enumerate-then-count peaks at $3{,}287$ to $44{,}979$\,MB. All arms complete, both cross-system count checks pass, and the all-arm comparison gate is therefore true. This supports bounded intermediates on these skewed, large-intermediate workloads, not a universal Datalog speed claim: native compilation time is excluded from the execution medians, the measurements are hardware-specific and quota-specific, and on moderate skew the advantage over xlog's own binary join is $2.00$--$4.95\times$ --- measured against a binary arm that completes at every size there, where the earlier artifact had recorded its two largest cases as skipped for blow-up.
 
 \subsection{Event-Calculus rule induction}\label{sec:ec-eval}
 
@@ -201,9 +201,9 @@ The micro figure falls for a selection-level reason instead. On the fold carryin
 
 \subsection{Verification cost and residency benefit}\label{sec:overhead}
 
-These two isolations ask what xlog's design costs, separated from ordinary GPU acceleration: what the equivalence proof buys with cold-compile time, and what device residency saves in transfers. Both run on an RTX 3090, and \Cref{tab:overhead} carries their measurements.
+These two isolations ask what xlog's design costs, separated from ordinary GPU acceleration: what the equivalence proof buys with cold-compile time, and what device residency saves in transfers. Both run on an A100 80GB PCIe pod with a $26.35$-core CPU quota, and \Cref{tab:overhead} carries their measurements.
 
-\textbf{Verification cost.} The cold epoch's compilation time is dominated by the on-GPU CDCL equivalence check, not the D4 compile. Split on probabilistic reachability chains, CDCL verification accounts for $96$--$100\%$ of the cold-compile time and grows with circuit size, while D4 compilation stays under $17$\,ms. The ``expensive'' cold epoch is thus almost entirely the price of the machine-checked correctness certificate (\Cref{sec:prob}), a cost the CPU-symbolic and GPU-Datalog systems surveyed in \Cref{sec:related} do not pay, because they do not verify.
+\textbf{Verification cost.} The cold epoch's compilation time is dominated by the on-GPU CDCL equivalence check, not the D4 compile. Split on probabilistic reachability chains, CDCL verification accounts for $98.8$--$99.4\%$ of the cold-compile time and grows with circuit size, while D4 compilation stays between $1.2$ and $11.7$\,ms and is non-zero at every point. The ``expensive'' cold epoch is thus almost entirely the price of the machine-checked correctness certificate (\Cref{sec:prob}), a cost the CPU-symbolic and GPU-Datalog systems surveyed in \Cref{sec:related} do not pay, because they do not verify.
 
 \begin{table}[htbp]
   \centering
@@ -215,21 +215,21 @@ These two isolations ask what xlog's design costs, separated from ordinary GPU a
     \textbf{Setting} & \textbf{Measured} \\
     \midrule
     \multicolumn{2}{@{}l}{\emph{Verification cost}} \\
-    chain $n{=}5$        & CDCL verify $251$\,ms \\
-    chain $n{=}40$       & CDCL verify $508$\,ms \\
+    chain $n{=}5$        & CDCL verify $531$\,ms \\
+    chain $n{=}40$       & CDCL verify $2{,}633$\,ms \\
     \addlinespace
     \multicolumn{2}{@{}l}{\emph{Residency benefit}} \\
-    per handoff          & round-trip of roughly $40$--$56\,{\mu}$s \\
-    $32$ handoffs/step   & $4\%$ of the step \\
-    $128$ handoffs/step  & ${\approx}10\%$ of the step; this is the standard batch-$64$ MNIST-addition step, $7.2$\,ms of $72$\,ms \\
-    $512$ handoffs/step  & holds near $9\%$ of the step \\
+    per handoff          & round-trip of roughly $61$--$176\,{\mu}$s \\
+    $32$ handoffs/step   & $9.2\%$ of the step \\
+    $128$ handoffs/step  & $16.1\%$ of the step; this is the standard batch-$64$ MNIST-addition step, $9.6$\,ms of $59.3$\,ms \\
+    $512$ handoffs/step  & holds near $15.5\%$ of the step \\
     \bottomrule
   \end{tabularx}
 \end{table}
 
 \textbf{Residency benefit.} To isolate the transfer-free advantage from ordinary GPU acceleration we run the same neural--symbolic pipeline with and without a forced device$\to$host$\to$device round-trip at the neural--symbolic boundary, the transfer a CPU-reasoning hybrid pays every step, sweeping the number of neural$\to$symbolic handoffs per step. Below a handful of handoffs the round-trip cost is lost in run-to-run variation. From a few dozen upward it is a visible share of the step, because the batched circuit compute grows sublinearly with the batch while the transfer grows linearly with the handoff count.
 
-On a single query the transfer is therefore negligible; at a realistic training batch it is a ${\approx}10\%$ tax that xlog does not pay, distinct from and additive to the GPU-compute and circuit-caching advantages. The forced per-buffer copy is an upper bound, since a hybrid could coalesce transfers. The larger transfer-dominated regime, large-state Datalog fixpoints where whole relations would cross the bus every iteration (\Cref{sec:intro}), lies outside what this isolation measures (\Cref{sec:limits}).
+On a single query the transfer is therefore negligible ($2.7\%$ at two handoffs); at a realistic training batch it is a ${\approx}16\%$ tax that xlog does not pay, distinct from and additive to the GPU-compute and circuit-caching advantages. The forced per-buffer copy is an upper bound, since a hybrid could coalesce transfers. The larger transfer-dominated regime, large-state Datalog fixpoints where whole relations would cross the bus every iteration (\Cref{sec:intro}), lies outside what this isolation measures (\Cref{sec:limits}).
 
 \subsection{Index reuse and the chain scorer}\label{sec:runtime-eval}
 
@@ -237,7 +237,7 @@ This pair of ablations asks what two of the runtime optimizations of \Cref{sec:d
 
 Both target the same waste, work repeated across calls that the previous call already did, and both are transparent to the program. Common-subexpression elimination and adaptive re-optimization are held to output equivalence with the unoptimized plan.
 
-\Cref{tab:runtime-opt} gives the medians. The index fixture is build-heavy by construction, so that building the index dominates the join, and neither arm records a host transfer. The chain scorer's two arms do not overlap on the chain-hot fixture; on a small input below its gate threshold, where the baseline path runs instead, the two medians differ by $1.3\%$ and the arms' ranges overlap. Both are point medians on single synthetic fixtures, and the scorer's coverage output is identical to the baseline's on both.
+\Cref{tab:runtime-opt} gives the medians. The index fixture is build-heavy by construction, so that building the index dominates the join, and neither arm records a host transfer. The chain scorer's two arms do not overlap on the chain-hot fixture; on a small input below its gate threshold, where the baseline path runs instead, the two medians differ by $2.0\%$ and the arms' ranges overlap. Both are point medians on single synthetic fixtures, and the scorer's coverage output is identical to the baseline's on both. The scorer's artifact now also records the host-transfer count per arm rather than asserting a fixed one: what the claim rests on is that the shared-memory arm adds none relative to baseline, and the measured difference is zero.
 
 \begin{table}[htbp]
   \centering
@@ -249,10 +249,10 @@ Both target the same waste, work repeated across calls that the previous call al
     \textbf{Fixture} & \textbf{Baseline median $\to$ optimized median} \\
     \midrule
     Persistent index reuse: repeated-session semi-join, eight left rows probing eight million right rows
-      & $0.255$\,s $\to$ $0.0794$\,s, a $3.21\times$ gain over $9$ timed runs after $12$ warm-up runs \\
+      & $16.09$\,ms $\to$ $2.27$\,ms, a $7.08\times$ gain over $9$ timed runs after $12$ warm-up runs \\
     \addlinespace
     Shared-memory chain scorer: chain-hot body search, $768$ candidate rows against a gate threshold of $256$
-      & $27.51$\,ms ($27.3$--$28.3$) $\to$ $4.93$\,ms ($4.9$--$5.4$), a $5.58\times$ gain over $12$ timed runs after $3$ warm-up runs \\
+      & $52.42$\,ms ($52.41$--$52.97$) $\to$ $7.28$\,ms ($7.28$--$7.29$), a $7.20\times$ gain over $12$ timed runs after $3$ warm-up runs \\
     \bottomrule
   \end{tabularx}
 \end{table}
