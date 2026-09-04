@@ -30,6 +30,8 @@ use crate::module::{module_path_to_string, LoadedModule, ModuleError, ModulePath
 use crate::parser::parse_program;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use xlog_core::{ScalarType, XlogError};
 
@@ -316,6 +318,21 @@ pub struct ModuleResolver {
     entry_module: Option<String>,
 }
 
+#[cfg(target_os = "linux")]
+fn linux_proc_fd_identity(source_file: &Path) -> Option<std::io::Result<PathBuf>> {
+    let descriptor = source_file.strip_prefix("/proc/self/fd").ok()?.to_str()?;
+    if descriptor.is_empty() || !descriptor.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(fs::metadata(source_file).map(|metadata| {
+        PathBuf::from(format!(
+            "/proc/self/fd/@xlog-source-{:x}-{:x}",
+            metadata.dev(),
+            metadata.ino()
+        ))
+    }))
+}
+
 impl ModuleResolver {
     /// Create a new resolver with given search paths
     pub fn new(search_paths: Vec<PathBuf>) -> Self {
@@ -396,7 +413,20 @@ impl ModuleResolver {
     }
 
     fn source_identity(source_file: &Path) -> Result<PathBuf, ModuleError> {
-        fs::canonicalize(source_file).map_err(|error| ModuleError::ParseError {
+        let identity = match fs::canonicalize(source_file) {
+            Ok(identity) => Ok(identity),
+            Err(error) => {
+                #[cfg(target_os = "linux")]
+                {
+                    linux_proc_fd_identity(source_file).unwrap_or(Err(error))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err(error)
+                }
+            }
+        };
+        identity.map_err(|error| ModuleError::ParseError {
             path: source_file.to_path_buf(),
             message: format!("failed to resolve source-file identity: {error}"),
         })
@@ -1892,6 +1922,8 @@ impl ModuleResolver {
 mod tests {
     use super::*;
     use std::io::Write;
+    #[cfg(target_os = "linux")]
+    use std::os::fd::AsRawFd;
     use tempfile::TempDir;
 
     fn create_test_module(dir: &Path, name: &str, content: &str) -> PathBuf {
@@ -1924,6 +1956,36 @@ mod tests {
         assert_eq!(loaded.source_file, entry);
         assert_eq!(loaded.path, vec!["program"]);
         assert_eq!(resolver.entry().unwrap().source_file, entry);
+        assert!(resolver.is_loaded("helper"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_load_entry_file_from_open_unlinked_proc_fd() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(tmp.path(), "helper", "helper_fact(1).");
+        let entry_path = tmp.path().join("entry.xlog");
+        fs::write(&entry_path, "use helper.\nentry_fact(1).\n").unwrap();
+        let entry = fs::File::open(&entry_path).unwrap();
+        let entry_proc_path = PathBuf::from(format!("/proc/self/fd/{}", entry.as_raw_fd()));
+        assert_eq!(
+            ModuleResolver::source_identity(&entry_proc_path).unwrap(),
+            fs::canonicalize(&entry_path).unwrap()
+        );
+        fs::remove_file(&entry_path).unwrap();
+        let duplicate = entry.try_clone().unwrap();
+        let duplicate_proc_path = PathBuf::from(format!("/proc/self/fd/{}", duplicate.as_raw_fd()));
+
+        assert!(fs::canonicalize(&entry_proc_path).is_err());
+        assert_eq!(
+            ModuleResolver::source_identity(&entry_proc_path).unwrap(),
+            ModuleResolver::source_identity(&duplicate_proc_path).unwrap()
+        );
+
+        let mut resolver = ModuleResolver::new(vec![tmp.path().to_path_buf()]);
+        let loaded = resolver.load_entry_file(&entry_proc_path).unwrap();
+
+        assert_eq!(loaded.source_file, entry_proc_path);
         assert!(resolver.is_loaded("helper"));
     }
 
