@@ -10,7 +10,7 @@ extern "C" __device__ void cudaGraphSetConditional(
 
 namespace cg = cooperative_groups;
 
-namespace {
+namespace xlog_resident_schedule {
 
 constexpr uint32_t kBlockSize = 256;
 constexpr uint32_t kMaxArity = 17;
@@ -1277,8 +1277,6 @@ __device__ bool validate_operation(
     return op.kind <= kOpDiff;
 }
 
-} // namespace
-
 extern "C" __global__ void resident_schedule_execute(
     const ResidentScheduleHeader *header,
     uint32_t region_index,
@@ -1569,3 +1567,5 @@ extern "C" __global__ void resident_schedule_execute(
         }
     }
 }
+
+} // namespace xlog_resident_schedule
