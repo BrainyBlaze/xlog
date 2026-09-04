@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
-namespace {
+namespace xlog_resident_filter_project {
 
 constexpr uint32_t kBlockSize = 256;
 constexpr uint32_t kMaxArity = 17;
@@ -171,8 +171,6 @@ __device__ __forceinline__ void copy_row(
     }
 }
 
-} // namespace
-
 extern "C" __global__ void resident_filter_mask_scan(
     ResidentRelationView input,
     const ResidentFilterComparisonDescriptor *comparisons,
@@ -324,3 +322,5 @@ extern "C" __global__ void resident_project_materialize(
         }
     }
 }
+
+} // namespace xlog_resident_filter_project
