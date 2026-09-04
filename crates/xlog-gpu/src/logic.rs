@@ -1689,8 +1689,8 @@ impl LogicProgram {
         executor.execute_plan(self.ordinary_plan("relation-store evaluation")?)?;
         self.enforce_constraints(&provider, &executor)?;
 
-        let total_output_rows = self.total_query_rows(executor.store())?;
         let mut stats = if profiling {
+            let total_output_rows = self.total_query_rows(provider.as_ref(), executor.store())?;
             Some(executor.execution_stats(total_output_rows))
         } else {
             None
@@ -1771,8 +1771,9 @@ impl LogicProgram {
             .execute_plan(self.ordinary_plan("session runtime evaluation")?)?;
         self.enforce_constraints(&provider, &runtime.executor)?;
 
-        let total_output_rows = self.total_query_rows(runtime.executor.store())?;
         let mut stats = if runtime.profiling {
+            let total_output_rows =
+                self.total_query_rows(provider.as_ref(), runtime.executor.store())?;
             Some(runtime.executor.execution_stats(total_output_rows))
         } else {
             None
@@ -2909,17 +2910,13 @@ impl LogicProgram {
             )?);
         }
 
-        let total_output_rows = queries
-            .iter()
-            .map(|query| {
-                query
-                    .buffer
-                    .cached_row_count()
-                    .map(u64::from)
-                    .unwrap_or_else(|| query.buffer.num_rows())
-            })
-            .sum();
-        let mut stats = profiling.then(|| executor.execution_stats(total_output_rows));
+        let mut stats = if profiling {
+            let total_output_rows =
+                total_logical_rows(provider.as_ref(), queries.iter().map(|query| &query.buffer))?;
+            Some(executor.execution_stats(total_output_rows))
+        } else {
+            None
+        };
         if let (Some(stats), Some(profile)) = (stats.as_mut(), resident_profile) {
             let scan_count =
                 usize::try_from(profile.telemetry.device_scan_invocations).map_err(|_| {
@@ -3285,9 +3282,9 @@ impl LogicProgram {
             )?);
         }
 
-        // Collect execution stats if profiling was enabled
-        let total_output_rows: u64 = queries.iter().map(|q| q.buffer.num_rows()).sum();
         let stats = if profiling {
+            let total_output_rows =
+                total_logical_rows(provider.as_ref(), queries.iter().map(|query| &query.buffer))?;
             Some(executor.execution_stats(total_output_rows))
         } else {
             None
@@ -3423,19 +3420,20 @@ impl LogicProgram {
         Ok(cloned)
     }
 
-    fn total_query_rows(&self, store: &RelationStore) -> Result<u64> {
-        let mut total = 0;
-        for i in 0..self.program.queries.len() {
-            let relation_name = format!("__xlog_query_{}", i);
+    fn total_query_rows(
+        &self,
+        provider: &CudaKernelProvider,
+        store: &RelationStore,
+    ) -> Result<u64> {
+        (0..self.program.queries.len()).try_fold(0_u64, |total, index| {
+            let relation_name = format!("__xlog_query_{index}");
             let buffer = store.get(&relation_name).ok_or_else(|| {
                 XlogError::Execution(format!(
-                    "Missing query result relation {} (compiler bug?)",
-                    relation_name
+                    "Missing query result relation {relation_name} (compiler bug?)"
                 ))
             })?;
-            total += buffer.num_rows();
-        }
-        Ok(total)
+            add_logical_row_count(provider, total, buffer)
+        })
     }
 
     fn logic_result_from_store(
@@ -3629,8 +3627,10 @@ impl LogicProgram {
         let lower_store =
             self.run_wfs_gpu_fixpoint(&provider, &base_store, wfs, profiling, &mut stats)?;
         self.enforce_constraints_in_store(provider.as_ref(), &lower_store)?;
-        let total_output_rows = self.total_query_rows(&lower_store)?;
-        finalize_iterative_execution_stats(&mut stats, total_output_rows);
+        if stats.is_some() {
+            let total_output_rows = self.total_query_rows(provider.as_ref(), &lower_store)?;
+            finalize_iterative_execution_stats(&mut stats, total_output_rows);
+        }
         self.logic_result_from_store(provider.as_ref(), &lower_store, stats)
     }
 
@@ -3739,8 +3739,11 @@ impl LogicProgram {
             )?;
             if converged {
                 self.enforce_constraints_in_store(&provider, &next_store)?;
-                let total_output_rows = self.total_query_rows(&next_store)?;
-                finalize_iterative_execution_stats(&mut stats, total_output_rows);
+                if stats.is_some() {
+                    let total_output_rows =
+                        self.total_query_rows(provider.as_ref(), &next_store)?;
+                    finalize_iterative_execution_stats(&mut stats, total_output_rows);
+                }
                 return self.logic_result_from_store(provider.as_ref(), &next_store, stats);
             }
             current_store = next_store;
@@ -4115,8 +4118,9 @@ impl LogicProgram {
         }
 
         self.enforce_constraints_in_store(provider, executor.store())?;
-        let total_output_rows: u64 = queries.iter().map(|q| q.buffer.num_rows()).sum();
         let stats = if profiling {
+            let total_output_rows =
+                total_logical_rows(provider, queries.iter().map(|query| &query.buffer))?;
             if let Some(mut stats) = accumulated_stats {
                 stats.total_output_rows = total_output_rows;
                 Some(stats)
@@ -4285,6 +4289,27 @@ fn finalize_iterative_execution_stats(stats: &mut Option<ExecutionStats>, total_
     if let Some(stats) = stats {
         stats.total_output_rows = total_output_rows;
     }
+}
+
+fn total_logical_rows<'a>(
+    provider: &CudaKernelProvider,
+    buffers: impl IntoIterator<Item = &'a CudaBuffer>,
+) -> Result<u64> {
+    buffers.into_iter().try_fold(0_u64, |total, buffer| {
+        add_logical_row_count(provider, total, buffer)
+    })
+}
+
+fn add_logical_row_count(
+    provider: &CudaKernelProvider,
+    total: u64,
+    buffer: &CudaBuffer,
+) -> Result<u64> {
+    let rows = u64::try_from(provider.validated_logical_row_count(buffer)?)
+        .map_err(|_| XlogError::Execution("logical query row count exceeds u64".into()))?;
+    total
+        .checked_add(rows)
+        .ok_or_else(|| XlogError::Execution("total logical query rows exceed u64".into()))
 }
 
 const DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION: usize = 1024;
@@ -9288,6 +9313,179 @@ mod tests {
             .ok_or_else(|| XlogError::Execution("missing query result".to_string()))?;
         assert_eq!(provider.download_column::<u32>(query, 0)?, vec![7]);
         Ok(())
+    }
+
+    #[test]
+    fn ordinary_routes_profile_logical_query_rows() -> Result<()> {
+        let _lock = resident_env_lock().lock().unwrap();
+        let _env = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred input(u32).
+                pred answer(u32).
+                input(1).
+                answer(X) :- input(X).
+                answer(X) :- input(X).
+                ?- answer(X).
+            "#,
+        )?;
+        assert_eq!(program.plan_kind_label(), "ordinary");
+
+        let direct = program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
+        let direct_logical =
+            u64::try_from(provider.validated_logical_row_count(&direct.queries[0].buffer)?)
+                .map_err(|_| XlogError::Execution("test row count exceeds u64".into()))?;
+        assert!(direct.queries[0].buffer.num_rows() > direct_logical);
+        assert_eq!(
+            direct.stats.as_ref().map(|stats| stats.total_output_rows),
+            Some(1)
+        );
+
+        let store = program.create_relation_store(provider.clone())?;
+        let stored = program.evaluate_with_relation_store(provider.clone(), &store, true)?;
+        assert_eq!(
+            stored.stats.as_ref().map(|stats| stats.total_output_rows),
+            Some(1)
+        );
+
+        let mut session = program.create_session_runtime(provider.clone(), &store, true)?;
+        let (retained, _) = program.evaluate_with_session_runtime(provider, &mut session)?;
+        assert_eq!(retained.stats.map(|stats| stats.total_output_rows), Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn unprofiled_ordinary_completion_does_not_read_query_row_metadata() -> Result<()> {
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(
+            r#"
+                pred input(u32).
+                pred answer(u32).
+                input(1).
+                answer(X) :- input(X).
+                answer(X) :- input(X).
+                ?- answer(X).
+            "#,
+        )?;
+
+        let mut executor = program.prepare_executor(&provider, HashMap::new(), false)?;
+        executor.execute_plan(program.ordinary_plan("unprofiled completion test")?)?;
+        let query = executor
+            .store_mut()
+            .get_mut("__xlog_query_0")
+            .expect("compiled query relation");
+        query.set_row_capacity(query.num_rows());
+        assert_eq!(query.cached_row_count(), None);
+        provider.reset_untracked_metadata_dtoh_count();
+        let result = program.finish_ordinary_evaluation(&provider, executor, false, None, None)?;
+        assert!(result.stats.is_none());
+        assert_eq!(provider.untracked_metadata_dtoh_count(), 0);
+        Ok(())
+    }
+
+    fn assert_profiled_nonordinary_query_rows(
+        source: &str,
+        expected_plan_kind: &str,
+    ) -> Result<()> {
+        let _lock = resident_env_lock().lock().unwrap();
+        let _env = ResidentEnvGuard::set(&[("XLOG_DISABLE_RESIDENT_RECURSION", "1")]);
+        let Some(provider) = ground_term_encoding_test_provider() else {
+            return Ok(());
+        };
+        let program = LogicProgram::compile(source)?;
+        assert_eq!(program.plan_kind_label(), expected_plan_kind);
+
+        let result = program.evaluate_with_options(provider.clone(), HashMap::new(), true)?;
+        let row_counts = result
+            .queries
+            .iter()
+            .map(|query| {
+                Ok::<_, XlogError>((
+                    query.buffer.num_rows(),
+                    u64::try_from(provider.validated_logical_row_count(&query.buffer)?)
+                        .map_err(|_| XlogError::Execution("test row count exceeds u64".into()))?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let logical_rows = row_counts.iter().map(|(_, logical)| logical).sum();
+        assert!(
+            row_counts
+                .iter()
+                .any(|(physical, logical)| physical > logical),
+            "fixture must distinguish physical capacity from logical rows: {row_counts:?}"
+        );
+        assert_eq!(
+            result.stats.map(|stats| stats.total_output_rows),
+            Some(logical_rows)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wfs_profiles_logical_query_rows_with_capacity_slack() -> Result<()> {
+        assert_profiled_nonordinary_query_rows(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred vertex(u32).
+                pred seed(u32, u32).
+                pred linked(u32, u32).
+                pred reach(u32, u32).
+                pred answer(u32, u32).
+                vertex(1). vertex(2). vertex(3).
+                seed(1, 2).
+                reach(X, Y) :- linked(X, Y).
+                reach(X, Z) :- reach(X, Y), linked(Y, Z).
+                linked(X, Y) :- vertex(X), vertex(Y), not know reach(X, Y).
+                linked(X, Y) :- seed(X, Y).
+                answer(X, Y) :- reach(X, Y).
+                answer(X, Y) :- reach(X, Y).
+                ?- answer(X, Y).
+            "#,
+            "epistemic_wfs_gpu",
+        )
+    }
+
+    #[test]
+    fn g91_profiles_logical_query_rows_with_capacity_slack() -> Result<()> {
+        assert_profiled_nonordinary_query_rows(
+            r#"
+                #pragma epistemic_mode = g91
+                pred domain(u32).
+                pred p(u32).
+                pred q(u32).
+                pred answer(u32).
+                domain(7).
+                p(X) :- domain(X), possible q(X).
+                q(X) :- domain(X), possible p(X).
+                answer(X) :- p(X).
+                answer(X) :- p(X).
+                ?- answer(X).
+            "#,
+            "epistemic_g91_compatibility_gpu",
+        )
+    }
+
+    #[test]
+    fn stratified_epistemic_profiles_logical_query_rows() -> Result<()> {
+        assert_profiled_nonordinary_query_rows(
+            r#"
+                #pragma epistemic_mode = faeel
+                pred node(u32).
+                pred edge(u32, u32).
+                pred accepted_edge(u32, u32).
+                pred accepted_path(u32, u32).
+                node(1). node(2). node(3).
+                edge(1, 2). edge(2, 3).
+                accepted_edge(X, Y) :- node(X), node(Y), know edge(X, Y).
+                accepted_path(X, Y) :- node(X), node(Y), know accepted_edge(X, Y).
+            "#,
+            "epistemic_stratified",
+        )
     }
 
     #[test]
