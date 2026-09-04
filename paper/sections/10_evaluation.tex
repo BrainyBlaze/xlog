@@ -120,9 +120,9 @@ The ablation is a separate experiment from the full run: its uncached arm recomp
     \addlinespace
     Deterministic: triangle counting on hub-skewed graphs of $3.65$M to $17.84$M triangles
       & Soufflé (standalone compiled mode, 26 jobs)
-      & counts match at every size; $0.58$, $0.57$, $0.66$, $0.64$ and $0.68$\,s; peak device allocations $85$ to $1{,}033$\,MB
-      & $0.51$, $1.12$, $1.71$, $2.48$ and $3.77$\,s; one-time per-case compilation recorded separately
-      & Soufflé/xlog: $0.88\times$, $1.96\times$, $2.59\times$, $3.88\times$, $\mathbf{5.54\times}$ \\
+      & counts match at every size; $0.57$--$0.68$\,s, nearly flat in the input; peak device allocations $85$--$1{,}033$\,MB
+      & $0.51$--$3.77$\,s, growing with the input; one-time per-case compilation recorded separately
+      & Soufflé/xlog: $0.88\times \to \mathbf{5.54\times}$ \\
     \bottomrule
   \end{tabularx}
 \end{table*}
