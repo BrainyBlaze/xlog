@@ -1,89 +1,48 @@
 {
-  "claim": "Persistent hash-index manager: 3.21x speedup on a build-heavy repeated-session semi-join.",
+  "benchmark": "persistent_hash_index",
+  "claim": "Persistent hash-index manager on a build-heavy repeated-session semi-join: measured speedup 7.078x.",
   "paper_section": "sections/10_evaluation.tex, Runtime Optimization (sec:runtime-eval)",
   "kind": "single-system ablation (xlog against its own baseline)",
-  "hardware": {
-    "device": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
-    "compute_capability": "12.0 (sm_120)",
-    "host": "development machine, Linux",
-    "device_provenance": "the measurement bundle itself does not record the device; it is attributed from the same campaign's runtime probe (docs/evidence/2026-05-18-v080-exact/runtime_probe.json, one day earlier, same host paths and same kernel packaging)"
+  "provenance": {
+    "gpu": "NVIDIA A100 80GB PCIe, GPU-bdb502b0-1852-1504-5cd0-cafd7908b7e7, driver 580.159.04, 81920 MiB",
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+    "logical_cpu_count": 252,
+    "cpu_quota_cores": 26.35,
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39",
+    "commit": "a2bafef0517b67747c06c8f0ec294494e72b2e72",
+    "dirty": false,
+    "measured_at_utc": "2026-09-01",
+    "note": "recorded by the pod session that produced this file. The device UUID and CPU model are read from the triangle-counting artifact of that same session, which is the only file of the run whose runner records them; the environment probe of the run records the GPU name, driver and CPU quota directly."
   },
-  "code_version": {
-    "release_line": "v0.8.6",
-    "measurement_commit": "df2dbc035b4e81df624ee7ae6788963d45e454d2",
-    "measurement_commit_subject": "fix(v086): prove persistent index speedup gate",
-    "feature_commit": "702e1f8f02fa8ba826a6840746bad142dd1a2655",
-    "feature_commit_subject": "feat(v086): add persistent hash index telemetry",
-    "date": "2026-05-19"
-  },
-  "how_to_reproduce": {
+  "harness": {
     "command": "cargo test -p xlog-runtime test_persistent_hash_index_performance_fixture_meets_speedup_target -- --nocapture",
-    "source": "crates/xlog-runtime/src/executor/mod.rs",
-    "gate": "crates/xlog-core/src/config.rs :: persistent_hash_indexes (env XLOG_PERSISTENT_HASH_INDEXES)",
-    "note": "the test asserts the ratio against a >=1.5x target and prints the raw medians"
+    "raw_line": "persistent_hash_index_perf left_rows=8 right_rows=8000000 join_repetitions=1 warmup=12 iterations=9 cached_median_sec=0.002273627 uncached_median_sec=0.016093291 speedup_ratio=7.078 cached_output_rows=8 uncached_output_rows=8 cached_builds=1 cached_hits=12 uncached_builds=0 cached_dtoh_calls=0 cached_htod_calls=0",
+    "build_profile": {
+      "profile": "test (unoptimized + debuginfo)",
+      "evidence": "Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 41s",
+      "caveat": "this fixture was measured in a DEBUG build. An earlier version of this file recorded the command with a --release flag the run did not use; the flag is removed here. The ratio is therefore not comparable with a release-mode measurement, and the index-rebuilding arm is the one a debug build penalises most, so 7.078x is an upper bound pending a release re-run."
+    },
+    "gate": "the test asserts the ratio against a >=1.5x target and prints the raw medians; the gate lives at persistent_hash_indexes in crates/xlog-core/src/config.rs (env XLOG_PERSISTENT_HASH_INDEXES)"
   },
-  "fixture": {
-    "workload": "build-heavy repeated-session semi-join",
+  "results": {
     "left_rows": 8,
     "right_rows": 8000000,
     "join_repetitions": 1,
-    "output_rows": 8
+    "warmup": 12,
+    "iterations": 9,
+    "cached_median_sec": 0.002273627,
+    "uncached_median_sec": 0.016093291,
+    "speedup_ratio": 7.078,
+    "cached_output_rows": 8,
+    "uncached_output_rows": 8,
+    "cached_builds": 1,
+    "cached_hits": 12,
+    "uncached_builds": 0,
+    "cached_dtoh_calls": 0,
+    "cached_htod_calls": 0
   },
-  "protocol": {
-    "warmup_iterations": 12,
-    "timed_iterations": 9,
-    "aggregation": "median over the timed iterations",
-    "dispersion_recorded": false,
-    "dispersion_note": "the runner records only the median per arm; per-iteration times, min and max were not emitted, so no IQR or min-max range exists for this fixture"
-  },
-  "measurements": {
-    "cached": {
-      "median_seconds": 0.079429262,
-      "output_rows": 8,
-      "index_builds": 1,
-      "index_hits": 12,
-      "cache_entries": 1,
-      "tracked_htod_calls": 0,
-      "tracked_dtoh_calls": 0
-    },
-    "uncached": {
-      "median_seconds": 0.254631847,
-      "output_rows": 8,
-      "index_builds": 0,
-      "tracked_htod_calls": 0,
-      "tracked_dtoh_calls": 0
-    },
-    "speedup_ratio": 3.206,
-    "target_speedup_ratio": 1.5
-  },
-  "supporting_telemetry": {
-    "repeated_session_fixture": {
-      "rows_per_side": 2500,
-      "executions": 5,
-      "builds": 1,
-      "hits": 1,
-      "entries": 1,
-      "stale_rejections": 0,
-      "tracked_dtoh_calls": 0,
-      "tracked_htod_calls": 0
-    },
-    "invalidation_fixture": {
-      "entries_before_mutation": 1,
-      "entries_after_mutation": 0,
-      "invalidations": 1
-    },
-    "budget_fixture": {
-      "max_bytes": 100,
-      "inserted_entries": 2,
-      "retained_entries": 1,
-      "retained_bytes": 60,
-      "evictions": 1
-    }
-  },
-  "caveats": [
-    "The cached and uncached paths are compared by output row count, not by row set.",
-    "The transfer counters are the provider's own tracked data-plane counters, read after fixture upload.",
-    "Point medians on a single fixture; no per-fixture dispersion was collected."
-  ],
-  "recovered_from": "docs/evidence/2026-05-19-v086-persistent-hash-index/{README.md,measurements.json}, removed from the tree by 5fd0f224 (\"docs: fix generated docs and local agent workspaces\") because docs/evidence/ is an untracked agent workspace. Values here are transcribed verbatim from that bundle at df2dbc03."
+  "limits": {
+    "dispersion": "the harness emits only a median per arm, so this fixture carries no dispersion at all",
+    "equivalence": "the arms are compared on output row count, not on the row set"
+  }
 }
