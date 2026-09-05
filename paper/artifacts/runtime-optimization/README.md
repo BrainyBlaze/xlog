@@ -7,8 +7,26 @@ head-to-head comparisons; those live in `../head-to-head/`.
 
 | File | Claim | Hardware | Fixture | n | Aggregation |
 |------|-------|----------|---------|---|-------------|
-| `persistent_hash_index.json` | 7.078x with the persistent hash-index manager | A100 80GB PCIe | build-heavy repeated-session semi-join, 8 x 8,000,000 rows | 9 timed, 12 warm-up | median per arm |
+| `persistent_hash_index.json` | 7.078x with the persistent hash-index manager | A100 80GB PCIe, **debug build** | build-heavy repeated-session semi-join, 8 x 8,000,000 rows | 9 timed, 12 warm-up | median per arm |
 | `chain_shared_memory_scorer.json` | 7.198x with the profile-gated shared-memory chain scorer | A100-SXM4 80GB | chain-hot, 768 rows per candidate (gate threshold 256) | 12 timed, 3 warm-up | median per arm |
+
+Two things about those numbers that an earlier version of this file got wrong,
+and that the reader needs before using them:
+
+**The index fixture was measured in a debug build.** The cargo invocation
+carried no `--release`, and the run's own log says `Finished 'test' profile
+[unoptimized + debuginfo]`. An earlier draft of the artifact recorded the
+command *with* a `--release` flag the run never used; the flag is gone and the
+profile is now recorded. An unoptimized build penalises the index-rebuilding arm
+hardest, so `7.078x` is an upper bound and is not comparable with the
+release-mode figures elsewhere in the Evaluation section. Re-running it in
+release is the obvious next measurement.
+
+**The chain scorer's ratio rose partly because its baseline got slower.** Both
+arms are slower here in absolute terms than in the earlier record — baseline
+27.51 ms to 52.42 ms, optimized 4.93 ms to 7.28 ms — and the ratio moved from
+5.58x to 7.198x only because the baseline slowed by more. That is a change of
+machine and of engine version, not a like-for-like gain.
 
 ## Provenance
 
@@ -25,10 +43,13 @@ it had to be *attributed* — from a runtime probe taken a day earlier that name
 an RTX PRO 3000 laptop GPU. Attribution is not measurement, and the new files do
 not need it.
 
-The new numbers are larger than the old ones on both fixtures. That is a change
-of hardware, not of the engine: the code is the same build as the head-to-head
-set, `a2bafef0` with runner files added on top and nothing under `crates/`
-touched.
+The new numbers are larger than the old ones on both fixtures, and it would be
+wrong to put that down to hardware alone. These runs are at `a2bafef0`, the same
+engine build as the head-to-head set; the records they replace are from the
+v0.8.6 campaign at `df2dbc03` and `ce78e32f`. Machine, build profile and engine
+version all differ, so neither ratio is a controlled before-and-after of the
+optimization — each is a fresh measurement of the current engine on a named
+machine.
 
 ## Reproduction
 

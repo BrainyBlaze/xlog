@@ -10,7 +10,7 @@
     "commit": "a2bafef0517b67747c06c8f0ec294494e72b2e72",
     "dirty": false,
     "measured_at_utc": "2026-09-01",
-    "note": "recorded by the run that produced this file. The previous version of this artifact was a bare list of numbers with no hardware, commit or date at all"
+    "note": "recorded by the pod session that produced this file. The device UUID and CPU model are read from the triangle-counting artifact of that same session, which is the only file of the run whose runner records them; the environment probe of the run records the GPU name, driver and CPU quota directly."
   },
   "protocol": {
     "queries": [
@@ -21,7 +21,7 @@
       256
     ],
     "handoffs": "2 per query",
-    "reported": "one measurement per point; roundtrip_per_handoff_us = (on_ms - off_ms) * 1000 / handoffs"
+    "reported": "each point is the mean of three measurements per arm, each measurement itself an average over the runner's inner iteration count; roundtrip_per_handoff_us = (on_ms - off_ms) * 1000 / handoffs"
   },
   "results": [
     {

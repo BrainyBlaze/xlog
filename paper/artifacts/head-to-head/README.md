@@ -15,6 +15,7 @@ measurements; hardware is not mixed within a comparison.
 | `residency_ablation.json` | xlog-only: forced host round-trip, single query | A100 80GB PCIe | 26.35 cores | n/a (single-system) |
 | `residency_scale_ablation.json` | xlog-only: forced host round-trip vs handoff count | A100 80GB PCIe | 26.35 cores | n/a (single-system) |
 | `verify_overhead_isolation.json` | xlog-only: CDCL-verify vs D4-compile split | A100 80GB PCIe | 26.35 cores | n/a (single-system) |
+| `mnist_addition_vs_scallop_quota_companion.json` | companion: the 27.2-core half of the CPU-quota observation | L40S x2 | 27.2 cores | **false** (see below) |
 
 The engine is the same build in all of them: the runners were added on top of
 `a2bafef0` and touch no file under `crates/`, so the differences between rows
@@ -36,6 +37,10 @@ published run gave Soufflé 7.65 cores; these give it 26.35 and 54.4.
   the defensible claim is the scaling, not any single cell. The memory split is
   the wider gap: fused counting peaks at 85/204/359/618/1,033 MB of provider
   allocations against 3,287/8,403/15,247/26,497/44,979 MB for the enumerate arm.
+  One caveat the artifact carries and a reader should apply: xlog's engine time
+  is 25--43 ms of that 0.57--0.68 s wall, so 93--96% of the xlog side is
+  process start, CUDA context and Arrow input. What is flat at these sizes is
+  the fixed cost.
 - **Triangle counting, moderate skew** — the companion at a hub-edge fraction of
   0.25 rather than 0.8. Fused WCOJ over xlog's own binary join is `2.00x`,
   `2.36x`, `3.67x`, `4.95x` across 40k--400k edges. Note that the binary arm
@@ -69,8 +74,22 @@ published run gave Soufflé 7.65 cores; these give it 26.35 and 54.4.
   `XLOG_WARMUP_PROFILE=1` splits the cold compile into D4-compile and on-GPU
   CDCL equivalence-verify. Verify is 98.8--99.4% of the cold compile across
   n=5..40, and `d4_compile_ms` is non-zero at every point, unlike the earlier
-  record. `n >= 50` still exceeds a CUDA grid-dimension limit on this CNF and is
-  out of range; that limit was reproduced on this run rather than carried over.
+  record. `n >= 50` exceeds a CUDA grid-dimension limit on this CNF and is out
+  of range. This run stops at n = 40 and does not itself contain that
+  observation: the sweep's error stream stayed on the pod, so the limit is
+  carried over from the earlier record rather than reproduced here.
+
+## The MNIST quota companion
+
+`mnist_addition_vs_scallop_quota_companion.json` is **not** an accepted
+comparison and its `comparison_acceptable` is `false`: the two arms read
+MNIST from different roots, which the runner flags as a protocol
+divergence. It is distributed for one purpose, to back the CPU-quota
+observation in Limitations: Scallop's steady epoch is 54.99 s here at a
+27.2-core quota against 31.79 s at 13.6 cores in the accepted run, same
+card, same wheel, same seeds. The two pods also differed in driver revision
+and host, so the quota is the candidate explanation and not an isolated
+cause.
 
 ## A note on file shape
 
