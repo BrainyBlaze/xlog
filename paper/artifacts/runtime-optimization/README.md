@@ -7,20 +7,25 @@ head-to-head comparisons; those live in `../head-to-head/`.
 
 | File | Claim | Hardware | Fixture | n | Aggregation |
 |------|-------|----------|---------|---|-------------|
-| `persistent_hash_index.json` | 7.078x with the persistent hash-index manager | A100 80GB PCIe, **debug build** | build-heavy repeated-session semi-join, 8 x 8,000,000 rows | 9 timed, 12 warm-up | median per arm |
+| `persistent_hash_index.json` | 8.334x with the persistent hash-index manager | A100 80GB PCIe, release build | build-heavy repeated-session semi-join, 8 x 8,000,000 rows | 9 timed, 12 warm-up | median per arm |
 | `chain_shared_memory_scorer.json` | 7.198x with the profile-gated shared-memory chain scorer | A100-SXM4 80GB | chain-hot, 768 rows per candidate (gate threshold 256) | 12 timed, 3 warm-up | median per arm |
 
 Two things about those numbers that an earlier version of this file got wrong,
 and that the reader needs before using them:
 
-**The index fixture was measured in a debug build.** The cargo invocation
-carried no `--release`, and the run's own log says `Finished 'test' profile
-[unoptimized + debuginfo]`. An earlier draft of the artifact recorded the
-command *with* a `--release` flag the run never used; the flag is gone and the
-profile is now recorded. An unoptimized build penalises the index-rebuilding arm
-hardest, so `7.078x` is an upper bound and is not comparable with the
-release-mode figures elsewhere in the Evaluation section. Re-running it in
-release is the obvious next measurement.
+**The index fixture is now measured in release, and the earlier caveat here
+was backwards.** A previous version of this file recorded the cargo command
+with a `--release` flag the run had not used; the measurement behind `7.078x`
+was a debug build, and this file then guessed that release would come out
+*lower*. It does not. A re-run put both profiles on one pod, one commit, one
+fixture: release `8.334x`, debug `7.716x`. The arms sit on different sides of
+the bus — the index-rebuilding arm is GPU-bound and barely moves (15.83 ms
+debug against 15.78 ms release), while the cached arm is host-side and does
+get faster (2.05 ms against 1.89 ms) — so optimizing the build widens the gap
+instead of closing it. The fixture's own >=1.5x gate passed in both profiles.
+Worth keeping in view: the debug arm of that re-run reads 7.716x against the
+7.078x of the first debug run on a different pod, so about 8% of the spread
+on this fixture is host rather than profile.
 
 **The chain scorer's ratio rose partly because its baseline got slower.** Both
 arms are slower here in absolute terms than in the earlier record — baseline
@@ -30,9 +35,9 @@ machine and of engine version, not a like-for-like gain.
 
 ## Provenance
 
-Both records were **re-measured on 2026-09-01 and 2026-09-02** on ephemeral
-RunPod GPUs, and each file now records its own device, driver, CPU quota and
-commit.
+Both records were **re-measured on ephemeral RunPod GPUs** — the chain scorer
+on 2026-09-02, the index manager on 2026-09-05 — and each file now records
+its own device, driver, CPU quota and commit.
 
 That replaces the previous situation, which is worth remembering because it is
 the failure this directory was written to avoid. The earlier values (3.21x and

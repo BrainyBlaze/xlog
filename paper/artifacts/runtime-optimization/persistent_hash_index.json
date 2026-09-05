@@ -1,26 +1,29 @@
 {
   "benchmark": "persistent_hash_index",
-  "claim": "Persistent hash-index manager on a build-heavy repeated-session semi-join: measured speedup 7.078x.",
+  "claim": "Persistent hash-index manager on a build-heavy repeated-session semi-join: measured speedup 8.334x in a release build.",
   "paper_section": "sections/10_evaluation.tex, Runtime Optimization (sec:runtime-eval)",
   "kind": "single-system ablation (xlog against its own baseline)",
   "provenance": {
-    "gpu": "NVIDIA A100 80GB PCIe, GPU-bdb502b0-1852-1504-5cd0-cafd7908b7e7, driver 580.159.04, 81920 MiB",
-    "cpu": "AMD EPYC 7763 64-Core Processor",
-    "logical_cpu_count": 252,
-    "cpu_quota_cores": 26.35,
-    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39",
+    "gpu": "NVIDIA A100 80GB PCIe, GPU-643dbc5c-49fa-dc70-e47b-0592120716c4, 580.126.20, 81920 MiB",
+    "logical_cpu_count": 128,
+    "cpu_quota_cores": 13.6,
+    "nvcc": [
+      "Cuda compilation tools, release 13.0, V13.0.88",
+      "Build cuda_13.0.r13.0/compiler.36424714_0"
+    ],
+    "kernel": "Linux ce86bbd7cf9b 6.8.0-107-generic #107~22.04.1-Ubuntu SMP PREEMPT_DYNAMIC Wed Mar 18 23:40:43 UTC  x86_64 x86_64 x86_64 GNU/Linux",
     "commit": "a2bafef0517b67747c06c8f0ec294494e72b2e72",
     "dirty": false,
-    "measured_at_utc": "2026-09-01",
-    "note": "recorded by the pod session that produced this file. The device UUID and CPU model are read from the triangle-counting artifact of that same session, which is the only file of the run whose runner records them; the environment probe of the run records the GPU name, driver and CPU quota directly."
+    "measured_at_utc": "2026-09-05",
+    "note": "recorded by the run that produced this file: the pod cloned the commit, verified HEAD against it and refused to proceed on a dirty tree. Same card model as the measurement it replaces."
   },
   "harness": {
-    "command": "cargo test -p xlog-runtime test_persistent_hash_index_performance_fixture_meets_speedup_target -- --nocapture",
-    "raw_line": "persistent_hash_index_perf left_rows=8 right_rows=8000000 join_repetitions=1 warmup=12 iterations=9 cached_median_sec=0.002273627 uncached_median_sec=0.016093291 speedup_ratio=7.078 cached_output_rows=8 uncached_output_rows=8 cached_builds=1 cached_hits=12 uncached_builds=0 cached_dtoh_calls=0 cached_htod_calls=0",
+    "command": "cargo test -p xlog-runtime --release test_persistent_hash_index_performance_fixture_meets_speedup_target -- --nocapture",
+    "raw_line": "persistent_hash_index_perf left_rows=8 right_rows=8000000 join_repetitions=1 warmup=12 iterations=9 cached_median_sec=0.001893855 uncached_median_sec=0.015784178 speedup_ratio=8.334 cached_output_rows=8 uncached_output_rows=8 cached_builds=1 cached_hits=12 uncached_builds=0 cached_dtoh_calls=0 cached_htod_calls=0",
     "build_profile": {
-      "profile": "test (unoptimized + debuginfo)",
-      "evidence": "Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 41s",
-      "caveat": "this fixture was measured in a DEBUG build. An earlier version of this file recorded the command with a --release flag the run did not use; the flag is removed here. The ratio is therefore not comparable with a release-mode measurement, and the index-rebuilding arm is the one a debug build penalises most, so 7.078x is an upper bound pending a release re-run."
+      "profile": "release [optimized]",
+      "evidence": "Finished `release` profile [optimized] target(s) in 1m 36s",
+      "history": "an earlier version of this file recorded a --release flag the run had not used, and the measurement behind it was a debug build. The flag is now true of the run that produced the number."
     },
     "gate": "the test asserts the ratio against a >=1.5x target and prints the raw medians; the gate lives at persistent_hash_indexes in crates/xlog-core/src/config.rs (env XLOG_PERSISTENT_HASH_INDEXES)"
   },
@@ -30,9 +33,9 @@
     "join_repetitions": 1,
     "warmup": 12,
     "iterations": 9,
-    "cached_median_sec": 0.002273627,
-    "uncached_median_sec": 0.016093291,
-    "speedup_ratio": 7.078,
+    "cached_median_sec": 0.001893855,
+    "uncached_median_sec": 0.015784178,
+    "speedup_ratio": 8.334,
     "cached_output_rows": 8,
     "uncached_output_rows": 8,
     "cached_builds": 1,
@@ -44,5 +47,15 @@
   "limits": {
     "dispersion": "the harness emits only a median per arm, so this fixture carries no dispersion at all",
     "equivalence": "the arms are compared on output row count, not on the row set"
+  },
+  "same_machine_control": {
+    "why": "the figure this replaces was taken in a debug build, so the run that produced the release number ran both profiles back to back on one pod, one commit, one fixture, to separate the profile from the machine",
+    "release_speedup": 8.334,
+    "debug_speedup": 7.716,
+    "release_profile_line": "Finished `release` profile [optimized] target(s) in 1m 36s",
+    "debug_profile_line": "Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 21s",
+    "reading": "release is the HIGHER ratio, which the earlier caveat in this file predicted backwards. The index-rebuilding arm is GPU-bound and barely moves between profiles (15.827 ms debug against 15.784 ms release); the cached arm is host-side and does get faster (2.051 ms against 1.894 ms), so optimizing the build widens the gap instead of closing it.",
+    "host_variation": "the debug arm here reads 7.716x against 7.078x from the earlier debug run on a different pod, so roughly 8% of spread is host, not profile",
+    "both_arms_passed": "the fixture's own >=1.5x gate passed in both profiles: 'test result: ok. 1 passed' in each log"
   }
 }
