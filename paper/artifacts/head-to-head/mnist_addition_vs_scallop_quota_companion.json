@@ -1,0 +1,728 @@
+{
+  "schema_version": 1,
+  "benchmark": "mnist_addition_vs_scallop",
+  "generated_at_utc": "2026-09-02T21:39:55.956724+00:00",
+  "repository": {
+    "commit": "ebf6c91f98bf8948721f9976566af930a3151b25",
+    "dirty": false,
+    "dirty_entries": [],
+    "remote": "https://github.com/BrainyBlaze/xlog.git"
+  },
+  "runner": {
+    "path": "paper/artifacts/head-to-head/runners/mnist_addition_vs_scallop.py",
+    "sha256": "bcdea23ba864f6af94293772f0ba0709801f96583d77b143e76e03a6f0e98065",
+    "argv": [
+      "paper/artifacts/head-to-head/runners/mnist_addition_vs_scallop.py",
+      "--protocol",
+      "strong_20000x5",
+      "--data-dir",
+      "/workspace/mnist-data",
+      "--timeout-s",
+      "7200",
+      "--scallop-python",
+      "/workspace/py310/bin/python",
+      "--output",
+      "/workspace/results/60_mnist_strong_20000x5.json"
+    ],
+    "work_dir": "/workspace/results/60_mnist_strong_20000x5_runs"
+  },
+  "hardware": {
+    "gpu": {
+      "command": "nvidia-smi --query-gpu=name,uuid,driver_version,memory.total --format=csv,noheader,nounits",
+      "returncode": 0,
+      "stdout": "NVIDIA L40S, GPU-2890cf27-71c8-2fb1-637b-5457c1b235f8, 580.178.04, 46068",
+      "stderr": "",
+      "status": "ok"
+    },
+    "cpu": "AMD EPYC 9554 64-Core Processor",
+    "logical_cpu_count": 256,
+    "cpu_quota_cores": {
+      "v2_cores": 27.2,
+      "v2_raw": "2720000 100000",
+      "v1_cores": "UNAVAILABLE",
+      "v1_raw": "/sys/fs/cgroup/cpu/cpu.cfs_quota_us / /sys/fs/cgroup/cpu/cpu.cfs_period_us are absent"
+    },
+    "host_memory_bytes": 1081799139328,
+    "platform": "Linux-6.8.0-137-generic-x86_64-with-glibc2.39"
+  },
+  "software": {
+    "runner_python": "3.12.3",
+    "xlog_python": {
+      "path": "/usr/bin/python3",
+      "version": {
+        "command": "/usr/bin/python3 -VV",
+        "returncode": 0,
+        "stdout": "Python 3.12.3 (main, Mar 23 2026, 19:04:32) [GCC 13.3.0]",
+        "stderr": "",
+        "status": "ok"
+      },
+      "torch": {
+        "command": "/usr/bin/python3 -c 'import torch; print(getattr(torch, '\"'\"'__version__'\"'\"', '\"'\"'unknown'\"'\"'))'",
+        "returncode": 0,
+        "stdout": "2.14.0+cu130",
+        "stderr": "",
+        "status": "ok"
+      },
+      "torchvision": {
+        "command": "/usr/bin/python3 -c 'import torchvision; print(getattr(torchvision, '\"'\"'__version__'\"'\"', '\"'\"'unknown'\"'\"'))'",
+        "returncode": 0,
+        "stdout": "0.29.0+cu130",
+        "stderr": "",
+        "status": "ok"
+      },
+      "pyxlog": {
+        "command": "/usr/bin/python3 -c 'import pyxlog; print(getattr(pyxlog, '\"'\"'__version__'\"'\"', '\"'\"'unknown'\"'\"'))'",
+        "returncode": 0,
+        "stdout": "0.12.0",
+        "stderr": "",
+        "status": "ok"
+      }
+    },
+    "nvcc": {
+      "command": "nvcc --version",
+      "returncode": 0,
+      "stdout": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:58:59_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0",
+      "stderr": "",
+      "status": "ok"
+    },
+    "scallop_python": {
+      "path": "/workspace/py310/bin/python",
+      "version": {
+        "command": "/workspace/py310/bin/python -VV",
+        "returncode": 0,
+        "stdout": "Python 3.10.21 (main, Sep  1 2026, 14:16:49) [Clang 22.1.3 ]",
+        "stderr": "",
+        "status": "ok"
+      },
+      "torch": {
+        "command": "/workspace/py310/bin/python -c 'import torch; print(getattr(torch, '\"'\"'__version__'\"'\"', '\"'\"'unknown'\"'\"'))'",
+        "returncode": 0,
+        "stdout": "2.14.0+cu130",
+        "stderr": "",
+        "status": "ok"
+      },
+      "torchvision": {
+        "command": "/workspace/py310/bin/python -c 'import torchvision; print(getattr(torchvision, '\"'\"'__version__'\"'\"', '\"'\"'unknown'\"'\"'))'",
+        "returncode": 0,
+        "stdout": "0.29.0+cu130",
+        "stderr": "",
+        "status": "ok"
+      },
+      "scallopy": {
+        "command": "/workspace/py310/bin/python -c 'import scallopy; print(getattr(scallopy, '\"'\"'__version__'\"'\"', '\"'\"'unknown'\"'\"'))'",
+        "returncode": 0,
+        "stdout": "unknown",
+        "stderr": "",
+        "status": "ok"
+      }
+    }
+  },
+  "protocol": {
+    "task": "MNIST addition trained from sum supervision only",
+    "metric": "held-out addition accuracy on the 10k MNIST test split, 5000 adjacent pairs",
+    "pairing": "adjacent (2i, 2i+1) over the test split, in file order",
+    "train_pairing": "adjacent (2i, 2i+1) over the first train_images images",
+    "batch_size": 64,
+    "lr": 0.001,
+    "optimizer": "Adam (both harnesses)",
+    "test_images": 10000,
+    "test_pairs": 5000,
+    "network": {
+      "xlog": {
+        "source": "examples/neural/01_minimal/train.py",
+        "source_sha256": "b2497a2066c9e2994d6e9f950a18a8c67014b4f8a6f538662e468d3dcb00a024",
+        "class": "MNISTNet",
+        "definition_sha256": "57e3e9fb4762ee89c59713d4ee5a44d98118f4c2fe06d3590973c9f460752c59",
+        "definition_text_sha256": "1c1594c472922ff6eb2bcccb2350af865e90af577101e694c73a4dbdf74f6dd8",
+        "definition_hash_basis": "sha256 of the class AST with comments and docstrings removed",
+        "n_parameters": 44426,
+        "probe": {
+          "command": "/usr/bin/python3 /workspace/results/60_mnist_strong_20000x5_runs/net_probe_xlog.py",
+          "returncode": 0,
+          "stdout": "n_parameters=44426",
+          "stderr": "",
+          "status": "ok"
+        }
+      },
+      "scallop": {
+        "source": "examples/neural/baseline/scallop/mnist_addition.py",
+        "source_sha256": "50a639db6bbc776a46d42a2ac14138dc1a774ea72f98b9d993c7100fc49150d2",
+        "class": "MNISTNet",
+        "definition_sha256": "57e3e9fb4762ee89c59713d4ee5a44d98118f4c2fe06d3590973c9f460752c59",
+        "definition_text_sha256": "47a68f8f2cc36968ee467394bd5a1a0fa9fbd3c92f46256d59acf4ec907d871a",
+        "definition_hash_basis": "sha256 of the class AST with comments and docstrings removed",
+        "n_parameters": 44426,
+        "probe": {
+          "command": "/workspace/py310/bin/python /workspace/results/60_mnist_strong_20000x5_runs/net_probe_scallop.py",
+          "returncode": 0,
+          "stdout": "n_parameters=44426",
+          "stderr": "",
+          "status": "ok"
+        }
+      },
+      "definitions_identical": true,
+      "parameter_counts_identical": true,
+      "networks_match": true
+    },
+    "xlog_harness": "examples/neural/01_minimal/train.py",
+    "scallop_harness": "examples/neural/baseline/scallop/mnist_addition.py",
+    "scallop_provenance": {
+      "provenance": "difftopbottomkclauses",
+      "k": 3
+    },
+    "mnist_data_dir": "/workspace/mnist-data",
+    "repetitions": 1,
+    "reported_time": "first_epoch_sec is epoch 1; steady_epoch_sec is the MEDIAN of epochs 2..n; total_train_sec is the harness's own total. Across seeds: mean, population std, n, and every value",
+    "steady_epoch_definition": "median of epochs 2..n",
+    "timeout_s": 7200,
+    "skip_scallop": false,
+    "seed_values_are_reconstructed": true,
+    "reconstruction_notes": [
+      "The published artifact records only the seed COUNT (5 and 3), not the seed values; these seeds are this runner's default and may differ from the published run.",
+      "The published artifact does not say whether its steady_epoch_sec was a median or a mean over epochs 2..n; the committed harnesses write steady_epoch_sec_mean, this runner reports the median and keeps the full epoch_sec list plus the mean per run.",
+      "Pair shuffling differs by harness: the Scallop baseline reshuffles training pairs every epoch, the xlog side hands a fixed query list to pyxlog.train_model_tensor. This is not configurable from either command line and is not recorded in the published artifact.",
+      "The published artifact records no data augmentation; both harnesses use ToTensor + Normalize((0.1307,), (0.3081,)) only."
+    ]
+  },
+  "comparison_acceptable": false,
+  "networks_match": true,
+  "results": {
+    "strong_20000x5": {
+      "protocol": "strong_20000x5",
+      "train_images": 20000,
+      "epochs": 5,
+      "seeds": [
+        7,
+        42,
+        123
+      ],
+      "repetitions": 1,
+      "observed_config": {
+        "xlog": {
+          "epochs": 5,
+          "batch_size": 64,
+          "lr": 0.001,
+          "train_images": 20000,
+          "train_pairs": 10000,
+          "test_images": 10000,
+          "heldout_pairs": 5000,
+          "pairing": "adjacent (2i, 2i+1)",
+          "mnist_data_dir": "/workspace/mnist-data"
+        },
+        "scallop": {
+          "epochs": 5,
+          "batch_size": 64,
+          "lr": 0.001,
+          "train_images": 20000,
+          "train_pairs": 10000,
+          "test_images": 10000,
+          "heldout_pairs": 5000,
+          "pairing": "adjacent (2i, 2i+1)",
+          "mnist_data_dir": "/workspace/xlog/examples/neural/01_minimal/data/mnist",
+          "provenance": "difftopbottomkclauses",
+          "k": 3
+        }
+      },
+      "divergence": [
+        {
+          "field": "mnist_data_dir",
+          "xlog": "/workspace/mnist-data",
+          "scallop": "/workspace/xlog/examples/neural/01_minimal/data/mnist"
+        }
+      ],
+      "xlog": {
+        "complete": true,
+        "per_seed": [
+          {
+            "seed": 7,
+            "successful_repetitions": 1,
+            "requested_repetitions": 1,
+            "status": "ok",
+            "heldout_addition_acc": 0.9544,
+            "first_epoch_sec": 108.503,
+            "steady_epoch_sec": 9.136,
+            "total_train_sec": 144.736
+          },
+          {
+            "seed": 42,
+            "successful_repetitions": 1,
+            "requested_repetitions": 1,
+            "status": "ok",
+            "heldout_addition_acc": 0.9508,
+            "first_epoch_sec": 108.562,
+            "steady_epoch_sec": 9.2595,
+            "total_train_sec": 145.712
+          },
+          {
+            "seed": 123,
+            "successful_repetitions": 1,
+            "requested_repetitions": 1,
+            "status": "ok",
+            "heldout_addition_acc": 0.962,
+            "first_epoch_sec": 108.615,
+            "steady_epoch_sec": 9.024000000000001,
+            "total_train_sec": 144.671
+          }
+        ],
+        "heldout_addition_acc": {
+          "mean": 0.9557,
+          "std": 0.0047,
+          "n": 3,
+          "values": [
+            0.9544,
+            0.9508,
+            0.962
+          ]
+        },
+        "first_epoch_sec": {
+          "mean": 108.56,
+          "std": 0.0457,
+          "n": 3,
+          "values": [
+            108.503,
+            108.562,
+            108.615
+          ]
+        },
+        "steady_epoch_sec": {
+          "mean": 9.1398,
+          "std": 0.0962,
+          "n": 3,
+          "values": [
+            9.136,
+            9.2595,
+            9.024000000000001
+          ]
+        },
+        "total_train_sec": {
+          "mean": 145.0397,
+          "std": 0.4762,
+          "n": 3,
+          "values": [
+            144.736,
+            145.712,
+            144.671
+          ]
+        }
+      },
+      "scallop": {
+        "complete": true,
+        "per_seed": [
+          {
+            "seed": 7,
+            "successful_repetitions": 1,
+            "requested_repetitions": 1,
+            "status": "ok",
+            "heldout_addition_acc": 0.954,
+            "first_epoch_sec": 55.672,
+            "steady_epoch_sec": 55.458,
+            "total_train_sec": 282.392
+          },
+          {
+            "seed": 42,
+            "successful_repetitions": 1,
+            "requested_repetitions": 1,
+            "status": "ok",
+            "heldout_addition_acc": 0.9558,
+            "first_epoch_sec": 54.225,
+            "steady_epoch_sec": 54.8665,
+            "total_train_sec": 274.923
+          },
+          {
+            "seed": 123,
+            "successful_repetitions": 1,
+            "requested_repetitions": 1,
+            "status": "ok",
+            "heldout_addition_acc": 0.943,
+            "first_epoch_sec": 60.484,
+            "steady_epoch_sec": 54.653000000000006,
+            "total_train_sec": 277.68
+          }
+        ],
+        "heldout_addition_acc": {
+          "mean": 0.9509,
+          "std": 0.0057,
+          "n": 3,
+          "values": [
+            0.954,
+            0.9558,
+            0.943
+          ]
+        },
+        "first_epoch_sec": {
+          "mean": 56.7937,
+          "std": 2.6755,
+          "n": 3,
+          "values": [
+            55.672,
+            54.225,
+            60.484
+          ]
+        },
+        "steady_epoch_sec": {
+          "mean": 54.9925,
+          "std": 0.3405,
+          "n": 3,
+          "values": [
+            55.458,
+            54.8665,
+            54.653000000000006
+          ]
+        },
+        "total_train_sec": {
+          "mean": 278.3317,
+          "std": 3.0838,
+          "n": 3,
+          "values": [
+            282.392,
+            274.923,
+            277.68
+          ]
+        }
+      },
+      "comparison_acceptable": false,
+      "runs": [
+        {
+          "side": "xlog",
+          "protocol": "strong_20000x5",
+          "seed": 7,
+          "repetition": 1,
+          "command": "/usr/bin/python3 -u '{repo}/examples/neural/01_minimal/train.py' --engine xlog --epochs 5 --batch-size 64 --lr 0.001 --seed 7 --train-limit 20000 --data-path /workspace/mnist-data --save-path /workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_7/rep_1/xlog/mnist_net.pt --metrics-path /workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_7/rep_1/xlog/metrics.json",
+          "returncode": 0,
+          "wall_s": 158.767174,
+          "log_dir": "/workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_7/rep_1/xlog",
+          "stdout_sha256": "577b1347b8d965d5c7bde86cfa250c673c36ae6904b3991b2dc1adf62baa643d",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "warnings": [],
+          "observed": {
+            "epochs": 5,
+            "batch_size": 64,
+            "lr": 0.001,
+            "train_images": 20000,
+            "train_pairs": 10000,
+            "test_images": 10000,
+            "heldout_pairs": 5000,
+            "pairing": "adjacent (2i, 2i+1)",
+            "mnist_data_dir": "/workspace/mnist-data"
+          },
+          "metrics_json": {
+            "compile_api_sec": 0.029,
+            "epoch_sec": [
+              108.503,
+              8.722,
+              9.067,
+              9.228,
+              9.205
+            ],
+            "first_epoch_sec": 108.503,
+            "steady_epoch_sec_mean": 9.056,
+            "warmup_sec": 99.448,
+            "total_train_sec": 144.736,
+            "per_query_ms": 2.895
+          },
+          "epoch_sec": [
+            108.503,
+            8.722,
+            9.067,
+            9.228,
+            9.205
+          ],
+          "epoch_timing_source": "measured",
+          "heldout_addition_acc": 0.9544,
+          "first_epoch_sec": 108.503,
+          "steady_epoch_sec": 9.136,
+          "steady_epoch_sec_mean_over_epochs": 9.0555,
+          "total_train_sec": 144.736,
+          "compile_api_sec": 0.029,
+          "status": "ok"
+        },
+        {
+          "side": "scallop",
+          "protocol": "strong_20000x5",
+          "seed": 7,
+          "repetition": 1,
+          "command": "/workspace/py310/bin/python -u '{repo}/examples/neural/baseline/scallop/mnist_addition.py' --epochs 5 --batch-size 64 --lr 0.001 --seed 7 --train-limit 20000 --provenance difftopbottomkclauses --k 3 --metrics-path /workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_7/rep_1/scallop/metrics.json",
+          "returncode": 0,
+          "wall_s": 296.38121,
+          "log_dir": "/workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_7/rep_1/scallop",
+          "stdout_sha256": "221e2501e87dd2bcfb3f29570be82d4e380260557cc4ea249819b112cd1ac474",
+          "stderr_sha256": "dea2d3c96b6a0be7e436c7fef8fd89284c63f23e01d538ad967e36f70b0a34ca",
+          "warnings": [],
+          "observed": {
+            "epochs": 5,
+            "batch_size": 64,
+            "lr": 0.001,
+            "train_images": 20000,
+            "train_pairs": 10000,
+            "test_images": 10000,
+            "heldout_pairs": 5000,
+            "pairing": "adjacent (2i, 2i+1)",
+            "mnist_data_dir": "/workspace/xlog/examples/neural/01_minimal/data/mnist",
+            "provenance": "difftopbottomkclauses",
+            "k": 3
+          },
+          "metrics_json": {
+            "compile_api_sec": 0.01,
+            "epoch_sec": [
+              55.672,
+              55.224,
+              60.624,
+              55.18,
+              55.692
+            ],
+            "first_epoch_sec": 55.672,
+            "steady_epoch_sec_mean": 56.68,
+            "warmup_sec": 0.0,
+            "total_train_sec": 282.392,
+            "per_query_ms": 5.648,
+            "framework": "scallop",
+            "provenance": "difftopbottomkclauses",
+            "k": 3
+          },
+          "epoch_sec": [
+            55.672,
+            55.224,
+            60.624,
+            55.18,
+            55.692
+          ],
+          "epoch_timing_source": "measured",
+          "heldout_addition_acc": 0.954,
+          "first_epoch_sec": 55.672,
+          "steady_epoch_sec": 55.458,
+          "steady_epoch_sec_mean_over_epochs": 56.68,
+          "total_train_sec": 282.392,
+          "compile_api_sec": 0.01,
+          "status": "ok"
+        },
+        {
+          "side": "xlog",
+          "protocol": "strong_20000x5",
+          "seed": 42,
+          "repetition": 1,
+          "command": "/usr/bin/python3 -u '{repo}/examples/neural/01_minimal/train.py' --engine xlog --epochs 5 --batch-size 64 --lr 0.001 --seed 42 --train-limit 20000 --data-path /workspace/mnist-data --save-path /workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_42/rep_1/xlog/mnist_net.pt --metrics-path /workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_42/rep_1/xlog/metrics.json",
+          "returncode": 0,
+          "wall_s": 159.604739,
+          "log_dir": "/workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_42/rep_1/xlog",
+          "stdout_sha256": "731f387c36a6123548863ebfaecc09bc530bbc270d2860a04588da3c7725c7e1",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "warnings": [],
+          "observed": {
+            "epochs": 5,
+            "batch_size": 64,
+            "lr": 0.001,
+            "train_images": 20000,
+            "train_pairs": 10000,
+            "test_images": 10000,
+            "heldout_pairs": 5000,
+            "pairing": "adjacent (2i, 2i+1)",
+            "mnist_data_dir": "/workspace/mnist-data"
+          },
+          "metrics_json": {
+            "compile_api_sec": 0.025,
+            "epoch_sec": [
+              108.562,
+              9.301,
+              9.417,
+              9.203,
+              9.218
+            ],
+            "first_epoch_sec": 108.562,
+            "steady_epoch_sec_mean": 9.285,
+            "warmup_sec": 99.278,
+            "total_train_sec": 145.712,
+            "per_query_ms": 2.914
+          },
+          "epoch_sec": [
+            108.562,
+            9.301,
+            9.417,
+            9.203,
+            9.218
+          ],
+          "epoch_timing_source": "measured",
+          "heldout_addition_acc": 0.9508,
+          "first_epoch_sec": 108.562,
+          "steady_epoch_sec": 9.2595,
+          "steady_epoch_sec_mean_over_epochs": 9.284749999999999,
+          "total_train_sec": 145.712,
+          "compile_api_sec": 0.025,
+          "status": "ok"
+        },
+        {
+          "side": "scallop",
+          "protocol": "strong_20000x5",
+          "seed": 42,
+          "repetition": 1,
+          "command": "/workspace/py310/bin/python -u '{repo}/examples/neural/baseline/scallop/mnist_addition.py' --epochs 5 --batch-size 64 --lr 0.001 --seed 42 --train-limit 20000 --provenance difftopbottomkclauses --k 3 --metrics-path /workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_42/rep_1/scallop/metrics.json",
+          "returncode": 0,
+          "wall_s": 288.757455,
+          "log_dir": "/workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_42/rep_1/scallop",
+          "stdout_sha256": "97c63ac5fe2b4771b88354ff0b34cc6be103629ebd27e5cc4369428a380bea41",
+          "stderr_sha256": "dea2d3c96b6a0be7e436c7fef8fd89284c63f23e01d538ad967e36f70b0a34ca",
+          "warnings": [],
+          "observed": {
+            "epochs": 5,
+            "batch_size": 64,
+            "lr": 0.001,
+            "train_images": 20000,
+            "train_pairs": 10000,
+            "test_images": 10000,
+            "heldout_pairs": 5000,
+            "pairing": "adjacent (2i, 2i+1)",
+            "mnist_data_dir": "/workspace/xlog/examples/neural/01_minimal/data/mnist",
+            "provenance": "difftopbottomkclauses",
+            "k": 3
+          },
+          "metrics_json": {
+            "compile_api_sec": 0.01,
+            "epoch_sec": [
+              54.225,
+              54.873,
+              54.155,
+              54.86,
+              56.811
+            ],
+            "first_epoch_sec": 54.225,
+            "steady_epoch_sec_mean": 55.174,
+            "warmup_sec": 0.0,
+            "total_train_sec": 274.923,
+            "per_query_ms": 5.498,
+            "framework": "scallop",
+            "provenance": "difftopbottomkclauses",
+            "k": 3
+          },
+          "epoch_sec": [
+            54.225,
+            54.873,
+            54.155,
+            54.86,
+            56.811
+          ],
+          "epoch_timing_source": "measured",
+          "heldout_addition_acc": 0.9558,
+          "first_epoch_sec": 54.225,
+          "steady_epoch_sec": 54.8665,
+          "steady_epoch_sec_mean_over_epochs": 55.17475,
+          "total_train_sec": 274.923,
+          "compile_api_sec": 0.01,
+          "status": "ok"
+        },
+        {
+          "side": "xlog",
+          "protocol": "strong_20000x5",
+          "seed": 123,
+          "repetition": 1,
+          "command": "/usr/bin/python3 -u '{repo}/examples/neural/01_minimal/train.py' --engine xlog --epochs 5 --batch-size 64 --lr 0.001 --seed 123 --train-limit 20000 --data-path /workspace/mnist-data --save-path /workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_123/rep_1/xlog/mnist_net.pt --metrics-path /workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_123/rep_1/xlog/metrics.json",
+          "returncode": 0,
+          "wall_s": 158.590567,
+          "log_dir": "/workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_123/rep_1/xlog",
+          "stdout_sha256": "cd1a332d5dfd132fb595e6950d8be2872544fdfe811ec98fc4dc9fdab3cb8b2a",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "warnings": [],
+          "observed": {
+            "epochs": 5,
+            "batch_size": 64,
+            "lr": 0.001,
+            "train_images": 20000,
+            "train_pairs": 10000,
+            "test_images": 10000,
+            "heldout_pairs": 5000,
+            "pairing": "adjacent (2i, 2i+1)",
+            "mnist_data_dir": "/workspace/mnist-data"
+          },
+          "metrics_json": {
+            "compile_api_sec": 0.029,
+            "epoch_sec": [
+              108.615,
+              8.892,
+              9.075,
+              8.973,
+              9.106
+            ],
+            "first_epoch_sec": 108.615,
+            "steady_epoch_sec_mean": 9.011,
+            "warmup_sec": 99.603,
+            "total_train_sec": 144.671,
+            "per_query_ms": 2.893
+          },
+          "epoch_sec": [
+            108.615,
+            8.892,
+            9.075,
+            8.973,
+            9.106
+          ],
+          "epoch_timing_source": "measured",
+          "heldout_addition_acc": 0.962,
+          "first_epoch_sec": 108.615,
+          "steady_epoch_sec": 9.024000000000001,
+          "steady_epoch_sec_mean_over_epochs": 9.0115,
+          "total_train_sec": 144.671,
+          "compile_api_sec": 0.029,
+          "status": "ok"
+        },
+        {
+          "side": "scallop",
+          "protocol": "strong_20000x5",
+          "seed": 123,
+          "repetition": 1,
+          "command": "/workspace/py310/bin/python -u '{repo}/examples/neural/baseline/scallop/mnist_addition.py' --epochs 5 --batch-size 64 --lr 0.001 --seed 123 --train-limit 20000 --provenance difftopbottomkclauses --k 3 --metrics-path /workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_123/rep_1/scallop/metrics.json",
+          "returncode": 0,
+          "wall_s": 291.069799,
+          "log_dir": "/workspace/results/60_mnist_strong_20000x5_runs/strong_20000x5/seed_123/rep_1/scallop",
+          "stdout_sha256": "cbe7fc47079ad3a69584da9c6dac837aba9ff42117971fd0cbe856e5e04e9122",
+          "stderr_sha256": "dea2d3c96b6a0be7e436c7fef8fd89284c63f23e01d538ad967e36f70b0a34ca",
+          "warnings": [],
+          "observed": {
+            "epochs": 5,
+            "batch_size": 64,
+            "lr": 0.001,
+            "train_images": 20000,
+            "train_pairs": 10000,
+            "test_images": 10000,
+            "heldout_pairs": 5000,
+            "pairing": "adjacent (2i, 2i+1)",
+            "mnist_data_dir": "/workspace/xlog/examples/neural/01_minimal/data/mnist",
+            "provenance": "difftopbottomkclauses",
+            "k": 3
+          },
+          "metrics_json": {
+            "compile_api_sec": 0.009,
+            "epoch_sec": [
+              60.484,
+              55.651,
+              52.24,
+              54.45,
+              54.856
+            ],
+            "first_epoch_sec": 60.484,
+            "steady_epoch_sec_mean": 54.299,
+            "warmup_sec": 6.185,
+            "total_train_sec": 277.68,
+            "per_query_ms": 5.554,
+            "framework": "scallop",
+            "provenance": "difftopbottomkclauses",
+            "k": 3
+          },
+          "epoch_sec": [
+            60.484,
+            55.651,
+            52.24,
+            54.45,
+            54.856
+          ],
+          "epoch_timing_source": "measured",
+          "heldout_addition_acc": 0.943,
+          "first_epoch_sec": 60.484,
+          "steady_epoch_sec": 54.653000000000006,
+          "steady_epoch_sec_mean_over_epochs": 54.29925,
+          "total_train_sec": 277.68,
+          "compile_api_sec": 0.009,
+          "status": "ok"
+        }
+      ]
+    }
+  },
+  "companion_note": "Not the accepted MNIST comparison: this run carried a mnist_data_dir divergence and its comparison_acceptable is false. It is distributed for one purpose, as the 27.2-core half of the CPU-quota observation in the Limitations section: Scallop steady epoch 54.99 s here against 31.79 s at 13.6 cores in the accepted run."
+}

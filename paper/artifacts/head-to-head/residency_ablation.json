@@ -1,20 +1,47 @@
-[
-  {
-    "labels": 4,
-    "off_ms_mean": 1.194,
-    "off_ms_std": 0.0077,
-    "on_ms_mean": 1.2543,
-    "on_ms_std": 0.0028,
-    "roundtrip_ms": 0.0603,
-    "residency_overhead_pct": 5.1
+{
+  "benchmark": "residency_ablation",
+  "claim": "Cost of keeping semantic state resident on the device, as a percentage of the same query with residency forced off.",
+  "provenance": {
+    "gpu": "NVIDIA A100 80GB PCIe, GPU-bdb502b0-1852-1504-5cd0-cafd7908b7e7, driver 580.159.04, 81920 MiB",
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+    "logical_cpu_count": 252,
+    "cpu_quota_cores": 26.35,
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39",
+    "commit": "a2bafef0517b67747c06c8f0ec294494e72b2e72",
+    "dirty": false,
+    "measured_at_utc": "2026-09-01",
+    "note": "recorded by the pod session that produced this file. The device UUID and CPU model are read from the triangle-counting artifact of that same session, which is the only file of the run whose runner records them; the environment probe of the run records the GPU name, driver and CPU quota directly."
   },
-  {
-    "labels": 10,
-    "off_ms_mean": 18.2265,
-    "off_ms_std": 0.0305,
-    "on_ms_mean": 18.2098,
-    "on_ms_std": 0.0198,
-    "roundtrip_ms": -0.0166,
-    "residency_overhead_pct": -0.1
-  }
-]
+  "protocol": {
+    "seeds": [
+      1,
+      2,
+      3
+    ],
+    "label_counts": [
+      4,
+      10
+    ],
+    "reported": "mean and population std over seeds of ms per iteration; roundtrip_ms = on_ms_mean - off_ms_mean"
+  },
+  "results": [
+    {
+      "labels": 4,
+      "off_ms_mean": 1.877,
+      "off_ms_std": 0.0954,
+      "on_ms_mean": 1.9278,
+      "on_ms_std": 0.0253,
+      "roundtrip_ms": 0.0508,
+      "residency_overhead_pct": 2.7
+    },
+    {
+      "labels": 10,
+      "off_ms_mean": 12.4528,
+      "off_ms_std": 0.1762,
+      "on_ms_mean": 12.7701,
+      "on_ms_std": 0.3241,
+      "roundtrip_ms": 0.3173,
+      "residency_overhead_pct": 2.5
+    }
+  ]
+}

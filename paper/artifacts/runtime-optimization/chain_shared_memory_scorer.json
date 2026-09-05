@@ -1,24 +1,123 @@
 {
-  "claim": "Profile-gated shared-memory chain scorer: 5.58x speedup on a chain-hot fixture, with the small-input control unchanged within 1.3% at the median.",
+  "schema_version": 1,
+  "benchmark": "chain_shared_memory_scorer",
+  "generated_at_utc": "2026-09-02T10:59:24.011092+00:00",
+  "claim": "Profile-gated shared-memory chain scorer: measured speedup on a chain-hot fixture, with the small-input control measured below the gate threshold.",
   "paper_section": "sections/10_evaluation.tex, Runtime Optimization (sec:runtime-eval)",
   "kind": "single-system ablation (xlog against its own baseline)",
+  "repository": {
+    "path": "/workspace/xlog",
+    "commit": "ebf6c91f98bf8948721f9976566af930a3151b25",
+    "commit_probe": {
+      "command": "git -C /workspace/xlog rev-parse HEAD",
+      "status": "ok",
+      "output": [
+        "ebf6c91f98bf8948721f9976566af930a3151b25"
+      ]
+    },
+    "branch": "restored",
+    "remote": "https://github.com/BrainyBlaze/xlog.git",
+    "commit_subject": "docs(paper): state which artifacts now have runners and what they had to choose",
+    "dirty": false,
+    "dirty_entries": []
+  },
+  "runner": {
+    "path": "scripts/measure_chain_shared_memory.py",
+    "absolute_path": "/workspace/xlog/scripts/measure_chain_shared_memory.py",
+    "sha256": "3d9cffb9568170ba558fe7a883af5b8b5a7a12d78a2f83831b56b83f777d182c",
+    "argv": [
+      "scripts/measure_chain_shared_memory.py",
+      "--output",
+      "/workspace/results/40_chain_shared_memory_scorer.json"
+    ]
+  },
   "hardware": {
-    "device": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
-    "compute_capability": "12.0 (sm_120)",
-    "host": "development machine, Linux",
-    "device_provenance": "the measurement bundle itself does not record the device; it is attributed from the same campaign's runtime probe (docs/evidence/2026-05-18-v080-exact/runtime_probe.json, one day earlier, same host paths and same kernel packaging)"
+    "gpu": {
+      "command": "nvidia-smi --query-gpu=name,uuid,driver_version,memory.total --format=csv,noheader,nounits",
+      "status": "ok",
+      "output": [
+        "NVIDIA A100-SXM4-80GB, GPU-17e020b0-7bbe-d835-af19-881e511f9a2a, 580.126.16, 81920"
+      ]
+    },
+    "gpu_compute_capability": {
+      "command": "nvidia-smi --query-gpu=compute_cap --format=csv,noheader",
+      "status": "ok",
+      "output": [
+        "8.0"
+      ]
+    },
+    "cpu": {
+      "model": "AMD EPYC 7742 64-Core Processor",
+      "status": "ok"
+    },
+    "logical_cpu_count": 128,
+    "cpu_quota_cores": {
+      "cores": 13.6,
+      "source": "cgroup_v2",
+      "cgroup_v2_present": true,
+      "cgroup_v1_present": false
+    },
+    "host_memory": {
+      "bytes": 2151618105344,
+      "status": "ok"
+    },
+    "platform": "Linux-6.8.0-100-generic-x86_64-with-glibc2.39",
+    "device_provenance": "recorded by this runner from nvidia-smi at measurement time"
+  },
+  "software": {
+    "python": "3.12.3",
+    "python_executable": "/usr/bin/python3",
+    "nvcc": {
+      "command": "nvcc --version",
+      "status": "ok",
+      "output": [
+        "nvcc: NVIDIA (R) Cuda compiler driver",
+        "Copyright (c) 2005-2025 NVIDIA Corporation",
+        "Built on Wed_Aug_20_01:58:59_PM_PDT_2025",
+        "Cuda compilation tools, release 13.0, V13.0.88",
+        "Build cuda_13.0.r13.0/compiler.36424714_0"
+      ]
+    },
+    "nvidia_smi": {
+      "command": "nvidia-smi --version",
+      "status": "ok",
+      "output": [
+        "NVIDIA-SMI version  : 580.126.16",
+        "NVML version        : 580.126",
+        "DRIVER version      : 580.126.16",
+        "CUDA Version        : 13.0"
+      ]
+    },
+    "torch": {
+      "status": "ok",
+      "version": "2.9.1+cu130",
+      "cuda_build_version": "13.0",
+      "cuda_available": true,
+      "device_name": "NVIDIA A100-SXM4-80GB",
+      "device_capability": [
+        8,
+        0
+      ]
+    },
+    "pyxlog": {
+      "status": "ok",
+      "version": "0.12.0",
+      "path": "/usr/local/lib/python3.12/dist-packages/pyxlog/__init__.py"
+    }
   },
   "code_version": {
-    "release_line": "v0.8.6",
-    "measurement_commit": "ce78e32f9c740187fb893f169632e1d9e67f1c25",
-    "measurement_commit_subject": "feat(v086): add chain exact shared-memory scorer",
-    "branch_at_measurement": "feat/v086-runtime-completion",
+    "release_line": "see repository.commit and software.pyxlog.version",
     "kernel": "crates/xlog-cuda/kernels/ilp_exact.cu (ilp_exact_score_chain_smem, ilp_exact_score_chain_smem_u32)",
-    "date": "2026-05-19"
+    "gate_source": "crates/xlog-cuda/src/provider/ilp_exact.rs",
+    "published_reference": {
+      "release_line": "v0.8.6",
+      "measurement_commit": "ce78e32f9c740187fb893f169632e1d9e67f1c25",
+      "date": "2026-05-19"
+    }
   },
   "how_to_reproduce": {
-    "runner_at_measurement_time": "scripts/measure_v086_chain_smem.py",
-    "runner_now": "scripts/measure_chain_shared_memory.py (renamed; the profile-trigger runner is scripts/measure_chain_shared_memory_profile.py)",
+    "runner": "scripts/measure_chain_shared_memory.py",
+    "command": "python scripts/measure_chain_shared_memory.py --output paper/artifacts/runtime-optimization/chain_shared_memory_scorer.json",
     "path": "pyxlog induce_exact(backend=\"native\") -> xlog_induce::induce_exact -> CudaKernelProvider::ilp_exact_score",
     "gate": "XLOG_ILP_EXACT_CHAIN_SMEM (default on) and XLOG_ILP_EXACT_CHAIN_SMEM_MIN_ROWS (default 256), crates/xlog-cuda/src/provider/ilp_exact.rs",
     "ab_method": "the same fixture is run twice in one process, once with the shared-memory path enabled and once disabled"
@@ -37,25 +136,108 @@
       "query_pairs_positive": 8,
       "query_pairs_negative": 8,
       "topology": "chain"
-    }
+    },
+    "source_sha256": "805dbf2b3c3dfd9f048aa80079b082b469b3fd6d07371892bb6a7c46a9f7caa2"
   },
   "protocol": {
     "warmup_iterations": 3,
     "timed_iterations": 12,
     "aggregation": "median over the timed iterations",
-    "dispersion_recorded": true,
-    "dispersion_note": "min and max seconds are recorded per arm; per-iteration times were not emitted, so the range is min-max rather than an IQR"
+    "dispersion_recorded": "every timed iteration is emitted per arm, alongside median, min and max",
+    "timing": "time.perf_counter around induce_exact with torch.cuda.synchronize after each call; warm-up iterations are untimed and followed by one synchronize",
+    "execution_order": [
+      "small_control/baseline",
+      "small_control/chain_smem",
+      "chain_hot/baseline",
+      "chain_hot/chain_smem"
+    ],
+    "execution_order_note": "kept from scripts/measure_chain_shared_memory_profile.py, which produced the published numbers; each arm compiles its own program",
+    "ab_method": "the same fixture is run twice in one process, once with the shared-memory path enabled and once disabled",
+    "gate": {
+      "XLOG_ILP_EXACT_CHAIN_SMEM": {
+        "inherited_raw": null,
+        "default_when_unset": true,
+        "driven_by_runner": true,
+        "note": "set to 1 for the chain_smem arm and 0 for the baseline arm, then restored"
+      },
+      "XLOG_ILP_EXACT_CHAIN_SMEM_MIN_ROWS": {
+        "inherited_raw": null,
+        "effective_min_rows": 256,
+        "default_when_unset": 256,
+        "driven_by_runner": false
+      }
+    },
+    "hardware_assertions": "none. Device-to-host transfer counts and total_scored are recorded; only added_dtoh_calls (a difference between arms) and total_scored (a property of the fixture) participate in comparison_acceptable",
+    "published_protocol_reference": {
+      "warmup_iterations": 3,
+      "timed_iterations": 12,
+      "source": "paper/artifacts/runtime-optimization/chain_shared_memory_scorer.json"
+    }
   },
   "measurements": {
     "chain_hot": {
+      "role": "above the gate threshold",
+      "rows_per_candidate": 768,
+      "query_pairs_positive": 32,
+      "query_pairs_negative": 32,
+      "topology": "chain",
       "baseline": {
         "chain_smem": false,
-        "median_seconds": 0.027507680497365072,
-        "min_seconds": 0.02734149800380692,
-        "max_seconds": 0.028317899035755545,
-        "iterations": 12,
+        "gate_env": {
+          "XLOG_ILP_EXACT_CHAIN_SMEM": "0"
+        },
         "warmup": 3,
-        "dtoh_calls": 2,
+        "requested_iterations": 12,
+        "total_scored_expected": 16,
+        "total_scored_expected_from": "4 topologies * 2 candidate relations squared",
+        "iterations": 12,
+        "median_seconds": 0.05241869599558413,
+        "min_seconds": 0.05240753013640642,
+        "max_seconds": 0.05297357263043523,
+        "seconds_per_iteration": [
+          0.05242513306438923,
+          0.05253733601421118,
+          0.05297357263043523,
+          0.05279695801436901,
+          0.05240841209888458,
+          0.05242875963449478,
+          0.05241225892677903,
+          0.052433688659220934,
+          0.05240850104019046,
+          0.052411166951060295,
+          0.05240951431915164,
+          0.05240753013640642
+        ],
+        "status": "ok",
+        "rows_per_candidate": 768,
+        "query_pairs_positive": 32,
+        "query_pairs_negative": 32,
+        "dtoh_calls": 1,
+        "dtoh_calls_detail": {
+          "per_iteration": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "distinct_observed": [
+            1
+          ],
+          "constant_across_iterations": true,
+          "value": 1
+        },
+        "total_scored_observed": [
+          16
+        ],
+        "total_scored_matches_fixture": true,
         "result_signature": [
           [
             "chain",
@@ -65,16 +247,67 @@
             0,
             0
           ]
-        ]
+        ],
+        "signature_stable_across_iterations": true,
+        "candidates_returned": 1
       },
       "chain_smem": {
         "chain_smem": true,
-        "median_seconds": 0.004927040485199541,
-        "min_seconds": 0.004898363025858998,
-        "max_seconds": 0.00541784503730014,
-        "iterations": 12,
+        "gate_env": {
+          "XLOG_ILP_EXACT_CHAIN_SMEM": "1"
+        },
         "warmup": 3,
-        "dtoh_calls": 2,
+        "requested_iterations": 12,
+        "total_scored_expected": 16,
+        "total_scored_expected_from": "4 topologies * 2 candidate relations squared",
+        "iterations": 12,
+        "median_seconds": 0.007281934842467308,
+        "min_seconds": 0.0072772810235619545,
+        "max_seconds": 0.0072851767763495445,
+        "seconds_per_iteration": [
+          0.007283332757651806,
+          0.00728381285443902,
+          0.0072772810235619545,
+          0.0072851767763495445,
+          0.007284835912287235,
+          0.007278433069586754,
+          0.007279535289853811,
+          0.007279044017195702,
+          0.007284144870936871,
+          0.007281119003891945,
+          0.007279083598405123,
+          0.007282750681042671
+        ],
+        "status": "ok",
+        "rows_per_candidate": 768,
+        "query_pairs_positive": 32,
+        "query_pairs_negative": 32,
+        "dtoh_calls": 1,
+        "dtoh_calls_detail": {
+          "per_iteration": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "distinct_observed": [
+            1
+          ],
+          "constant_across_iterations": true,
+          "value": 1
+        },
+        "total_scored_observed": [
+          16
+        ],
+        "total_scored_matches_fixture": true,
         "result_signature": [
           [
             "chain",
@@ -84,20 +317,79 @@
             0,
             0
           ]
-        ]
+        ],
+        "signature_stable_across_iterations": true,
+        "candidates_returned": 1
       },
       "parity": true,
-      "speedup_ratio": 5.58300273358745
+      "speedup_ratio": 7.19845715865034,
+      "median_delta_percent": -86.10813431322146,
+      "delta_sign_note": "median_delta_percent is (smem_median - baseline_median) / baseline_median * 100 -- the same quantity the profile runner calls regression_percent. A negative value means the shared-memory arm is faster.",
+      "arms_complete": true
     },
     "small_control": {
+      "role": "below the gate threshold (baseline scorer must run unchanged)",
+      "rows_per_candidate": 32,
+      "query_pairs_positive": 8,
+      "query_pairs_negative": 8,
+      "topology": "chain",
       "baseline": {
         "chain_smem": false,
-        "median_seconds": 0.0011941255070269108,
-        "min_seconds": 0.0008972260402515531,
-        "max_seconds": 0.0012547150254249573,
-        "iterations": 12,
+        "gate_env": {
+          "XLOG_ILP_EXACT_CHAIN_SMEM": "0"
+        },
         "warmup": 3,
-        "dtoh_calls": 2,
+        "requested_iterations": 12,
+        "total_scored_expected": 16,
+        "total_scored_expected_from": "4 topologies * 2 candidate relations squared",
+        "iterations": 12,
+        "median_seconds": 0.0003962262999266386,
+        "min_seconds": 0.0003904900513589382,
+        "max_seconds": 0.0004092962481081486,
+        "seconds_per_iteration": [
+          0.0004092962481081486,
+          0.00040625035762786865,
+          0.0004044068045914173,
+          0.00039556995034217834,
+          0.0004019918851554394,
+          0.0003947792574763298,
+          0.0003917831927537918,
+          0.0003904900513589382,
+          0.00039688264951109886,
+          0.00040319468826055527,
+          0.0003947680816054344,
+          0.0003954698331654072
+        ],
+        "status": "ok",
+        "rows_per_candidate": 32,
+        "query_pairs_positive": 8,
+        "query_pairs_negative": 8,
+        "dtoh_calls": 1,
+        "dtoh_calls_detail": {
+          "per_iteration": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "distinct_observed": [
+            1
+          ],
+          "constant_across_iterations": true,
+          "value": 1
+        },
+        "total_scored_observed": [
+          16
+        ],
+        "total_scored_matches_fixture": true,
         "result_signature": [
           [
             "chain",
@@ -107,16 +399,67 @@
             0,
             0
           ]
-        ]
+        ],
+        "signature_stable_across_iterations": true,
+        "candidates_returned": 1
       },
       "chain_smem": {
         "chain_smem": true,
-        "median_seconds": 0.0011783409863710403,
-        "min_seconds": 0.0011135960230603814,
-        "max_seconds": 0.0016609960002824664,
-        "iterations": 12,
+        "gate_env": {
+          "XLOG_ILP_EXACT_CHAIN_SMEM": "1"
+        },
         "warmup": 3,
-        "dtoh_calls": 2,
+        "requested_iterations": 12,
+        "total_scored_expected": 16,
+        "total_scored_expected_from": "4 topologies * 2 candidate relations squared",
+        "iterations": 12,
+        "median_seconds": 0.00038824090734124184,
+        "min_seconds": 0.00038594193756580353,
+        "max_seconds": 0.0003951992839574814,
+        "seconds_per_iteration": [
+          0.0003951992839574814,
+          0.00039059994742274284,
+          0.00038724392652511597,
+          0.00039327703416347504,
+          0.00038778502494096756,
+          0.0003866329789161682,
+          0.0003947480581700802,
+          0.00038594193756580353,
+          0.0003886967897415161,
+          0.0003873240202665329,
+          0.00038686394691467285,
+          0.00039374688640236855
+        ],
+        "status": "ok",
+        "rows_per_candidate": 32,
+        "query_pairs_positive": 8,
+        "query_pairs_negative": 8,
+        "dtoh_calls": 1,
+        "dtoh_calls_detail": {
+          "per_iteration": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "distinct_observed": [
+            1
+          ],
+          "constant_across_iterations": true,
+          "value": 1
+        },
+        "total_scored_observed": [
+          16
+        ],
+        "total_scored_matches_fixture": true,
         "result_signature": [
           [
             "chain",
@@ -126,25 +469,38 @@
             0,
             0
           ]
-        ]
+        ],
+        "signature_stable_across_iterations": true,
+        "candidates_returned": 1
       },
       "parity": true,
-      "median_delta_percent": -1.3218477088869953,
-      "delta_sign_note": "regression_percent is computed by the runner as (smem_median - baseline_median) / baseline_median * 100, so the recorded -1.3218% means the shared-memory arm's median is 1.32% FASTER than the baseline's: the small-input control does not regress, and the 5% small-case guard is met with room. The min-max ranges of the two arms overlap, so the paper reports the control as unchanged within 1.3% rather than claiming a gain. The earlier draft of the paper described this figure as a 1.3% regression, which inverted the sign."
+      "speedup_ratio": 1.0205681380668576,
+      "median_delta_percent": -2.015361571625928,
+      "delta_sign_note": "median_delta_percent is (smem_median - baseline_median) / baseline_median * 100 -- the same quantity the profile runner calls regression_percent. A negative value means the shared-memory arm is faster.",
+      "arms_complete": true
     },
     "transfer_budget": {
-      "baseline_dtoh_calls": 2,
-      "chain_smem_dtoh_calls": 2,
-      "added_dtoh_calls": 0
+      "baseline_dtoh_calls": 1,
+      "chain_smem_dtoh_calls": 1,
+      "added_dtoh_calls": 0,
+      "note": "absolute counts are observations of this device and driver; only the difference between the arms is a product statement"
     },
     "fallback": {
-      "non_chain_uses_baseline_logic": true
+      "non_chain_uses_baseline_logic": "not measured by this runner; stated by python/tests/contract_docs/bounded-exact-induction.md"
     }
   },
-  "caveats": [
-    "Point medians on two synthetic fixtures; no per-fixture dispersion beyond min-max was collected.",
-    "No committed test executes the shared-memory kernel: the exact-induction parity tests use fixtures below the gate threshold and therefore exercise only the baseline scorer. Parity above the threshold is established by this A/B run, not by the test suite.",
-    "Parity is compared on the public coverage signature, which is identical across the two arms on both fixtures."
-  ],
-  "recovered_from": "docs/evidence/2026-05-19-v086-chain-smem/{README.md,measurements.json}, removed from the tree by 5fd0f224 (\"docs: fix generated docs and local agent workspaces\") because docs/evidence/ is an untracked agent workspace. Values here are transcribed verbatim from that bundle at ce78e32f."
+  "results": {
+    "chain_hot_speedup_ratio": 7.19845715865034,
+    "chain_hot_speedup_meets_contract_min": true,
+    "contract_min_speedup": 1.2,
+    "small_control_median_delta_percent": -2.015361571625928,
+    "small_control_within_contract_guard": true,
+    "contract_max_small_regression_percent": 5.0,
+    "chain_hot_parity": true,
+    "small_control_parity": true,
+    "added_dtoh_calls": 0,
+    "shared_memory_adds_no_host_transfers": true,
+    "source": "python/tests/contract_docs/bounded-exact-induction.md"
+  },
+  "comparison_acceptable": true
 }

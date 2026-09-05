@@ -1,47 +1,73 @@
-[
-  {
-    "queries": 1,
-    "handoffs": 2,
-    "off_ms": 18.4377,
-    "on_ms": 18.5305,
-    "roundtrip_ms": 0.0927,
-    "overhead_pct": 0.5,
-    "roundtrip_per_handoff_us": 46.36
+{
+  "benchmark": "residency_scale_ablation",
+  "claim": "How the residency round-trip cost scales with the number of queries, that is with the number of host-device handoffs.",
+  "provenance": {
+    "gpu": "NVIDIA A100 80GB PCIe, GPU-bdb502b0-1852-1504-5cd0-cafd7908b7e7, driver 580.159.04, 81920 MiB",
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+    "logical_cpu_count": 252,
+    "cpu_quota_cores": 26.35,
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39",
+    "commit": "a2bafef0517b67747c06c8f0ec294494e72b2e72",
+    "dirty": false,
+    "measured_at_utc": "2026-09-01",
+    "note": "recorded by the pod session that produced this file. The device UUID and CPU model are read from the triangle-counting artifact of that same session, which is the only file of the run whose runner records them; the environment probe of the run records the GPU name, driver and CPU quota directly."
   },
-  {
-    "queries": 4,
-    "handoffs": 8,
-    "off_ms": 23.1668,
-    "on_ms": 21.108,
-    "roundtrip_ms": -2.0589,
-    "overhead_pct": -8.9,
-    "roundtrip_per_handoff_us": -257.36
+  "protocol": {
+    "queries": [
+      1,
+      4,
+      16,
+      64,
+      256
+    ],
+    "handoffs": "2 per query",
+    "reported": "each point is the mean of three measurements per arm, each measurement itself an average over the runner's inner iteration count; roundtrip_per_handoff_us = (on_ms - off_ms) * 1000 / handoffs"
   },
-  {
-    "queries": 16,
-    "handoffs": 32,
-    "off_ms": 30.5982,
-    "on_ms": 31.8238,
-    "roundtrip_ms": 1.2256,
-    "overhead_pct": 4.0,
-    "roundtrip_per_handoff_us": 38.3
-  },
-  {
-    "queries": 64,
-    "handoffs": 128,
-    "off_ms": 71.7954,
-    "on_ms": 78.954,
-    "roundtrip_ms": 7.1587,
-    "overhead_pct": 10.0,
-    "roundtrip_per_handoff_us": 55.93
-  },
-  {
-    "queries": 256,
-    "handoffs": 512,
-    "off_ms": 292.027,
-    "on_ms": 317.0759,
-    "roundtrip_ms": 25.049,
-    "overhead_pct": 8.6,
-    "roundtrip_per_handoff_us": 48.92
-  }
-]
+  "results": [
+    {
+      "queries": 1,
+      "handoffs": 2,
+      "off_ms": 12.8937,
+      "on_ms": 13.2458,
+      "roundtrip_ms": 0.3521,
+      "overhead_pct": 2.7,
+      "roundtrip_per_handoff_us": 176.05
+    },
+    {
+      "queries": 4,
+      "handoffs": 8,
+      "off_ms": 18.5883,
+      "on_ms": 19.0724,
+      "roundtrip_ms": 0.4841,
+      "overhead_pct": 2.6,
+      "roundtrip_per_handoff_us": 60.51
+    },
+    {
+      "queries": 16,
+      "handoffs": 32,
+      "off_ms": 29.8845,
+      "on_ms": 32.6237,
+      "roundtrip_ms": 2.7391,
+      "overhead_pct": 9.2,
+      "roundtrip_per_handoff_us": 85.6
+    },
+    {
+      "queries": 64,
+      "handoffs": 128,
+      "off_ms": 59.3416,
+      "on_ms": 68.9078,
+      "roundtrip_ms": 9.5662,
+      "overhead_pct": 16.1,
+      "roundtrip_per_handoff_us": 74.74
+    },
+    {
+      "queries": 256,
+      "handoffs": 512,
+      "off_ms": 202.6082,
+      "on_ms": 234.0358,
+      "roundtrip_ms": 31.4276,
+      "overhead_pct": 15.5,
+      "roundtrip_per_handoff_us": 61.38
+    }
+  ]
+}
