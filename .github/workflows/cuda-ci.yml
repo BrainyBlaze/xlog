@@ -117,12 +117,15 @@ jobs:
   # get GPU coverage is the same mechanism that let a broken test sit on main:
   # whatever the filter misses is exactly what nobody checks. On a warm
   # self-hosted runner a documentation-only pull request rebuilds nothing.
+  # PR runners register with --no-default-labels and only
+  # xlog-cuda-pr<PR number>-<full head SHA>. This binds paid GPU work to the
+  # reviewed revision without accepting unrelated nightly or main jobs.
   cuda-slice:
     name: cuda-slice
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, linux, x64, cuda]
+    runs-on: ${{ format('xlog-cuda-pr{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -155,7 +158,10 @@ jobs:
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository))
-    runs-on: [self-hosted, linux, x64, cuda]
+    runs-on: >-
+      ${{ github.event_name == 'pull_request'
+          && format('xlog-cuda-pr{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha)
+          || fromJSON('["self-hosted","linux","x64","cuda"]') }}
     timeout-minutes: 90
     env:
       PINNED_CORPUS_SHA: 74f2895486737b4caa42229389d309994e7ad3ea
