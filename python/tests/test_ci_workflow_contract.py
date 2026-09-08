@@ -193,10 +193,22 @@ def test_the_rust_suite_runs_nightly_and_a_device_slice_gates_every_pull_request
     rust_tests = jobs["rust-tests"]
     assert isinstance(rust_tests, dict)
     assert "github.event_name == 'schedule'" in rust_tests["if"]
+    assert rust_tests["runs-on"] == ["self-hosted", "linux", "x64", "cuda"]
 
     device_slice = jobs["cuda-slice"]
     assert isinstance(device_slice, dict)
-    assert device_slice["runs-on"] == ["self-hosted", "linux", "x64", "cuda"]
+    pr_runner_label = (
+        "format('xlog-cuda-pr{0}-{1}', github.event.pull_request.number, "
+        "github.event.pull_request.head.sha)"
+    )
+    assert device_slice["runs-on"] == "${{ " + pr_runner_label + " }}"
+    wheel = jobs["python-wheel-gpu"]
+    assert isinstance(wheel, dict)
+    assert " ".join(wheel["runs-on"].split()) == (
+        "${{ github.event_name == 'pull_request' && "
+        + pr_runner_label
+        + " || fromJSON('[\"self-hosted\",\"linux\",\"x64\",\"cuda\"]') }}"
+    )
     assert "github.event_name == 'pull_request'" in device_slice["if"]
     assert "head.repo.full_name == github.repository" in device_slice["if"]
     # Deliberately not gated on the change classifier. A filter that decides
