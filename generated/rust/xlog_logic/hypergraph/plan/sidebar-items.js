@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PlanError","RulePlan"],"fn":["explain_plans","plan_rule","plan_rules","plan_scc_rules"]};

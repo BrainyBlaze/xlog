@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["WCOJ_COST_GATE_PARAMS"],"fn":["build_cycle4_var_order","build_triangle_var_order","cycle4_kernel_output_cols","cycle4_lookup_perms","triangle_kernel_output_cols","triangle_lookup_perms","wcoj_cost_gate_predicts_wcoj"],"struct":["HeatAwareLeaderModel","LeaderCardinalityModel","WcojCostGateParams"],"trait":["WcojVariableOrderingModel"]};

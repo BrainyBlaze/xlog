@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["induce_exact_nary"],"struct":["InduceExactNaryRequest","NaryInductionConfig","NaryInductionResult","ScoredNaryCandidate"]};

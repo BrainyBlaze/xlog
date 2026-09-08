@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["LogAction","LogResult","SinkError"],"struct":["InMemorySink","LogRecord","LoggingResource","NullSink"],"trait":["LoggingSink"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["cnf","compilation","epistemic","epistemic_production","exact","gpu","kc","mc","neural_fast_path","pir","provenance","wfs","xgcf"]};

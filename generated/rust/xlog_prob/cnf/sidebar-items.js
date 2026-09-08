@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["canonical_pir_hash","encode_cnf"],"struct":["CnfEncoding","CnfFormula"]};

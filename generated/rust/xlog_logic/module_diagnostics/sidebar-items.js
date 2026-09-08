@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CandidateSourceKind","ModuleDeclarationKind","ModuleRole","ModuleViolationKind"],"fn":["diagnose_module_boundaries"],"struct":["ModuleBoundaryInput","ModuleBoundaryReport","ModuleDeclaration","ModuleManifest","ModuleViolation"]};

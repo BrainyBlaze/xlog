@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NARY_MAX_ATOM_ARITY","NARY_MAX_BODY_ATOMS","NARY_MAX_HEAD_ARITY","NARY_MAX_JOIN_VARS"],"enum":["NaryLayoutError"],"fn":["binding_code","decode_binding","flatten_patterns","score_pattern_flat","score_pattern_flat_coverage"],"struct":["FlatRelation","NaryPatternBatchLayout"]};

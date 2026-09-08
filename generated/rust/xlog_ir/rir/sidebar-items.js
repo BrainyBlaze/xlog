@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["K_CLIQUE_MAX_EDGES","K_CLIQUE_MAX_K"],"enum":["CompareOp","ConstValue","Expr","JoinType","MultiwayPlan","PlannedHashReason","ProjectExpr","RirNode"],"struct":["ColumnSwap","CostPredictionRecord","HelperSplitSpec","KCliqueVariableOrder","LookupPerm","SortedLayoutSpec","StreamGroupId","VariableOrder"]};

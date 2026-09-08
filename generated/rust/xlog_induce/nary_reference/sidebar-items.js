@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["score_pattern_reference"],"struct":["HostRelation","ReferenceCoverage"]};

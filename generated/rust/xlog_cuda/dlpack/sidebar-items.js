@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["K_DLBOOL","K_DLCPU","K_DLCUDA","K_DLFLOAT","K_DLINT","K_DLUINT"],"fn":["export_slice_managed_tensor"],"struct":["DLDataType","DLDevice","DLManagedTensor","DLTensor","DlpackManagedTensor","DlpackTable"],"type":["DLDataTypeCode","DLDeleter","DLDeviceType"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["gen_and_circuit","gen_decision_circuit","gen_deep_chain_circuit","gen_large_or_circuit","gen_or_circuit","gen_single_lit_circuit","numerical_gradient","run_tiny_xgcf_backward","run_tiny_xgcf_forward","tiny_xgcf_spec"],"struct":["TinyXgcfDevice","TinyXgcfRun","TinyXgcfSpec"]};

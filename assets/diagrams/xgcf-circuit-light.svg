@@ -1,0 +1,77 @@
+<!-- xlog diagram: XGCF circuit structure (light). Source: ARCHITECTURE.md "XGCF: GPU Circuit Format" + probabilistic engines. Levelized DAG (LIT/AND/OR/DECISION), evaluated level-by-level in log space; forward values up, adjoints back down. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320" font-family="Inter, system-ui, sans-serif">
+  <rect width="900" height="320" fill="#FBFBFD"/>
+  <defs>
+    <marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6B6880"/>
+    </marker>
+    <marker id="agb" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7C3AED"/>
+    </marker>
+  </defs>
+
+  <text x="28" y="38" font-size="16" font-weight="600" fill="#1E1B2E">The XGCF circuit</text>
+  <text x="28" y="56" font-size="11" fill="#6B6880">A levelized DAG evaluated one level at a time in log space &#8212; values flow up, gradients flow back down.</text>
+
+  <!-- level bands -->
+  <g font-size="9" font-weight="600" letter-spacing="0.5" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">
+    <text x="30" y="264">LEVEL 0</text>
+    <text x="30" y="192">LEVEL 1</text>
+    <text x="30" y="120">LEVEL 2</text>
+  </g>
+  <g stroke="#E4E3EE" stroke-width="1">
+    <line x1="110" y1="260" x2="660" y2="260"/>
+    <line x1="110" y1="188" x2="660" y2="188"/>
+    <line x1="110" y1="116" x2="660" y2="116"/>
+  </g>
+
+  <!-- LIT leaves (level 0) -->
+  <g>
+    <rect x="150" y="242" width="86" height="36" rx="18" fill="#7C3AED" fill-opacity="0.12" stroke="#7C3AED" stroke-width="1.1"/>
+    <text x="193" y="264" text-anchor="middle" font-size="10.5" font-weight="600" fill="#7C3AED" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">LIT rain</text>
+    <rect x="290" y="242" width="120" height="36" rx="18" fill="#7C3AED" fill-opacity="0.12" stroke="#7C3AED" stroke-width="1.1"/>
+    <text x="350" y="264" text-anchor="middle" font-size="10.5" font-weight="600" fill="#7C3AED" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">LIT sprinkler</text>
+    <rect x="464" y="242" width="100" height="36" rx="18" fill="#7C3AED" fill-opacity="0.12" stroke="#7C3AED" stroke-width="1.1"/>
+    <text x="514" y="264" text-anchor="middle" font-size="10.5" font-weight="600" fill="#7C3AED" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">LIT &#172;rain</text>
+  </g>
+
+  <!-- AND nodes (level 1) -->
+  <rect x="196" y="170" width="90" height="36" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <text x="241" y="192" text-anchor="middle" font-size="11" font-weight="600" fill="#1E1B2E">AND</text>
+  <rect x="404" y="170" width="90" height="36" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <text x="449" y="192" text-anchor="middle" font-size="11" font-weight="600" fill="#1E1B2E">AND</text>
+
+  <!-- OR root (level 2) -->
+  <rect x="300" y="94" width="110" height="40" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <text x="355" y="112" text-anchor="middle" font-size="11" font-weight="600" fill="#1E1B2E">OR (root)</text>
+  <text x="355" y="126" text-anchor="middle" font-size="8.5" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">logsumexp</text>
+
+  <!-- forward edges (up) -->
+  <g stroke="#6B6880" stroke-width="1.4" fill="none" marker-end="url(#ag)">
+    <path d="M193,242 C193,226 220,216 232,208"/>
+    <path d="M350,242 C330,226 270,216 254,208"/>
+    <path d="M350,242 C370,226 420,216 436,208"/>
+    <path d="M514,242 C514,226 480,216 466,208"/>
+    <path d="M241,170 C241,152 310,142 330,136"/>
+    <path d="M449,170 C449,152 400,142 382,136"/>
+  </g>
+
+  <!-- output -->
+  <path d="M355,94 V72" stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#ag)"/>
+  <text x="368" y="76" font-size="10" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">log P(query)</text>
+
+  <!-- backward pass (adjoints), offset to the right -->
+  <g stroke="#7C3AED" stroke-width="1.3" fill="none" stroke-dasharray="4 3" marker-end="url(#agb)">
+    <path d="M410,110 C560,120 600,170 580,238"/>
+  </g>
+  <text x="620" y="170" font-size="9.5" fill="#7C3AED" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">adjoints (backward)</text>
+  <text x="620" y="184" font-size="9.5" fill="#7C3AED" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">&#8594; gradients at leaves</text>
+
+  <!-- side facts -->
+  <rect x="676" y="216" width="196" height="72" rx="8" fill="#F3F3F8" stroke="#B9B7C8" stroke-width="1"/>
+  <text x="692" y="236" font-size="10" font-weight="600" letter-spacing="0.5" fill="#6B6880" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">NODE TYPES</text>
+  <text x="692" y="254" font-size="10" fill="#1E1B2E" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">LIT &#183; AND &#183; OR &#183; DECISION</text>
+  <text x="692" y="272" font-size="9.5" fill="#6B6880">one kernel launch per level</text>
+
+  <text x="28" y="308" font-size="10.5" fill="#6B6880">AND sums log-values; OR combines with logsumexp for stability. Weights update between evaluations without recompiling the structure.</text>
+</svg>

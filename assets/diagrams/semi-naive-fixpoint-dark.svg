@@ -1,0 +1,52 @@
+<!-- xlog diagram: semi-naive fixpoint (dark). Source: docs ARCHITECTURE.md "Fixpoint Iteration (Semi-Naive)" + recursion page. Delta-driven iteration until no new tuples. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 264" font-family="Inter, system-ui, sans-serif">
+  <rect width="900" height="264" fill="#0E0E16"/>
+  <defs>
+    <marker id="afd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9B98B4"/>
+    </marker>
+  </defs>
+
+  <text x="28" y="38" font-size="16" font-weight="600" fill="#E7E6F0">Semi-naive fixpoint</text>
+  <text x="28" y="56" font-size="11" fill="#9B98B4">Recursion iterates on the delta of newly-derived tuples, so each round does less work until nothing new appears.</text>
+
+  <path d="M800,108 V84 H267 V106" stroke="#9B98B4" stroke-width="1.5" fill="none" stroke-dasharray="4 3" marker-end="url(#afd)"/>
+  <text x="533" y="78" text-anchor="middle" font-size="9.5" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">&#916; not empty &#8212; repeat</text>
+
+  <g>
+    <rect x="28" y="110" width="120" height="56" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+    <rect x="29.5" y="112" width="3.5" height="52" rx="1.75" fill="#8B83F0"/>
+    <text x="88" y="134" text-anchor="middle" font-size="12" font-weight="600" fill="#E7E6F0">Seed</text>
+    <text x="88" y="149" text-anchor="middle" font-size="9.5" fill="#9B98B4">base rules</text>
+    <path d="M148,138 H190" stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#afd)"/>
+
+    <rect x="192" y="110" width="150" height="56" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+    <rect x="193.5" y="112" width="3.5" height="52" rx="1.75" fill="#8B83F0"/>
+    <text x="267" y="134" text-anchor="middle" font-size="12" font-weight="600" fill="#E7E6F0">Evaluate</text>
+    <text x="267" y="149" text-anchor="middle" font-size="9.5" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">rules on &#916;</text>
+    <path d="M342,138 H372" stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#afd)"/>
+
+    <rect x="374" y="110" width="150" height="56" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+    <rect x="375.5" y="112" width="3.5" height="52" rx="1.75" fill="#8B83F0"/>
+    <text x="449" y="134" text-anchor="middle" font-size="12" font-weight="600" fill="#E7E6F0">New tuples</text>
+    <text x="449" y="149" text-anchor="middle" font-size="9.5" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">dedup(out &#8722; full)</text>
+    <path d="M524,138 H554" stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#afd)"/>
+
+    <rect x="556" y="110" width="148" height="56" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+    <rect x="557.5" y="112" width="3.5" height="52" rx="1.75" fill="#8B83F0"/>
+    <text x="630" y="134" text-anchor="middle" font-size="12" font-weight="600" fill="#E7E6F0">Merge</text>
+    <text x="630" y="149" text-anchor="middle" font-size="9.5" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">full &#8746;= new; &#916;=new</text>
+    <path d="M704,138 H763" stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#afd)"/>
+  </g>
+
+  <polygon points="800,106 836,138 800,170 764,138" fill="#171626" stroke="#8B83F0" stroke-width="1.25"/>
+  <text x="800" y="142" text-anchor="middle" font-size="11" font-weight="600" fill="#E7E6F0">&#916; = &#8709;?</text>
+
+  <path d="M800,170 V198" stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#afd)"/>
+  <text x="810" y="188" font-size="9.5" fill="#9B98B4">yes</text>
+  <rect x="734" y="200" width="132" height="40" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+  <rect x="735.5" y="202" width="3.5" height="36" rx="1.75" fill="#10B981"/>
+  <text x="803" y="224" text-anchor="middle" font-size="12" font-weight="600" fill="#E7E6F0">Fixpoint</text>
+
+  <text x="28" y="256" font-size="10.5" fill="#9B98B4">Each round rewrites one recursive scan to read only the delta; the loop stops when a round derives no new tuples.</text>
+</svg>

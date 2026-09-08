@@ -1,0 +1,62 @@
+<!-- xlog diagram: MC resident megakernel (dark). Source: probabilistic engines page + xlog-prob mc/resident. One kernel launch evaluates all sampled worlds on-device (sample -> derive -> count per world); zero tracked host transfers in the measured region; fail-closed gate rejects unsupported fragments. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" font-family="Inter, system-ui, sans-serif">
+  <rect width="900" height="300" fill="#0E0E16"/>
+  <defs>
+    <marker id="amd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9B98B4"/>
+    </marker>
+  </defs>
+
+  <text x="28" y="38" font-size="16" font-weight="600" fill="#E7E6F0">Monte Carlo: the resident megakernel</text>
+  <text x="28" y="56" font-size="11" fill="#9B98B4">One kernel launch evaluates every sampled world on the device; the host reads back only the final counts.</text>
+
+  <!-- fail-closed gate -->
+  <rect x="28" y="112" width="128" height="64" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+  <rect x="29.5" y="114" width="3.5" height="60" rx="1.75" fill="#D97706"/>
+  <text x="92" y="134" text-anchor="middle" font-size="11.5" font-weight="600" fill="#E7E6F0">Fragment gate</text>
+  <text x="92" y="149" text-anchor="middle" font-size="8.5" fill="#9B98B4">negation / aggregates /</text>
+  <text x="92" y="161" text-anchor="middle" font-size="8.5" fill="#9B98B4">disjunctions rejected</text>
+  <path d="M156,144 H184" stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#amd)"/>
+  <text x="170" y="132" text-anchor="middle" font-size="8.5" fill="#9B98B4">pass</text>
+  <path d="M92,176 V208" stroke="#F87171" stroke-width="1.4" fill="none" stroke-dasharray="4 3" marker-end="url(#amd)"/>
+  <text x="92" y="226" text-anchor="middle" font-size="9" fill="#F87171">typed rejection</text>
+  <text x="92" y="239" text-anchor="middle" font-size="8.5" fill="#F87171">(no silent fallback)</text>
+
+  <!-- device plane: single launch -->
+  <path d="M186,84 H716 L728,96 V236 H186 Z" fill="#1C1A33" stroke="#8B83F0" stroke-width="1.25"/>
+  <rect x="198" y="92" width="104" height="15" rx="7.5" fill="#10B981"/>
+  <text x="250" y="102.5" text-anchor="middle" font-size="9" font-weight="600" fill="#0E0E16" letter-spacing="0.5" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">GPU-RESIDENT</text>
+  <text x="330" y="103" font-size="9.5" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">one kernel launch &#183; zero tracked host transfers</text>
+
+  <!-- world lanes -->
+  <g>
+    <rect x="204" y="118" width="440" height="30" rx="5" fill="#0E0E16" stroke="#3A3850" stroke-width="1"/>
+    <text x="222" y="137" font-size="9.5" font-weight="600" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">world 0</text>
+    <text x="420" y="137" text-anchor="middle" font-size="9.5" fill="#E7E6F0" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">sample &#8594; derive &#8594; check query</text>
+    <rect x="204" y="154" width="440" height="30" rx="5" fill="#0E0E16" stroke="#3A3850" stroke-width="1"/>
+    <text x="222" y="173" font-size="9.5" font-weight="600" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">world 1</text>
+    <text x="420" y="173" text-anchor="middle" font-size="9.5" fill="#E7E6F0" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">sample &#8594; derive &#8594; check query</text>
+    <text x="424" y="199" text-anchor="middle" font-size="11" fill="#9B98B4">&#8942;</text>
+    <rect x="204" y="204" width="440" height="26" rx="5" fill="#0E0E16" stroke="#3A3850" stroke-width="1"/>
+    <text x="222" y="221" font-size="9.5" font-weight="600" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">world N-1</text>
+    <text x="420" y="221" text-anchor="middle" font-size="9.5" fill="#E7E6F0" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">sample &#8594; derive &#8594; check query</text>
+  </g>
+
+  <!-- device counts -->
+  <rect x="656" y="140" width="60" height="60" rx="7" fill="#0E0E16" stroke="#E7E6F0" stroke-width="1.25"/>
+  <text x="686" y="165" text-anchor="middle" font-size="10" font-weight="600" fill="#E7E6F0">counts</text>
+  <text x="686" y="180" text-anchor="middle" font-size="8" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">on device</text>
+  <g stroke="#9B98B4" stroke-width="1.2" fill="none" marker-end="url(#amd)">
+    <path d="M644,133 C652,133 652,150 655,152"/>
+    <path d="M644,169 H655"/>
+    <path d="M644,217 C652,217 652,190 655,188"/>
+  </g>
+
+  <!-- host result -->
+  <path d="M728,170 H760" stroke="#9B98B4" stroke-width="1.5" fill="none" marker-end="url(#amd)"/>
+  <rect x="762" y="140" width="110" height="60" rx="7" fill="#171626" stroke="#E7E6F0" stroke-width="1.25"/>
+  <text x="817" y="163" text-anchor="middle" font-size="11" font-weight="600" fill="#E7E6F0">Estimate</text>
+  <text x="817" y="179" text-anchor="middle" font-size="8.5" fill="#9B98B4" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">p&#770; &#177; CI &#183; seed</text>
+
+  <text x="28" y="288" font-size="10.5" fill="#9B98B4">Each world samples its facts (deterministic per seed), derives, and checks the query in parallel; unsupported programs need the labeled CPU-oracle opt-in.</text>
+</svg>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["reduce_nary","reduce_per_topology"],"struct":["KeptNaryPattern","ScoredPair"]};

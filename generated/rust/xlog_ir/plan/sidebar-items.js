@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["CompiledRule","ExecutionPlan","GeneratedQueryRuleProvenance","PlanBuilder","Scc","Stratum"]};

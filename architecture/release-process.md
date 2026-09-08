@@ -1,0 +1,157 @@
+# Release Process
+
+XLOG's release boundaries for crates, Python wheels, CLI archives, CUDA validation, and the xlog.md docs deployment.
+
+<Note>
+For contributors — how XLOG is released internally. If you just want to install
+and use XLOG, you do not need this page.
+</Note>
+
+This page explains how a release is built, validated, and published. It covers
+release mechanics only, not promises about which features are available.
+`CHANGELOG.md` records which tagged release first contains a change. Contributor
+pull requests do not edit it. `release-plz` generates package-specific entries from
+Conventional Commit history in the rolling release pull request and keeps
+`[Unreleased]` as the boundary above the generated release sections.
+
+XLOG uses a split release model. GitHub Actions check source hygiene and package
+metadata automatically, and a targeted workflow can exercise trusted commits on
+a self-hosted CUDA runner. A maintainer still runs the complete CUDA release gate
+on a real GPU host before publication.
+
+## Published Artifacts
+
+Public releases target:
+
+- Linux `x86_64`;
+- NVIDIA CUDA Toolkit 13.x;
+- crates.io packages for the public Rust crates;
+- `pyxlog` Python wheels;
+- GitHub release CLI archives for `xlog`.
+
+Release tooling reads package versions from the workspace manifests. Do not copy
+that value into documentation: use the changelog and tagged release metadata as
+the authoritative record.
+
+## Rust Package Boundary
+
+Not every crate in the workspace is published. The two lists below split the
+workspace into what goes to crates.io and what stays internal.
+
+Publishable crates:
+
+- `xlog-cli`
+- `xlog-core`
+- `xlog-cuda`
+- `xlog-gpu`
+- `xlog-ir`
+- `xlog-logic`
+- `xlog-prob`
+- `xlog-runtime`
+- `xlog-solve`
+- `xlog-stats`
+
+Workspace packages that are not published to crates.io:
+
+- `pyxlog`
+- `xlog-neural`
+- `xlog-induce`
+- `xlog-cuda-tests`
+- `xlog-integration`
+
+`pyxlog` ships as a Python package on PyPI, not as a crates.io Rust crate.
+
+## CUDA Artifact Model
+
+XLOG runs GPU kernels, and those compiled kernels are not checked into the tree.
+The CUDA source lives under `crates/xlog-cuda/kernels`. The Rust build and
+packaging scripts compile it into the binary artifacts.
+
+At runtime, XLOG looks for a compiled kernel in four places, in this order:
+
+1. `XLOG_CUBIN_DIR` (an environment variable pointing at a kernel directory);
+2. a `kernels/` folder next to the installed package or binary;
+3. Cargo's `OUT_DIR`, used for source-tree builds;
+4. embedded portable PTX — GPU assembly compiled into the Rust binary as a
+   last-resort fallback.
+
+Release archives and Python wheels include pre-staged kernel artifacts. This lets
+consumers run GPU code without recompiling kernels the first time.
+
+## GPU Release Validation
+
+GitHub-hosted CI cannot prove the GPU path works because those runners have no
+CUDA hardware. A targeted workflow runs native Python relation tests and focused
+Rust GPU suites on the self-hosted CUDA runner after pushes to `main`, when a
+maintainer dispatches the workflow from `main` for an explicitly reviewed full
+commit SHA, or for a pull request whose head branch belongs to this repository.
+Its job condition skips external forks before assigning the CUDA runner, and the
+workflow never uses `pull_request_target`. This targeted workflow is not the
+release gate. Before publication a maintainer runs the validation script on a
+real GPU host:
+
+```bash
+scripts/validate_release_gpu.sh --mode release
+```
+
+This script requires CUDA hardware and
+`XLOG_PINNED_CORPUS_ROOT` pointing to the exact clean corpus checkout described
+in [CUDA Certification](/architecture/certification). It sets
+`XLOG_REQUIRE_CUDA=1`, builds the release artifacts, creates a fresh virtual
+environment with the host's site packages visible, and force-installs the exact
+wheel without resolving dependencies. It verifies the imported native module,
+runs the native relation-provenance and API suites, and runs the resident runtime
+feature plus exact preparation, production, scaling, and semantic acceptance
+filters. It rejects missing, ignored, skipped, or count-mismatched test output.
+The remaining gates cover probabilistic GPU behavior, CUDA certification, and
+packaged-kernel layout. A green GitHub-hosted CI run does not satisfy this gate —
+only a passing complete GPU run does.
+
+## Docs Deployment
+
+The public docs live at `https://xlog.md`. Here is how a change to them reaches
+that site.
+
+Source pages are MDX files under `docs/`. The GitHub workflow
+`.github/workflows/docs.yml` runs whenever `docs/**` changes on a pull
+request or on `main`. It pins Node 22 and `mint@4.2.666`. It validates the
+Mintlify site, exports a static bundle, and force-pushes the generated site to
+the `docs-dist` branch on `main`.
+
+DigitalOcean App Platform serves the `docs-dist` branch, configured by
+`.do/docs-app.yaml`. That app owns both `xlog.md` and `www.xlog.md`.
+
+The generated static HTML is never hand-edited in the source tree. To change the
+docs, edit the MDX in `docs/`, then let validation, export, and the workflow
+publish `docs-dist`.
+
+## Source and package availability
+
+The documentation site follows the source tree, while crates, wheels, and CLI
+archives are immutable release artifacts. A documented API can therefore appear
+in a source build before every package index contains it. Check `CHANGELOG.md`
+or the selected artifact's release notes before depending on a newly documented
+surface. Feature pages use factual "available since" statements where a stable
+first release is known instead of maintaining a duplicate list on this page.
+
+Two runtime behaviors are available since 0.12.0: chunked
+multiway unions for same-head rule outputs, with a byte budget controlled by
+`XLOG_UNION_CHUNK_BYTES`, and `warning[W0510]` on stderr when an imported module
+declares a pragma, since pragmas apply only in the entry file.
+
+## Required Secrets
+
+Release workflows read repository secrets to publish to crates.io and PyPI and
+to automate GitHub releases. Store those secrets in GitHub Actions settings. Do
+not commit tokens or generated credentials to the repository.
+
+## Release Checklist
+
+For a release candidate:
+
+1. Confirm `CHANGELOG.md` separates `[Unreleased]` from the target release.
+2. Run ordinary CI and docs validation.
+3. Run CUDA release validation on a supported GPU host.
+4. Build and inspect the Python wheel and CLI archive layouts.
+5. Publish Rust crates, Python wheels, and GitHub release artifacts.
+6. Confirm `xlog.md` serves the exported docs over HTTPS.

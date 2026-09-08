@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PatternVar"],"fn":["canonical_binary_pattern","enumerate_patterns"],"struct":["BodyAtomPattern","NaryEnumerationConfig","NaryRulePattern"]};

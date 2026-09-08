@@ -1,0 +1,97 @@
+# Adaptive Indexing
+
+How XLOG reuses build-side hash indexes across repeated joins while respecting relation generations, schemas, keys, and device memory budgets.
+
+<Note>
+For contributors — how adaptive indexing works internally. This page is dense on
+purpose. It documents the runtime executor, not a user workflow.
+</Note>
+
+Adaptive indexing lets XLOG skip rebuilding the same join index over and over.
+When a query joins two relations, the smaller side (the *build side*) is turned
+into a hash table so the larger side can probe it. Adaptive indexing keeps that
+hash table around and reuses it when an identical join recurs.
+
+It is deliberately narrow. It is a persistent build-side hash-index cache inside
+the runtime executor, not a broad physical-design subsystem. It reuses an
+expensive join index only when the same relation, contents, key columns, schema,
+and GPU all recur across evaluations.
+
+## What is cached
+
+The cache is an object named `JoinIndexCache`. Each stored index is looked up by
+a composite key, so an index built for one situation is never reused in a
+different one. The key combines:
+
+- relation ID — which relation the index is built over;
+- relation-store generation — a version counter that bumps whenever the relation
+  changes, so a new generation forces a fresh index;
+- key column list — the columns the index is keyed on;
+- schema signature — the column types and the row width;
+- CUDA device ordinal — which GPU the index lives on (numbered from 0).
+
+That key prevents a stale index from being reused after a relation update, a
+schema change, a key change, or a provider/device mismatch.
+
+## Build decision
+
+Not every join is worth an index. The executor considers building a persistent
+index only when all of these hold:
+
+- the build-side relation is hot enough — it has been used often enough to pay
+  back the build cost;
+- the estimated index bytes fit the cache budget — the byte limit for cached
+  indexes;
+- the relation is stable for the current generation — it is not mid-change;
+- the runtime configuration allows persistent hash indexes.
+
+If those conditions are not met, the join uses the ordinary path. The cache then
+records a miss or a deferred build.
+
+## Cache lifetime
+
+Cached indexes do not live forever. An index is invalidated when its relation is
+replaced or removed. The runtime also clears the relevant cache entries when a
+state reset would make the cached relation metadata unsafe to trust.
+
+The cache is byte-bounded. When a new index is inserted, older entries can be
+evicted until the new one fits. If it still cannot fit, the build is skipped.
+
+## Configuration
+
+The runtime configuration can turn persistent hash indexes on or off explicitly.
+When that setting is left unset, environment defaults decide the behavior.
+
+There is also a background build mode. Instead of blocking the current join to
+build an index, it can request the build through the recorded provider path — the
+runtime code path that produced the relation's data. The finished index is then
+made available to later evaluations.
+
+## Telemetry
+
+To confirm the cache is actually being reused, read the executor stats. They
+track distinct events:
+
+- hits and misses;
+- builds and deferred builds;
+- evictions;
+- invalidations;
+- stale rejections;
+- background build requests and completions.
+
+Use those counters to verify reuse. A faster second run is not proof on its own —
+only treat adaptive indexing as active when the stats show a hit or a completed
+build.
+
+## Boundaries
+
+Adaptive indexing does not currently promise:
+
+- arbitrary secondary-index selection — choosing extra indexes beyond the join
+  hash index;
+- sort-merge planning — the alternative join strategy that sorts both sides;
+- global physical-design tuning — deciding indexes across the whole workload;
+- correctness changes.
+
+It is a cache for reusable hash-join build structures. Correctness stays exactly
+the same as the ordinary join route.
