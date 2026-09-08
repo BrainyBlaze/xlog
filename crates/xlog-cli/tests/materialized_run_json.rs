@@ -81,6 +81,76 @@ reached(X) :- seed(X).
 }
 
 #[test]
+fn recursive_deterministic_json_stats_count_serialized_query_rows() {
+    let _device = match CudaDevice::new(0) {
+        Ok(device) => device,
+        Err(error) if std::env::var("XLOG_REQUIRE_CUDA").as_deref() == Ok("1") => {
+            panic!("XLOG_REQUIRE_CUDA=1 but CUDA initialization failed: {error}")
+        }
+        Err(error) => {
+            eprintln!("SKIPPED recursive deterministic JSON stats: CUDA unavailable: {error}");
+            return;
+        }
+    };
+    let fixture = TempDir::new().expect("create fixture directory");
+    let program = fixture.path().join("recursive_stats.xlog");
+    std::fs::write(
+        &program,
+        r#"
+pred edge(symbol, symbol).
+pred reachable(symbol).
+pred answer(symbol).
+pred audit(symbol).
+edge(seed, step).
+reachable(seed).
+reachable(To) :- reachable(From), edge(From, To).
+answer(yes) :- reachable(step).
+audit(ok).
+?- answer(Value).
+?- audit(Value).
+"#,
+    )
+    .expect("write program");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid program path"),
+            "--output",
+            "json",
+            "--materialize-relation",
+            "answer",
+            "--stats",
+            "--stats-format",
+            "json",
+        ])
+        .output()
+        .expect("run recursive deterministic JSON export");
+    assert!(
+        output.status.success(),
+        "xlog run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("valid run JSON");
+    let stats_line = String::from_utf8(output.stderr)
+        .expect("UTF-8 stats")
+        .lines()
+        .next()
+        .expect("stats line")
+        .to_owned();
+    let stats: Value = serde_json::from_str(&stats_line).expect("valid stats JSON");
+    let serialized_query_rows: u64 = payload["queries"]
+        .as_array()
+        .expect("query array")
+        .iter()
+        .map(|query| query["rows"].as_array().expect("query rows").len() as u64)
+        .sum();
+
+    assert_eq!(serialized_query_rows, 2);
+    assert_eq!(stats["output_rows"].as_u64(), Some(serialized_query_rows));
+}
+
+#[test]
 fn deterministic_json_run_preserves_every_scalar_type() {
     let _device = match CudaDevice::new(0) {
         Ok(device) => device,
