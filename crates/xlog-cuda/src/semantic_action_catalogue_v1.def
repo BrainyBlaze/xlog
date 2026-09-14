@@ -1,0 +1,63 @@
+# Canonical encoding: non-comment lines, single spaces between tokens, LF terminator.
+# SHA-256 of that encoding is the catalogue identity, generated at build time.
+domain xlog.semantic-action-catalogue.v1
+generation 3
+constant TEXT_CARDINALITY 248077
+constant MASK_TOKEN 248078
+constant TEXT_NULL 0xffffffff
+constant OPERAND_CAPACITY 4
+constant BINDING_CAPACITY 4
+constant SCRATCH_BYTES 25165824
+constant COMPONENT_COUNT 136
+constant FIELD_COUNT 18
+constant COMPONENT_KIND_TEXT 0
+constant COMPONENT_KIND_EDIT 1
+constant NULL_CATEGORY 0
+constant NO_EDIT_ACTIVE_MASK 0x00001
+constant NO_EDIT_NULL_MASK 0x3fffe
+constant INSERT_SUPPORT_ACTIVE_MASK 0x2087f
+constant INSERT_SUPPORT_NULL_MASK 0x1f780
+field 0 action_class ACTION_CLASS 2
+field 1 opcode SEMANTIC_OPCODE 2
+field 2 target_handle PREDICATE_SCHEMA_DESCRIPTOR 1
+field 3 operand_0 TYPED_OPERAND_DESCRIPTOR 1
+field 4 operand_1 TYPED_OPERAND_DESCRIPTOR 1
+field 5 operand_2 TYPED_OPERAND_DESCRIPTOR 1
+field 6 operand_3 TYPED_OPERAND_DESCRIPTOR 1
+field 7 binding_0 TYPED_BINDING_DESCRIPTOR 1
+field 8 binding_1 TYPED_BINDING_DESCRIPTOR 1
+field 9 binding_2 TYPED_BINDING_DESCRIPTOR 1
+field 10 binding_3 TYPED_BINDING_DESCRIPTOR 1
+field 11 qualifier_bundle ORDERED_QUALIFIER_BUNDLE 1
+field 12 guard_descriptor GUARD_DESCRIPTOR 1
+field 13 edge_TRUE EDGE_DESCRIPTOR 1
+field 14 edge_FALSE EDGE_DESCRIPTOR 1
+field 15 edge_BOTH EDGE_DESCRIPTOR 1
+field 16 edge_NEITHER EDGE_DESCRIPTOR 1
+field 17 leaf_payload SUPPORT_EVENT_DESCRIPTOR 1
+action 0 NO_EDIT NO_EDIT_ACTIVE_MASK NO_EDIT_NULL_MASK
+action 1 APPLY OPCODE_SIGNATURE OPCODE_SIGNATURE
+opcode 0 NULL ONLY_UNDER_NO_EDIT
+opcode 1 INSERT_SUPPORT INSERT_SUPPORT_ACTIVE_MASK INSERT_SUPPORT_NULL_MASK
+rule TARGET_ARITY_PREFIX target_arity_0_to_4 operand_i_non_NULL_iff_i_lt_arity
+rule QUALIFIER_EMPTY distinct_EMPTY_BUNDLE_non_NULL
+rule SUPPORT_EVENT PRO_or_CONTRA unit_presence provenance source context scope ABSTAIN_illegal
+rule NULL entry_0 inactive_singleton still_consumes_Philox P_1 Q_1 mass_2pow63
+rule TEXT_ACTIVITY acquired_valid_MASK_and_retained_selected_bitmap original_ring_slot_and_logical_position
+rule MASK_SOURCE exact_MASK_TOKEN no_token_provenance not_an_ordinary_token
+rule TEXT_NULL typed_action_not_token inactive_singleton no_logits_or_support_access still_consumes_Philox P_1 Q_1 mass_2pow63
+rule TEXT_ROWS actual_MASK_rows_only shared_lane_primal summed_lane_adjoints retained_original_mapping
+rule TEXT_EFFECT selected_MASK_only no_NULL_token_provenance_or_terminal active_empty_support_is_error
+rule CODEBOOK_ORDER generation_digest_cardinality logical_typed_bytes_ascending never_physical_slot_order
+rule APPLY_GATE admitted_typed_codebooks acquired_base completion_aware_support full_transition_reserve
+rule BINDING owner_base_admission_logical_descriptors retained_UTF8 encoding_v2
+rule PWL relative_exact_FP32 clamp_minus16_0 floor_2powminus31 simplex_projection i192_u192
+rule CDF zero_based ties_to_even denominator_2pow86_times_h mass_2pow63
+rule RNG Philox4x32_10 key_law_model counter_136p_plus_i stream_serial56_family8
+rule RNG_SUCCESSOR pending_only_no_canonical_publication
+roster 0 32 1 text 0
+roster 32 18 1 edit 0
+roster 50 18 1 edit 1
+roster 68 32 2 text 0
+roster 100 18 2 edit 0
+roster 118 18 2 edit 1

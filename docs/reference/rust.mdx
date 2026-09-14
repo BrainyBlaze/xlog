@@ -78,6 +78,53 @@ program. Caller-supplied assumptions are explicit and are not silently discarded
 Both FAEEL and acyclic G91 evidence use this boundary; no
 unconditioned or CPU fallback is substituted when validation fails.
 
+## Semantic task programs
+
+`xlog_cuda::SemanticTaskEvaluationSpec` binds two ordered admitted statement
+records, their allowed supports, a native `SemanticTaskProgram`, explicit
+`SemanticTaskScoring` coefficients, and two truth-eligibility masks. XLOG does
+not prescribe the statement predicate, arguments, task answers, or reward
+weights. The resident transition ABI still has two query slots and two candidate
+lanes; this is a capacity limit, not a task definition.
+
+Use `xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)`
+for a self-contained XLOG source program with two selected zero-arity queries.
+Source facts provide its concrete inputs. During cold task binding, the native
+owner runs the canonical GPU evaluator and derives expected Boolean truth from
+the completed query results. Python cannot inject an expected-answer array.
+This adapter does not resolve imports or accept external relation buffers.
+
+Scoring maximizes `correct_weight * correct_queries + all_correct_weight *
+all_correct - work_weight * measured_work` among eligible candidates, retaining
+the earlier candidate on ties. Return scoring separately prices improvement,
+refusals, and spent work. All six coefficients are required nonnegative `u32`
+values; combinations that can overflow the signed return are rejected.
+Each nonzero four-bit mask permits truth value `n` through bit `n`.
+
+Task identity binds the exact program source, query mapping, observed result
+bytes, expected truths, scoring, masks, and admitted record selections.
+Restoration re-executes the observer and checks this identity. Observer failures
+poison the session; previous bindings cannot be reused after such a failure.
+Cold observer reads are outside the resident transition loop, and must not be
+reported as measured zero-transfer execution.
+
+### Supplied numerical policy
+
+The `semantic-policy` Cargo feature requires all three build inputs:
+
+- `XLOG_SEMANTIC_POLICY_HEADER`: the producer's self-contained numerical header.
+- `XLOG_SEMANTIC_POLICY_SHA256`: its expected 64-digit hexadecimal SHA-256.
+- `XLOG_SEMANTIC_POLICY_NAMESPACE`: its C++ namespace, for example
+  `policy_provider::numeric`.
+
+There is no default producer or digest. The build stages the verified header
+bytes and checks numerical ABI version 1: FP32 vectors of width 128, 18 fields,
+the field and adjoint layouts, and the forward and derivative operation
+signatures. These are explicit supported-ABI constraints, not support for an
+arbitrary model architecture. The selected header digest and namespace are
+included in restoration compatibility identity. Integrity and ABI checks do
+not establish numerical correctness or GPU equivalence.
+
 ## Breaking changes
 
 Changes on this list stop downstream Rust code from compiling. Each entry names

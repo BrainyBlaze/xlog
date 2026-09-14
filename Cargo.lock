@@ -1358,6 +1358,7 @@ dependencies = [
  "cudarc",
  "pyo3",
  "rand 0.8.6",
+ "serde_json",
  "sha2",
  "xlog-core",
  "xlog-cuda",
@@ -2211,7 +2212,9 @@ dependencies = [
  "arrow",
  "bytemuck",
  "cudarc",
+ "getrandom 0.3.4",
  "libloading",
+ "sha2",
  "xlog-core",
  "xlog-logic",
 ]

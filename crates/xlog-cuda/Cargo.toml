@@ -25,6 +25,8 @@ xlog-core.workspace = true
 cudarc.workspace = true
 libloading.workspace = true
 arrow = { version = "59", default-features = false, features = ["ffi", "ipc"] }
+sha2 = "0.11"
+getrandom = "0.3"
 
 [build-dependencies]
 xlog-core.workspace = true
@@ -44,6 +46,11 @@ xlog-logic = { path = "../xlog-logic" }
 [features]
 default = []
 arrow-device-import = []
+# Compile the semantic loop with its pinned external numerical policy header.
+# XLOG_SEMANTIC_POLICY_HEADER names the delivered artifact at build time.
+# XLOG_SEMANTIC_POLICY_SHA256 pins its bytes; XLOG_SEMANTIC_POLICY_NAMESPACE
+# selects its declared numerical ABI namespace. All three inputs are required.
+semantic-policy = []
 # Diagnostic-only: enable per-phase CUDA-event timing inside
 # the WCOJ triangle dispatch. Production builds leave this off
 # to keep the hot path zero-overhead. The phase-report binary

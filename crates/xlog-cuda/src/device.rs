@@ -1443,6 +1443,15 @@ const _: () = {
 mod tests {
     use super::*;
 
+    #[test]
+    fn semantic_native_owner_chain_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CudaFunction>();
+        assert_send_sync::<crate::SemanticHypergraph>();
+        assert_send_sync::<crate::SemanticTransitionSession>();
+        assert_send_sync::<crate::SemanticPublishedLease>();
+        assert_send_sync::<crate::SemanticTensorContentWitness>();
+    }
     use cudarc::driver::DevicePtrMut;
 
     #[test]
