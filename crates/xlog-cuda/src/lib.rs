@@ -14,6 +14,9 @@ pub mod launch;
 pub mod memory;
 pub mod multi_gpu_memory;
 pub mod provider;
+mod semantic_hypergraph;
+mod semantic_transition;
+mod semantic_work;
 pub mod type_seam;
 pub mod wcoj_metadata;
 #[cfg(feature = "wcoj-phase-timing")]
@@ -47,6 +50,41 @@ pub use provider::{
     GROUPBY_MODULE, ILP_MODULE, JOIN_MODULE, PACK_MODULE, PIR_MODULE, SCAN_MODULE, SET_OPS_MODULE,
     SORT_MODULE,
 };
+pub use semantic_hypergraph::{
+    SemanticAdmission, SemanticAdmissionLimits, SemanticAdmissionRecords, SemanticArgument,
+    SemanticExtents, SemanticForkHandle, SemanticHandleKind, SemanticHypergraph,
+    SemanticHypergraphCapacities, SemanticHypergraphError, SemanticHypergraphExecutionStats,
+    SemanticInsertOutcome, SemanticInsertedSupport, SemanticPolarity, SemanticPredicateRecord,
+    SemanticRecordRole, SemanticRootDigest, SemanticRootHandle, SemanticRootSnapshot,
+    SemanticStatementHandle, SemanticStatementIdentity, SemanticStatementKey, SemanticStatementRef,
+    SemanticSupportEvent, SemanticSupportHandle, SemanticSupportIdentity, SemanticSupportRecord,
+    SemanticSupportRef, SemanticTruth, SemanticTypedRecord, SemanticVersionHandle,
+    SemanticVersionIdentity, SemanticVersionRef, SemanticView,
+};
+#[cfg(feature = "semantic-policy")]
+pub use semantic_transition::SemanticPolicyGradients;
+pub use semantic_transition::{
+    SemanticTaskEvaluationSpec, SemanticTaskProgram, SemanticTaskObservation, SemanticTaskScoring,
+    SemanticTaskEvaluation, SemanticTaskFacts, SemanticTaskRefusal,
+    Identity256, SemanticActionCatalogue, SemanticActionDescriptor, SemanticCatalogueBinding,
+    SemanticCatalogueField, SemanticCatalogueSignature, SemanticComponent, SemanticComponentInput,
+    SemanticPolicyFieldLayout, SemanticPolicyLayout,
+    SemanticActiveRow, SemanticActiveRows, SemanticContinuationInput, SemanticParentBinding, SemanticPublishedIdentity,
+    SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
+    SemanticPublishedLease, SemanticPreparedStep, SemanticPreparedStepOutcome, SemanticReplayMaterial, SemanticTransitionKind,
+    SemanticFeedback, SemanticFeedbackSchema, SemanticFeedbackRecordMaterial, SEMANTIC_FEEDBACK_SUPPORT_FIELDS,
+    SemanticTaskObservationRoots,
+    SemanticModelContext,
+    SemanticObservedSource, SemanticSourceMapping,
+    SemanticStateRecord, SemanticStateRole, SemanticTensorInput, SemanticTensorLayout, SemanticTensorContentWitness,
+    SemanticTextSlot, SemanticTextRow,
+    SemanticRngBinding, SemanticTransitionError, SemanticTransitionHostIoStats,
+    SemanticTransitionLane, SemanticTransitionObservation, SemanticTransitionOutcome, SemanticTransitionRefusal, SemanticTransitionReceipt,
+    SemanticTransitionSession, SemanticTransitionWork, SEMANTIC_TRANSITION_COMPONENT_COUNT,
+    SEMANTIC_TRANSITION_GENERATION,
+};
+pub use semantic_work::ModelWorkKind;
+
 pub use wcoj_metadata::{
     HeatDist, LayoutSignature, RootMetadata, VertexId, WcojCycle4HgWorkPlanU32,
     WcojCycle4HgWorkPlanU64, WcojRelationMetadata, WcojTriangleHgWorkPlanU32,
