@@ -7619,7 +7619,7 @@ struct PolicyBackward {
     text_cells: u64,
 }
 
-/// Fresh device-owned adjoints for one exact policy invocation. Their tracked
+/// Dedicated device-owned adjoints for one exact policy invocation. Their tracked
 /// allocations can be consumed on another recorded stream without host copies.
 #[cfg(feature = "semantic-policy")]
 pub struct SemanticPolicyGradients {
@@ -7702,6 +7702,19 @@ struct PolicyBuffers {
     scores: TrackedCudaSlice<f32>,
     recurrent: TrackedCudaSlice<f32>,
     text_logits: TrackedCudaSlice<f32>,
+    adjoints: Option<PolicyAdjointBuffers>,
+}
+
+/// Reserved with the original forward tape, then consumed by its sole backward.
+/// Output storage is never recycled into a later invocation's working banks.
+#[cfg(feature = "semantic-policy")]
+struct PolicyAdjointBuffers {
+    parameters: TrackedCudaSlice<f32>,
+    text_logits: TrackedCudaSlice<f32>,
+    recurrent: TrackedCudaSlice<f32>,
+    scores: TrackedCudaSlice<f32>,
+    coefficients: TrackedCudaSlice<f64>,
+    status: TrackedCudaSlice<u64>,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -8468,7 +8481,6 @@ fn prepared_segment_allocation_bytes(
 fn policy_buffer_bytes(layout: &SemanticPolicyLayout) -> Result<usize, SemanticTransitionError> {
     [
         layout.parameter_cells,
-        128,
         layout.score_cells(),
         layout.recurrent_cells(),
         32 * TEXT_CARDINALITY,
@@ -8478,7 +8490,13 @@ fn policy_buffer_bytes(layout: &SemanticPolicyLayout) -> Result<usize, SemanticT
         sum.checked_add(cells)
             .ok_or(SemanticTransitionError::GenerationExhausted)
     })?
-    .checked_mul(size_of::<f32>())
+    // Each primal bank has a dedicated adjoint bank. Only the forward hidden
+    // vector is shared scratch; coefficients and status keep their own types.
+    .checked_mul(2)
+    .and_then(|cells| cells.checked_add(128))
+    .and_then(|cells| cells.checked_mul(size_of::<f32>()))
+    .and_then(|bytes| bytes.checked_add(COMPONENT_COUNT * size_of::<f64>()))
+    .and_then(|bytes| bytes.checked_add(size_of::<u64>()))
     .ok_or(SemanticTransitionError::GenerationExhausted)
 }
 
@@ -14723,6 +14741,26 @@ impl SemanticTransitionSession {
             text_logits: reservation
                 .alloc::<f32>(text_cells)
                 .map_err(|error| runtime_error("original text snapshot allocation", error))?,
+            adjoints: Some(PolicyAdjointBuffers {
+                parameters: reservation
+                    .alloc::<f32>(layout.parameter_cells)
+                    .map_err(|error| runtime_error("parameter adjoint allocation", error))?,
+                text_logits: reservation
+                    .alloc::<f32>(text_cells)
+                    .map_err(|error| runtime_error("text adjoint allocation", error))?,
+                recurrent: reservation
+                    .alloc::<f32>(layout.recurrent_cells())
+                    .map_err(|error| runtime_error("recurrent adjoint allocation", error))?,
+                scores: reservation
+                    .alloc::<f32>(layout.score_cells())
+                    .map_err(|error| runtime_error("score adjoint allocation", error))?,
+                coefficients: reservation
+                    .alloc::<f64>(COMPONENT_COUNT)
+                    .map_err(|error| runtime_error("cotangent snapshot allocation", error))?,
+                status: reservation
+                    .alloc::<u64>(1)
+                    .map_err(|error| runtime_error("policy backward status allocation", error))?,
+            }),
             layout,
         })
     }
@@ -15125,8 +15163,9 @@ impl SemanticTransitionSession {
     /// logit adjoints enter the existing FP32 model backward.
     ///
     /// This is a terminal device operation, not another transition: forward
-    /// receipts, recurrent values, semantic state and RNG are only read. Fresh
-    /// output allocations cannot be overwritten by a later proposal.
+    /// receipts, recurrent values, semantic state and RNG are only read. The
+    /// original tape's preallocated outputs cannot be overwritten by a later
+    /// proposal; backward neither reserves nor allocates device memory.
     #[cfg(feature = "semantic-policy")]
     pub fn backward_policy(
         &mut self,
@@ -15343,33 +15382,16 @@ impl SemanticTransitionSession {
             });
         }
         let text_cells = policy.text_logits.len();
-        let cells = policy.layout.parameter_cells
-            + text_cells
-            + policy.layout.recurrent_cells()
-            + policy.layout.score_cells();
-        let mut reservation = self
-            .provider
-            .memory()
-            .reserve_bytes((cells * 4 + COMPONENT_COUNT * 8 + 8) as u64)
-            .map_err(|e| runtime_error("policy backward reservation", e))?;
-        let parameters = reservation
-            .alloc::<f32>(policy.layout.parameter_cells)
-            .map_err(|e| runtime_error("parameter adjoint allocation", e))?;
-        let text_logits = reservation
-            .alloc::<f32>(text_cells)
-            .map_err(|e| runtime_error("text adjoint allocation", e))?;
-        let recurrent = reservation
-            .alloc::<f32>(policy.layout.recurrent_cells())
-            .map_err(|e| runtime_error("recurrent adjoint allocation", e))?;
-        let scores = reservation
-            .alloc::<f32>(policy.layout.score_cells())
-            .map_err(|e| runtime_error("score adjoint allocation", e))?;
-        let coefficients = reservation
-            .alloc::<f64>(COMPONENT_COUNT)
-            .map_err(|e| runtime_error("cotangent snapshot allocation", e))?;
-        let status = reservation
-            .alloc::<u64>(1)
-            .map_err(|e| runtime_error("policy backward status allocation", e))?;
+        let PolicyAdjointBuffers {
+            parameters,
+            text_logits,
+            recurrent,
+            scores,
+            coefficients,
+            status,
+        } = policy.adjoints.as_ref().ok_or_else(|| {
+            publication_input_error("original policy adjoint banks have already been consumed")
+        })?;
         let io = TransitionKernelIo {
             logits: &policy.text_logits,
             support: &tape.support,
@@ -15411,14 +15433,31 @@ impl SemanticTransitionSession {
         recorder.write(&self.scratch);
         recorder.write(&policy.hidden);
         recorder.write(&policy.scores);
-        for buffer in [&parameters, &text_logits, &recurrent, &scores] {
+        for buffer in [parameters, text_logits, recurrent, scores] {
             recorder.write(buffer);
         }
-        recorder.write(&coefficients);
-        recorder.write(&status);
+        recorder.write(coefficients);
+        recorder.write(status);
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|e| runtime_error("policy backward stream admission", e))?;
         let execute = self.execute.clone();
+        let layout = policy.layout.clone();
+        let binding = tape.binding;
+        let support_cells = tape.support.len();
+        // Consume only after every fallible admission check. The recorder owns
+        // the scratch banks through execution; exported outputs retain their
+        // original step until the final consumer-stream join.
+        let PolicyAdjointBuffers {
+            parameters,
+            text_logits,
+            coefficients,
+            ..
+        } = self.policy_tapes[tape_index]
+            .policy
+            .buffers
+            .adjoints
+            .take()
+            .expect("checked original adjoint banks");
         // A capsule can be deleted before its consumer finishes. The original
         // step keeps the actual outputs until its final consumer-stream join,
         // without keeping a witness (which would create a release cycle).
@@ -15457,9 +15496,6 @@ impl SemanticTransitionSession {
             }
             Ok::<(), XlogError>(())
         })?;
-        let layout = policy.layout.clone();
-        let binding = tape.binding;
-        let support_cells = tape.support.len();
         if let Err(error) = self.order_content_consumers(consumer_stream) {
             self.poisoned = true;
             return Err(error);
