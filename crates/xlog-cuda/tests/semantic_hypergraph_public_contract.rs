@@ -432,22 +432,34 @@ fn symbol_reuse_changes_new_admission_not_retained_meaning() {
 
 #[test]
 fn admitted_support_metadata_binds_to_the_selected_statement() {
-    if std::env::var("XLOG_REQUIRE_CUDA").as_deref() != Ok("1") { return; }
+    if std::env::var("XLOG_REQUIRE_CUDA").as_deref() != Ok("1") {
+        return;
+    }
     let provider = CudaProviderBuilder::new(0, MemoryBudget::with_limit(64 * 1024 * 1024))
-        .with_stream_capacity(1).build().unwrap();
+        .with_stream_capacity(1)
+        .build()
+        .unwrap();
     let provider = Arc::new(provider);
     let runtime = Arc::clone(provider.memory().runtime().unwrap());
     let stream_id = runtime.stream_pool().acquire().unwrap();
     let stream = runtime.stream_pool().resolve(stream_id).unwrap();
-    let domain = provider.bind_resident_execution_domain(runtime, stream_id, stream).unwrap();
-    let mut graph = provider.allocate_semantic_hypergraph(&domain,
-        SemanticHypergraphCapacities::try_new(2, 2, 2, 2).unwrap()).unwrap();
+    let domain = provider
+        .bind_resident_execution_domain(runtime, stream_id, stream)
+        .unwrap();
+    let mut graph = provider
+        .allocate_semantic_hypergraph(
+            &domain,
+            SemanticHypergraphCapacities::try_new(2, 2, 2, 2).unwrap(),
+        )
+        .unwrap();
     let mut records = typed_records(symbol::intern("two statement entity"));
     let mut second = records.records[0].clone();
     second.arguments[1] = SemanticArgument::U64(20);
     let second_index = records.records.len() as u32;
     records.records.push(second);
-    let admission = graph.admit_records(graph.empty_root(), records, admission_limits()).unwrap();
+    let admission = graph
+        .admit_records(graph.empty_root(), records, admission_limits())
+        .unwrap();
     let first = admission.statement_key(0).unwrap();
     let second = admission.statement_key(second_index).unwrap();
     let event = admission.support_event(0).unwrap();
@@ -462,8 +474,14 @@ fn admitted_support_metadata_binds_to_the_selected_statement() {
     };
     assert_ne!(first_support, second_support);
     for key in [first, second] {
-        assert_eq!(graph.truth(SemanticView::Fork(fork), &key).unwrap(), SemanticTruth::True);
-        assert!(matches!(graph.insert_support(fork, &key, &event).unwrap(), SemanticInsertOutcome::Unchanged(_)));
+        assert_eq!(
+            graph.truth(SemanticView::Fork(fork), &key).unwrap(),
+            SemanticTruth::True
+        );
+        assert!(matches!(
+            graph.insert_support(fork, &key, &event).unwrap(),
+            SemanticInsertOutcome::Unchanged(_)
+        ));
     }
     graph.discard(fork).unwrap();
 }
@@ -538,8 +556,13 @@ fn device_resident_statement_support_lifecycle_is_exact() {
         .expect("semantic storage initialization must execute on CUDA");
     let data_plane_before = provider.host_transfer_stats();
     let launch_metadata_before = provider.host_launch_metadata_transfer_stats();
-    let admission = graph.admit_records(graph.empty_root(),
-        typed_records(symbol::intern("lifecycle entity")), admission_limits()).unwrap();
+    let admission = graph
+        .admit_records(
+            graph.empty_root(),
+            typed_records(symbol::intern("lifecycle entity")),
+            admission_limits(),
+        )
+        .unwrap();
     let key = admission.statement_key(0).unwrap();
     let pro = admission.support_event(0).unwrap();
     let contra = admission.support_event(1).unwrap();
@@ -837,14 +860,22 @@ fn unchanged_seal_reuses_base_without_spending_root_slots() {
     let empty_snapshot = graph.snapshot(SemanticView::Root(empty)).unwrap();
     let no_edit = graph.fork(empty).unwrap();
     assert_eq!(graph.seal(no_edit).unwrap(), empty);
-    assert_eq!(graph.snapshot(SemanticView::Root(empty)).unwrap(), empty_snapshot);
+    assert_eq!(
+        graph.snapshot(SemanticView::Root(empty)).unwrap(),
+        empty_snapshot
+    );
     assert_stale(
         graph.snapshot(SemanticView::Fork(no_edit)).unwrap_err(),
         SemanticHandleKind::Fork,
     );
 
-    let admission = graph.admit_records(empty,
-        typed_records(symbol::intern("repeated entity")), admission_limits()).unwrap();
+    let admission = graph
+        .admit_records(
+            empty,
+            typed_records(symbol::intern("repeated entity")),
+            admission_limits(),
+        )
+        .unwrap();
     let key = admission.statement_key(0).unwrap();
     let event = admission.support_event(0).unwrap();
     let changed = graph.fork(empty).unwrap();
@@ -857,7 +888,10 @@ fn unchanged_seal_reuses_base_without_spending_root_slots() {
         SemanticInsertOutcome::Unchanged(_)
     ));
     let root = graph.seal(changed).unwrap();
-    assert_ne!(root, empty, "a later duplicate must not erase the first insertion");
+    assert_ne!(
+        root, empty,
+        "a later duplicate must not erase the first insertion"
+    );
     let snapshot = graph.snapshot(SemanticView::Root(root)).unwrap();
     assert_eq!(snapshot.extents(), SemanticExtents::new(1, 1, 1));
     for _ in 0..3 {
@@ -868,6 +902,9 @@ fn unchanged_seal_reuses_base_without_spending_root_slots() {
         ));
         assert_eq!(graph.seal(duplicate).unwrap(), root);
         assert_eq!(graph.snapshot(SemanticView::Root(root)).unwrap(), snapshot);
-        assert_eq!(graph.truth(SemanticView::Root(root), &key).unwrap(), SemanticTruth::True);
+        assert_eq!(
+            graph.truth(SemanticView::Root(root), &key).unwrap(),
+            SemanticTruth::True
+        );
     }
 }

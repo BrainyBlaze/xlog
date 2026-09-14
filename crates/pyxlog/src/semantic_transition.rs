@@ -10,21 +10,23 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyList, PyString, PyTuple};
 use sha2::{Digest, Sha256};
 use xlog_core::{RelId, ScalarType, Schema};
+use xlog_cuda::memory::DeviceAllocationProvenance;
 use xlog_cuda::{
     DlpackManagedTensor, Identity256, SemanticAdmissionLimits, SemanticAdmissionRecords,
     SemanticArgument, SemanticContinuationInput, SemanticHypergraphCapacities,
-    SemanticParentBinding, SemanticPolarity, SemanticPredicateRecord, SemanticPublishedLease, SemanticPreparedStep,
-    SemanticRecordRole, SemanticRngBinding, SemanticStateRecord, SemanticStateRole,
-    SemanticSupportRecord, SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout,
-    SemanticTextSlot, SemanticTransitionKind, SemanticTransitionSession, SemanticTypedRecord,
-    SemanticObservedSource, SemanticSourceMapping,
+    SemanticObservedSource, SemanticParentBinding, SemanticPolarity, SemanticPredicateRecord,
+    SemanticPreparedStep, SemanticPublishedLease, SemanticRecordRole, SemanticRngBinding,
+    SemanticSourceMapping, SemanticStateRecord, SemanticStateRole, SemanticSupportRecord,
+    SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout, SemanticTextSlot,
+    SemanticTransitionKind, SemanticTransitionSession, SemanticTypedRecord,
+};
+use xlog_cuda::{
+    SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
 };
 use xlog_prob::exact::GpuConfig;
-use xlog_cuda::memory::DeviceAllocationProvenance;
-use xlog_cuda::{SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView};
 
-use crate::types::{val_err, xlog_err};
 use crate::guarded_python_callback as recording_callback;
+use crate::types::{val_err, xlog_err};
 
 type PredicateInput = (u32, String, Vec<(String, u8, String)>, Vec<usize>);
 type RecordInput = (u32, Vec<(u8, Py<PyAny>)>, Vec<u32>);
@@ -60,11 +62,7 @@ type SupportInput = (u32, String, u32, u32, u32, u32);
 /// External aliases require their owning Runtime to remain alive until release.
 /// Transferable native ownership does not make arbitrary Python finalizers safe
 /// on workers. Only a retained content witness may verify from a worker thread.
-#[pyclass(
-    name = "SemanticTransitionSession",
-    module = "pyxlog._native",
-    frozen
-)]
+#[pyclass(name = "SemanticTransitionSession", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticTransitionSession {
     inner: Mutex<SemanticTransitionSession>,
     importing: Arc<AtomicBool>,
@@ -83,7 +81,9 @@ impl PySemanticTransitionSession {
 
     fn owner(&self) -> PyResult<MutexGuard<'_, SemanticTransitionSession>> {
         self.require_creator()?;
-        if !self.recording.load(Ordering::Acquire) { drain_export_owners(); }
+        if !self.recording.load(Ordering::Acquire) {
+            drain_export_owners();
+        }
         self.witness_owner()
     }
 
@@ -227,17 +227,22 @@ fn invalid(message: &str) -> PyErr {
 }
 
 #[cfg(feature = "semantic-policy")]
-fn transition_refusal(outcome: &xlog_cuda::SemanticTransitionOutcome) -> Option<(&'static str, u64)> {
+fn transition_refusal(
+    outcome: &xlog_cuda::SemanticTransitionOutcome,
+) -> Option<(&'static str, u64)> {
     use xlog_cuda::{SemanticTransitionOutcome, SemanticTransitionRefusal};
     match outcome {
         SemanticTransitionOutcome::Published(_) => None,
         SemanticTransitionOutcome::Refused(refusal) => Some(match refusal {
-            SemanticTransitionRefusal::InvalidFinalSupport { completed_draws } =>
-                ("invalid_final_support", *completed_draws),
-            SemanticTransitionRefusal::NonFinitePolicyInput { completed_draws } =>
-                ("non_finite_policy_input", *completed_draws),
-            SemanticTransitionRefusal::WorkCounterOverflow { completed_draws } =>
-                ("work_counter_overflow", *completed_draws),
+            SemanticTransitionRefusal::InvalidFinalSupport { completed_draws } => {
+                ("invalid_final_support", *completed_draws)
+            }
+            SemanticTransitionRefusal::NonFinitePolicyInput { completed_draws } => {
+                ("non_finite_policy_input", *completed_draws)
+            }
+            SemanticTransitionRefusal::WorkCounterOverflow { completed_draws } => {
+                ("work_counter_overflow", *completed_draws)
+            }
         }),
     }
 }
@@ -268,31 +273,49 @@ fn transition_kind(value: &ColdValue) -> PyResult<SemanticTransitionKind> {
     }
 }
 
-fn prepared_transition(value: &Bound<'_, PyAny>, budget: &mut usize) -> PyResult<SemanticTransitionKind> {
+fn prepared_transition(
+    value: &Bound<'_, PyAny>,
+    budget: &mut usize,
+) -> PyResult<SemanticTransitionKind> {
     if !value.is_exact_instance_of::<PyString>() {
-        return Err(invalid("a prepared transition must be an exact proposal or recompute string"));
+        return Err(invalid(
+            "a prepared transition must be an exact proposal or recompute string",
+        ));
     }
     let kind = transition_kind(&ColdValue::read(value, budget, 0)?)?;
     if kind == SemanticTransitionKind::Drain {
-        return Err(invalid("segment drain is selected only by the acquired device terminal state"));
+        return Err(invalid(
+            "segment drain is selected only by the acquired device terminal state",
+        ));
     }
     Ok(kind)
 }
 
-fn prepared_transitions<'py>(value: &Bound<'py, PyAny>)
-    -> PyResult<impl ExactSizeIterator<Item = SemanticTransitionKind> + Clone + 'py> {
+fn prepared_transitions<'py>(
+    value: &Bound<'py, PyAny>,
+) -> PyResult<impl ExactSizeIterator<Item = SemanticTransitionKind> + Clone + 'py> {
     if !value.is_exact_instance_of::<PyTuple>() {
-        return Err(invalid("segment transitions must be an exact tuple of proposal or recompute modes"));
+        return Err(invalid(
+            "segment transitions must be an exact tuple of proposal or recompute modes",
+        ));
     }
     let values = value.cast::<PyTuple>()?.clone();
-    if values.is_empty() { return Err(invalid("segment transitions must not be empty")); }
+    if values.is_empty() {
+        return Err(invalid("segment transitions must not be empty"));
+    }
     let mut budget = 16 * 1024 * 1024;
-    for item in values.iter() { prepared_transition(&item, &mut budget)?; }
+    for item in values.iter() {
+        prepared_transition(&item, &mut budget)?;
+    }
     // Retain only the caller's exact immutable tuple. Native reserves the full
     // segment budget before materializing any T-sized collection of modes.
-    Ok((0..values.len()).map(move |index| prepared_transition(
-        &values.get_item(index).expect("validated exact tuple index"), &mut 128)
-        .expect("validated immutable ordinary transition")))
+    Ok((0..values.len()).map(move |index| {
+        prepared_transition(
+            &values.get_item(index).expect("validated exact tuple index"),
+            &mut 128,
+        )
+        .expect("validated immutable ordinary transition")
+    }))
 }
 
 // Alias retirement returns its retained Session reference before the Runtime's
@@ -300,10 +323,18 @@ fn prepared_transitions<'py>(value: &Bound<'py, PyAny>)
 // guarantee: supported Runtime custody must retain every original Python graph
 // owner through backward and close aliases before its creator-thread cleanup.
 enum PublishedExportOwner {
-    Session { _session: Py<PySemanticTransitionSession> },
-    Parent { _parent: Py<PySemanticPublishedParent> },
-    Prepared { _step: Py<PySemanticPreparedStep> },
-    Producers { _producers: Vec<Py<PyAny>> },
+    Session {
+        _session: Py<PySemanticTransitionSession>,
+    },
+    Parent {
+        _parent: Py<PySemanticPublishedParent>,
+    },
+    Prepared {
+        _step: Py<PySemanticPreparedStep>,
+    },
+    Producers {
+        _producers: Vec<Py<PyAny>>,
+    },
 }
 
 /// The graph and Session share the original pool/model owner until explicit
@@ -315,12 +346,22 @@ struct PreparedProducerResources {
 
 impl Drop for PreparedProducerResources {
     fn drop(&mut self) {
-        let producers = std::mem::take(self.producers.get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner));
+        let producers = std::mem::take(
+            self.producers
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         // Always defer the final decrefs out of native graph/Session destruction.
-        DEFERRED_EXPORT_OWNERS.get_or_init(|| Mutex::new(Vec::new())).lock()
+        DEFERRED_EXPORT_OWNERS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((self.owner_thread, PublishedExportOwner::Producers { _producers: producers }));
+            .push((
+                self.owner_thread,
+                PublishedExportOwner::Producers {
+                    _producers: producers,
+                },
+            ));
     }
 }
 
@@ -341,14 +382,22 @@ struct PreparedBuildGuard<'a> {
 struct PreparedRetirementGuard<'a>(&'a AtomicBool);
 
 impl Drop for PreparedRetirementGuard<'_> {
-    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl Drop for PreparedBuildGuard<'_> {
     fn drop(&mut self) {
         if !self.committed {
-            if let Ok(mut state) = self.task_use.state() { state.phase = TaskUsePhase::Refused; }
-            self.session.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).abort();
+            if let Ok(mut state) = self.task_use.state() {
+                state.phase = TaskUsePhase::Refused;
+            }
+            self.session
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .abort();
         }
         self.session.recording.store(false, Ordering::Release);
     }
@@ -363,18 +412,39 @@ struct PreparedMemoryScope<'py> {
 }
 
 impl<'py> PreparedMemoryScope<'py> {
-    fn new(py: Python<'py>, scope: &Bound<'py, PyAny>, check: &dyn Fn() -> PyResult<()>) -> PyResult<Self> {
+    fn new(
+        py: Python<'py>,
+        scope: &Bound<'py, PyAny>,
+        check: &dyn Fn() -> PyResult<()>,
+    ) -> PyResult<Self> {
         let exit = recording_callback(check, || scope.getattr("__exit__"))?;
-        Ok(Self { py, exit, entered: false })
+        Ok(Self {
+            py,
+            exit,
+            entered: false,
+        })
     }
 
     fn finish(&mut self, error: Option<&PyErr>) -> PyResult<()> {
-        if !std::mem::replace(&mut self.entered, false) { return Ok(()); }
+        if !std::mem::replace(&mut self.entered, false) {
+            return Ok(());
+        }
         let result = if let Some(error) = error {
-            self.exit.call1((error.get_type(self.py), error.value(self.py), error.traceback(self.py)))?
-        } else { self.exit.call1((self.py.None(), self.py.None(), self.py.None()))? };
-        if !result.is_none() && !(result.is_exact_instance_of::<PyBool>() && !result.extract::<bool>()?) {
-            return Err(invalid("recording memory scope must not suppress producer or capture failure"));
+            self.exit.call1((
+                error.get_type(self.py),
+                error.value(self.py),
+                error.traceback(self.py),
+            ))?
+        } else {
+            self.exit
+                .call1((self.py.None(), self.py.None(), self.py.None()))?
+        };
+        if !result.is_none()
+            && !(result.is_exact_instance_of::<PyBool>() && !result.extract::<bool>()?)
+        {
+            return Err(invalid(
+                "recording memory scope must not suppress producer or capture failure",
+            ));
         }
         Ok(())
     }
@@ -544,8 +614,15 @@ impl ColdValue {
             Self::Integer(item) => py.get_type::<PyInt>().call1((item,))?.unbind(),
             Self::Text(item) => PyString::new(py, item).into_any().unbind(),
             Self::Bytes(item) => PyBytes::new(py, item).into_any().unbind(),
-            Self::Sequence(items) => PyTuple::new(py, items.iter().map(|item| item.python_value(py))
-                .collect::<PyResult<Vec<_>>>()?)?.into_any().unbind(),
+            Self::Sequence(items) => PyTuple::new(
+                py,
+                items
+                    .iter()
+                    .map(|item| item.python_value(py))
+                    .collect::<PyResult<Vec<_>>>()?,
+            )?
+            .into_any()
+            .unbind(),
         })
     }
 
@@ -570,7 +647,9 @@ impl ColdValue {
 
         fn decode(remaining: &mut &[u8], budget: &mut usize, depth: usize) -> PyResult<ColdValue> {
             if depth > 32 || *budget == 0 {
-                return Err(invalid("cold task transport exceeds its depth or 16 MiB budget"));
+                return Err(invalid(
+                    "cold task transport exceeds its depth or 16 MiB budget",
+                ));
             }
             *budget -= 1;
             let tag = take(remaining, 1)?[0];
@@ -583,7 +662,8 @@ impl ColdValue {
                 },
                 2 | 3 => {
                     let count = length(remaining)?;
-                    *budget = budget.checked_sub(count)
+                    *budget = budget
+                        .checked_sub(count)
                         .ok_or_else(|| invalid("cold task transport exceeds its 16 MiB budget"))?;
                     let text = std::str::from_utf8(take(remaining, count)?)
                         .map_err(|_| invalid("cold metadata text is not UTF-8"))?;
@@ -604,7 +684,9 @@ impl ColdValue {
                     // Every child consumes at least one node and one tag byte.
                     // Check both before allocating from the declared count.
                     if count > *budget || count > remaining.len() {
-                        return Err(invalid("cold metadata sequence exceeds its input or budget"));
+                        return Err(invalid(
+                            "cold metadata sequence exceeds its input or budget",
+                        ));
                     }
                     let mut values = Vec::with_capacity(count);
                     for _ in 0..count {
@@ -612,15 +694,20 @@ impl ColdValue {
                     }
                     Ok(ColdValue::Sequence(values))
                 }
-                _ => Err(invalid("cold metadata encoding contains an unsupported tag")),
+                _ => Err(invalid(
+                    "cold metadata encoding contains an unsupported tag",
+                )),
             }
         }
 
-        let mut remaining = bytes.strip_prefix(b"xlog.cold.value.v1\0")
+        let mut remaining = bytes
+            .strip_prefix(b"xlog.cold.value.v1\0")
             .ok_or_else(|| invalid("cold metadata encoding has an incorrect domain"))?;
         let value = decode(&mut remaining, &mut (16 * 1024 * 1024), 0)?;
         if !remaining.is_empty() || value.canonical_bytes() != bytes {
-            return Err(invalid("cold metadata encoding is not exact canonical metadata"));
+            return Err(invalid(
+                "cold metadata encoding is not exact canonical metadata",
+            ));
         }
         Ok(value)
     }
@@ -825,20 +912,24 @@ fn parse_tensor_layout(value: &ColdValue) -> PyResult<SemanticTensorLayout> {
 fn parse_content_ranges(value: &ColdValue) -> PyResult<Vec<(SemanticStateRole, u64)>> {
     let rows = value.sequence()?;
     if rows.is_empty() {
-        return Err(invalid("content guard requires at least one published range"));
+        return Err(invalid(
+            "content guard requires at least one published range",
+        ));
     }
     let mut seen = BTreeSet::new();
-    rows.iter().map(|row| {
-        let fields = row.fields(2)?;
-        let code = fields[0].unsigned()?;
-        let role = SemanticStateRole::from_code(code)
-            .ok_or_else(|| invalid("unknown native publication content role"))?;
-        let index = fields[1].unsigned()?;
-        if !seen.insert((code, index)) {
-            return Err(invalid("content guard repeats a published range"));
-        }
-        Ok((role, index))
-    }).collect()
+    rows.iter()
+        .map(|row| {
+            let fields = row.fields(2)?;
+            let code = fields[0].unsigned()?;
+            let role = SemanticStateRole::from_code(code)
+                .ok_or_else(|| invalid("unknown native publication content role"))?;
+            let index = fields[1].unsigned()?;
+            if !seen.insert((code, index)) {
+                return Err(invalid("content guard repeats a published range"));
+            }
+            Ok((role, index))
+        })
+        .collect()
 }
 
 // Before native admission joins producer streams, any failed Python handoff
@@ -879,8 +970,11 @@ fn parse_tensor_inputs(
 }
 
 fn parse_tensor_inputs_guarded(
-    value: &Bound<'_, PyAny>, budget: &mut usize, expected_device: usize,
-    consumer_stream: u64, check: &dyn Fn() -> PyResult<()>,
+    value: &Bound<'_, PyAny>,
+    budget: &mut usize,
+    expected_device: usize,
+    consumer_stream: u64,
+    check: &dyn Fn() -> PyResult<()>,
 ) -> PyResult<ParsedTensorInputs> {
     let consumer_stream = i64::try_from(consumer_stream)
         .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?;
@@ -902,17 +996,32 @@ fn parse_tensor_inputs_guarded(
         let native_allocation = if fields[4].is_none() {
             None
         } else {
-            Some(fields[4].extract::<PyRef<'_, PyNativeTensorAllocation>>()?.provenance.clone())
+            Some(
+                fields[4]
+                    .extract::<PyRef<'_, PyNativeTensorAllocation>>()?
+                    .provenance
+                    .clone(),
+            )
         };
-        pending.push((layout, logical_begin, logical_end, fields[3].clone(), native_allocation));
+        pending.push((
+            layout,
+            logical_begin,
+            logical_end,
+            fields[3].clone(),
+            native_allocation,
+        ));
     }
     // Keep the actual producers independently of mutable caller-owned rows.
     // Their original autograd objects are distinct from DLPack storage aliases.
     for (_, _, _, producer, _) in &pending {
         validate_producer_device_guarded(producer, expected_device, check)?;
     }
-    let producers = TensorHandoff(pending.iter()
-        .map(|(_, _, _, producer, _)| producer.clone().unbind()).collect());
+    let producers = TensorHandoff(
+        pending
+            .iter()
+            .map(|(_, _, _, producer, _)| producer.clone().unbind())
+            .collect(),
+    );
     let mut handoff = TensorHandoff(Vec::with_capacity(pending.len()));
     for (layout, logical_begin, logical_end, producer, native_allocation) in pending {
         // Preserve the original exception without invoking its Python __str__
@@ -926,25 +1035,38 @@ fn parse_tensor_inputs_guarded(
             native_allocation,
         });
     }
-    Ok(ParsedTensorInputs { handoff, producers: producers.into_native() })
+    Ok(ParsedTensorInputs {
+        handoff,
+        producers: producers.into_native(),
+    })
 }
 
-fn validate_continuation_producer(producer: &Bound<'_, PyAny>, expected_device: usize) -> PyResult<()> {
+fn validate_continuation_producer(
+    producer: &Bound<'_, PyAny>,
+    expected_device: usize,
+) -> PyResult<()> {
     validate_continuation_producer_guarded(producer, expected_device, &|| Ok(()))
 }
 
 fn validate_continuation_producer_guarded(
-    producer: &Bound<'_, PyAny>, expected_device: usize, check: &dyn Fn() -> PyResult<()>,
+    producer: &Bound<'_, PyAny>,
+    expected_device: usize,
+    check: &dyn Fn() -> PyResult<()>,
 ) -> PyResult<()> {
     if !recording_callback(check, || producer.hasattr("__dlpack__"))?
-        || !recording_callback(check, || producer.hasattr("__dlpack_device__"))? {
-        return Err(invalid("continuation services require original CUDA DLPack producers"));
+        || !recording_callback(check, || producer.hasattr("__dlpack_device__"))?
+    {
+        return Err(invalid(
+            "continuation services require original CUDA DLPack producers",
+        ));
     }
     validate_producer_device_guarded(producer, expected_device, check)
 }
 
 fn validate_producer_device_guarded(
-    producer: &Bound<'_, PyAny>, expected_device: usize, check: &dyn Fn() -> PyResult<()>,
+    producer: &Bound<'_, PyAny>,
+    expected_device: usize,
+    check: &dyn Fn() -> PyResult<()>,
 ) -> PyResult<()> {
     // Reject known foreign-device producers before consuming any capsule.
     // Native admission still validates raw capsules and retains uncertain owners.
@@ -1143,17 +1265,26 @@ fn parse_parent(
         .iter()
         .map(parse_tensor_layout)
         .collect::<PyResult<Vec<_>>>()?;
-    let model_numerical_mode = metadata_value(metadata, "model_numerical_mode", &mut budget)?
-        .canonical_bytes();
+    let model_numerical_mode =
+        metadata_value(metadata, "model_numerical_mode", &mut budget)?.canonical_bytes();
     // The producer owns numerical semantics and format versions. XLOG retains
     // the complete canonical contribution, and requires lossless cold restore
     // before admitting it; a payload hash is not reconstructible metadata.
     ColdValue::from_canonical_bytes(&model_numerical_mode)?;
-    let [schema_begin, schema_bytes, schema_digest_offset, generation_offset,
-        numerical_digest_offset, identity_offset] =
-        unsigned_array::<6>(&metadata_value(metadata, "model_contract_layout", &mut budget)?)?;
-    let model_contract_layout = SemanticModelContractLayout { schema_begin, schema_bytes,
-        schema_digest_offset, generation_offset, numerical_digest_offset, identity_offset };
+    let [schema_begin, schema_bytes, schema_digest_offset, generation_offset, numerical_digest_offset, identity_offset] =
+        unsigned_array::<6>(&metadata_value(
+            metadata,
+            "model_contract_layout",
+            &mut budget,
+        )?)?;
+    let model_contract_layout = SemanticModelContractLayout {
+        schema_begin,
+        schema_bytes,
+        schema_digest_offset,
+        generation_offset,
+        numerical_digest_offset,
+        identity_offset,
+    };
     let mut parent = SemanticParentBinding {
         recovered_instance,
         source,
@@ -1194,15 +1325,21 @@ fn parse_parent(
         role_counts,
         records,
         tensors: Vec::new(),
-        model_memory: SemanticModelMemory { allocations: Vec::new(), storages: Vec::new(), views: Vec::new() },
+        model_memory: SemanticModelMemory {
+            allocations: Vec::new(),
+            storages: Vec::new(),
+            views: Vec::new(),
+        },
         active_layouts,
     };
-    parent.bind_initial_sources(
-        &task_use.authority.initial_sources,
-        &task_use.authority.source_mapping,
-        &task_use.authority.canonical,
-        metadata_integer(metadata, "provenance_capacity_records", &mut budget)?,
-    ).map_err(xlog_err)?;
+    parent
+        .bind_initial_sources(
+            &task_use.authority.initial_sources,
+            &task_use.authority.source_mapping,
+            &task_use.authority.canonical,
+            metadata_integer(metadata, "provenance_capacity_records", &mut budget)?,
+        )
+        .map_err(xlog_err)?;
     // Only after all scalar/control input checks may a real producer callback
     // execute. The caller rechecks the unchanged task and phase after handoff.
     Ok(parent)
@@ -1438,8 +1575,11 @@ fn observation_json_string(value: &str) -> String {
 /// its own byte cap; the separate total counts each SHA-addressed material once.
 /// All caps are checked before copying payloads, independently of metadata.
 fn read_replay_rows(
-    value: &Bound<'_, PyAny>, budget: &mut usize,
-    max_material_bytes: usize, mut total_material_bytes: usize, max_evidence_bytes: usize,
+    value: &Bound<'_, PyAny>,
+    budget: &mut usize,
+    max_material_bytes: usize,
+    mut total_material_bytes: usize,
+    max_evidence_bytes: usize,
 ) -> PyResult<ColdValue> {
     if max_material_bytes == 0 || total_material_bytes == 0 || max_evidence_bytes == 0 {
         return Err(invalid("replay kit byte caps must be positive integers"));
@@ -1449,13 +1589,17 @@ fn read_replay_rows(
     for row in object_sequence(value, budget)? {
         let fields = object_sequence(&row, budget)?;
         if fields.len() != 5 {
-            return Err(invalid("replay row requires basis, identity, record line, materials and evidence"));
+            return Err(invalid(
+                "replay row requires basis, identity, record line, materials and evidence",
+            ));
         }
         let mut materials = Vec::new();
         for material in object_sequence(&fields[3], budget)? {
             let pair = object_sequence(&material, budget)?;
             if pair.len() != 2 {
-                return Err(invalid("replay material requires its reference and bytes or None"));
+                return Err(invalid(
+                    "replay material requires its reference and bytes or None",
+                ));
             }
             let reference = read_material_reference(&pair[0], budget)?;
             if !pair[1].is_none() {
@@ -1471,11 +1615,16 @@ fn read_replay_rows(
                 }
                 if let Some(previous) = unique_materials.get(digest) {
                     if exact_replay_bytes(previous)? != bytes {
-                        return Err(invalid("shared replay material digest names different bytes"));
+                        return Err(invalid(
+                            "shared replay material digest names different bytes",
+                        ));
                     }
                 } else {
-                    total_material_bytes = total_material_bytes.checked_sub(bytes.len())
-                        .ok_or_else(|| invalid("replay materials exceed max_total_material_bytes"))?;
+                    total_material_bytes = total_material_bytes
+                        .checked_sub(bytes.len())
+                        .ok_or_else(|| {
+                            invalid("replay materials exceed max_total_material_bytes")
+                        })?;
                     unique_materials.insert(digest.to_owned(), pair[1].clone());
                 }
             }
@@ -1487,61 +1636,101 @@ fn read_replay_rows(
         }
         rows.push((fields, materials));
     }
-    let unique_materials = unique_materials.into_iter().map(|(digest, value)|
-        Ok((digest, Arc::<[u8]>::from(exact_replay_bytes(&value)?))))
+    let unique_materials = unique_materials
+        .into_iter()
+        .map(|(digest, value)| Ok((digest, Arc::<[u8]>::from(exact_replay_bytes(&value)?))))
         .collect::<PyResult<BTreeMap<_, _>>>()?;
-    Ok(ColdValue::Sequence(rows.into_iter().map(|(fields, materials)| {
-        let materials = materials.into_iter().map(|(reference, payload)| {
-            let bytes = if payload.is_none() { ColdValue::None } else {
-                let digest = reference.fields(4)?[2].text()?;
-                ColdValue::Bytes(Arc::clone(unique_materials.get(digest)
-                    .ok_or_else(|| invalid("replay material payload is absent"))?))
-            };
-            Ok(ColdValue::Sequence(vec![reference, bytes]))
-        }).collect::<PyResult<Vec<_>>>()?;
-        Ok(ColdValue::Sequence(vec![
-            ColdValue::read(&fields[0], budget, 0)?,
-            ColdValue::read(&fields[1], budget, 0)?,
-            ColdValue::read(&fields[2], budget, 0)?,
-            ColdValue::Sequence(materials),
-            ColdValue::Bytes(Arc::from(exact_replay_bytes(&fields[4])?)),
-        ]))
-    }).collect::<PyResult<Vec<_>>>()?))
+    Ok(ColdValue::Sequence(
+        rows.into_iter()
+            .map(|(fields, materials)| {
+                let materials = materials
+                    .into_iter()
+                    .map(|(reference, payload)| {
+                        let bytes = if payload.is_none() {
+                            ColdValue::None
+                        } else {
+                            let digest = reference.fields(4)?[2].text()?;
+                            ColdValue::Bytes(Arc::clone(
+                                unique_materials
+                                    .get(digest)
+                                    .ok_or_else(|| invalid("replay material payload is absent"))?,
+                            ))
+                        };
+                        Ok(ColdValue::Sequence(vec![reference, bytes]))
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
+                Ok(ColdValue::Sequence(vec![
+                    ColdValue::read(&fields[0], budget, 0)?,
+                    ColdValue::read(&fields[1], budget, 0)?,
+                    ColdValue::read(&fields[2], budget, 0)?,
+                    ColdValue::Sequence(materials),
+                    ColdValue::Bytes(Arc::from(exact_replay_bytes(&fields[4])?)),
+                ]))
+            })
+            .collect::<PyResult<Vec<_>>>()?,
+    ))
 }
 
 fn exact_replay_bytes<'a>(value: &'a Bound<'_, PyAny>) -> PyResult<&'a [u8]> {
     if !value.is_exact_instance_of::<PyBytes>() {
-        return Err(PyTypeError::new_err("replay payloads require exact builtin bytes"));
+        return Err(PyTypeError::new_err(
+            "replay payloads require exact builtin bytes",
+        ));
     }
     Ok(value.cast::<PyBytes>()?.as_bytes())
 }
 
 fn replay_dictionary<'py>(
-    value: &Bound<'py, PyAny>, keys: &[&str], budget: &mut usize,
+    value: &Bound<'py, PyAny>,
+    keys: &[&str],
+    budget: &mut usize,
 ) -> PyResult<Vec<Bound<'py, PyAny>>> {
     if !value.is_exact_instance_of::<PyDict>() {
-        return Err(PyTypeError::new_err("replay references require exact builtin dictionaries"));
+        return Err(PyTypeError::new_err(
+            "replay references require exact builtin dictionaries",
+        ));
     }
     let dictionary = value.cast::<PyDict>()?;
     if dictionary.len() != keys.len() {
-        return Err(invalid("replay reference dictionary has an incorrect key set"));
+        return Err(invalid(
+            "replay reference dictionary has an incorrect key set",
+        ));
     }
     for (key, _) in dictionary.iter() {
-        if !key.is_exact_instance_of::<PyString>() || !keys.contains(&key.extract::<String>()?.as_str()) {
-            return Err(invalid("replay reference dictionary has an incorrect key set"));
+        if !key.is_exact_instance_of::<PyString>()
+            || !keys.contains(&key.extract::<String>()?.as_str())
+        {
+            return Err(invalid(
+                "replay reference dictionary has an incorrect key set",
+            ));
         }
         ColdValue::read(&key, budget, 0)?;
     }
-    keys.iter().map(|key| dictionary.get_item(key)?.ok_or_else(|| invalid("replay reference field is absent"))).collect()
+    keys.iter()
+        .map(|key| {
+            dictionary
+                .get_item(key)?
+                .ok_or_else(|| invalid("replay reference field is absent"))
+        })
+        .collect()
 }
 
 fn read_material_reference(value: &Bound<'_, PyAny>, budget: &mut usize) -> PyResult<ColdValue> {
-    let fields = replay_dictionary(value, &["identity", "kind", "bytes_sha256", "reconstruction"], budget)?;
+    let fields = replay_dictionary(
+        value,
+        &["identity", "kind", "bytes_sha256", "reconstruction"],
+        budget,
+    )?;
     let reconstruction = if fields[3].is_none() {
         ColdValue::None
     } else {
         let fields = replay_dictionary(&fields[3], &["operation", "inputs"], budget)?;
-        ColdValue::Sequence(fields.iter().map(|value| ColdValue::read(value, budget, 0)).collect::<PyResult<_>>()?)
+        ColdValue::Sequence(
+            fields
+                .iter()
+                .map(|value| ColdValue::read(value, budget, 0))
+                .collect::<PyResult<_>>()?,
+        )
     };
     Ok(ColdValue::Sequence(vec![
         ColdValue::read(&fields[0], budget, 0)?,
@@ -1552,7 +1741,10 @@ fn read_material_reference(value: &Bound<'_, PyAny>, budget: &mut usize) -> PyRe
 }
 
 fn replay_hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 type ReplayJsonObject = BTreeMap<String, Box<serde_json::value::RawValue>>;
@@ -1560,12 +1752,18 @@ type ReplayJsonObject = BTreeMap<String, Box<serde_json::value::RawValue>>;
 /// Split a JSON value using serde's parser without normalizing its scalar bytes.
 fn take_replay_json<'a>(remaining: &mut &'a str) -> PyResult<&'a str> {
     let input = *remaining;
-    if input.as_bytes().first().is_some_and(u8::is_ascii_whitespace) {
+    if input
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_whitespace)
+    {
         return Err(invalid("replay JSON containers require compact separators"));
     }
-    let mut values = serde_json::Deserializer::from_str(input)
-        .into_iter::<&serde_json::value::RawValue>();
-    let value = values.next().ok_or_else(|| invalid("replay JSON value is absent"))?
+    let mut values =
+        serde_json::Deserializer::from_str(input).into_iter::<&serde_json::value::RawValue>();
+    let value = values
+        .next()
+        .ok_or_else(|| invalid("replay JSON value is absent"))?
         .map_err(|_| invalid("replay JSON value is invalid"))?;
     *remaining = &input[values.byte_offset()..];
     Ok(value.get())
@@ -1582,15 +1780,26 @@ fn replay_json_key(raw: &str) -> PyResult<Vec<u32>> {
             units.push(character as u32);
             continue;
         }
-        let escaped = characters.next().ok_or_else(|| invalid("replay JSON key escape is incomplete"))?;
+        let escaped = characters
+            .next()
+            .ok_or_else(|| invalid("replay JSON key escape is incomplete"))?;
         units.push(match escaped {
             '"' | '\\' | '/' => escaped as u32,
-            'b' => 8, 'f' => 12, 'n' => 10, 'r' => 13, 't' => 9,
+            'b' => 8,
+            'f' => 12,
+            'n' => 10,
+            'r' => 13,
+            't' => 9,
             'u' => {
                 let mut unit = 0;
                 for _ in 0..4 {
-                    unit = unit * 16 + characters.next().and_then(|value| value.to_digit(16))
-                        .ok_or_else(|| invalid("replay JSON key Unicode escape is incomplete"))?;
+                    unit = unit * 16
+                        + characters
+                            .next()
+                            .and_then(|value| value.to_digit(16))
+                            .ok_or_else(|| {
+                                invalid("replay JSON key Unicode escape is incomplete")
+                            })?;
                 }
                 unit
             }
@@ -1602,7 +1811,10 @@ fn replay_json_key(raw: &str) -> PyResult<Vec<u32>> {
     while position < units.len() {
         let unit = units[position];
         if (0xd800..=0xdbff).contains(&unit)
-            && units.get(position + 1).is_some_and(|next| (0xdc00..=0xdfff).contains(next)) {
+            && units
+                .get(position + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
             points.push(0x10000 + ((unit - 0xd800) << 10) + units[position + 1] - 0xdc00);
             position += 2;
         } else {
@@ -1617,12 +1829,18 @@ fn replay_json_key(raw: &str) -> PyResult<Vec<u32>> {
 /// Scalar spelling and complete episode laws remain the upstream data owner's
 /// responsibility; their original bytes are preserved and content-hashed here.
 fn validate_replay_json_structure(raw: &str, depth: usize) -> PyResult<()> {
-    if depth > 32 { return Err(invalid("replay JSON exceeds its nesting bound")); }
+    if depth > 32 {
+        return Err(invalid("replay JSON exceeds its nesting bound"));
+    }
     let object = raw.starts_with('{');
-    if !object && !raw.starts_with('[') { return Ok(()); }
+    if !object && !raw.starts_with('[') {
+        return Ok(());
+    }
     let end = if object { "}" } else { "]" };
     let mut remaining = &raw[1..];
-    if remaining == end { return Ok(()); }
+    if remaining == end {
+        return Ok(());
+    }
     let mut previous: Option<Vec<u32>> = None;
     loop {
         if object {
@@ -1634,12 +1852,16 @@ fn validate_replay_json_structure(raw: &str, depth: usize) -> PyResult<()> {
                 return Err(invalid("replay JSON object keys must be sorted and unique"));
             }
             previous = Some(key);
-            remaining = remaining.strip_prefix(':')
+            remaining = remaining
+                .strip_prefix(':')
                 .ok_or_else(|| invalid("replay JSON objects require compact separators"))?;
         }
         validate_replay_json_structure(take_replay_json(&mut remaining)?, depth + 1)?;
-        if remaining == end { return Ok(()); }
-        remaining = remaining.strip_prefix(',')
+        if remaining == end {
+            return Ok(());
+        }
+        remaining = remaining
+            .strip_prefix(',')
             .ok_or_else(|| invalid("replay JSON containers require compact separators"))?;
     }
 }
@@ -1647,22 +1869,33 @@ fn validate_replay_json_structure(raw: &str, depth: usize) -> PyResult<()> {
 /// Keep uninterpreted JSON bytes, including Python float spelling and escaped
 /// UTF-16. Sorted root reassembly also rejects duplicate keys and extra spacing.
 fn replay_json_object(text: &str) -> PyResult<ReplayJsonObject> {
-    let object: ReplayJsonObject = serde_json::from_str(text)
-        .map_err(|_| invalid("replay episode requires a JSON object"))?;
+    let object: ReplayJsonObject =
+        serde_json::from_str(text).map_err(|_| invalid("replay episode requires a JSON object"))?;
     if replay_json_join(&object, None) != text {
-        return Err(invalid("replay JSON object must preserve canonical keys and separators"));
+        return Err(invalid(
+            "replay JSON object must preserve canonical keys and separators",
+        ));
     }
     Ok(object)
 }
 
 fn replay_json_join(object: &ReplayJsonObject, omit: Option<&str>) -> String {
-    format!("{{{}}}", object.iter().filter(|(key, _)| Some(key.as_str()) != omit)
-        .map(|(key, value)| format!("{}:{}", observation_json_string(key), value.get()))
-        .collect::<Vec<_>>().join(","))
+    format!(
+        "{{{}}}",
+        object
+            .iter()
+            .filter(|(key, _)| Some(key.as_str()) != omit)
+            .map(|(key, value)| format!("{}:{}", observation_json_string(key), value.get()))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 fn replay_json_field<'a>(object: &'a ReplayJsonObject, key: &str) -> PyResult<&'a str> {
-    object.get(key).map(|value| value.get()).ok_or_else(|| invalid("replay episode binding field is absent"))
+    object
+        .get(key)
+        .map(|value| value.get())
+        .ok_or_else(|| invalid("replay episode binding field is absent"))
 }
 
 fn replay_json_value(text: &str) -> PyResult<serde_json::Value> {
@@ -1675,8 +1908,14 @@ fn replay_identity_json(value: &ColdValue) -> PyResult<String> {
         ColdValue::Bool(value) => value.to_string(),
         ColdValue::Integer(value) => value.clone(),
         ColdValue::Text(value) => observation_json_string(value),
-        ColdValue::Sequence(values) => format!("[{}]", values.iter().map(replay_identity_json)
-            .collect::<PyResult<Vec<_>>>()?.join(",")),
+        ColdValue::Sequence(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(replay_identity_json)
+                .collect::<PyResult<Vec<_>>>()?
+                .join(",")
+        ),
         ColdValue::Bytes(_) => return Err(invalid("replay identity cannot contain payload bytes")),
     })
 }
@@ -1710,21 +1949,57 @@ impl ReplayMaterial {
         let fields = pair[0].fields(4)?;
         checked_digest(&fields[0])?;
         let identity = fields[0].text()?.to_owned();
-        if earlier.contains(&identity) { return Err(invalid("duplicate replay material identity")); }
+        if earlier.contains(&identity) {
+            return Err(invalid("duplicate replay material identity"));
+        }
         let kind = fields[1].text()?.to_owned();
-        if !matches!(kind.as_str(), "entry-boundary" | "source-tokens" | "topology" | "cache" |
-            "feedback" | "feedback-statements" | "feedback-support-provenance" | "feedback-encoder" |
-            "parameters" | "physical-partition" | "numerical-realization" | "logits" | "random-state" |
-            "baseline" | "final-mask" | "pwl-cell" | "active-set" | "vjp" | "receipt" | "theory-delta" |
-            "evidence" | "theory-state" | "logical-state" | "world-root" | "neural-generation" |
-            "law" | "codebook" | "roster" | "action" | "result" | "observation" | "environment" |
-            "provenance" | "downstream-snapshot" | "estimator-bound" | "training-view") {
+        if !matches!(
+            kind.as_str(),
+            "entry-boundary"
+                | "source-tokens"
+                | "topology"
+                | "cache"
+                | "feedback"
+                | "feedback-statements"
+                | "feedback-support-provenance"
+                | "feedback-encoder"
+                | "parameters"
+                | "physical-partition"
+                | "numerical-realization"
+                | "logits"
+                | "random-state"
+                | "baseline"
+                | "final-mask"
+                | "pwl-cell"
+                | "active-set"
+                | "vjp"
+                | "receipt"
+                | "theory-delta"
+                | "evidence"
+                | "theory-state"
+                | "logical-state"
+                | "world-root"
+                | "neural-generation"
+                | "law"
+                | "codebook"
+                | "roster"
+                | "action"
+                | "result"
+                | "observation"
+                | "environment"
+                | "provenance"
+                | "downstream-snapshot"
+                | "estimator-bound"
+                | "training-view"
+        ) {
             return Err(invalid("unknown replay material kind"));
         }
         let (bytes_sha256, reconstruction, bytes) = match (&fields[2], &fields[3], &pair[1]) {
             (ColdValue::Text(digest), ColdValue::None, ColdValue::Bytes(bytes)) => {
                 checked_digest(&fields[2])?;
-                if replay_hash(bytes) != *digest { return Err(invalid("replay material byte digest differs")); }
+                if replay_hash(bytes) != *digest {
+                    return Err(invalid("replay material byte digest differs"));
+                }
                 (Some(digest.clone()), None, Some(Arc::clone(bytes)))
             }
             (ColdValue::None, reconstruction, ColdValue::None) => {
@@ -1732,16 +2007,30 @@ impl ReplayMaterial {
                 let operation = fields[0].text()?.to_owned();
                 let inputs = fields[1].strings()?;
                 if inputs.is_empty() || inputs.iter().any(|value| !earlier.contains(value)) {
-                    return Err(invalid("replay reconstruction inputs must name earlier materials"));
+                    return Err(invalid(
+                        "replay reconstruction inputs must name earlier materials",
+                    ));
                 }
                 (None, Some(ReplayReconstruction { operation, inputs }), None)
             }
-            _ => return Err(invalid("replay material requires exactly bytes or reconstruction")),
+            _ => {
+                return Err(invalid(
+                    "replay material requires exactly bytes or reconstruction",
+                ))
+            }
         };
         if kind == "training-view" && bytes_sha256.as_ref() != Some(&identity) {
-            return Err(invalid("training-view identity must be the digest of its original bytes"));
+            return Err(invalid(
+                "training-view identity must be the digest of its original bytes",
+            ));
         }
-        Ok(Self { identity, kind, bytes_sha256, reconstruction, bytes })
+        Ok(Self {
+            identity,
+            kind,
+            bytes_sha256,
+            reconstruction,
+            bytes,
+        })
     }
 }
 
@@ -1767,7 +2056,10 @@ enum ReplayBasis {
 
 impl ReplayBasis {
     fn name(&self) -> &'static str {
-        match self { Self::Episode { .. } => "episode", Self::CorpusAnchor => "anchor" }
+        match self {
+            Self::Episode { .. } => "episode",
+            Self::CorpusAnchor => "anchor",
+        }
     }
 }
 
@@ -1781,46 +2073,77 @@ struct NativeReplayBinding {
 impl ReplayRow {
     fn native_replay(&self) -> PyResult<NativeReplayBinding> {
         let ReplayBasis::Episode { execution } = &self.basis else {
-            return Err(invalid("a corpus anchor has admission evidence, not a native execution to replay"));
+            return Err(invalid(
+                "a corpus anchor has admission evidence, not a native execution to replay",
+            ));
         };
-        let digest = |name: &str| execution.get(name).and_then(serde_json::Value::as_str)
-            .ok_or_else(|| invalid("native replay material root is absent"));
+        let digest = |name: &str| {
+            execution
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid("native replay material root is absent"))
+        };
         let predecessor = digest("action_base_h_logical")?;
         let successor = digest("action_successor_h_logical")?;
         let envelope = replay_json_object(replay_json_field(&self.record, "envelope")?)?;
         let provenance = replay_json_value(replay_json_field(&envelope, "provenance_identity")?)?;
-        let provenance = provenance.as_str().ok_or_else(|| invalid("native replay provenance root is absent"))?;
-        let resolve = |identity: &str, kind: &str| self.materials.iter()
-            .find(|material| material.identity == identity && material.kind == kind)
-            .ok_or_else(|| invalid("native replay input does not resolve to its exact material"));
+        let provenance = provenance
+            .as_str()
+            .ok_or_else(|| invalid("native replay provenance root is absent"))?;
+        let resolve = |identity: &str, kind: &str| {
+            self.materials
+                .iter()
+                .find(|material| material.identity == identity && material.kind == kind)
+                .ok_or_else(|| {
+                    invalid("native replay input does not resolve to its exact material")
+                })
+        };
         let original = resolve(predecessor, "logical-state")?;
         let result = resolve(successor, "logical-state")?;
         let provenance = resolve(provenance, "provenance")?;
-        let reconstruction = result.reconstruction.as_ref()
-            .ok_or_else(|| invalid("successor must be reconstructed, not loaded from its own full snapshot"))?;
+        let reconstruction = result.reconstruction.as_ref().ok_or_else(|| {
+            invalid("successor must be reconstructed, not loaded from its own full snapshot")
+        })?;
         if reconstruction.operation != NATIVE_REPLAY_OPERATION {
-            return Err(invalid("successor reconstruction must use the pinned native transition operation"));
+            return Err(invalid(
+                "successor reconstruction must use the pinned native transition operation",
+            ));
         }
-        let invocation = execution.get("invocation").and_then(serde_json::Value::as_object)
+        let invocation = execution
+            .get("invocation")
+            .and_then(serde_json::Value::as_object)
             .ok_or_else(|| invalid("native replay invocation is absent"))?;
-        for input in [predecessor, provenance.identity.as_str()].into_iter()
-            .chain(invocation.values().filter_map(serde_json::Value::as_str)) {
+        for input in [predecessor, provenance.identity.as_str()]
+            .into_iter()
+            .chain(invocation.values().filter_map(serde_json::Value::as_str))
+        {
             if !reconstruction.inputs.iter().any(|item| item == input) {
                 return Err(invalid("native successor reconstruction omits an original invocation input or provenance root"));
             }
         }
         fn bytes(material: &ReplayMaterial) -> PyResult<&[u8]> {
-            material.bytes.as_deref()
-                .ok_or_else(|| invalid("native predecessor and provenance require their complete original bytes"))
+            material.bytes.as_deref().ok_or_else(|| {
+                invalid("native predecessor and provenance require their complete original bytes")
+            })
         }
-        let material = xlog_cuda::SemanticReplayMaterial::decode(bytes(original)?, &self.evidence,
-            replay_digest_identity(predecessor)?, replay_digest_identity(successor)?).map_err(xlog_err)?;
+        let material = xlog_cuda::SemanticReplayMaterial::decode(
+            bytes(original)?,
+            &self.evidence,
+            replay_digest_identity(predecessor)?,
+            replay_digest_identity(successor)?,
+        )
+        .map_err(xlog_err)?;
         ColdValue::from_canonical_bytes(material.model_numerical_mode().map_err(xlog_err)?)?;
-        let original_decisions = material.verify_provenance(bytes(provenance)?).map_err(xlog_err)?;
+        let original_decisions = material
+            .verify_provenance(bytes(provenance)?)
+            .map_err(xlog_err)?;
         // Historical metadata is reproducible input only. Never install this
         // snapshot as the current TaskUse authority or derive a present grant.
         AuthoritySnapshot::parse(&ColdValue::from_canonical_bytes(&original_decisions)?)?;
-        Ok(NativeReplayBinding { material, original_decisions: original_decisions.into() })
+        Ok(NativeReplayBinding {
+            material,
+            original_decisions: original_decisions.into(),
+        })
     }
 
     fn python_view(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
@@ -1836,20 +2159,37 @@ impl ReplayRow {
                 item.set_item("operation", &reconstruction.operation)?;
                 item.set_item("inputs", PyList::new(py, &reconstruction.inputs)?)?;
                 reference.set_item("reconstruction", item)?;
-            } else { reference.set_item("reconstruction", py.None())?; }
-            let payload = if let (Some(digest), Some(bytes)) = (&material.bytes_sha256, &material.bytes) {
-                blobs.entry(digest).or_insert_with(|| PyBytes::new(py, bytes).into_any().unbind()).clone_ref(py)
-            } else { py.None() };
+            } else {
+                reference.set_item("reconstruction", py.None())?;
+            }
+            let payload =
+                if let (Some(digest), Some(bytes)) = (&material.bytes_sha256, &material.bytes) {
+                    blobs
+                        .entry(digest)
+                        .or_insert_with(|| PyBytes::new(py, bytes).into_any().unbind())
+                        .clone_ref(py)
+                } else {
+                    py.None()
+                };
             materials.push((reference, payload));
         }
-        Ok((self.basis.name(), self.identity.python_value(py)?, &self.record_line, PyTuple::new(py, materials)?,
-            PyBytes::new(py, &self.evidence)).into_pyobject(py)?.unbind())
+        Ok((
+            self.basis.name(),
+            self.identity.python_value(py)?,
+            &self.record_line,
+            PyTuple::new(py, materials)?,
+            PyBytes::new(py, &self.evidence),
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     fn parse(value: &ColdValue) -> PyResult<Self> {
         let fields = value.fields(5)?;
         let basis = fields[0].text()?;
-        if !matches!(basis, "episode" | "anchor") { return Err(invalid("unknown replay row basis")); }
+        if !matches!(basis, "episode" | "anchor") {
+            return Err(invalid("unknown replay row basis"));
+        }
         let identity = fields[1].fields(6)?;
         checked_digest(&identity[1])?;
         checked_digest(&identity[2])?;
@@ -1861,36 +2201,69 @@ impl ReplayRow {
         // semantic laws or an additional native identity projection.
         let content = if basis == "anchor" {
             format!("[\"dlm-new/corpus-anchor/v1\",{payload}]")
-        } else { payload };
-        if replay_json_value(replay_json_field(&record, "content_sha256")?)? != identity[2].text()?
-            || replay_hash(content.as_bytes()) != identity[2].text()? {
-            return Err(invalid("replay record content digest differs from its identity"));
+        } else {
+            payload
+        };
+        if replay_json_value(replay_json_field(&record, "content_sha256")?)?
+            != identity[2].text()?
+            || replay_hash(content.as_bytes()) != identity[2].text()?
+        {
+            return Err(invalid(
+                "replay record content digest differs from its identity",
+            ));
         }
         validate_replay_training_identity(identity, &record)?;
-        let ColdValue::Bytes(evidence) = &fields[4] else { return Err(invalid("replay evidence bytes are absent")); };
-        if evidence.is_empty() { return Err(invalid("replay evidence bytes are empty")); }
+        let ColdValue::Bytes(evidence) = &fields[4] else {
+            return Err(invalid("replay evidence bytes are absent"));
+        };
+        if evidence.is_empty() {
+            return Err(invalid("replay evidence bytes are empty"));
+        }
         if basis == "anchor" {
             let source = validate_anchor_admission(identity, &record, evidence)?;
             let transported = fields[3].fields(1)?;
             let material = ReplayMaterial::parse(&transported[0], &BTreeSet::new())?;
-            if material.kind != "training-view" || replay_json_value(replay_json_field(&record, "training_view_identity")?)? != material.identity {
-                return Err(invalid("corpus anchor requires its one original training-view material"));
+            if material.kind != "training-view"
+                || replay_json_value(replay_json_field(&record, "training_view_identity")?)?
+                    != material.identity
+            {
+                return Err(invalid(
+                    "corpus anchor requires its one original training-view material",
+                ));
             }
             validate_replay_training_payload(&material, identity, &source, true)?;
-            return Ok(Self { basis: ReplayBasis::CorpusAnchor, identity: fields[1].clone(),
-                record_line, record, materials: vec![material], evidence: Arc::clone(evidence) });
+            return Ok(Self {
+                basis: ReplayBasis::CorpusAnchor,
+                identity: fields[1].clone(),
+                record_line,
+                record,
+                materials: vec![material],
+                evidence: Arc::clone(evidence),
+            });
         }
         let envelope = replay_json_object(replay_json_field(&record, "envelope")?)?;
         let execution = replay_json_object(replay_json_field(&envelope, "execution_materials")?)?;
-        let expected = ["action_base_h_logical", "action_successor_h_logical", "invocation", "training_view_identity", "baseline", "materials"];
-        if execution.len() != expected.len() || !expected.iter().all(|key| execution.contains_key(*key)) {
+        let expected = [
+            "action_base_h_logical",
+            "action_successor_h_logical",
+            "invocation",
+            "training_view_identity",
+            "baseline",
+            "materials",
+        ];
+        if execution.len() != expected.len()
+            || !expected.iter().all(|key| execution.contains_key(*key))
+        {
             return Err(invalid("replay execution materials field set differs"));
         }
-        let declared: Vec<Box<serde_json::value::RawValue>> = serde_json::from_str(replay_json_field(&execution, "materials")?)
-            .map_err(|_| invalid("replay material roster is not an array"))?;
+        let declared: Vec<Box<serde_json::value::RawValue>> =
+            serde_json::from_str(replay_json_field(&execution, "materials")?)
+                .map_err(|_| invalid("replay material roster is not an array"))?;
         let transported = fields[3].sequence()?;
         if declared.len() != transported.len() || declared.is_empty() {
-            return Err(invalid("replay material roster is missing or detached from the episode"));
+            return Err(invalid(
+                "replay material roster is missing or detached from the episode",
+            ));
         }
         let mut earlier = BTreeSet::new();
         let mut materials = Vec::new();
@@ -1902,67 +2275,144 @@ impl ReplayRow {
                 replay_json_object(reconstruction)?;
             }
             if replay_json_value(declared.get())? != material.reference_json() {
-                return Err(invalid("replay material order or reference differs from the episode"));
+                return Err(invalid(
+                    "replay material order or reference differs from the episode",
+                ));
             }
             earlier.insert(material.identity.clone());
             materials.push(material);
         }
         let require_kind = |raw: &str, kind: &str| -> PyResult<()> {
             let value = replay_json_value(raw)?;
-            let identity = value.as_str().ok_or_else(|| invalid("replay material binding requires a digest"))?;
-            if !materials.iter().any(|material| material.identity == identity && material.kind == kind) {
-                return Err(invalid("replay execution binding does not resolve to its material kind"));
+            let identity = value
+                .as_str()
+                .ok_or_else(|| invalid("replay material binding requires a digest"))?;
+            if !materials
+                .iter()
+                .any(|material| material.identity == identity && material.kind == kind)
+            {
+                return Err(invalid(
+                    "replay execution binding does not resolve to its material kind",
+                ));
             }
             Ok(())
         };
-        require_kind(replay_json_field(&execution, "action_base_h_logical")?, "logical-state")?;
-        require_kind(replay_json_field(&execution, "action_successor_h_logical")?, "logical-state")?;
+        require_kind(
+            replay_json_field(&execution, "action_base_h_logical")?,
+            "logical-state",
+        )?;
+        require_kind(
+            replay_json_field(&execution, "action_successor_h_logical")?,
+            "logical-state",
+        )?;
         let invocation = replay_json_object(replay_json_field(&execution, "invocation")?)?;
-        let invocation_kinds = [("entry_boundary_identity", "entry-boundary"), ("source_tokens_identity", "source-tokens"),
-            ("topology_identity", "topology"), ("cache_identity", "cache"), ("feedback_identity", "feedback"),
-            ("model_generation", "neural-generation"), ("parameters_identity", "parameters"),
-            ("physical_partition_identity", "physical-partition"), ("numerical_realization_identity", "numerical-realization"),
-            ("logits_identity", "logits"), ("random_state_identity", "random-state")];
-        if invocation.len() != invocation_kinds.len() { return Err(invalid("replay invocation field set differs")); }
-        for (name, kind) in invocation_kinds { require_kind(replay_json_field(&invocation, name)?, kind)?; }
-        if replay_json_field(&invocation, "model_generation")? != replay_json_field(&envelope, "neural_generation")? {
-            return Err(invalid("replay invocation generation differs from its envelope"));
+        let invocation_kinds = [
+            ("entry_boundary_identity", "entry-boundary"),
+            ("source_tokens_identity", "source-tokens"),
+            ("topology_identity", "topology"),
+            ("cache_identity", "cache"),
+            ("feedback_identity", "feedback"),
+            ("model_generation", "neural-generation"),
+            ("parameters_identity", "parameters"),
+            ("physical_partition_identity", "physical-partition"),
+            ("numerical_realization_identity", "numerical-realization"),
+            ("logits_identity", "logits"),
+            ("random_state_identity", "random-state"),
+        ];
+        if invocation.len() != invocation_kinds.len() {
+            return Err(invalid("replay invocation field set differs"));
         }
-        let training = materials.iter().filter(|material| material.kind == "training-view").collect::<Vec<_>>();
-        if training.len() != 1 { return Err(invalid("replay episode requires one original training-view material")); }
-        if replay_json_value(replay_json_field(&execution, "training_view_identity")?)? != training[0].identity {
-            return Err(invalid("replay episode training-view identity differs from its original material"));
+        for (name, kind) in invocation_kinds {
+            require_kind(replay_json_field(&invocation, name)?, kind)?;
+        }
+        if replay_json_field(&invocation, "model_generation")?
+            != replay_json_field(&envelope, "neural_generation")?
+        {
+            return Err(invalid(
+                "replay invocation generation differs from its envelope",
+            ));
+        }
+        let training = materials
+            .iter()
+            .filter(|material| material.kind == "training-view")
+            .collect::<Vec<_>>();
+        if training.len() != 1 {
+            return Err(invalid(
+                "replay episode requires one original training-view material",
+            ));
+        }
+        if replay_json_value(replay_json_field(&execution, "training_view_identity")?)?
+            != training[0].identity
+        {
+            return Err(invalid(
+                "replay episode training-view identity differs from its original material",
+            ));
         }
         let source = replay_json_value(replay_json_field(&invocation, "source_tokens_identity")?)?;
-        validate_replay_training_payload(training[0], identity,
-            source.as_str().ok_or_else(|| invalid("replay source identity is not a digest"))?, false)?;
+        validate_replay_training_payload(
+            training[0],
+            identity,
+            source
+                .as_str()
+                .ok_or_else(|| invalid("replay source identity is not a digest"))?,
+            false,
+        )?;
         Ok(Self {
-            basis: ReplayBasis::Episode { execution: replay_json_value(replay_json_field(&envelope, "execution_materials")?)? },
-            identity: fields[1].clone(), record_line, record,
-            materials, evidence: Arc::clone(evidence),
+            basis: ReplayBasis::Episode {
+                execution: replay_json_value(replay_json_field(&envelope, "execution_materials")?)?,
+            },
+            identity: fields[1].clone(),
+            record_line,
+            record,
+            materials,
+            evidence: Arc::clone(evidence),
         })
     }
 }
 
-fn validate_replay_training_identity(identity: &[ColdValue], record: &ReplayJsonObject) -> PyResult<()> {
-    const NAMES: [&str; 9] = ["data_manifest_hash", "example_id", "final_split", "tokenizer_hash",
-        "tokenizer_revision", "mask_policy_hash", "training_seed", "epoch_index", "variant_index"];
+fn validate_replay_training_identity(
+    identity: &[ColdValue],
+    record: &ReplayJsonObject,
+) -> PyResult<()> {
+    const NAMES: [&str; 9] = [
+        "data_manifest_hash",
+        "example_id",
+        "final_split",
+        "tokenizer_hash",
+        "tokenizer_revision",
+        "mask_policy_hash",
+        "training_seed",
+        "epoch_index",
+        "variant_index",
+    ];
     let view = identity[0].fields(NAMES.len())?;
     let original = replay_json_object(replay_json_field(record, "training_view")?)?;
-    if original.len() != NAMES.len() { return Err(invalid("training view requires its original nine fields")); }
+    if original.len() != NAMES.len() {
+        return Err(invalid("training view requires its original nine fields"));
+    }
     for (index, name) in NAMES.iter().enumerate() {
-        if index < 6 { view[index].text()?; }
-        else if !matches!(&view[index], ColdValue::Integer(value) if !value.starts_with('-')) {
-            return Err(invalid("training view seed, epoch and variant require nonnegative integers"));
+        if index < 6 {
+            view[index].text()?;
+        } else if !matches!(&view[index], ColdValue::Integer(value) if !value.starts_with('-')) {
+            return Err(invalid(
+                "training view seed, epoch and variant require nonnegative integers",
+            ));
         }
         if replay_json_field(&original, name)? != replay_identity_json(&view[index])? {
-            return Err(invalid("training identity differs from its original record projection"));
+            return Err(invalid(
+                "training identity differs from its original record projection",
+            ));
         }
     }
-    for index in [0, 3, 5] { checked_digest(&view[index])?; }
+    for index in [0, 3, 5] {
+        checked_digest(&view[index])?;
+    }
     if replay_json_field(record, "example_id")? != replay_identity_json(&view[1])?
-        || !matches!(view[2].text()?, "train" | "dev" | "request-local-replay") {
-        return Err(invalid("replay training identity names another example or a sealed partition"));
+        || !matches!(view[2].text()?, "train" | "dev" | "request-local-replay")
+    {
+        return Err(invalid(
+            "replay training identity names another example or a sealed partition",
+        ));
     }
     if let Some(split) = record.get("final_split") {
         if split.get() != replay_identity_json(&view[2])? {
@@ -1970,78 +2420,158 @@ fn validate_replay_training_identity(identity: &[ColdValue], record: &ReplayJson
         }
     }
     let canonical = replay_identity_json(&identity[0])?;
-    if replay_hash(format!("[\"dlm-new/training-view-identity/v1\",{canonical}]").as_bytes()) != identity[1].text()? {
+    if replay_hash(format!("[\"dlm-new/training-view-identity/v1\",{canonical}]").as_bytes())
+        != identity[1].text()?
+    {
         return Err(invalid("training-view identity digest differs"));
     }
     Ok(())
 }
 
-fn validate_anchor_admission(identity: &[ColdValue], record: &ReplayJsonObject, evidence: &[u8]) -> PyResult<String> {
-    let keys = ["content_sha256", "example_id", "group", "training_view", "training_view_identity"];
+fn validate_anchor_admission(
+    identity: &[ColdValue],
+    record: &ReplayJsonObject,
+    evidence: &[u8],
+) -> PyResult<String> {
+    let keys = [
+        "content_sha256",
+        "example_id",
+        "group",
+        "training_view",
+        "training_view_identity",
+    ];
     if record.len() != keys.len() || keys.iter().any(|key| !record.contains_key(*key)) {
         return Err(invalid("corpus anchor record field set differs"));
     }
     let view = identity[0].fields(9)?;
     if view[2].text()? != "train"
-        || replay_json_value(replay_json_field(record, "group")?)?.as_str().is_none_or(str::is_empty) {
-        return Err(invalid("corpus anchor requires its admitted train partition and original retention group"));
+        || replay_json_value(replay_json_field(record, "group")?)?
+            .as_str()
+            .is_none_or(str::is_empty)
+    {
+        return Err(invalid(
+            "corpus anchor requires its admitted train partition and original retention group",
+        ));
     }
-    let text = std::str::from_utf8(evidence).map_err(|_| invalid("corpus admission evidence is not UTF-8"))?;
+    let text = std::str::from_utf8(evidence)
+        .map_err(|_| invalid("corpus admission evidence is not UTF-8"))?;
     validate_replay_json_structure(text, 0)?;
     let parts: Vec<Box<serde_json::value::RawValue>> = serde_json::from_str(text)
         .map_err(|_| invalid("corpus anchor admission evidence requires its canonical record"))?;
-    if parts.len() != 3 || replay_json_value(parts[0].get())? != "dlm-new/corpus-anchor-admission/v1"
-        || parts[1].get() != replay_identity_json(&view[0])? {
-        return Err(invalid("corpus anchor admission differs from the original manifest"));
+    if parts.len() != 3
+        || replay_json_value(parts[0].get())? != "dlm-new/corpus-anchor-admission/v1"
+        || parts[1].get() != replay_identity_json(&view[0])?
+    {
+        return Err(invalid(
+            "corpus anchor admission differs from the original manifest",
+        ));
     }
     let entry = replay_json_value(parts[2].get())?;
-    let entry = entry.as_array().filter(|entry| entry.len() == 10)
+    let entry = entry
+        .as_array()
+        .filter(|entry| entry.len() == 10)
         .ok_or_else(|| invalid("corpus anchor admission requires the complete manifest entry"))?;
     if entry[0] != view[1].text()? || entry[1] != "train" {
-        return Err(invalid("corpus anchor admission names another example or partition"));
+        return Err(invalid(
+            "corpus anchor admission names another example or partition",
+        ));
     }
     for index in [2, 3, 4] {
-        replay_digest_identity(entry[index].as_str().ok_or_else(|| invalid("manifest entry content digest is absent"))?)?;
+        replay_digest_identity(
+            entry[index]
+                .as_str()
+                .ok_or_else(|| invalid("manifest entry content digest is absent"))?,
+        )?;
     }
-    let provenance = entry[7].as_array().filter(|parts| parts.len() == 11)
+    let provenance = entry[7]
+        .as_array()
+        .filter(|parts| parts.len() == 11)
         .ok_or_else(|| invalid("corpus anchor requires its complete original corpus provenance"))?;
-    let admission = entry[8].as_array().filter(|parts| parts.len() == 3)
+    let admission = entry[8]
+        .as_array()
+        .filter(|parts| parts.len() == 3)
         .ok_or_else(|| invalid("corpus anchor requires its original admission decision"))?;
-    if provenance[0] != "corpus" || admission[0] != "corpus" || admission[2] != "corpus"
-        || !provenance[8].as_array().is_some_and(|uses| uses.iter().any(|use_| use_ == "training"))
-        || !admission[1].as_array().is_some_and(|splits| splits.iter().any(|split| split == "train")) {
+    if provenance[0] != "corpus"
+        || admission[0] != "corpus"
+        || admission[2] != "corpus"
+        || !provenance[8]
+            .as_array()
+            .is_some_and(|uses| uses.iter().any(|use_| use_ == "training"))
+        || !admission[1]
+            .as_array()
+            .is_some_and(|splits| splits.iter().any(|split| split == "train"))
+    {
         return Err(invalid("corpus anchor has no train-only corpus admission"));
     }
     // This checks the transported producer record, not a signature or a grant.
     // TaskAuthority still requires the trusted application's full dependency
     // closure and fresh permission for every use of these retained bytes.
-    Ok(entry[4].as_str().expect("checked original normalized record digest").to_owned())
+    Ok(entry[4]
+        .as_str()
+        .expect("checked original normalized record digest")
+        .to_owned())
 }
 
-fn validate_replay_training_payload(material: &ReplayMaterial, identity: &[ColdValue], source: &str, require_retention: bool) -> PyResult<()> {
-    let bytes = material.bytes.as_deref().ok_or_else(|| invalid("training view requires its original bytes"))?;
+fn validate_replay_training_payload(
+    material: &ReplayMaterial,
+    identity: &[ColdValue],
+    source: &str,
+    require_retention: bool,
+) -> PyResult<()> {
+    let bytes = material
+        .bytes
+        .as_deref()
+        .ok_or_else(|| invalid("training view requires its original bytes"))?;
     let mut tag = [0u8; 32];
     let schema = b"dlm-new/training-view/v1";
     tag[..schema.len()].copy_from_slice(schema);
-    if bytes.len() < 136 || bytes[..32] != tag
+    if bytes.len() < 136
+        || bytes[..32] != tag
         || bytes[32..64] != *replay_digest_identity(identity[1].text()?)?.as_bytes()
-        || bytes[64..96] != *replay_digest_identity(source)?.as_bytes() {
-        return Err(invalid("training-view header differs from its original identity or source"));
+        || bytes[64..96] != *replay_digest_identity(source)?.as_bytes()
+    {
+        return Err(invalid(
+            "training-view header differs from its original identity or source",
+        ));
     }
-    let word = |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("bounded training-view word"));
-    let window = usize::try_from(word(96)).map_err(|_| invalid("training-view window exceeds host address space"))?;
+    let word = |offset: usize| {
+        u64::from_le_bytes(
+            bytes[offset..offset + 8]
+                .try_into()
+                .expect("bounded training-view word"),
+        )
+    };
+    let window = usize::try_from(word(96))
+        .map_err(|_| invalid("training-view window exceeds host address space"))?;
     let length = identity[3].unsigned()?;
     let block = identity[4].unsigned()?;
     let answer_start = word(128);
-    let expected = window.checked_mul(68).and_then(|size| size.checked_add(136 + (window % 2) * 4));
-    if window == 0 || length == 0 || block == 0 || word(104) != length || word(112) != block
-        || word(120) > length || answer_start == 0 || answer_start > length
-        || (require_retention && answer_start == length) || expected != Some(bytes.len())
-        || length.checked_mul(2).is_none_or(|extent| extent > window as u64) {
-        return Err(invalid("training-view byte extent or dimensions differ from its original row"));
+    let expected = window
+        .checked_mul(68)
+        .and_then(|size| size.checked_add(136 + (window % 2) * 4));
+    if window == 0
+        || length == 0
+        || block == 0
+        || word(104) != length
+        || word(112) != block
+        || word(120) > length
+        || answer_start == 0
+        || answer_start > length
+        || (require_retention && answer_start == length)
+        || expected != Some(bytes.len())
+        || length
+            .checked_mul(2)
+            .is_none_or(|extent| extent > window as u64)
+    {
+        return Err(invalid(
+            "training-view byte extent or dimensions differ from its original row",
+        ));
     }
     let padding = 136 + window * 20;
-    if bytes[padding..padding + (window % 2) * 4].iter().any(|&value| value != 0) {
+    if bytes[padding..padding + (window % 2) * 4]
+        .iter()
+        .any(|&value| value != 0)
+    {
         return Err(invalid("training-view alignment padding is not canonical"));
     }
     let mut targets = BTreeSet::new();
@@ -2049,9 +2579,14 @@ fn validate_replay_training_payload(material: &ReplayMaterial, identity: &[ColdV
     for target in identity[5].sequence()? {
         let target = target.fields(3)?;
         let position = target[0].unsigned()?;
-        if position >= length || previous.is_some_and(|last| position <= last)
-            || target[1].unsigned()? != position || Some(target[2].unsigned()?) != length.checked_add(position) {
-            return Err(invalid("training-view targets must retain ordered (p, p, L+p) coordinates"));
+        if position >= length
+            || previous.is_some_and(|last| position <= last)
+            || target[1].unsigned()? != position
+            || Some(target[2].unsigned()?) != length.checked_add(position)
+        {
+            return Err(invalid(
+                "training-view targets must retain ordered (p, p, L+p) coordinates",
+            ));
         }
         previous = Some(position);
         targets.insert(target[2].unsigned()? as usize);
@@ -2060,24 +2595,38 @@ fn validate_replay_training_payload(material: &ReplayMaterial, identity: &[ColdV
     for slot in 0..window {
         let label = word(136 + window * 8 + slot * 8) as i64;
         let offset = 136 + window * 16 + slot * 4;
-        let weight = f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("bounded training-view weight"));
+        let weight = f32::from_le_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .expect("bounded training-view weight"),
+        );
         if targets.contains(&slot) {
             if label < 0 || !weight.is_finite() || weight <= 0.0 {
-                return Err(invalid("training-view target is absent from its original MASK supervision"));
+                return Err(invalid(
+                    "training-view target is absent from its original MASK supervision",
+                ));
             }
         } else if label != -100 || weight != 0.0 {
-            return Err(invalid("training-view MASK supervision contains an undeclared target"));
+            return Err(invalid(
+                "training-view MASK supervision contains an undeclared target",
+            ));
         }
         // Retention reads the original causal memory predictor, not the
         // permuted prediction stream or a newly drawn subset of MASK rows.
         let next = slot as u64 + 1;
         let expected_label = if next >= answer_start && next < length {
             let token = word(136 + (slot + 1) * 8) as i64;
-            if token < 0 { return Err(invalid("training-view retention target is not a token")); }
+            if token < 0 {
+                return Err(invalid("training-view retention target is not a token"));
+            }
             token
-        } else { -100 };
+        } else {
+            -100
+        };
         if word(retention + slot * 8) as i64 != expected_label {
-            return Err(invalid("training-view retention labels differ from the original answer projection"));
+            return Err(invalid(
+                "training-view retention labels differ from the original answer projection",
+            ));
         }
     }
     Ok(())
@@ -2094,57 +2643,81 @@ fn replay_digest_identity(text: &str) -> PyResult<Identity256> {
 }
 
 fn select_replay_row(rows: &[ReplayRow], selection: &ColdValue) -> PyResult<Option<usize>> {
-    if selection == &ColdValue::None { return Ok(None); }
+    if selection == &ColdValue::None {
+        return Ok(None);
+    }
     let fields = selection.fields(2)?;
     let ordinal = usize::try_from(fields[0].unsigned()?)
         .map_err(|_| invalid("selected replay ordinal exceeds host address space"))?;
-    let row = rows.get(ordinal).ok_or_else(|| invalid("selected replay ordinal is absent"))?;
+    let row = rows
+        .get(ordinal)
+        .ok_or_else(|| invalid("selected replay ordinal is absent"))?;
     if row.identity != fields[1] {
-        return Err(invalid("selected replay identity differs from the exact original row"));
+        return Err(invalid(
+            "selected replay identity differs from the exact original row",
+        ));
     }
     Ok(Some(ordinal))
 }
 
 fn decode_selected_replay(
-    rows: &[ReplayRow], selection: &ColdValue,
+    rows: &[ReplayRow],
+    selection: &ColdValue,
 ) -> PyResult<(Option<usize>, Option<NativeReplayBinding>)> {
     let selection = select_replay_row(rows, selection)?;
     let mut selected = None;
     for (ordinal, row) in rows.iter().enumerate() {
         if matches!(row.basis, ReplayBasis::CorpusAnchor) {
             if selection == Some(ordinal) {
-                return Err(invalid("native execution replay cannot select a corpus anchor"));
+                return Err(invalid(
+                    "native execution replay cannot select a corpus anchor",
+                ));
             }
             continue;
         }
         let material = row.native_replay()?;
-        if selection == Some(ordinal) { selected = Some(material); }
+        if selection == Some(ordinal) {
+            selected = Some(material);
+        }
     }
     Ok((selection, selected))
 }
 
 fn read_task_evaluation_spec(
-    statements: &Bound<'_, PyAny>, supports: &Bound<'_, PyAny>,
-    source: &Bound<'_, PyAny>, queries: &Bound<'_, PyAny>,
-    scoring: &Bound<'_, PyAny>, truth_masks: &Bound<'_, PyAny>, budget: &mut usize,
+    statements: &Bound<'_, PyAny>,
+    supports: &Bound<'_, PyAny>,
+    source: &Bound<'_, PyAny>,
+    queries: &Bound<'_, PyAny>,
+    scoring: &Bound<'_, PyAny>,
+    truth_masks: &Bound<'_, PyAny>,
+    budget: &mut usize,
 ) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
     let statements = ColdValue::read(statements, budget, 0)?;
     let statements = statements.fields(2)?;
-    let record_index = |value: &ColdValue| u32::try_from(value.unsigned()?)
-        .map_err(|_| invalid("native admitted record index exceeds u32"));
+    let record_index = |value: &ColdValue| {
+        u32::try_from(value.unsigned()?)
+            .map_err(|_| invalid("native admitted record index exceeds u32"))
+    };
     let statement_records = [record_index(&statements[0])?, record_index(&statements[1])?];
-    let allowed_support_records = ColdValue::read(supports, budget, 0)?.sequence()?.iter()
-        .map(record_index).collect::<PyResult<Vec<_>>>()?;
+    let allowed_support_records = ColdValue::read(supports, budget, 0)?
+        .sequence()?
+        .iter()
+        .map(record_index)
+        .collect::<PyResult<Vec<_>>>()?;
     let source = ColdValue::read(source, budget, 0)?.text()?.to_owned();
     let queries = ColdValue::read(queries, budget, 0)?;
     let queries = queries.fields(2)?;
-    let query_ordinal = |value: &ColdValue| usize::try_from(value.unsigned()?)
-        .map_err(|_| invalid("native task query ordinal exceeds host address space"));
+    let query_ordinal = |value: &ColdValue| {
+        usize::try_from(value.unsigned()?)
+            .map_err(|_| invalid("native task query ordinal exceeds host address space"))
+    };
     let query_ordinals = [query_ordinal(&queries[0])?, query_ordinal(&queries[1])?];
     let scoring = ColdValue::read(scoring, budget, 0)?;
     let scoring = scoring.fields(6)?;
-    let weight = |value: &ColdValue| u32::try_from(value.unsigned()?)
-        .map_err(|_| invalid("native task scoring weight exceeds u32"));
+    let weight = |value: &ColdValue| {
+        u32::try_from(value.unsigned()?)
+            .map_err(|_| invalid("native task scoring weight exceeds u32"))
+    };
     let scoring = xlog_cuda::SemanticTaskScoring {
         correct_weight: weight(&scoring[0])?,
         all_correct_weight: weight(&scoring[1])?,
@@ -2155,23 +2728,38 @@ fn read_task_evaluation_spec(
     };
     let masks = ColdValue::read(truth_masks, budget, 0)?;
     let masks = masks.fields(2)?;
-    let mask = |value: &ColdValue| u8::try_from(value.unsigned()?)
-        .map_err(|_| invalid("native task truth mask exceeds u8"));
+    let mask = |value: &ColdValue| {
+        u8::try_from(value.unsigned()?).map_err(|_| invalid("native task truth mask exceeds u8"))
+    };
     let admissible_truth_masks = [mask(&masks[0])?, mask(&masks[1])?];
-    let program = Arc::new(xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)
-        .map_err(xlog_err)?);
+    let program = Arc::new(
+        xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)
+            .map_err(xlog_err)?,
+    );
     Ok(xlog_cuda::SemanticTaskEvaluationSpec {
-        statement_records, allowed_support_records, program, scoring, admissible_truth_masks,
+        statement_records,
+        allowed_support_records,
+        program,
+        scoring,
+        admissible_truth_masks,
     })
 }
 
 fn read_task_replay_limits(
-    material: &Bound<'_, PyAny>, total: &Bound<'_, PyAny>, evidence: &Bound<'_, PyAny>,
+    material: &Bound<'_, PyAny>,
+    total: &Bound<'_, PyAny>,
+    evidence: &Bound<'_, PyAny>,
     budget: &mut usize,
 ) -> PyResult<[usize; 3]> {
     let mut limits = [0; 3];
-    for (index, (value, name)) in [(material, "max_material_bytes"),
-        (total, "max_total_material_bytes"), (evidence, "max_evidence_bytes")].into_iter().enumerate() {
+    for (index, (value, name)) in [
+        (material, "max_material_bytes"),
+        (total, "max_total_material_bytes"),
+        (evidence, "max_evidence_bytes"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         limits[index] = usize::try_from(ColdValue::read(value, budget, 0)?.unsigned()?)
             .map_err(|_| invalid(&format!("{name} exceeds host address space")))?;
     }
@@ -2271,7 +2859,11 @@ impl TaskAuthority {
             task_ref: values[0].text()?.to_owned(),
             scope,
             live,
-            replay: values[3].sequence()?.iter().map(ReplayRow::parse).collect::<PyResult<_>>()?,
+            replay: values[3]
+                .sequence()?
+                .iter()
+                .map(ReplayRow::parse)
+                .collect::<PyResult<_>>()?,
             dependencies,
             feedback_roots: values[5].strings()?,
             publication: grants(&values[6], false)?,
@@ -2306,28 +2898,50 @@ impl TaskAuthority {
             let revision = fields[3].text()?;
             let entry = fields[4].fields(10)?;
             entry[0].text()?;
-            for digest in &entry[2..5] { checked_digest(digest)?; }
+            for digest in &entry[2..5] {
+                checked_digest(digest)?;
+            }
             entry[6].strings()?;
             let observation = entry[9].fields(4)?;
             let field = observation[0].text()?;
             checked_digest(&observation[1])?;
             checked_digest(&observation[2])?;
-            let tokens = fields[5].sequence()?.iter().map(ColdValue::unsigned)
+            let tokens = fields[5]
+                .sequence()?
+                .iter()
+                .map(ColdValue::unsigned)
                 .collect::<PyResult<Vec<_>>>()?;
             if tokens.is_empty() || observation[3].unsigned()? != tokens.len() as u64 {
-                return Err(invalid("observed source token payload or bound count is invalid"));
+                return Err(invalid(
+                    "observed source token payload or bound count is invalid",
+                ));
             }
-            let payload = format!("[{}]", tokens.iter().map(u64::to_string).collect::<Vec<_>>().join(","));
+            let payload = format!(
+                "[{}]",
+                tokens
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
             let transform = format!("{{\"field\":{},\"template\":\"observed-source-field:v1\",\"tokenizer_hash\":{},\"tokenizer_revision\":{}}}",
                 observation_json_string(field), observation_json_string(tokenizer), observation_json_string(revision));
-            let hash = |bytes: &[u8]| Sha256::digest(bytes).iter()
-                .map(|byte| format!("{byte:02x}")).collect::<String>();
+            let hash = |bytes: &[u8]| {
+                Sha256::digest(bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            };
             if hash(payload.as_bytes()) != observation[1].text()?
-                || hash(transform.as_bytes()) != observation[2].text()? {
+                || hash(transform.as_bytes()) != observation[2].text()?
+            {
                 return Err(invalid("observed payload or tokenizer transformation differs from the admitted binding"));
             }
             let origin = entry[7].sequence()?;
-            let branch = origin.first().ok_or_else(|| invalid("source origin is absent"))?.text()?;
+            let branch = origin
+                .first()
+                .ok_or_else(|| invalid("source origin is absent"))?
+                .text()?;
             if branch == "corpus" || entry[5] != ColdValue::None {
                 checked_digest(&entry[5])?;
             }
@@ -2336,66 +2950,124 @@ impl TaskAuthority {
                 "live" => {
                     validate_live(&entry[7], &self.scope)?;
                     if !self.live.iter().any(|live| live.canonical == entry[7]) {
-                        return Err(invalid("initial source live origin differs from this task's admitted envelope"));
+                        return Err(invalid(
+                            "initial source live origin differs from this task's admitted envelope",
+                        ));
                     }
                     if !source_envelopes.contains(origin[1].text()?) {
-                        return Err(invalid("initial source lineage omits its actual live origin envelope"));
+                        return Err(invalid(
+                            "initial source lineage omits its actual live origin envelope",
+                        ));
                     }
                 }
                 "corpus" => {
                     corpus_sources.insert(identity.to_owned());
                     let origin = entry[7].fields(11)?;
-                    for index in [1, 2, 3, 4, 5, 6, 9, 10] { origin[index].text()?; }
+                    for index in [1, 2, 3, 4, 5, 6, 9, 10] {
+                        origin[index].text()?;
+                    }
                     for index in [7, 8] {
                         let capabilities = origin[index].strings()?;
                         unique(&capabilities)?;
-                        if capabilities.is_empty() { return Err(invalid("corpus origin has an empty capability set")); }
+                        if capabilities.is_empty() {
+                            return Err(invalid("corpus origin has an empty capability set"));
+                        }
                     }
                 }
-                _ => return Err(invalid("observed source requires complete corpus or live origin")),
+                _ => {
+                    return Err(invalid(
+                        "observed source requires complete corpus or live origin",
+                    ))
+                }
             }
             let admission = entry[8].fields(3)?;
             let permitted = admission[1].strings()?;
             unique(&permitted)?;
             if admission[0].text()? != branch
-                || permitted.iter().any(|split| !matches!(split.as_str(), "train" | "dev" | "eval" | "request-local-replay"))
+                || permitted.iter().any(|split| {
+                    !matches!(
+                        split.as_str(),
+                        "train" | "dev" | "eval" | "request-local-replay"
+                    )
+                })
                 || (branch == "corpus" && admission[2].text()? != "corpus")
-                || (branch == "live" && !matches!(admission[2].text()?, "cross-request" | "request-local")) {
-                return Err(invalid("observed source admission does not match its full origin"));
+                || (branch == "live"
+                    && !matches!(admission[2].text()?, "cross-request" | "request-local"))
+            {
+                return Err(invalid(
+                    "observed source admission does not match its full origin",
+                ));
             }
             if entry[1] == ColdValue::None {
-                if branch != "live" || !origin[8].sequence()?.is_empty() || !permitted.is_empty()
-                    || admission[2].text()? != "request-local" {
-                    return Err(invalid("observation-only source cannot carry learning or replay admission"));
+                if branch != "live"
+                    || !origin[8].sequence()?.is_empty()
+                    || !permitted.is_empty()
+                    || admission[2].text()? != "request-local"
+                {
+                    return Err(invalid(
+                        "observation-only source cannot carry learning or replay admission",
+                    ));
                 }
                 learning = false;
             } else {
                 let split = entry[1].text()?;
                 if !permitted.iter().any(|allowed| allowed == split) {
-                    return Err(invalid("source split is absent from its admitted partitions"));
+                    return Err(invalid(
+                        "source split is absent from its admitted partitions",
+                    ));
                 }
                 learning &= split != "eval";
                 if branch == "live" && origin[8].sequence()?.is_empty() {
-                    return Err(invalid("live source without learning rights cannot enter a replay partition"));
+                    return Err(invalid(
+                        "live source without learning rights cannot enter a replay partition",
+                    ));
                 }
             }
             sources.push(SemanticObservedSource {
-                identity: identity.to_owned(), tokens, origin: value.canonical_bytes(),
+                identity: identity.to_owned(),
+                tokens,
+                origin: value.canonical_bytes(),
             });
-            partitions.push((if entry[1] == ColdValue::None { None } else { Some(entry[1].text()?.to_owned()) }, admission[2].text()?.to_owned()));
+            partitions.push((
+                if entry[1] == ColdValue::None {
+                    None
+                } else {
+                    Some(entry[1].text()?.to_owned())
+                },
+                admission[2].text()?.to_owned(),
+            ));
         }
-        let mapping = mapping.sequence()?.iter().map(|entry| {
-            let fields = entry.fields(3)?;
-            let source = fields[0].text()?;
-            let offset = fields[1].unsigned()?;
-            let logical_position = fields[2].unsigned()?;
-            if sources.iter().find(|entry| entry.identity == source)
-                .is_none_or(|entry| offset >= entry.tokens.len() as u64) {
-                return Err(invalid("initial source mapping has an unknown source or out-of-range token offset"));
-            }
-            Ok(SemanticSourceMapping { source: source.to_owned(), offset, logical_position })
-        }).collect::<PyResult<Vec<_>>>()?;
-        if mapping.iter().map(|entry| entry.logical_position).collect::<BTreeSet<_>>().len() != mapping.len() {
+        let mapping = mapping
+            .sequence()?
+            .iter()
+            .map(|entry| {
+                let fields = entry.fields(3)?;
+                let source = fields[0].text()?;
+                let offset = fields[1].unsigned()?;
+                let logical_position = fields[2].unsigned()?;
+                if sources
+                    .iter()
+                    .find(|entry| entry.identity == source)
+                    .is_none_or(|entry| offset >= entry.tokens.len() as u64)
+                {
+                    return Err(invalid(
+                        "initial source mapping has an unknown source or out-of-range token offset",
+                    ));
+                }
+                Ok(SemanticSourceMapping {
+                    source: source.to_owned(),
+                    offset,
+                    logical_position,
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        if mapping
+            .iter()
+            .map(|entry| entry.logical_position)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != mapping.len()
+        {
             return Err(invalid("initial source mapping repeats a logical position"));
         }
         self.initial_sources = sources;
@@ -2424,32 +3096,51 @@ impl TaskAuthority {
     }
 
     fn source_lineage_envelopes(&self, identity: &str) -> PyResult<BTreeSet<String>> {
-        let index = self.dependencies.iter().map(|node| (node.identity.as_str(), node))
+        let index = self
+            .dependencies
+            .iter()
+            .map(|node| (node.identity.as_str(), node))
             .collect::<BTreeMap<_, _>>();
         let mut pending = vec![identity];
         let mut seen = BTreeSet::new();
         let mut envelopes = BTreeSet::new();
         let mut observed = false;
         while let Some(reference) = pending.pop() {
-            if !seen.insert(reference) { continue; }
-            let node = index.get(reference)
-                .ok_or_else(|| invalid("initial source is absent from the complete task dependency graph"))?;
+            if !seen.insert(reference) {
+                continue;
+            }
+            let node = index.get(reference).ok_or_else(|| {
+                invalid("initial source is absent from the complete task dependency graph")
+            })?;
             if node.kind == "target_value" {
-                return Err(invalid("initial source depends on a target value through data or control lineage"));
+                return Err(invalid(
+                    "initial source depends on a target value through data or control lineage",
+                ));
             }
             observed |= node.kind == "source";
             envelopes.extend(node.live_envelopes.iter().cloned());
-            pending.extend(node.data_parents.iter().chain(&node.control_parents).map(String::as_str));
+            pending.extend(
+                node.data_parents
+                    .iter()
+                    .chain(&node.control_parents)
+                    .map(String::as_str),
+            );
         }
-        if !observed { return Err(invalid("initial source lacks observed data ancestry")); }
+        if !observed {
+            return Err(invalid("initial source lacks observed data ancestry"));
+        }
         Ok(envelopes)
     }
 
     fn require_source_origins(&self) -> PyResult<()> {
         for node in &self.dependencies {
-            if node.kind == "source" && node.live_envelopes.is_empty()
-                && !self.corpus_sources.contains(&node.identity) {
-                return Err(invalid("source root without a live envelope requires its admitted corpus observation"));
+            if node.kind == "source"
+                && node.live_envelopes.is_empty()
+                && !self.corpus_sources.contains(&node.identity)
+            {
+                return Err(invalid(
+                    "source root without a live envelope requires its admitted corpus observation",
+                ));
             }
         }
         Ok(())
@@ -2460,10 +3151,7 @@ impl TaskAuthority {
         for (row, replay) in self.replay.iter().enumerate() {
             let fields = replay.identity.fields(6)?;
             let context = fields[0].fields(9)?;
-            if !matches!(
-                context[2].text()?,
-                "train" | "dev" | "request-local-replay"
-            ) {
+            if !matches!(context[2].text()?, "train" | "dev" | "request-local-replay") {
                 return Err(invalid("replay task cannot contain sealed evaluation rows"));
             }
             checked_digest(&fields[1])?;
@@ -2614,10 +3302,13 @@ impl TaskAuthority {
                 .filter_map(|(i, node)| node.native_record.as_ref().map(|_| i)),
         );
         for source in &self.initial_sources {
-            let i = *index.get(source.identity.as_str())
-                .ok_or_else(|| invalid("initial source is absent from the task dependency closure"))?;
+            let i = *index.get(source.identity.as_str()).ok_or_else(|| {
+                invalid("initial source is absent from the task dependency closure")
+            })?;
             if !matches!(self.dependencies[i].kind.as_str(), "source" | "derived") {
-                return Err(invalid("initial observation must resolve to a source data/control lineage"));
+                return Err(invalid(
+                    "initial observation must resolve to a source data/control lineage",
+                ));
             }
             pending.push(i);
         }
@@ -2664,9 +3355,12 @@ impl TaskAuthority {
     }
 
     fn bind_native_reads(
-        &self, observations: &xlog_cuda::SemanticTaskObservationRoots, supports: &[u32],
+        &self,
+        observations: &xlog_cuda::SemanticTaskObservationRoots,
+        supports: &[u32],
     ) -> PyResult<()> {
-        let mut expected = observations.query_records
+        let mut expected = observations
+            .query_records
             .iter()
             .map(|&index| ("statement".to_owned(), index))
             .chain(supports.iter().map(|&index| ("support".to_owned(), index)))
@@ -2674,7 +3368,9 @@ impl TaskAuthority {
             .collect::<BTreeSet<_>>();
         for &(query, statement, support) in &observations.contributors {
             if query >= observations.query_records.len() as u32 {
-                return Err(invalid("native observation contributor names an absent task query"));
+                return Err(invalid(
+                    "native observation contributor names an absent task query",
+                ));
             }
             let statement = statement.ok_or_else(|| invalid(
                 "native feedback contributor has a derived target without an original admitted statement"))?;
@@ -2747,9 +3443,12 @@ impl TaskAuthority {
             if let Some(purpose) = &grant.learning_purpose {
                 for (split, scope) in &self.source_partitions {
                     if (purpose == "current-request-fast-adaptation"
-                            && (split.as_deref() != Some("request-local-replay") || scope != "request-local"))
+                        && (split.as_deref() != Some("request-local-replay")
+                            || scope != "request-local"))
                         || (purpose == "durable-slow-consolidation"
-                            && (!matches!(split.as_deref(), Some("train" | "dev")) || scope == "request-local")) {
+                            && (!matches!(split.as_deref(), Some("train" | "dev"))
+                                || scope == "request-local"))
+                    {
                         return Err(invalid("training grant is incompatible with an observed source's immutable split or replay scope"));
                     }
                 }
@@ -2844,10 +3543,19 @@ pub(crate) struct PySemanticTransitionController {
 
 #[derive(Clone, Debug)]
 enum TaskUsePhase {
-    Importing { operation: String, reads: bool },
+    Importing {
+        operation: String,
+        reads: bool,
+    },
     Imported,
-    Recording { scope: Arc<()>, operation: Option<String> },
-    Prepared { scope: Arc<()>, operation: Option<String> },
+    Recording {
+        scope: Arc<()>,
+        operation: Option<String>,
+    },
+    Prepared {
+        scope: Arc<()>,
+        operation: Option<String>,
+    },
     Segment(String),
     Refused,
 }
@@ -2867,10 +3575,15 @@ struct TaskIssuance {
 
 impl TaskIssuance {
     fn issue(counter: Arc<AtomicU64>) -> PyResult<Self> {
-        let previous = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire,
-            |generation| generation.checked_add(1))
+        let previous = counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+                generation.checked_add(1)
+            })
             .map_err(|_| invalid("native task issuance generation is exhausted"))?;
-        Ok(Self { counter, generation: previous + 1 })
+        Ok(Self {
+            counter,
+            generation: previous + 1,
+        })
     }
 
     fn require_current(&self) -> PyResult<()> {
@@ -2890,57 +3603,99 @@ impl TaskUseState {
         let operation = match &self.phase {
             TaskUsePhase::Imported => None,
             TaskUsePhase::Segment(operation) => Some(operation.clone()),
-            _ => return Err(invalid("segment recording cannot be nested or resume a refused use")),
+            _ => {
+                return Err(invalid(
+                    "segment recording cannot be nested or resume a refused use",
+                ))
+            }
         };
         let scope = Arc::new(());
-        self.phase = TaskUsePhase::Recording { scope: Arc::clone(&scope), operation };
+        self.phase = TaskUsePhase::Recording {
+            scope: Arc::clone(&scope),
+            operation,
+        };
         Ok(scope)
     }
 
     fn prepared_content_binding(&self, scope: &Arc<()>) -> PyResult<(Option<String>, Vec<u8>)> {
         let operation = match &self.phase {
             TaskUsePhase::Recording { scope: current, .. }
-                | TaskUsePhase::Prepared { scope: current, .. }
-                if Arc::ptr_eq(current, scope) => None,
+            | TaskUsePhase::Prepared { scope: current, .. }
+                if Arc::ptr_eq(current, scope) =>
+            {
+                None
+            }
             // Native retained-step custody is additionally required by every
             // caller; a completed step's witnesses outlive its recording scope.
             TaskUsePhase::Segment(operation) => Some(operation.clone()),
-            _ => return Err(invalid("prepared content belongs to no active or completed recording")),
+            _ => {
+                return Err(invalid(
+                    "prepared content belongs to no active or completed recording",
+                ))
+            }
         };
         Ok((operation, self.snapshot.canonical.clone()))
     }
 
     fn finish_build(&mut self, scope: &Arc<()>) -> PyResult<()> {
-        let TaskUsePhase::Recording { scope: current, operation } = &self.phase else {
+        let TaskUsePhase::Recording {
+            scope: current,
+            operation,
+        } = &self.phase
+        else {
             return Err(invalid("only the original recording may finish"));
         };
         if !Arc::ptr_eq(current, scope) {
             return Err(invalid("segment recording scope changed"));
         }
-        self.phase = TaskUsePhase::Prepared { scope: Arc::clone(scope), operation: operation.clone() };
+        self.phase = TaskUsePhase::Prepared {
+            scope: Arc::clone(scope),
+            operation: operation.clone(),
+        };
         Ok(())
     }
 
     fn admit_built_segment(
-        &mut self, scope: &Arc<()>, authority: &TaskAuthority,
-        operation: String, snapshot: AuthoritySnapshot,
+        &mut self,
+        scope: &Arc<()>,
+        authority: &TaskAuthority,
+        operation: String,
+        snapshot: AuthoritySnapshot,
     ) -> PyResult<()> {
-        let TaskUsePhase::Prepared { scope: current, operation: original } = &self.phase else {
-            return Err(invalid("built segment may be submitted exactly once after recording"));
+        let TaskUsePhase::Prepared {
+            scope: current,
+            operation: original,
+        } = &self.phase
+        else {
+            return Err(invalid(
+                "built segment may be submitted exactly once after recording",
+            ));
         };
-        if !Arc::ptr_eq(current, scope) || original.as_ref().is_some_and(|value| value != &operation) {
-            return Err(invalid("built segment changed its scope or original operation"));
+        if !Arc::ptr_eq(current, scope)
+            || original.as_ref().is_some_and(|value| value != &operation)
+        {
+            return Err(invalid(
+                "built segment changed its scope or original operation",
+            ));
         }
         // Reuse the ordinary authoritative snapshot check. No callback or native
         // operation may intervene before the caller's one actual submission.
-        self.phase = original.as_ref().map_or(TaskUsePhase::Imported,
-            |value| TaskUsePhase::Segment(value.clone()));
+        self.phase = original.as_ref().map_or(TaskUsePhase::Imported, |value| {
+            TaskUsePhase::Segment(value.clone())
+        });
         self.admit_segment(authority, operation, snapshot)
     }
 
-    fn finish_import(&mut self, authority: &TaskAuthority, snapshot: AuthoritySnapshot) -> PyResult<()> {
+    fn finish_import(
+        &mut self,
+        authority: &TaskAuthority,
+        snapshot: AuthoritySnapshot,
+    ) -> PyResult<()> {
         let result = match &self.phase {
-            TaskUsePhase::Importing { operation, reads: false } => snapshot
+            TaskUsePhase::Importing {
+                operation,
+                reads: false,
+            } => snapshot
                 .newer_than(&self.snapshot)
                 .and_then(|()| authority.check_use(operation, &snapshot, false)),
             _ => Err(invalid("only the closed original import may finish")),
@@ -2960,15 +3715,20 @@ impl TaskUseState {
 
     fn require_read(&self) -> PyResult<()> {
         match &self.phase {
-            TaskUsePhase::Imported | TaskUsePhase::Segment(_)
-                | TaskUsePhase::Importing { reads: true, .. } => Ok(()),
-            _ => Err(invalid("task use is not available outside its controlled import")),
+            TaskUsePhase::Imported
+            | TaskUsePhase::Segment(_)
+            | TaskUsePhase::Importing { reads: true, .. } => Ok(()),
+            _ => Err(invalid(
+                "task use is not available outside its controlled import",
+            )),
         }
     }
 
     fn require_read_during_import(&self, importing: bool) -> PyResult<()> {
         if importing != matches!(&self.phase, TaskUsePhase::Importing { .. }) {
-            return Err(invalid("task reader does not belong to the active import state"));
+            return Err(invalid(
+                "task reader does not belong to the active import state",
+            ));
         }
         self.require_read()
     }
@@ -2976,7 +3736,9 @@ impl TaskUseState {
     fn require_public_use(&self) -> PyResult<()> {
         match &self.phase {
             TaskUsePhase::Imported | TaskUsePhase::Segment(_) => Ok(()),
-            _ => Err(invalid("unfinished or refused import grants no public operation")),
+            _ => Err(invalid(
+                "unfinished or refused import grants no public operation",
+            )),
         }
     }
 
@@ -2994,8 +3756,15 @@ impl TaskUseState {
     fn content_handoff_binding(&self) -> PyResult<(String, Vec<u8>)> {
         let operation = match &self.phase {
             TaskUsePhase::Segment(operation)
-                | TaskUsePhase::Importing { operation, reads: true } => operation,
-            _ => return Err(invalid("tensor content requires an admitted segment or controlled import")),
+            | TaskUsePhase::Importing {
+                operation,
+                reads: true,
+            } => operation,
+            _ => {
+                return Err(invalid(
+                    "tensor content requires an admitted segment or controlled import",
+                ))
+            }
         };
         Ok((operation.clone(), self.snapshot.canonical.clone()))
     }
@@ -3068,19 +3837,23 @@ fn feedback_schema_object(py: Python<'_>, schema: &FeedbackSchema) -> PyResult<P
             .chain([("record", 32, 1, true), ("record", 40, 1, true)])
             .collect::<Vec<_>>(),
     )?;
-    Ok((1u64, PyBytes::new(py, &schema.identity), PyBytes::new(py, &adapter),
-        schema.statement_bytes, schema.feature_width, 2u64, fields)
-        .into_pyobject(py)?.unbind())
+    Ok((
+        1u64,
+        PyBytes::new(py, &schema.identity),
+        PyBytes::new(py, &adapter),
+        schema.statement_bytes,
+        schema.feature_width,
+        2u64,
+        fields,
+    )
+        .into_pyobject(py)?
+        .unbind())
 }
 
 /// A controller-issued, task-bound use. It cannot issue or refresh grants.
 /// It retains its real Session, nonreused issuance and exact native task epoch.
 /// Transferable ownership does not permit off-thread orchestration or reads.
-#[pyclass(
-    name = "SemanticTransitionTaskUse",
-    module = "pyxlog._native",
-    frozen
-)]
+#[pyclass(name = "SemanticTransitionTaskUse", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticTransitionTaskUse {
     session: Py<PySemanticTransitionSession>,
     controller: Arc<()>,
@@ -3101,7 +3874,8 @@ impl PySemanticTransitionTaskUse {
 
     fn require_current(&self, owner: &SemanticTransitionSession) -> PyResult<()> {
         self.require_identity(owner)?;
-        self.state()?.require_read_during_import(self.importing.load(Ordering::Acquire))
+        self.state()?
+            .require_read_during_import(self.importing.load(Ordering::Acquire))
     }
 
     fn require_identity(&self, owner: &SemanticTransitionSession) -> PyResult<()> {
@@ -3130,26 +3904,44 @@ struct ColdImportGuard<'a> {
 }
 
 impl<'a> ColdImportGuard<'a> {
-    fn begin(session: &'a PySemanticTransitionSession, original_decisions: Option<Arc<[u8]>>) -> PyResult<Self> {
+    fn begin(
+        session: &'a PySemanticTransitionSession,
+        original_decisions: Option<Arc<[u8]>>,
+    ) -> PyResult<Self> {
         let mut owner = session.owner()?;
         if session.importing.load(Ordering::Acquire)
             || session.recording.load(Ordering::Acquire)
-            || session.retiring.load(Ordering::Acquire) || owner.is_poisoned() {
+            || session.retiring.load(Ordering::Acquire)
+            || owner.is_poisoned()
+        {
             owner.abort();
-            return Err(invalid("native session cannot enter a nested or aborted import"));
+            return Err(invalid(
+                "native session cannot enter a nested or aborted import",
+            ));
         }
         let issuance = match TaskIssuance::issue(Arc::clone(&session.issuance)) {
             Ok(issuance) => issuance,
-            Err(error) => { owner.abort(); return Err(error); }
+            Err(error) => {
+                owner.abort();
+                return Err(error);
+            }
         };
         session.importing.store(true, Ordering::Release);
-        Ok(Self { session, issuance, original_decisions, committed: false })
+        Ok(Self {
+            session,
+            issuance,
+            original_decisions,
+            committed: false,
+        })
     }
 }
 
 impl Drop for ColdImportGuard<'_> {
     fn drop(&mut self) {
-        let mut owner = self.session.inner.lock()
+        let mut owner = self
+            .session
+            .inner
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !self.committed {
             owner.abort();
@@ -3179,7 +3971,9 @@ impl<'a> ImportReadScope<'a> {
 impl Drop for ImportReadScope<'_> {
     fn drop(&mut self) {
         if let Ok(mut state) = self.task_use.state() {
-            if let TaskUsePhase::Importing { reads, .. } = &mut state.phase { *reads = false; }
+            if let TaskUsePhase::Importing { reads, .. } = &mut state.phase {
+                *reads = false;
+            }
         }
     }
 }
@@ -3188,11 +3982,7 @@ impl Drop for ImportReadScope<'_> {
 /// Keep it alive through the original model invocation and every exported alias.
 /// Retire bank reads separately from the original step's final consumers when
 /// late backward must survive bank reuse. Final release destroys step custody.
-#[pyclass(
-    name = "SemanticPublishedParent",
-    module = "pyxlog._native",
-    frozen
-)]
+#[pyclass(name = "SemanticPublishedParent", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticPublishedParent {
     session: Py<PySemanticTransitionSession>,
     task_use: Py<PySemanticTransitionTaskUse>,
@@ -3272,17 +4062,28 @@ impl PreparedPolicyInputs {
 }
 
 impl PySemanticPreparedStep {
-    fn require_recording_stream(&self, owner: &SemanticTransitionSession, stream: u64) -> PyResult<()> {
-        let native = owner.prepared_stream(&self.inner).map_err(xlog_err)?.cu_stream() as u64;
+    fn require_recording_stream(
+        &self,
+        owner: &SemanticTransitionSession,
+        stream: u64,
+    ) -> PyResult<()> {
+        let native = owner
+            .prepared_stream(&self.inner)
+            .map_err(xlog_err)?
+            .cu_stream() as u64;
         let declared = if stream == 1 { 0 } else { stream };
         if declared != native {
-            return Err(invalid("recorded producer handoff requires the original native capture stream"));
+            return Err(invalid(
+                "recorded producer handoff requires the original native capture stream",
+            ));
         }
         Ok(())
     }
 
     fn content_binding_with_owner(
-        &self, py: Python<'_>, owner: &SemanticTransitionSession,
+        &self,
+        py: Python<'_>,
+        owner: &SemanticTransitionSession,
     ) -> PyResult<(Option<String>, Vec<u8>)> {
         let task_use = self.task_use.borrow(py);
         task_use.require_identity(owner)?;
@@ -3291,22 +4092,38 @@ impl PySemanticPreparedStep {
         Ok(binding)
     }
 
-    fn completed_observation_streams(&self, py: Python<'_>, consumer_streams: &Bound<'_, PyAny>) -> PyResult<Vec<u64>> {
+    fn completed_observation_streams(
+        &self,
+        py: Python<'_>,
+        consumer_streams: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<u64>> {
         let session = self.session.borrow(py);
         session.require_creator()?;
-        if session.importing.load(Ordering::Acquire) || session.recording.load(Ordering::Acquire)
-            || session.retiring.load(Ordering::Acquire) {
-            return Err(invalid("completed input observation cannot overlap recording, import or retirement"));
+        if session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "completed input observation cannot overlap recording, import or retirement",
+            ));
         }
         let mut budget = 16 * 1024 * 1024;
         let streams = ColdValue::read(consumer_streams, &mut budget, 0)?;
-        let streams = streams.sequence()?.iter().map(ColdValue::unsigned).collect::<PyResult<Vec<_>>>()?;
+        let streams = streams
+            .sequence()?
+            .iter()
+            .map(ColdValue::unsigned)
+            .collect::<PyResult<Vec<_>>>()?;
         if streams.is_empty() {
-            return Err(invalid("completed input observation requires the original consumer streams"));
+            return Err(invalid(
+                "completed input observation requires the original consumer streams",
+            ));
         }
         let owner = session.owner()?;
         if self.content_binding_with_owner(py, &owner)?.0.is_none() {
-            return Err(invalid("completed input observation requires the admitted original operation"));
+            return Err(invalid(
+                "completed input observation requires the admitted original operation",
+            ));
         }
         Ok(streams)
     }
@@ -3317,16 +4134,23 @@ impl PySemanticPreparedStep {
         if self.session.as_ptr() != task_use.session.as_ptr()
             || !Arc::ptr_eq(&issued.controller, &task_use.controller)
             || !issued.issuance.same_as(&task_use.issuance)
-            || issued.task_epoch != task_use.task_epoch || issued.task_identity != task_use.task_identity {
+            || issued.task_epoch != task_use.task_epoch
+            || issued.task_identity != task_use.task_identity
+        {
             return Err(invalid("prepared step belongs to another task use"));
         }
         Ok(())
     }
 
     fn export(
-        &self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>,
-        export: impl FnOnce(&mut SemanticTransitionSession, &SemanticPreparedStep, u64)
-            -> Result<DlpackManagedTensor, xlog_cuda::SemanticTransitionError>,
+        &self,
+        py: Python<'_>,
+        consumer_stream: &Bound<'_, PyAny>,
+        export: impl FnOnce(
+            &mut SemanticTransitionSession,
+            &SemanticPreparedStep,
+            u64,
+        ) -> Result<DlpackManagedTensor, xlog_cuda::SemanticTransitionError>,
     ) -> PyResult<Py<PyAny>> {
         self.session.borrow(py).require_creator()?;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
@@ -3334,8 +4158,10 @@ impl PySemanticPreparedStep {
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
         let tensor = export(&mut owner, &self.inner, stream).map_err(xlog_err)?;
-        crate::dlpack_capsule_from_tensor(py,
-            retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?)
+        crate::dlpack_capsule_from_tensor(
+            py,
+            retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?,
+        )
     }
 }
 
@@ -3350,51 +4176,91 @@ impl PySemanticPreparedStep {
         session.require_creator()?;
         let owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
-        match owner.prepared_transition_kind(&self.inner).map_err(xlog_err)? {
+        match owner
+            .prepared_transition_kind(&self.inner)
+            .map_err(xlog_err)?
+        {
             SemanticTransitionKind::Proposal => Ok("proposal"),
             SemanticTransitionKind::Recompute => Ok("recompute"),
-            SemanticTransitionKind::Drain => Err(invalid("drain is not a cold scheduled transition")),
+            SemanticTransitionKind::Drain => {
+                Err(invalid("drain is not a cold scheduled transition"))
+            }
         }
     }
 
     /// Cold fixed-address Source U64[32,8]; populated by this step's device acquire.
     #[pyo3(signature = (*, consumer_stream))]
     fn source(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.export(py, consumer_stream, SemanticTransitionSession::prepared_source)
+        self.export(
+            py,
+            consumer_stream,
+            SemanticTransitionSession::prepared_source,
+        )
     }
 
     /// Cold full-capacity prefix view. Only the device prefix extent is live.
     #[pyo3(signature = (*, consumer_stream))]
     fn prefix(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.export(py, consumer_stream, SemanticTransitionSession::prepared_prefix)
+        self.export(
+            py,
+            consumer_stream,
+            SemanticTransitionSession::prepared_prefix,
+        )
     }
 
     #[pyo3(signature = (*, consumer_stream))]
-    fn prefix_extent(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.export(py, consumer_stream, SemanticTransitionSession::prepared_prefix_extent)
+    fn prefix_extent(
+        &self,
+        py: Python<'_>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        self.export(
+            py,
+            consumer_stream,
+            SemanticTransitionSession::prepared_prefix_extent,
+        )
     }
 
     #[pyo3(signature = (*, consumer_stream))]
     fn ring_head(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.export(py, consumer_stream, SemanticTransitionSession::prepared_ring_head)
+        self.export(
+            py,
+            consumer_stream,
+            SemanticTransitionSession::prepared_ring_head,
+        )
     }
 
     /// Original-sealed U64[1] terminal state of the actual device parent.
     /// This is a private input snapshot, never an alias of the authority lease.
     #[pyo3(signature = (*, consumer_stream))]
-    fn terminal_state(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.export(py, consumer_stream, SemanticTransitionSession::prepared_terminal)
+    fn terminal_state(
+        &self,
+        py: Python<'_>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        self.export(
+            py,
+            consumer_stream,
+            SemanticTransitionSession::prepared_terminal,
+        )
     }
 
     #[pyo3(signature = (role, index, *, consumer_stream))]
-    fn tensor(&self, py: Python<'_>, role: &Bound<'_, PyAny>, index: &Bound<'_, PyAny>,
-        consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn tensor(
+        &self,
+        py: Python<'_>,
+        role: &Bound<'_, PyAny>,
+        index: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
         self.session.borrow(py).require_creator()?;
         let role = ColdValue::read(role, &mut 128, 0)?.unsigned()?;
         let role = SemanticStateRole::from_code(role)
             .ok_or_else(|| invalid("unknown native publication tensor role"))?;
         let index = ColdValue::read(index, &mut 128, 0)?.unsigned()?;
-        self.export(py, consumer_stream, |owner, step, stream| owner.prepared_tensor(step, role, index, stream))
+        self.export(py, consumer_stream, |owner, step, stream| {
+            owner.prepared_tensor(step, role, index, stream)
+        })
     }
 
     /// Return (native provenance, full allocation U8 DLPack capsule) for the
@@ -3404,8 +4270,13 @@ impl PySemanticPreparedStep {
     /// Capacity does not certify live input content. Version-counter origins
     /// belong to the model producer, independently of this physical owner.
     #[pyo3(signature = (role, index, *, consumer_stream))]
-    fn tensor_allocation(&self, py: Python<'_>, role: &Bound<'_, PyAny>, index: &Bound<'_, PyAny>,
-        consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyTuple>> {
+    fn tensor_allocation(
+        &self,
+        py: Python<'_>,
+        role: &Bound<'_, PyAny>,
+        index: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
         self.session.borrow(py).require_creator()?;
         let role = SemanticStateRole::from_code(ColdValue::read(role, &mut 128, 0)?.unsigned()?)
             .ok_or_else(|| invalid("unknown native publication tensor role"))?;
@@ -3414,36 +4285,56 @@ impl PySemanticPreparedStep {
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
-        let (provenance, tensor) = owner.prepared_tensor_allocation(&self.inner, role, index, stream)
+        let (provenance, tensor) = owner
+            .prepared_tensor_allocation(&self.inner, role, index, stream)
             .map_err(xlog_err)?;
         let tensor = retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
-        Ok((Py::new(py, PyNativeTensorAllocation { provenance })?,
-            crate::dlpack_capsule_from_tensor(py, tensor)?).into_pyobject(py)?.unbind())
+        Ok((
+            Py::new(py, PyNativeTensorAllocation { provenance })?,
+            crate::dlpack_capsule_from_tensor(py, tensor)?,
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Export an admitted immutable record; bank-varying records require their
     /// dedicated device-produced input port rather than a guessed cold extent.
     #[pyo3(signature = (role, index, *, consumer_stream))]
-    fn record(&self, py: Python<'_>, role: &Bound<'_, PyAny>, index: &Bound<'_, PyAny>,
-        consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn record(
+        &self,
+        py: Python<'_>,
+        role: &Bound<'_, PyAny>,
+        index: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
         self.session.borrow(py).require_creator()?;
         let role = SemanticStateRole::from_code(ColdValue::read(role, &mut 128, 0)?.unsigned()?)
             .ok_or_else(|| invalid("unknown native publication record role"))?;
         let index = ColdValue::read(index, &mut 128, 0)?.unsigned()?;
-        self.export(py, consumer_stream, |owner, step, stream| owner.prepared_record(step, role, index, stream))
+        self.export(py, consumer_stream, |owner, step, stream| {
+            owner.prepared_record(step, role, index, stream)
+        })
     }
 
     fn range_keys(&self, py: Python<'_>) -> PyResult<Vec<(u64, u64)>> {
         let session = self.session.borrow(py);
         let owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
-        Ok(owner.prepared_range_keys(&self.inner).map_err(xlog_err)?
-            .into_iter().map(|(role, index)| (role as u64, index)).collect())
+        Ok(owner
+            .prepared_range_keys(&self.inner)
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|(role, index)| (role as u64, index))
+            .collect())
     }
 
     #[pyo3(signature = (*, ranges, consumer_stream))]
-    fn guard_content(&self, py: Python<'_>, ranges: &Bound<'_, PyAny>,
-        consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn guard_content(
+        &self,
+        py: Python<'_>,
+        ranges: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         let mut budget = 16 * 1024 * 1024;
         let ranges = parse_content_ranges(&ColdValue::read(ranges, &mut budget, 0)?)?;
@@ -3451,7 +4342,9 @@ impl PySemanticPreparedStep {
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
-        owner.guard_prepared_content(&self.inner, &ranges, stream).map_err(xlog_err)
+        owner
+            .guard_prepared_content(&self.inner, &ranges, stream)
+            .map_err(xlog_err)
     }
 
     /// Immutable admitted topology/table identities, generation and capacities.
@@ -3460,10 +4353,19 @@ impl PySemanticPreparedStep {
         let session = self.session.borrow(py);
         let owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
-        let (topology, table, generation, prefix, feedback, position) =
-            owner.prepared_model_geometry(&self.inner).map_err(xlog_err)?;
-        Ok((PyBytes::new(py, topology.as_bytes()), PyBytes::new(py, table.as_bytes()),
-            generation, prefix, feedback, position).into_pyobject(py)?.unbind())
+        let (topology, table, generation, prefix, feedback, position) = owner
+            .prepared_model_geometry(&self.inner)
+            .map_err(xlog_err)?;
+        Ok((
+            PyBytes::new(py, topology.as_bytes()),
+            PyBytes::new(py, table.as_bytes()),
+            generation,
+            prefix,
+            feedback,
+            position,
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Cold authenticated binding of this completed step's original model.
@@ -3475,20 +4377,34 @@ impl PySemanticPreparedStep {
     /// serialization to verify the same sealed inputs. Unknown completion and
     /// skipped steps cannot expose a binding; a refusal has no successor.
     #[pyo3(signature = (*, consumer_streams))]
-    fn completed_model_binding(&self, py: Python<'_>, consumer_streams: &Bound<'_, PyAny>)
-        -> PyResult<Py<PyTuple>> {
+    fn completed_model_binding(
+        &self,
+        py: Python<'_>,
+        consumer_streams: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
         let streams = self.completed_observation_streams(py, consumer_streams)?;
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         let (predecessor, successor, generation, geometry, numerical) = owner
-            .prepared_model_binding(&self.inner, &streams).map_err(xlog_err)?;
+            .prepared_model_binding(&self.inner, &streams)
+            .map_err(xlog_err)?;
         let identity = |value: xlog_cuda::SemanticPublishedIdentity| {
-            (PyBytes::new(py, value.instance.as_bytes()), value.word,
-                PyBytes::new(py, value.logical_digest.as_bytes()), PyBytes::new(py, value.state_digest.as_bytes()))
+            (
+                PyBytes::new(py, value.instance.as_bytes()),
+                value.word,
+                PyBytes::new(py, value.logical_digest.as_bytes()),
+                PyBytes::new(py, value.state_digest.as_bytes()),
+            )
         };
-        Ok((identity(predecessor), successor.map(identity), generation,
-            PyBytes::new(py, geometry.as_bytes()), PyBytes::new(py, numerical.as_bytes()))
-            .into_pyobject(py)?.unbind())
+        Ok((
+            identity(predecessor),
+            successor.map(identity),
+            generation,
+            PyBytes::new(py, geometry.as_bytes()),
+            PyBytes::new(py, numerical.as_bytes()),
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Cold original records, not encoded features or current-bank substitutes.
@@ -3498,21 +4414,43 @@ impl PySemanticPreparedStep {
     /// Native identity is the original range seal; a carrier hashes raw_bytes
     /// separately for bytes_sha256. No new model or publication identity issues.
     #[pyo3(signature = (*, consumer_streams))]
-    fn completed_feedback_records(&self, py: Python<'_>, consumer_streams: &Bound<'_, PyAny>)
-        -> PyResult<Py<PyTuple>> {
+    fn completed_feedback_records(
+        &self,
+        py: Python<'_>,
+        consumer_streams: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
         let streams = self.completed_observation_streams(py, consumer_streams)?;
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
-        let (predecessor, successor, records) = owner.prepared_feedback_records(&self.inner, &streams).map_err(xlog_err)?;
+        let (predecessor, successor, records) = owner
+            .prepared_feedback_records(&self.inner, &streams)
+            .map_err(xlog_err)?;
         let identity = |value: xlog_cuda::SemanticPublishedIdentity| {
-            (PyBytes::new(py, value.instance.as_bytes()), value.word,
-                PyBytes::new(py, value.logical_digest.as_bytes()), PyBytes::new(py, value.state_digest.as_bytes()))
+            (
+                PyBytes::new(py, value.instance.as_bytes()),
+                value.word,
+                PyBytes::new(py, value.logical_digest.as_bytes()),
+                PyBytes::new(py, value.state_digest.as_bytes()),
+            )
         };
-        let records = PyTuple::new(py, records.iter().map(|record| (
-            record.role as u64, record.index, record.generation, record.capacity_bytes,
-            record.logical_begin, record.logical_end, PyBytes::new(py, record.identity.as_bytes()),
-            PyBytes::new(py, &record.bytes))))?;
-        Ok((identity(predecessor), successor.map(identity), records).into_pyobject(py)?.unbind())
+        let records = PyTuple::new(
+            py,
+            records.iter().map(|record| {
+                (
+                    record.role as u64,
+                    record.index,
+                    record.generation,
+                    record.capacity_bytes,
+                    record.logical_begin,
+                    record.logical_end,
+                    PyBytes::new(py, record.identity.as_bytes()),
+                    PyBytes::new(py, &record.bytes),
+                )
+            }),
+        )?;
+        Ok((identity(predecessor), successor.map(identity), records)
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Original imported task lineage, with no invented publication identity.
@@ -3521,8 +4459,13 @@ impl PySemanticPreparedStep {
         let owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
         let task_use = self.task_use.borrow(py);
-        Ok((task_use.task_epoch, dependency_lineage_object(py, &task_use.authority.dependencies)?,
-            PyTuple::new(py, &task_use.authority.feedback_roots)?).into_pyobject(py)?.unbind())
+        Ok((
+            task_use.task_epoch,
+            dependency_lineage_object(py, &task_use.authority.dependencies)?,
+            PyTuple::new(py, &task_use.authority.feedback_roots)?,
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Reserve a producer-derived upper bound before capture; no device allocator
@@ -3534,7 +4477,9 @@ impl PySemanticPreparedStep {
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
-        owner.reserve_tensor_content(&self.inner, capacity).map_err(xlog_err)
+        owner
+            .reserve_tensor_content(&self.inner, capacity)
+            .map_err(xlog_err)
     }
 
     /// Reserve event slots before capture; no additional model forward occurs.
@@ -3545,31 +4490,47 @@ impl PySemanticPreparedStep {
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
-        owner.reserve_model_work(&self.inner, capacity).map_err(xlog_err)
+        owner
+            .reserve_model_work(&self.inner, capacity)
+            .map_err(xlog_err)
     }
 
     /// Record one original executed operation's unit category and geometry.
     /// The native transition freezes the roster when enqueue_step returns.
-    fn record_model_work(&self, py: Python<'_>, kind: &Bound<'_, PyAny>,
-        dimensions: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn record_model_work(
+        &self,
+        py: Python<'_>,
+        kind: &Bound<'_, PyAny>,
+        dimensions: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         let kind = ColdValue::read(kind, &mut 128, 0)?.unsigned()?;
         let kind = xlog_cuda::ModelWorkKind::from_code(kind)
             .ok_or_else(|| invalid("unknown model work unit category"))?;
         let geometry = ColdValue::read(dimensions, &mut 1024, 0)?;
         let dimensions = geometry.sequence()?;
-        if dimensions.len() > 8 { return Err(invalid("model work geometry exceeds eight dimensions")); }
+        if dimensions.len() > 8 {
+            return Err(invalid("model work geometry exceeds eight dimensions"));
+        }
         let mut values = [0u64; 8];
-        for (index, dimension) in dimensions.iter().enumerate() { values[index] = dimension.unsigned()?; }
+        for (index, dimension) in dimensions.iter().enumerate() {
+            values[index] = dimension.unsigned()?;
+        }
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
-        owner.record_model_work(&self.inner, kind, &values[..dimensions.len()]).map_err(xlog_err)
+        owner
+            .record_model_work(&self.inner, kind, &values[..dimensions.len()])
+            .map_err(xlog_err)
     }
 
     /// Charge original autograd save occurrences using retained native layouts,
     /// never a Python byte total or a later replacement tensor.
-    fn record_saved_tensor_work(&self, py: Python<'_>, witness: PyRef<'_, PySemanticTensorContentWitness>) -> PyResult<()> {
+    fn record_saved_tensor_work(
+        &self,
+        py: Python<'_>,
+        witness: PyRef<'_, PySemanticTensorContentWitness>,
+    ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         if witness.session.as_ptr() != self.session.as_ptr() {
             return Err(invalid("saved work belongs to another Session"));
@@ -3577,22 +4538,41 @@ impl PySemanticPreparedStep {
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
-        owner.record_saved_tensor_work(&self.inner, &witness.inner).map_err(xlog_err)
+        owner
+            .record_saved_tensor_work(&self.inner, &witness.inner)
+            .map_err(xlog_err)
     }
 
     /// Original native feedback producer ports: schema and six DLPack capsules.
     #[pyo3(signature = (*, consumer_stream))]
-    fn feedback(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyTuple>> {
+    fn feedback(
+        &self,
+        py: Python<'_>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
         self.session.borrow(py).require_creator()?;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
-        let (schema, tensors) = owner.prepared_feedback(&self.inner, stream).map_err(xlog_err)?;
-        let tensors = tensors.into_iter().map(|tensor| crate::dlpack_capsule_from_tensor(py,
-            retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?))
+        let (schema, tensors) = owner
+            .prepared_feedback(&self.inner, stream)
+            .map_err(xlog_err)?;
+        let tensors = tensors
+            .into_iter()
+            .map(|tensor| {
+                crate::dlpack_capsule_from_tensor(
+                    py,
+                    retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?,
+                )
+            })
             .collect::<PyResult<Vec<_>>>()?;
-        Ok((feedback_schema_object(py, &schema)?, PyTuple::new(py, tensors)?).into_pyobject(py)?.unbind())
+        Ok((
+            feedback_schema_object(py, &schema)?,
+            PyTuple::new(py, tensors)?,
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 }
 
@@ -3608,11 +4588,19 @@ enum ContentStepRef<'a> {
 }
 
 impl ContentStepOwner {
-    fn check_producer_stream(&self, py: Python<'_>, owner: &SemanticTransitionSession, stream: u64) -> PyResult<()> {
+    fn check_producer_stream(
+        &self,
+        py: Python<'_>,
+        owner: &SemanticTransitionSession,
+        stream: u64,
+    ) -> PyResult<()> {
         if let Self::Prepared(step) = self {
             let step = step.borrow(py);
             let issued = step.task_use.borrow(py);
-            if matches!(&issued.state()?.phase, TaskUsePhase::Recording { .. } | TaskUsePhase::Prepared { .. }) {
+            if matches!(
+                &issued.state()?.phase,
+                TaskUsePhase::Recording { .. } | TaskUsePhase::Prepared { .. }
+            ) {
                 step.session.borrow(py).require_creator()?;
                 step.require_recording_stream(owner, stream)?;
             }
@@ -3626,18 +4614,26 @@ impl ContentStepOwner {
         } else if let Ok(step) = value.extract::<Py<PySemanticPreparedStep>>() {
             Ok(Self::Prepared(step))
         } else {
-            Err(invalid("content requires an authentic acquired parent or prepared step"))
+            Err(invalid(
+                "content requires an authentic acquired parent or prepared step",
+            ))
         }
     }
 
-    fn binding(&self, py: Python<'_>, owner: &SemanticTransitionSession, retained: bool)
-        -> PyResult<(Option<String>, Vec<u8>)> {
+    fn binding(
+        &self,
+        py: Python<'_>,
+        owner: &SemanticTransitionSession,
+        retained: bool,
+    ) -> PyResult<(Option<String>, Vec<u8>)> {
         match self {
             Self::Published(parent) => {
                 let parent = parent.borrow(py);
                 let (operation, snapshot) = if retained {
                     parent.retained_content_binding_with_owner(py, owner)?
-                } else { parent.content_binding_with_owner(py, owner)? };
+                } else {
+                    parent.content_binding_with_owner(py, owner)?
+                };
                 Ok((Some(operation), snapshot))
             }
             Self::Prepared(step) => step.borrow(py).content_binding_with_owner(py, owner),
@@ -3703,13 +4699,17 @@ impl PySemanticTensorContentWitness {
         let check = || -> PyResult<()> {
             let owner = session.witness_owner()?;
             if self.parent.binding(py, &owner, true)? != binding {
-                return Err(invalid("tensor content authority changed during producer callback"));
+                return Err(invalid(
+                    "tensor content authority changed during producer callback",
+                ));
             }
             self.parent.check_producer_stream(py, &owner, stream)
         };
         check()?;
-        let ParsedTensorInputs { handoff: tensors, producers: _producers } =
-            parse_tensor_inputs_guarded(tensors, &mut budget, device, stream, &check)?;
+        let ParsedTensorInputs {
+            handoff: tensors,
+            producers: _producers,
+        } = parse_tensor_inputs_guarded(tensors, &mut budget, device, stream, &check)?;
         let mut owner = session.witness_owner()?;
         match &self.parent {
             ContentStepOwner::Published(parent) => {
@@ -3719,11 +4719,15 @@ impl PySemanticTensorContentWitness {
                 let state = task_use.state()?;
                 let (operation, snapshot) = state.content_handoff_binding()?;
                 if (Some(operation), snapshot) != binding {
-                    return Err(invalid("tensor content authority changed during producer handoff"));
+                    return Err(invalid(
+                        "tensor content authority changed during producer handoff",
+                    ));
                 }
                 let lease = parent.lease()?;
                 owner.retained_step_identity(&lease).map_err(xlog_err)?;
-                owner.verify_tensor_content(&lease, &self.inner, tensors.into_native(), stream).map_err(xlog_err)
+                owner
+                    .verify_tensor_content(&lease, &self.inner, tensors.into_native(), stream)
+                    .map_err(xlog_err)
             }
             ContentStepOwner::Prepared(step) => {
                 let step = step.borrow(py);
@@ -3731,9 +4735,17 @@ impl PySemanticTensorContentWitness {
                 task_use.require_identity(&owner)?;
                 let state = task_use.state()?;
                 if state.prepared_content_binding(&step.scope)? != binding {
-                    return Err(invalid("tensor content authority changed during producer handoff"));
+                    return Err(invalid(
+                        "tensor content authority changed during producer handoff",
+                    ));
                 }
-                owner.verify_prepared_tensor_content(&step.inner, &self.inner, tensors.into_native(), stream)
+                owner
+                    .verify_prepared_tensor_content(
+                        &step.inner,
+                        &self.inner,
+                        tensors.into_native(),
+                        stream,
+                    )
                     .map_err(xlog_err)
             }
         }
@@ -3747,11 +4759,7 @@ impl PySemanticTensorContentWitness {
 /// The Runtime must retain this complete invocation, its model output and packed
 /// inputs through original backward or explicit final use and guaranteed creator cleanup.
 #[cfg(feature = "semantic-policy")]
-#[pyclass(
-    name = "SemanticPolicyInvocation",
-    module = "pyxlog._native",
-    frozen
-)]
+#[pyclass(name = "SemanticPolicyInvocation", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticPolicyInvocation {
     session: Py<PySemanticTransitionSession>,
     _task_use: Py<PySemanticTransitionTaskUse>,
@@ -3888,36 +4896,55 @@ impl PySemanticPolicyInvocation {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
             if self.final_use_binding(py, &owner)? != expected {
-                return Err(invalid("policy backward authority changed during producer handoff"));
+                return Err(invalid(
+                    "policy backward authority changed during producer handoff",
+                ));
             }
             Ok(())
         };
-        validate_producer_device_guarded(score_cotangents, self.session.borrow(py).device_ordinal, &check)?;
+        validate_producer_device_guarded(
+            score_cotangents,
+            self.session.borrow(py).device_ordinal,
+            &check,
+        )?;
         let mut handoff = TensorHandoff(vec![crate::dlpack_from_py_for_stream_guarded(
-            score_cotangents, producer_stream, &check)?]);
+            score_cotangents,
+            producer_stream,
+            &check,
+        )?]);
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         // A producer callback may have terminally aborted the shared owner.
         // Recheck the actual original parent and exact authority before
         // relinquishing the quarantined handoff or launching the native VJP.
         if self.final_use_binding(py, &owner)? != expected {
-            return Err(invalid("policy backward authority changed during producer handoff"));
+            return Err(invalid(
+                "policy backward authority changed during producer handoff",
+            ));
         }
         let tensor = handoff.0.pop().expect("one original cotangent producer");
         let gradients = match &self._parent {
-            ContentStepOwner::Published(_) =>
-                owner.backward_policy_dlpack(self.rng, tensor, consumer_stream),
+            ContentStepOwner::Published(_) => {
+                owner.backward_policy_dlpack(self.rng, tensor, consumer_stream)
+            }
             ContentStepOwner::Prepared(step) => owner.backward_prepared_policy_dlpack(
-                &step.borrow(py).inner, self.rng, tensor, consumer_stream),
-        }.map_err(xlog_err)?;
+                &step.borrow(py).inner,
+                self.rng,
+                tensor,
+                consumer_stream,
+            ),
+        }
+        .map_err(xlog_err)?;
         let [parameters, text] = gradients.into_dlpack().map_err(xlog_err)?;
         // The actual parent also owns the original continuation producers and
         // Session. Both capsule owners preserve them through late consumers,
         // with final Python decrefs deferred to the creating thread.
-        let export_owner = || -> PublishedExportOwner { match &self._parent {
-            ContentStepOwner::Published(parent) => parent.clone_ref(py).into(),
-            ContentStepOwner::Prepared(step) => step.clone_ref(py).into(),
-        } };
+        let export_owner = || -> PublishedExportOwner {
+            match &self._parent {
+                ContentStepOwner::Published(parent) => parent.clone_ref(py).into(),
+                ContentStepOwner::Prepared(step) => step.clone_ref(py).into(),
+            }
+        };
         let parameters = retain_export_owner(parameters, export_owner(), session.owner_thread)?;
         let text = retain_export_owner(text, export_owner(), session.owner_thread)?;
         Ok((
@@ -3938,11 +4965,7 @@ impl PySemanticPolicyInvocation {
     /// invocations require ``finish_refusal``. Final use is one-shot, including
     /// uncertain native failures.
     #[pyo3(signature = (*, consumer_stream))]
-    fn finish_inference(
-        &self,
-        py: Python<'_>,
-        consumer_stream: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
+    fn finish_inference(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         self.require_public_result(py)?;
         if self.training {
@@ -3960,15 +4983,16 @@ impl PySemanticPolicyInvocation {
     /// admitted here. This shares the one-shot final-use owner with ``backward``
     /// and ``finish_inference`` and retains the parent for its later release.
     #[pyo3(signature = (*, consumer_stream))]
-    fn finish_refusal(
-        &self,
-        py: Python<'_>,
-        consumer_stream: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
+    fn finish_refusal(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         self.require_public_result(py)?;
-        if !matches!(&self.outcome, xlog_cuda::SemanticTransitionOutcome::Refused(_)) {
-            return Err(invalid("policy refusal completion requires an actual native refusal"));
+        if !matches!(
+            &self.outcome,
+            xlog_cuda::SemanticTransitionOutcome::Refused(_)
+        ) {
+            return Err(invalid(
+                "policy refusal completion requires an actual native refusal",
+            ));
         }
         self.finish_final_use(py, consumer_stream)
     }
@@ -3976,11 +5000,7 @@ impl PySemanticPolicyInvocation {
 
 #[cfg(feature = "semantic-policy")]
 impl PySemanticPolicyInvocation {
-    fn finish_final_use(
-        &self,
-        py: Python<'_>,
-        consumer_stream: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
+    fn finish_final_use(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
         let expected = {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
@@ -4001,8 +5021,12 @@ impl PySemanticPolicyInvocation {
                 owner.finish_policy_invocation(&lease, self.rng, consumer_stream)
             }
             ContentStepOwner::Prepared(step) => owner.finish_prepared_policy_invocation(
-                &step.borrow(py).inner, self.rng, consumer_stream),
-        }.map_err(xlog_err)
+                &step.borrow(py).inner,
+                self.rng,
+                consumer_stream,
+            ),
+        }
+        .map_err(xlog_err)
     }
 
     fn published_observation(&self) -> PyResult<&xlog_cuda::SemanticTransitionObservation> {
@@ -4021,17 +5045,23 @@ impl PySemanticPolicyInvocation {
     ) -> PyResult<(String, Vec<u8>)> {
         let task_use = self._task_use.borrow(py);
         if self.session.as_ptr() != task_use.session.as_ptr() {
-            return Err(invalid("policy final use belongs to another native Session"));
+            return Err(invalid(
+                "policy final use belongs to another native Session",
+            ));
         }
         let binding = match &self._parent {
             ContentStepOwner::Published(parent) => {
                 let parent = parent.borrow(py);
                 if self.session.as_ptr() != parent.session.as_ptr() {
-                    return Err(invalid("policy final use belongs to another native Session"));
+                    return Err(invalid(
+                        "policy final use belongs to another native Session",
+                    ));
                 }
                 parent.require_task(py, &task_use)?;
                 task_use.require_current(owner)?;
-                owner.retained_step_identity(&*parent.lease()?).map_err(xlog_err)?;
+                owner
+                    .retained_step_identity(&*parent.lease()?)
+                    .map_err(xlog_err)?;
                 let state = task_use.state()?;
                 state.require_public_use()?;
                 state.content_handoff_binding()?
@@ -4039,7 +5069,9 @@ impl PySemanticPolicyInvocation {
             ContentStepOwner::Prepared(step) => {
                 let step = step.borrow(py);
                 if self.session.as_ptr() != step.session.as_ptr() {
-                    return Err(invalid("policy final use belongs to another native Session"));
+                    return Err(invalid(
+                        "policy final use belongs to another native Session",
+                    ));
                 }
                 step.require_task(py, &task_use)?;
                 task_use.require_identity(owner)?;
@@ -4047,12 +5079,23 @@ impl PySemanticPolicyInvocation {
                 let state = task_use.state()?;
                 state.require_public_use()?;
                 let (operation, snapshot) = state.prepared_content_binding(&step.scope)?;
-                (operation.ok_or_else(|| invalid("policy final use requires actual admitted execution"))?, snapshot)
+                (
+                    operation.ok_or_else(|| {
+                        invalid("policy final use requires actual admitted execution")
+                    })?,
+                    snapshot,
+                )
             }
         };
-        let operation = if self.training { "training" } else { "inference" };
+        let operation = if self.training {
+            "training"
+        } else {
+            "inference"
+        };
         if binding.0 != operation {
-            return Err(invalid("policy final use requires the original admitted operation"));
+            return Err(invalid(
+                "policy final use requires the original admitted operation",
+            ));
         }
         Ok(binding)
     }
@@ -4088,38 +5131,65 @@ fn descriptor_meaning_object(
 ) -> PyResult<Py<PyAny>> {
     use xlog_cuda::SemanticActionDescriptor;
     let value = match descriptor {
-        SemanticActionDescriptor::Target { predicate } =>
-            ("target", predicate.0).into_pyobject(py)?.into_any(),
-        SemanticActionDescriptor::Operand { scalar_type, sort_label, encoded_value } =>
-            ("operand", scalar_type.to_code(), sort_label.as_str(), PyBytes::new(py, encoded_value))
-                .into_pyobject(py)?.into_any(),
-        SemanticActionDescriptor::QualifierBundle { records } =>
-            ("qualifier_bundle", PyTuple::new(py, records.iter().copied())?)
-                .into_pyobject(py)?.into_any(),
-        SemanticActionDescriptor::SupportEvent { source_record } =>
-            ("support_event", *source_record).into_pyobject(py)?.into_any(),
+        SemanticActionDescriptor::Target { predicate } => {
+            ("target", predicate.0).into_pyobject(py)?.into_any()
+        }
+        SemanticActionDescriptor::Operand {
+            scalar_type,
+            sort_label,
+            encoded_value,
+        } => (
+            "operand",
+            scalar_type.to_code(),
+            sort_label.as_str(),
+            PyBytes::new(py, encoded_value),
+        )
+            .into_pyobject(py)?
+            .into_any(),
+        SemanticActionDescriptor::QualifierBundle { records } => (
+            "qualifier_bundle",
+            PyTuple::new(py, records.iter().copied())?,
+        )
+            .into_pyobject(py)?
+            .into_any(),
+        SemanticActionDescriptor::SupportEvent { source_record } => {
+            ("support_event", *source_record)
+                .into_pyobject(py)?
+                .into_any()
+        }
     };
     Ok(value.unbind())
 }
 
 fn dependency_lineage_object(py: Python<'_>, dependencies: &[Dependency]) -> PyResult<Py<PyTuple>> {
-    let rows = dependencies.iter().map(|dependency| {
-        (
-            dependency.identity.as_str(),
-            dependency.kind.as_str(),
-            PyTuple::new(py, &dependency.data_parents)?,
-            PyTuple::new(py, &dependency.control_parents)?,
-            PyTuple::new(py, &dependency.live_envelopes)?,
-            dependency.target,
-            dependency.native_record.as_ref().map(|(kind, index)| (kind.as_str(), *index)),
-        ).into_pyobject(py).map(Bound::unbind)
-    }).collect::<PyResult<Vec<_>>>()?;
+    let rows = dependencies
+        .iter()
+        .map(|dependency| {
+            (
+                dependency.identity.as_str(),
+                dependency.kind.as_str(),
+                PyTuple::new(py, &dependency.data_parents)?,
+                PyTuple::new(py, &dependency.control_parents)?,
+                PyTuple::new(py, &dependency.live_envelopes)?,
+                dependency.target,
+                dependency
+                    .native_record
+                    .as_ref()
+                    .map(|(kind, index)| (kind.as_str(), *index)),
+            )
+                .into_pyobject(py)
+                .map(Bound::unbind)
+        })
+        .collect::<PyResult<Vec<_>>>()?;
     Ok(PyTuple::new(py, rows)?.unbind())
 }
 
 fn release_python_producers(producers: &Mutex<Vec<Py<PyAny>>>) {
-    let producers = std::mem::take(&mut *producers.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner));
+    let producers = std::mem::take(
+        &mut *producers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
     drop(producers);
 }
 
@@ -4151,52 +5221,76 @@ impl PySemanticPublishedParent {
     }
 
     fn content_binding_with_owner(
-        &self, py: Python<'_>, owner: &SemanticTransitionSession,
+        &self,
+        py: Python<'_>,
+        owner: &SemanticTransitionSession,
     ) -> PyResult<(String, Vec<u8>)> {
         let task_use = self.task_use.borrow(py);
         task_use.require_current(owner)?;
-        owner.published_identity(&*self.lease()?).map_err(xlog_err)?;
+        owner
+            .published_identity(&*self.lease()?)
+            .map_err(xlog_err)?;
         let binding = task_use.state()?.content_handoff_binding()?;
         Ok(binding)
     }
 
     fn retained_content_binding_with_owner(
-        &self, py: Python<'_>, owner: &SemanticTransitionSession,
+        &self,
+        py: Python<'_>,
+        owner: &SemanticTransitionSession,
     ) -> PyResult<(String, Vec<u8>)> {
         let task_use = self.task_use.borrow(py);
         task_use.require_current(owner)?;
-        owner.retained_step_identity(&*self.lease()?).map_err(xlog_err)?;
+        owner
+            .retained_step_identity(&*self.lease()?)
+            .map_err(xlog_err)?;
         let binding = task_use.state()?.content_handoff_binding()?;
         Ok(binding)
     }
 
     fn release_native_ownership(
-        &self, py: Python<'_>, consumer_streams: &Bound<'_, PyAny>, reader_only: bool,
+        &self,
+        py: Python<'_>,
+        consumer_streams: &Bound<'_, PyAny>,
+        reader_only: bool,
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
         if session.importing.load(Ordering::Acquire) {
-            return Err(invalid("public parent release cannot interrupt a native import"));
+            return Err(invalid(
+                "public parent release cannot interrupt a native import",
+            ));
         }
         let mut budget = 4096;
         let streams = ColdValue::read(consumer_streams, &mut budget, 0)?;
-        let streams = streams.sequence()?.iter().map(ColdValue::unsigned)
+        let streams = streams
+            .sequence()?
+            .iter()
+            .map(ColdValue::unsigned)
             .collect::<PyResult<Vec<_>>>()?;
         let mut owner = session.owner()?;
         if session.importing.load(Ordering::Acquire) {
-            return Err(invalid("public parent release cannot interrupt a native import"));
+            return Err(invalid(
+                "public parent release cannot interrupt a native import",
+            ));
         }
         // Cleanup uses the opaque original lease, not a new use grant. Bank
         // retirement preserves Python producers and their original graph until
         // native final release confirms all late consumers have completed.
         if reader_only {
-            owner.release_published_reader(&mut *self.lease()?, &streams).map_err(xlog_err)?;
+            owner
+                .release_published_reader(&mut *self.lease()?, &streams)
+                .map_err(xlog_err)?;
         } else {
-            owner.release(&mut *self.lease()?, &streams).map_err(xlog_err)?;
+            owner
+                .release(&mut *self.lease()?, &streams)
+                .map_err(xlog_err)?;
         }
         drop(owner);
         drop(session);
-        if !reader_only { self.release_continuation_producers(); }
+        if !reader_only {
+            self.release_continuation_producers();
+        }
         Ok(())
     }
 }
@@ -4232,7 +5326,9 @@ impl PySemanticPublishedParent {
         task_use.require_current(&owner)?;
         let state = task_use.state()?;
         state.content_handoff_binding()?;
-        owner.guard_published_content(&*self.lease()?, &ranges, stream).map_err(xlog_err)
+        owner
+            .guard_published_content(&*self.lease()?, &ranges, stream)
+            .map_err(xlog_err)
     }
 
     /// The sealed identity returned by this lease's single native Acquire.
@@ -4265,8 +5361,14 @@ impl PySemanticPublishedParent {
         let session = self.session.borrow(py);
         let owner = session.owner()?;
         self.task_use.borrow(py).require_current(&owner)?;
-        let ranges = owner.published_range_keys(&*self.lease()?).map_err(xlog_err)?;
-        Ok(PyTuple::new(py, ranges.into_iter().map(|(role, index)| (role as u64, index)))?.unbind())
+        let ranges = owner
+            .published_range_keys(&*self.lease()?)
+            .map_err(xlog_err)?;
+        Ok(PyTuple::new(
+            py,
+            ranges.into_iter().map(|(role, index)| (role as u64, index)),
+        )?
+        .unbind())
     }
 
     /// Project model metadata from this exact acquired parent. Returns:
@@ -4295,28 +5397,58 @@ impl PySemanticPublishedParent {
     /// views are read-only by contract and consumed once; retain their framework
     /// tensors until final use. ``consumer_stream`` follows tensor()'s protocol.
     #[pyo3(signature = (*, consumer_stream))]
-    fn model_context(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyTuple>> {
+    fn model_context(
+        &self,
+        py: Python<'_>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
         self.session.borrow(py).require_creator()?;
         let mut budget = 128;
         let stream = ColdValue::read(consumer_stream, &mut budget, 0)?.unsigned()?;
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.task_use.borrow(py).require_current(&owner)?;
-        let context = owner.published_model_context(&*self.lease()?, stream).map_err(xlog_err)?;
+        let context = owner
+            .published_model_context(&*self.lease()?, stream)
+            .map_err(xlog_err)?;
         let parent = context.parent;
         let root = context.semantic_root;
-        let capsule = |tensor| crate::dlpack_capsule_from_tensor(py,
-            retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?);
-        Ok(((PyBytes::new(py, parent.instance.as_bytes()), parent.word,
-                PyBytes::new(py, parent.logical_digest.as_bytes()), PyBytes::new(py, parent.state_digest.as_bytes())),
+        let capsule = |tensor| {
+            crate::dlpack_capsule_from_tensor(
+                py,
+                retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?,
+            )
+        };
+        Ok((
+            (
+                PyBytes::new(py, parent.instance.as_bytes()),
+                parent.word,
+                PyBytes::new(py, parent.logical_digest.as_bytes()),
+                PyBytes::new(py, parent.state_digest.as_bytes()),
+            ),
             PyBytes::new(py, context.descriptor_digest.as_bytes()),
-            (root.0, root.1, root.2, PyBytes::new(py, root.3.as_bytes()), (root.4[0], root.4[1], root.4[2])),
+            (
+                root.0,
+                root.1,
+                root.2,
+                PyBytes::new(py, root.3.as_bytes()),
+                (root.4[0], root.4[1], root.4[2]),
+            ),
             (capsule(context.prefix.0)?, capsule(context.prefix.1)?),
-            (capsule(context.ring_head)?, capsule(context.source)?), context.generations,
-            (PyBytes::new(py, context.topology_identity.as_bytes()), PyBytes::new(py, context.table_identity.as_bytes())),
+            (capsule(context.ring_head)?, capsule(context.source)?),
+            context.generations,
+            (
+                PyBytes::new(py, context.topology_identity.as_bytes()),
+                PyBytes::new(py, context.table_identity.as_bytes()),
+            ),
             context.capacities,
-            (PyBytes::new(py, context.numerical_state.0.as_bytes()),
-                PyBytes::new(py, context.numerical_state.1.as_bytes()))).into_pyobject(py)?.unbind())
+            (
+                PyBytes::new(py, context.numerical_state.0.as_bytes()),
+                PyBytes::new(py, context.numerical_state.1.as_bytes()),
+            ),
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Resolve one descriptor in this live parent's native catalogue.
@@ -4350,8 +5482,13 @@ impl PySemanticPublishedParent {
         let session = self.session.borrow(py);
         let owner = session.owner()?;
         self.task_use.borrow(py).require_current(&owner)?;
-        owner.published_identity(&*self.lease()?).map_err(xlog_err)?;
-        let cardinality = owner.components().iter().find(|entry| entry.field == field)
+        owner
+            .published_identity(&*self.lease()?)
+            .map_err(xlog_err)?;
+        let cardinality = owner
+            .components()
+            .iter()
+            .find(|entry| entry.field == field)
             .ok_or_else(|| invalid("descriptor field is absent from the native catalogue"))?
             .cardinality;
         if category >= cardinality {
@@ -4360,12 +5497,23 @@ impl PySemanticPublishedParent {
         let meaning = if category == 0 {
             py.None()
         } else {
-            descriptor_meaning_object(py, owner.descriptor_meaning(field, category)
-                .ok_or_else(|| invalid("native descriptor category has no meaning"))?)?
+            descriptor_meaning_object(
+                py,
+                owner
+                    .descriptor_meaning(field, category)
+                    .ok_or_else(|| invalid("native descriptor category has no meaning"))?,
+            )?
         };
         let binding = owner.binding();
-        Ok(((binding.generation, PyBytes::new(py, binding.digest.as_bytes())), meaning)
-            .into_pyobject(py)?.unbind())
+        Ok((
+            (
+                binding.generation,
+                PyBytes::new(py, binding.digest.as_bytes()),
+            ),
+            meaning,
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Return the retained task's checked dependency graph for this live parent.
@@ -4386,16 +5534,23 @@ impl PySemanticPublishedParent {
         let owner = session.owner()?;
         let task_use = self.task_use.borrow(py);
         task_use.require_current(&owner)?;
-        let identity = owner.published_identity(&*self.lease()?).map_err(xlog_err)?;
+        let identity = owner
+            .published_identity(&*self.lease()?)
+            .map_err(xlog_err)?;
         let parent_identity = (
-            PyBytes::new(py, identity.instance.as_bytes()), identity.word,
+            PyBytes::new(py, identity.instance.as_bytes()),
+            identity.word,
             PyBytes::new(py, identity.logical_digest.as_bytes()),
             PyBytes::new(py, identity.state_digest.as_bytes()),
         );
-        Ok((parent_identity, task_use.task_epoch,
+        Ok((
+            parent_identity,
+            task_use.task_epoch,
             dependency_lineage_object(py, &task_use.authority.dependencies)?,
-            PyTuple::new(py, &task_use.authority.feedback_roots)?)
-            .into_pyobject(py)?.unbind())
+            PyTuple::new(py, &task_use.authority.feedback_roots)?,
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Cold read of the complete original model contribution from this parent's
@@ -4407,7 +5562,9 @@ impl PySemanticPublishedParent {
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.task_use.borrow(py).require_current(&owner)?;
-        let bytes = owner.published_model_numerical_mode(&*self.lease()?).map_err(xlog_err)?;
+        let bytes = owner
+            .published_model_numerical_mode(&*self.lease()?)
+            .map_err(xlog_err)?;
         let value = ColdValue::from_canonical_bytes(&bytes)?;
         value.python_value(py)
     }
@@ -4426,9 +5583,13 @@ impl PySemanticPublishedParent {
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.task_use.borrow(py).require_current(&owner)?;
-        let tensor = owner.published_source(&*self.lease()?, stream).map_err(xlog_err)?;
-        crate::dlpack_capsule_from_tensor(py,
-            retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?)
+        let tensor = owner
+            .published_source(&*self.lease()?, stream)
+            .map_err(xlog_err)?;
+        crate::dlpack_capsule_from_tensor(
+            py,
+            retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?,
+        )
     }
 
     /// Original terminal flag from this acquired parent's private step inputs,
@@ -4440,16 +5601,24 @@ impl PySemanticPublishedParent {
     /// tensor until final use and join its consumer streams at release.
     /// ``consumer_stream`` follows tensor()'s protocol.
     #[pyo3(signature = (*, consumer_stream))]
-    fn terminal_state(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn terminal_state(
+        &self,
+        py: Python<'_>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
         self.session.borrow(py).require_creator()?;
         let mut budget = 128;
         let stream = ColdValue::read(consumer_stream, &mut budget, 0)?.unsigned()?;
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.task_use.borrow(py).require_current(&owner)?;
-        let tensor = owner.published_terminal(&*self.lease()?, stream).map_err(xlog_err)?;
-        crate::dlpack_capsule_from_tensor(py,
-            retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?)
+        let tensor = owner
+            .published_terminal(&*self.lease()?, stream)
+            .map_err(xlog_err)?;
+        crate::dlpack_capsule_from_tensor(
+            py,
+            retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?,
+        )
     }
 
     /// Return (computed, rows) from this acquired bank's sealed active-cache
@@ -4460,9 +5629,20 @@ impl PySemanticPublishedParent {
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.task_use.borrow(py).require_current(&owner)?;
-        let active = owner.published_active_rows(&*self.lease()?).map_err(xlog_err)?;
-        let rows = PyTuple::new(py, active.rows.into_iter().map(|row|
-            (row.physical_row, row.source_slot, row.logical_position, row.kind)))?;
+        let active = owner
+            .published_active_rows(&*self.lease()?)
+            .map_err(xlog_err)?;
+        let rows = PyTuple::new(
+            py,
+            active.rows.into_iter().map(|row| {
+                (
+                    row.physical_row,
+                    row.source_slot,
+                    row.logical_position,
+                    row.kind,
+                )
+            }),
+        )?;
         Ok((active.computed, rows).into_pyobject(py)?.unbind())
     }
 
@@ -4489,12 +5669,22 @@ impl PySemanticPublishedParent {
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.task_use.borrow(py).require_current(&owner)?;
-        let (identity, tensor) = owner.published_prefix(&*self.lease()?, stream).map_err(xlog_err)?;
-        let parent_identity = (PyBytes::new(py, identity.instance.as_bytes()), identity.word,
-            PyBytes::new(py, identity.logical_digest.as_bytes()), PyBytes::new(py, identity.state_digest.as_bytes()));
+        let (identity, tensor) = owner
+            .published_prefix(&*self.lease()?, stream)
+            .map_err(xlog_err)?;
+        let parent_identity = (
+            PyBytes::new(py, identity.instance.as_bytes()),
+            identity.word,
+            PyBytes::new(py, identity.logical_digest.as_bytes()),
+            PyBytes::new(py, identity.state_digest.as_bytes()),
+        );
         let tensor = retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
-        Ok((parent_identity, crate::dlpack_capsule_from_tensor(py, tensor)?)
-            .into_pyobject(py)?.unbind())
+        Ok((
+            parent_identity,
+            crate::dlpack_capsule_from_tensor(py, tensor)?,
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Export a real bank tensor with its cold physical-capacity shape as a
@@ -4552,11 +5742,16 @@ impl PySemanticPublishedParent {
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.task_use.borrow(py).require_current(&owner)?;
-        let (provenance, tensor) = owner.published_tensor_allocation(&*self.lease()?, role, index, stream)
+        let (provenance, tensor) = owner
+            .published_tensor_allocation(&*self.lease()?, role, index, stream)
             .map_err(xlog_err)?;
         let tensor = retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
-        Ok((Py::new(py, PyNativeTensorAllocation { provenance })?,
-            crate::dlpack_capsule_from_tensor(py, tensor)?).into_pyobject(py)?.unbind())
+        Ok((
+            Py::new(py, PyNativeTensorAllocation { provenance })?,
+            crate::dlpack_capsule_from_tensor(py, tensor)?,
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Export a sealed native record's actual device bytes, including raw
@@ -4611,7 +5806,11 @@ impl PySemanticPublishedParent {
     /// until their final deleters, including any original encoder backward.
     /// Release must name every consumer stream after the final use of all six.
     #[pyo3(signature = (*, consumer_stream))]
-    fn feedback(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyTuple>> {
+    fn feedback(
+        &self,
+        py: Python<'_>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
         self.session.borrow(py).require_creator()?;
         let mut budget = 128;
         let stream = ColdValue::read(consumer_stream, &mut budget, 0)?.unsigned()?;
@@ -4620,24 +5819,48 @@ impl PySemanticPublishedParent {
         let task_use = self.task_use.borrow(py);
         task_use.require_current(&owner)?;
         task_use.state()?.content_handoff_binding()?;
-        let feedback = owner.published_feedback(&*self.lease()?, stream).map_err(xlog_err)?;
+        let feedback = owner
+            .published_feedback(&*self.lease()?, stream)
+            .map_err(xlog_err)?;
         let identity = feedback.parent;
-        let parent_identity = (PyBytes::new(py, identity.instance.as_bytes()), identity.word,
-            PyBytes::new(py, identity.logical_digest.as_bytes()), PyBytes::new(py, identity.state_digest.as_bytes()));
+        let parent_identity = (
+            PyBytes::new(py, identity.instance.as_bytes()),
+            identity.word,
+            PyBytes::new(py, identity.logical_digest.as_bytes()),
+            PyBytes::new(py, identity.state_digest.as_bytes()),
+        );
         let schema = feedback_schema_object(py, &feedback.schema)?;
-        let [features, device_validity, queries, originals, offsets, supports] = feedback.into_dlpack();
-        let features = retain_export_owner(features, self.session.clone_ref(py), session.owner_thread)?;
-        let device_validity = retain_export_owner(device_validity, self.session.clone_ref(py), session.owner_thread)?;
+        let [features, device_validity, queries, originals, offsets, supports] =
+            feedback.into_dlpack();
+        let features =
+            retain_export_owner(features, self.session.clone_ref(py), session.owner_thread)?;
+        let device_validity = retain_export_owner(
+            device_validity,
+            self.session.clone_ref(py),
+            session.owner_thread,
+        )?;
         let export = |tensor| {
-            let tensor = retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
+            let tensor =
+                retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
             crate::dlpack_capsule_from_tensor(py, tensor)
         };
-        let lineage = (task_use.task_epoch,
+        let lineage = (
+            task_use.task_epoch,
             PyTuple::new(py, xlog_cuda::SEMANTIC_FEEDBACK_SUPPORT_FIELDS)?,
-            export(queries)?, export(originals)?, export(offsets)?, export(supports)?);
-        Ok((parent_identity, schema, crate::dlpack_capsule_from_tensor(py, features)?,
-            crate::dlpack_capsule_from_tensor(py, device_validity)?, lineage)
-            .into_pyobject(py)?.unbind())
+            export(queries)?,
+            export(originals)?,
+            export(offsets)?,
+            export(supports)?,
+        );
+        Ok((
+            parent_identity,
+            schema,
+            crate::dlpack_capsule_from_tensor(py, features)?,
+            crate::dlpack_capsule_from_tensor(py, device_validity)?,
+            lineage,
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Join the actual bank consumers and retire only this exact bank reader.
@@ -4765,8 +5988,11 @@ impl PySemanticTransitionController {
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (task_use, *, transitions, producer))]
     fn build_segment(
-        &self, py: Python<'_>, task_use: Py<PySemanticTransitionTaskUse>,
-        transitions: &Bound<'_, PyAny>, producer: Py<PyAny>,
+        &self,
+        py: Python<'_>,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        transitions: &Bound<'_, PyAny>,
+        producer: Py<PyAny>,
     ) -> PyResult<()> {
         let session = self.session.borrow(py);
         session.require_creator()?;
@@ -4776,15 +6002,28 @@ impl PySemanticTransitionController {
             return Err(invalid("segment task belongs to another Session"));
         }
         let transitions = prepared_transitions(transitions)?;
-        if session.importing.load(Ordering::Acquire) || session.retiring.load(Ordering::Acquire)
-            || session.recording.swap(true, Ordering::AcqRel) {
-            return Err(invalid("segment recording cannot overlap another recording or import"));
+        if session.importing.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+            || session.recording.swap(true, Ordering::AcqRel)
+        {
+            return Err(invalid(
+                "segment recording cannot overlap another recording or import",
+            ));
         }
-        let mut guard = PreparedBuildGuard { session: &session, task_use: &issued, committed: false };
+        let mut guard = PreparedBuildGuard {
+            session: &session,
+            task_use: &issued,
+            committed: false,
+        };
         let (scope, snapshot, handles, stream) = {
             let mut owner = session.owner()?;
             issued.require_identity(&owner)?;
-            if session.prepared_segment.lock().map_err(|_| invalid("prepared segment mutex is poisoned"))?.is_some() {
+            if session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                .is_some()
+            {
                 return Err(invalid("previous prepared segment has not been retired"));
             }
             let mut state = issued.state()?;
@@ -4795,29 +6034,54 @@ impl PySemanticTransitionController {
         };
         let mut steps = Vec::with_capacity(handles.len());
         for inner in handles {
-            steps.push(Py::new(py, PySemanticPreparedStep {
-                session: self.session.clone_ref(py), task_use: task_use.clone_ref(py),
-                scope: Arc::clone(&scope), inner, continuation_producers: Mutex::new(Vec::new()),
-                policy_inputs: Mutex::new(None),
-            })?);
+            steps.push(Py::new(
+                py,
+                PySemanticPreparedStep {
+                    session: self.session.clone_ref(py),
+                    task_use: task_use.clone_ref(py),
+                    scope: Arc::clone(&scope),
+                    inner,
+                    continuation_producers: Mutex::new(Vec::new()),
+                    policy_inputs: Mutex::new(None),
+                },
+            )?);
         }
         let resources = Arc::new(PreparedProducerResources {
-            producers: Mutex::new(vec![producer.clone_ref(py)]), owner_thread: session.owner_thread,
+            producers: Mutex::new(vec![producer.clone_ref(py)]),
+            owner_thread: session.owner_thread,
         });
-        *session.prepared_segment.lock().map_err(|_| invalid("prepared segment mutex is poisoned"))? =
-            Some(PreparedPythonSegment { scope: Arc::clone(&scope), task_use: task_use.clone_ref(py),
-                steps: steps.iter().map(|step| step.clone_ref(py)).collect(), resources: Arc::clone(&resources),
-                producers_retired: false });
+        *session
+            .prepared_segment
+            .lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))? =
+            Some(PreparedPythonSegment {
+                scope: Arc::clone(&scope),
+                task_use: task_use.clone_ref(py),
+                steps: steps.iter().map(|step| step.clone_ref(py)).collect(),
+                resources: Arc::clone(&resources),
+                producers_retired: false,
+            });
         let check = || self.check_recording(py, &issued, &scope, &snapshot);
         let kwargs = PyDict::new(py);
-        kwargs.set_item("steps", PyTuple::new(py, steps.iter().map(|step| step.clone_ref(py)))?)?;
+        kwargs.set_item(
+            "steps",
+            PyTuple::new(py, steps.iter().map(|step| step.clone_ref(py)))?,
+        )?;
         kwargs.set_item("consumer_stream", stream.cu_stream() as u64)?;
         let prepare = recording_callback(check, || producer.bind(py).getattr("prepare_segment"))?;
-        let prepared = recording_callback(check, || prepare.call((task_use.clone_ref(py),), Some(&kwargs)))?;
-        resources.producers.lock().map_err(|_| invalid("prepared producer owner mutex is poisoned"))?
+        let prepared = recording_callback(check, || {
+            prepare.call((task_use.clone_ref(py),), Some(&kwargs))
+        })?;
+        resources
+            .producers
+            .lock()
+            .map_err(|_| invalid("prepared producer owner mutex is poisoned"))?
             .push(prepared.clone().unbind());
         let memory = recording_callback(check, || prepared.getattr("memory_scope"))?;
-        resources.producers.lock().map_err(|_| invalid("prepared producer owner mutex is poisoned"))?
+        resources
+            .producers
+            .lock()
+            .map_err(|_| invalid("prepared producer owner mutex is poisoned"))?
             .push(memory.clone().unbind());
         let mut memory_owner = PreparedMemoryScope::new(py, &memory, &check)?;
         let enter = recording_callback(check, || memory.getattr("__enter__"))?;
@@ -4830,37 +6094,64 @@ impl PySemanticTransitionController {
             let external: Arc<dyn Send + Sync> = resources.clone();
             let (mut capture, capture_stream) = {
                 let mut owner = session.owner()?;
-                owner.begin_prepared_segment(vec![external]).map_err(xlog_err)?
+                owner
+                    .begin_prepared_segment(vec![external])
+                    .map_err(xlog_err)?
             };
             if capture_stream.cu_stream() != stream.cu_stream() {
-                return Err(invalid("native recording stream changed after cold preparation"));
+                return Err(invalid(
+                    "native recording stream changed after cold preparation",
+                ));
             }
             for step in &steps {
                 check()?;
                 let native = step.borrow(py).inner.clone();
                 let error = std::cell::RefCell::new(None);
-                let result = capture.add_conditional_if(&stream,
+                let result = capture.add_conditional_if(
+                    &stream,
                     |handle| -> PyResult<()> {
-                        let result = session.owner()?.record_prepared_step_admission(&native, handle).map_err(xlog_err);
-                        if let Err(value) = &result { *error.borrow_mut() = Some(value.clone_ref(py)); }
+                        let result = session
+                            .owner()?
+                            .record_prepared_step_admission(&native, handle)
+                            .map_err(xlog_err);
+                        if let Err(value) = &result {
+                            *error.borrow_mut() = Some(value.clone_ref(py));
+                        }
                         result
                     },
-                    |body| body.capture_on_stream(&stream, || -> PyResult<()> {
-                        let result = (|| {
-                            session.owner()?.record_prepared_step_inputs(&native).map_err(xlog_err)?;
-                            let enqueue = recording_callback(check, || prepared.getattr("enqueue_step"))?;
-                            recording_callback(check, || {
-                                let value = enqueue.call1((step.clone_ref(py),))?;
-                                if !value.is_none() { return Err(invalid("enqueue_step must return None, not a host result")); }
-                                Ok(())
-                            })?;
-                            let mut owner = session.owner()?;
-                            owner.enqueue_prepared_transition(&native).map_err(xlog_err)?;
-                            owner.record_prepared_step_release(&native).map_err(xlog_err)
-                        })();
-                        if let Err(value) = &result { *error.borrow_mut() = Some(value.clone_ref(py)); }
-                        result
-                    }));
+                    |body| {
+                        body.capture_on_stream(&stream, || -> PyResult<()> {
+                            let result = (|| {
+                                session
+                                    .owner()?
+                                    .record_prepared_step_inputs(&native)
+                                    .map_err(xlog_err)?;
+                                let enqueue =
+                                    recording_callback(check, || prepared.getattr("enqueue_step"))?;
+                                recording_callback(check, || {
+                                    let value = enqueue.call1((step.clone_ref(py),))?;
+                                    if !value.is_none() {
+                                        return Err(invalid(
+                                            "enqueue_step must return None, not a host result",
+                                        ));
+                                    }
+                                    Ok(())
+                                })?;
+                                let mut owner = session.owner()?;
+                                owner
+                                    .enqueue_prepared_transition(&native)
+                                    .map_err(xlog_err)?;
+                                owner
+                                    .record_prepared_step_release(&native)
+                                    .map_err(xlog_err)
+                            })();
+                            if let Err(value) = &result {
+                                *error.borrow_mut() = Some(value.clone_ref(py));
+                            }
+                            result
+                        })
+                    },
+                );
                 if let Err(graph_error) = result {
                     return Err(error.into_inner().unwrap_or_else(|| xlog_err(graph_error)));
                 }
@@ -4869,7 +6160,10 @@ impl PySemanticTransitionController {
             // Instantiation and any graph destructor run outside the owner lock.
             let mut executable = Some(capture.instantiate().map_err(xlog_err)?);
             check()?;
-            let installed = session.owner()?.finish_prepared_segment(&mut executable).map_err(xlog_err);
+            let installed = session
+                .owner()?
+                .finish_prepared_segment(&mut executable)
+                .map_err(xlog_err);
             drop(executable);
             installed
         })();
@@ -4895,8 +6189,11 @@ impl PySemanticTransitionController {
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (task_use, *, operation, snapshot, refresh_snapshot))]
     fn execute_segment(
-        &self, py: Python<'_>, task_use: Py<PySemanticTransitionTaskUse>,
-        operation: &Bound<'_, PyAny>, snapshot: &Bound<'_, PyAny>,
+        &self,
+        py: Python<'_>,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        operation: &Bound<'_, PyAny>,
+        snapshot: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyTuple>> {
         let session = self.session.borrow(py);
@@ -4904,33 +6201,62 @@ impl PySemanticTransitionController {
         let issued = task_use.borrow(py);
         self.require_read_issued(&issued)?;
         if session.recording.load(Ordering::Acquire) || session.retiring.load(Ordering::Acquire) {
-            return Err(invalid("segment submission cannot overlap a producer ownership scope"));
+            return Err(invalid(
+                "segment submission cannot overlap a producer ownership scope",
+            ));
         }
-        if !refresh_snapshot.is_callable() { return Err(invalid("completion requires the original current authority callback")); }
+        if !refresh_snapshot.is_callable() {
+            return Err(invalid(
+                "completion requires the original current authority callback",
+            ));
+        }
         let mut budget = 16 * 1024 * 1024;
-        let operation = ColdValue::read(operation, &mut budget, 0)?.text()?.to_owned();
+        let operation = ColdValue::read(operation, &mut budget, 0)?
+            .text()?
+            .to_owned();
         let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
         let (scope, steps) = {
-            let stored = session.prepared_segment.lock().map_err(|_| invalid("prepared segment mutex is poisoned"))?;
-            let stored = stored.as_ref().ok_or_else(|| invalid("no original built segment"))?;
+            let stored = session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let stored = stored
+                .as_ref()
+                .ok_or_else(|| invalid("no original built segment"))?;
             if stored.task_use.as_ptr() != task_use.as_ptr() {
                 return Err(invalid("built segment belongs to another task use"));
             }
-            (Arc::clone(&stored.scope), stored.steps.iter().map(|step| step.clone_ref(py)).collect::<Vec<_>>())
+            (
+                Arc::clone(&stored.scope),
+                stored
+                    .steps
+                    .iter()
+                    .map(|step| step.clone_ref(py))
+                    .collect::<Vec<_>>(),
+            )
         };
-        let mut guard = PreparedBuildGuard { session: &session, task_use: &issued, committed: false };
+        let mut guard = PreparedBuildGuard {
+            session: &session,
+            task_use: &issued,
+            committed: false,
+        };
         let expected = {
             let mut owner = session.owner()?;
             issued.require_identity(&owner)?;
             let mut state = issued.state()?;
             state.admit_built_segment(&scope, &issued.authority, operation.clone(), snapshot)?;
             let expected = Self::execution_binding(&state, false)?;
-            owner.launch_prepared_segment(state.snapshot.canonical.clone()).map_err(xlog_err)?;
+            owner
+                .launch_prepared_segment(state.snapshot.canonical.clone())
+                .map_err(xlog_err)?;
             expected
         };
         let shared = &*session;
         let outcomes = py.detach(|| {
-            let mut owner = shared.inner.lock().map_err(|_| invalid("native semantic session owner mutex is poisoned"))?;
+            let mut owner = shared
+                .inner
+                .lock()
+                .map_err(|_| invalid("native semantic session owner mutex is poisoned"))?;
             owner.complete_prepared_segment().map_err(xlog_err)
         })?;
         let check = || -> PyResult<()> {
@@ -4938,8 +6264,11 @@ impl PySemanticTransitionController {
             let owner = session.owner()?;
             issued.require_identity(&owner)?;
             if !owner.prepared_segment_completion_known()
-                || Self::execution_binding(&*issued.state()?, false)? != expected {
-                return Err(invalid("completed segment authority changed during result handoff"));
+                || Self::execution_binding(&*issued.state()?, false)? != expected
+            {
+                return Err(invalid(
+                    "completed segment authority changed during result handoff",
+                ));
             }
             Ok(())
         };
@@ -4950,21 +6279,37 @@ impl PySemanticTransitionController {
             issued.require_identity(&owner)?;
             let mut state = issued.state()?;
             if Self::execution_binding(&state, false)? != expected {
-                return Err(invalid("completion snapshot no longer belongs to this original operation"));
+                return Err(invalid(
+                    "completion snapshot no longer belongs to this original operation",
+                ));
             }
             state.revalidate_activation(&issued.authority, fresh)?;
             owner.acquire().map_err(xlog_err)?
         };
-        let parent = Py::new(py, PySemanticPublishedParent {
-            session: self.session.clone_ref(py), task_use: task_use.clone_ref(py),
-            inner: Mutex::new(lease), continuation_producers: Mutex::new(Vec::new()),
-        })?;
-        if outcomes.len() != steps.len() { return Err(invalid("native completion changed the original step count")); }
+        let parent = Py::new(
+            py,
+            PySemanticPublishedParent {
+                session: self.session.clone_ref(py),
+                task_use: task_use.clone_ref(py),
+                inner: Mutex::new(lease),
+                continuation_producers: Mutex::new(Vec::new()),
+            },
+        )?;
+        if outcomes.len() != steps.len() {
+            return Err(invalid("native completion changed the original step count"));
+        }
         let mut rows = Vec::with_capacity(steps.len());
         for (step, completed) in steps.into_iter().zip(outcomes) {
             let (transition, status, refusal, invocation) = match completed {
-                xlog_cuda::SemanticPreparedStepOutcome::Skipped { status, .. } => (None, status, None, py.None()),
-                xlog_cuda::SemanticPreparedStepOutcome::Completed { invocation, transition, outcome, .. } => {
+                xlog_cuda::SemanticPreparedStepOutcome::Skipped { status, .. } => {
+                    (None, status, None, py.None())
+                }
+                xlog_cuda::SemanticPreparedStepOutcome::Completed {
+                    invocation,
+                    transition,
+                    outcome,
+                    ..
+                } => {
                     let label = match transition {
                         SemanticTransitionKind::Proposal => "proposal",
                         SemanticTransitionKind::Recompute => "recompute",
@@ -4972,15 +6317,33 @@ impl PySemanticTransitionController {
                     };
                     let refusal = transition_refusal(&outcome);
                     let invocation = if transition == SemanticTransitionKind::Proposal {
-                        Py::new(py, self.issue_prepared_policy_invocation(py, task_use.clone_ref(py),
-                            step.clone_ref(py), invocation, outcome, operation == "training")?)?.into_any()
-                    } else { py.None() };
+                        Py::new(
+                            py,
+                            self.issue_prepared_policy_invocation(
+                                py,
+                                task_use.clone_ref(py),
+                                step.clone_ref(py),
+                                invocation,
+                                outcome,
+                                operation == "training",
+                            )?,
+                        )?
+                        .into_any()
+                    } else {
+                        py.None()
+                    };
                     (Some(label), 0, refusal, invocation)
                 }
             };
-            rows.push((step, transition, status, refusal, invocation).into_pyobject(py)?.unbind());
+            rows.push(
+                (step, transition, status, refusal, invocation)
+                    .into_pyobject(py)?
+                    .unbind(),
+            );
         }
-        let result = (parent, PyTuple::new(py, rows)?).into_pyobject(py)?.unbind();
+        let result = (parent, PyTuple::new(py, rows)?)
+            .into_pyobject(py)?
+            .unbind();
         guard.committed = true;
         Ok(result)
     }
@@ -4993,86 +6356,160 @@ impl PySemanticTransitionController {
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (task_use, *, consumer_streams))]
     fn retire_segment(
-        &self, py: Python<'_>, task_use: Py<PySemanticTransitionTaskUse>,
+        &self,
+        py: Python<'_>,
+        task_use: Py<PySemanticTransitionTaskUse>,
         consumer_streams: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let session = self.session.borrow(py);
         session.require_creator()?;
         self.require_read_issued(&task_use.borrow(py))?;
-        if session.importing.load(Ordering::Acquire) || session.recording.load(Ordering::Acquire)
-            || session.retiring.swap(true, Ordering::AcqRel) {
-            return Err(invalid("segment retirement cannot be nested or overlap recording/import"));
+        if session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.swap(true, Ordering::AcqRel)
+        {
+            return Err(invalid(
+                "segment retirement cannot be nested or overlap recording/import",
+            ));
         }
         let _retirement = PreparedRetirementGuard(&session.retiring);
         let snapshot = task_use.borrow(py).state()?.snapshot.canonical.clone();
         let mut budget = 16 * 1024 * 1024;
         let streams = ColdValue::read(consumer_streams, &mut budget, 0)?;
-        let streams = streams.sequence()?.iter().map(ColdValue::unsigned).collect::<PyResult<Vec<_>>>()?;
-        if streams.is_empty() || streams.iter().any(|&stream| stream == 0 || stream == 2 || stream > i64::MAX as u64) {
-            return Err(invalid("final segment retirement requires exact supported consumer streams"));
+        let streams = streams
+            .sequence()?
+            .iter()
+            .map(ColdValue::unsigned)
+            .collect::<PyResult<Vec<_>>>()?;
+        if streams.is_empty()
+            || streams
+                .iter()
+                .any(|&stream| stream == 0 || stream == 2 || stream > i64::MAX as u64)
+        {
+            return Err(invalid(
+                "final segment retirement requires exact supported consumer streams",
+            ));
         }
         let (steps, resources, producers_retired) = {
-            let stored = session.prepared_segment.lock().map_err(|_| invalid("prepared segment mutex is poisoned"))?;
-            let stored = stored.as_ref().ok_or_else(|| invalid("no original prepared segment to retire"))?;
+            let stored = session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let stored = stored
+                .as_ref()
+                .ok_or_else(|| invalid("no original prepared segment to retire"))?;
             if stored.task_use.as_ptr() != task_use.as_ptr() {
                 return Err(invalid("segment retirement belongs to another task use"));
             }
-            (stored.steps.iter().map(|step| step.clone_ref(py)).collect::<Vec<_>>(),
-                Arc::clone(&stored.resources), stored.producers_retired)
+            (
+                stored
+                    .steps
+                    .iter()
+                    .map(|step| step.clone_ref(py))
+                    .collect::<Vec<_>>(),
+                Arc::clone(&stored.resources),
+                stored.producers_retired,
+            )
         };
         let graph = {
             let mut owner = session.owner()?;
             for step in &steps {
-                owner.quiesce_prepared_step(&step.borrow(py).inner, &streams).map_err(xlog_err)?;
+                owner
+                    .quiesce_prepared_step(&step.borrow(py).inner, &streams)
+                    .map_err(xlog_err)?;
             }
-            owner.take_prepared_executable_for_retirement().map_err(xlog_err)?
+            owner
+                .take_prepared_executable_for_retirement()
+                .map_err(xlog_err)?
         };
         drop(graph);
         let prepared = {
-            let retained = resources.producers.lock().map_err(|_| invalid("prepared producer owner mutex is poisoned"))?;
-            retained.get(1).ok_or_else(|| invalid("original prepared producer is absent"))?.clone_ref(py)
+            let retained = resources
+                .producers
+                .lock()
+                .map_err(|_| invalid("prepared producer owner mutex is poisoned"))?;
+            retained
+                .get(1)
+                .ok_or_else(|| invalid("original prepared producer is absent"))?
+                .clone_ref(py)
         };
         if !producers_retired {
             let check = || -> PyResult<()> {
                 let issued = task_use.borrow(py);
                 self.require_read_issued(&issued)?;
                 if issued.state()?.snapshot.canonical != snapshot {
-                    return Err(invalid("original task authority changed during producer retirement"));
+                    return Err(invalid(
+                        "original task authority changed during producer retirement",
+                    ));
                 }
                 Ok(())
             };
             let finish = recording_callback(check, || prepared.bind(py).getattr("finish_segment"))?;
             let finished = recording_callback(check, || finish.call0())?;
-            if !finished.is_none() { return Err(invalid("finish_segment must return None after retiring original producers")); }
-            session.prepared_segment.lock().map_err(|_| invalid("prepared segment mutex is poisoned"))?
-                .as_mut().ok_or_else(|| invalid("original segment was removed during producer retirement"))?
+            if !finished.is_none() {
+                return Err(invalid(
+                    "finish_segment must return None after retiring original producers",
+                ));
+            }
+            session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                .as_mut()
+                .ok_or_else(|| invalid("original segment was removed during producer retirement"))?
                 .producers_retired = true;
         }
         for step in &steps {
             let step = step.borrow(py);
-            let continuation = std::mem::take(&mut *step.continuation_producers.lock()
-                .map_err(|_| invalid("continuation producer ownership mutex is poisoned"))?);
-            let policy = step.policy_inputs.lock().map_err(|_| invalid("prepared policy inputs mutex is poisoned"))?.take();
+            let continuation = std::mem::take(
+                &mut *step
+                    .continuation_producers
+                    .lock()
+                    .map_err(|_| invalid("continuation producer ownership mutex is poisoned"))?,
+            );
+            let policy = step
+                .policy_inputs
+                .lock()
+                .map_err(|_| invalid("prepared policy inputs mutex is poisoned"))?
+                .take();
             drop(policy);
             drop(continuation);
         }
         drain_export_owners();
         for step in &steps {
-            session.owner()?.release_prepared_step(&step.borrow(py).inner, &streams).map_err(xlog_err)?;
+            session
+                .owner()?
+                .release_prepared_step(&step.borrow(py).inner, &streams)
+                .map_err(xlog_err)?;
             // Preserve only unretired steps if another external alias delays a
             // later release. A retry never re-releases an already removed owner.
             let removed = {
-                let mut stored = session.prepared_segment.lock().map_err(|_| invalid("prepared segment mutex is poisoned"))?;
-                let stored = stored.as_mut().ok_or_else(|| invalid("original segment disappeared during retirement"))?;
-                let index = stored.steps.iter().position(|original| original.as_ptr() == step.as_ptr())
+                let mut stored = session
+                    .prepared_segment
+                    .lock()
+                    .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+                let stored = stored
+                    .as_mut()
+                    .ok_or_else(|| invalid("original segment disappeared during retirement"))?;
+                let index = stored
+                    .steps
+                    .iter()
+                    .position(|original| original.as_ptr() == step.as_ptr())
                     .ok_or_else(|| invalid("original retirement step changed"))?;
                 stored.steps.remove(index)
             };
             drop(removed);
         }
-        let native_resources = session.owner()?.take_prepared_resources_for_retirement().map_err(xlog_err)?;
+        let native_resources = session
+            .owner()?
+            .take_prepared_resources_for_retirement()
+            .map_err(xlog_err)?;
         drop(native_resources);
-        let retained = session.prepared_segment.lock().map_err(|_| invalid("prepared segment mutex is poisoned"))?.take();
+        let retained = session
+            .prepared_segment
+            .lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+            .take();
         drop(retained);
         drop(resources);
         drop(prepared);
@@ -5124,20 +6561,47 @@ impl PySemanticTransitionController {
         self.session.borrow(py).require_creator()?;
         let mut budget = 16 * 1024 * 1024;
         let [material_limit, total_material_limit, evidence_limit] = read_task_replay_limits(
-            max_material_bytes, max_total_material_bytes, max_evidence_bytes, &mut budget)?;
-        let spec = read_task_evaluation_spec(statement_records, allowed_support_records,
-            task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, &mut budget)?;
-        let rows = read_replay_rows(replay_rows, &mut budget, material_limit,
-            total_material_limit, evidence_limit)?;
-        let rows = rows.sequence()?.iter().map(ReplayRow::parse).collect::<PyResult<Vec<_>>>()?;
-        let (_, selected) = decode_selected_replay(&rows,
-            &ColdValue::read(replay_selection, &mut budget, 0)?)?;
+            max_material_bytes,
+            max_total_material_bytes,
+            max_evidence_bytes,
+            &mut budget,
+        )?;
+        let spec = read_task_evaluation_spec(
+            statement_records,
+            allowed_support_records,
+            task_program_source,
+            task_query_ordinals,
+            task_scoring,
+            admissible_truth_masks,
+            &mut budget,
+        )?;
+        let rows = read_replay_rows(
+            replay_rows,
+            &mut budget,
+            material_limit,
+            total_material_limit,
+            evidence_limit,
+        )?;
+        let rows = rows
+            .sequence()?
+            .iter()
+            .map(ReplayRow::parse)
+            .collect::<PyResult<Vec<_>>>()?;
+        let (_, selected) =
+            decode_selected_replay(&rows, &ColdValue::read(replay_selection, &mut budget, 0)?)?;
         let session = self.session.borrow(py);
-        let roots = session.owner()?.task_observation_roots(&spec,
-            selected.as_ref().map(|binding| &binding.material)).map_err(xlog_err)?;
-        Ok((PyBytes::new(py, roots.root_digest.as_bytes()),
-            PyTuple::new(py, roots.root_extents)?, PyTuple::new(py, roots.query_records)?,
-            PyTuple::new(py, roots.contributors)?).into_pyobject(py)?.unbind())
+        let roots = session
+            .owner()?
+            .task_observation_roots(&spec, selected.as_ref().map(|binding| &binding.material))
+            .map_err(xlog_err)?;
+        Ok((
+            PyBytes::new(py, roots.root_digest.as_bytes()),
+            PyTuple::new(py, roots.root_extents)?,
+            PyTuple::new(py, roots.query_records)?,
+            PyTuple::new(py, roots.contributors)?,
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Import resolved rights and lineage into this controller's real Session.
@@ -5298,7 +6762,11 @@ impl PySemanticTransitionController {
         let mut import = ColdImportGuard::begin(&session, None)?;
         let mut budget = 16 * 1024 * 1024;
         let [material_limit, total_material_limit, evidence_limit] = read_task_replay_limits(
-            max_material_bytes, max_total_material_bytes, max_evidence_bytes, &mut budget)?;
+            max_material_bytes,
+            max_total_material_bytes,
+            max_evidence_bytes,
+            &mut budget,
+        )?;
         let values = [
             task_ref,
             task_scope,
@@ -5312,10 +6780,18 @@ impl PySemanticTransitionController {
         ]
         .into_iter()
         .enumerate()
-        .map(|(index, value)| if index == 3 {
-            read_replay_rows(value, &mut budget, material_limit, total_material_limit, evidence_limit)
-        } else {
-            ColdValue::read(value, &mut budget, 0)
+        .map(|(index, value)| {
+            if index == 3 {
+                read_replay_rows(
+                    value,
+                    &mut budget,
+                    material_limit,
+                    total_material_limit,
+                    evidence_limit,
+                )
+            } else {
+                ColdValue::read(value, &mut budget, 0)
+            }
         })
         .collect::<PyResult<Vec<_>>>()?;
         let mut authority = TaskAuthority::parse(&values)?;
@@ -5325,12 +6801,26 @@ impl PySemanticTransitionController {
         )?;
         let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
         authority.check_snapshot(&snapshot)?;
-        let spec = read_task_evaluation_spec(statement_records, allowed_support_records,
-            task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, &mut budget)?;
-        let (selection, selected_material) = decode_selected_replay(&authority.replay,
-            &ColdValue::read(replay_selection, &mut budget, 0)?)?;
-        let observations = session.owner()?.task_observation_roots(&spec,
-            selected_material.as_ref().map(|binding| &binding.material)).map_err(xlog_err)?;
+        let spec = read_task_evaluation_spec(
+            statement_records,
+            allowed_support_records,
+            task_program_source,
+            task_query_ordinals,
+            task_scoring,
+            admissible_truth_masks,
+            &mut budget,
+        )?;
+        let (selection, selected_material) = decode_selected_replay(
+            &authority.replay,
+            &ColdValue::read(replay_selection, &mut budget, 0)?,
+        )?;
+        let observations = session
+            .owner()?
+            .task_observation_roots(
+                &spec,
+                selected_material.as_ref().map(|binding| &binding.material),
+            )
+            .map_err(xlog_err)?;
         authority.bind_native_reads(&observations, &spec.allowed_support_records)?;
         let operation = ColdValue::read(replay_operation, &mut budget, 0)?;
         let (phase, transition) = if let Some(material) = &selected_material {
@@ -5344,7 +6834,9 @@ impl PySemanticTransitionController {
             let kind = material.material.transition_kind();
             if kind == SemanticTransitionKind::Proposal {
                 if !pack_policy.is_callable() {
-                    return Err(invalid("proposal replay requires its real Runtime policy packer"));
+                    return Err(invalid(
+                        "proposal replay requires its real Runtime policy packer",
+                    ));
                 }
                 #[cfg(not(feature = "semantic-policy"))]
                 return Err(invalid("proposal replay requires a semantic-policy build"));
@@ -5352,11 +6844,27 @@ impl PySemanticTransitionController {
                 return Err(invalid("no-draw replay must not supply a policy packer"));
             }
             import.original_decisions = Some(Arc::clone(&material.original_decisions));
-            (TaskUsePhase::Importing { operation, reads: false }, Some(kind))
+            (
+                TaskUsePhase::Importing {
+                    operation,
+                    reads: false,
+                },
+                Some(kind),
+            )
         } else {
-            if operation != ColdValue::None || [restore_invocation, pack_policy,
-                finish_invocation, refresh_snapshot].iter().any(|callback| !callback.is_none()) {
-                return Err(invalid("fresh import requires no replay operation or callbacks"));
+            if operation != ColdValue::None
+                || [
+                    restore_invocation,
+                    pack_policy,
+                    finish_invocation,
+                    refresh_snapshot,
+                ]
+                .iter()
+                .any(|callback| !callback.is_none())
+            {
+                return Err(invalid(
+                    "fresh import requires no replay operation or callbacks",
+                ));
             }
             (TaskUsePhase::Imported, None)
         };
@@ -5364,26 +6872,46 @@ impl PySemanticTransitionController {
             let mut owner = session.owner()?;
             owner.bind_task_evaluation(spec).map_err(xlog_err)?;
             if let Some(material) = &selected_material {
-                owner.restore_replay_material(&material.material).map_err(xlog_err)?;
+                owner
+                    .restore_replay_material(&material.material)
+                    .map_err(xlog_err)?;
             }
-            (*owner.task_evaluation_identity()
-                .ok_or_else(|| invalid("native import lost its task binding"))?.as_bytes(),
-                owner.task_evaluation_epoch())
+            (
+                *owner
+                    .task_evaluation_identity()
+                    .ok_or_else(|| invalid("native import lost its task binding"))?
+                    .as_bytes(),
+                owner.task_evaluation_epoch(),
+            )
         };
-        let task_use = Py::new(py, PySemanticTransitionTaskUse {
-            session: self.session.clone_ref(py),
-            controller: Arc::clone(&self.identity),
-            issuance: import.issuance.clone(),
-            importing: Arc::clone(&session.importing),
-            task_identity: identity,
-            task_epoch,
-            authority,
-            state: Mutex::new(TaskUseState { phase, snapshot }),
-        })?;
+        let task_use = Py::new(
+            py,
+            PySemanticTransitionTaskUse {
+                session: self.session.clone_ref(py),
+                controller: Arc::clone(&self.identity),
+                issuance: import.issuance.clone(),
+                importing: Arc::clone(&session.importing),
+                task_identity: identity,
+                task_epoch,
+                authority,
+                state: Mutex::new(TaskUseState { phase, snapshot }),
+            },
+        )?;
         if let (Some(ordinal), Some(material), Some(kind)) =
-            (selection, selected_material, transition) {
-            let replay = self.replay_import(py, &task_use, ordinal, material, kind,
-                restore_invocation, pack_policy, finish_invocation, refresh_snapshot, &import);
+            (selection, selected_material, transition)
+        {
+            let replay = self.replay_import(
+                py,
+                &task_use,
+                ordinal,
+                material,
+                kind,
+                restore_invocation,
+                pack_policy,
+                finish_invocation,
+                refresh_snapshot,
+                &import,
+            );
             if let Err(error) = replay {
                 if let Ok(mut state) = task_use.borrow(py).state() {
                     state.phase = TaskUsePhase::Refused;
@@ -5433,28 +6961,47 @@ impl PySemanticTransitionController {
         task_use.require_current(&owner)?;
         let state = task_use.state()?;
         let TaskUsePhase::Segment(operation) = &state.phase else {
-            return Err(invalid("replay export requires its admitted original operation"));
+            return Err(invalid(
+                "replay export requires its admitted original operation",
+            ));
         };
         snapshot.newer_than(&state.snapshot)?;
         task_use.authority.check_use(operation, &snapshot, false)?;
         if std::ptr::eq(predecessor, successor) {
-            return Err(invalid("replay export requires distinct predecessor and successor readers"));
+            return Err(invalid(
+                "replay export requires distinct predecessor and successor readers",
+            ));
         }
         let predecessor = predecessor.lease()?;
         let successor = successor.lease()?;
         let predecessor_identity = owner.published_identity(&predecessor).map_err(xlog_err)?;
         let successor_identity = owner.published_identity(&successor).map_err(xlog_err)?;
-        let evidence = owner.published_replay_evidence(&predecessor, &successor).map_err(xlog_err)?;
-        let provenance = owner.published_replay_provenance(&predecessor, &successor).map_err(xlog_err)?;
-        let material = owner.published_state_material(&predecessor).map_err(xlog_err)?;
+        let evidence = owner
+            .published_replay_evidence(&predecessor, &successor)
+            .map_err(xlog_err)?;
+        let provenance = owner
+            .published_replay_provenance(&predecessor, &successor)
+            .map_err(xlog_err)?;
+        let material = owner
+            .published_state_material(&predecessor)
+            .map_err(xlog_err)?;
         let identity = |value: xlog_cuda::SemanticPublishedIdentity| {
-            (PyBytes::new(py, value.instance.as_bytes()), value.word,
+            (
+                PyBytes::new(py, value.instance.as_bytes()),
+                value.word,
                 PyBytes::new(py, value.logical_digest.as_bytes()),
-                PyBytes::new(py, value.state_digest.as_bytes()))
+                PyBytes::new(py, value.state_digest.as_bytes()),
+            )
         };
-        Ok((identity(predecessor_identity), identity(successor_identity),
-            PyBytes::new(py, &material), PyBytes::new(py, &provenance),
-            PyBytes::new(py, &evidence)).into_pyobject(py)?.unbind())
+        Ok((
+            identity(predecessor_identity),
+            identity(successor_identity),
+            PyBytes::new(py, &material),
+            PyBytes::new(py, &provenance),
+            PyBytes::new(py, &evidence),
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 
     /// Revalidate exact rights before each encoder or model forward and native transition.
@@ -5560,7 +7107,14 @@ impl PySemanticTransitionController {
         tensors: &Bound<'_, PyAny>,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<PySemanticTensorContentWitness> {
-        self.bind_tensor_content(py, task_use, ContentStepOwner::from_python(parent)?, tensors, consumer_stream, false)
+        self.bind_tensor_content(
+            py,
+            task_use,
+            ContentStepOwner::from_python(parent)?,
+            tensors,
+            consumer_stream,
+            false,
+        )
     }
 
     /// Bind all actual model tensors to the original native model baseline.
@@ -5587,7 +7141,14 @@ impl PySemanticTransitionController {
         tensors: &Bound<'_, PyAny>,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<PySemanticTensorContentWitness> {
-        self.bind_tensor_content(py, task_use, ContentStepOwner::from_python(parent)?, tensors, consumer_stream, true)
+        self.bind_tensor_content(
+            py,
+            task_use,
+            ContentStepOwner::from_python(parent)?,
+            tensors,
+            consumer_stream,
+            true,
+        )
     }
 
     /// Retain the actual original-forward outputs for this acquired parent.
@@ -5626,14 +7187,37 @@ impl PySemanticTransitionController {
         match ContentStepOwner::from_python(parent)? {
             ContentStepOwner::Published(parent) => {
                 self.require_issued(task_use)?;
-                self.bind_continuation_in_execution(py, task_use, ContentStepRef::Published(&parent.borrow(py)), text_rows,
-                    text_row_count, selected_text, active_rows, active_row_count,
-                    numerical_admissibility, tensors, producer_witness, consumer_stream, None)
+                self.bind_continuation_in_execution(
+                    py,
+                    task_use,
+                    ContentStepRef::Published(&parent.borrow(py)),
+                    text_rows,
+                    text_row_count,
+                    selected_text,
+                    active_rows,
+                    active_row_count,
+                    numerical_admissibility,
+                    tensors,
+                    producer_witness,
+                    consumer_stream,
+                    None,
+                )
             }
             ContentStepOwner::Prepared(step) => self.bind_continuation_in_execution(
-                py, task_use, ContentStepRef::Prepared(&step.borrow(py)), text_rows, text_row_count,
-                selected_text, active_rows, active_row_count, numerical_admissibility, tensors,
-                producer_witness, consumer_stream, None),
+                py,
+                task_use,
+                ContentStepRef::Prepared(&step.borrow(py)),
+                text_rows,
+                text_row_count,
+                selected_text,
+                active_rows,
+                active_row_count,
+                numerical_admissibility,
+                tensors,
+                producer_witness,
+                consumer_stream,
+                None,
+            ),
         }
     }
 
@@ -5663,7 +7247,9 @@ impl PySemanticTransitionController {
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
         let fields = object_sequence(binding, &mut budget)?;
         if fields.len() != 2 {
-            return Err(invalid("policy binding requires generation and exact digest bytes"));
+            return Err(invalid(
+                "policy binding requires generation and exact digest bytes",
+            ));
         }
         let binding = xlog_cuda::SemanticCatalogueBinding {
             generation: ColdValue::read(&fields[0], &mut budget, 0)?.unsigned()?,
@@ -5679,8 +7265,12 @@ impl PySemanticTransitionController {
             if binding != owner.binding() {
                 return Err(invalid("policy packing belongs to another native binding"));
             }
-            if step.policy_inputs.lock()
-                .map_err(|_| invalid("prepared policy producer owner is poisoned"))?.is_some() {
+            if step
+                .policy_inputs
+                .lock()
+                .map_err(|_| invalid("prepared policy producer owner is poisoned"))?
+                .is_some()
+            {
                 return Err(invalid("prepared policy producers were already bound"));
             }
             self.continuation_binding(&state, parent, false)?
@@ -5697,34 +7287,59 @@ impl PySemanticTransitionController {
             step.require_recording_stream(&owner, stream)?;
             self.require_continuation_witness(py, parent, producer_witness)?;
             if self.continuation_binding(&state, parent, false)? != expected {
-                return Err(invalid("prepared policy authority changed during producer handoff"));
+                return Err(invalid(
+                    "prepared policy authority changed during producer handoff",
+                ));
             }
             Ok(())
         };
         for input in &inputs {
             validate_producer_device_guarded(input.bind(py), device, &check)?;
-            handoff.0.push(crate::dlpack_from_py_for_stream_guarded(input.bind(py), producer_stream, &check)?);
+            handoff.0.push(crate::dlpack_from_py_for_stream_guarded(
+                input.bind(py),
+                producer_stream,
+                &check,
+            )?);
         }
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         let state = self.continuation_state(py, task_use, parent, &owner, None)?;
         self.require_continuation_witness(py, parent, producer_witness)?;
         if self.continuation_binding(&state, parent, false)? != expected {
-            return Err(invalid("prepared policy authority changed during producer handoff"));
+            return Err(invalid(
+                "prepared policy authority changed during producer handoff",
+            ));
         }
-        let [text, support, parameters]: [_; 3] = handoff.into_native().try_into()
+        let [text, support, parameters]: [_; 3] = handoff
+            .into_native()
+            .try_into()
             .unwrap_or_else(|_| unreachable!("exact policy producer roster"));
-        owner.bind_prepared_policy(&step.inner, binding, text, support, parameters,
-            &producer_witness.inner, stream).map_err(xlog_err)?;
+        owner
+            .bind_prepared_policy(
+                &step.inner,
+                binding,
+                text,
+                support,
+                parameters,
+                &producer_witness.inner,
+                stream,
+            )
+            .map_err(xlog_err)?;
         drop(state);
         drop(owner);
         drop(session);
-        let mut retained = step.policy_inputs.lock()
+        let mut retained = step
+            .policy_inputs
+            .lock()
             .map_err(|_| invalid("prepared policy producer owner is poisoned"))?;
         if retained.is_some() {
             return Err(invalid("prepared policy producers were already bound"));
         }
-        *retained = Some(PreparedPolicyInputs { model_output, inputs, invocation_issued: false });
+        *retained = Some(PreparedPolicyInputs {
+            model_output,
+            inputs,
+            invocation_issued: false,
+        });
         Ok(())
     }
 
@@ -5751,8 +7366,17 @@ impl PySemanticTransitionController {
     ) -> PyResult<PySemanticPolicyInvocation> {
         self.session.borrow(py).require_creator()?;
         self.require_issued(&task_use.borrow(py))?;
-        self.execute_policy_in_execution(py, task_use, parent, binding,
-            model_output, text_logits, product_support, parameters, None)
+        self.execute_policy_in_execution(
+            py,
+            task_use,
+            parent,
+            binding,
+            model_output,
+            text_logits,
+            product_support,
+            parameters,
+            None,
+        )
     }
 
     /// Publish the already admitted recompute/drain continuation without any
@@ -5855,22 +7479,39 @@ impl PySemanticTransitionController {
         let mut parent = parse_parent(metadata, source, prefix, records, task_use)?;
         let device = self.session.borrow(py).device_ordinal;
         let mut budget = 16 * 1024 * 1024;
-        parent.model_memory.storages = ColdValue::read(model_storages, &mut budget, 0)?.sequence()?.iter()
+        parent.model_memory.storages = ColdValue::read(model_storages, &mut budget, 0)?
+            .sequence()?
+            .iter()
             .map(|row| {
                 let fields = row.fields(3)?;
-                Ok(SemanticModelStorage { allocation: fields[0].unsigned()?,
-                    byte_offset: fields[1].unsigned()?, span_bytes: fields[2].unsigned()? })
-            }).collect::<PyResult<_>>()?;
-        parent.model_memory.views = ColdValue::read(model_views, &mut budget, 0)?.sequence()?.iter()
+                Ok(SemanticModelStorage {
+                    allocation: fields[0].unsigned()?,
+                    byte_offset: fields[1].unsigned()?,
+                    span_bytes: fields[2].unsigned()?,
+                })
+            })
+            .collect::<PyResult<_>>()?;
+        parent.model_memory.views = ColdValue::read(model_views, &mut budget, 0)?
+            .sequence()?
+            .iter()
             .map(|row| {
                 let fields = row.fields(4)?;
-                Ok(SemanticModelView { role: fields[0].unsigned()?, index: fields[1].unsigned()?,
-                    storage: fields[2].unsigned()?, byte_offset: fields[3].unsigned()? })
-            }).collect::<PyResult<_>>()?;
-        let ParsedTensorInputs { handoff: tensors, producers: _producers } =
-            parse_tensor_inputs(tensors, &mut budget, device)?;
-        let ParsedTensorInputs { handoff: allocations, producers: _allocation_producers } =
-            parse_tensor_inputs(model_allocations, &mut budget, device)?;
+                Ok(SemanticModelView {
+                    role: fields[0].unsigned()?,
+                    index: fields[1].unsigned()?,
+                    storage: fields[2].unsigned()?,
+                    byte_offset: fields[3].unsigned()?,
+                })
+            })
+            .collect::<PyResult<_>>()?;
+        let ParsedTensorInputs {
+            handoff: tensors,
+            producers: _producers,
+        } = parse_tensor_inputs(tensors, &mut budget, device)?;
+        let ParsedTensorInputs {
+            handoff: allocations,
+            producers: _allocation_producers,
+        } = parse_tensor_inputs(model_allocations, &mut budget, device)?;
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         task_use.require_current(&owner)?;
@@ -5932,7 +7573,9 @@ impl PySemanticTransitionController {
         self.session.borrow(py).require_creator()?;
         self.require_read_issued(task_use)?;
         match &parent {
-            ContentStepOwner::Published(acquired) => acquired.borrow(py).require_task(py, task_use)?,
+            ContentStepOwner::Published(acquired) => {
+                acquired.borrow(py).require_task(py, task_use)?
+            }
             ContentStepOwner::Prepared(step) => step.borrow(py).require_task(py, task_use)?,
         }
         let binding = {
@@ -5948,7 +7591,9 @@ impl PySemanticTransitionController {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
             if parent.binding(py, &owner, false)? != binding {
-                return Err(invalid("original content scope changed during producer callback"));
+                return Err(invalid(
+                    "original content scope changed during producer callback",
+                ));
             }
             parent.check_producer_stream(py, &owner, stream)
         };
@@ -5964,22 +7609,37 @@ impl PySemanticTransitionController {
                 let acquired = acquired.borrow(py);
                 let (operation, snapshot) = state.content_handoff_binding()?;
                 if (Some(operation), snapshot) != binding {
-                    return Err(invalid("tensor content authority changed during producer handoff"));
+                    return Err(invalid(
+                        "tensor content authority changed during producer handoff",
+                    ));
                 }
                 let lease = acquired.lease()?;
                 owner.published_identity(&lease).map_err(xlog_err)?;
-                if model { owner.bind_model_content(&lease, handoff.into_native(), stream) }
-                else { owner.capture_tensor_content(&lease, handoff.into_native(), stream) }
+                if model {
+                    owner.bind_model_content(&lease, handoff.into_native(), stream)
+                } else {
+                    owner.capture_tensor_content(&lease, handoff.into_native(), stream)
+                }
             }
             ContentStepOwner::Prepared(step) => {
                 let step = step.borrow(py);
                 if state.prepared_content_binding(&step.scope)? != binding {
-                    return Err(invalid("tensor content authority changed during producer handoff"));
+                    return Err(invalid(
+                        "tensor content authority changed during producer handoff",
+                    ));
                 }
-                if model { owner.bind_prepared_model_content(&step.inner, handoff.into_native(), stream) }
-                else { owner.capture_prepared_tensor_content(&step.inner, handoff.into_native(), stream) }
+                if model {
+                    owner.bind_prepared_model_content(&step.inner, handoff.into_native(), stream)
+                } else {
+                    owner.capture_prepared_tensor_content(
+                        &step.inner,
+                        handoff.into_native(),
+                        stream,
+                    )
+                }
             }
-        }.map_err(xlog_err)?;
+        }
+        .map_err(xlog_err)?;
         drop(state);
         drop(owner);
         Ok(PySemanticTensorContentWitness {
@@ -6005,8 +7665,11 @@ impl PySemanticTransitionController {
     }
 
     fn check_recording(
-        &self, py: Python<'_>, task_use: &PySemanticTransitionTaskUse,
-        scope: &Arc<()>, snapshot: &[u8],
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        scope: &Arc<()>,
+        snapshot: &[u8],
     ) -> PyResult<()> {
         self.require_read_issued(task_use)?;
         if self.session.as_ptr() != task_use.session.as_ptr() {
@@ -6019,8 +7682,11 @@ impl PySemanticTransitionController {
         if !session.recording.load(Ordering::Acquire)
             || !matches!(&state.phase, TaskUsePhase::Recording { scope: current, .. }
                 if Arc::ptr_eq(scope, current))
-            || state.snapshot.canonical != snapshot {
-            return Err(invalid("original recording scope or authority changed during callback"));
+            || state.snapshot.canonical != snapshot
+        {
+            return Err(invalid(
+                "original recording scope or authority changed during callback",
+            ));
         }
         Ok(())
     }
@@ -6032,8 +7698,18 @@ impl PySemanticTransitionController {
     fn execution_binding(state: &TaskUseState, importing: bool) -> PyResult<(String, Vec<u8>)> {
         let operation = match (&state.phase, importing) {
             (TaskUsePhase::Segment(operation), false)
-                | (TaskUsePhase::Importing { operation, reads: false }, true) => operation,
-            _ => return Err(invalid("controller execution requires its admitted phase with import reads closed")),
+            | (
+                TaskUsePhase::Importing {
+                    operation,
+                    reads: false,
+                },
+                true,
+            ) => operation,
+            _ => {
+                return Err(invalid(
+                    "controller execution requires its admitted phase with import reads closed",
+                ))
+            }
         };
         Ok((operation.clone(), state.snapshot.canonical.clone()))
     }
@@ -6051,15 +7727,21 @@ impl PySemanticTransitionController {
         if self.session.as_ptr() != task_use.session.as_ptr()
             || self.session.as_ptr() != parent.session.as_ptr()
         {
-            return Err(invalid("controller execution owners belong to another native Session"));
+            return Err(invalid(
+                "controller execution owners belong to another native Session",
+            ));
         }
         task_use.require_identity(owner)?;
         if let Some(guard) = import {
             let session = self.session.borrow(py);
-            if !std::ptr::eq(&*session, guard.session) || guard.committed
+            if !std::ptr::eq(&*session, guard.session)
+                || guard.committed
                 || !guard.issuance.same_as(&task_use.issuance)
-                || !session.importing.load(Ordering::Acquire) {
-                return Err(invalid("controller execution requires this Session's active uncommitted import guard"));
+                || !session.importing.load(Ordering::Acquire)
+            {
+                return Err(invalid(
+                    "controller execution requires this Session's active uncommitted import guard",
+                ));
             }
         }
         let state = task_use.state()?;
@@ -6089,12 +7771,15 @@ impl PySemanticTransitionController {
             owner.admit_transition(&lease, kind).map_err(xlog_err)?;
             lease
         };
-        let parent = Py::new(py, PySemanticPublishedParent {
-            session: self.session.clone_ref(py),
-            task_use: task_use.clone_ref(py),
-            inner: Mutex::new(lease),
-            continuation_producers: Mutex::new(Vec::new()),
-        })?;
+        let parent = Py::new(
+            py,
+            PySemanticPublishedParent {
+                session: self.session.clone_ref(py),
+                task_use: task_use.clone_ref(py),
+                inner: Mutex::new(lease),
+                continuation_producers: Mutex::new(Vec::new()),
+            },
+        )?;
         let acquired = parent.borrow(py);
         let expected = {
             let owner = import.session.owner()?;
@@ -6112,13 +7797,20 @@ impl PySemanticTransitionController {
             };
             let restored = {
                 let _reads = ImportReadScope::enter(&issued)?;
-                restore_invocation.call1((task_use.clone_ref(py), parent.clone_ref(py), row, transition))?
+                restore_invocation.call1((
+                    task_use.clone_ref(py),
+                    parent.clone_ref(py),
+                    row,
+                    transition,
+                ))?
             };
             self.check_import_callback(py, &issued, &acquired, import, &expected)?;
             let mut budget = 16 * 1024 * 1024;
             let restored = object_sequence(&restored, &mut budget)?;
             if restored.len() != 2 {
-                return Err(invalid("original invocation restore must return its output and continuation arguments"));
+                return Err(invalid(
+                    "original invocation restore must return its output and continuation arguments",
+                ));
             }
             // Retain the original output even without the policy feature.
             let _original_output = restored[0].clone().unbind();
@@ -6126,50 +7818,89 @@ impl PySemanticTransitionController {
             if arguments.len() != 9 {
                 return Err(invalid("original continuation requires six CUDA services, tensors, its captured producer witness and consumer stream"));
             }
-            let producer_witness = arguments[7].extract::<PyRef<'_, PySemanticTensorContentWitness>>()?;
-            self.bind_continuation_in_execution(py, &issued, ContentStepRef::Published(&acquired),
-                &arguments[0], &arguments[1], &arguments[2], &arguments[3],
-                &arguments[4], &arguments[5], &arguments[6], &producer_witness,
-                &arguments[8], Some(import))?;
+            let producer_witness =
+                arguments[7].extract::<PyRef<'_, PySemanticTensorContentWitness>>()?;
+            self.bind_continuation_in_execution(
+                py,
+                &issued,
+                ContentStepRef::Published(&acquired),
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+                &arguments[4],
+                &arguments[5],
+                &arguments[6],
+                &producer_witness,
+                &arguments[8],
+                Some(import),
+            )?;
             if kind == SemanticTransitionKind::Proposal {
                 #[cfg(feature = "semantic-policy")]
                 {
                     let policy = {
                         let _reads = ImportReadScope::enter(&issued)?;
-                        _pack_policy.call1((task_use.clone_ref(py), parent.clone_ref(py), _original_output.clone_ref(py)))?
+                        _pack_policy.call1((
+                            task_use.clone_ref(py),
+                            parent.clone_ref(py),
+                            _original_output.clone_ref(py),
+                        ))?
                     };
                     self.check_import_callback(py, &issued, &acquired, import, &expected)?;
                     let policy = object_sequence(&policy, &mut budget)?;
                     if policy.len() != 4 {
                         return Err(invalid("Runtime replay policy requires binding, logits, parameters and actual product support"));
                     }
-                    let invocation = self.execute_policy_in_execution(py,
-                        task_use.clone_ref(py), parent.clone_ref(py), &policy[0],
-                        _original_output, policy[1].clone().unbind(),
-                        policy[3].clone().unbind(), policy[2].clone().unbind(), Some(import))?;
+                    let invocation = self.execute_policy_in_execution(
+                        py,
+                        task_use.clone_ref(py),
+                        parent.clone_ref(py),
+                        &policy[0],
+                        _original_output,
+                        policy[1].clone().unbind(),
+                        policy[3].clone().unbind(),
+                        policy[2].clone().unbind(),
+                        Some(import),
+                    )?;
                     // Keep the complete original invocation in existing failure
                     // custody until native final use succeeds. Import replay
                     // verifies history; it neither runs a backward nor opens
                     // the public policy final-use API during Importing.
                     let retained = TensorHandoff(vec![invocation]);
                     let invocation = &retained.0[0];
-                    let comparison = invocation.outcome.as_published().map_err(xlog_err).and_then(|_| {
-                        self.verify_import_successor(py, &issued, &acquired, &material.material, import)
-                    });
+                    let comparison = invocation
+                        .outcome
+                        .as_published()
+                        .map_err(xlog_err)
+                        .and_then(|_| {
+                            self.verify_import_successor(
+                                py,
+                                &issued,
+                                &acquired,
+                                &material.material,
+                                import,
+                            )
+                        });
                     let completion = (|| -> PyResult<()> {
                         let mut owner = import.session.owner()?;
-                        let state = self.execution_state(py, &issued, &acquired, &owner, Some(import))?;
+                        let state =
+                            self.execution_state(py, &issued, &acquired, &owner, Some(import))?;
                         if Self::execution_binding(&state, true)? != expected {
-                            return Err(invalid("policy import authority changed before final use"));
+                            return Err(invalid(
+                                "policy import authority changed before final use",
+                            ));
                         }
                         invocation.start_final_use()?;
                         // Policy handoff and predecessor/successor comparison
                         // use this controller-owned legacy stream. Native final
                         // use also checks the original continuation's stream.
-                        owner.finish_policy_invocation(&*acquired.lease()?, invocation.rng, 1)
+                        owner
+                            .finish_policy_invocation(&*acquired.lease()?, invocation.rng, 1)
                             .map_err(xlog_err)
                     })();
-                    if completion.is_ok() { drop(retained.into_native()); }
+                    if completion.is_ok() {
+                        drop(retained.into_native());
+                    }
                     // Finalization is attempted once even for a refusal or a
                     // failed comparison. Uncertain completion retains invocation,
                     // tape and reader; reader release will not retry that use.
@@ -6193,16 +7924,21 @@ impl PySemanticTransitionController {
             };
             let mut budget = 16 * 1024 * 1024;
             let mut streams = ColdValue::read(&streams, &mut budget, 0)?
-                .sequence()?.iter().map(ColdValue::unsigned).collect::<PyResult<Vec<_>>>()?;
+                .sequence()?
+                .iter()
+                .map(ColdValue::unsigned)
+                .collect::<PyResult<Vec<_>>>()?;
             // Complete-state verification uses this actual controller-owned
             // legacy stream in addition to the Runtime's exact consumer roster.
-            if !streams.contains(&1) { streams.push(1); }
+            if !streams.contains(&1) {
+                streams.push(1);
+            }
             Ok(streams)
         })();
         let streams = match (replay_result, cleanup_result) {
             (Err(error), cleanup) => {
-                let release = cleanup.and_then(|streams|
-                    Self::release_import_reader(&acquired, import, &streams));
+                let release = cleanup
+                    .and_then(|streams| Self::release_import_reader(&acquired, import, &streams));
                 return finish_with_cleanup(py, Err(error), release);
             }
             (Ok(()), Err(error)) => return Err(error),
@@ -6220,7 +7956,9 @@ impl PySemanticTransitionController {
                 let mut owner = import.session.owner()?;
                 let state = self.execution_state(py, &issued, &acquired, &owner, Some(import))?;
                 if Self::execution_binding(&state, true)? != expected {
-                    return Err(invalid("current authority changed outside the importer's refresh"));
+                    return Err(invalid(
+                        "current authority changed outside the importer's refresh",
+                    ));
                 }
                 snapshot.newer_than(&state.snapshot)?;
                 issued.authority.check_use(&expected.0, &snapshot, false)?;
@@ -6228,7 +7966,9 @@ impl PySemanticTransitionController {
                 // aliases, but retain P's reader for final full comparison.
                 // An uncertain completion is quarantined, never retried here.
                 release_allowed = false;
-                owner.quiesce_published_reader(&*acquired.lease()?, &streams).map_err(xlog_err)?;
+                owner
+                    .quiesce_published_reader(&*acquired.lease()?, &streams)
+                    .map_err(xlog_err)?;
                 release_allowed = true;
             }
             self.verify_import_successor(py, &issued, &acquired, &material.material, import)?;
@@ -6236,49 +7976,70 @@ impl PySemanticTransitionController {
         })();
         let release = if release_allowed {
             Self::release_import_reader(&acquired, import, &streams)
-        } else { Ok(()) };
+        } else {
+            Ok(())
+        };
         let snapshot = finish_with_cleanup(py, final_result, release)?;
         let owner = import.session.owner()?;
         let mut state = self.execution_state(py, &issued, &acquired, &owner, Some(import))?;
         state.finish_import(&issued.authority, snapshot)
     }
 
-    fn release_import_reader(parent: &PySemanticPublishedParent,
-        import: &ColdImportGuard<'_>, streams: &[u64]) -> PyResult<()> {
+    fn release_import_reader(
+        parent: &PySemanticPublishedParent,
+        import: &ColdImportGuard<'_>,
+        streams: &[u64],
+    ) -> PyResult<()> {
         let mut owner = import.session.owner()?;
         if owner.is_poisoned() {
-            return Err(invalid("failed native completion retains the import reader in quarantine"));
+            return Err(invalid(
+                "failed native completion retains the import reader in quarantine",
+            ));
         }
-        owner.release(&mut *parent.lease()?, streams).map_err(xlog_err)?;
+        owner
+            .release(&mut *parent.lease()?, streams)
+            .map_err(xlog_err)?;
         drop(owner);
         parent.release_continuation_producers();
         Ok(())
     }
 
     fn check_import_callback(
-        &self, py: Python<'_>, task_use: &PySemanticTransitionTaskUse,
-        parent: &PySemanticPublishedParent, import: &ColdImportGuard<'_>,
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        import: &ColdImportGuard<'_>,
         expected: &(String, Vec<u8>),
     ) -> PyResult<()> {
         let owner = import.session.owner()?;
         let state = self.execution_state(py, task_use, parent, &owner, Some(import))?;
         if Self::execution_binding(&state, true)? != *expected {
-            return Err(invalid("import callback changed the task's original current authority"));
+            return Err(invalid(
+                "import callback changed the task's original current authority",
+            ));
         }
-        owner.published_identity(&*parent.lease()?).map_err(xlog_err)?;
+        owner
+            .published_identity(&*parent.lease()?)
+            .map_err(xlog_err)?;
         Ok(())
     }
 
     fn verify_import_successor(
-        &self, py: Python<'_>, task_use: &PySemanticTransitionTaskUse,
-        predecessor: &PySemanticPublishedParent, material: &xlog_cuda::SemanticReplayMaterial,
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        predecessor: &PySemanticPublishedParent,
+        material: &xlog_cuda::SemanticReplayMaterial,
         import: &ColdImportGuard<'_>,
     ) -> PyResult<()> {
         let mut owner = import.session.owner()?;
         let _state = self.execution_state(py, task_use, predecessor, &owner, Some(import))?;
         let mut successor = owner.acquire().map_err(xlog_err)?;
         let comparison = predecessor.lease().and_then(|lease| {
-            owner.verify_replay_publication(material, &lease, &successor).map_err(xlog_err)
+            owner
+                .verify_replay_publication(material, &lease, &successor)
+                .map_err(xlog_err)
         });
         // This private successor was never exported to Python; native full
         // content verification registered the controller's legacy stream 1.
@@ -6327,29 +8088,52 @@ impl PySemanticTransitionController {
             let owner = session.owner()?;
             let state = self.continuation_state(py, task_use, parent, &owner, import)?;
             if self.continuation_binding(&state, parent, import.is_some())? != expected {
-                return Err(invalid("original continuation scope changed during producer callback"));
+                return Err(invalid(
+                    "original continuation scope changed during producer callback",
+                ));
             }
             Ok(())
         };
-        let services = [text_rows, text_row_count, selected_text, active_rows,
-            active_row_count, numerical_admissibility];
+        let services = [
+            text_rows,
+            text_row_count,
+            selected_text,
+            active_rows,
+            active_row_count,
+            numerical_admissibility,
+        ];
         // Retain the original Python producers independently of mutable input
         // rows. Native code retains the captured witness without a Python cycle.
         // Any failed callback leaves these original autograd owners quarantined.
         let mut producer_owners = TensorHandoff(vec![producer_witness._inputs.clone_ref(py)]);
-        producer_owners.0.extend(producer_witness._producers.iter().map(|value| value.clone_ref(py)));
-        producer_owners.0.extend(services.iter().map(|value| (*value).clone().unbind()));
+        producer_owners.0.extend(
+            producer_witness
+                ._producers
+                .iter()
+                .map(|value| value.clone_ref(py)),
+        );
+        producer_owners
+            .0
+            .extend(services.iter().map(|value| (*value).clone().unbind()));
         let device = self.session.borrow(py).device_ordinal;
         for producer in services {
             validate_continuation_producer_guarded(producer, device, &check)?;
         }
-        let ParsedTensorInputs { handoff: tensors, producers } =
-            parse_tensor_inputs_guarded(tensors, &mut budget, device, consumer_stream, &check)?;
+        let ParsedTensorInputs {
+            handoff: tensors,
+            producers,
+        } = parse_tensor_inputs_guarded(tensors, &mut budget, device, consumer_stream, &check)?;
         producer_owners.0.extend(producers);
         let mut service_handoff = TensorHandoff(Vec::with_capacity(services.len()));
         for producer in services {
-            service_handoff.0.push(crate::dlpack_from_py_for_stream_guarded(producer,
-                i64::try_from(consumer_stream).map_err(|_| invalid("consumer stream exceeds DLPack address space"))?, &check)?);
+            service_handoff
+                .0
+                .push(crate::dlpack_from_py_for_stream_guarded(
+                    producer,
+                    i64::try_from(consumer_stream)
+                        .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
+                    &check,
+                )?);
         }
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
@@ -6361,9 +8145,14 @@ impl PySemanticTransitionController {
             ));
         }
         let authority_decisions = match import {
-            Some(guard) => guard.original_decisions.as_ref()
-                .ok_or_else(|| invalid("cold replay continuation lacks original native authority decisions"))?
-                .as_ref().to_vec(),
+            Some(guard) => guard
+                .original_decisions
+                .as_ref()
+                .ok_or_else(|| {
+                    invalid("cold replay continuation lacks original native authority decisions")
+                })?
+                .as_ref()
+                .to_vec(),
             None => state.snapshot.canonical.clone(),
         };
         let [text_rows, text_row_count, selected_text, active_rows,
@@ -6371,21 +8160,30 @@ impl PySemanticTransitionController {
                 .into_native().try_into()
                 .unwrap_or_else(|_| unreachable!("exact continuation service producer roster"));
         let input = SemanticContinuationInput {
-                    text_rows,
-                    text_row_count,
-                    selected_text,
-                    active_rows,
-                    active_row_count,
-                    numerical_admissibility,
-                    tensors: tensors.into_native(),
-                    authority_decisions,
-                };
+            text_rows,
+            text_row_count,
+            selected_text,
+            active_rows,
+            active_row_count,
+            numerical_admissibility,
+            tensors: tensors.into_native(),
+            authority_decisions,
+        };
         let result = match parent {
             ContentStepRef::Published(parent) => owner.bind_continuation(
-                &*parent.lease()?, input, &producer_witness.inner, consumer_stream),
+                &*parent.lease()?,
+                input,
+                &producer_witness.inner,
+                consumer_stream,
+            ),
             ContentStepRef::Prepared(step) => owner.bind_prepared_continuation(
-                &step.inner, input, &producer_witness.inner, consumer_stream),
-        }.map_err(xlog_err);
+                &step.inner,
+                input,
+                &producer_witness.inner,
+                consumer_stream,
+            ),
+        }
+        .map_err(xlog_err);
         drop(state);
         drop(owner);
         drop(session);
@@ -6394,8 +8192,11 @@ impl PySemanticTransitionController {
             ContentStepRef::Published(parent) => &parent.continuation_producers,
             ContentStepRef::Prepared(step) => &step.continuation_producers,
         };
-        retained.lock()
-            .map_err(|_| PyRuntimeError::new_err("continuation producer ownership mutex is poisoned"))?
+        retained
+            .lock()
+            .map_err(|_| {
+                PyRuntimeError::new_err("continuation producer ownership mutex is poisoned")
+            })?
             .append(&mut producer_owners.0);
         Ok(())
     }
@@ -6408,43 +8209,61 @@ impl PySemanticTransitionController {
     ) -> PyResult<()> {
         if witness.session.as_ptr() != self.session.as_ptr()
             || !match (parent, &witness.parent) {
-                (ContentStepRef::Published(parent), ContentStepOwner::Published(issued)) =>
-                    std::ptr::eq(&*issued.borrow(py), parent),
-                (ContentStepRef::Prepared(step), ContentStepOwner::Prepared(issued)) =>
-                    std::ptr::eq(&*issued.borrow(py), step),
+                (ContentStepRef::Published(parent), ContentStepOwner::Published(issued)) => {
+                    std::ptr::eq(&*issued.borrow(py), parent)
+                }
+                (ContentStepRef::Prepared(step), ContentStepOwner::Prepared(issued)) => {
+                    std::ptr::eq(&*issued.borrow(py), step)
+                }
                 _ => false,
             }
         {
-            return Err(invalid("continuation producer witness belongs to another Session or published parent"));
+            return Err(invalid(
+                "continuation producer witness belongs to another Session or published parent",
+            ));
         }
         Ok(())
     }
 
     fn continuation_state<'a>(
-        &self, py: Python<'_>, task_use: &'a PySemanticTransitionTaskUse,
-        parent: ContentStepRef<'_>, owner: &SemanticTransitionSession,
+        &self,
+        py: Python<'_>,
+        task_use: &'a PySemanticTransitionTaskUse,
+        parent: ContentStepRef<'_>,
+        owner: &SemanticTransitionSession,
         import: Option<&ColdImportGuard<'_>>,
     ) -> PyResult<MutexGuard<'a, TaskUseState>> {
         match parent {
-            ContentStepRef::Published(parent) => self.execution_state(py, task_use, parent, owner, import),
+            ContentStepRef::Published(parent) => {
+                self.execution_state(py, task_use, parent, owner, import)
+            }
             ContentStepRef::Prepared(step) => {
-                if import.is_some() { return Err(invalid("prepared recording cannot replace replay import")); }
+                if import.is_some() {
+                    return Err(invalid("prepared recording cannot replace replay import"));
+                }
                 self.require_read_issued(task_use)?;
                 step.require_task(py, task_use)?;
                 task_use.require_identity(owner)?;
                 owner.prepared_stream(&step.inner).map_err(xlog_err)?;
                 let state = task_use.state()?;
                 if !matches!(&state.phase, TaskUsePhase::Recording { scope, .. }
-                    if Arc::ptr_eq(scope, &step.scope)) {
-                    return Err(invalid("continuation requires this step's original recording"));
+                    if Arc::ptr_eq(scope, &step.scope))
+                {
+                    return Err(invalid(
+                        "continuation requires this step's original recording",
+                    ));
                 }
                 Ok(state)
             }
         }
     }
 
-    fn continuation_binding(&self, state: &TaskUseState, parent: ContentStepRef<'_>, importing: bool)
-        -> PyResult<(Option<String>, Vec<u8>)> {
+    fn continuation_binding(
+        &self,
+        state: &TaskUseState,
+        parent: ContentStepRef<'_>,
+        importing: bool,
+    ) -> PyResult<(Option<String>, Vec<u8>)> {
         match parent {
             ContentStepRef::Published(_) => Self::execution_binding(state, importing)
                 .map(|(operation, snapshot)| (Some(operation), snapshot)),
@@ -6471,16 +8290,23 @@ impl PySemanticTransitionController {
         self.require_issued(&issued)?;
         original.require_task(py, &issued)?;
         issued.require_current(&owner)?;
-        owner.require_prepared_policy_invocation(&original.inner, rng).map_err(xlog_err)?;
+        owner
+            .require_prepared_policy_invocation(&original.inner, rng)
+            .map_err(xlog_err)?;
         let state = issued.state()?;
         state.require_public_use()?;
         let (operation, _) = state.prepared_content_binding(&original.scope)?;
         if operation.as_deref() != Some(if training { "training" } else { "inference" }) {
-            return Err(invalid("prepared policy result changed its admitted operation"));
+            return Err(invalid(
+                "prepared policy result changed its admitted operation",
+            ));
         }
-        let mut retained = original.policy_inputs.lock()
+        let mut retained = original
+            .policy_inputs
+            .lock()
             .map_err(|_| invalid("prepared policy producer owner is poisoned"))?;
-        let inputs = retained.as_mut()
+        let inputs = retained
+            .as_mut()
             .ok_or_else(|| invalid("prepared policy has no original numerical producers"))?;
         let (model_output, packed) = inputs.issue_originals(py)?;
         drop(retained);
@@ -6553,7 +8379,11 @@ impl PySemanticTransitionController {
             let owner = session.owner()?;
             let state = self.execution_state(py, &issued, &acquired, &owner, import)?;
             if Self::execution_binding(&state, import.is_some())? != expected
-                || owner.continuation_rng(&*acquired.lease()?).map_err(xlog_err)? != rng {
+                || owner
+                    .continuation_rng(&*acquired.lease()?)
+                    .map_err(xlog_err)?
+                    != rng
+            {
                 return Err(invalid("policy invocation changed during producer handoff"));
             }
             Ok(())
@@ -6563,7 +8393,11 @@ impl PySemanticTransitionController {
         }
         let mut handoff = TensorHandoff(Vec::with_capacity(3));
         for input in &inputs {
-            handoff.0.push(crate::dlpack_from_py_for_stream_guarded(input.bind(py), 1, &check)?);
+            handoff.0.push(crate::dlpack_from_py_for_stream_guarded(
+                input.bind(py),
+                1,
+                &check,
+            )?);
         }
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
@@ -6617,13 +8451,20 @@ impl PySemanticTransitionController {
             .map_err(xlog_err)?;
         owner.capture().map_err(xlog_err)?;
         owner.launch().map_err(xlog_err)?;
-        Ok(owner.observe(rng.proposal).map_err(xlog_err)?
-            .into_published().map_err(xlog_err)?.next_proposal)
+        Ok(owner
+            .observe(rng.proposal)
+            .map_err(xlog_err)?
+            .into_published()
+            .map_err(xlog_err)?
+            .next_proposal)
     }
 }
 
-
-fn finish_with_cleanup<T>(py: Python<'_>, result: PyResult<T>, cleanup: PyResult<()>) -> PyResult<T> {
+fn finish_with_cleanup<T>(
+    py: Python<'_>,
+    result: PyResult<T>,
+    cleanup: PyResult<()>,
+) -> PyResult<T> {
     match (result, cleanup) {
         (Err(error), Err(cleanup_error)) => {
             // Retain the original cause order, then append each distinct cleanup
@@ -6775,9 +8616,9 @@ fn parse_admission(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_admission, parse_text_slots, AuthoritySnapshot, ColdValue, FeedbackSchema,
-        PredicateInput, RecordInput, SupportInput, TaskAuthority, TaskUsePhase, TaskUseState,
-        object_sequence, read_replay_rows, select_replay_row, ReplayBasis, ReplayRow,
+        object_sequence, parse_admission, parse_text_slots, read_replay_rows, select_replay_row,
+        AuthoritySnapshot, ColdValue, FeedbackSchema, PredicateInput, RecordInput, ReplayBasis,
+        ReplayRow, SupportInput, TaskAuthority, TaskUsePhase, TaskUseState,
     };
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyTuple};
@@ -6791,8 +8632,16 @@ mod tests {
             let arguments = py.eval(c"((9,4),(8,3),'pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2).',(1,0),(5,4,3,2,1,0),(15,7))", None, None).unwrap();
             let arguments = arguments.cast::<PyTuple>().unwrap();
             let fields = arguments.iter().collect::<Vec<_>>();
-            let spec = super::read_task_evaluation_spec(&fields[0], &fields[1], &fields[2],
-                &fields[3], &fields[4], &fields[5], &mut (16 * 1024 * 1024)).unwrap();
+            let spec = super::read_task_evaluation_spec(
+                &fields[0],
+                &fields[1],
+                &fields[2],
+                &fields[3],
+                &fields[4],
+                &fields[5],
+                &mut (16 * 1024 * 1024),
+            )
+            .unwrap();
             assert_eq!(spec.statement_records, [9, 4]);
             assert_eq!(spec.allowed_support_records, [8, 3]);
             assert_eq!(spec.admissible_truth_masks, [15, 7]);
@@ -6834,11 +8683,25 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let modes = PyTuple::new(py, ["proposal", "recompute", "proposal"]).unwrap();
-            assert_eq!(super::prepared_transitions(modes.as_any()).unwrap().collect::<Vec<_>>(),
-                [SemanticTransitionKind::Proposal, SemanticTransitionKind::Recompute,
-                    SemanticTransitionKind::Proposal]);
-            for expression in ["()", "('drain',)", "('proposal', True)", "('update',)",
-                "['proposal']", "3", "type('Schedule', (tuple,), {})(('proposal',))"] {
+            assert_eq!(
+                super::prepared_transitions(modes.as_any())
+                    .unwrap()
+                    .collect::<Vec<_>>(),
+                [
+                    SemanticTransitionKind::Proposal,
+                    SemanticTransitionKind::Recompute,
+                    SemanticTransitionKind::Proposal
+                ]
+            );
+            for expression in [
+                "()",
+                "('drain',)",
+                "('proposal', True)",
+                "('update',)",
+                "['proposal']",
+                "3",
+                "type('Schedule', (tuple,), {})(('proposal',))",
+            ] {
                 let expression = CString::new(expression).unwrap();
                 let value = py.eval(&expression, None, None).unwrap();
                 assert!(super::prepared_transitions(&value).is_err());
@@ -6850,7 +8713,10 @@ mod tests {
     fn cold_segment_build_does_not_admit_execution_or_allow_scope_substitution() {
         let (inputs, snapshot) = task_inputs("");
         let authority = TaskAuthority::parse(&inputs).unwrap();
-        let mut state = TaskUseState { phase: TaskUsePhase::Imported, snapshot: snapshot.clone() };
+        let mut state = TaskUseState {
+            phase: TaskUsePhase::Imported,
+            snapshot: snapshot.clone(),
+        };
         let scope = state.begin_build().unwrap();
         let foreign = std::sync::Arc::new(());
         assert!(state.require_public_use().is_err());
@@ -6859,13 +8725,19 @@ mod tests {
         assert!(state.prepared_content_binding(&scope).is_ok());
         assert!(state.prepared_content_binding(&foreign).is_err());
         assert!(state.finish_build(&foreign).is_err());
-        assert!(state.admit_segment(&authority, "inference".into(), snapshot.clone()).is_err());
+        assert!(state
+            .admit_segment(&authority, "inference".into(), snapshot.clone())
+            .is_err());
         state.finish_build(&scope).unwrap();
         assert!(state.finish_build(&scope).is_err());
         assert!(state.require_public_use().is_err());
-        assert!(state.admit_built_segment(&foreign, &authority, "inference".into(), snapshot.clone()).is_err());
+        assert!(state
+            .admit_built_segment(&foreign, &authority, "inference".into(), snapshot.clone())
+            .is_err());
         // Even the authentic completed recording cannot reuse the import snapshot.
-        assert!(state.admit_built_segment(&scope, &authority, "inference".into(), snapshot).is_err());
+        assert!(state
+            .admit_built_segment(&scope, &authority, "inference".into(), snapshot)
+            .is_err());
         assert!(matches!(state.phase, TaskUsePhase::Refused));
         assert!(state.prepared_content_binding(&scope).is_err());
     }
@@ -6875,22 +8747,32 @@ mod tests {
         let (_, snapshot) = task_inputs("");
         for refuse in [false, true] {
             let state = std::sync::Mutex::new(TaskUseState {
-                phase: TaskUsePhase::Imported, snapshot: snapshot.clone(),
+                phase: TaskUsePhase::Imported,
+                snapshot: snapshot.clone(),
             });
             let scope = state.lock().unwrap().begin_build().unwrap();
-            let expected = state.lock().unwrap().prepared_content_binding(&scope).unwrap();
+            let expected = state
+                .lock()
+                .unwrap()
+                .prepared_content_binding(&scope)
+                .unwrap();
             let result = super::recording_callback(
                 || {
                     let binding = state.lock().unwrap().prepared_content_binding(&scope)?;
-                    if binding != expected { return Err(super::invalid("recording changed")); }
+                    if binding != expected {
+                        return Err(super::invalid("recording changed"));
+                    }
                     Ok(())
                 },
                 || {
                     // The real callback boundary permits reentry: no state lock
                     // may span the callback, and its result cannot hide mutation.
                     let mut state = state.try_lock().expect("callback ran under state lock");
-                    if refuse { state.phase = TaskUsePhase::Refused; }
-                    else { state.snapshot.canonical.push(0); }
+                    if refuse {
+                        state.phase = TaskUsePhase::Refused;
+                    } else {
+                        state.snapshot.canonical.push(0);
+                    }
                     Ok(())
                 },
             );
@@ -6907,18 +8789,32 @@ mod tests {
             let original = locals.get_item("scope").unwrap().unwrap();
             let mut scope = super::PreparedMemoryScope::new(py, &original, &|| Ok(())).unwrap();
             let checks = std::cell::Cell::new(0);
-            let result = super::recording_callback(|| {
-                checks.set(checks.get() + 1);
-                if checks.get() > 1 { Err(super::invalid("authority refused during pool entry")) } else { Ok(()) }
-            }, || {
-                original.call_method0("__enter__")?;
-                scope.entered = true;
-                Ok(())
-            });
+            let result = super::recording_callback(
+                || {
+                    checks.set(checks.get() + 1);
+                    if checks.get() > 1 {
+                        Err(super::invalid("authority refused during pool entry"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    original.call_method0("__enter__")?;
+                    scope.entered = true;
+                    Ok(())
+                },
+            );
             assert!(result.is_err());
             drop(scope);
-            assert_eq!(locals.get_item("events").unwrap().unwrap().extract::<Vec<String>>().unwrap(),
-                ["enter", "exit"]);
+            assert_eq!(
+                locals
+                    .get_item("events")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<Vec<String>>()
+                    .unwrap(),
+                ["enter", "exit"]
+            );
         });
     }
 
@@ -6933,8 +8829,15 @@ mod tests {
             original.call_method0("__enter__").unwrap();
             scope.entered = true;
             scope.finish(None).unwrap();
-            assert_eq!(locals.get_item("events").unwrap().unwrap().extract::<Vec<String>>().unwrap(),
-                ["enter", "original"]);
+            assert_eq!(
+                locals
+                    .get_item("events")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<Vec<String>>()
+                    .unwrap(),
+                ["enter", "original"]
+            );
         });
     }
 
@@ -6942,12 +8845,22 @@ mod tests {
     #[test]
     fn segment_completion_preserves_native_refusal_without_a_policy_invocation() {
         use xlog_cuda::{SemanticTransitionOutcome, SemanticTransitionRefusal};
-        let refused = SemanticTransitionOutcome::Refused(
-            SemanticTransitionRefusal::NonFinitePolicyInput { completed_draws: 0 });
-        assert_eq!(super::transition_refusal(&refused), Some(("non_finite_policy_input", 0)));
-        let refused = SemanticTransitionOutcome::Refused(
-            SemanticTransitionRefusal::InvalidFinalSupport { completed_draws: 17 });
-        assert_eq!(super::transition_refusal(&refused), Some(("invalid_final_support", 17)));
+        let refused =
+            SemanticTransitionOutcome::Refused(SemanticTransitionRefusal::NonFinitePolicyInput {
+                completed_draws: 0,
+            });
+        assert_eq!(
+            super::transition_refusal(&refused),
+            Some(("non_finite_policy_input", 0))
+        );
+        let refused =
+            SemanticTransitionOutcome::Refused(SemanticTransitionRefusal::InvalidFinalSupport {
+                completed_draws: 17,
+            });
+        assert_eq!(
+            super::transition_refusal(&refused),
+            Some(("invalid_final_support", 17))
+        );
     }
 
     #[test]
@@ -6959,7 +8872,8 @@ mod tests {
             let payload = locals.get_item("payload").unwrap().unwrap().unbind();
             locals.del_item("payload").unwrap();
             let resources = std::sync::Arc::new(super::PreparedProducerResources {
-                producers: std::sync::Mutex::new(vec![payload]), owner_thread: std::thread::current().id(),
+                producers: std::sync::Mutex::new(vec![payload]),
+                owner_thread: std::thread::current().id(),
             });
             let recorded_owner = std::sync::Arc::clone(&resources);
             drop(resources);
@@ -6969,7 +8883,15 @@ mod tests {
             assert!(!reference.call0().unwrap().is_none());
             super::drain_export_owners();
             assert!(reference.call0().unwrap().is_none());
-            assert_eq!(locals.get_item("events").unwrap().unwrap().extract::<Vec<String>>().unwrap(), ["released"]);
+            assert_eq!(
+                locals
+                    .get_item("events")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<Vec<String>>()
+                    .unwrap(),
+                ["released"]
+            );
         });
     }
 
@@ -6980,9 +8902,18 @@ mod tests {
             let globals = PyDict::new(py);
             py.run(c"class Producer:\n def __dlpack_device__(self): return (2,0)\n def __dlpack__(self, *, stream):\n  self.seen_stream = stream\n  return None\nproducer = Producer()", Some(&globals), None).unwrap();
             let producer = globals.get_item("producer").unwrap().unwrap();
-            let error = crate::dlpack_from_py_for_stream(&producer, 73).err().unwrap();
+            let error = crate::dlpack_from_py_for_stream(&producer, 73)
+                .err()
+                .unwrap();
             assert!(error.to_string().contains("Invalid DLPack capsule"));
-            assert_eq!(producer.getattr("seen_stream").unwrap().extract::<u64>().unwrap(), 73);
+            assert_eq!(
+                producer
+                    .getattr("seen_stream")
+                    .unwrap()
+                    .extract::<u64>()
+                    .unwrap(),
+                73
+            );
         });
     }
 
@@ -6991,7 +8922,8 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let globals = PyDict::new(py);
-            py.run(cr#"
+            py.run(
+                cr#"
 from enum import IntEnum
 class DeviceKind(IntEnum):
     CUDA = 2
@@ -7009,21 +8941,42 @@ class Producer:
         raise AssertionError('capsule consumed by device preflight')
 producer = Producer()
 device = (DeviceKind.CUDA, 0)
-"#, Some(&globals), None).unwrap();
+"#,
+                Some(&globals),
+                None,
+            )
+            .unwrap();
             let producer = globals.get_item("producer").unwrap().unwrap();
             let device = globals.get_item("device").unwrap().unwrap();
             assert!(ColdValue::read(&device, &mut 128, 0).is_err());
             super::validate_producer_device_guarded(&producer, 0, &|| Ok(())).unwrap();
             super::validate_continuation_producer(&producer, 0).unwrap();
             assert!(super::validate_producer_device_guarded(&producer, 1, &|| Ok(())).is_err());
-            assert_eq!(globals.get_item("calls").unwrap().unwrap()
-                .extract::<Vec<String>>().unwrap(), ["device", "device", "device"]);
-            for expression in ["(DeviceKind.CPU, 0)", "(DeviceKind.CUDA, -1)",
-                "(DeviceKind.CUDA, False)", "(DeviceKind.CUDA, 1 << 31)",
-                "[DeviceKind.CUDA, 0]", "(True, 0)"] {
-                let device = py.eval(&CString::new(expression).unwrap(), Some(&globals), None).unwrap();
+            assert_eq!(
+                globals
+                    .get_item("calls")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<Vec<String>>()
+                    .unwrap(),
+                ["device", "device", "device"]
+            );
+            for expression in [
+                "(DeviceKind.CPU, 0)",
+                "(DeviceKind.CUDA, -1)",
+                "(DeviceKind.CUDA, False)",
+                "(DeviceKind.CUDA, 1 << 31)",
+                "[DeviceKind.CUDA, 0]",
+                "(True, 0)",
+            ] {
+                let device = py
+                    .eval(&CString::new(expression).unwrap(), Some(&globals), None)
+                    .unwrap();
                 globals.set_item("device", device).unwrap();
-                assert!(super::validate_producer_device_guarded(&producer, 0, &|| Ok(())).is_err(), "{expression}");
+                assert!(
+                    super::validate_producer_device_guarded(&producer, 0, &|| Ok(())).is_err(),
+                    "{expression}"
+                );
             }
         });
     }
@@ -7033,7 +8986,8 @@ device = (DeviceKind.CUDA, 0)
         Python::initialize();
         Python::attach(|py| {
             let globals = PyDict::new(py);
-            py.run(cr#"
+            py.run(
+                cr#"
 from enum import IntEnum
 class DeviceKind(IntEnum):
     CUDA = 2
@@ -7053,17 +9007,32 @@ class Producer:
         calls.append('export')
         return None
 producer = Producer()
-"#, Some(&globals), None).unwrap();
+"#,
+                Some(&globals),
+                None,
+            )
+            .unwrap();
             let producer = globals.get_item("producer").unwrap().unwrap();
             let check = || {
                 if globals.get_item("refused")?.unwrap().extract::<bool>()? {
                     Err(super::invalid("original producer authority was refused"))
-                } else { Ok(()) }
+                } else {
+                    Ok(())
+                }
             };
             let error = super::validate_producer_device_guarded(&producer, 0, &check).unwrap_err();
-            assert!(error.to_string().contains("original producer authority was refused"));
-            assert_eq!(globals.get_item("calls").unwrap().unwrap()
-                .extract::<Vec<String>>().unwrap(), ["device"]);
+            assert!(error
+                .to_string()
+                .contains("original producer authority was refused"));
+            assert_eq!(
+                globals
+                    .get_item("calls")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<Vec<String>>()
+                    .unwrap(),
+                ["device"]
+            );
         });
     }
 
@@ -7073,9 +9042,21 @@ producer = Producer()
         Python::attach(|py| {
             let globals = PyDict::new(py);
             py.run(c"class ForeignProducer:\n    def __init__(self, device):\n        self.device = device\n    def __dlpack_device__(self):\n        return self.device\n    def __dlpack__(self, **kwargs):\n        raise AssertionError('capsule consumed before CUDA producer validation')\nclass MissingDevice:\n    def __dlpack__(self, **kwargs):\n        raise AssertionError('capsule consumed without device declaration')", Some(&globals), None).unwrap();
-            for expression in ["None", "()", "1", "MissingDevice()", "ForeignProducer((1, 0))", "ForeignProducer((2, 1))"] {
-                let value = py.eval(&CString::new(expression).unwrap(), Some(&globals), None).unwrap();
-                assert!(super::validate_continuation_producer(&value, 0).is_err(), "{expression}");
+            for expression in [
+                "None",
+                "()",
+                "1",
+                "MissingDevice()",
+                "ForeignProducer((1, 0))",
+                "ForeignProducer((2, 1))",
+            ] {
+                let value = py
+                    .eval(&CString::new(expression).unwrap(), Some(&globals), None)
+                    .unwrap();
+                assert!(
+                    super::validate_continuation_producer(&value, 0).is_err(),
+                    "{expression}"
+                );
             }
         });
     }
@@ -7084,13 +9065,37 @@ producer = Producer()
     fn tensor_layout_transport_preserves_all_scalar_codes_and_coordinates() {
         Python::initialize();
         Python::attach(|py| {
-            for (scalar, width) in [(1, 1), (2, 4), (3, 8), (4, 2), (5, 2), (6, 4), (7, 8), (8, 1)] {
-                let expression = format!("(4, 11, {width}, {scalar}, 3, 1, (2, 3, 5, 0), ({}, {}, {width}, 0))", 15 * width, 5 * width);
-                let value = py.eval(&CString::new(expression).unwrap(), None, None).unwrap();
+            for (scalar, width) in [
+                (1, 1),
+                (2, 4),
+                (3, 8),
+                (4, 2),
+                (5, 2),
+                (6, 4),
+                (7, 8),
+                (8, 1),
+            ] {
+                let expression = format!(
+                    "(4, 11, {width}, {scalar}, 3, 1, (2, 3, 5, 0), ({}, {}, {width}, 0))",
+                    15 * width,
+                    5 * width
+                );
+                let value = py
+                    .eval(&CString::new(expression).unwrap(), None, None)
+                    .unwrap();
                 let cold = ColdValue::read(&value, &mut 4096, 0).unwrap();
                 let layout = super::parse_tensor_layout(&cold).unwrap();
-                assert_eq!((layout.role, layout.index, layout.element_bytes, layout.scalar_type, layout.rank, layout.logical_axis),
-                    (4, 11, width, scalar, 3, 1));
+                assert_eq!(
+                    (
+                        layout.role,
+                        layout.index,
+                        layout.element_bytes,
+                        layout.scalar_type,
+                        layout.rank,
+                        layout.logical_axis
+                    ),
+                    (4, 11, width, scalar, 3, 1)
+                );
                 assert_eq!(layout.dimensions, [2, 3, 5, 0]);
                 assert_eq!(layout.strides_bytes, [15 * width, 5 * width, width, 0]);
             }
@@ -7099,9 +9104,15 @@ producer = Producer()
                 "(4, -1, 8, 7, 1, 0, (2, 0, 0, 0), (8, 0, 0, 0))",
                 "(4, 0, 8, 7, 1, 0, (2, 0, 0), (8, 0, 0, 0))",
             ] {
-                let value = py.eval(&CString::new(expression).unwrap(), None, None).unwrap();
-                assert!(ColdValue::read(&value, &mut 4096, 0)
-                    .and_then(|cold| super::parse_tensor_layout(&cold)).is_err(), "{expression}");
+                let value = py
+                    .eval(&CString::new(expression).unwrap(), None, None)
+                    .unwrap();
+                assert!(
+                    ColdValue::read(&value, &mut 4096, 0)
+                        .and_then(|cold| super::parse_tensor_layout(&cold))
+                        .is_err(),
+                    "{expression}"
+                );
             }
         });
     }
@@ -7117,12 +9128,17 @@ producer = Producer()
                 "((layout, 0, 2, p, None), (layout, 0, 2, p))",
                 "((layout, 0, 2, p, None), (layout, True, 2, p, None))",
             ] {
-                let value = py.eval(&CString::new(expression).unwrap(), Some(&globals), None).unwrap();
+                let value = py
+                    .eval(&CString::new(expression).unwrap(), Some(&globals), None)
+                    .unwrap();
                 let error = match super::parse_tensor_inputs(&value, &mut 4096, 0) {
                     Ok(_) => panic!("accepted malformed tensor input: {expression}"),
                     Err(error) => error,
                 };
-                assert!(error.is_instance_of::<pyo3::exceptions::PyValueError>(py), "{error}");
+                assert!(
+                    error.is_instance_of::<pyo3::exceptions::PyValueError>(py),
+                    "{error}"
+                );
             }
         });
     }
@@ -7131,21 +9147,41 @@ producer = Producer()
     fn content_guard_ranges_preserve_exact_roles_and_reject_coercion() {
         Python::initialize();
         Python::attach(|py| {
-            let value = py.eval(c"((1, 0), (4, 18446744073709551615))", None, None).unwrap();
+            let value = py
+                .eval(c"((1, 0), (4, 18446744073709551615))", None, None)
+                .unwrap();
             let cold = ColdValue::read(&value, &mut 4096, 0).unwrap();
             let ranges = super::parse_content_ranges(&cold).unwrap();
-            assert_eq!(ranges, vec![
-                (xlog_cuda::SemanticStateRole::from_code(1).unwrap(), 0),
-                (xlog_cuda::SemanticStateRole::from_code(4).unwrap(), u64::MAX),
-            ]);
+            assert_eq!(
+                ranges,
+                vec![
+                    (xlog_cuda::SemanticStateRole::from_code(1).unwrap(), 0),
+                    (
+                        xlog_cuda::SemanticStateRole::from_code(4).unwrap(),
+                        u64::MAX
+                    ),
+                ]
+            );
             for expression in [
-                "()", "((1, 0), (1, 0))", "((0, 0),)", "((999, 0),)",
-                "((True, 0),)", "((1, False),)", "((1, -1),)",
-                "((1, 18446744073709551616),)", "((1, 0, 0),)",
+                "()",
+                "((1, 0), (1, 0))",
+                "((0, 0),)",
+                "((999, 0),)",
+                "((True, 0),)",
+                "((1, False),)",
+                "((1, -1),)",
+                "((1, 18446744073709551616),)",
+                "((1, 0, 0),)",
             ] {
-                let value = py.eval(&CString::new(expression).unwrap(), None, None).unwrap();
-                assert!(ColdValue::read(&value, &mut 4096, 0)
-                    .and_then(|cold| super::parse_content_ranges(&cold)).is_err(), "{expression}");
+                let value = py
+                    .eval(&CString::new(expression).unwrap(), None, None)
+                    .unwrap();
+                assert!(
+                    ColdValue::read(&value, &mut 4096, 0)
+                        .and_then(|cold| super::parse_content_ranges(&cold))
+                        .is_err(),
+                    "{expression}"
+                );
             }
         });
     }
@@ -7164,7 +9200,9 @@ producer = Producer()
     fn initial_source_ledger_cannot_be_supplied_as_private_record_bytes() {
         Python::initialize();
         Python::attach(|py| {
-            let records = py.eval(c"[(2, 0, 4096, b'caller-authored-origin')]", None, None).unwrap();
+            let records = py
+                .eval(c"[(2, 0, 4096, b'caller-authored-origin')]", None, None)
+                .unwrap();
             assert!(super::parse_state_records(&records, &mut 4096).is_err());
         });
     }
@@ -7175,11 +9213,15 @@ producer = Producer()
         Python::attach(|py| {
             for expression in [c"[(3, 0, 32, bytes(32))]", c"[(3, 0, 64, b'x' * 32)]"] {
                 let records = py.eval(expression, None, None).unwrap();
-                assert!(super::parse_state_records(&records, &mut 4096).is_err(),
-                    "fresh prefix identity belongs to the native prefix source owner");
+                assert!(
+                    super::parse_state_records(&records, &mut 4096).is_err(),
+                    "fresh prefix identity belongs to the native prefix source owner"
+                );
             }
             let records = py.eval(c"[]", None, None).unwrap();
-            assert!(super::parse_state_records(&records, &mut 4096).unwrap().is_empty());
+            assert!(super::parse_state_records(&records, &mut 4096)
+                .unwrap()
+                .is_empty());
         });
     }
 
@@ -7187,9 +9229,13 @@ producer = Producer()
     fn runtime_contract_cannot_be_supplied_as_caller_record() {
         Python::initialize();
         Python::attach(|py| {
-            let records = py.eval(c"[(43, 0, 4096, b'caller-runtime-contract')]", None, None).unwrap();
-            assert!(super::parse_state_records(&records, &mut 4096).is_err(),
-                "the complete runtime contract belongs to the native publication owner");
+            let records = py
+                .eval(c"[(43, 0, 4096, b'caller-runtime-contract')]", None, None)
+                .unwrap();
+            assert!(
+                super::parse_state_records(&records, &mut 4096).is_err(),
+                "the complete runtime contract belongs to the native publication owner"
+            );
         });
     }
 
@@ -7230,13 +9276,33 @@ producer = Producer()
             let capsule = crate::dlpack_export_for_stream(&original, None).unwrap();
             globals.set_item("capsule", capsule).unwrap();
             py.run(c"alias = torch.utils.dlpack.from_dlpack(capsule)\nassert alias.data_ptr() == y.data_ptr()\nassert alias.dtype == y.dtype and alias.shape == y.shape and alias.stride() == y.stride()\nassert y.requires_grad and not y.is_leaf and y.grad_fn is original_fn\ny.backward(torch.tensor([1., 2., 3.]))\nassert torch.equal(x.grad, torch.tensor([0., 4., 12.]))", Some(&globals), None).unwrap();
-            py.run(c"x.grad = None\nempty = x.square()[:0]\nempty_fn = empty.grad_fn", Some(&globals), None).unwrap();
+            py.run(
+                c"x.grad = None\nempty = x.square()[:0]\nempty_fn = empty.grad_fn",
+                Some(&globals),
+                None,
+            )
+            .unwrap();
             let empty = globals.get_item("empty").unwrap().unwrap();
-            globals.set_item("empty_capsule", crate::dlpack_export_for_stream(&empty, None).unwrap()).unwrap();
+            globals
+                .set_item(
+                    "empty_capsule",
+                    crate::dlpack_export_for_stream(&empty, None).unwrap(),
+                )
+                .unwrap();
             py.run(c"empty_alias = torch.utils.dlpack.from_dlpack(empty_capsule)\nassert empty_alias.shape == (0,) and empty_alias.numel() == 0\nassert empty.requires_grad and empty.grad_fn is empty_fn\nempty.backward(torch.empty(0))\nassert torch.equal(x.grad, torch.zeros(3))", Some(&globals), None).unwrap();
-            py.run(c"x.grad = None\nscalar = x.square().sum()\nscalar_fn = scalar.grad_fn", Some(&globals), None).unwrap();
+            py.run(
+                c"x.grad = None\nscalar = x.square().sum()\nscalar_fn = scalar.grad_fn",
+                Some(&globals),
+                None,
+            )
+            .unwrap();
             let scalar = globals.get_item("scalar").unwrap().unwrap();
-            globals.set_item("scalar_capsule", crate::dlpack_export_for_stream(&scalar, None).unwrap()).unwrap();
+            globals
+                .set_item(
+                    "scalar_capsule",
+                    crate::dlpack_export_for_stream(&scalar, None).unwrap(),
+                )
+                .unwrap();
             py.run(c"scalar_alias = torch.utils.dlpack.from_dlpack(scalar_capsule)\nassert scalar_alias.shape == () and scalar_alias.stride() == ()\nassert scalar_alias.numel() == 1 and scalar_alias.data_ptr() == scalar.data_ptr()\nassert scalar_alias.dtype == scalar.dtype\nassert scalar.requires_grad and not scalar.is_leaf and scalar.grad_fn is scalar_fn\nscalar.backward()\nassert torch.equal(x.grad, torch.tensor([0., 2., 4.]))", Some(&globals), None).unwrap();
         });
     }
@@ -7327,37 +9393,60 @@ snapshot = (0, ('1970-01-01T00:00:01Z', 1_000_000),
             )
             .unwrap();
             let mut budget = 16 * 1024 * 1024;
-            let inputs = object_sequence(&globals.get_item("inputs").unwrap().unwrap(), &mut budget).unwrap();
-            let inputs = inputs.iter().enumerate().map(|(index, value)| if index == 3 {
-                read_replay_rows(value, &mut budget, 1 << 20, 1 << 20, 1024)
-            } else { ColdValue::read(value, &mut budget, 0) }).collect::<PyResult<Vec<_>>>().unwrap();
+            let inputs =
+                object_sequence(&globals.get_item("inputs").unwrap().unwrap(), &mut budget)
+                    .unwrap();
+            let inputs = inputs
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    if index == 3 {
+                        read_replay_rows(value, &mut budget, 1 << 20, 1 << 20, 1024)
+                    } else {
+                        ColdValue::read(value, &mut budget, 0)
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()
+                .unwrap();
             let snapshot = ColdValue::read(
                 &globals.get_item("snapshot").unwrap().unwrap(),
                 &mut budget,
                 0,
             )
             .unwrap();
-            (
-                inputs,
-                AuthoritySnapshot::parse(&snapshot).unwrap(),
-            )
+            (inputs, AuthoritySnapshot::parse(&snapshot).unwrap())
         })
     }
 
-    fn replay_transport(change: &str, material_limit: usize, evidence_limit: usize) -> PyResult<ColdValue> {
+    fn replay_transport(
+        change: &str,
+        material_limit: usize,
+        evidence_limit: usize,
+    ) -> PyResult<ColdValue> {
         Python::initialize();
         Python::attach(|py| {
             let globals = PyDict::new(py);
-            py.run(&CString::new(format!("{TASK_INPUT}\nrow = list(replay[0])\n{change}")).unwrap(), Some(&globals), None)?;
+            py.run(
+                &CString::new(format!("{TASK_INPUT}\nrow = list(replay[0])\n{change}")).unwrap(),
+                Some(&globals),
+                None,
+            )?;
             let row = globals.get_item("row")?.unwrap();
             let rows = PyTuple::new(py, [row])?;
-            read_replay_rows(rows.as_any(), &mut (16 * 1024 * 1024), material_limit, 1 << 20, evidence_limit)
+            read_replay_rows(
+                rows.as_any(),
+                &mut (16 * 1024 * 1024),
+                material_limit,
+                1 << 20,
+                evidence_limit,
+            )
         })
     }
 
     #[test]
     fn replay_carrier_preserves_uninterpreted_metadata_with_original_training_identity() {
-        let rows = replay_transport(r#"
+        let rows = replay_transport(
+            r#"
 episode = json.loads(row[2])
 episode['application_metadata'] = dict(resource='edge', labels=['observed', 'reviewed'])
 episode.pop('content_sha256')
@@ -7366,11 +9455,18 @@ digest = hashlib.sha256(canonical(episode).encode()).hexdigest()
 episode['content_sha256'] = digest
 row[1] = (*row[1][:2], digest, *row[1][3:])
 row[2] = canonical(episode)
-"#, 1 << 20, 1024).unwrap();
+"#,
+            1 << 20,
+            1024,
+        )
+        .unwrap();
         let row = ReplayRow::parse(&rows.sequence().unwrap()[0]).unwrap();
         assert!(row.record.contains_key("application_metadata"));
         assert!(!row.record.contains_key("replay_identity"));
-        assert!(row.native_replay().is_err(), "carrier integrity must not issue native replay authority");
+        assert!(
+            row.native_replay().is_err(),
+            "carrier integrity must not issue native replay authority"
+        );
     }
 
     #[test]
@@ -7384,13 +9480,17 @@ row[2] = canonical(episode)
         ] {
             let change = format!("identity = list(row[1])\n{mutation}\nrow[1] = tuple(identity)");
             let rows = replay_transport(&change, 1 << 20, 1024).unwrap();
-            assert!(ReplayRow::parse(&rows.sequence().unwrap()[0]).is_err(), "{mutation}");
+            assert!(
+                ReplayRow::parse(&rows.sequence().unwrap()[0]).is_err(),
+                "{mutation}"
+            );
         }
     }
 
     #[test]
     fn replay_identity_cannot_detach_from_the_record_projection() {
-        let rows = replay_transport(r#"
+        let rows = replay_transport(
+            r#"
 episode = json.loads(row[2])
 episode['training_view']['mask_policy_hash'] = '9'*64
 episode.pop('content_sha256')
@@ -7399,9 +9499,15 @@ digest = hashlib.sha256(canonical(episode).encode()).hexdigest()
 episode['content_sha256'] = digest
 row[1] = (*row[1][:2], digest, *row[1][3:])
 row[2] = canonical(episode)
-"#, 1 << 20, 1024).unwrap();
+"#,
+            1 << 20,
+            1024,
+        )
+        .unwrap();
         let error = ReplayRow::parse(&rows.sequence().unwrap()[0]).unwrap_err();
-        assert!(error.to_string().contains("training identity differs from its original record projection"));
+        assert!(error
+            .to_string()
+            .contains("training identity differs from its original record projection"));
     }
 
     #[test]
@@ -7413,7 +9519,9 @@ row[2] = canonical(episode)
                 Ok(_) => panic!("accepted inadmissible replay usage {usage}"),
                 Err(error) => error,
             };
-            assert!(error.to_string().contains("replay training identity names another example or a sealed partition"));
+            assert!(error
+                .to_string()
+                .contains("replay training identity names another example or a sealed partition"));
         }
     }
 
@@ -7422,14 +9530,29 @@ row[2] = canonical(episode)
         let rows = replay_transport("", 1 << 20, 1024).unwrap();
         let row = ReplayRow::parse(&rows.sequence().unwrap()[0]).unwrap();
         assert_eq!(row.evidence.as_ref(), b"carrier-evidence");
-        assert_eq!(row.identity.fields(6).unwrap()[0].fields(9).unwrap()[6],
-            ColdValue::Integer("1267650600228229401496703205376".into()));
+        assert_eq!(
+            row.identity.fields(6).unwrap()[0].fields(9).unwrap()[6],
+            ColdValue::Integer("1267650600228229401496703205376".into())
+        );
         assert!(row.record_line.contains("\\ud83d\\ude00"));
         assert_eq!(row.record.len(), 8);
-        let ReplayBasis::Episode { execution } = &row.basis else { panic!("episode basis expected") };
-        assert_eq!(execution["materials"].as_array().unwrap().len(), row.materials.len());
-        assert!(row.materials.iter().any(|item| item.reconstruction.is_some() && item.bytes.is_none()));
-        assert!(row.materials.iter().filter(|item| item.kind != "training-view").filter_map(|item| item.bytes.as_ref()).all(|bytes| bytes.starts_with(b"carrier:")));
+        let ReplayBasis::Episode { execution } = &row.basis else {
+            panic!("episode basis expected")
+        };
+        assert_eq!(
+            execution["materials"].as_array().unwrap().len(),
+            row.materials.len()
+        );
+        assert!(row
+            .materials
+            .iter()
+            .any(|item| item.reconstruction.is_some() && item.bytes.is_none()));
+        assert!(row
+            .materials
+            .iter()
+            .filter(|item| item.kind != "training-view")
+            .filter_map(|item| item.bytes.as_ref())
+            .all(|bytes| bytes.starts_with(b"carrier:")));
     }
 
     #[test]
@@ -7469,8 +9592,15 @@ row[2] = canonical(episode)
             "class Custom(dict):\n def __getitem__(self, key): raise AssertionError('custom callback ran')\nref, payload = row[3][0]; row[3] = ((Custom(ref), payload), *row[3][1:])",
             1 << 20, 1024,
         ).unwrap_err();
-        assert!(dictionary.to_string().contains("exact builtin dictionaries"));
-        let bytes = replay_transport("row[4] = type('CustomBytes', (bytes,), {})(row[4])", 1 << 20, 1024).unwrap_err();
+        assert!(dictionary
+            .to_string()
+            .contains("exact builtin dictionaries"));
+        let bytes = replay_transport(
+            "row[4] = type('CustomBytes', (bytes,), {})(row[4])",
+            1 << 20,
+            1024,
+        )
+        .unwrap_err();
         assert!(bytes.to_string().contains("exact builtin bytes"));
     }
 
@@ -7479,7 +9609,11 @@ row[2] = canonical(episode)
         Python::initialize();
         Python::attach(|py| {
             let rows = PyTuple::empty(py);
-            assert!(read_replay_rows(rows.as_any(), &mut 1, 1, 1, 1).unwrap().sequence().unwrap().is_empty());
+            assert!(read_replay_rows(rows.as_any(), &mut 1, 1, 1, 1)
+                .unwrap()
+                .sequence()
+                .unwrap()
+                .is_empty());
             for caps in [(0, 1, 1), (1, 0, 1), (1, 1, 0)] {
                 assert!(read_replay_rows(rows.as_any(), &mut 1, caps.0, caps.1, caps.2).is_err());
             }
@@ -7491,13 +9625,34 @@ row[2] = canonical(episode)
         Python::initialize();
         Python::attach(|py| {
             let globals = PyDict::new(py);
-            py.run(&CString::new(format!("{TASK_INPUT}\nrows = (replay_fixture(), replay_fixture())")).unwrap(), Some(&globals), None).unwrap();
+            py.run(
+                &CString::new(format!(
+                    "{TASK_INPUT}\nrows = (replay_fixture(), replay_fixture())"
+                ))
+                .unwrap(),
+                Some(&globals),
+                None,
+            )
+            .unwrap();
             let rows = globals.get_item("rows").unwrap().unwrap();
-            let read = |material, total, evidence| read_replay_rows(&rows, &mut (16 * 1024 * 1024), material, total, evidence);
+            let read = |material, total, evidence| {
+                read_replay_rows(&rows, &mut (16 * 1024 * 1024), material, total, evidence)
+            };
             let parsed = read(1 << 20, 1 << 20, 1024).unwrap();
             let row = ReplayRow::parse(&parsed.sequence().unwrap()[0]).unwrap();
-            let material_bytes = row.materials.iter().filter_map(|item| item.bytes.as_ref()).map(|bytes| bytes.len()).sum::<usize>();
-            let maximum = row.materials.iter().filter_map(|item| item.bytes.as_ref()).map(|bytes| bytes.len()).max().unwrap();
+            let material_bytes = row
+                .materials
+                .iter()
+                .filter_map(|item| item.bytes.as_ref())
+                .map(|bytes| bytes.len())
+                .sum::<usize>();
+            let maximum = row
+                .materials
+                .iter()
+                .filter_map(|item| item.bytes.as_ref())
+                .map(|bytes| bytes.len())
+                .max()
+                .unwrap();
             // Both episodes reuse the same blobs; evidence is bounded per row.
             read(maximum, material_bytes, row.evidence.len()).unwrap();
             assert!(read(maximum - 1, material_bytes, row.evidence.len()).is_err());
@@ -7510,8 +9665,15 @@ row[2] = canonical(episode)
     fn replay_caps_bound_each_material_and_evidence_without_double_counting_shared_blobs() {
         let rows = replay_transport("", 1 << 20, 1024).unwrap();
         let row = ReplayRow::parse(&rows.sequence().unwrap()[0]).unwrap();
-        let maximum = row.materials.iter().filter_map(|item| item.bytes.as_ref()).map(|bytes| bytes.len()).max().unwrap();
-        replay_transport("", maximum, row.evidence.len()).expect("per-material cap is not a whole-row sum");
+        let maximum = row
+            .materials
+            .iter()
+            .filter_map(|item| item.bytes.as_ref())
+            .map(|bytes| bytes.len())
+            .max()
+            .unwrap();
+        replay_transport("", maximum, row.evidence.len())
+            .expect("per-material cap is not a whole-row sum");
     }
 
     #[test]
@@ -7519,12 +9681,32 @@ row[2] = canonical(episode)
         Python::initialize();
         Python::attach(|py| {
             let globals = PyDict::new(py);
-            py.run(&CString::new(format!("{TASK_INPUT}\nrows = (replay_fixture(), replay_fixture())")).unwrap(), Some(&globals), None).unwrap();
-            let rows = read_replay_rows(&globals.get_item("rows").unwrap().unwrap(), &mut (16 * 1024 * 1024), 1 << 20, 1 << 20, 1024).unwrap();
+            py.run(
+                &CString::new(format!(
+                    "{TASK_INPUT}\nrows = (replay_fixture(), replay_fixture())"
+                ))
+                .unwrap(),
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+            let rows = read_replay_rows(
+                &globals.get_item("rows").unwrap().unwrap(),
+                &mut (16 * 1024 * 1024),
+                1 << 20,
+                1 << 20,
+                1024,
+            )
+            .unwrap();
             let first = ReplayRow::parse(&rows.sequence().unwrap()[0]).unwrap();
             let second = ReplayRow::parse(&rows.sequence().unwrap()[1]).unwrap();
-            assert!(std::sync::Arc::ptr_eq(first.materials[0].bytes.as_ref().unwrap(), second.materials[0].bytes.as_ref().unwrap()),
-                "one SHA-addressed material was copied once per episode");
+            assert!(
+                std::sync::Arc::ptr_eq(
+                    first.materials[0].bytes.as_ref().unwrap(),
+                    second.materials[0].bytes.as_ref().unwrap()
+                ),
+                "one SHA-addressed material was copied once per episode"
+            );
         });
     }
 
@@ -7536,21 +9718,31 @@ row[2] = canonical(episode)
             py.run(
                 &CString::new(format!(
                     "{TASK_INPUT}\nsource = list(replay[0]); source[1] = list(source[1])"
-                )).unwrap(),
-                Some(&globals), None,
-            ).unwrap();
+                ))
+                .unwrap(),
+                Some(&globals),
+                None,
+            )
+            .unwrap();
             let source = globals.get_item("source").unwrap().unwrap();
             let input = PyTuple::new(py, [&source]).unwrap();
             let retained = read_replay_rows(
-                input.as_any(), &mut (16 * 1024 * 1024), 1 << 20, 1 << 20, 1024,
-            ).unwrap();
+                input.as_any(),
+                &mut (16 * 1024 * 1024),
+                1 << 20,
+                1 << 20,
+                1024,
+            )
+            .unwrap();
             // This is the complete data carrier, not fabricated native evidence.
             // All caller-owned lists and reference dictionaries can now change.
             py.run(c"source[1][0][6] = -1\nsource[2] = 'changed episode'\nsource[3][0][0]['identity'] = 'changed identity'\nnext(ref for ref, _ in source[3] if ref['reconstruction'])['reconstruction']['inputs'].clear()\nsource[4] = b'changed evidence'",
                 Some(&globals), None).unwrap();
             let row = ReplayRow::parse(&retained.sequence().unwrap()[0]).unwrap();
-            assert_eq!(row.identity.fields(6).unwrap()[0].fields(9).unwrap()[6],
-                ColdValue::Integer("1267650600228229401496703205376".into()));
+            assert_eq!(
+                row.identity.fields(6).unwrap()[0].fields(9).unwrap()[6],
+                ColdValue::Integer("1267650600228229401496703205376".into())
+            );
             assert_eq!(row.evidence.as_ref(), b"carrier-evidence");
             assert!(row.record_line.contains("-0.0"));
             assert!(row.record_line.contains("\\ud83d\\ude00"));
@@ -7558,8 +9750,13 @@ row[2] = canonical(episode)
             let exported = row.python_view(py).unwrap();
             let output = PyTuple::new(py, [exported.bind(py)]).unwrap();
             let round_trip = read_replay_rows(
-                output.as_any(), &mut (16 * 1024 * 1024), 1 << 20, 1 << 20, 1024,
-            ).unwrap();
+                output.as_any(),
+                &mut (16 * 1024 * 1024),
+                1 << 20,
+                1 << 20,
+                1024,
+            )
+            .unwrap();
             assert_eq!(round_trip, retained);
             ReplayRow::parse(&round_trip.sequence().unwrap()[0]).unwrap();
 
@@ -7569,8 +9766,13 @@ row[2] = canonical(episode)
             let fresh = row.python_view(py).unwrap();
             let output = PyTuple::new(py, [fresh.bind(py)]).unwrap();
             let after_mutation = read_replay_rows(
-                output.as_any(), &mut (16 * 1024 * 1024), 1 << 20, 1 << 20, 1024,
-            ).unwrap();
+                output.as_any(),
+                &mut (16 * 1024 * 1024),
+                1 << 20,
+                1 << 20,
+                1024,
+            )
+            .unwrap();
             assert_eq!(after_mutation, retained);
             ReplayRow::parse(&after_mutation.sequence().unwrap()[0]).unwrap();
         });
@@ -7586,8 +9788,8 @@ row[2] = canonical(episode)
             let primary_object = primary.value(py).clone();
             let cleanup = PyRuntimeError::new_err("original owner cleanup failure");
             let cleanup_object = cleanup.value(py).clone();
-            let error = super::finish_with_cleanup::<()>(py, Err(primary), Err(cleanup))
-                .unwrap_err();
+            let error =
+                super::finish_with_cleanup::<()>(py, Err(primary), Err(cleanup)).unwrap_err();
             assert!(error.value(py).is(&primary_object));
             assert!(error.is_instance_of::<PyValueError>(py));
             assert!(error.cause(py).unwrap().value(py).is(&cleanup_object));
@@ -7621,14 +9823,15 @@ row[2] = canonical(episode)
             primary.set_cause(py, Some(original_cause));
             successor_cleanup.set_cause(py, Some(successor_cause));
 
-            let comparison = super::finish_with_cleanup::<()>(
-                py, Err(primary), Err(successor_cleanup),
-            );
-            let error = super::finish_with_cleanup(py, comparison, Err(predecessor_cleanup))
-                .unwrap_err();
+            let comparison =
+                super::finish_with_cleanup::<()>(py, Err(primary), Err(successor_cleanup));
+            let error =
+                super::finish_with_cleanup(py, comparison, Err(predecessor_cleanup)).unwrap_err();
             let mut next = Some(error);
             for expected_object in expected {
-                let current = next.take().expect("each original exception remains reachable");
+                let current = next
+                    .take()
+                    .expect("each original exception remains reachable");
                 assert!(current.value(py).is(&expected_object));
                 next = current.cause(py);
             }
@@ -7646,20 +9849,24 @@ row[2] = canonical(episode)
             let cause = PyRuntimeError::new_err("existing cause");
             let cleanup = PyRuntimeError::new_err("cleanup failure");
             let expected = [
-                primary.value(py).clone(), cause.value(py).clone(), cleanup.value(py).clone(),
+                primary.value(py).clone(),
+                cause.value(py).clone(),
+                cleanup.value(py).clone(),
             ];
             primary.set_cause(py, Some(cause.clone_ref(py)));
             cause.set_cause(py, Some(primary.clone_ref(py)));
             cleanup.set_cause(py, Some(cause));
 
-            let error = super::finish_with_cleanup::<()>(py, Err(primary), Err(cleanup))
-                .unwrap_err();
+            let error =
+                super::finish_with_cleanup::<()>(py, Err(primary), Err(cleanup)).unwrap_err();
             let repeated = error.cause(py).unwrap();
-            let error = super::finish_with_cleanup::<()>(py, Err(error), Err(repeated))
-                .unwrap_err();
+            let error =
+                super::finish_with_cleanup::<()>(py, Err(error), Err(repeated)).unwrap_err();
             let mut next = Some(error);
             for expected_object in expected {
-                let current = next.take().expect("each distinct exception remains reachable");
+                let current = next
+                    .take()
+                    .expect("each distinct exception remains reachable");
                 assert!(current.value(py).is(&expected_object));
                 next = current.cause(py);
             }
@@ -7683,12 +9890,16 @@ row[2] = canonical(episode)
 
     #[test]
     fn replay_json_key_order_preserves_lone_surrogates_and_non_bmp_code_points() {
-        super::validate_replay_json_structure(r#"{"a":0,"\ud800":1,"\ue000":2,"\ud800\udc00":3}"#, 0).unwrap();
-        for raw in [
-            r#"{"a":0,"\u0061":1}"#,
-            r#"{"\ud800\udc00":3,"\ue000":2}"#,
-        ] {
-            assert!(super::validate_replay_json_structure(raw, 0).is_err(), "{raw}");
+        super::validate_replay_json_structure(
+            r#"{"a":0,"\ud800":1,"\ue000":2,"\ud800\udc00":3}"#,
+            0,
+        )
+        .unwrap();
+        for raw in [r#"{"a":0,"\u0061":1}"#, r#"{"\ud800\udc00":3,"\ue000":2}"#] {
+            assert!(
+                super::validate_replay_json_structure(raw, 0).is_err(),
+                "{raw}"
+            );
         }
     }
 
@@ -7698,7 +9909,10 @@ row[2] = canonical(episode)
             "old = row[1][2]; line = row[2].replace('\\\"operation\\\":', '\\\"operation\\\":\\\"ignored\\\",\\\"operation\\\":', 1); body = line.replace('\\\"content_sha256\\\":\\\"'+old+'\\\",', '', 1); digest = hashlib.sha256(body.encode()).hexdigest(); row[2] = line.replace(old, digest, 1); row[1] = (*row[1][:2], digest, *row[1][3:])",
             1 << 20, 1024,
         ).and_then(|rows| ReplayRow::parse(&rows.sequence()?[0]));
-        assert!(result.is_err(), "duplicate reconstruction operation was silently overwritten");
+        assert!(
+            result.is_err(),
+            "duplicate reconstruction operation was silently overwritten"
+        );
     }
 
     #[test]
@@ -7710,7 +9924,9 @@ row[2] = canonical(episode)
         let row = ReplayRow::parse(&rows.sequence().unwrap()[0]).unwrap();
         assert!(row.record_line.contains("\\ud800"));
         assert!(row.record_line.contains("1e-09"));
-        assert!(row.record_line.contains("1606938044258990275541962092341162602522202993782792835301376"));
+        assert!(row
+            .record_line
+            .contains("1606938044258990275541962092341162602522202993782792835301376"));
     }
 
     fn observed_source_authority(change: &str) -> PyResult<(TaskAuthority, AuthoritySnapshot)> {
@@ -7730,14 +9946,27 @@ entry = ['example', 'request-local-replay', '4'*64, '5'*64, '6'*64,
 sources = [('source', '7'*64, tokenizer, revision, entry, tokens)]
 mapping = [('source', 1, 7)]
 "#;
-            py.run(&CString::new(format!("{TASK_INPUT}\n{source}\n{change}")).unwrap(), Some(&globals), None)?;
+            py.run(
+                &CString::new(format!("{TASK_INPUT}\n{source}\n{change}")).unwrap(),
+                Some(&globals),
+                None,
+            )?;
             let mut budget = 16 * 1024 * 1024;
             let inputs = object_sequence(&globals.get_item("inputs")?.unwrap(), &mut budget)?;
-            let inputs = inputs.iter().enumerate().map(|(index, value)| if index == 3 {
-                read_replay_rows(value, &mut budget, 1 << 20, 1 << 20, 1024)
-            } else { ColdValue::read(value, &mut budget, 0) }).collect::<PyResult<Vec<_>>>()?;
+            let inputs = inputs
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    if index == 3 {
+                        read_replay_rows(value, &mut budget, 1 << 20, 1 << 20, 1024)
+                    } else {
+                        ColdValue::read(value, &mut budget, 0)
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()?;
             let mut authority = TaskAuthority::parse(&inputs)?;
-            let mut read = |name| ColdValue::read(&globals.get_item(name)?.unwrap(), &mut budget, 0);
+            let mut read =
+                |name| ColdValue::read(&globals.get_item(name)?.unwrap(), &mut budget, 0);
             let snapshot = AuthoritySnapshot::parse(&read("snapshot")?)?;
             authority.bind_initial_sources(&read("sources")?, &read("mapping")?)?;
             Ok((authority, snapshot))
@@ -7766,7 +9995,10 @@ mapping = [('source', 1, 7)]
         let mut expired = snapshot.clone();
         expired.observed_at.micros = 11_000_000;
         assert!(authority.check_use("inference", &expired, true).is_err());
-        assert_ne!(authority.canonical, TaskAuthority::parse(&task_inputs("").0).unwrap().canonical);
+        assert_ne!(
+            authority.canonical,
+            TaskAuthority::parse(&task_inputs("").0).unwrap().canonical
+        );
     }
 
     fn fresh_source_authority(change: &str) -> PyResult<(TaskAuthority, AuthoritySnapshot)> {
@@ -7794,14 +10026,18 @@ mapping = [('source', 1, 7)]
             replay.check_use("training", &snapshot, before).unwrap();
         }
 
-        let mut state = TaskUseState { phase: TaskUsePhase::Imported, snapshot };
+        let mut state = TaskUseState {
+            phase: TaskUsePhase::Imported,
+            snapshot,
+        };
         let scope = state.begin_build().unwrap();
         state.finish_build(&scope).unwrap();
         let (_, before) = task_inputs("snapshot = (1, *snapshot[1:])");
-        state.admit_built_segment(&scope, &authority, "training".into(), before).unwrap();
-        let (_, after) = task_inputs(
-            "snapshot = (2, ('1970-01-01T00:00:06Z', 6_000_000), *snapshot[2:])",
-        );
+        state
+            .admit_built_segment(&scope, &authority, "training".into(), before)
+            .unwrap();
+        let (_, after) =
+            task_inputs("snapshot = (2, ('1970-01-01T00:00:06Z', 6_000_000), *snapshot[2:])");
         // This is the production authority state machine, not a native FINAL
         // lease or permission to deliver an external effect.
         state.revalidate_activation(&authority, after).unwrap();
@@ -7817,7 +10053,11 @@ mapping = [('source', 1, 7)]
                 assert!(authority.check_use("training", &snapshot, before).is_err());
             }
         }
-        assert!(fresh_source_authority("sources = []").err().unwrap().to_string().contains("unknown source"));
+        assert!(fresh_source_authority("sources = []")
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("unknown source"));
     }
 
     #[test]
@@ -7859,10 +10099,18 @@ mapping = [('source', 1, 7)]
             "snapshot = (2, *snapshot[1:4], ('publication-revoke',))",
             "snapshot = (2, *snapshot[1:3], ((envelope, snapshot[2], ('live-revoke',)),), ())",
         ] {
-            let mut state = TaskUseState { phase: TaskUsePhase::Imported, snapshot: snapshot.clone() };
-            state.admit_segment(&authority, "training".into(), before.clone()).unwrap();
+            let mut state = TaskUseState {
+                phase: TaskUsePhase::Imported,
+                snapshot: snapshot.clone(),
+            };
+            state
+                .admit_segment(&authority, "training".into(), before.clone())
+                .unwrap();
             let (_, after) = task_inputs(change);
-            assert!(state.revalidate_activation(&authority, after).is_err(), "{change}");
+            assert!(
+                state.revalidate_activation(&authority, after).is_err(),
+                "{change}"
+            );
             assert!(matches!(state.phase, TaskUsePhase::Refused));
             assert!(state.require_public_use().is_err());
         }
@@ -7891,7 +10139,8 @@ mapping = [('source', 1, 7)]
     fn observed_inference_only_live_source_does_not_acquire_learning_rights() {
         let (authority, snapshot) = observed_source_authority(
             "envelope[8] = []\nentry[1] = None\nentry[8] = ['live', [], 'request-local']",
-        ).unwrap();
+        )
+        .unwrap();
         authority.check_use("inference", &snapshot, true).unwrap();
         assert!(!authority.sources_allow_learning);
         assert!(authority.check_use("training", &snapshot, true).is_err());
@@ -7905,7 +10154,10 @@ mapping = [('source', 1, 7)]
         ).unwrap();
         authority.check_use("inference", &snapshot, true).unwrap();
         assert!(authority.sources_allow_learning);
-        assert!(authority.initial_sources[0].origin.windows(b"corpus-source".len()).any(|part| part == b"corpus-source"));
+        assert!(authority.initial_sources[0]
+            .origin
+            .windows(b"corpus-source".len())
+            .any(|part| part == b"corpus-source"));
     }
 
     #[test]
@@ -8070,14 +10322,22 @@ mapping = [('source', 1, 7)]
             let lineage = super::dependency_lineage_object(py, &dependencies).unwrap();
             let locals = pyo3::types::PyDict::new(py);
             locals.set_item("lineage", lineage).unwrap();
-            py.run(&CString::new(r#"
+            py.run(
+                &CString::new(
+                    r#"
 assert type(lineage) is tuple
 assert lineage == ((
     'query-input', 'mask', ('source-b', 'source-a'), ('choice',),
     ('source-grant',), (3, 7), ('support', 5),
 ),)
 assert type(lineage[0]) is tuple
-"#).unwrap(), None, Some(&locals)).unwrap();
+"#,
+                )
+                .unwrap(),
+                None,
+                Some(&locals),
+            )
+            .unwrap();
         });
     }
 
@@ -8094,7 +10354,10 @@ assert type(lineage[0]) is tuple
             let target = project(&SemanticActionDescriptor::Target {
                 predicate: RelId(19),
             });
-            assert_eq!(target.extract::<(String, u32)>(py).unwrap(), ("target".into(), 19));
+            assert_eq!(
+                target.extract::<(String, u32)>(py).unwrap(),
+                ("target".into(), 19)
+            );
 
             let bits = vec![0, 0, 0, 128];
             let operand = project(&SemanticActionDescriptor::Operand {
@@ -8103,22 +10366,31 @@ assert type(lineage[0]) is tuple
                 encoded_value: bits.clone(),
             });
             let (kind, scalar, sort, bytes) = operand
-                .extract::<(String, u8, String, Vec<u8>)>(py).unwrap();
-            assert_eq!((kind.as_str(), scalar, sort.as_str(), bytes),
-                ("operand", ScalarType::F32.to_code(), "measurement", bits));
+                .extract::<(String, u8, String, Vec<u8>)>(py)
+                .unwrap();
+            assert_eq!(
+                (kind.as_str(), scalar, sort.as_str(), bytes),
+                ("operand", ScalarType::F32.to_code(), "measurement", bits)
+            );
 
             let empty = project(&SemanticActionDescriptor::QualifierBundle { records: vec![] });
             assert!(!empty.is_none(py));
-            assert_eq!(empty.extract::<(String, Vec<u32>)>(py).unwrap(),
-                ("qualifier_bundle".into(), vec![]));
+            assert_eq!(
+                empty.extract::<(String, Vec<u32>)>(py).unwrap(),
+                ("qualifier_bundle".into(), vec![])
+            );
             let qualified = project(&SemanticActionDescriptor::QualifierBundle {
                 records: vec![7, 2, 7],
             });
-            assert_eq!(qualified.extract::<(String, Vec<u32>)>(py).unwrap(),
-                ("qualifier_bundle".into(), vec![7, 2, 7]));
+            assert_eq!(
+                qualified.extract::<(String, Vec<u32>)>(py).unwrap(),
+                ("qualifier_bundle".into(), vec![7, 2, 7])
+            );
             let support = project(&SemanticActionDescriptor::SupportEvent { source_record: 5 });
-            assert_eq!(support.extract::<(String, u32)>(py).unwrap(),
-                ("support_event".into(), 5));
+            assert_eq!(
+                support.extract::<(String, u32)>(py).unwrap(),
+                ("support_event".into(), 5)
+            );
         });
     }
 
@@ -8231,9 +10503,15 @@ else:
             let pointers = retained.inputs.each_ref().map(|input| input.as_ptr());
             let (issued_output, issued_inputs) = retained.issue_originals(py).unwrap();
             assert_eq!(issued_output.as_ptr(), output.as_ptr());
-            assert_eq!(issued_inputs.each_ref().map(|input| input.as_ptr()), pointers);
+            assert_eq!(
+                issued_inputs.each_ref().map(|input| input.as_ptr()),
+                pointers
+            );
             assert_eq!(retained.model_output.as_ptr(), output.as_ptr());
-            assert_eq!(retained.inputs.each_ref().map(|input| input.as_ptr()), pointers);
+            assert_eq!(
+                retained.inputs.each_ref().map(|input| input.as_ptr()),
+                pointers
+            );
             assert!(retained.issue_originals(py).is_err());
         });
     }
@@ -8327,16 +10605,22 @@ else:
 
     #[test]
     fn task_authority_rejects_identity_only_replay_rows() {
-        assert!(replay_transport("row = row[1]", 1 << 20, 1024).is_err(),
-            "identity-only rows omit the episode, material closure and native evidence");
+        assert!(
+            replay_transport("row = row[1]", 1 << 20, 1024).is_err(),
+            "identity-only rows omit the episode, material closure and native evidence"
+        );
     }
 
     #[test]
     fn task_authority_preserves_canonical_values_and_checks_independent_grants() {
         let (values, snapshot) = task_inputs("");
         let authority = TaskAuthority::parse(&values).unwrap();
-        authority.bind_native_reads(&observation_roots([0, 1], vec![]), &[]).unwrap();
-        let view = authority.replay[0].identity.fields(6).unwrap()[0].fields(9).unwrap();
+        authority
+            .bind_native_reads(&observation_roots([0, 1], vec![]), &[])
+            .unwrap();
+        let view = authority.replay[0].identity.fields(6).unwrap()[0]
+            .fields(9)
+            .unwrap();
         assert_eq!(
             view[6],
             ColdValue::Integer("1267650600228229401496703205376".into())
@@ -8377,30 +10661,55 @@ else:
         let restored = ColdValue::from_canonical_bytes(&snapshot.canonical).unwrap();
         let restored_snapshot = AuthoritySnapshot::parse(&restored).unwrap();
         assert_eq!(restored_snapshot.canonical, snapshot.canonical);
-        assert_eq!(restored_snapshot.segment_end.micros, snapshot.segment_end.micros);
+        assert_eq!(
+            restored_snapshot.segment_end.micros,
+            snapshot.segment_end.micros
+        );
         let identity = &values[3].sequence().unwrap()[0].fields(4).unwrap()[0];
-        assert_eq!(&ColdValue::from_canonical_bytes(&identity.canonical_bytes()).unwrap(), identity);
-        let primitives = ColdValue::Sequence(vec![ColdValue::None, ColdValue::Bool(true), ColdValue::Bool(false),
-            ColdValue::Integer("0".into()), ColdValue::Integer("-123456789012345678901234567890".into()),
-            ColdValue::Text(String::new()), ColdValue::Text("original π😀\ntext".into()), ColdValue::Sequence(Vec::new())]);
-        assert_eq!(ColdValue::from_canonical_bytes(&primitives.canonical_bytes()).unwrap(), primitives);
+        assert_eq!(
+            &ColdValue::from_canonical_bytes(&identity.canonical_bytes()).unwrap(),
+            identity
+        );
+        let primitives = ColdValue::Sequence(vec![
+            ColdValue::None,
+            ColdValue::Bool(true),
+            ColdValue::Bool(false),
+            ColdValue::Integer("0".into()),
+            ColdValue::Integer("-123456789012345678901234567890".into()),
+            ColdValue::Text(String::new()),
+            ColdValue::Text("original π😀\ntext".into()),
+            ColdValue::Sequence(Vec::new()),
+        ]);
+        assert_eq!(
+            ColdValue::from_canonical_bytes(&primitives.canonical_bytes()).unwrap(),
+            primitives
+        );
     }
 
     #[test]
     fn cold_metadata_decoder_refuses_truncation_trailing_bytes_and_unrecoverable_tags() {
         let (_, snapshot) = task_inputs("");
         for end in 0..snapshot.canonical.len() {
-            assert!(ColdValue::from_canonical_bytes(&snapshot.canonical[..end]).is_err(), "truncation {end}");
+            assert!(
+                ColdValue::from_canonical_bytes(&snapshot.canonical[..end]).is_err(),
+                "truncation {end}"
+            );
         }
         let mut trailing = snapshot.canonical.clone();
         trailing.push(0);
         assert!(ColdValue::from_canonical_bytes(&trailing).is_err());
-        for body in [vec![1, 2], vec![5, 0], vec![255], vec![3, 1, 0, 0, 0, 0, 0, 0, 0, 255]] {
+        for body in [
+            vec![1, 2],
+            vec![5, 0],
+            vec![255],
+            vec![3, 1, 0, 0, 0, 0, 0, 0, 0, 255],
+        ] {
             let mut bytes = b"xlog.cold.value.v1\0".to_vec();
             bytes.extend(body);
             assert!(ColdValue::from_canonical_bytes(&bytes).is_err());
         }
-        let payload_hash = ColdValue::Bytes(std::sync::Arc::from(&b"retained payload"[..])).canonical_bytes();
+        let payload_hash =
+            ColdValue::Bytes(std::sync::Arc::from(&b"retained payload"[..])).canonical_bytes();
         assert!(ColdValue::from_canonical_bytes(&payload_hash).is_err());
         let mut wrong_domain = snapshot.canonical;
         wrong_domain[0] = b'y';
@@ -8409,9 +10718,14 @@ else:
 
     #[test]
     fn cold_metadata_decoder_requires_canonical_decimal_integers_and_checked_bounds() {
-        for integer in ["", "00", "01", "-0", "-01", "+1", "1.0", "1e9", " 1", "1 ", "--1", "1_0", "٠"] {
+        for integer in [
+            "", "00", "01", "-0", "-01", "+1", "1.0", "1e9", " 1", "1 ", "--1", "1_0", "٠",
+        ] {
             let bytes = ColdValue::Integer(integer.into()).canonical_bytes();
-            assert!(ColdValue::from_canonical_bytes(&bytes).is_err(), "{integer:?}");
+            assert!(
+                ColdValue::from_canonical_bytes(&bytes).is_err(),
+                "{integer:?}"
+            );
         }
         for tag in [2, 3, 4] {
             let mut bytes = b"xlog.cold.value.v1\0".to_vec();
@@ -8420,9 +10734,14 @@ else:
             assert!(ColdValue::from_canonical_bytes(&bytes).is_err());
         }
         let mut bounded = ColdValue::None;
-        for _ in 0..32 { bounded = ColdValue::Sequence(vec![bounded]); }
+        for _ in 0..32 {
+            bounded = ColdValue::Sequence(vec![bounded]);
+        }
         ColdValue::from_canonical_bytes(&bounded.canonical_bytes()).unwrap();
-        assert!(ColdValue::from_canonical_bytes(&ColdValue::Sequence(vec![bounded]).canonical_bytes()).is_err());
+        assert!(ColdValue::from_canonical_bytes(
+            &ColdValue::Sequence(vec![bounded]).canonical_bytes()
+        )
+        .is_err());
         let mut over_budget = b"xlog.cold.value.v1\0".to_vec();
         over_budget.push(3);
         over_budget.extend_from_slice(&(16u64 * 1024 * 1024).to_le_bytes());
@@ -8464,9 +10783,15 @@ else:
     fn native_observer_roots_cannot_be_omitted_from_feedback_authority() {
         let (values, _) = task_inputs("inputs=inputs[:5]+((),)+inputs[6:]");
         let authority = TaskAuthority::parse(&values).unwrap();
-        authority.bind_native_reads(&observation_roots([0, 1], vec![]), &[]).unwrap();
-        assert!(authority.bind_native_reads(&observation_roots([0, 2], vec![]), &[]).is_err());
-        assert!(authority.bind_native_reads(&observation_roots([0, 1], vec![]), &[0]).is_err());
+        authority
+            .bind_native_reads(&observation_roots([0, 1], vec![]), &[])
+            .unwrap();
+        assert!(authority
+            .bind_native_reads(&observation_roots([0, 2], vec![]), &[])
+            .is_err());
+        assert!(authority
+            .bind_native_reads(&observation_roots([0, 1], vec![]), &[0])
+            .is_err());
         let (values, _) = task_inputs("nodes=nodes[:5]+(('observer','derived',('source',),('target',),(),None,('observer',0)),); inputs=inputs[:4]+(nodes,(),)+inputs[6:]");
         assert!(TaskAuthority::parse(&values).is_err());
         let (values, _) = task_inputs("nodes=nodes[:5]+(('observer','derived',('source',),(),(),None,None),); inputs=inputs[:4]+(nodes,)+inputs[5:]");
@@ -8477,13 +10802,16 @@ else:
     }
 
     fn observation_roots(
-        query_records: [u32; 2], contributors: Vec<(u32, Option<u32>, u32)>,
+        query_records: [u32; 2],
+        contributors: Vec<(u32, Option<u32>, u32)>,
     ) -> xlog_cuda::SemanticTaskObservationRoots {
         // This authority-unit input grants nothing. The native material tests
         // separately verify how the owner produces these exact coordinates.
         xlog_cuda::SemanticTaskObservationRoots {
-            root_digest: xlog_cuda::Identity256::default(), root_extents: [0; 3],
-            query_records, contributors,
+            root_digest: xlog_cuda::Identity256::default(),
+            root_extents: [0; 3],
+            query_records,
+            contributors,
         }
     }
 
@@ -8533,8 +10861,9 @@ else:
         assert!(stale
             .admit_segment(&authority, "inference".into(), before)
             .is_err());
-        let (_, after) =
-            task_inputs("snapshot=(2,('1970-01-01T00:00:06Z',6_000_000),snapshot[2],snapshot[3],())");
+        let (_, after) = task_inputs(
+            "snapshot=(2,('1970-01-01T00:00:06Z',6_000_000),snapshot[2],snapshot[3],())",
+        );
         // Authority alone can pass. The public controller separately requires
         // the actual native FINAL lease and terminal intent, not this state.
         state.revalidate_activation(&authority, after).unwrap();
@@ -8552,8 +10881,13 @@ else:
         let row = authority.replay[0].clone();
         let rows = vec![row.clone(), row];
         assert_eq!(select_replay_row(&rows, &ColdValue::None).unwrap(), None);
-        let selection = |index: &str, identity| ColdValue::Sequence(vec![ColdValue::Integer(index.into()), identity]);
-        assert_eq!(select_replay_row(&rows, &selection("1", rows[1].identity.clone())).unwrap(), Some(1));
+        let selection = |index: &str, identity| {
+            ColdValue::Sequence(vec![ColdValue::Integer(index.into()), identity])
+        };
+        assert_eq!(
+            select_replay_row(&rows, &selection("1", rows[1].identity.clone())).unwrap(),
+            Some(1)
+        );
         assert!(select_replay_row(&rows, &selection("2", rows[0].identity.clone())).is_err());
         assert!(select_replay_row(&rows, &selection("-1", rows[0].identity.clone())).is_err());
         assert!(select_replay_row(&rows, &ColdValue::Integer("0".into())).is_err());
@@ -8567,7 +10901,10 @@ else:
         let (values, snapshot) = task_inputs("");
         let authority = TaskAuthority::parse(&values).unwrap();
         let mut state = TaskUseState {
-            phase: TaskUsePhase::Importing { operation: "inference".into(), reads: false },
+            phase: TaskUsePhase::Importing {
+                operation: "inference".into(),
+                reads: false,
+            },
             snapshot,
         };
         assert!(state.require_read().is_err());
@@ -8578,7 +10915,9 @@ else:
         assert!(state.require_public_use().is_err());
         assert!(state.content_handoff_binding().is_ok());
         let (_, newer) = task_inputs("snapshot=(1,snapshot[1],snapshot[2],snapshot[3],())");
-        assert!(state.admit_segment(&authority, "inference".into(), newer.clone()).is_err());
+        assert!(state
+            .admit_segment(&authority, "inference".into(), newer.clone())
+            .is_err());
         assert!(state.revalidate_activation(&authority, newer).is_err());
         state.set_import_reads(false).unwrap();
         assert!(state.require_read().is_err());
@@ -8613,19 +10952,40 @@ else:
 
     #[test]
     fn task_issuance_is_atomic_and_never_wraps() {
-        use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
         let counter = Arc::new(AtomicU64::new(0));
-        let handles = (0..16).map(|_| {
-            let counter = Arc::clone(&counter);
-            std::thread::spawn(move || super::TaskIssuance::issue(counter).unwrap())
-        }).collect::<Vec<_>>();
-        let mut issued = handles.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>();
+        let handles = (0..16)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                std::thread::spawn(move || super::TaskIssuance::issue(counter).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let mut issued = handles
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
         issued.sort_by_key(|token| token.generation);
-        assert_eq!(issued.iter().map(|token| token.generation).collect::<Vec<_>>(), (1..=16).collect::<Vec<_>>());
-        assert!(issued[..15].iter().all(|token| token.require_current().is_err()));
+        assert_eq!(
+            issued
+                .iter()
+                .map(|token| token.generation)
+                .collect::<Vec<_>>(),
+            (1..=16).collect::<Vec<_>>()
+        );
+        assert!(issued[..15]
+            .iter()
+            .all(|token| token.require_current().is_err()));
         issued[15].require_current().unwrap();
         let exhausted = Arc::new(AtomicU64::new(u64::MAX - 1));
-        assert_eq!(super::TaskIssuance::issue(Arc::clone(&exhausted)).unwrap().generation, u64::MAX);
+        assert_eq!(
+            super::TaskIssuance::issue(Arc::clone(&exhausted))
+                .unwrap()
+                .generation,
+            u64::MAX
+        );
         assert!(super::TaskIssuance::issue(Arc::clone(&exhausted)).is_err());
         assert_eq!(exhausted.load(Ordering::Acquire), u64::MAX);
     }
@@ -8633,13 +10993,19 @@ else:
     #[test]
     fn shared_import_state_admits_only_its_controlled_reader_phase() {
         let (_, snapshot) = task_inputs("");
-        let mut state = TaskUseState { phase: TaskUsePhase::Imported, snapshot };
+        let mut state = TaskUseState {
+            phase: TaskUsePhase::Imported,
+            snapshot,
+        };
         state.require_read_during_import(false).unwrap();
         assert!(state.require_read_during_import(true).is_err());
         state.phase = TaskUsePhase::Segment("inference".into());
         state.require_read_during_import(false).unwrap();
         assert!(state.require_read_during_import(true).is_err());
-        state.phase = TaskUsePhase::Importing { operation: "inference".into(), reads: false };
+        state.phase = TaskUsePhase::Importing {
+            operation: "inference".into(),
+            reads: false,
+        };
         assert!(state.require_read_during_import(true).is_err());
         state.set_import_reads(true).unwrap();
         state.require_read_during_import(true).unwrap();
@@ -8658,32 +11024,48 @@ else:
             let producers = Arc::new(Mutex::new(Vec::<Py<PyAny>>::new()));
             let original_roster = Arc::clone(&producers);
             let creator = std::thread::current().id();
-            let check_retirement = pyo3::types::PyCFunction::new_closure(
-                py, None, None, move |_args, _kwargs| {
-                    let unlocked_and_empty = original_roster.try_lock()
-                        .map(|roster| roster.is_empty()).unwrap_or(false);
+            let check_retirement =
+                pyo3::types::PyCFunction::new_closure(py, None, None, move |_args, _kwargs| {
+                    let unlocked_and_empty = original_roster
+                        .try_lock()
+                        .map(|roster| roster.is_empty())
+                        .unwrap_or(false);
                     Ok::<_, PyErr>((std::thread::current().id() == creator, unlocked_and_empty))
-                },
-            ).unwrap();
+                })
+                .unwrap();
             let globals = PyDict::new(py);
-            globals.set_item("check_retirement", check_retirement).unwrap();
+            globals
+                .set_item("check_retirement", check_retirement)
+                .unwrap();
             py.run(c"import weakref\nfinalized = []\nclass Producer:\n    def __del__(self):\n        finalized.append(check_retirement())\nproducer = Producer()\nreference = weakref.ref(producer)", Some(&globals), None).unwrap();
-            producers.lock().unwrap().push(
-                globals.get_item("producer").unwrap().unwrap().unbind(),
-            );
+            producers
+                .lock()
+                .unwrap()
+                .push(globals.get_item("producer").unwrap().unwrap().unbind());
             globals.del_item("producer").unwrap();
             let reference = globals.get_item("reference").unwrap().unwrap();
-            assert!(!reference.call0().unwrap().is_none(),
-                "the original roster must retain its actual Python producer");
+            assert!(
+                !reference.call0().unwrap().is_none(),
+                "the original roster must retain its actual Python producer"
+            );
 
             super::release_python_producers(&producers);
 
             assert!(producers.lock().unwrap().is_empty());
-            assert_eq!(globals.get_item("finalized").unwrap().unwrap()
-                .extract::<Vec<(bool, bool)>>().unwrap(), vec![(true, true)],
-                "the original finalizer must reenter its unlocked roster on the creator thread");
-            assert!(reference.call0().unwrap().is_none(),
-                "producer retirement leaked the original Python owner");
+            assert_eq!(
+                globals
+                    .get_item("finalized")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<Vec<(bool, bool)>>()
+                    .unwrap(),
+                vec![(true, true)],
+                "the original finalizer must reenter its unlocked roster on the creator thread"
+            );
+            assert!(
+                reference.call0().unwrap().is_none(),
+                "producer retirement leaked the original Python owner"
+            );
         });
     }
 
@@ -8692,38 +11074,72 @@ else:
     fn retained_semantic_classes_allow_worker_access_and_drop_under_runtime_custody() {
         use pyo3::impl_::pyclass::{PyClassImpl, PyClassThreadChecker};
         fn worker_payload<T: PyClassImpl + Send + Sync>() -> bool
-        where T::ThreadChecker: Send + 'static {
+        where
+            T::ThreadChecker: Send + 'static,
+        {
             let checker = <T::ThreadChecker as PyClassThreadChecker<T>>::new();
-            std::thread::spawn(move || Python::attach(|py| {
-                <T::ThreadChecker as PyClassThreadChecker<T>>::check(&checker)
-                    && <T::ThreadChecker as PyClassThreadChecker<T>>::can_drop(&checker, py)
-            })).join().unwrap()
+            std::thread::spawn(move || {
+                Python::attach(|py| {
+                    <T::ThreadChecker as PyClassThreadChecker<T>>::check(&checker)
+                        && <T::ThreadChecker as PyClassThreadChecker<T>>::can_drop(&checker, py)
+                })
+            })
+            .join()
+            .unwrap()
         }
         Python::initialize();
         let classes = [
-            ("Session", worker_payload::<super::PySemanticTransitionSession>()),
-            ("Controller", worker_payload::<super::PySemanticTransitionController>()),
-            ("TaskUse", worker_payload::<super::PySemanticTransitionTaskUse>()),
-            ("Parent", worker_payload::<super::PySemanticPublishedParent>()),
-            ("Witness", worker_payload::<super::PySemanticTensorContentWitness>()),
-            ("PolicyInvocation", worker_payload::<super::PySemanticPolicyInvocation>()),
+            (
+                "Session",
+                worker_payload::<super::PySemanticTransitionSession>(),
+            ),
+            (
+                "Controller",
+                worker_payload::<super::PySemanticTransitionController>(),
+            ),
+            (
+                "TaskUse",
+                worker_payload::<super::PySemanticTransitionTaskUse>(),
+            ),
+            (
+                "Parent",
+                worker_payload::<super::PySemanticPublishedParent>(),
+            ),
+            (
+                "Witness",
+                worker_payload::<super::PySemanticTensorContentWitness>(),
+            ),
+            (
+                "PolicyInvocation",
+                worker_payload::<super::PySemanticPolicyInvocation>(),
+            ),
         ];
-        assert!(classes.iter().all(|(_, transferable)| *transferable), "{classes:?}");
+        assert!(
+            classes.iter().all(|(_, transferable)| *transferable),
+            "{classes:?}"
+        );
     }
 
     #[test]
     fn creator_thread_gate_refuses_worker_before_conversion_or_callback() {
-        use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
         let creator = std::thread::current().id();
         super::require_creator_thread(creator).unwrap();
         let called = Arc::new(AtomicBool::new(false));
         let callback = Arc::clone(&called);
         let refused = std::thread::spawn(move || {
-            super::require_creator_thread(creator).and_then(|()| {
-                callback.store(true, Ordering::Release);
-                Ok(())
-            }).is_err()
-        }).join().unwrap();
+            super::require_creator_thread(creator)
+                .and_then(|()| {
+                    callback.store(true, Ordering::Release);
+                    Ok(())
+                })
+                .is_err()
+        })
+        .join()
+        .unwrap();
         assert!(refused);
         assert!(!called.load(Ordering::Acquire));
     }
@@ -8749,12 +11165,18 @@ else:
         let authority = TaskAuthority::parse(&values).unwrap();
         let (_, newer) = task_inputs("snapshot=(1,snapshot[1],snapshot[2],snapshot[3],())");
         for phase in [
-            TaskUsePhase::Importing { operation: "inference".into(), reads: true },
+            TaskUsePhase::Importing {
+                operation: "inference".into(),
+                reads: true,
+            },
             TaskUsePhase::Imported,
             TaskUsePhase::Segment("inference".into()),
             TaskUsePhase::Refused,
         ] {
-            let mut state = TaskUseState { phase, snapshot: original.clone() };
+            let mut state = TaskUseState {
+                phase,
+                snapshot: original.clone(),
+            };
             assert!(state.finish_import(&authority, newer.clone()).is_err());
             assert!(matches!(state.phase, TaskUsePhase::Refused));
             assert_eq!(state.snapshot.canonical, original.canonical);
@@ -8770,7 +11192,8 @@ else:
         let (values, original) = task_inputs("");
         let authority = TaskAuthority::parse(&values).unwrap();
         for (operation, unrelated_revocation) in [
-            ("inference", "training-revoke"), ("training", "inference-revoke"),
+            ("inference", "training-revoke"),
+            ("training", "inference-revoke"),
         ] {
             let (_, newer) = task_inputs(&format!(
                 "snapshot=(1,('1970-01-01T00:00:06Z',6_000_000),snapshot[2],snapshot[3],('{unrelated_revocation}',))"
@@ -8780,7 +11203,10 @@ else:
             authority.check_use(operation, &newer, false).unwrap();
             assert!(authority.check_use(operation, &newer, true).is_err());
             let mut state = TaskUseState {
-                phase: TaskUsePhase::Importing { operation: operation.into(), reads: false },
+                phase: TaskUsePhase::Importing {
+                    operation: operation.into(),
+                    reads: false,
+                },
                 snapshot: original.clone(),
             };
             state.finish_import(&authority, newer.clone()).unwrap();
@@ -8829,15 +11255,25 @@ else:
         let (_, snapshot) = task_inputs("");
         let canonical = snapshot.canonical.clone();
         let mut state = TaskUseState {
-            phase: TaskUsePhase::Segment("training".into()), snapshot,
+            phase: TaskUsePhase::Segment("training".into()),
+            snapshot,
         };
         let binding = |state: &TaskUseState, importing| {
             PySemanticTransitionController::execution_binding(state, importing)
         };
-        assert_eq!(binding(&state, false).unwrap(), ("training".into(), canonical.clone()));
+        assert_eq!(
+            binding(&state, false).unwrap(),
+            ("training".into(), canonical.clone())
+        );
         assert!(binding(&state, true).is_err());
-        state.phase = TaskUsePhase::Importing { operation: "inference".into(), reads: false };
-        assert_eq!(binding(&state, true).unwrap(), ("inference".into(), canonical));
+        state.phase = TaskUsePhase::Importing {
+            operation: "inference".into(),
+            reads: false,
+        };
+        assert_eq!(
+            binding(&state, true).unwrap(),
+            ("inference".into(), canonical)
+        );
         assert!(binding(&state, false).is_err());
         state.set_import_reads(true).unwrap();
         assert!(binding(&state, true).is_err());
@@ -8853,21 +11289,30 @@ else:
     fn tensor_content_handoff_detects_authority_refresh_and_refusal() {
         let (values, snapshot) = task_inputs("");
         let authority = TaskAuthority::parse(&values).unwrap();
-        let mut state = TaskUseState { phase: TaskUsePhase::Imported, snapshot };
+        let mut state = TaskUseState {
+            phase: TaskUsePhase::Imported,
+            snapshot,
+        };
         assert!(state.content_handoff_binding().is_err());
         let (_, first) = task_inputs("snapshot=(1,snapshot[1],snapshot[2],snapshot[3],())");
-        state.admit_segment(&authority, "inference".into(), first).unwrap();
+        state
+            .admit_segment(&authority, "inference".into(), first)
+            .unwrap();
         let captured = state.content_handoff_binding().unwrap();
         assert_eq!(captured, state.content_handoff_binding().unwrap());
         let (_, refreshed) = task_inputs(
             "snapshot=(2,('1970-01-01T00:00:02Z',2_000_000),snapshot[2],snapshot[3],())",
         );
-        state.admit_segment(&authority, "inference".into(), refreshed).unwrap();
+        state
+            .admit_segment(&authority, "inference".into(), refreshed)
+            .unwrap();
         assert_ne!(captured, state.content_handoff_binding().unwrap());
         let (_, revoked) = task_inputs(
             "snapshot=(3,('1970-01-01T00:00:03Z',3_000_000),snapshot[2],snapshot[3],('inference-revoke',))",
         );
-        assert!(state.admit_segment(&authority, "inference".into(), revoked).is_err());
+        assert!(state
+            .admit_segment(&authority, "inference".into(), revoked)
+            .is_err());
         assert!(state.content_handoff_binding().is_err());
     }
 
@@ -8883,18 +11328,21 @@ else:
         state
             .admit_segment(&authority, "inference".into(), first)
             .unwrap();
-        let (_, next) =
-            task_inputs("snapshot=(2,('1970-01-01T00:00:02Z',2_000_000),snapshot[2],snapshot[3],())");
+        let (_, next) = task_inputs(
+            "snapshot=(2,('1970-01-01T00:00:02Z',2_000_000),snapshot[2],snapshot[3],())",
+        );
         state
             .admit_segment(&authority, "inference".into(), next)
             .unwrap();
-        let (_, changed) =
-            task_inputs("snapshot=(3,('1970-01-01T00:00:03Z',3_000_000),snapshot[2],snapshot[3],())");
+        let (_, changed) = task_inputs(
+            "snapshot=(3,('1970-01-01T00:00:03Z',3_000_000),snapshot[2],snapshot[3],())",
+        );
         assert!(state
             .admit_segment(&authority, "training".into(), changed)
             .is_err());
-        let (_, expired) =
-            task_inputs("snapshot=(4,('1970-01-01T00:00:06Z',6_000_000),snapshot[2],snapshot[3],())");
+        let (_, expired) = task_inputs(
+            "snapshot=(4,('1970-01-01T00:00:06Z',6_000_000),snapshot[2],snapshot[3],())",
+        );
         assert!(state
             .admit_segment(&authority, "inference".into(), expired)
             .is_err());

@@ -916,7 +916,8 @@ impl CudaFunction {
             numAttrs: 0,
         };
         unsafe {
-            sys::cuOccupancyMaxActiveClusters(&mut num_clusters, self.cu_function(), &cfg).result()?
+            sys::cuOccupancyMaxActiveClusters(&mut num_clusters, self.cu_function(), &cfg)
+                .result()?
         };
         Ok(num_clusters as u32)
     }

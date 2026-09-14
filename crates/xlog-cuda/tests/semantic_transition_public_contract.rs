@@ -11,8 +11,11 @@ fn feedback_coordinates_use_the_cuda_producers_shared_encoder() {
     // production kernel. This is CPU evidence, not a CUDA launch or lease test.
     let mut nonce = [0u8; 8];
     getrandom::fill(&mut nonce).unwrap();
-    let directory = std::env::temp_dir().join(format!("xlog-feedback-{}-{:016x}",
-        std::process::id(), u64::from_ne_bytes(nonce)));
+    let directory = std::env::temp_dir().join(format!(
+        "xlog-feedback-{}-{:016x}",
+        std::process::id(),
+        u64::from_ne_bytes(nonce)
+    ));
     std::fs::create_dir(&directory).unwrap();
     struct Output(std::path::PathBuf);
     impl Drop for Output {
@@ -23,15 +26,28 @@ fn feedback_coordinates_use_the_cuda_producers_shared_encoder() {
     }
     let output = Output(directory);
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let compile = std::process::Command::new(std::env::var_os("CXX").unwrap_or_else(|| "c++".into()))
-        .args(["-std=c++17", "-Wall", "-Wextra", "-Werror", "-I"])
-        .arg(root.join("kernels"))
-        .arg(root.join("tests/semantic_feedback_encoding.cpp"))
-        .arg("-o").arg(output.0.join("encoder-test"))
-        .output().expect("C++ compiler required for the native coordinate contract");
-    assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
-    let execution = std::process::Command::new(output.0.join("encoder-test")).output().unwrap();
-    assert!(execution.status.success(), "{}", String::from_utf8_lossy(&execution.stderr));
+    let compile =
+        std::process::Command::new(std::env::var_os("CXX").unwrap_or_else(|| "c++".into()))
+            .args(["-std=c++17", "-Wall", "-Wextra", "-Werror", "-I"])
+            .arg(root.join("kernels"))
+            .arg(root.join("tests/semantic_feedback_encoding.cpp"))
+            .arg("-o")
+            .arg(output.0.join("encoder-test"))
+            .output()
+            .expect("C++ compiler required for the native coordinate contract");
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let execution = std::process::Command::new(output.0.join("encoder-test"))
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -829,7 +845,11 @@ fn public_session_reduces_nonunit_importance_factors_across_both_lanes() {
         .unwrap();
     session.capture().unwrap();
     session.launch().unwrap();
-    let forward = session.observe(rng.proposal).unwrap().into_published().unwrap();
+    let forward = session
+        .observe(rng.proposal)
+        .unwrap()
+        .into_published()
+        .unwrap();
     assert_eq!(forward.components.len(), 136);
 
     // Convert the exact integer to decimal before Rust's correctly rounded
@@ -1280,45 +1300,65 @@ fn public_decoder_matches_canonical_typed_identity_and_ordered_support_lifecycle
 fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
     use xlog_core::{RelId, ScalarType, Schema};
     use xlog_cuda::{
-        SemanticTaskEvaluationSpec, SemanticTaskProgram, SemanticTaskObservation, SemanticTaskScoring,
-        SemanticActionDescriptor as D, SemanticAdmissionLimits,
-        SemanticAdmissionRecords, SemanticArgument as A, SemanticHypergraphCapacities,
-        SemanticPolarity as P, SemanticPredicateRecord, SemanticRecordRole as Role,
-        SemanticSupportRecord, SemanticTaskRefusal as Refusal, SemanticTypedRecord,
+        SemanticActionDescriptor as D, SemanticAdmissionLimits, SemanticAdmissionRecords,
+        SemanticArgument as A, SemanticHypergraphCapacities, SemanticPolarity as P,
+        SemanticPredicateRecord, SemanticRecordRole as Role, SemanticSupportRecord,
+        SemanticTaskEvaluationSpec, SemanticTaskObservation, SemanticTaskProgram,
+        SemanticTaskRefusal as Refusal, SemanticTaskScoring, SemanticTypedRecord,
     };
 
     #[derive(Debug)]
     struct ArithmeticProgram;
     impl SemanticTaskProgram for ArithmeticProgram {
-        fn observe(&self, _: Arc<xlog_cuda::CudaKernelProvider>)
-            -> Result<SemanticTaskObservation, SemanticTransitionError> {
+        fn observe(
+            &self,
+            _: Arc<xlog_cuda::CudaKernelProvider>,
+        ) -> Result<SemanticTaskObservation, SemanticTransitionError> {
             let inputs = [[1u32, 1u32], [0u32, 1u32]];
             let results = inputs.map(|[left, right]| (left + right) / 2);
             Ok(SemanticTaskObservation {
-                program_source: b"fn observe(left: u32, right: u32) -> u32 { (left + right) / 2 }".to_vec(),
-                input_bytes: inputs.into_iter().flatten().flat_map(u32::to_le_bytes).collect(),
+                program_source: b"fn observe(left: u32, right: u32) -> u32 { (left + right) / 2 }"
+                    .to_vec(),
+                input_bytes: inputs
+                    .into_iter()
+                    .flatten()
+                    .flat_map(u32::to_le_bytes)
+                    .collect(),
                 result_bytes: results.into_iter().flat_map(u32::to_le_bytes).collect(),
-                expected_truth: results.map(|value| if value == 1 {
-                    xlog_cuda::SemanticTruth::True
-                } else { xlog_cuda::SemanticTruth::False }),
+                expected_truth: results.map(|value| {
+                    if value == 1 {
+                        xlog_cuda::SemanticTruth::True
+                    } else {
+                        xlog_cuda::SemanticTruth::False
+                    }
+                }),
             })
         }
     }
     let task_spec = || SemanticTaskEvaluationSpec {
-        statement_records: [0, 1], allowed_support_records: vec![0, 1, 2, 3],
+        statement_records: [0, 1],
+        allowed_support_records: vec![0, 1, 2, 3],
         program: Arc::new(ArithmeticProgram),
         scoring: SemanticTaskScoring {
-            correct_weight: 14, all_correct_weight: 7, work_weight: 1,
-            improvement_weight: 45, refusal_weight: 15, spent_weight: 1,
+            correct_weight: 14,
+            all_correct_weight: 7,
+            work_weight: 1,
+            improvement_weight: 45,
+            refusal_weight: 15,
+            spent_weight: 1,
         },
         admissible_truth_masks: [7, 7],
     };
     #[derive(Debug)]
     struct FailingProgram;
     impl SemanticTaskProgram for FailingProgram {
-        fn observe(&self, _: Arc<xlog_cuda::CudaKernelProvider>)
-            -> Result<SemanticTaskObservation, SemanticTransitionError> {
-            Err(SemanticTransitionError::InvalidInput { detail: "observer failed".into() })
+        fn observe(
+            &self,
+            _: Arc<xlog_cuda::CudaKernelProvider>,
+        ) -> Result<SemanticTaskObservation, SemanticTransitionError> {
+            Err(SemanticTransitionError::InvalidInput {
+                detail: "observer failed".into(),
+            })
         }
     }
 
@@ -1462,9 +1502,7 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
     };
     for (name, selected, expected_return, expected_queries, refusals, work) in cases {
         let mut session = new_session();
-        let binding = session
-            .bind_task_evaluation(task_spec())
-            .unwrap();
+        let binding = session.bind_task_evaluation(task_spec()).unwrap();
         assert_eq!(session.task_evaluation_identity(), Some(binding));
         let category = |field, wanted: &dyn Fn(&D) -> bool| {
             (1..session.components()[32 + field as usize].cardinality)
@@ -1633,12 +1671,24 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
     failing.program = Arc::new(FailingProgram);
     assert!(matches!(session.bind_task_evaluation(failing),
         Err(SemanticTransitionError::InvalidInput { detail }) if detail == "observer failed"));
-    assert!(session.is_poisoned(), "observer failure must prevent reuse of the native Session");
+    assert!(
+        session.is_poisoned(),
+        "observer failure must prevent reuse of the native Session"
+    );
     assert_eq!(session.task_evaluation_identity(), Some(original));
-    assert_eq!(session.task_evaluation_epoch(), original_epoch,
-        "failed observation must not issue a new task generation");
-    assert!(matches!(session.bind_task_evaluation(task_spec()), Err(SemanticTransitionError::Poisoned)));
-    assert!(matches!(session.capture(), Err(SemanticTransitionError::Poisoned)));
+    assert_eq!(
+        session.task_evaluation_epoch(),
+        original_epoch,
+        "failed observation must not issue a new task generation"
+    );
+    assert!(matches!(
+        session.bind_task_evaluation(task_spec()),
+        Err(SemanticTransitionError::Poisoned)
+    ));
+    assert!(matches!(
+        session.capture(),
+        Err(SemanticTransitionError::Poisoned)
+    ));
     drop(session);
     provider.memory().reap_pending_deallocations().unwrap();
     assert_eq!(provider.memory().allocated_bytes(), 0);

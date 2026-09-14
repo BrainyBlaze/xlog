@@ -1218,8 +1218,13 @@ impl ConditionalCudaGraphSequenceBuilder {
     ) -> std::result::Result<Self, CudaConditionalGraphUnavailable> {
         let builder = Self::new(stream)?;
         external_resources.push(stream.clone());
-        builder.graph.modules.lock().unwrap_or_else(|error| error.into_inner())
-            .external_resources.extend(external_resources);
+        builder
+            .graph
+            .modules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .external_resources
+            .extend(external_resources);
         Ok(builder)
     }
 
@@ -4339,9 +4344,9 @@ mod tests {
         let suffix = module.load_function("suffix").expect("suffix kernel");
         let resource = Arc::new(vec![17_u8, 29]);
         let retained_resource = Arc::downgrade(&resource);
-        let mut builder = ConditionalCudaGraphSequenceBuilder::new_retaining(
-            &stream, vec![resource],
-        ).expect("conditional graph support required");
+        let mut builder =
+            ConditionalCudaGraphSequenceBuilder::new_retaining(&stream, vec![resource])
+                .expect("conditional graph support required");
         assert!(retained_resource.upgrade().is_some());
         builder
             .add_conditional_if(

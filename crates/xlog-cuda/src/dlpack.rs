@@ -236,8 +236,7 @@ pub(crate) unsafe fn dlpack_tensor_metadata(
     if dl.device.device_id != device_id {
         return Err(XlogError::Kernel(format!(
             "DLPack tensor device_id {} does not match provider device_id {}",
-            dl.device.device_id,
-            device_id
+            dl.device.device_id, device_id
         )));
     }
 

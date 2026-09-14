@@ -258,7 +258,9 @@ pub(crate) struct SemanticMaterialReader<'a> {
 }
 
 impl<'a> SemanticMaterialReader<'a> {
-    pub(crate) fn new(bytes: &'a [u8]) -> Self { Self { remaining: bytes } }
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
+        Self { remaining: bytes }
+    }
 
     pub(crate) fn take(&mut self, len: usize) -> Result<&'a [u8], SemanticHypergraphError> {
         if len > self.remaining.len() {
@@ -269,17 +271,24 @@ impl<'a> SemanticMaterialReader<'a> {
         Ok(value)
     }
 
-    pub(crate) fn u8(&mut self) -> Result<u8, SemanticHypergraphError> { Ok(self.take(1)?[0]) }
+    pub(crate) fn u8(&mut self) -> Result<u8, SemanticHypergraphError> {
+        Ok(self.take(1)?[0])
+    }
     pub(crate) fn u32(&mut self) -> Result<u32, SemanticHypergraphError> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
     pub(crate) fn u64(&mut self) -> Result<u64, SemanticHypergraphError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
-    pub(crate) fn count(&mut self, min_bytes_per_item: usize) -> Result<usize, SemanticHypergraphError> {
+    pub(crate) fn count(
+        &mut self,
+        min_bytes_per_item: usize,
+    ) -> Result<usize, SemanticHypergraphError> {
         let count = self.u32()? as usize;
         if min_bytes_per_item == 0 || count > self.remaining.len() / min_bytes_per_item {
-            return Err(admission_error("execution material count exceeds remaining bytes"));
+            return Err(admission_error(
+                "execution material count exceeds remaining bytes",
+            ));
         }
         Ok(count)
     }
@@ -288,8 +297,11 @@ impl<'a> SemanticMaterialReader<'a> {
         self.take(len)
     }
     pub(crate) fn finish(self) -> Result<(), SemanticHypergraphError> {
-        if self.remaining.is_empty() { Ok(()) }
-        else { Err(admission_error("trailing execution material bytes")) }
+        if self.remaining.is_empty() {
+            Ok(())
+        } else {
+            Err(admission_error("trailing execution material bytes"))
+        }
     }
 }
 
@@ -299,23 +311,36 @@ pub(crate) fn material_u32(output: &mut Vec<u8>, value: u32) {
 pub(crate) fn material_u64(output: &mut Vec<u8>, value: u64) {
     output.extend_from_slice(&value.to_le_bytes());
 }
-pub(crate) fn material_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), SemanticHypergraphError> {
+pub(crate) fn material_bytes(
+    output: &mut Vec<u8>,
+    bytes: &[u8],
+) -> Result<(), SemanticHypergraphError> {
     material_count(output, bytes.len())?;
     output.extend_from_slice(bytes);
     Ok(())
 }
 fn material_count(output: &mut Vec<u8>, count: usize) -> Result<(), SemanticHypergraphError> {
-    material_u32(output, u32::try_from(count).map_err(|_| admission_error("material count exceeds u32"))?);
+    material_u32(
+        output,
+        u32::try_from(count).map_err(|_| admission_error("material count exceeds u32"))?,
+    );
     Ok(())
 }
 fn material_budget(remaining: &mut usize, count: usize) -> Result<(), SemanticHypergraphError> {
-    *remaining = remaining.checked_sub(count).ok_or_else(|| admission_error("execution material exceeds admission bound"))?;
+    *remaining = remaining
+        .checked_sub(count)
+        .ok_or_else(|| admission_error("execution material exceeds admission bound"))?;
     Ok(())
 }
-fn material_string(reader: &mut SemanticMaterialReader<'_>, budget: &mut usize) -> Result<String, SemanticHypergraphError> {
+fn material_string(
+    reader: &mut SemanticMaterialReader<'_>,
+    budget: &mut usize,
+) -> Result<String, SemanticHypergraphError> {
     let bytes = reader.bytes()?;
     material_budget(budget, bytes.len())?;
-    Ok(std::str::from_utf8(bytes).map_err(|_| admission_error("execution material text is not UTF-8"))?.to_owned())
+    Ok(std::str::from_utf8(bytes)
+        .map_err(|_| admission_error("execution material text is not UTF-8"))?
+        .to_owned())
 }
 
 impl SemanticRootMaterial {
@@ -325,20 +350,26 @@ impl SemanticRootMaterial {
             for argument in &record.arguments {
                 if let SemanticArgument::Symbol(index) = argument {
                     if *index as usize != occurrence || occurrence >= self.symbols.len() {
-                        return Err(admission_error("material symbols are not in canonical occurrence order"));
+                        return Err(admission_error(
+                            "material symbols are not in canonical occurrence order",
+                        ));
                     }
                     occurrence += 1;
                 }
             }
         }
         if occurrence != self.symbols.len() {
-            return Err(admission_error("material contains unreferenced symbol text"));
+            return Err(admission_error(
+                "material contains unreferenced symbol text",
+            ));
         }
         Ok(())
     }
 
     /// Resolves retained text once for the existing cold typed-admission path.
-    pub(crate) fn admission_records(&self) -> Result<SemanticAdmissionRecords, SemanticHypergraphError> {
+    pub(crate) fn admission_records(
+        &self,
+    ) -> Result<SemanticAdmissionRecords, SemanticHypergraphError> {
         self.validate_symbol_indices()?;
         let mut records = self.records.clone();
         for record in &mut records.records {
@@ -360,13 +391,20 @@ impl SemanticRootMaterial {
             material_u32(&mut out, predicate.predicate.0);
             out.push(predicate.role.code());
             material_count(&mut out, predicate.schema.columns.len())?;
-            for ((name, scalar), label) in predicate.schema.columns.iter().zip(predicate.schema.sort_labels()) {
+            for ((name, scalar), label) in predicate
+                .schema
+                .columns
+                .iter()
+                .zip(predicate.schema.sort_labels())
+            {
                 material_bytes(&mut out, name.as_bytes())?;
                 out.push(scalar.to_code());
                 material_bytes(&mut out, label.as_bytes())?;
             }
             material_count(&mut out, predicate.schema.key_columns.len())?;
-            for &column in &predicate.schema.key_columns { material_count(&mut out, column)?; }
+            for &column in &predicate.schema.key_columns {
+                material_count(&mut out, column)?;
+            }
         }
         material_count(&mut out, self.records.records.len())?;
         for record in &self.records.records {
@@ -375,46 +413,76 @@ impl SemanticRootMaterial {
             for argument in &record.arguments {
                 out.push(argument_type(*argument).to_code());
                 match argument {
-                    SemanticArgument::U32(value) | SemanticArgument::F32Bits(value) | SemanticArgument::Symbol(value) => material_u32(&mut out, *value),
-                    SemanticArgument::U64(value) | SemanticArgument::F64Bits(value) => material_u64(&mut out, *value),
+                    SemanticArgument::U32(value)
+                    | SemanticArgument::F32Bits(value)
+                    | SemanticArgument::Symbol(value) => material_u32(&mut out, *value),
+                    SemanticArgument::U64(value) | SemanticArgument::F64Bits(value) => {
+                        material_u64(&mut out, *value)
+                    }
                     SemanticArgument::I32(value) => material_u32(&mut out, *value as u32),
                     SemanticArgument::I64(value) => material_u64(&mut out, *value as u64),
                     SemanticArgument::Bool(value) => out.push(u8::from(*value)),
                 }
             }
             material_count(&mut out, record.qualifiers.len())?;
-            for &qualifier in &record.qualifiers { material_u32(&mut out, qualifier); }
+            for &qualifier in &record.qualifiers {
+                material_u32(&mut out, qualifier);
+            }
         }
         material_count(&mut out, self.records.supports.len())?;
         for support in &self.records.supports {
             material_u32(&mut out, support.statement);
             out.push(support.polarity.code() as u8);
-            for value in [support.provenance, support.source, support.context, support.scope] { material_u32(&mut out, value); }
+            for value in [
+                support.provenance,
+                support.source,
+                support.context,
+                support.scope,
+            ] {
+                material_u32(&mut out, value);
+            }
         }
         material_count(&mut out, self.symbols.len())?;
-        for symbol in &self.symbols { material_bytes(&mut out, symbol.as_bytes())?; }
+        for symbol in &self.symbols {
+            material_bytes(&mut out, symbol.as_bytes())?;
+        }
         material_count(&mut out, self.insertions.len())?;
         for insertion in &self.insertions {
             if insertion.statement.is_some() && insertion.reconstruction != [0; 10] {
-                return Err(admission_error("original material target has derived reconstruction references"));
+                return Err(admission_error(
+                    "original material target has derived reconstruction references",
+                ));
             }
             out.push(u8::from(insertion.statement.is_some()));
-            if let Some(statement) = insertion.statement { material_u32(&mut out, statement); }
-            for reference in insertion.reconstruction { material_u32(&mut out, reference); }
+            if let Some(statement) = insertion.statement {
+                material_u32(&mut out, statement);
+            }
+            for reference in insertion.reconstruction {
+                material_u32(&mut out, reference);
+            }
             material_u32(&mut out, insertion.support);
             out.extend_from_slice(&insertion.version);
         }
         out.extend_from_slice(&self.digest);
-        for extent in self.extents { material_u32(&mut out, extent); }
+        for extent in self.extents {
+            material_u32(&mut out, extent);
+        }
         out.extend_from_slice(&self.admission_base_digest);
-        for extent in self.admission_base_extents { material_u32(&mut out, extent); }
+        for extent in self.admission_base_extents {
+            material_u32(&mut out, extent);
+        }
         Ok(out)
     }
 
-    pub(crate) fn decode(bytes: &[u8], limits: SemanticAdmissionLimits) -> Result<Self, SemanticHypergraphError> {
+    pub(crate) fn decode(
+        bytes: &[u8],
+        limits: SemanticAdmissionLimits,
+    ) -> Result<Self, SemanticHypergraphError> {
         let mut reader = SemanticMaterialReader::new(bytes);
         if reader.take(8)? != b"XLOGROOT" || reader.u32()? != 2 {
-            return Err(admission_error("unsupported semantic root material encoding"));
+            return Err(admission_error(
+                "unsupported semantic root material encoding",
+            ));
         }
         let mut record_budget = limits.max_records as usize;
         let mut term_budget = limits.max_terms as usize;
@@ -426,9 +494,12 @@ impl SemanticRootMaterial {
         for _ in 0..count {
             let predicate = RelId(reader.u32()?);
             let role = match reader.u8()? {
-                1 => SemanticRecordRole::Statement, 2 => SemanticRecordRole::Qualifier,
-                3 => SemanticRecordRole::Provenance, 4 => SemanticRecordRole::Source,
-                5 => SemanticRecordRole::Context, 6 => SemanticRecordRole::Scope,
+                1 => SemanticRecordRole::Statement,
+                2 => SemanticRecordRole::Qualifier,
+                3 => SemanticRecordRole::Provenance,
+                4 => SemanticRecordRole::Source,
+                5 => SemanticRecordRole::Context,
+                6 => SemanticRecordRole::Scope,
                 _ => return Err(admission_error("invalid material record role")),
             };
             let count = reader.count(9)?;
@@ -437,18 +508,29 @@ impl SemanticRootMaterial {
             let mut labels = Vec::with_capacity(count);
             for _ in 0..count {
                 let name = material_string(&mut reader, &mut text_budget)?;
-                let scalar = ScalarType::from_code(reader.u8()?).ok_or_else(|| admission_error("invalid material scalar code"))?;
+                let scalar = ScalarType::from_code(reader.u8()?)
+                    .ok_or_else(|| admission_error("invalid material scalar code"))?;
                 let label = material_string(&mut reader, &mut text_budget)?;
-                if label.trim().is_empty() { return Err(admission_error("empty material sort label")); }
+                if label.trim().is_empty() {
+                    return Err(admission_error("empty material sort label"));
+                }
                 columns.push((name, scalar));
                 labels.push(label);
             }
-            let mut schema = Schema::new(columns).with_sort_labels(labels).map_err(admission_error)?;
+            let mut schema = Schema::new(columns)
+                .with_sort_labels(labels)
+                .map_err(admission_error)?;
             let count = reader.count(4)?;
             material_budget(&mut term_budget, count)?;
             schema.key_columns.clear();
-            for _ in 0..count { schema.key_columns.push(reader.u32()? as usize); }
-            predicates.push(SemanticPredicateRecord { predicate, role, schema });
+            for _ in 0..count {
+                schema.key_columns.push(reader.u32()? as usize);
+            }
+            predicates.push(SemanticPredicateRecord {
+                predicate,
+                role,
+                schema,
+            });
         }
         let count = reader.count(12)?;
         material_budget(&mut record_budget, count)?;
@@ -459,7 +541,8 @@ impl SemanticRootMaterial {
             material_budget(&mut term_budget, count)?;
             let mut arguments = Vec::with_capacity(count);
             for _ in 0..count {
-                let scalar = ScalarType::from_code(reader.u8()?).ok_or_else(|| admission_error("invalid material scalar code"))?;
+                let scalar = ScalarType::from_code(reader.u8()?)
+                    .ok_or_else(|| admission_error("invalid material scalar code"))?;
                 arguments.push(match scalar {
                     ScalarType::U32 => SemanticArgument::U32(reader.u32()?),
                     ScalarType::U64 => SemanticArgument::U64(reader.u64()?),
@@ -468,70 +551,129 @@ impl SemanticRootMaterial {
                     ScalarType::F32 => SemanticArgument::F32Bits(reader.u32()?),
                     ScalarType::F64 => SemanticArgument::F64Bits(reader.u64()?),
                     ScalarType::Symbol => SemanticArgument::Symbol(reader.u32()?),
-                    ScalarType::Bool => SemanticArgument::Bool(match reader.u8()? { 0 => false, 1 => true, _ => return Err(admission_error("noncanonical material boolean")) }),
+                    ScalarType::Bool => SemanticArgument::Bool(match reader.u8()? {
+                        0 => false,
+                        1 => true,
+                        _ => return Err(admission_error("noncanonical material boolean")),
+                    }),
                 });
             }
             let count = reader.count(4)?;
             material_budget(&mut reference_budget, count)?;
             let mut qualifiers = Vec::with_capacity(count);
-            for _ in 0..count { qualifiers.push(reader.u32()?); }
-            records.push(SemanticTypedRecord { predicate, arguments, qualifiers });
+            for _ in 0..count {
+                qualifiers.push(reader.u32()?);
+            }
+            records.push(SemanticTypedRecord {
+                predicate,
+                arguments,
+                qualifiers,
+            });
         }
         let count = reader.count(21)?;
         material_budget(&mut record_budget, count)?;
-        material_budget(&mut reference_budget, count.checked_mul(5).ok_or_else(size_overflow)?)?;
+        material_budget(
+            &mut reference_budget,
+            count.checked_mul(5).ok_or_else(size_overflow)?,
+        )?;
         let mut supports = Vec::with_capacity(count);
         for _ in 0..count {
             let statement = reader.u32()?;
-            let polarity = match reader.u8()? { 1 => SemanticPolarity::Pro, 2 => SemanticPolarity::Contra, _ => return Err(admission_error("invalid material polarity")) };
-            supports.push(SemanticSupportRecord { statement, polarity, provenance: reader.u32()?, source: reader.u32()?, context: reader.u32()?, scope: reader.u32()? });
+            let polarity = match reader.u8()? {
+                1 => SemanticPolarity::Pro,
+                2 => SemanticPolarity::Contra,
+                _ => return Err(admission_error("invalid material polarity")),
+            };
+            supports.push(SemanticSupportRecord {
+                statement,
+                polarity,
+                provenance: reader.u32()?,
+                source: reader.u32()?,
+                context: reader.u32()?,
+                scope: reader.u32()?,
+            });
         }
         let count = reader.count(4)?;
-        if count > limits.max_terms as usize { return Err(admission_error("material symbol count exceeds admission bound")); }
+        if count > limits.max_terms as usize {
+            return Err(admission_error(
+                "material symbol count exceeds admission bound",
+            ));
+        }
         let mut symbols = Vec::with_capacity(count);
-        for _ in 0..count { symbols.push(material_string(&mut reader, &mut text_budget)?); }
+        for _ in 0..count {
+            symbols.push(material_string(&mut reader, &mut text_budget)?);
+        }
         let count = reader.count(77)?;
         let mut insertions = Vec::with_capacity(count);
         for _ in 0..count {
             let statement = match reader.u8()? {
-                0 => None, 1 => Some(reader.u32()?),
+                0 => None,
+                1 => Some(reader.u32()?),
                 _ => return Err(admission_error("invalid material target origin")),
             };
             let mut reconstruction = [0; 10];
-            for reference in &mut reconstruction { *reference = reader.u32()?; }
-            if statement.is_some() && reconstruction != [0; 10] {
-                return Err(admission_error("original material target has derived reconstruction references"));
+            for reference in &mut reconstruction {
+                *reference = reader.u32()?;
             }
-            insertions.push(SemanticRootInsertion { statement, reconstruction,
-                support: reader.u32()?, version: reader.take(32)?.try_into().unwrap() });
+            if statement.is_some() && reconstruction != [0; 10] {
+                return Err(admission_error(
+                    "original material target has derived reconstruction references",
+                ));
+            }
+            insertions.push(SemanticRootInsertion {
+                statement,
+                reconstruction,
+                support: reader.u32()?,
+                version: reader.take(32)?.try_into().unwrap(),
+            });
         }
         let digest = reader.take(32)?.try_into().unwrap();
         let extents = [reader.u32()?, reader.u32()?, reader.u32()?];
         let admission_base_digest = reader.take(32)?.try_into().unwrap();
         let admission_base_extents = [reader.u32()?, reader.u32()?, reader.u32()?];
         reader.finish()?;
-        let material = Self { records: SemanticAdmissionRecords { predicates, records, supports },
-            symbols, insertions, digest, extents, admission_base_digest, admission_base_extents };
+        let material = Self {
+            records: SemanticAdmissionRecords {
+                predicates,
+                records,
+                supports,
+            },
+            symbols,
+            insertions,
+            digest,
+            extents,
+            admission_base_digest,
+            admission_base_extents,
+        };
         material.validate_symbol_indices()?;
         Ok(material)
     }
 }
 
-fn normalized_material_admission(admission: &SemanticAdmission) -> Result<(SemanticAdmissionRecords, Vec<String>), SemanticHypergraphError> {
+fn normalized_material_admission(
+    admission: &SemanticAdmission,
+) -> Result<(SemanticAdmissionRecords, Vec<String>), SemanticHypergraphError> {
     let mut records = admission.records.clone();
     let mut symbols = Vec::with_capacity(admission.symbols.entries().len());
     for record in &mut records.records {
         for argument in &mut record.arguments {
             if let SemanticArgument::Symbol(index) = argument {
-                let (accepted, text) = admission.symbols.entries().get(symbols.len())
+                let (accepted, text) = admission
+                    .symbols
+                    .entries()
+                    .get(symbols.len())
                     .ok_or_else(|| admission_error("retained admission symbol is missing"))?;
-                if *index != *accepted { return Err(admission_error("retained admission symbol order differs")); }
+                if *index != *accepted {
+                    return Err(admission_error("retained admission symbol order differs"));
+                }
                 *index = u32::try_from(symbols.len()).map_err(|_| size_overflow())?;
                 symbols.push(text.to_string());
             }
         }
     }
-    if symbols.len() != admission.symbols.entries().len() { return Err(admission_error("retained admission has excess symbols")); }
+    if symbols.len() != admission.symbols.entries().len() {
+        return Err(admission_error("retained admission has excess symbols"));
+    }
     Ok((records, symbols))
 }
 
@@ -540,7 +682,9 @@ fn material_root_digest(previous: [u8; 32], version: [u8; 32], extents: [u32; 3]
     bytes[..22].copy_from_slice(b"xlog.semantic.root.v1\0");
     bytes[32..64].copy_from_slice(&previous);
     bytes[64..96].copy_from_slice(&version);
-    for (chunk, extent) in bytes[96..].chunks_exact_mut(4).zip(extents) { chunk.copy_from_slice(&extent.to_le_bytes()); }
+    for (chunk, extent) in bytes[96..].chunks_exact_mut(4).zip(extents) {
+        chunk.copy_from_slice(&extent.to_le_bytes());
+    }
     Sha256::digest(bytes).into()
 }
 
@@ -562,33 +706,46 @@ fn record_encoding_prefix(schema: Identity256, predicate: RelId, arity: usize) -
 }
 
 fn qualified_statement_identity(
-    atom: [u8; 32], qualifiers: impl ExactSizeIterator<Item = [u8; 32]>,
+    atom: [u8; 32],
+    qualifiers: impl ExactSizeIterator<Item = [u8; 32]>,
 ) -> SemanticStatementIdentity {
     let mut hash = Sha256::new();
     hash.update(b"xlog.semantic.statement.v2\0");
     hash.update(atom);
     hash.update((qualifiers.len() as u32).to_le_bytes());
-    for qualifier in qualifiers { hash.update(qualifier); }
+    for qualifier in qualifiers {
+        hash.update(qualifier);
+    }
     SemanticStatementIdentity(hash.finalize().into())
 }
 
 /// Reconstructs a decoder-selected target from the same retained typed input.
 /// Source references select values only; they never create an original target.
 fn material_statement_key(
-    admission: &SemanticAdmission, original: Option<u32>, reconstruction: &[u32; 10],
+    admission: &SemanticAdmission,
+    original: Option<u32>,
+    reconstruction: &[u32; 10],
 ) -> Result<SemanticStatementKey, SemanticHypergraphError> {
     if let Some(record) = original {
         if *reconstruction != [0; 10] {
-            return Err(admission_error("original material target has derived reconstruction references"));
+            return Err(admission_error(
+                "original material target has derived reconstruction references",
+            ));
         }
         return admission.statement_key(record);
     }
     let predicates = &admission.records.predicates;
-    let target = predicates.iter().find(|entry| entry.predicate.0 == reconstruction[0])
-        .ok_or_else(|| admission_error("derived target predicate is outside the retained admission"))?;
+    let target = predicates
+        .iter()
+        .find(|entry| entry.predicate.0 == reconstruction[0])
+        .ok_or_else(|| {
+            admission_error("derived target predicate is outside the retained admission")
+        })?;
     let arity = target.schema.arity();
     if target.role != SemanticRecordRole::Statement || arity > 4 {
-        return Err(admission_error("derived target requires an admitted statement schema of at most four arguments"));
+        return Err(admission_error(
+            "derived target requires an admitted statement schema of at most four arguments",
+        ));
     }
     let mut bytes = record_encoding_prefix(admission.schema_generation, target.predicate, arity);
     for argument in 0..4 {
@@ -596,39 +753,67 @@ fn material_statement_key(
         let argument_index = reconstruction[2 + 2 * argument] as usize;
         if argument >= arity {
             if record_index != 0 || argument_index != 0 {
-                return Err(admission_error("derived target has nonzero inactive argument references"));
+                return Err(admission_error(
+                    "derived target has nonzero inactive argument references",
+                ));
             }
             continue;
         }
-        let record = admission.records.records.get(record_index)
-            .ok_or_else(|| admission_error("derived argument record is outside the retained admission"))?;
-        let source = predicates.iter().find(|entry| entry.predicate == record.predicate)
-            .ok_or_else(|| admission_error("derived argument predicate is outside the retained admission"))?;
-        let column = source.schema.columns.get(argument_index)
+        let record = admission.records.records.get(record_index).ok_or_else(|| {
+            admission_error("derived argument record is outside the retained admission")
+        })?;
+        let source = predicates
+            .iter()
+            .find(|entry| entry.predicate == record.predicate)
+            .ok_or_else(|| {
+                admission_error("derived argument predicate is outside the retained admission")
+            })?;
+        let column = source
+            .schema
+            .columns
+            .get(argument_index)
             .ok_or_else(|| admission_error("derived argument is outside its source schema"))?;
         if column.1 != target.schema.columns[argument].1
-            || source.schema.sort_labels().get(argument_index) != target.schema.sort_labels().get(argument) {
-            return Err(admission_error("derived argument type or sort differs from its target schema"));
+            || source.schema.sort_labels().get(argument_index)
+                != target.schema.sort_labels().get(argument)
+        {
+            return Err(admission_error(
+                "derived argument type or sort differs from its target schema",
+            ));
         }
         let encoding = &admission.encoded_records[record_index];
-        let span = encoding.arguments.get(argument_index)
-            .ok_or_else(|| admission_error("derived argument lacks its retained canonical bytes"))?;
+        let span = encoding.arguments.get(argument_index).ok_or_else(|| {
+            admission_error("derived argument lacks its retained canonical bytes")
+        })?;
         bytes.extend_from_slice(&encoding.bytes[span.clone()]);
     }
-    let qualifiers = if reconstruction[9] == u32::MAX { &[][..] } else {
+    let qualifiers = if reconstruction[9] == u32::MAX {
+        &[][..]
+    } else {
         admission.statement_key(reconstruction[9])?;
         &admission.records.records[reconstruction[9] as usize].qualifiers
     };
-    let identity = qualified_statement_identity(Sha256::digest(bytes).into(), qualifiers.iter().map(|&index|
-        Sha256::digest(&admission.encoded_records[index as usize].bytes).into()));
-    Ok(SemanticStatementKey { identity, owner: admission.base.owner, record: u32::MAX })
+    let identity = qualified_statement_identity(
+        Sha256::digest(bytes).into(),
+        qualifiers
+            .iter()
+            .map(|&index| Sha256::digest(&admission.encoded_records[index as usize].bytes).into()),
+    );
+    Ok(SemanticStatementKey {
+        identity,
+        owner: admission.base.owner,
+        record: u32::MAX,
+    })
 }
 
 /// Packs an already-validated insertion identically for original and restored
 /// targets. Runtime ownership and the typed reconstruction are checked by callers.
 fn encode_support_insertion(
-    command: &mut DeviceCommand, fork: SemanticForkHandle, statement: &SemanticStatementKey,
-    event: &SemanticSupportEvent, reconstruction: &[u32; 10],
+    command: &mut DeviceCommand,
+    fork: SemanticForkHandle,
+    statement: &SemanticStatementKey,
+    event: &SemanticSupportEvent,
+    reconstruction: &[u32; 10],
 ) {
     command.words[0] = OP_INSERT_SUPPORT;
     command.words[1] = fork.owner;
@@ -640,8 +825,8 @@ fn encode_support_insertion(
     command.words[16..20].copy_from_slice(&identity_words(statement.identity.0));
     command.words[20..24].copy_from_slice(&identity_words(event.identity(statement.identity).0));
     for word in 0..5 {
-        command.words[24 + word] = u64::from(reconstruction[2 * word])
-            | (u64::from(reconstruction[2 * word + 1]) << 32);
+        command.words[24 + word] =
+            u64::from(reconstruction[2 * word]) | (u64::from(reconstruction[2 * word + 1]) << 32);
     }
 }
 
@@ -653,14 +838,19 @@ impl SemanticRootMaterial {
         &self,
         admission: &SemanticAdmission,
         query_records: [u32; 2],
-    ) -> Result<crate::semantic_transition::SemanticTaskObservationRoots, SemanticHypergraphError> {
+    ) -> Result<crate::semantic_transition::SemanticTaskObservationRoots, SemanticHypergraphError>
+    {
         self.validate_lineage(admission)?;
         let queries = query_records.map(|record| admission.statement_key(record));
         let mut contributors = Vec::new();
         for (ordinal, query) in queries.into_iter().enumerate() {
             let query = query?;
             for insertion in &self.insertions {
-                let key = material_statement_key(admission, insertion.statement, &insertion.reconstruction)?;
+                let key = material_statement_key(
+                    admission,
+                    insertion.statement,
+                    &insertion.reconstruction,
+                )?;
                 if key.identity == query.identity {
                     contributors.push((ordinal as u32, insertion.statement, insertion.support));
                 }
@@ -674,36 +864,55 @@ impl SemanticRootMaterial {
         })
     }
 
-    fn validate_lineage(&self, admission: &SemanticAdmission) -> Result<(), SemanticHypergraphError> {
+    fn validate_lineage(
+        &self,
+        admission: &SemanticAdmission,
+    ) -> Result<(), SemanticHypergraphError> {
         let (records, symbols) = normalized_material_admission(admission)?;
         if self.records != records || self.symbols != symbols {
-            return Err(admission_error("root material differs from the owner's complete typed admission"));
+            return Err(admission_error(
+                "root material differs from the owner's complete typed admission",
+            ));
         }
         let mut heads = std::collections::BTreeMap::<[u8; 32], ([u8; 32], u64)>::new();
         let mut supports = std::collections::BTreeSet::new();
         let mut digest = material_root_digest([0; 32], [0; 32], [0; 3]);
         let mut extents = [0u32; 3];
-        let mut found_base = self.admission_base_extents == extents && self.admission_base_digest == digest;
+        let mut found_base =
+            self.admission_base_extents == extents && self.admission_base_digest == digest;
         for insertion in &self.insertions {
-            let key = material_statement_key(admission, insertion.statement, &insertion.reconstruction)?;
+            let key =
+                material_statement_key(admission, insertion.statement, &insertion.reconstruction)?;
             let event = admission.support_event(insertion.support)?;
             let support = event.identity(key.identity).0;
-            if !supports.insert((key.identity.0, support)) { return Err(admission_error("material repeats an unchanged support insertion")); }
+            if !supports.insert((key.identity.0, support)) {
+                return Err(admission_error(
+                    "material repeats an unchanged support insertion",
+                ));
+            }
             let previous = heads.get(&key.identity.0).copied().unwrap_or(([0; 32], 0));
             let truth = previous.1 | event.polarity.code();
             let version = material_version_digest(previous.0, support, truth);
-            if version != insertion.version { return Err(admission_error("material version identity does not match typed insertion history")); }
+            if version != insertion.version {
+                return Err(admission_error(
+                    "material version identity does not match typed insertion history",
+                ));
+            }
             heads.insert(key.identity.0, (version, truth));
-            extents = [u32::try_from(heads.len()).map_err(|_| size_overflow())?,
+            extents = [
+                u32::try_from(heads.len()).map_err(|_| size_overflow())?,
                 extents[1].checked_add(1).ok_or_else(size_overflow)?,
-                extents[2].checked_add(1).ok_or_else(size_overflow)?];
+                extents[2].checked_add(1).ok_or_else(size_overflow)?,
+            ];
             digest = material_root_digest(digest, version, extents);
             if extents == self.admission_base_extents && digest == self.admission_base_digest {
                 found_base = true;
             }
         }
         if digest != self.digest || extents != self.extents || !found_base {
-            return Err(admission_error("material root or original admission base differs from insertion history"));
+            return Err(admission_error(
+                "material root or original admission base differs from insertion history",
+            ));
         }
         Ok(())
     }
@@ -712,29 +921,50 @@ impl SemanticRootMaterial {
 /// Extracts only a sealed root's generation-valid reachable records. The transient
 /// arena copy is not itself material: candidate state and other roots never escape.
 fn material_from_arena(
-    arena: &[u64], capacities: SemanticHypergraphCapacities, root: SemanticRootHandle,
-    snapshot: SemanticRootSnapshot, admission: &SemanticAdmission,
+    arena: &[u64],
+    capacities: SemanticHypergraphCapacities,
+    root: SemanticRootHandle,
+    snapshot: SemanticRootSnapshot,
+    admission: &SemanticAdmission,
 ) -> Result<SemanticRootMaterial, SemanticHypergraphError> {
-    let corrupt = || SemanticHypergraphError::CorruptLineage { detail: "root material contains invalid native reachability or generation".into() };
+    let corrupt = || SemanticHypergraphError::CorruptLineage {
+        detail: "root material contains invalid native reachability or generation".into(),
+    };
     if arena.len() as u64 != checked_arena_words(capacities)? || root.slot >= capacities.roots {
         return Err(corrupt());
     }
-    let statements = CONTROL_WORDS as usize + capacities.roots as usize * ROOT_WORDS as usize + CANDIDATE_WORDS as usize;
+    let statements = CONTROL_WORDS as usize
+        + capacities.roots as usize * ROOT_WORDS as usize
+        + CANDIDATE_WORDS as usize;
     let supports = statements + capacities.statements as usize * STATEMENT_WORDS as usize;
     let versions = supports + capacities.supports as usize * SUPPORT_WORDS as usize;
-    let heads = versions + capacities.versions as usize * VERSION_WORDS as usize + root.slot as usize * capacities.statements as usize;
+    let heads = versions
+        + capacities.versions as usize * VERSION_WORDS as usize
+        + root.slot as usize * capacities.statements as usize;
     let root_offset = CONTROL_WORDS as usize + root.slot as usize * ROOT_WORDS as usize;
     let native_root = &arena[root_offset..root_offset + ROOT_WORDS as usize];
-    if arena[1] != root.owner || native_root[0] != 3 || native_root[1] != root.generation || root.generation == 0 {
+    if arena[1] != root.owner
+        || native_root[0] != 3
+        || native_root[1] != root.generation
+        || root.generation == 0
+    {
         return Err(corrupt());
     }
     let identity = |words: &[u64]| -> [u8; 32] {
         let mut bytes = [0; 32];
-        for (chunk, word) in bytes.chunks_exact_mut(8).zip(words) { chunk.copy_from_slice(&word.to_le_bytes()); }
+        for (chunk, word) in bytes.chunks_exact_mut(8).zip(words) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
         bytes
     };
     if identity(&native_root[6..10]) != snapshot.digest.0
-        || native_root[3..6] != [u64::from(snapshot.extents.statements), u64::from(snapshot.extents.supports), u64::from(snapshot.extents.versions)] {
+        || native_root[3..6]
+            != [
+                u64::from(snapshot.extents.statements),
+                u64::from(snapshot.extents.supports),
+                u64::from(snapshot.extents.versions),
+            ]
+    {
         return Err(corrupt());
     }
     let mut seen_versions = std::collections::BTreeSet::new();
@@ -743,67 +973,126 @@ fn material_from_arena(
     let mut statement_count = 0u32;
     for statement_slot in 0..capacities.statements as usize {
         let mut encoded = arena[heads + statement_slot];
-        if encoded == 0 { continue; }
+        if encoded == 0 {
+            continue;
+        }
         statement_count += 1;
         let offset = statements + statement_slot * STATEMENT_WORDS as usize;
         let statement = &arena[offset..offset + STATEMENT_WORDS as usize];
-        if statement[0] != 3 || statement[1] == 0 { return Err(corrupt()); }
+        if statement[0] != 3 || statement[1] == 0 {
+            return Err(corrupt());
+        }
         let statement_identity = identity(&statement[3..7]);
         let mut newer_ordinal = u64::MAX;
         while encoded != 0 {
             let version_slot = usize::try_from(encoded - 1).map_err(|_| corrupt())?;
-            if version_slot >= capacities.versions as usize || !seen_versions.insert(version_slot) { return Err(corrupt()); }
+            if version_slot >= capacities.versions as usize || !seen_versions.insert(version_slot) {
+                return Err(corrupt());
+            }
             let offset = versions + version_slot * VERSION_WORDS as usize;
             let version = &arena[offset..offset + VERSION_WORDS as usize];
-            if version[0] != 3 || version[1] == 0 || version[3] != statement_slot as u64
-                || version[4] != statement[1] || version[13] == 0 || version[13] >= newer_ordinal { return Err(corrupt()); }
+            if version[0] != 3
+                || version[1] == 0
+                || version[3] != statement_slot as u64
+                || version[4] != statement[1]
+                || version[13] == 0
+                || version[13] >= newer_ordinal
+            {
+                return Err(corrupt());
+            }
             newer_ordinal = version[13];
             let support_slot = usize::try_from(version[5]).map_err(|_| corrupt())?;
-            if support_slot >= capacities.supports as usize || !seen_supports.insert(support_slot) { return Err(corrupt()); }
+            if support_slot >= capacities.supports as usize || !seen_supports.insert(support_slot) {
+                return Err(corrupt());
+            }
             let offset = supports + support_slot * SUPPORT_WORDS as usize;
             let support = &arena[offset..offset + SUPPORT_WORDS as usize];
-            if support[0] != 3 || support[1] == 0 || support[1] != version[6]
-                || support[3] != statement_slot as u64 || support[4] != statement[1]
-                || !matches!(support[5], 1 | 2) { return Err(corrupt()); }
+            if support[0] != 3
+                || support[1] == 0
+                || support[1] != version[6]
+                || support[3] != statement_slot as u64
+                || support[4] != statement[1]
+                || !matches!(support[5], 1 | 2)
+            {
+                return Err(corrupt());
+            }
             let support_identity = identity(&support[6..10]);
             let statement_index = u32::try_from(support[10]).map_err(|_| corrupt())?;
             let statement_index = (statement_index != u32::MAX).then_some(statement_index);
             let support_index = u32::try_from(support[11]).map_err(|_| corrupt())?;
-            let reconstruction = std::array::from_fn(|word|
-                (support[12 + word / 2] >> (32 * (word % 2))) as u32);
+            let reconstruction =
+                std::array::from_fn(|word| (support[12 + word / 2] >> (32 * (word % 2))) as u32);
             let key = material_statement_key(admission, statement_index, &reconstruction)?;
             let event = admission.support_event(support_index)?;
-            if key.identity.0 != statement_identity || event.polarity.code() != support[5]
-                || event.identity(key.identity).0 != support_identity {
-                return Err(admission_error("reachable insertion differs from its original typed occurrences"));
+            if key.identity.0 != statement_identity
+                || event.polarity.code() != support[5]
+                || event.identity(key.identity).0 != support_identity
+            {
+                return Err(admission_error(
+                    "reachable insertion differs from its original typed occurrences",
+                ));
             }
-            let (previous, previous_truth) = if version[7] == 0 { ([0; 32], 0) } else {
+            let (previous, previous_truth) = if version[7] == 0 {
+                ([0; 32], 0)
+            } else {
                 let slot = usize::try_from(version[7] - 1).map_err(|_| corrupt())?;
-                if slot >= capacities.versions as usize { return Err(corrupt()); }
+                if slot >= capacities.versions as usize {
+                    return Err(corrupt());
+                }
                 let offset = versions + slot * VERSION_WORDS as usize;
                 (identity(&arena[offset + 9..offset + 13]), arena[offset + 8])
             };
             let digest = identity(&version[9..13]);
-            if previous_truth > 3 || version[8] != previous_truth | support[5]
-                || digest != material_version_digest(previous, support_identity, version[8]) { return Err(corrupt()); }
-            ordered.push((version[13], SemanticRootInsertion {
-                statement: statement_index, reconstruction, support: support_index, version: digest,
-            }));
+            if previous_truth > 3
+                || version[8] != previous_truth | support[5]
+                || digest != material_version_digest(previous, support_identity, version[8])
+            {
+                return Err(corrupt());
+            }
+            ordered.push((
+                version[13],
+                SemanticRootInsertion {
+                    statement: statement_index,
+                    reconstruction,
+                    support: support_index,
+                    version: digest,
+                },
+            ));
             encoded = version[7];
         }
     }
     ordered.sort_unstable_by_key(|(ordinal, _)| *ordinal);
-    if ordered.iter().enumerate().any(|(index, (ordinal, _))| *ordinal != index as u64 + 1)
+    if ordered
+        .iter()
+        .enumerate()
+        .any(|(index, (ordinal, _))| *ordinal != index as u64 + 1)
         || statement_count != snapshot.extents.statements
         || seen_supports.len() != snapshot.extents.supports as usize
-        || seen_versions.len() != snapshot.extents.versions as usize { return Err(corrupt()); }
+        || seen_versions.len() != snapshot.extents.versions as usize
+    {
+        return Err(corrupt());
+    }
     let (records, symbols) = normalized_material_admission(admission)?;
-    let material = SemanticRootMaterial { records, symbols,
-        insertions: ordered.into_iter().map(|(_, insertion)| insertion).collect(), digest: snapshot.digest.0,
-        extents: [snapshot.extents.statements, snapshot.extents.supports, snapshot.extents.versions],
+    let material = SemanticRootMaterial {
+        records,
+        symbols,
+        insertions: ordered
+            .into_iter()
+            .map(|(_, insertion)| insertion)
+            .collect(),
+        digest: snapshot.digest.0,
+        extents: [
+            snapshot.extents.statements,
+            snapshot.extents.supports,
+            snapshot.extents.versions,
+        ],
         admission_base_digest: admission.base_snapshot.digest.0,
-        admission_base_extents: [admission.base_snapshot.extents.statements,
-            admission.base_snapshot.extents.supports, admission.base_snapshot.extents.versions] };
+        admission_base_extents: [
+            admission.base_snapshot.extents.statements,
+            admission.base_snapshot.extents.supports,
+            admission.base_snapshot.extents.versions,
+        ],
+    };
     material.validate_lineage(admission)?;
     Ok(material)
 }
@@ -1058,7 +1347,8 @@ fn admit_semantic_records(
     let mut atoms = Vec::<[u8; 32]>::with_capacity(records.records.len());
     let mut encoded_records = Vec::with_capacity(records.records.len());
     for record in &records.records {
-        let mut bytes = record_encoding_prefix(schema_generation, record.predicate, record.arguments.len());
+        let mut bytes =
+            record_encoding_prefix(schema_generation, record.predicate, record.arguments.len());
         let mut arguments = Vec::with_capacity(record.arguments.len());
         for &argument in &record.arguments {
             let start = bytes.len();
@@ -1097,8 +1387,13 @@ fn admit_semantic_records(
                 return None;
             }
             Some(SemanticStatementKey {
-                identity: qualified_statement_identity(atoms[index],
-                    record.qualifiers.iter().map(|&qualifier| atoms[qualifier as usize])),
+                identity: qualified_statement_identity(
+                    atoms[index],
+                    record
+                        .qualifiers
+                        .iter()
+                        .map(|&qualifier| atoms[qualifier as usize]),
+                ),
                 owner: base.owner,
                 record: index as u32,
             })
@@ -2544,69 +2839,127 @@ impl SemanticHypergraph {
     /// Cold export under the transition owner's exclusive, quiescent acquisition.
     /// Native validation is intentional: resident execution invalidates host ledgers.
     pub(crate) fn export_transition_root_parts(
-        &mut self, owner: u64, slot: u64, generation: u64,
+        &mut self,
+        owner: u64,
+        slot: u64,
+        generation: u64,
     ) -> Result<SemanticRootMaterial, SemanticHypergraphError> {
         self.ensure_not_poisoned()?;
         if owner != self.owner {
-            return Err(SemanticHypergraphError::ForeignHandle { kind: SemanticHandleKind::Root });
+            return Err(SemanticHypergraphError::ForeignHandle {
+                kind: SemanticHandleKind::Root,
+            });
         }
         let slot = checked_receipt_slot(slot, SemanticHandleKind::Root, self.capacities.roots)?;
         self.export_transition_root(SemanticRootHandle::new(owner, slot, generation))
     }
 
     /// Exports an existing opaque root through native generation validation.
-    pub(crate) fn export_transition_root(&mut self, root: SemanticRootHandle) -> Result<SemanticRootMaterial, SemanticHypergraphError> {
+    pub(crate) fn export_transition_root(
+        &mut self,
+        root: SemanticRootHandle,
+    ) -> Result<SemanticRootMaterial, SemanticHypergraphError> {
         self.ensure_not_poisoned()?;
         if root.owner != self.owner {
-            return Err(SemanticHypergraphError::ForeignHandle { kind: SemanticHandleKind::Root });
+            return Err(SemanticHypergraphError::ForeignHandle {
+                kind: SemanticHandleKind::Root,
+            });
         }
-        if self.admission.is_none() { return Err(admission_error("root material export requires typed admission")); }
+        if self.admission.is_none() {
+            return Err(admission_error(
+                "root material export requires typed admission",
+            ));
+        }
         let mut command = self.command_for(OP_SNAPSHOT);
         write_view(&mut command, SemanticView::Root(root));
         let receipt = self.run(command, ArenaAccess::Read)?;
         self.expect_success(&receipt)?;
         let result = (|| {
-            let snapshot = SemanticRootSnapshot::new(SemanticRootDigest(receipt_identity(&receipt, 16)), receipt_extents(&receipt)?);
-            let arena = self.provider.dtoh_small_metadata_untracked(&self.arena,
-                usize::try_from(self.arena_words).map_err(|_| size_overflow())?)
+            let snapshot = SemanticRootSnapshot::new(
+                SemanticRootDigest(receipt_identity(&receipt, 16)),
+                receipt_extents(&receipt)?,
+            );
+            let arena = self
+                .provider
+                .dtoh_small_metadata_untracked(
+                    &self.arena,
+                    usize::try_from(self.arena_words).map_err(|_| size_overflow())?,
+                )
                 .map_err(|error| runtime_error("root material arena read", error))?;
-            material_from_arena(&arena, self.capacities, root, snapshot,
-                self.admission.as_ref().expect("checked typed admission"))
+            material_from_arena(
+                &arena,
+                self.capacities,
+                root,
+                snapshot,
+                self.admission.as_ref().expect("checked typed admission"),
+            )
         })();
         poison_after_reconciliation_error(&mut self.poisoned, result)
     }
 
     /// Rematerializes a complete root on a fresh, already-admitted native owner.
     /// No original physical slot, generation, or encoded embedding is imported.
-    pub(crate) fn restore_root(&mut self, material: &SemanticRootMaterial) -> Result<SemanticRootHandle, SemanticHypergraphError> {
+    pub(crate) fn restore_root(
+        &mut self,
+        material: &SemanticRootMaterial,
+    ) -> Result<SemanticRootHandle, SemanticHypergraphError> {
         self.ensure_host_facade_available()?;
-        let admission = self.admission.as_ref().ok_or_else(|| admission_error("root restoration requires typed admission"))?;
-        if admission.base != self.empty_root || self.current_fork.is_some() || self.fork.generation != 1
+        let admission = self
+            .admission
+            .as_ref()
+            .ok_or_else(|| admission_error("root restoration requires typed admission"))?;
+        if admission.base != self.empty_root
+            || self.current_fork.is_some()
+            || self.fork.generation != 1
             || self.roots.iter().filter(|slot| slot.live).count() != 1
             || self.statements.iter().any(|slot| slot.live)
-            || self.supports.iter().any(|slot| slot.live) || self.versions.iter().any(|slot| slot.live) {
-            return Err(admission_error("root restoration requires a fresh empty native owner"));
+            || self.supports.iter().any(|slot| slot.live)
+            || self.versions.iter().any(|slot| slot.live)
+        {
+            return Err(admission_error(
+                "root restoration requires a fresh empty native owner",
+            ));
         }
         material.validate_lineage(admission)?;
         let base_versions = material.admission_base_extents[2] as usize;
-        let needed_roots = 1 + u32::from(!material.insertions.is_empty())
+        let needed_roots = 1
+            + u32::from(!material.insertions.is_empty())
             + u32::from(base_versions > 0 && base_versions < material.insertions.len());
-        if material.extents[0] > self.capacities.statements || material.extents[1] > self.capacities.supports
+        if material.extents[0] > self.capacities.statements
+            || material.extents[1] > self.capacities.supports
             || material.extents[2] > self.capacities.versions
-            || self.capacities.roots < needed_roots {
-            return Err(admission_error("root material exceeds fresh native capacities"));
+            || self.capacities.roots < needed_roots
+        {
+            return Err(admission_error(
+                "root material exceeds fresh native capacities",
+            ));
         }
         let result = (|| {
             let mut admission_root = self.empty_root;
-            let root = if material.insertions.is_empty() { self.empty_root } else {
+            let root = if material.insertions.is_empty() {
+                self.empty_root
+            } else {
                 let mut fork = self.fork(self.empty_root)?;
                 for (index, insertion) in material.insertions.iter().enumerate() {
                     let admission = self.admission.as_ref().expect("checked typed admission");
-                    let key = material_statement_key(admission, insertion.statement, &insertion.reconstruction)?;
+                    let key = material_statement_key(
+                        admission,
+                        insertion.statement,
+                        &insertion.reconstruction,
+                    )?;
                     let event = admission.support_event(insertion.support)?;
-                    match self.insert_support_reconstructed(fork, &key, &event, &insertion.reconstruction)? {
-                        SemanticInsertOutcome::Inserted(inserted) if inserted.version.identity.0 == insertion.version => {}
-                        _ => return self.corrupt("restored insertion differs from canonical root material"),
+                    match self.insert_support_reconstructed(
+                        fork,
+                        &key,
+                        &event,
+                        &insertion.reconstruction,
+                    )? {
+                        SemanticInsertOutcome::Inserted(inserted)
+                            if inserted.version.identity.0 == insertion.version => {}
+                        _ => {
+                            return self
+                                .corrupt("restored insertion differs from canonical root material")
+                        }
                     }
                     if index + 1 == base_versions && base_versions < material.insertions.len() {
                         admission_root = self.seal(fork)?;
@@ -2619,21 +2972,46 @@ impl SemanticHypergraph {
                 admission_root = root;
             }
             let snapshot = self.snapshot(SemanticView::Root(root))?;
-            if snapshot.digest.0 != material.digest || snapshot.extents != SemanticExtents::new(material.extents[0], material.extents[1], material.extents[2]) {
-                return self.corrupt("fresh native root differs from restored digest or reachable extents");
+            if snapshot.digest.0 != material.digest
+                || snapshot.extents
+                    != SemanticExtents::new(
+                        material.extents[0],
+                        material.extents[1],
+                        material.extents[2],
+                    )
+            {
+                return self.corrupt(
+                    "fresh native root differs from restored digest or reachable extents",
+                );
             }
-            let base_snapshot = if admission_root == root { snapshot }
-                else { self.snapshot(SemanticView::Root(admission_root))? };
+            let base_snapshot = if admission_root == root {
+                snapshot
+            } else {
+                self.snapshot(SemanticView::Root(admission_root))?
+            };
             if base_snapshot.digest.0 != material.admission_base_digest
-                || base_snapshot.extents != SemanticExtents::new(material.admission_base_extents[0],
-                    material.admission_base_extents[1], material.admission_base_extents[2]) {
-                return self.corrupt("fresh native admission base differs from its retained original binding");
+                || base_snapshot.extents
+                    != SemanticExtents::new(
+                        material.admission_base_extents[0],
+                        material.admission_base_extents[1],
+                        material.admission_base_extents[2],
+                    )
+            {
+                return self.corrupt(
+                    "fresh native admission base differs from its retained original binding",
+                );
             }
             let admission = self.admission.as_mut().expect("checked typed admission");
             admission.base = admission_root;
             admission.base_snapshot = base_snapshot;
-            admission.identity = derive_admission_identity(&admission.records, admission.schema_generation,
-                &admission.encoded_records, &admission.statement_keys, &admission.support_events, &base_snapshot);
+            admission.identity = derive_admission_identity(
+                &admission.records,
+                admission.schema_generation,
+                &admission.encoded_records,
+                &admission.statement_keys,
+                &admission.support_events,
+                &base_snapshot,
+            );
             Ok(root)
         })();
         poison_after_reconciliation_error(&mut self.poisoned, result)
@@ -2721,14 +3099,19 @@ impl SemanticHypergraph {
         self.ensure_host_facade_available()?;
         self.validate_fork(fork)?;
         if statement.record == u32::MAX {
-            let admission = self.admission.as_ref()
-                .ok_or_else(|| admission_error("derived insertion requires retained typed admission"))?;
+            let admission = self.admission.as_ref().ok_or_else(|| {
+                admission_error("derived insertion requires retained typed admission")
+            })?;
             if material_statement_key(admission, None, reconstruction)? != *statement {
-                return Err(admission_error("derived insertion key differs from its typed reconstruction"));
+                return Err(admission_error(
+                    "derived insertion key differs from its typed reconstruction",
+                ));
             }
         } else {
             if *reconstruction != [0; 10] {
-                return Err(admission_error("original insertion has derived reconstruction references"));
+                return Err(admission_error(
+                    "original insertion has derived reconstruction references",
+                ));
             }
             self.validate_statement_key(statement)?;
         }
@@ -4530,49 +4913,105 @@ pub(crate) mod tests {
             admission_base_extents: [0; 3],
         };
         let limits = SemanticAdmissionLimits {
-            max_records: 5, max_terms: 25, max_references: 2, max_utf8_bytes: 1024,
+            max_records: 5,
+            max_terms: 25,
+            max_references: 2,
+            max_utf8_bytes: 1024,
         };
         let encoded = material.encode().unwrap();
-        assert_eq!(SemanticRootMaterial::decode(&encoded, limits).unwrap(), material);
+        assert_eq!(
+            SemanticRootMaterial::decode(&encoded, limits).unwrap(),
+            material
+        );
         for len in 0..encoded.len() {
             assert!(SemanticRootMaterial::decode(&encoded[..len], limits).is_err());
         }
         let mut trailing = encoded.clone();
         trailing.push(0);
         assert!(SemanticRootMaterial::decode(&trailing, limits).is_err());
-        let tight = SemanticAdmissionLimits { max_terms: 24, ..limits };
+        let tight = SemanticAdmissionLimits {
+            max_terms: 24,
+            ..limits
+        };
         assert!(SemanticRootMaterial::decode(&encoded, tight).is_err());
         let mut reader = SemanticMaterialReader::new(&[255; 4]);
         assert!(reader.count(1).is_err());
     }
 
     pub(crate) fn root_material_records() -> SemanticAdmissionRecords {
-        let roles = [SemanticRecordRole::Statement, SemanticRecordRole::Provenance,
-            SemanticRecordRole::Source, SemanticRecordRole::Context, SemanticRecordRole::Scope];
-        let predicates = roles.into_iter().enumerate().map(|(index, role)| SemanticPredicateRecord {
-            predicate: RelId(index as u32), role,
-            schema: Schema::new(vec![("value".into(), ScalarType::U32)]),
-        }).collect();
-        let records = [0, 0, 1, 2, 3, 4, 2].into_iter().enumerate().map(|(index, predicate)| SemanticTypedRecord {
-            predicate: RelId(predicate), arguments: vec![SemanticArgument::U32(index as u32)], qualifiers: vec![],
-        }).collect();
-        let mut supports: Vec<_> = [SemanticPolarity::Pro, SemanticPolarity::Contra].into_iter().map(|polarity| SemanticSupportRecord {
-            statement: 0, polarity, provenance: 2, source: 3, context: 4, scope: 5,
-        }).collect();
-        supports.push(SemanticSupportRecord { statement: 0, polarity: SemanticPolarity::Pro,
-            provenance: 2, source: 6, context: 4, scope: 5 });
-        SemanticAdmissionRecords { predicates, records, supports }
+        let roles = [
+            SemanticRecordRole::Statement,
+            SemanticRecordRole::Provenance,
+            SemanticRecordRole::Source,
+            SemanticRecordRole::Context,
+            SemanticRecordRole::Scope,
+        ];
+        let predicates = roles
+            .into_iter()
+            .enumerate()
+            .map(|(index, role)| SemanticPredicateRecord {
+                predicate: RelId(index as u32),
+                role,
+                schema: Schema::new(vec![("value".into(), ScalarType::U32)]),
+            })
+            .collect();
+        let records = [0, 0, 1, 2, 3, 4, 2]
+            .into_iter()
+            .enumerate()
+            .map(|(index, predicate)| SemanticTypedRecord {
+                predicate: RelId(predicate),
+                arguments: vec![SemanticArgument::U32(index as u32)],
+                qualifiers: vec![],
+            })
+            .collect();
+        let mut supports: Vec<_> = [SemanticPolarity::Pro, SemanticPolarity::Contra]
+            .into_iter()
+            .map(|polarity| SemanticSupportRecord {
+                statement: 0,
+                polarity,
+                provenance: 2,
+                source: 3,
+                context: 4,
+                scope: 5,
+            })
+            .collect();
+        supports.push(SemanticSupportRecord {
+            statement: 0,
+            polarity: SemanticPolarity::Pro,
+            provenance: 2,
+            source: 6,
+            context: 4,
+            scope: 5,
+        });
+        SemanticAdmissionRecords {
+            predicates,
+            records,
+            supports,
+        }
     }
 
     pub(crate) fn root_material_limits() -> SemanticAdmissionLimits {
-        SemanticAdmissionLimits { max_records: 32, max_terms: 64, max_references: 32, max_utf8_bytes: 1024 }
+        SemanticAdmissionLimits {
+            max_records: 32,
+            max_terms: 64,
+            max_references: 32,
+            max_utf8_bytes: 1024,
+        }
     }
 
     pub(crate) fn admit_material_records(records: SemanticAdmissionRecords) -> SemanticAdmission {
-        admit_semantic_records(records, root_material_limits(),
-            SemanticRootHandle::new(1, 0, 1), || Ok(SemanticRootSnapshot::new(
-                SemanticRootDigest(material_root_digest([0; 32], [0; 32], [0; 3])),
-                SemanticExtents::default()))).unwrap()
+        admit_semantic_records(
+            records,
+            root_material_limits(),
+            SemanticRootHandle::new(1, 0, 1),
+            || {
+                Ok(SemanticRootSnapshot::new(
+                    SemanticRootDigest(material_root_digest([0; 32], [0; 32], [0; 3])),
+                    SemanticExtents::default(),
+                ))
+            },
+        )
+        .unwrap()
     }
 
     pub(crate) fn reconstructed_material_statement(
@@ -4584,38 +5023,78 @@ pub(crate) mod tests {
     }
 
     fn verify_native_material_reconstruction(
-        executable: &std::path::Path, directory: &std::path::Path,
+        executable: &std::path::Path,
+        directory: &std::path::Path,
         run: &impl Fn(&mut std::process::Command),
     ) {
         let mut records = root_material_records();
         records.predicates[0].schema = Schema::new(vec![
-            ("left".into(), ScalarType::U32), ("right".into(), ScalarType::U32),
-        ]).with_sort_labels(vec!["bit".into(), "bit".into()]).unwrap();
+            ("left".into(), ScalarType::U32),
+            ("right".into(), ScalarType::U32),
+        ])
+        .with_sort_labels(vec!["bit".into(), "bit".into()])
+        .unwrap();
         records.records[0].arguments = vec![SemanticArgument::U32(0), SemanticArgument::U32(0)];
         records.records[1].arguments = vec![SemanticArgument::U32(1), SemanticArgument::U32(1)];
         records.supports.push(records.supports[0].clone());
         let empty_digest = material_root_digest([0; 32], [0; 32], [0; 3]);
-        let admission = admit_semantic_records(records, root_material_limits(),
-            SemanticRootHandle::new(91, 0, 1), || Ok(SemanticRootSnapshot::new(
-                SemanticRootDigest(empty_digest), SemanticExtents::default()))).unwrap();
+        let admission = admit_semantic_records(
+            records,
+            root_material_limits(),
+            SemanticRootHandle::new(91, 0, 1),
+            || {
+                Ok(SemanticRootSnapshot::new(
+                    SemanticRootDigest(empty_digest),
+                    SemanticExtents::default(),
+                ))
+            },
+        )
+        .unwrap();
         let (records, symbols) = normalized_material_admission(&admission).unwrap();
         let derived_equal = [0, 0, 0, 0, 1, 0, 0, 0, 0, u32::MAX];
         let derived_new = [0, 0, 0, 1, 1, 0, 0, 0, 0, u32::MAX];
         let original = material_statement_key(&admission, Some(0), &[0; 10]).unwrap();
-        assert_eq!(original.identity, material_statement_key(&admission, None, &derived_equal).unwrap().identity);
+        assert_eq!(
+            original.identity,
+            material_statement_key(&admission, None, &derived_equal)
+                .unwrap()
+                .identity
+        );
         let new_key = material_statement_key(&admission, None, &derived_new).unwrap();
-        assert!(admission.statement_keys.iter().flatten().all(|key| key.identity != new_key.identity));
+        assert!(admission
+            .statement_keys
+            .iter()
+            .flatten()
+            .all(|key| key.identity != new_key.identity));
         let mut encodings = Vec::new();
-        for (case, (statement, reconstruction)) in
-            [(Some(0), [0; 10]), (None, derived_equal), (None, derived_new)].into_iter().enumerate() {
+        for (case, (statement, reconstruction)) in [
+            (Some(0), [0; 10]),
+            (None, derived_equal),
+            (None, derived_new),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let key = material_statement_key(&admission, statement, &reconstruction).unwrap();
             let event = admission.support_event(3).unwrap();
-            let version = material_version_digest([0; 32], event.identity(key.identity).0, event.polarity.code());
+            let version = material_version_digest(
+                [0; 32],
+                event.identity(key.identity).0,
+                event.polarity.code(),
+            );
             let material = SemanticRootMaterial {
-                records: records.clone(), symbols: symbols.clone(),
-                insertions: vec![SemanticRootInsertion { statement, reconstruction, support: 3, version }],
-                digest: material_root_digest(empty_digest, version, [1; 3]), extents: [1; 3],
-                admission_base_digest: empty_digest, admission_base_extents: [0; 3],
+                records: records.clone(),
+                symbols: symbols.clone(),
+                insertions: vec![SemanticRootInsertion {
+                    statement,
+                    reconstruction,
+                    support: 3,
+                    version,
+                }],
+                digest: material_root_digest(empty_digest, version, [1; 3]),
+                extents: [1; 3],
+                admission_base_digest: empty_digest,
+                admission_base_extents: [0; 3],
             };
             material.validate_lineage(&admission).unwrap();
             let encoded = material.encode().unwrap();
@@ -4637,8 +5116,13 @@ pub(crate) mod tests {
                 if reuse {
                     commands.push(fork());
                     let mut insert = DeviceCommand::default();
-                    encode_support_insertion(&mut insert, SemanticForkHandle::new(91, 0, 1),
-                        &key, &event, &reconstruction);
+                    encode_support_insertion(
+                        &mut insert,
+                        SemanticForkHandle::new(91, 0, 1),
+                        &key,
+                        &event,
+                        &reconstruction,
+                    );
                     commands.push(insert);
                     let mut discard = DeviceCommand::default();
                     discard.words[0] = OP_DISCARD;
@@ -4647,10 +5131,20 @@ pub(crate) mod tests {
                 }
                 commands.push(fork());
                 let insertion = &decoded.insertions[0];
-                let restored_key = material_statement_key(&admission, insertion.statement, &insertion.reconstruction).unwrap();
+                let restored_key = material_statement_key(
+                    &admission,
+                    insertion.statement,
+                    &insertion.reconstruction,
+                )
+                .unwrap();
                 let mut insert = DeviceCommand::default();
-                encode_support_insertion(&mut insert, SemanticForkHandle::new(91, 0, 1 + u64::from(reuse)),
-                    &restored_key, &admission.support_event(insertion.support).unwrap(), &insertion.reconstruction);
+                encode_support_insertion(
+                    &mut insert,
+                    SemanticForkHandle::new(91, 0, 1 + u64::from(reuse)),
+                    &restored_key,
+                    &admission.support_event(insertion.support).unwrap(),
+                    &insertion.reconstruction,
+                );
                 commands.push(insert);
                 let mut seal = DeviceCommand::default();
                 seal.words[0] = OP_SEAL;
@@ -4658,22 +5152,39 @@ pub(crate) mod tests {
                 commands.push(seal);
                 let command_path = directory.join(format!("material-{case}-{reuse}.commands"));
                 let output_path = directory.join(format!("material-{case}-{reuse}.arena"));
-                let bytes: Vec<_> = commands.iter().flat_map(|command| command.words.iter()
-                    .flat_map(|word| word.to_ne_bytes())).collect();
+                let bytes: Vec<_> = commands
+                    .iter()
+                    .flat_map(|command| command.words.iter().flat_map(|word| word.to_ne_bytes()))
+                    .collect();
                 std::fs::write(&command_path, bytes).unwrap();
-                run(std::process::Command::new(executable).arg("--commands").arg(&command_path).arg(&output_path));
+                run(std::process::Command::new(executable)
+                    .arg("--commands")
+                    .arg(&command_path)
+                    .arg(&output_path));
                 let bytes = std::fs::read(&output_path).unwrap();
                 assert_eq!(bytes.len() % 8, 0);
-                let words: Vec<_> = bytes.chunks_exact(8).map(|word| u64::from_ne_bytes(word.try_into().unwrap())).collect();
+                let words: Vec<_> = bytes
+                    .chunks_exact(8)
+                    .map(|word| u64::from_ne_bytes(word.try_into().unwrap()))
+                    .collect();
                 let root = SemanticRootHandle::new(91, words[3] as u32, words[4]);
-                let digest = std::array::from_fn(|byte| (words[16 + byte / 8] >> (8 * (byte % 8))) as u8);
-                let snapshot = SemanticRootSnapshot::new(SemanticRootDigest(digest),
-                    SemanticExtents::new(words[13] as u32, words[14] as u32, words[15] as u32));
+                let digest =
+                    std::array::from_fn(|byte| (words[16 + byte / 8] >> (8 * (byte % 8))) as u8);
+                let snapshot = SemanticRootSnapshot::new(
+                    SemanticRootDigest(digest),
+                    SemanticExtents::new(words[13] as u32, words[14] as u32, words[15] as u32),
+                );
                 let capacities = SemanticHypergraphCapacities::try_new(4, 4, 8, 8).unwrap();
                 let arena = &words[RECEIPT_WORDS..];
-                let observed = material_from_arena(arena, capacities, root, snapshot, &admission).unwrap();
-                assert_eq!(observed, decoded, "native restoration changed original/derived target or support occurrence");
-                let support = (CONTROL_WORDS + 4 * ROOT_WORDS + CANDIDATE_WORDS + 4 * STATEMENT_WORDS) as usize;
+                let observed =
+                    material_from_arena(arena, capacities, root, snapshot, &admission).unwrap();
+                assert_eq!(
+                    observed, decoded,
+                    "native restoration changed original/derived target or support occurrence"
+                );
+                let support =
+                    (CONTROL_WORDS + 4 * ROOT_WORDS + CANDIDATE_WORDS + 4 * STATEMENT_WORDS)
+                        as usize;
                 assert_eq!(arena[support + 1], 1 + u64::from(reuse));
                 std::fs::remove_file(command_path).unwrap();
                 std::fs::remove_file(output_path).unwrap();
@@ -4693,7 +5204,10 @@ pub(crate) mod tests {
                 assert!(changed.encode().is_err());
             }
         }
-        assert_ne!(encodings[0], encodings[1], "derived bytes acquired original record zero");
+        assert_ne!(
+            encodings[0], encodings[1],
+            "derived bytes acquired original record zero"
+        );
         assert_ne!(Sha256::digest(&encodings[0]), Sha256::digest(&encodings[1]));
     }
 
@@ -4704,32 +5218,61 @@ pub(crate) mod tests {
         let mut nonce = [0; 8];
         getrandom::fill(&mut nonce).unwrap();
         let directory = std::env::temp_dir().join(format!(
-            "xlog-native-truth-{}-{}", std::process::id(), u64::from_le_bytes(nonce)));
+            "xlog-native-truth-{}-{}",
+            std::process::id(),
+            u64::from_le_bytes(nonce)
+        ));
         std::fs::create_dir(&directory).unwrap();
         let deadline = Instant::now() + Duration::from_secs(120);
         let run = |command: &mut Command| {
-            let mut child = command.current_dir(&directory).spawn()
+            let mut child = command
+                .current_dir(&directory)
+                .spawn()
                 .expect("native truth regression command must start; no silent compiler skip");
             loop {
-                if let Some(status) = child.try_wait().expect("native truth regression process status") {
-                    assert!(status.success(), "native truth regression failed; output retained in {}", directory.display());
+                if let Some(status) = child
+                    .try_wait()
+                    .expect("native truth regression process status")
+                {
+                    assert!(
+                        status.success(),
+                        "native truth regression failed; output retained in {}",
+                        directory.display()
+                    );
                     break;
                 }
                 if Instant::now() >= deadline {
-                    child.kill().expect("stop timed-out native truth regression");
-                    child.wait().expect("reap timed-out native truth regression");
-                    panic!("native truth regression exceeded two minutes; output retained in {}", directory.display());
+                    child
+                        .kill()
+                        .expect("stop timed-out native truth regression");
+                    child
+                        .wait()
+                        .expect("reap timed-out native truth regression");
+                    panic!(
+                        "native truth regression exceeded two minutes; output retained in {}",
+                        directory.display()
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
         };
         for name in ["semantic_truth_receipt", "semantic_feedback_lineage"] {
             let executable = directory.join(name);
-            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("tests/{name}.cpp"));
-            let mut compiler = Command::new(std::env::var_os("CXX").unwrap_or_else(|| "c++".into()));
-            compiler.args(["-std=c++20", "-O0", "-Wall", "-Wextra", "-I", env!("OUT_DIR")]);
-            if cfg!(feature = "semantic-policy") { compiler.arg("-DXLOG_SEMANTIC_POLICY"); }
+            let source =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/{name}.cpp"));
+            let mut compiler =
+                Command::new(std::env::var_os("CXX").unwrap_or_else(|| "c++".into()));
+            compiler.args([
+                "-std=c++20",
+                "-O0",
+                "-Wall",
+                "-Wextra",
+                "-I",
+                env!("OUT_DIR"),
+            ]);
+            if cfg!(feature = "semantic-policy") {
+                compiler.arg("-DXLOG_SEMANTIC_POLICY");
+            }
             run(compiler.arg(source).arg("-o").arg(&executable));
             run(&mut Command::new(&executable));
             if name == "semantic_truth_receipt" {
@@ -4746,27 +5289,43 @@ pub(crate) mod tests {
 
     #[test]
     fn task_selection_identity_retains_exact_admitted_occurrences() {
-        use crate::semantic_transition::{task_binding_tests::{task_spec, arithmetic_observation}, TaskEvaluationBinding};
+        use crate::semantic_transition::{
+            task_binding_tests::{arithmetic_observation, task_spec},
+            TaskEvaluationBinding,
+        };
         let mut records = root_material_records();
         records.predicates[0].schema = Schema::new(vec![
-            ("left".into(), ScalarType::U32), ("right".into(), ScalarType::U32),
-        ]).with_sort_labels(vec!["bit".into(), "bit".into()]).unwrap();
+            ("left".into(), ScalarType::U32),
+            ("right".into(), ScalarType::U32),
+        ])
+        .with_sort_labels(vec!["bit".into(), "bit".into()])
+        .unwrap();
         records.records[0].arguments = vec![SemanticArgument::U32(1), SemanticArgument::U32(1)];
         records.records[1].arguments = vec![SemanticArgument::U32(0), SemanticArgument::U32(1)];
         records.records.push(records.records[0].clone());
         records.supports.push(records.supports[0].clone());
         let admission = admit_material_records(records);
         let bind = |statement_records, allowed_support_records: Vec<u32>| {
-            let binding = TaskEvaluationBinding::bind(&admission,
-                task_spec(statement_records, allowed_support_records.clone()), arithmetic_observation()).unwrap();
+            let binding = TaskEvaluationBinding::bind(
+                &admission,
+                task_spec(statement_records, allowed_support_records.clone()),
+                arithmetic_observation(),
+            )
+            .unwrap();
             assert_eq!(binding.spec().statement_records, statement_records);
-            assert_eq!(binding.spec().allowed_support_records, allowed_support_records);
+            assert_eq!(
+                binding.spec().allowed_support_records,
+                allowed_support_records
+            );
             binding
         };
         let first = bind([0, 1], vec![0]).words(1);
         let equal_occurrence = bind([0, 1], vec![3]).words(1);
-        assert_ne!(first[6..], equal_occurrence[6..],
-            "resident task bank collapsed equal support occurrences");
+        assert_ne!(
+            first[6..],
+            equal_occurrence[6..],
+            "resident task bank collapsed equal support occurrences"
+        );
         assert_eq!(first[17..19], [0, 1]);
         assert_eq!(first[27], 0);
         assert_eq!(equal_occurrence[27], 3);
@@ -4781,25 +5340,51 @@ pub(crate) mod tests {
         ] {
             // Same semantic query/support operands are not the same original
             // admitted source selections for restoration and read provenance.
-            assert_ne!(left.identity(), right.identity(), "task identity lost original record selections");
+            assert_ne!(
+                left.identity(),
+                right.identity(),
+                "task identity lost original record selections"
+            );
         }
     }
 
     #[test]
     fn root_material_lineage_binds_cross_statement_order_and_original_support() {
-        let admission = admit_semantic_records(root_material_records(), root_material_limits(),
-            SemanticRootHandle::new(1, 0, 1), || Ok(SemanticRootSnapshot::new(
-                SemanticRootDigest(material_root_digest([0; 32], [0; 32], [0; 3])), SemanticExtents::default()))).unwrap();
+        let admission = admit_semantic_records(
+            root_material_records(),
+            root_material_limits(),
+            SemanticRootHandle::new(1, 0, 1),
+            || {
+                Ok(SemanticRootSnapshot::new(
+                    SemanticRootDigest(material_root_digest([0; 32], [0; 32], [0; 3])),
+                    SemanticExtents::default(),
+                ))
+            },
+        )
+        .unwrap();
         let (records, symbols) = normalized_material_admission(&admission).unwrap();
-        let mut material = SemanticRootMaterial { records, symbols, insertions: vec![],
-            digest: material_root_digest([0; 32], [0; 32], [0; 3]), extents: [0; 3],
-            admission_base_digest: material_root_digest([0; 32], [0; 32], [0; 3]), admission_base_extents: [0; 3] };
+        let mut material = SemanticRootMaterial {
+            records,
+            symbols,
+            insertions: vec![],
+            digest: material_root_digest([0; 32], [0; 32], [0; 3]),
+            extents: [0; 3],
+            admission_base_digest: material_root_digest([0; 32], [0; 32], [0; 3]),
+            admission_base_extents: [0; 3],
+        };
         for (ordinal, (statement, support)) in [(1, 0), (0, 1)].into_iter().enumerate() {
             let key = admission.statement_key(statement).unwrap();
             let event = admission.support_event(support).unwrap();
-            let version = material_version_digest([0; 32], event.identity(key.identity).0, event.polarity.code());
+            let version = material_version_digest(
+                [0; 32],
+                event.identity(key.identity).0,
+                event.polarity.code(),
+            );
             material.insertions.push(SemanticRootInsertion {
-                statement: Some(statement), reconstruction: [0; 10], support, version,
+                statement: Some(statement),
+                reconstruction: [0; 10],
+                support,
+                version,
             });
             material.extents = [(ordinal + 1) as u32; 3];
             material.digest = material_root_digest(material.digest, version, material.extents);
@@ -4809,13 +5394,18 @@ pub(crate) mod tests {
         // acquired root, even after that original physical root is retired.
         let first = &material.insertions[0];
         material.admission_base_digest = material_root_digest(
-            material_root_digest([0; 32], [0; 32], [0; 3]), first.version, [1; 3]);
+            material_root_digest([0; 32], [0; 32], [0; 3]),
+            first.version,
+            [1; 3],
+        );
         material.admission_base_extents = [1; 3];
         material.validate_lineage(&admission).unwrap();
         let mut wrong_base = material.clone();
         wrong_base.admission_base_digest[0] ^= 1;
         assert!(wrong_base.validate_lineage(&admission).is_err());
-        let decoded = SemanticRootMaterial::decode(&material.encode().unwrap(), root_material_limits()).unwrap();
+        let decoded =
+            SemanticRootMaterial::decode(&material.encode().unwrap(), root_material_limits())
+                .unwrap();
         assert_eq!(decoded, material);
         assert_eq!(decoded.records.supports[0].statement, 0);
         assert_eq!(decoded.insertions[0].statement, Some(1));
@@ -4840,19 +5430,33 @@ pub(crate) mod tests {
         let admission = admit_material_records(declared);
         let (records, symbols) = normalized_material_admission(&admission).unwrap();
         let empty = material_root_digest([0; 32], [0; 32], [0; 3]);
-        let mut material = SemanticRootMaterial { records, symbols, insertions: vec![],
-            digest: empty, extents: [0; 3], admission_base_digest: empty,
-            admission_base_extents: [0; 3] };
+        let mut material = SemanticRootMaterial {
+            records,
+            symbols,
+            insertions: vec![],
+            digest: empty,
+            extents: [0; 3],
+            admission_base_digest: empty,
+            admission_base_extents: [0; 3],
+        };
         let mut previous = [0; 32];
         for (statement, support, extents, truth) in [
-            (7, 0, [1, 1, 1], 1), (7, 1, [1, 2, 2], 3), (1, 2, [2, 3, 3], 1),
+            (7, 0, [1, 1, 1], 1),
+            (7, 1, [1, 2, 2], 3),
+            (1, 2, [2, 3, 3], 1),
         ] {
             let key = admission.statement_key(statement).unwrap();
             let event = admission.support_event(support).unwrap();
             let version = material_version_digest(
-                if statement == 7 { previous } else { [0; 32] }, event.identity(key.identity).0, truth);
+                if statement == 7 { previous } else { [0; 32] },
+                event.identity(key.identity).0,
+                truth,
+            );
             material.insertions.push(SemanticRootInsertion {
-                statement: Some(statement), reconstruction: [0; 10], support, version,
+                statement: Some(statement),
+                reconstruction: [0; 10],
+                support,
+                version,
             });
             material.extents = extents;
             material.digest = material_root_digest(material.digest, version, extents);
@@ -4862,7 +5466,9 @@ pub(crate) mod tests {
                 material.admission_base_extents = extents;
             }
         }
-        let material = SemanticRootMaterial::decode(&material.encode().unwrap(), root_material_limits()).unwrap();
+        let material =
+            SemanticRootMaterial::decode(&material.encode().unwrap(), root_material_limits())
+                .unwrap();
         let roots = material.task_observation_roots(&admission, [0, 8]).unwrap();
         assert_eq!(roots.query_records, [0, 8]);
         assert_eq!(roots.root_digest.as_bytes(), &material.digest);
@@ -4886,20 +5492,55 @@ pub(crate) mod tests {
     fn root_material_symbols_retain_occurrence_order_and_enforce_byte_budget() {
         let mut records = root_material_records();
         records.predicates[0].schema = Schema::new(vec![("value".into(), ScalarType::Symbol)]);
-        records.records[0].arguments = vec![SemanticArgument::Symbol(symbol::intern("root-material-a"))];
-        records.records[1].arguments = vec![SemanticArgument::Symbol(symbol::intern("root-material-b"))];
-        let admission = admit_semantic_records(records, root_material_limits(), SemanticRootHandle::new(1, 0, 1),
-            || Ok(SemanticRootSnapshot::new(SemanticRootDigest([0; 32]), SemanticExtents::default()))).unwrap();
+        records.records[0].arguments =
+            vec![SemanticArgument::Symbol(symbol::intern("root-material-a"))];
+        records.records[1].arguments =
+            vec![SemanticArgument::Symbol(symbol::intern("root-material-b"))];
+        let admission = admit_semantic_records(
+            records,
+            root_material_limits(),
+            SemanticRootHandle::new(1, 0, 1),
+            || {
+                Ok(SemanticRootSnapshot::new(
+                    SemanticRootDigest([0; 32]),
+                    SemanticExtents::default(),
+                ))
+            },
+        )
+        .unwrap();
         let (records, symbols) = normalized_material_admission(&admission).unwrap();
-        let mut material = SemanticRootMaterial { records, symbols, insertions: vec![], digest: [0; 32], extents: [0; 3],
-            admission_base_digest: material_root_digest([0; 32], [0; 32], [0; 3]), admission_base_extents: [0; 3] };
-        assert_eq!(material.records.records[0].arguments, [SemanticArgument::Symbol(0)]);
-        assert_eq!(material.records.records[1].arguments, [SemanticArgument::Symbol(1)]);
+        let mut material = SemanticRootMaterial {
+            records,
+            symbols,
+            insertions: vec![],
+            digest: [0; 32],
+            extents: [0; 3],
+            admission_base_digest: material_root_digest([0; 32], [0; 32], [0; 3]),
+            admission_base_extents: [0; 3],
+        };
+        assert_eq!(
+            material.records.records[0].arguments,
+            [SemanticArgument::Symbol(0)]
+        );
+        assert_eq!(
+            material.records.records[1].arguments,
+            [SemanticArgument::Symbol(1)]
+        );
         let bytes = material.encode().unwrap();
-        assert_eq!(SemanticRootMaterial::decode(&bytes, root_material_limits()).unwrap(), material);
+        assert_eq!(
+            SemanticRootMaterial::decode(&bytes, root_material_limits()).unwrap(),
+            material
+        );
         let records = material.admission_records().unwrap();
         assert_eq!(records, admission.records);
-        assert!(SemanticRootMaterial::decode(&bytes, SemanticAdmissionLimits { max_utf8_bytes: 1, ..root_material_limits() }).is_err());
+        assert!(SemanticRootMaterial::decode(
+            &bytes,
+            SemanticAdmissionLimits {
+                max_utf8_bytes: 1,
+                ..root_material_limits()
+            }
+        )
+        .is_err());
         material.records.records[1].arguments = vec![SemanticArgument::Symbol(0)];
         assert!(material.encode().is_err());
     }
@@ -4910,9 +5551,18 @@ pub(crate) mod tests {
         let mut records = root_material_records();
         records.records.push(records.records[0].clone());
         records.supports.push(records.supports[1].clone());
-        let admission = admit_semantic_records(records, root_material_limits(),
-            SemanticRootHandle::new(17, 0, 1), || Ok(SemanticRootSnapshot::new(
-                SemanticRootDigest(material_root_digest([0; 32], [0; 32], [0; 3])), SemanticExtents::default()))).unwrap();
+        let admission = admit_semantic_records(
+            records,
+            root_material_limits(),
+            SemanticRootHandle::new(17, 0, 1),
+            || {
+                Ok(SemanticRootSnapshot::new(
+                    SemanticRootDigest(material_root_digest([0; 32], [0; 32], [0; 3])),
+                    SemanticExtents::default(),
+                ))
+            },
+        )
+        .unwrap();
         let capacities = SemanticHypergraphCapacities::try_new(2, 3, 3, 3).unwrap();
         // Native ABI input to the same extraction function used after the cold
         // device copy. This checks the CPU decoder, not CUDA execution.
@@ -4933,37 +5583,81 @@ pub(crate) mod tests {
         arena[versions + VERSION_WORDS as usize] = 99;
         let mut digest = material_root_digest([0; 32], [0; 32], [0; 3]);
         for (index, (statement_index, support_index, statement_slot, slot)) in
-            [(1u32, 0u32, 1usize, 2usize), (7, 3, 0, 0)].into_iter().enumerate() {
+            [(1u32, 0u32, 1usize, 2usize), (7, 3, 0, 0)]
+                .into_iter()
+                .enumerate()
+        {
             let key = admission.statement_key(statement_index).unwrap();
             let event = admission.support_event(support_index).unwrap();
             let support_digest = event.identity(key.identity).0;
-            let version_digest = material_version_digest([0; 32], support_digest, event.polarity.code());
+            let version_digest =
+                material_version_digest([0; 32], support_digest, event.polarity.code());
             let statement = statements + statement_slot * STATEMENT_WORDS as usize;
             arena[statement] = 3;
             arena[statement + 1] = 8;
             arena[statement + 3..statement + 7].copy_from_slice(&identity_words(key.identity.0));
             let support = supports + slot * SUPPORT_WORDS as usize;
-            arena[support..support + 6].copy_from_slice(&[3, 9, 0, statement_slot as u64, 8, event.polarity.code()]);
+            arena[support..support + 6].copy_from_slice(&[
+                3,
+                9,
+                0,
+                statement_slot as u64,
+                8,
+                event.polarity.code(),
+            ]);
             arena[support + 6..support + 10].copy_from_slice(&identity_words(support_digest));
             arena[support + 10] = u64::from(statement_index);
             arena[support + 11] = u64::from(support_index);
             let version = versions + slot * VERSION_WORDS as usize;
-            arena[version..version + 9].copy_from_slice(&[3, 10, 0, statement_slot as u64, 8, slot as u64, 9, 0, event.polarity.code()]);
+            arena[version..version + 9].copy_from_slice(&[
+                3,
+                10,
+                0,
+                statement_slot as u64,
+                8,
+                slot as u64,
+                9,
+                0,
+                event.polarity.code(),
+            ]);
             arena[version + 9..version + 13].copy_from_slice(&identity_words(version_digest));
             arena[version + 13] = index as u64 + 1;
             arena[heads + statement_slot] = slot as u64 + 1;
             digest = material_root_digest(digest, version_digest, [(index + 1) as u32; 3]);
         }
         arena[root_offset + 6..root_offset + 10].copy_from_slice(&identity_words(digest));
-        let snapshot = SemanticRootSnapshot::new(SemanticRootDigest(digest), SemanticExtents::new(2, 2, 2));
+        let snapshot =
+            SemanticRootSnapshot::new(SemanticRootDigest(digest), SemanticExtents::new(2, 2, 2));
         let material = material_from_arena(&arena, capacities, root, snapshot, &admission).unwrap();
-        assert_eq!(material.insertions.iter().map(|insertion| insertion.statement).collect::<Vec<_>>(), [Some(1), Some(7)]);
-        assert_eq!(material.insertions.iter().map(|insertion| insertion.support).collect::<Vec<_>>(), [0, 3]);
+        assert_eq!(
+            material
+                .insertions
+                .iter()
+                .map(|insertion| insertion.statement)
+                .collect::<Vec<_>>(),
+            [Some(1), Some(7)]
+        );
+        assert_eq!(
+            material
+                .insertions
+                .iter()
+                .map(|insertion| insertion.support)
+                .collect::<Vec<_>>(),
+            [0, 3]
+        );
         assert_eq!(material.extents, [2; 3]);
-        for (offset, value) in [(versions + 13, 0), (versions + 13, 1), (versions + 6, 8),
-            (versions + 7, 1), (heads, 4), (root_offset + 1, 3),
-            (supports + 10, 1), (supports + 10, u64::MAX),
-            (supports + 11, 0), (supports + 11, u64::MAX)] {
+        for (offset, value) in [
+            (versions + 13, 0),
+            (versions + 13, 1),
+            (versions + 6, 8),
+            (versions + 7, 1),
+            (heads, 4),
+            (root_offset + 1, 3),
+            (supports + 10, 1),
+            (supports + 10, u64::MAX),
+            (supports + 11, 0),
+            (supports + 11, u64::MAX),
+        ] {
             let mut damaged = arena.clone();
             damaged[offset] = value;
             assert!(material_from_arena(&damaged, capacities, root, snapshot, &admission).is_err());
@@ -4976,8 +5670,15 @@ pub(crate) mod tests {
         records.predicates[0].schema = Schema::new(vec![("value".into(), ScalarType::Bool)]);
         records.records[0].arguments = vec![SemanticArgument::Bool(false)];
         records.records[1].arguments = vec![SemanticArgument::Bool(true)];
-        let material = SemanticRootMaterial { records, symbols: vec![], insertions: vec![], digest: [0; 32], extents: [0; 3],
-            admission_base_digest: material_root_digest([0; 32], [0; 32], [0; 3]), admission_base_extents: [0; 3] };
+        let material = SemanticRootMaterial {
+            records,
+            symbols: vec![],
+            insertions: vec![],
+            digest: [0; 32],
+            extents: [0; 3],
+            admission_base_digest: material_root_digest([0; 32], [0; 32], [0; 3]),
+            admission_base_extents: [0; 3],
+        };
         let encoded = material.encode().unwrap();
         let mut reader = SemanticMaterialReader::new(&encoded);
         reader.take(12).unwrap();
@@ -5009,13 +5710,22 @@ pub(crate) mod tests {
     fn root_material_native_restore_preserves_history_after_retirement_and_slot_reuse() {
         let mut graph = retirement_test_graph().expect("XLOG_REQUIRE_CUDA=1 is required");
         graph.device_controlled = false;
-        graph = graph.admit_initial_records(root_material_records(), &[0], root_material_limits()).unwrap();
+        graph = graph
+            .admit_initial_records(root_material_records(), &[0], root_material_limits())
+            .unwrap();
         graph.enter_transition();
-        let insert = |graph: &mut SemanticHypergraph, base: SemanticRootHandle, statement: u32, support: u32| {
+        let insert = |graph: &mut SemanticHypergraph,
+                      base: SemanticRootHandle,
+                      statement: u32,
+                      support: u32| {
             let admission = graph.admission.as_ref().unwrap();
             let key = admission.statement_key(statement).unwrap();
             let event = admission.support_event(support).unwrap();
-            let fork = retirement_command(graph, OP_FORK, &[(8, base.slot as u64), (9, base.generation)]);
+            let fork = retirement_command(
+                graph,
+                OP_FORK,
+                &[(8, base.slot as u64), (9, base.generation)],
+            );
             assert_eq!(fork.words[0], STATUS_OK);
             let mut command = graph.command_for(OP_INSERT_SUPPORT);
             command.words[9] = fork.words[6];
@@ -5024,7 +5734,10 @@ pub(crate) mod tests {
             command.words[14] = u64::from(event.record);
             command.words[16..20].copy_from_slice(&identity_words(key.identity.0));
             command.words[20..24].copy_from_slice(&identity_words(event.identity(key.identity).0));
-            assert_eq!(graph.run(command, ArenaAccess::ReadWrite).unwrap().words[0], STATUS_OK);
+            assert_eq!(
+                graph.run(command, ArenaAccess::ReadWrite).unwrap().words[0],
+                STATUS_OK
+            );
             let sealed = retirement_command(graph, OP_SEAL, &[(9, fork.words[6])]);
             assert_eq!(sealed.words[0], STATUS_OK);
             SemanticRootHandle::new(graph.owner, sealed.words[3] as u32, sealed.words[4])
@@ -5033,15 +5746,35 @@ pub(crate) mod tests {
         let original_base_snapshot = *graph.admission().unwrap().base_snapshot();
         let unrelated = insert(&mut graph, original_base, 1, 1);
         let first = insert(&mut graph, original_base, 1, 0);
-        assert_eq!(retirement_root(&mut graph, unrelated, first).words[0], STATUS_OK);
+        assert_eq!(
+            retirement_root(&mut graph, unrelated, first).words[0],
+            STATUS_OK
+        );
         let second = insert(&mut graph, first, 0, 1);
         let root = insert(&mut graph, second, 1, 1);
-        assert_eq!(retirement_root(&mut graph, original_base, root).words[0], STATUS_OK);
+        assert_eq!(
+            retirement_root(&mut graph, original_base, root).words[0],
+            STATUS_OK
+        );
         let material = graph.export_transition_root(root).unwrap();
-        assert_eq!(material.insertions.iter().map(|insertion| (insertion.statement, insertion.support)).collect::<Vec<_>>(), [(Some(0), 0), (Some(1), 0), (Some(0), 1), (Some(1), 1)]);
-        assert_eq!(material.admission_base_digest, original_base_snapshot.digest.0);
+        assert_eq!(
+            material
+                .insertions
+                .iter()
+                .map(|insertion| (insertion.statement, insertion.support))
+                .collect::<Vec<_>>(),
+            [(Some(0), 0), (Some(1), 0), (Some(0), 1), (Some(1), 1)]
+        );
+        assert_eq!(
+            material.admission_base_digest,
+            original_base_snapshot.digest.0
+        );
         assert_eq!(material.admission_base_extents, [1; 3]);
-        let pending = retirement_command(&mut graph, OP_FORK, &[(8, root.slot as u64), (9, root.generation)]);
+        let pending = retirement_command(
+            &mut graph,
+            OP_FORK,
+            &[(8, root.slot as u64), (9, root.generation)],
+        );
         assert_eq!(pending.words[0], STATUS_OK);
         let key = graph.admission().unwrap().statement_key(0).unwrap();
         let event = graph.admission().unwrap().support_event(2).unwrap();
@@ -5051,20 +5784,43 @@ pub(crate) mod tests {
         pending_insert.words[13] = u64::from(key.record);
         pending_insert.words[14] = u64::from(event.record);
         pending_insert.words[16..20].copy_from_slice(&identity_words(key.identity.0));
-        pending_insert.words[20..24].copy_from_slice(&identity_words(event.identity(key.identity).0));
+        pending_insert.words[20..24]
+            .copy_from_slice(&identity_words(event.identity(key.identity).0));
         let pending_inserted = graph.run(pending_insert, ArenaAccess::ReadWrite).unwrap();
         assert_eq!(pending_inserted.words[0], STATUS_OK);
         assert_eq!(pending_inserted.words[1], OUTCOME_INSERTED);
         assert_eq!(graph.export_transition_root(root).unwrap(), material);
-        let decoded = SemanticRootMaterial::decode(&material.encode().unwrap(), root_material_limits()).unwrap();
-        let mut too_small = graph.provider.allocate_semantic_hypergraph(&graph.domain,
-            SemanticHypergraphCapacities::try_new(2, 8, 16, 16).unwrap()).unwrap();
-        too_small.admit_records(too_small.empty_root, decoded.admission_records().unwrap(), root_material_limits()).unwrap();
+        let decoded =
+            SemanticRootMaterial::decode(&material.encode().unwrap(), root_material_limits())
+                .unwrap();
+        let mut too_small = graph
+            .provider
+            .allocate_semantic_hypergraph(
+                &graph.domain,
+                SemanticHypergraphCapacities::try_new(2, 8, 16, 16).unwrap(),
+            )
+            .unwrap();
+        too_small
+            .admit_records(
+                too_small.empty_root,
+                decoded.admission_records().unwrap(),
+                root_material_limits(),
+            )
+            .unwrap();
         let before = too_small.execution_stats();
         assert!(too_small.restore_root(&decoded).is_err());
         assert_eq!(too_small.execution_stats(), before);
-        let mut restored = graph.provider.allocate_semantic_hypergraph(&graph.domain, graph.capacities).unwrap();
-        restored.admit_records(restored.empty_root, decoded.admission_records().unwrap(), root_material_limits()).unwrap();
+        let mut restored = graph
+            .provider
+            .allocate_semantic_hypergraph(&graph.domain, graph.capacities)
+            .unwrap();
+        restored
+            .admit_records(
+                restored.empty_root,
+                decoded.admission_records().unwrap(),
+                root_material_limits(),
+            )
+            .unwrap();
         let before = restored.execution_stats();
         let mut damaged = decoded.clone();
         damaged.digest[0] ^= 1;
@@ -5073,10 +5829,16 @@ pub(crate) mod tests {
         let fresh = restored.restore_root(&decoded).unwrap();
         assert_ne!(fresh.owner, root.owner);
         assert_ne!(restored.admission().unwrap().base(), fresh);
-        assert_eq!(*restored.admission().unwrap().base_snapshot(), original_base_snapshot);
+        assert_eq!(
+            *restored.admission().unwrap().base_snapshot(),
+            original_base_snapshot
+        );
         assert_eq!(restored.export_transition_root(fresh).unwrap(), decoded);
         assert!(restored.restore_root(&decoded).is_err());
-        assert!(matches!(restored.export_transition_root(root), Err(SemanticHypergraphError::ForeignHandle { .. })));
+        assert!(matches!(
+            restored.export_transition_root(root),
+            Err(SemanticHypergraphError::ForeignHandle { .. })
+        ));
         assert!(graph.export_transition_root(unrelated).is_err());
     }
 

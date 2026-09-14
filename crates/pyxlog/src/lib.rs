@@ -303,13 +303,17 @@ fn dlpack_export_for_stream_guarded(
     let sys = guarded_python_callback(check, || obj.py().import("sys"))?;
     let modules = guarded_python_callback(check, || sys.getattr("modules"))?;
     let mut producer = obj.clone();
-    if let Some(torch) = guarded_python_callback(check, || modules.cast::<PyDict>()?.get_item("torch"))? {
+    if let Some(torch) =
+        guarded_python_callback(check, || modules.cast::<PyDict>()?.get_item("torch"))?
+    {
         let tensor_type = guarded_python_callback(check, || torch.getattr("Tensor"))?;
         let is_tensor = guarded_python_callback(check, || obj.is_instance(&tensor_type))?;
         let requires_grad = if is_tensor {
             let value = guarded_python_callback(check, || obj.getattr("requires_grad"))?;
             guarded_python_callback(check, || value.extract::<bool>())?
-        } else { false };
+        } else {
+            false
+        };
         if requires_grad {
             let detach = guarded_python_callback(check, || tensor_type.getattr("detach"))?;
             let alias = guarded_python_callback(check, || detach.call1((obj,)))?;
@@ -318,8 +322,9 @@ fn dlpack_export_for_stream_guarded(
                 let alias_value = guarded_python_callback(check, || alias_method.call0())?;
                 let original_method = guarded_python_callback(check, || obj.getattr(method))?;
                 let original_value = guarded_python_callback(check, || original_method.call0())?;
-                let equal = guarded_python_callback(check, || alias_value.rich_compare(
-                    &original_value, pyo3::basic::CompareOp::Eq))?;
+                let equal = guarded_python_callback(check, || {
+                    alias_value.rich_compare(&original_value, pyo3::basic::CompareOp::Eq)
+                })?;
                 if !guarded_python_callback(check, || equal.is_truthy())? {
                     return Err(PyBufferError::new_err(
                         "DLPack transport alias changed the original tensor storage",
@@ -329,8 +334,9 @@ fn dlpack_export_for_stream_guarded(
             for attribute in ["shape", "dtype", "device"] {
                 let alias_value = guarded_python_callback(check, || alias.getattr(attribute))?;
                 let original_value = guarded_python_callback(check, || obj.getattr(attribute))?;
-                let equal = guarded_python_callback(check, || alias_value.rich_compare(
-                    &original_value, pyo3::basic::CompareOp::Eq))?;
+                let equal = guarded_python_callback(check, || {
+                    alias_value.rich_compare(&original_value, pyo3::basic::CompareOp::Eq)
+                })?;
                 if !guarded_python_callback(check, || equal.is_truthy())? {
                     return Err(PyBufferError::new_err(
                         "DLPack transport alias changed the original tensor layout",
@@ -359,9 +365,11 @@ pub(crate) fn dlpack_from_py_for_stream(
 /// Read the producer's DLPack device declaration without Python conversions.
 /// Device kinds may be integer enums; the tuple and ordinal remain exact builtins.
 pub(crate) fn dlpack_device_pair(device: &Bound<'_, PyAny>) -> PyResult<(i32, i32)> {
-    let invalid_pair = || PyValueError::new_err(
-        "DLPack device must be an exact tuple (integer kind, exact integer id)",
-    );
+    let invalid_pair = || {
+        PyValueError::new_err(
+            "DLPack device must be an exact tuple (integer kind, exact integer id)",
+        )
+    };
     if !device.is_exact_instance_of::<PyTuple>() {
         return Err(invalid_pair());
     }
@@ -371,8 +379,10 @@ pub(crate) fn dlpack_device_pair(device: &Bound<'_, PyAny>) -> PyResult<(i32, i3
     }
     let kind = fields.get_item(0)?;
     let ordinal = fields.get_item(1)?;
-    if kind.is_instance_of::<PyBool>() || !kind.is_instance_of::<PyInt>()
-        || !ordinal.is_exact_instance_of::<PyInt>() {
+    if kind.is_instance_of::<PyBool>()
+        || !kind.is_instance_of::<PyInt>()
+        || !ordinal.is_exact_instance_of::<PyInt>()
+    {
         return Err(invalid_pair());
     }
     // PyO3's signed integer extraction reads the checked PyLong payload, not
@@ -386,7 +396,9 @@ pub(crate) fn dlpack_device_pair(device: &Bound<'_, PyAny>) -> PyResult<(i32, i3
         )));
     }
     if device_id < 0 {
-        return Err(PyValueError::new_err("DLPack device id must be nonnegative"));
+        return Err(PyValueError::new_err(
+            "DLPack device id must be nonnegative",
+        ));
     }
     Ok((device_type, device_id))
 }
@@ -397,7 +409,9 @@ pub(crate) fn dlpack_from_py_for_stream_guarded(
     check: &dyn Fn() -> PyResult<()>,
 ) -> PyResult<DlpackManagedTensor> {
     if consumer_stream <= 0 || consumer_stream == 2 {
-        return Err(PyValueError::new_err("DLPack requires an explicit supported consumer stream"));
+        return Err(PyValueError::new_err(
+            "DLPack requires an explicit supported consumer stream",
+        ));
     }
     check()?;
     let py = obj.py();
@@ -472,7 +486,8 @@ mod dlpack_guard_tests {
         Python::initialize();
         Python::attach(|py| {
             let globals = PyDict::new(py);
-            py.run(cr#"
+            py.run(
+                cr#"
 from enum import IntEnum
 class DeviceKind(IntEnum):
     CUDA = 2
@@ -492,23 +507,46 @@ class Producer:
         calls.append('export')
         raise AssertionError('export ran after authority refusal')
 producer = Producer()
-"#, Some(&globals), None).unwrap();
+"#,
+                Some(&globals),
+                None,
+            )
+            .unwrap();
             let producer = globals.get_item("producer").unwrap().unwrap();
             let check = || {
                 if globals.get_item("refused")?.unwrap().extract::<bool>()? {
-                    Err(PyValueError::new_err("original producer authority was refused"))
-                } else { Ok(()) }
+                    Err(PyValueError::new_err(
+                        "original producer authority was refused",
+                    ))
+                } else {
+                    Ok(())
+                }
             };
             // The ordinary caller has no authority guard: the same production
             // importer reaches export. This controls the guarded-path check.
             assert!(super::dlpack_from_py_for_stream(&producer, 19).is_err());
-            py.run(c"assert 'export' in calls\ncalls.clear()\nrefused = False", Some(&globals), None).unwrap();
+            py.run(
+                c"assert 'export' in calls\ncalls.clear()\nrefused = False",
+                Some(&globals),
+                None,
+            )
+            .unwrap();
             let error = match super::dlpack_from_py_for_stream_guarded(&producer, 19, &check) {
                 Ok(_) => panic!("revoked producer handed off a native tensor"),
                 Err(error) => error,
             };
-            assert!(error.to_string().contains("original producer authority was refused"));
-            assert_eq!(globals.get_item("calls").unwrap().unwrap().extract::<Vec<String>>().unwrap(), ["device"]);
+            assert!(error
+                .to_string()
+                .contains("original producer authority was refused"));
+            assert_eq!(
+                globals
+                    .get_item("calls")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<Vec<String>>()
+                    .unwrap(),
+                ["device"]
+            );
         });
     }
 
@@ -517,7 +555,8 @@ producer = Producer()
         Python::initialize();
         Python::attach(|py| {
             let globals = PyDict::new(py);
-            py.run(cr#"
+            py.run(
+                cr#"
 from enum import IntEnum
 class DeviceKind(IntEnum):
     CUDA = 2
@@ -541,17 +580,29 @@ class Producer:
         return None
 producer = Producer()
 devices = [(2, 0), (DeviceKind.CUDA, 0), (IntegerKind(2), 0)]
-"#, Some(&globals), None).unwrap();
+"#,
+                Some(&globals),
+                None,
+            )
+            .unwrap();
             let producer = globals.get_item("producer").unwrap().unwrap();
             let devices = globals.get_item("devices").unwrap().unwrap();
             for device in devices.cast::<PyList>().unwrap().iter() {
                 globals.set_item("device", device).unwrap();
                 py.run(c"calls.clear()", Some(&globals), None).unwrap();
                 let error = super::dlpack_from_py_for_stream_guarded(&producer, 19, &|| Ok(()))
-                    .err().expect("invalid capsule must not be consumed");
+                    .err()
+                    .expect("invalid capsule must not be consumed");
                 assert!(error.to_string().contains("Invalid DLPack capsule"));
-                assert_eq!(globals.get_item("calls").unwrap().unwrap()
-                    .extract::<Vec<String>>().unwrap(), ["device", "export"]);
+                assert_eq!(
+                    globals
+                        .get_item("calls")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<Vec<String>>()
+                        .unwrap(),
+                    ["device", "export"]
+                );
             }
         });
     }
@@ -561,7 +612,8 @@ devices = [(2, 0), (DeviceKind.CUDA, 0), (IntegerKind(2), 0)]
         Python::initialize();
         Python::attach(|py| {
             let globals = PyDict::new(py);
-            py.run(cr#"
+            py.run(
+                cr#"
 class Pair(tuple):
     def __iter__(self):
         raise AssertionError('tuple subclass iterated')
@@ -586,15 +638,28 @@ devices = [None, [2, 0], Pair((2, 0)), (), (2,), (2, 0, 0),
            (1, 0), (-1, 0), (2, -1), (2, 1 << 31), (1 << 31, 0),
            (IntegerKind(1), 0), (IntegerKind(-1), 0),
            (IntegerKind(1 << 80), 0), (2, IntegerKind(0))]
-"#, Some(&globals), None).unwrap();
+"#,
+                Some(&globals),
+                None,
+            )
+            .unwrap();
             let producer = globals.get_item("producer").unwrap().unwrap();
             let devices = globals.get_item("devices").unwrap().unwrap();
             for device in devices.cast::<PyList>().unwrap().iter() {
                 globals.set_item("device", device).unwrap();
                 py.run(c"calls.clear()", Some(&globals), None).unwrap();
-                assert!(super::dlpack_from_py_for_stream_guarded(&producer, 19, &|| Ok(())).is_err());
-                assert_eq!(globals.get_item("calls").unwrap().unwrap()
-                    .extract::<Vec<String>>().unwrap(), ["device"]);
+                assert!(
+                    super::dlpack_from_py_for_stream_guarded(&producer, 19, &|| Ok(())).is_err()
+                );
+                assert_eq!(
+                    globals
+                        .get_item("calls")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<Vec<String>>()
+                        .unwrap(),
+                    ["device"]
+                );
             }
         });
     }
@@ -604,7 +669,8 @@ devices = [None, [2, 0], Pair((2, 0)), (), (2,), (2, 0, 0),
         Python::initialize();
         Python::attach(|py| {
             let globals = PyDict::new(py);
-            py.run(cr#"
+            py.run(
+                cr#"
 calls = []
 class DeviceIndex:
     def __int__(self):
@@ -622,17 +688,31 @@ class Producer:
         raise AssertionError('export ran after invalid device metadata')
 producer = Producer()
 devices = [(2, DeviceIndex()), (DeviceIndex(), 0)]
-"#, Some(&globals), None).unwrap();
+"#,
+                Some(&globals),
+                None,
+            )
+            .unwrap();
             let producer = globals.get_item("producer").unwrap().unwrap();
             let devices = globals.get_item("devices").unwrap().unwrap();
             for device in devices.cast::<PyList>().unwrap().iter() {
                 globals.set_item("device", device).unwrap();
                 py.run(c"calls.clear()", Some(&globals), None).unwrap();
                 let error = super::dlpack_from_py_for_stream_guarded(&producer, 19, &|| Ok(()))
-                    .err().expect("custom device conversion must not hand off a native tensor");
-                assert!(error.to_string().contains("exact tuple (integer kind, exact integer id)"));
-                assert_eq!(globals.get_item("calls").unwrap().unwrap()
-                    .extract::<Vec<String>>().unwrap(), ["device"]);
+                    .err()
+                    .expect("custom device conversion must not hand off a native tensor");
+                assert!(error
+                    .to_string()
+                    .contains("exact tuple (integer kind, exact integer id)"));
+                assert_eq!(
+                    globals
+                        .get_item("calls")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<Vec<String>>()
+                        .unwrap(),
+                    ["device"]
+                );
             }
         });
     }

@@ -255,10 +255,18 @@ fn write_semantic_policy_identity(out_dir: &Path, supplied: Option<([u8; 32], &s
 
 fn push_semantic_policy_options(args: &mut Vec<String>, name: &str, enabled: bool) {
     if name == "semantic_transition" && enabled {
-        args.extend([
-            "-DXLOG_SEMANTIC_POLICY=1", "--std=c++17", "--fmad=false",
-            "--ftz=false", "--prec-div=true", "--prec-sqrt=true",
-        ].into_iter().map(str::to_owned));
+        args.extend(
+            [
+                "-DXLOG_SEMANTIC_POLICY=1",
+                "--std=c++17",
+                "--fmad=false",
+                "--ftz=false",
+                "--prec-div=true",
+                "--prec-sqrt=true",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
     }
 }
 
@@ -521,7 +529,10 @@ fn main() {
     // kernel module) leaves other build configs reusing a cached
     // OUT_DIR whose embedded PTX table predates the module.
     println!("cargo:rerun-if-changed=src/kernel_manifest_data.rs");
-    println!("cargo:rerun-if-changed={}", kernels_dir.join("semantic_feedback_encoding.cuh").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        kernels_dir.join("semantic_feedback_encoding.cuh").display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         kernels_dir.join("semantic_policy_binding.cuh").display()
