@@ -59,6 +59,104 @@ pub fn resolve_checked(id: u32) -> Option<String> {
     reg.to_string.get(id as usize).cloned()
 }
 
+/// Owned symbol meanings copied together from one registry state.
+///
+/// Entries retain request order and duplicates. Their text does not change when
+/// the registry is cleared or an ID is reused. This authenticates the meaning at
+/// snapshot time, not the provenance of an ID supplied before that time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SymbolSnapshot {
+    entries: Box<[(u32, Box<str>)]>,
+}
+
+impl SymbolSnapshot {
+    /// Returns immutable `(registry ID, accepted UTF-8 text)` entries.
+    pub fn entries(&self) -> &[(u32, Box<str>)] {
+        &self.entries
+    }
+}
+
+/// A complete symbol snapshot could not be admitted within its caller's bounds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SymbolSnapshotError {
+    /// A requested ID is absent from the locked registry state.
+    MissingSymbol {
+        /// Missing registry ID.
+        id: u32,
+    },
+    /// The request contains too many entries, including duplicates.
+    EntryLimit {
+        /// Number of requested entries.
+        requested: usize,
+        /// Maximum admitted entries.
+        limit: usize,
+    },
+    /// Accepted text would exceed the UTF-8 byte budget.
+    ByteLimit {
+        /// Maximum admitted UTF-8 bytes, counting duplicates.
+        limit: usize,
+    },
+    /// A writer previously panicked while holding the registry lock.
+    RegistryPoisoned,
+}
+
+impl std::fmt::Display for SymbolSnapshotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingSymbol { id } => write!(f, "symbol ID {id} is not registered"),
+            Self::EntryLimit { requested, limit } => {
+                write!(
+                    f,
+                    "symbol snapshot has {requested} entries, exceeding {limit}"
+                )
+            }
+            Self::ByteLimit { limit } => {
+                write!(f, "symbol snapshot UTF-8 bytes exceed {limit}")
+            }
+            Self::RegistryPoisoned => write!(f, "symbol registry lock is poisoned"),
+        }
+    }
+}
+
+impl std::error::Error for SymbolSnapshotError {}
+
+/// Copies all requested symbols under one read lock, or returns no snapshot.
+///
+/// Count and UTF-8 byte bounds include duplicates. All IDs and byte lengths are
+/// checked before copying any text; no registry entry is added or renumbered.
+pub fn snapshot_checked(
+    ids: &[u32],
+    max_entries: usize,
+    max_utf8_bytes: usize,
+) -> Result<SymbolSnapshot, SymbolSnapshotError> {
+    if ids.len() > max_entries {
+        return Err(SymbolSnapshotError::EntryLimit {
+            requested: ids.len(),
+            limit: max_entries,
+        });
+    }
+    let reg = registry()
+        .read()
+        .map_err(|_| SymbolSnapshotError::RegistryPoisoned)?;
+    let mut remaining = max_utf8_bytes;
+    for &id in ids {
+        let text = reg
+            .to_string
+            .get(id as usize)
+            .ok_or(SymbolSnapshotError::MissingSymbol { id })?;
+        remaining = remaining
+            .checked_sub(text.len())
+            .ok_or(SymbolSnapshotError::ByteLimit {
+                limit: max_utf8_bytes,
+            })?;
+    }
+    let entries = ids
+        .iter()
+        .map(|&id| (id, reg.to_string[id as usize].clone().into_boxed_str()))
+        .collect();
+    Ok(SymbolSnapshot { entries })
+}
+
 /// Clear all symbols. For testing/REPL only.
 /// WARNING: Invalidates all existing symbol IDs.
 pub fn clear() {
@@ -138,6 +236,104 @@ mod tests {
     // Each test must call setup() to get clean state
     fn setup() {
         clear();
+    }
+
+    #[test]
+    #[serial]
+    fn snapshot_preserves_order_duplicates_and_utf8_limits() {
+        setup();
+        let empty = intern("");
+        let unicode = intern("é🎉");
+        let ids = [unicode, empty, unicode];
+        let snapshot = snapshot_checked(&ids, 3, 12).unwrap();
+        let entries: Vec<_> = snapshot
+            .entries()
+            .iter()
+            .map(|(id, text)| (*id, text.as_ref()))
+            .collect();
+        assert_eq!(entries, [(unicode, "é🎉"), (empty, ""), (unicode, "é🎉")]);
+        assert_eq!(
+            snapshot_checked(&ids, 2, 12),
+            Err(SymbolSnapshotError::EntryLimit {
+                requested: 3,
+                limit: 2
+            })
+        );
+        assert_eq!(
+            snapshot_checked(&ids, 3, 11),
+            Err(SymbolSnapshotError::ByteLimit { limit: 11 })
+        );
+        assert!(snapshot_checked(&[], 0, 0).unwrap().entries().is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn snapshot_missing_symbol_rejects_whole_request_without_mutation() {
+        setup();
+        let valid = intern("present");
+        assert_eq!(
+            snapshot_checked(&[valid, 9, valid], 3, 100),
+            Err(SymbolSnapshotError::MissingSymbol { id: 9 })
+        );
+        assert_eq!(count(), 1);
+        assert_eq!(resolve(valid), "present");
+    }
+
+    #[test]
+    #[serial]
+    fn snapshot_survives_clear_and_reintern_without_reinterpreting_ids() {
+        setup();
+        let id = intern("old");
+        let accepted = snapshot_checked(&[id], 1, 3).unwrap();
+        clear();
+        assert_eq!(intern("new"), id);
+        let current = snapshot_checked(&[id], 1, 3).unwrap();
+        assert_eq!(accepted.entries()[0].1.as_ref(), "old");
+        assert_eq!(current.entries()[0].1.as_ref(), "new");
+        assert_ne!(accepted, current);
+    }
+
+    #[test]
+    #[serial]
+    fn snapshot_never_tears_across_concurrent_registry_replacement() {
+        setup();
+        intern("old-left");
+        intern("old-right");
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                start.wait();
+                for index in 0..1000 {
+                    clear();
+                    let (left, right) = if index % 2 == 0 {
+                        ("new-left", "new-right")
+                    } else {
+                        ("old-left", "old-right")
+                    };
+                    intern(left);
+                    intern(right);
+                }
+            });
+            start.wait();
+            for _ in 0..1000 {
+                match snapshot_checked(&[0, 1], 2, 18) {
+                    Ok(snapshot) => {
+                        let entries = snapshot.entries();
+                        let pair = (entries[0].1.as_ref(), entries[1].1.as_ref());
+                        assert!(
+                            pair == ("old-left", "old-right") || pair == ("new-left", "new-right"),
+                            "torn snapshot: {pair:?}"
+                        );
+                    }
+                    Err(SymbolSnapshotError::MissingSymbol { .. }) => {}
+                    other => panic!("unexpected snapshot result: {other:?}"),
+                }
+            }
+            writer.join().unwrap();
+            let final_snapshot = snapshot_checked(&[0, 1], 2, 18).unwrap();
+            assert_eq!(final_snapshot.entries()[0].1.as_ref(), "old-left");
+            assert_eq!(final_snapshot.entries()[1].1.as_ref(), "old-right");
+        });
     }
 
     #[test]
