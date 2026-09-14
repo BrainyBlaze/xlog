@@ -6,13 +6,13 @@
 //!
 //! Design: `docs/plans/2026-04-17-m8-ilp-exact-kernel-design.md`.
 
-use std::marker::PhantomData;
+use crate::memory::DeviceRead;
 use std::sync::atomic::Ordering;
 
 use crate::{LaunchAsync, LaunchConfig};
 use xlog_core::{resolve_bool, Result, ScalarType, XlogError};
 
-use super::{ilp_exact_kernels, RawCudaView, ILP_EXACT_MODULE};
+use super::{ilp_exact_kernels, ILP_EXACT_MODULE};
 use crate::memory::{CudaBuffer, TrackedCudaSlice};
 
 const ILP_EXACT_BLOCK_SIZE: u32 = 256;
@@ -326,18 +326,12 @@ impl super::CudaKernelProvider {
         };
         match layout {
             ExactPairLayout::U64 => {
-                let cand_arg0_view = RawCudaView::<u64> {
-                    ptr: *cand_arg0_buf.device_ptr(),
-                    len: total_rows,
-                    stream: cand_arg0_buf.stream().clone(),
-                    _marker: PhantomData,
-                };
-                let cand_arg1_view = RawCudaView::<u64> {
-                    ptr: *cand_arg1_buf.device_ptr(),
-                    len: total_rows,
-                    stream: cand_arg1_buf.stream().clone(),
-                    _marker: PhantomData,
-                };
+                let cand_arg0_view = unsafe { cand_arg0_buf.device_view().cast::<u64>() }
+                    .and_then(|view| view.try_slice(..total_rows))
+                    .ok_or_else(|| XlogError::Kernel("device scalar view is invalid".into()))?;
+                let cand_arg1_view = unsafe { cand_arg1_buf.device_view().cast::<u64>() }
+                    .and_then(|view| view.try_slice(..total_rows))
+                    .ok_or_else(|| XlogError::Kernel("device scalar view is invalid".into()))?;
                 let pos_arg0_view = self.column_as_u64_view(pos_col0, pos_rows as usize)?;
                 let pos_arg1_view = self.column_as_u64_view(pos_col1, pos_rows as usize)?;
                 let neg_arg0_view = self.column_as_u64_view(neg_col0, neg_rows as usize)?;
@@ -378,18 +372,12 @@ impl super::CudaKernelProvider {
                 .map_err(|e| XlogError::Kernel(format!("ilp_exact_score launch: {}", e)))?;
             }
             ExactPairLayout::U32 | ExactPairLayout::Symbol => {
-                let cand_arg0_view = RawCudaView::<u32> {
-                    ptr: *cand_arg0_buf.device_ptr(),
-                    len: total_rows,
-                    stream: cand_arg0_buf.stream().clone(),
-                    _marker: PhantomData,
-                };
-                let cand_arg1_view = RawCudaView::<u32> {
-                    ptr: *cand_arg1_buf.device_ptr(),
-                    len: total_rows,
-                    stream: cand_arg1_buf.stream().clone(),
-                    _marker: PhantomData,
-                };
+                let cand_arg0_view = unsafe { cand_arg0_buf.device_view().cast::<u32>() }
+                    .and_then(|view| view.try_slice(..total_rows))
+                    .ok_or_else(|| XlogError::Kernel("device scalar view is invalid".into()))?;
+                let cand_arg1_view = unsafe { cand_arg1_buf.device_view().cast::<u32>() }
+                    .and_then(|view| view.try_slice(..total_rows))
+                    .ok_or_else(|| XlogError::Kernel("device scalar view is invalid".into()))?;
                 let pos_arg0_view = self.column_as_u32_view(pos_col0, pos_rows as usize)?;
                 let pos_arg1_view = self.column_as_u32_view(pos_col1, pos_rows as usize)?;
                 let neg_arg0_view = self.column_as_u32_view(neg_col0, neg_rows as usize)?;

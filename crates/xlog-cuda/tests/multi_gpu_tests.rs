@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{GpuDevicePool, MultiGpuMemoryManager};
 

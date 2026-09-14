@@ -56,43 +56,35 @@ use xlog_core::{Result, ScalarType, Schema, XlogError};
 use super::{wcoj_kernels, CudaKernelProvider, WCOJ_MODULE};
 use crate::device_runtime::StreamId;
 use crate::launch::LaunchRecorder;
-use crate::memory::{CudaColumn, TrackedCudaSlice};
+use crate::memory::{CudaColumn, DeviceMemoryView, DeviceRead, TrackedCudaSlice};
 use crate::wcoj_metadata::WcojRelationMetadata;
 use crate::CudaBuffer;
 use crate::{AsKernelParam, LaunchAsync, LaunchConfig};
 
 const BLOCK_SIZE: u32 = 256;
 
-fn column_u32(input: &CudaBuffer, col_idx: usize) -> Result<&TrackedCudaSlice<u32>> {
+fn column_u32(input: &CudaBuffer, col_idx: usize) -> Result<DeviceMemoryView<u32>> {
     let col = input.column(col_idx).ok_or_else(|| {
         XlogError::Kernel(format!(
             "wcoj_layout_u32_recorded: column {col_idx} not found"
         ))
     })?;
-    match col {
-        CudaColumn::Owned(slice) => unsafe {
-            Ok(&*(slice as *const TrackedCudaSlice<u8> as *const TrackedCudaSlice<u32>))
-        },
-        _ => Err(XlogError::Kernel(
-            "wcoj_layout_u32_recorded: input column must be owned".to_string(),
-        )),
-    }
+    // SAFETY: unsigned integers accept every bit pattern. The checked cast
+    // preserves the storage owner and validates byte length and alignment.
+    unsafe { col.device_view().cast() }
+        .ok_or_else(|| XlogError::Kernel("invalid u32 device column layout".into()))
 }
 
-fn column_u64(input: &CudaBuffer, col_idx: usize) -> Result<&TrackedCudaSlice<u64>> {
+fn column_u64(input: &CudaBuffer, col_idx: usize) -> Result<DeviceMemoryView<u64>> {
     let col = input.column(col_idx).ok_or_else(|| {
         XlogError::Kernel(format!(
             "wcoj_layout_u64_recorded: column {col_idx} not found"
         ))
     })?;
-    match col {
-        CudaColumn::Owned(slice) => unsafe {
-            Ok(&*(slice as *const TrackedCudaSlice<u8> as *const TrackedCudaSlice<u64>))
-        },
-        _ => Err(XlogError::Kernel(
-            "wcoj_layout_u64_recorded: input column must be owned".to_string(),
-        )),
-    }
+    // SAFETY: unsigned integers accept every bit pattern. The checked cast
+    // preserves the storage owner and validates byte length and alignment.
+    unsafe { col.device_view().cast() }
+        .ok_or_else(|| XlogError::Kernel("invalid u64 device column layout".into()))
 }
 
 impl CudaKernelProvider {
@@ -643,8 +635,8 @@ impl CudaKernelProvider {
         // n >= 2: run the checker. Output flag in u32 (4 bytes).
         let mut flag_buf = self.memory.alloc::<u32>(1)?;
 
-        let col0 = column_u32(input, 0)?;
-        let col1 = column_u32(input, 1)?;
+        let col0 = &column_u32(input, 0)?;
+        let col1 = &column_u32(input, 1)?;
 
         // Resolve the kernel before queueing launch-stream work.
         // If the module lookup fails, `flag_buf` can drop without
@@ -674,11 +666,11 @@ impl CudaKernelProvider {
         // window keeps the dealloc-safety chain intact.
         let one: u32 = 1;
         let grid = n.div_ceil(BLOCK_SIZE);
-        let queued_result: Result<()> = (|| {
-            self.htod_launch_metadata_async_copy_one(
-                &one,
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            self.initialize_launch_metadata_u32(
+                one,
                 &flag_buf,
-                &cu_stream,
+                stream,
                 "wcoj_layout fast-path flag init",
             )?;
 
@@ -688,8 +680,8 @@ impl CudaKernelProvider {
             unsafe {
                 kernel
                     .clone()
-                    .launch_on_stream(
-                        &cu_stream,
+                    .launch_in(
+                        stream,
                         LaunchConfig {
                             grid_dim: (grid, 1, 1),
                             block_dim: (BLOCK_SIZE, 1, 1),
@@ -704,18 +696,13 @@ impl CudaKernelProvider {
                     })?;
             }
             Ok(())
-        })();
-        if let Err(e) = queued_result {
-            let _ = cu_stream.synchronize();
-            return Err(e);
-        }
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
 
-        if let Err(e) = rec.commit(runtime) {
-            let _ = cu_stream.synchronize();
-            return Err(XlogError::Kernel(format!(
-                "wcoj_layout fast-path: commit {e}"
-            )));
-        }
+        rec.commit()
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path: commit {e}")))?;
 
         cu_stream
             .synchronize()
@@ -767,8 +754,8 @@ impl CudaKernelProvider {
         }
 
         let mut flag_buf = self.memory.alloc::<u32>(1)?;
-        let col0 = column_u64(input, 0)?;
-        let col1 = column_u64(input, 1)?;
+        let col0 = &column_u64(input, 0)?;
+        let col1 = &column_u64(input, 1)?;
 
         let device = self.device.inner();
         let kernel = device
@@ -790,19 +777,19 @@ impl CudaKernelProvider {
 
         let one: u32 = 1;
         let grid = n.div_ceil(BLOCK_SIZE);
-        let queued_result: Result<()> = (|| {
-            self.htod_launch_metadata_async_copy_one(
-                &one,
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            self.initialize_launch_metadata_u32(
+                one,
                 &flag_buf,
-                &cu_stream,
+                stream,
                 "wcoj_layout fast-path u64 flag init",
             )?;
 
             unsafe {
                 kernel
                     .clone()
-                    .launch_on_stream(
-                        &cu_stream,
+                    .launch_in(
+                        stream,
                         LaunchConfig {
                             grid_dim: (grid, 1, 1),
                             block_dim: (BLOCK_SIZE, 1, 1),
@@ -817,18 +804,13 @@ impl CudaKernelProvider {
                     })?;
             }
             Ok(())
-        })();
-        if let Err(e) = queued_result {
-            let _ = cu_stream.synchronize();
-            return Err(e);
-        }
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
 
-        if let Err(e) = rec.commit(runtime) {
-            let _ = cu_stream.synchronize();
-            return Err(XlogError::Kernel(format!(
-                "wcoj_layout fast-path u64: commit {e}"
-            )));
-        }
+        rec.commit()
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path u64: commit {e}")))?;
 
         cu_stream
             .synchronize()
@@ -880,13 +862,13 @@ impl CudaKernelProvider {
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 4B: preflight {e}")))?;
 
-        let queued_result: Result<()> = (|| {
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
             unsafe {
                 let r0 = sys::cuMemcpyDtoDAsync_v2(
                     *out_col0.device_ptr(),
                     *src_col0.device_ptr(),
                     bpc,
-                    cu_stream.cu_stream(),
+                    stream.stream().cu_stream(),
                 );
                 if r0 != sys::cudaError_enum::CUDA_SUCCESS {
                     return Err(XlogError::Kernel(format!(
@@ -897,7 +879,7 @@ impl CudaKernelProvider {
                     *out_col1.device_ptr(),
                     *src_col1.device_ptr(),
                     bpc,
-                    cu_stream.cu_stream(),
+                    stream.stream().cu_stream(),
                 );
                 if r1 != sys::cudaError_enum::CUDA_SUCCESS {
                     return Err(XlogError::Kernel(format!(
@@ -905,25 +887,20 @@ impl CudaKernelProvider {
                     )));
                 }
             }
-            self.htod_launch_metadata_async_copy_one(
-                &n,
+            self.initialize_launch_metadata_u32(
+                n,
                 &out_d_num_rows,
-                cu_stream,
+                stream,
                 "wcoj_layout clone 4B d_num_rows",
             )?;
             Ok(())
-        })();
-        if let Err(e) = queued_result {
-            let _ = cu_stream.synchronize();
-            return Err(e);
-        }
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
 
-        if let Err(e) = rec.commit(runtime) {
-            let _ = cu_stream.synchronize();
-            return Err(XlogError::Kernel(format!(
-                "wcoj_layout clone 4B: commit {e}"
-            )));
-        }
+        rec.commit()
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 4B: commit {e}")))?;
 
         Ok(CudaBuffer::from_columns_with_host_count(
             vec![out_col0.into(), out_col1.into()],
@@ -961,13 +938,13 @@ impl CudaKernelProvider {
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 8B: preflight {e}")))?;
 
-        let queued_result: Result<()> = (|| {
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
             unsafe {
                 let r0 = sys::cuMemcpyDtoDAsync_v2(
                     *out_col0.device_ptr(),
                     *src_col0.device_ptr(),
                     bpc,
-                    cu_stream.cu_stream(),
+                    stream.stream().cu_stream(),
                 );
                 if r0 != sys::cudaError_enum::CUDA_SUCCESS {
                     return Err(XlogError::Kernel(format!(
@@ -978,7 +955,7 @@ impl CudaKernelProvider {
                     *out_col1.device_ptr(),
                     *src_col1.device_ptr(),
                     bpc,
-                    cu_stream.cu_stream(),
+                    stream.stream().cu_stream(),
                 );
                 if r1 != sys::cudaError_enum::CUDA_SUCCESS {
                     return Err(XlogError::Kernel(format!(
@@ -986,25 +963,20 @@ impl CudaKernelProvider {
                     )));
                 }
             }
-            self.htod_launch_metadata_async_copy_one(
-                &n,
+            self.initialize_launch_metadata_u32(
+                n,
                 &out_d_num_rows,
-                cu_stream,
+                stream,
                 "wcoj_layout clone 8B d_num_rows",
             )?;
             Ok(())
-        })();
-        if let Err(e) = queued_result {
-            let _ = cu_stream.synchronize();
-            return Err(e);
-        }
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
 
-        if let Err(e) = rec.commit(runtime) {
-            let _ = cu_stream.synchronize();
-            return Err(XlogError::Kernel(format!(
-                "wcoj_layout clone 8B: commit {e}"
-            )));
-        }
+        rec.commit()
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 8B: commit {e}")))?;
 
         Ok(CudaBuffer::from_columns_with_host_count(
             vec![out_col0.into(), out_col1.into()],
@@ -1520,6 +1492,7 @@ impl CudaKernelProvider {
         let mut offsets_buf = self.memory.alloc::<u32>(grid as usize)?;
         let d_total = self.memory.alloc::<u32>(1)?;
 
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(grid)?;
         let mut rec_count = LaunchRecorder::new_strict(launch_stream);
         for buf in edges.iter() {
             rec_count.read(buf.num_rows_device());
@@ -1551,6 +1524,9 @@ impl CudaKernelProvider {
         rec_count.write(&thread_counts_buf);
         rec_count.write(&offsets_buf);
         rec_count.write(&d_total);
+        for level in scan_scratch.levels() {
+            rec_count.read_write(level);
+        }
         rec_count.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!("{}: count preflight failed: {}", entry_label, e))
         })?;
@@ -1598,100 +1574,108 @@ impl CudaKernelProvider {
             Some(buf) => buf.as_kernel_param(),
             None => null_order_ptr.as_kernel_param(),
         };
-        unsafe {
-            let mut params: Vec<*mut c_void> = match &leader_metadata {
-                CliqueLeaderMetadata::U32(leader_metadata) => vec![
-                    (&d_edge_col0).as_kernel_param(),
-                    (&d_edge_col1).as_kernel_param(),
-                    (&d_edge_n).as_kernel_param(),
-                    leader_edge_idx.as_kernel_param(),
-                    edge_order_param,
-                    iteration_order_param,
-                    n_leader.as_kernel_param(),
-                    (&leader_metadata.unique_keys).as_kernel_param(),
-                    (&leader_metadata.fan_out).as_kernel_param(),
-                    (&leader_metadata.prefix_sum).as_kernel_param(),
-                    leader_metadata_key_count.as_kernel_param(),
-                    block_work_unit.as_kernel_param(),
-                    (&count_buf).as_kernel_param(),
-                    (&thread_counts_buf).as_kernel_param(),
-                ],
-                CliqueLeaderMetadata::U64(leader_metadata) => vec![
-                    (&d_edge_col0).as_kernel_param(),
-                    (&d_edge_col1).as_kernel_param(),
-                    (&d_edge_n).as_kernel_param(),
-                    leader_edge_idx.as_kernel_param(),
-                    edge_order_param,
-                    iteration_order_param,
-                    n_leader.as_kernel_param(),
-                    (&leader_metadata.unique_keys).as_kernel_param(),
-                    (&leader_metadata.fan_out).as_kernel_param(),
-                    (&leader_metadata.prefix_sum).as_kernel_param(),
-                    leader_metadata_key_count.as_kernel_param(),
-                    block_work_unit.as_kernel_param(),
-                    (&count_buf).as_kernel_param(),
-                    (&thread_counts_buf).as_kernel_param(),
-                ],
-            };
-            count_kernel
-                .clone()
-                .launch_on_stream(&cu_stream, count_config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "{}: count kernel launch failed: {}",
-                        entry_label, e
-                    ))
-                })?;
-        }
-
-        // dtod count → offsets (scan modifies offsets in place).
-        let bytes_count = (grid as usize) * std::mem::size_of::<u32>();
-        unsafe {
-            let res = sys::cuMemcpyDtoDAsync_v2(
-                *offsets_buf.device_ptr(),
-                *count_buf.device_ptr(),
-                bytes_count,
-                cu_stream.cu_stream(),
-            );
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "{}: dtod count → offsets failed: {:?}",
-                    entry_label, res
-                )));
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                let mut params: Vec<*mut c_void> = match &leader_metadata {
+                    CliqueLeaderMetadata::U32(leader_metadata) => vec![
+                        (&d_edge_col0).as_kernel_param(),
+                        (&d_edge_col1).as_kernel_param(),
+                        (&d_edge_n).as_kernel_param(),
+                        leader_edge_idx.as_kernel_param(),
+                        edge_order_param,
+                        iteration_order_param,
+                        n_leader.as_kernel_param(),
+                        (&leader_metadata.unique_keys).as_kernel_param(),
+                        (&leader_metadata.fan_out).as_kernel_param(),
+                        (&leader_metadata.prefix_sum).as_kernel_param(),
+                        leader_metadata_key_count.as_kernel_param(),
+                        block_work_unit.as_kernel_param(),
+                        (&count_buf).as_kernel_param(),
+                        (&thread_counts_buf).as_kernel_param(),
+                    ],
+                    CliqueLeaderMetadata::U64(leader_metadata) => vec![
+                        (&d_edge_col0).as_kernel_param(),
+                        (&d_edge_col1).as_kernel_param(),
+                        (&d_edge_n).as_kernel_param(),
+                        leader_edge_idx.as_kernel_param(),
+                        edge_order_param,
+                        iteration_order_param,
+                        n_leader.as_kernel_param(),
+                        (&leader_metadata.unique_keys).as_kernel_param(),
+                        (&leader_metadata.fan_out).as_kernel_param(),
+                        (&leader_metadata.prefix_sum).as_kernel_param(),
+                        leader_metadata_key_count.as_kernel_param(),
+                        block_work_unit.as_kernel_param(),
+                        (&count_buf).as_kernel_param(),
+                        (&thread_counts_buf).as_kernel_param(),
+                    ],
+                };
+                count_kernel
+                    .clone()
+                    .launch_in(stream, count_config, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "{}: count kernel launch failed: {}",
+                            entry_label, e
+                        ))
+                    })?;
             }
-        }
 
-        // Device-side exclusive prefix-sum on offsets.
-        self.multiblock_scan_u32_inplace_on_stream(
-            &mut offsets_buf,
-            grid,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
+            // dtod count → offsets (scan modifies offsets in place).
+            let bytes_count = (grid as usize) * std::mem::size_of::<u32>();
+            unsafe {
+                let res = sys::cuMemcpyDtoDAsync_v2(
+                    *offsets_buf.device_ptr(),
+                    *count_buf.device_ptr(),
+                    bytes_count,
+                    stream.stream().cu_stream(),
+                );
+                if res != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "{}: dtod count → offsets failed: {:?}",
+                        entry_label, res
+                    )));
+                }
+            }
 
-        // Compute total = counts[n-1] + offsets[n-1].
-        let total_kernel = device
-            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
-            .ok_or_else(|| XlogError::Kernel("wcoj_compute_total kernel not found".to_string()))?;
-        unsafe {
-            total_kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (1, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (&count_buf, &offsets_buf, grid, &d_total),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!("wcoj_compute_total launch failed: {}", e))
+            // Device-side exclusive prefix-sum on offsets.
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut offsets_buf,
+                grid,
+                stream,
+                &mut scan_scratch,
+            )?;
+
+            // Compute total = counts[n-1] + offsets[n-1].
+            let total_kernel = device
+                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
+                .ok_or_else(|| {
+                    XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
                 })?;
-        }
+            unsafe {
+                total_kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (1, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (&count_buf, &offsets_buf, grid, &d_total),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("wcoj_compute_total launch failed: {}", e))
+                    })?;
+            }
 
-        rec_count.commit(runtime).map_err(|e| {
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_count = unsafe { rec_count.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec_count.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "{}: count+scan+total commit failed: {}",
                 entry_label, e
@@ -1730,14 +1714,6 @@ impl CudaKernelProvider {
                 XlogError::Kernel(format!("{}: htod out_col_ptrs failed: {}", entry_label, e))
             })?;
         let out_d_num_rows = self.memory.alloc::<u32>(1)?;
-
-        // H2D output row count.
-        self.htod_launch_metadata_async_copy_one(
-            &total_rows,
-            &out_d_num_rows,
-            &cu_stream,
-            &format!("{entry_label}: out_d_num_rows"),
-        )?;
 
         let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
         for buf in edges.iter() {
@@ -1815,54 +1791,69 @@ impl CudaKernelProvider {
             block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 0,
         };
-        unsafe {
-            let mut params: Vec<*mut c_void> = match &leader_metadata {
-                CliqueLeaderMetadata::U32(leader_metadata) => vec![
-                    (&d_edge_col0).as_kernel_param(),
-                    (&d_edge_col1).as_kernel_param(),
-                    (&d_edge_n).as_kernel_param(),
-                    leader_edge_idx.as_kernel_param(),
-                    edge_order_param,
-                    iteration_order_param,
-                    n_leader.as_kernel_param(),
-                    (&leader_metadata.unique_keys).as_kernel_param(),
-                    (&leader_metadata.fan_out).as_kernel_param(),
-                    (&leader_metadata.prefix_sum).as_kernel_param(),
-                    leader_metadata_key_count.as_kernel_param(),
-                    block_work_unit.as_kernel_param(),
-                    (&thread_counts_buf).as_kernel_param(),
-                    (&offsets_buf).as_kernel_param(),
-                    total_rows.as_kernel_param(),
-                    (&d_out_cols).as_kernel_param(),
-                ],
-                CliqueLeaderMetadata::U64(leader_metadata) => vec![
-                    (&d_edge_col0).as_kernel_param(),
-                    (&d_edge_col1).as_kernel_param(),
-                    (&d_edge_n).as_kernel_param(),
-                    leader_edge_idx.as_kernel_param(),
-                    edge_order_param,
-                    iteration_order_param,
-                    n_leader.as_kernel_param(),
-                    (&leader_metadata.unique_keys).as_kernel_param(),
-                    (&leader_metadata.fan_out).as_kernel_param(),
-                    (&leader_metadata.prefix_sum).as_kernel_param(),
-                    leader_metadata_key_count.as_kernel_param(),
-                    block_work_unit.as_kernel_param(),
-                    (&thread_counts_buf).as_kernel_param(),
-                    (&offsets_buf).as_kernel_param(),
-                    total_rows.as_kernel_param(),
-                    (&d_out_cols).as_kernel_param(),
-                ],
-            };
-            materialize_kernel
-                .clone()
-                .launch_on_stream(&cu_stream, mat_config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("{}: materialize launch failed: {}", entry_label, e))
-                })?;
-        }
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            self.initialize_launch_metadata_u32(
+                total_rows,
+                &out_d_num_rows,
+                stream,
+                &format!("{entry_label}: out_d_num_rows"),
+            )?;
+            unsafe {
+                let mut params: Vec<*mut c_void> = match &leader_metadata {
+                    CliqueLeaderMetadata::U32(leader_metadata) => vec![
+                        (&d_edge_col0).as_kernel_param(),
+                        (&d_edge_col1).as_kernel_param(),
+                        (&d_edge_n).as_kernel_param(),
+                        leader_edge_idx.as_kernel_param(),
+                        edge_order_param,
+                        iteration_order_param,
+                        n_leader.as_kernel_param(),
+                        (&leader_metadata.unique_keys).as_kernel_param(),
+                        (&leader_metadata.fan_out).as_kernel_param(),
+                        (&leader_metadata.prefix_sum).as_kernel_param(),
+                        leader_metadata_key_count.as_kernel_param(),
+                        block_work_unit.as_kernel_param(),
+                        (&thread_counts_buf).as_kernel_param(),
+                        (&offsets_buf).as_kernel_param(),
+                        total_rows.as_kernel_param(),
+                        (&d_out_cols).as_kernel_param(),
+                    ],
+                    CliqueLeaderMetadata::U64(leader_metadata) => vec![
+                        (&d_edge_col0).as_kernel_param(),
+                        (&d_edge_col1).as_kernel_param(),
+                        (&d_edge_n).as_kernel_param(),
+                        leader_edge_idx.as_kernel_param(),
+                        edge_order_param,
+                        iteration_order_param,
+                        n_leader.as_kernel_param(),
+                        (&leader_metadata.unique_keys).as_kernel_param(),
+                        (&leader_metadata.fan_out).as_kernel_param(),
+                        (&leader_metadata.prefix_sum).as_kernel_param(),
+                        leader_metadata_key_count.as_kernel_param(),
+                        block_work_unit.as_kernel_param(),
+                        (&thread_counts_buf).as_kernel_param(),
+                        (&offsets_buf).as_kernel_param(),
+                        total_rows.as_kernel_param(),
+                        (&d_out_cols).as_kernel_param(),
+                    ],
+                };
+                materialize_kernel
+                    .clone()
+                    .launch_in(stream, mat_config, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "{}: materialize launch failed: {}",
+                            entry_label, e
+                        ))
+                    })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
 
-        rec_mat.commit(runtime).map_err(|e| {
+        rec_mat.commit().map_err(|e| {
             XlogError::Kernel(format!("{}: materialize commit failed: {}", entry_label, e))
         })?;
 
@@ -2446,41 +2437,47 @@ impl CudaKernelProvider {
         // Pointers all device-resident; preflight verified cross-stream
         // tracking. Raw params are required because the
         // metadata-extended ABI exceeds the tuple-launch arity.
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&d_edge_col0).as_kernel_param(),
-                (&d_edge_col1).as_kernel_param(),
-                (&d_edge_n).as_kernel_param(),
-                leader_edge_idx.as_kernel_param(),
-                (&d_edge_order).as_kernel_param(),
-                (&d_iteration_order).as_kernel_param(),
-                n_leader.as_kernel_param(),
-                (&leader_metadata.unique_keys).as_kernel_param(),
-                (&leader_metadata.fan_out).as_kernel_param(),
-                (&leader_metadata.prefix_sum).as_kernel_param(),
-                leader_metadata.key_count.as_kernel_param(),
-                block_work_unit.as_kernel_param(),
-                (&row_counts).as_kernel_param(),
-            ];
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut params,
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "{}: groupby-count launch failed: {}",
-                        entry_label, e
-                    ))
-                })?;
-        }
-        rec.commit(runtime)
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&d_edge_col0).as_kernel_param(),
+                    (&d_edge_col1).as_kernel_param(),
+                    (&d_edge_n).as_kernel_param(),
+                    leader_edge_idx.as_kernel_param(),
+                    (&d_edge_order).as_kernel_param(),
+                    (&d_iteration_order).as_kernel_param(),
+                    n_leader.as_kernel_param(),
+                    (&leader_metadata.unique_keys).as_kernel_param(),
+                    (&leader_metadata.fan_out).as_kernel_param(),
+                    (&leader_metadata.prefix_sum).as_kernel_param(),
+                    leader_metadata.key_count.as_kernel_param(),
+                    block_work_unit.as_kernel_param(),
+                    (&row_counts).as_kernel_param(),
+                ];
+                kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "{}: groupby-count launch failed: {}",
+                            entry_label, e
+                        ))
+                    })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{}: commit failed: {}", entry_label, e)))?;
 
         // Staging buffer (root, count) over the n_leader input rows:

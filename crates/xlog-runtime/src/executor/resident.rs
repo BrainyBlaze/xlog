@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Instant;
 
 use cudarc::driver::{sys::CUevent_flags, CudaEvent};
 use xlog_core::{resolve_bool, symbol, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::cuda_graph::{
-    CapturedCudaGraph, ConditionalCudaGraphSequenceBuilder, CudaConditionalGraphUnavailable,
-    CudaGraphNodeKind,
+    reserve_uncaptured_stream, retire_after_stream_captures, CapturedCudaGraph,
+    ConditionalCudaGraphSequenceBuilder, CudaConditionalGraphUnavailable, CudaGraphNodeKind,
 };
 use xlog_cuda::device_runtime::{BlockId, ResidentCompletionEvent, XlogDeviceRuntime};
 use xlog_cuda::launch::LaunchRecorder;
@@ -290,6 +292,83 @@ struct ResidentRunOwners {
     relation_registration: Vec<(RelId, String)>,
     transaction_identity: Arc<()>,
     output_schema_plans: Vec<ResidentOutputSchemaPlan>,
+}
+
+/// Holds actual foreign-resource owners across an operation that may enqueue.
+/// Allocation reservations remain governed by the existing runtime registry.
+/// This boundary retains the enclosing graph, host bank, streams and events too.
+struct PendingResidentOwners<T: Send + 'static> {
+    value: Option<T>,
+    wait: fn(&mut T) -> bool,
+}
+
+impl<T: Send + 'static> PendingResidentOwners<T> {
+    fn new(owners: T, wait: fn(&mut T) -> bool) -> Self {
+        Self {
+            value: Some(owners),
+            wait,
+        }
+    }
+
+    /// The caller has proved completion or transferred this pending owner.
+    fn into_inner(mut self) -> T {
+        self.value
+            .take()
+            .expect("resident execution owners missing")
+    }
+}
+
+impl<T: Send + 'static> PendingResidentOwners<T> {
+    fn with_admission<A, R, E>(
+        mut self,
+        admit: impl FnOnce(&T) -> std::result::Result<A, E>,
+        operation: impl FnOnce(&mut T) -> std::result::Result<R, E>,
+    ) -> std::result::Result<(Self, R), E> {
+        let admission = admit(&self)?;
+        // This local drops before the owning self parameter on error or unwind,
+        // so retirement can run immediately without a later lifecycle entry.
+        let result = operation(&mut self)?;
+        drop(admission);
+        Ok((self, result))
+    }
+}
+
+impl<T: Send + 'static> Deref for PendingResidentOwners<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+            .as_ref()
+            .expect("resident execution owners missing")
+    }
+}
+
+impl<T: Send + 'static> DerefMut for PendingResidentOwners<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.value
+            .as_mut()
+            .expect("resident execution owners missing")
+    }
+}
+
+impl<T: Send + 'static> Drop for PendingResidentOwners<T> {
+    fn drop(&mut self) {
+        let Some(owners) = self.value.take() else {
+            return;
+        };
+        let wait = self.wait;
+        retire_after_stream_captures(move || {
+            // Preserve the full dependency chain even if waiting or reporting
+            // its failure unwinds. No registry lock is held during this wait.
+            let mut owners = ManuallyDrop::new(owners);
+            if !wait(&mut owners) {
+                eprintln!("CUDA resident completion remains unknown; retaining execution owners");
+                return;
+            }
+            // SAFETY: the exact terminal event or stream wait succeeded. This
+            // is the only release of the manually retained owner.
+            unsafe { ManuallyDrop::drop(&mut owners) };
+        });
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2218,13 +2297,17 @@ pub struct ResidentGraphPreflightReport {
 
 /// A resident transaction whose one graph launch is in flight.
 pub struct ResidentGraphInFlight<'executor> {
-    // Field order is intentional: abandoned execution waits before graph and
-    // workspace owners are destroyed.
-    completion: ResidentCompletionEvent,
-    timing_start: CudaEvent,
-    timing_end: CudaEvent,
-    owners: ResidentRunOwners,
+    execution: PendingResidentOwners<ResidentLaunchOwners>,
     _executor: PhantomData<&'executor Executor>,
+}
+
+struct ResidentLaunchOwners {
+    // Keep every handle beside its allocations through partial enqueue as well
+    // as terminal event-record and wait errors.
+    completion: Option<ResidentCompletionEvent>,
+    timing_start: Option<CudaEvent>,
+    timing_end: Option<CudaEvent>,
+    owners: ResidentRunOwners,
 }
 
 /// A resident transaction after its one terminal completion wait.
@@ -2393,68 +2476,87 @@ impl<'executor> PreparedResidentGraph<'executor> {
 
     /// Launch the already-instantiated graph exactly once.
     pub fn launch(
-        mut self,
+        self,
     ) -> std::result::Result<ResidentGraphInFlight<'executor>, ResidentGraphExecutionError> {
         validate_resident_source_set_snapshots(
             self.source_guard,
             self.owners.source_epoch,
             &self.source_set_snapshots,
         )?;
-        self.owners
-            .execution_domain
-            .preflight(&mut self.owners.recorder)
-            .map_err(runtime_error)?;
-        let timing_start = self
-            .owners
-            .stream
-            .record_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
-            .map_err(|error| {
-                runtime_error(format!("resident timing-start event failed: {error}"))
-            })?;
-        self.owners
-            .graph
-            .launch(&self.owners.stream)
-            .map_err(runtime_error)?;
-        let timing_end = match self
-            .owners
-            .stream
-            .record_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
-        {
-            Ok(event) => event,
-            Err(error) => {
-                let _ = self.owners.stream.synchronize();
-                return Err(runtime_error(format!(
-                    "resident timing-end event failed after graph launch: {error}"
-                )));
-            }
-        };
-        self.owners
-            .runtime
-            .record_conditional_graph_launch(self.has_device_status_writer);
-        let recorder = std::mem::replace(
-            &mut self.owners.recorder,
-            self.owners.execution_domain.new_strict_recorder(),
+        // Arm before the first API that may enqueue. The recorder protects
+        // tracked allocations; this owner also protects the graph, host bank,
+        // provider, exact stream/context and timing/completion handles.
+        let execution = PendingResidentOwners::new(
+            ResidentLaunchOwners {
+                completion: None,
+                timing_start: None,
+                timing_end: None,
+                owners: self.owners,
+            },
+            |execution| match execution.completion.as_mut() {
+                Some(completion) => completion.synchronize().is_ok(),
+                None => execution.owners.stream.synchronize().is_ok(),
+            },
         );
-        if let Err(error) = self.owners.execution_domain.commit(recorder) {
-            let _ = self.owners.stream.synchronize();
-            return Err(runtime_error(error));
-        }
-        let completion = match self
-            .owners
-            .runtime
-            .record_resident_completion_event(&self.owners.stream)
-        {
-            Ok(completion) => completion,
-            Err(error) => {
-                let _ = self.owners.stream.synchronize();
-                return Err(runtime_error(error));
-            }
-        };
+        let (execution, ()) = execution.with_admission(
+            |execution| reserve_uncaptured_stream(&execution.owners.stream).map_err(runtime_error),
+            |execution| {
+                let execution_domain = execution.owners.execution_domain.clone();
+                let recorder = std::mem::replace(
+                    &mut execution.owners.recorder,
+                    execution_domain.new_strict_recorder(),
+                );
+                // SAFETY: graph preparation registered every runtime allocation touched
+                // by this graph on `recorder`. The closure queues the timing events and
+                // graph launch synchronously and uses only the domain-supplied stream.
+                let enqueued = unsafe {
+                    execution_domain.enqueue(recorder, |stream| {
+                        execution.timing_start = Some(
+                            stream
+                                .stream()
+                                .record_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
+                                .map_err(|error| {
+                                    runtime_error(format!(
+                                        "resident timing-start event failed: {error}"
+                                    ))
+                                })?,
+                        );
+                        execution
+                            .owners
+                            .graph
+                            .launch_in(stream)
+                            .map_err(runtime_error)?;
+                        execution.timing_end = Some(
+                            stream
+                                .stream()
+                                .record_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
+                                .map_err(|error| {
+                                    runtime_error(format!(
+                                "resident timing-end event failed after graph launch: {error}"
+                            ))
+                                })?,
+                        );
+                        execution
+                            .owners
+                            .runtime
+                            .record_conditional_graph_launch(self.has_device_status_writer);
+                        Ok::<(), ResidentGraphExecutionError>(())
+                    })
+                }
+                .map_err(runtime_error)?;
+                enqueued.commit().map_err(runtime_error)?;
+                execution.completion = Some(
+                    execution
+                        .owners
+                        .runtime
+                        .record_resident_completion_event(&execution.owners.stream)
+                        .map_err(runtime_error)?,
+                );
+                Ok::<(), ResidentGraphExecutionError>(())
+            },
+        )?;
         Ok(ResidentGraphInFlight {
-            completion,
-            timing_start,
-            timing_end,
-            owners: self.owners,
+            execution,
             _executor: PhantomData,
         })
     }
@@ -2466,10 +2568,26 @@ impl<'executor> ResidentGraphInFlight<'executor> {
         mut self,
     ) -> std::result::Result<ResidentGraphSynchronized<'executor>, ResidentGraphExecutionError>
     {
-        self.completion.synchronize().map_err(runtime_error)?;
+        let capture_exclusion =
+            reserve_uncaptured_stream(&self.execution.owners.stream).map_err(runtime_error)?;
+        self.execution
+            .completion
+            .as_mut()
+            .expect("resident completion event missing after launch")
+            .synchronize()
+            .map_err(runtime_error)?;
+        drop(capture_exclusion);
         let elapsed_ms = self
+            .execution
             .timing_start
-            .elapsed_ms(&self.timing_end)
+            .as_ref()
+            .expect("resident timing-start event missing after launch")
+            .elapsed_ms(
+                self.execution
+                    .timing_end
+                    .as_ref()
+                    .expect("resident timing-end event missing after launch"),
+            )
             .map_err(|error| {
                 runtime_error(format!("resident CUDA-event timing failed: {error}"))
             })?;
@@ -2481,7 +2599,7 @@ impl<'executor> ResidentGraphInFlight<'executor> {
             .clamp(0.0, u64::MAX as f64) as u64;
         Ok(ResidentGraphSynchronized {
             device_elapsed_ns,
-            owners: self.owners,
+            owners: self.execution.into_inner().owners,
             _executor: PhantomData,
         })
     }
@@ -2490,32 +2608,41 @@ impl<'executor> ResidentGraphInFlight<'executor> {
 impl<'executor> ResidentGraphSynchronized<'executor> {
     /// Perform the transaction's only device-to-host observation and decode it.
     pub fn observe_final_receipt(
-        mut self,
+        self,
     ) -> std::result::Result<ObservedResidentGraphReceipt, ResidentGraphExecutionError> {
         let phase_diagnostics = resolve_bool(None, "XLOG_RESIDENT_LATENCY_DIAGNOSTICS", false)
             .map_err(runtime_error)?;
         let receipt_d2h_started = phase_diagnostics.then(Instant::now);
         let encoded_len = self.owners.receipt.len_bytes();
-        let bytes = self
-            .owners
-            .provider
-            .observe_resident_packed_receipt(
-                &self.owners.receipt,
-                &mut self.owners.pinned_receipt,
-                &self.owners.stream,
-            )
-            .map_err(runtime_error)?;
+        // The earlier graph event precedes this D2H. Keep both the pinned
+        // destination and device source until this exact stream completes.
+        let pending =
+            PendingResidentOwners::new(self.owners, |owners| owners.stream.synchronize().is_ok());
+        let (pending, bytes) = pending.with_admission(
+            |owners| reserve_uncaptured_stream(&owners.stream).map_err(runtime_error),
+            |owners| {
+                owners
+                    .provider
+                    .observe_resident_packed_receipt(
+                        &owners.receipt,
+                        &mut owners.pinned_receipt,
+                        &owners.stream,
+                    )
+                    .map_err(runtime_error)
+            },
+        )?;
+        let mut owners = pending.into_inner();
         let receipt_d2h_ns = receipt_d2h_started
             .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
             .unwrap_or(0);
         let decode_started = phase_diagnostics.then(Instant::now);
-        let relation_count_len = self.owners.output_indices.len();
-        let schema_winner_count = self.owners.output_schema_plans.len();
+        let relation_count_len = owners.output_indices.len();
+        let schema_winner_count = owners.output_schema_plans.len();
         let expected_count_fields = relation_count_len + 4 + schema_winner_count;
-        if self.owners.receipt.relation_count_len() as usize != relation_count_len
-            || self.owners.receipt.device_trace_field_count() != 4
-            || self.owners.receipt.schema_winner_count() as usize != schema_winner_count
-            || self.owners.receipt.total_count_field_len() as usize != expected_count_fields
+        if owners.receipt.relation_count_len() as usize != relation_count_len
+            || owners.receipt.device_trace_field_count() != 4
+            || owners.receipt.schema_winner_count() as usize != schema_winner_count
+            || owners.receipt.total_count_field_len() as usize != expected_count_fields
             || bytes.len() != encoded_len
             || encoded_len != 44 + 4 * expected_count_fields
         {
@@ -2614,8 +2741,8 @@ impl<'executor> ResidentGraphSynchronized<'executor> {
             }
         };
 
-        let mut counts = Vec::with_capacity(self.owners.output_indices.len());
-        for index in 0..self.owners.output_indices.len() {
+        let mut counts = Vec::with_capacity(owners.output_indices.len());
+        for index in 0..owners.output_indices.len() {
             counts.push(field_u32(44 + index * 4)?);
         }
         let device_scan_invocations = u64::from(field_u32(44 + relation_count_len * 4)?);
@@ -2629,20 +2756,15 @@ impl<'executor> ResidentGraphSynchronized<'executor> {
         }
         let mut outputs = Vec::new();
         if terminal.is_ok() {
-            let selected_schemas = resident_resolve_output_schemas(
-                &self.owners.output_schema_plans,
-                &schema_winner_ids,
-            )
-            .map_err(runtime_error)?;
-            let mut cache_entries = Vec::with_capacity(counts.len());
-            for ((_, relation_index), count) in self
-                .owners
-                .output_indices
-                .iter()
-                .zip(counts.iter().copied())
-            {
-                let relation = private_relation(&self.owners.relations, *relation_index)
+            let selected_schemas =
+                resident_resolve_output_schemas(&owners.output_schema_plans, &schema_winner_ids)
                     .map_err(runtime_error)?;
+            let mut cache_entries = Vec::with_capacity(counts.len());
+            for ((_, relation_index), count) in
+                owners.output_indices.iter().zip(counts.iter().copied())
+            {
+                let relation =
+                    private_relation(&owners.relations, *relation_index).map_err(runtime_error)?;
                 if count > relation.capacity() {
                     return Err(runtime_error(format!(
                         "resident receipt count {count} exceeds output capacity {}",
@@ -2651,15 +2773,14 @@ impl<'executor> ResidentGraphSynchronized<'executor> {
                 }
                 cache_entries.push((relation.buffer(), count));
             }
-            self.owners
+            owners
                 .provider
                 .finalize_resident_logical_counts(&cache_entries)
                 .map_err(runtime_error)?;
             for ((name, relation_index), schema) in
-                self.owners.output_indices.iter().zip(selected_schemas)
+                owners.output_indices.iter().zip(selected_schemas)
             {
-                let relation = self
-                    .owners
+                let relation = owners
                     .relations
                     .get_mut(*relation_index)
                     .and_then(Option::take)
@@ -2686,10 +2807,10 @@ impl<'executor> ResidentGraphSynchronized<'executor> {
             iterations,
             terminal,
             outputs,
-            source_epoch: self.owners.source_epoch,
-            relation_registration: self.owners.relation_registration.clone(),
-            transaction_identity: Arc::clone(&self.owners.transaction_identity),
-            provider: Arc::clone(&self.owners.provider),
+            source_epoch: owners.source_epoch,
+            relation_registration: owners.relation_registration.clone(),
+            transaction_identity: Arc::clone(&owners.transaction_identity),
+            provider: Arc::clone(&owners.provider),
             phase_timings: phase_diagnostics.then_some(ResidentFinalObservationPhaseTimings {
                 receipt_d2h_ns,
                 decode_schema_staging_ns,
@@ -4915,6 +5036,26 @@ impl Executor {
             );
         }
 
+        // Build the same complete owner set inside capture and before replay.
+        // No live admission may cross BeginCapture.
+        let record_launch = || {
+            let mut recorder = execution_domain.new_strict_recorder();
+            for binding in &schedule_bindings {
+                binding.record_uses(&mut recorder);
+            }
+            ResidentScheduleExternalBindings::new(
+                physical.filter_scratch.as_ref(),
+                &physical.set_workspace,
+                &physical.join_workspace,
+                &physical.control,
+                &device_trace,
+                &schema_winners,
+                &receipt,
+            )
+            .record_uses(&mut recorder);
+            schedule_program.record_uses(&mut recorder);
+            recorder
+        };
         let graph_capture_started = diagnostics.as_ref().map(|_| std::time::Instant::now());
         let mut sequence =
             ConditionalCudaGraphSequenceBuilder::new(&stream).map_err(conditional_graph_error)?;
@@ -4934,12 +5075,17 @@ impl Executor {
                 sequence
                     .add_conditional_while(u32::from(region.iteration_limit != 0), true, |body| {
                         body.capture_on_stream(&stream, || unsafe {
-                            self.provider.record_resident_schedule_region_on_stream(
-                                &schedule_program,
-                                region_index,
-                                Some(&body),
-                                &stream,
-                            )
+                            execution_domain
+                                .enqueue(record_launch(), |enqueue| {
+                                    self.provider.record_resident_schedule_region_on_stream(
+                                        &schedule_program,
+                                        region_index,
+                                        Some(body),
+                                        enqueue,
+                                    )
+                                })
+                                .map_err(|error| xlog_core::XlogError::Kernel(error.to_string()))?
+                                .commit()
                         })?;
                         conditional_body_node_kinds.push(body.linear_chain_node_kinds()?);
                         Ok(())
@@ -4948,12 +5094,17 @@ impl Executor {
             } else {
                 sequence
                     .capture_segment_on_stream(&stream, || unsafe {
-                        self.provider.record_resident_schedule_region_on_stream(
-                            &schedule_program,
-                            region_index,
-                            None,
-                            &stream,
-                        )
+                        execution_domain
+                            .enqueue(record_launch(), |enqueue| {
+                                self.provider.record_resident_schedule_region_on_stream(
+                                    &schedule_program,
+                                    region_index,
+                                    None,
+                                    enqueue,
+                                )
+                            })
+                            .map_err(|error| xlog_core::XlogError::Kernel(error.to_string()))?
+                            .commit()
                     })
                     .map_err(conditional_graph_error)?;
             }
@@ -4975,21 +5126,7 @@ impl Executor {
         }
 
         let validation_started = diagnostics.as_ref().map(|_| std::time::Instant::now());
-        let mut recorder = execution_domain.new_strict_recorder();
-        for binding in &schedule_bindings {
-            binding.record_uses(&mut recorder);
-        }
-        ResidentScheduleExternalBindings::new(
-            physical.filter_scratch.as_ref(),
-            &physical.set_workspace,
-            &physical.join_workspace,
-            &physical.control,
-            &device_trace,
-            &schema_winners,
-            &receipt,
-        )
-        .record_uses(&mut recorder);
-        schedule_program.record_uses(&mut recorder);
+        let recorder = record_launch();
 
         let graph_node_kinds = graph.linear_chain_node_kinds().map_err(runtime_error)?;
         resident_validate_parent_graph_kinds(&graph_node_kinds, &capture_topology.parent_kinds)
@@ -6588,6 +6725,131 @@ fn checked_capacity_class(source_capacity: u32) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
+    // These scenarios drive one process-wide CUDA retirement queue. Isolate
+    // their injected waits/panics; production queue workers remain concurrent.
+    fn resident_retirement_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    #[test]
+    fn pending_resident_owners_release_admission_before_error_retirement() {
+        let _retirement_test = resident_retirement_test_guard();
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        struct Admission(Arc<AtomicBool>);
+        impl Drop for Admission {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        for unwind in [false, true] {
+            let excluded = Arc::new(AtomicBool::new(false));
+            let owner = Arc::new(());
+            let observer = Arc::downgrade(&owner);
+            let pending = super::PendingResidentOwners::new(
+                (owner, Arc::clone(&excluded)),
+                |(_, excluded)| {
+                    assert!(
+                        !excluded.load(Ordering::SeqCst),
+                        "admission must end before retirement waits"
+                    );
+                    true
+                },
+            );
+            let outcome = std::panic::catch_unwind(move || {
+                pending.with_admission(
+                    |(_, excluded)| {
+                        excluded.store(true, Ordering::SeqCst);
+                        Ok::<_, ()>(Admission(Arc::clone(excluded)))
+                    },
+                    |_| -> std::result::Result<(), ()> {
+                        if unwind {
+                            panic!("controlled partial operation unwind");
+                        }
+                        Err(())
+                    },
+                )
+            });
+            assert_eq!(outcome.is_err(), unwind);
+            if let Ok(result) = outcome {
+                assert!(result.is_err());
+            }
+            assert!(!excluded.load(Ordering::SeqCst));
+            assert!(
+                observer.upgrade().is_none(),
+                "completed owners must retire without another lifecycle entry"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_resident_owners_rearm_for_late_receipt_copy() {
+        let _retirement_test = resident_retirement_test_guard();
+        let owner = std::sync::Arc::new(());
+        let observer = std::sync::Arc::downgrade(&owner);
+        let completed = super::PendingResidentOwners::new(owner, |_| {
+            panic!("successful completion transfers ownership without another wait")
+        });
+        let synchronized_owner = completed.into_inner();
+        assert!(observer.upgrade().is_some());
+        // A graph's completed event cannot release the subsequent D2H source
+        // and destination: the later operation needs its own completion proof.
+        let copy = super::PendingResidentOwners::new(synchronized_owner, |_| false);
+        drop(copy);
+        assert!(observer.upgrade().is_some());
+    }
+
+    #[test]
+    fn pending_resident_owners_remain_retained_if_wait_unwinds() {
+        let _retirement_test = resident_retirement_test_guard();
+        let owner = std::sync::Arc::new(());
+        let observer = std::sync::Arc::downgrade(&owner);
+        let result = std::panic::catch_unwind(move || {
+            drop(super::PendingResidentOwners::new(owner, |_| {
+                panic!("controlled completion wait failure")
+            }));
+        });
+        assert!(result.is_err());
+        assert!(observer.upgrade().is_some());
+    }
+
+    #[test]
+    fn pending_resident_owners_keep_full_chain_after_failed_completion() {
+        let _retirement_test = resident_retirement_test_guard();
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        struct Owner(Arc<AtomicUsize>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        // The same owner boundary encloses graph enqueue, completion recording,
+        // terminal waiting and the later device-to-host receipt operation.
+        for completion in [false, true] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let owners: Vec<_> = (0..5)
+                .map(|_| Arc::new(Owner(Arc::clone(&drops))))
+                .collect();
+            let observers: Vec<_> = owners.iter().map(Arc::downgrade).collect();
+            let pending =
+                super::PendingResidentOwners::new((owners, completion), |(_, completed)| {
+                    *completed
+                });
+            drop(pending);
+            assert_eq!(drops.load(Ordering::SeqCst), if completion { 5 } else { 0 });
+            assert!(observers
+                .iter()
+                .all(|owner| owner.upgrade().is_some() != completion));
+        }
+    }
+
     use super::{
         checked_capacity_class, resident_compact_allocation_bytes,
         resident_compact_filter_descriptors, resident_compact_preflight_device_bytes,

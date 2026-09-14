@@ -101,6 +101,7 @@ impl LogResult {
 
 fn classify_error(e: &ResourceError) -> &'static str {
     match e {
+        ResourceError::AllocationRetained(_) => "AllocationRetained",
         ResourceError::OutOfBudget { .. } => "OutOfBudget",
         ResourceError::Driver(_) => "Driver",
         ResourceError::StreamMisuse(_) => "StreamMisuse",
@@ -295,7 +296,7 @@ impl LoggingSink for NullSink {
 
 /// Telemetry decorator for [`DeviceMemoryResource`].
 pub struct LoggingResource {
-    inner: Box<dyn DeviceMemoryResource + Send + Sync>,
+    inner: std::sync::Arc<dyn DeviceMemoryResource + Send + Sync>,
     sink: std::sync::Arc<dyn LoggingSink>,
     /// Count of records the sink refused or errored on. Surfaced as
     /// a diagnostic for callers that want to detect telemetry loss
@@ -311,7 +312,7 @@ impl LoggingResource {
         sink: std::sync::Arc<dyn LoggingSink>,
     ) -> Self {
         Self {
-            inner,
+            inner: std::sync::Arc::from(inner),
             sink,
             dropped_records: AtomicU64::new(0),
         }
@@ -334,10 +335,13 @@ impl LoggingResource {
         bytes: usize,
         stream: StreamId,
         tag: AllocTag,
-        result: ResourceResult<DeviceBlock>,
-    ) -> ResourceResult<DeviceBlock> {
+        result: &ResourceResult<crate::memory::ResourceBlockRetirement>,
+    ) {
         let (ptr, generation, recorded_bytes) = match &result {
-            Ok(block) => (Some(block.ptr), Some(block.generation), Some(block.bytes)),
+            Ok(owner) => {
+                let block = owner.block();
+                (Some(block.ptr), Some(block.generation), Some(block.bytes))
+            }
             Err(_) => (None, None, Some(bytes)),
         };
         self.emit(LogRecord {
@@ -351,37 +355,31 @@ impl LoggingResource {
             thread_id: current_thread_id_u64(),
             order_counter: next_order_counter(),
             timestamp_nanos: now_nanos(),
-            result: LogResult::from_result(&result),
+            result: LogResult::from_result(result),
         });
-        result
     }
 }
 
 impl DeviceMemoryResource for LoggingResource {
-    fn allocate(
+    fn materialize(
         &self,
-        bytes: usize,
-        stream: StreamId,
-        tag: AllocTag,
+        request: super::resource::AllocationRequest,
     ) -> ResourceResult<DeviceBlock> {
-        let result = self.inner.allocate(bytes, stream, tag);
-        self.record_allocation(bytes, stream, tag, result)
+        let (bytes, stream, tag) = (request.bytes, request.stream, request.tag);
+        let reclamation = request.reclamation();
+        let result = self.inner.materialize(request).map(|block| {
+            crate::memory::ResourceBlockRetirement::new(
+                block,
+                std::sync::Arc::clone(&self.inner),
+                reclamation,
+            )
+        });
+        self.record_allocation(bytes, stream, tag, &result);
+        result.map(crate::memory::ResourceBlockRetirement::into_block)
     }
 
-    fn allocate_with_reservation_pressure(
-        &self,
-        bytes: usize,
-        reservation_pressure_bytes: usize,
-        stream: StreamId,
-        tag: AllocTag,
-    ) -> ResourceResult<DeviceBlock> {
-        let result = self.inner.allocate_with_reservation_pressure(
-            bytes,
-            reservation_pressure_bytes,
-            stream,
-            tag,
-        );
-        self.record_allocation(bytes, stream, tag, result)
+    fn allocation_accounting(&self) -> std::sync::Arc<super::resource::AllocationAccounting> {
+        self.inner.allocation_accounting()
     }
 
     fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
@@ -458,6 +456,14 @@ impl DeviceMemoryResource for LoggingResource {
         self.inner.supports_block_use_tracking()
     }
 
+    fn access_dependencies(
+        &self,
+        block: BlockId,
+        bytes: usize,
+    ) -> ResourceResult<Option<std::sync::Arc<super::resource::DeviceAccessDependencies>>> {
+        self.inner.access_dependencies(block, bytes)
+    }
+
     fn prepare_block_use(
         &self,
         block: BlockId,
@@ -486,6 +492,33 @@ mod tests {
     use super::super::resource::BlockState;
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn host_logging_panic_retires_the_unpublished_allocation() {
+        struct PanicSink;
+        impl LoggingSink for PanicSink {
+            fn emit(&self, _: LogRecord) -> Result<(), SinkError> {
+                panic!("telemetry publication interrupted");
+            }
+        }
+        let _serial = crate::cuda_graph::capture_lifecycle_test_guard();
+        let inner = super::super::budget::tests::DeferredHostResource {
+            release_on_detach: true,
+            ..Default::default()
+        };
+        let ledger = Arc::clone(&inner.accounting);
+        let owners = Arc::clone(&inner.owners);
+        let logging = LoggingResource::new(Box::new(inner), Arc::new(PanicSink));
+        let budget = super::super::budget::GlobalDeviceBudget::new(Box::new(logging), 64);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = budget.allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED);
+        }))
+        .is_err());
+        crate::cuda_graph::reap_capture_retirements();
+        assert_eq!(ledger.snapshot(), (0, 64));
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert!(owners.lock().unwrap().is_empty());
+    }
 
     use crate::CudaDevice;
 
