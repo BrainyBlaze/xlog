@@ -471,10 +471,10 @@ fn catalogue_sha256(bytes: &[u8]) -> [u8; 32] {
         padded.push(0);
     }
     padded.extend_from_slice(&(bytes.len() as u64 * 8).to_be_bytes());
-    for block in padded.chunks_exact(64) {
+    for block in padded.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (word, chunk) in w.iter_mut().zip(block.chunks_exact(4)) {
-            *word = u32::from_be_bytes(chunk.try_into().unwrap());
+        for (word, chunk) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+            *word = u32::from_be_bytes(*chunk);
         }
         for i in 16..64 {
             let a = w[i - 15];
@@ -507,7 +507,7 @@ fn catalogue_sha256(bytes: &[u8]) -> [u8; 32] {
         }
     }
     let mut digest = [0; 32];
-    for (chunk, word) in digest.chunks_exact_mut(4).zip(state) {
+    for (chunk, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
         chunk.copy_from_slice(&word.to_be_bytes());
     }
     digest
