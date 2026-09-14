@@ -666,6 +666,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "semantic_publication_content_guard",
             "semantic_retained_model_contract_guard",
             "semantic_tensor_content_witness",
+            "semantic_model_work_reset",
             "semantic_publication_step_inputs",
             "semantic_publication_step_input_guard",
             "semantic_publication_step_admit",

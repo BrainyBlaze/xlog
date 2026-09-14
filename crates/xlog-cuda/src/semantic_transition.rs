@@ -5949,6 +5949,8 @@ struct PreparedStepStorage {
 struct PreparedModelWork {
     recording: ModelWorkRecording,
     device: TrackedCudaSlice<ModelWorkEvent>,
+    actual: TrackedCudaSlice<u64>,
+    reset: CudaFunction,
 }
 
 #[repr(C)]
@@ -5960,6 +5962,41 @@ struct ModelWorkInput {
 }
 
 impl PreparedModelWork {
+    fn reset_slots(
+        &self,
+        domain: &ResidentExecutionDomain,
+        poisoned: &mut bool,
+        first: usize,
+        count: usize,
+    ) -> Result<(), SemanticTransitionError> {
+        let end = first
+            .checked_add(count)
+            .filter(|end| *end <= self.actual.len() / 3)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let mut recorder = domain.new_strict_recorder();
+        recorder.write(&self.actual);
+        let arguments = (
+            self.actual.device_ptr_value() + (first * 3 * size_of::<u64>()) as u64,
+            ((end - first) * 3) as u64,
+        );
+        enqueue_recorded(domain, poisoned, recorder, |enqueue| {
+            // SAFETY: the checked range belongs to this original step's cold
+            // allocation. Reset and producer kernels share the capture stream.
+            unsafe {
+                self.reset.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (32, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    arguments,
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })
+    }
+
     fn descriptor(&self) -> ModelWorkInput {
         ModelWorkInput {
             events: self.device.device_ptr_value(),
@@ -9429,7 +9466,7 @@ impl SemanticTransitionSession {
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("model work reservation stream admission", error))?;
         let bytes = event_capacity
-            .checked_mul(size_of::<ModelWorkEvent>())
+            .checked_mul(size_of::<ModelWorkEvent>() + 3 * size_of::<u64>())
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let bytes =
             u64::try_from(bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?;
@@ -9439,17 +9476,120 @@ impl SemanticTransitionSession {
             .reserve_bytes(bytes)
             .map_err(|error| runtime_error("original model work reservation", error))?;
         let recording = ModelWorkRecording::new(event_capacity).map_err(publication_input_error)?;
+        let reset = self
+            .provider
+            .device()
+            .inner()
+            .get_func("xlog_semantic_transition", "semantic_model_work_reset")
+            .ok_or_else(|| runtime_error("kernel lookup", "model work reset unavailable"))?;
         let device = reservation
             .alloc(event_capacity)
             .map_err(|error| runtime_error("original model work allocation", error))?;
+        let actual = reservation
+            .alloc(event_capacity * 3)
+            .map_err(|error| runtime_error("original device work allocation", error))?;
+        let work = PreparedModelWork {
+            recording,
+            device,
+            actual,
+            reset,
+        };
+        // Initialize the complete exported scratch allocation cold. Each real
+        // producer occurrence additionally records its own reset before use.
+        work.reset_slots(&self.domain, &mut self.poisoned, 0, event_capacity)?;
         self.steps
             .get_mut(&step.token)
             .expect("checked original step")
             .prepared
             .as_mut()
             .expect("prepared owner")
-            .model_work = Some(PreparedModelWork { recording, device });
+            .model_work = Some(work);
         Ok(())
+    }
+
+    /// Export the original work scratch as U64[capacity,3] before capture.
+    /// Each row is [actual_units, sticky_overflow, producer_writes]. It is not a
+    /// canonical receipt or a writable alias of the immutable work descriptors.
+    pub fn model_work_buffer(
+        &mut self,
+        step: &SemanticPreparedStep,
+        consumer_stream: u64,
+    ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
+        self.check_prepared_cold(step)?;
+        if consumer_stream != self.stream.cu_stream() as u64 {
+            return Err(publication_input_error(
+                "model work producers must use the original native recording stream",
+            ));
+        }
+        let work = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("prepared owner")
+            .model_work
+            .as_ref()
+            .ok_or_else(|| publication_input_error("model work requires its cold reservation"))?;
+        let capacity = i64::try_from(work.actual.len() / 3)
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        // SAFETY: the entire padding-free U64 scratch bank was initialized by
+        // the cold reset; the exported view retains its actual allocation owner.
+        let view = unsafe { work.actual.view().cast::<u8>() }
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        self.export_prepared_view(
+            step,
+            view,
+            vec![capacity, 3],
+            vec![3, 1],
+            (1, 64),
+            consumer_stream,
+        )
+    }
+
+    /// Reserve an occurrence in the current original recording and enqueue its
+    /// reset immediately before the producer. A composite operator records one
+    /// occurrence per actual unit category, rather than charging a dense mask.
+    pub fn record_model_device_work(
+        &mut self,
+        step: &SemanticPreparedStep,
+        kind: ModelWorkKind,
+        upper_dimensions: &[u64],
+    ) -> Result<usize, SemanticTransitionError> {
+        self.check_prepared_content_stream(step, self.stream.cu_stream() as u64)?;
+        let result = (|| {
+            let work = self
+                .steps
+                .get_mut(&step.token)
+                .expect("checked original step")
+                .prepared
+                .as_mut()
+                .expect("prepared owner")
+                .model_work
+                .as_mut()
+                .ok_or_else(|| {
+                    publication_input_error("model work requires its cold reservation")
+                })?;
+            let slot = work.recording.events().len();
+            if slot >= work.actual.len() / 3 {
+                return Err(publication_input_error(
+                    "model work exceeds its cold event capacity",
+                ));
+            }
+            let actual = work
+                .actual
+                .device_ptr_value()
+                .checked_add((slot * 3 * size_of::<u64>()) as u64)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            let event = ModelWorkEvent::device_operation(kind, upper_dimensions, actual)
+                .map_err(publication_input_error)?;
+            work.recording
+                .push(event)
+                .map_err(publication_input_error)?;
+            work.reset_slots(&self.domain, &mut self.poisoned, slot, 1)?;
+            Ok(slot)
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
     }
 
     /// Append an actual operator occurrence during the original first recording.
@@ -10871,6 +11011,7 @@ impl SemanticTransitionSession {
             recorder.write(&prepared.result);
             if let Some(work) = &prepared.model_work {
                 recorder.read(&work.device);
+                recorder.read_write(&work.actual);
             }
             if let Some(digests) = &prepared.digests {
                 recorder.read_write(digests.as_ref());
@@ -16402,6 +16543,7 @@ impl SemanticTransitionSession {
         recorder.read(io.support);
         if let Some(work) = io.model_work {
             recorder.read(&work.device);
+            recorder.read(&work.actual);
         }
         recorder.write(&self.scratch);
         recorder.write(io.receipts);

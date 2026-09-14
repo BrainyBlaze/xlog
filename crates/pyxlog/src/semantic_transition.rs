@@ -264,6 +264,25 @@ fn parse_witness_consumer_stream(value: &Bound<'_, PyAny>, budget: &mut usize) -
     Ok(stream)
 }
 
+fn parse_model_work(
+    kind: &Bound<'_, PyAny>,
+    dimensions: &Bound<'_, PyAny>,
+) -> PyResult<(xlog_cuda::ModelWorkKind, [u64; 8], usize)> {
+    let kind = ColdValue::read(kind, &mut 128, 0)?.unsigned()?;
+    let kind = xlog_cuda::ModelWorkKind::from_code(kind)
+        .ok_or_else(|| invalid("unknown model work unit category"))?;
+    let geometry = ColdValue::read(dimensions, &mut 1024, 0)?;
+    let dimensions = geometry.sequence()?;
+    if dimensions.len() > 8 {
+        return Err(invalid("model work geometry exceeds eight dimensions"));
+    }
+    let mut values = [0u64; 8];
+    for (index, dimension) in dimensions.iter().enumerate() {
+        values[index] = dimension.unsigned()?;
+    }
+    Ok((kind, values, dimensions.len()))
+}
+
 fn transition_kind(value: &ColdValue) -> PyResult<SemanticTransitionKind> {
     match value.text()? {
         "proposal" => Ok(SemanticTransitionKind::Proposal),
@@ -4495,6 +4514,42 @@ impl PySemanticPreparedStep {
             .map_err(xlog_err)
     }
 
+    /// Cold native-owned U64[capacity,3] work scratch, retained by this step.
+    /// Rows are [actual_units, sticky_overflow, producer_writes]; the producer
+    /// must count every reached category, including predicates and padding.
+    #[pyo3(signature = (*, consumer_stream))]
+    fn model_work_buffer(
+        &self,
+        py: Python<'_>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        self.export(
+            py,
+            consumer_stream,
+            SemanticTransitionSession::model_work_buffer,
+        )
+    }
+
+    /// Record a bounded device-produced category and reset its original slot.
+    /// Returns the row index in model_work_buffer, not a device result. Call
+    /// before the producer in the same active original recording stream. A
+    /// closed forward recording cannot receive work from a later invocation.
+    fn record_model_device_work(
+        &self,
+        py: Python<'_>,
+        kind: &Bound<'_, PyAny>,
+        upper_dimensions: &Bound<'_, PyAny>,
+    ) -> PyResult<usize> {
+        self.session.borrow(py).require_creator()?;
+        let (kind, values, rank) = parse_model_work(kind, upper_dimensions)?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        self.content_binding_with_owner(py, &owner)?;
+        owner
+            .record_model_device_work(&self.inner, kind, &values[..rank])
+            .map_err(xlog_err)
+    }
+
     /// Record one original executed operation's unit category and geometry.
     /// The native transition freezes the roster when enqueue_step returns.
     fn record_model_work(
@@ -4504,23 +4559,12 @@ impl PySemanticPreparedStep {
         dimensions: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
-        let kind = ColdValue::read(kind, &mut 128, 0)?.unsigned()?;
-        let kind = xlog_cuda::ModelWorkKind::from_code(kind)
-            .ok_or_else(|| invalid("unknown model work unit category"))?;
-        let geometry = ColdValue::read(dimensions, &mut 1024, 0)?;
-        let dimensions = geometry.sequence()?;
-        if dimensions.len() > 8 {
-            return Err(invalid("model work geometry exceeds eight dimensions"));
-        }
-        let mut values = [0u64; 8];
-        for (index, dimension) in dimensions.iter().enumerate() {
-            values[index] = dimension.unsigned()?;
-        }
+        let (kind, values, rank) = parse_model_work(kind, dimensions)?;
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
         owner
-            .record_model_work(&self.inner, kind, &values[..dimensions.len()])
+            .record_model_work(&self.inner, kind, &values[..rank])
             .map_err(xlog_err)
     }
 

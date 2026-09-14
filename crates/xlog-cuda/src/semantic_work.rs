@@ -1,5 +1,7 @@
-//! Original first-recording work geometry. Units are logical operations, not
-//! elapsed time, instructions or FLOPs. Every recorded occurrence is retained.
+//! Original first-recording work geometry and device-produced work. Units are
+//! logical operations, not elapsed time, instructions or FLOPs. Every recorded
+//! occurrence is retained; conditional producers supply actual units separately
+//! from their cold upper geometry.
 
 use std::collections::HashSet;
 
@@ -57,11 +59,14 @@ pub(crate) struct ModelWorkEvent {
     pub tensor: u64,
     pub rank: u64,
     pub dimensions: [u64; 8],
+    /// Zero for exact geometry, otherwise the original retained device slot
+    /// containing [actual units, sticky overflow, producer writes].
+    pub actual: u64,
 }
 
-// SAFETY: the CUDA ABI is twelve padding-free u64 words, with no host pointers.
+// SAFETY: the CUDA ABI is thirteen padding-free u64 words, with no host pointers.
 unsafe impl crate::DeviceRepr for ModelWorkEvent {}
-const _: () = assert!(std::mem::size_of::<ModelWorkEvent>() == 96);
+const _: () = assert!(std::mem::size_of::<ModelWorkEvent>() == 104);
 
 impl ModelWorkEvent {
     pub(crate) fn operation(kind: ModelWorkKind, dimensions: &[u64]) -> Result<Self, &'static str> {
@@ -69,6 +74,19 @@ impl ModelWorkEvent {
             return Err("saved-copy work requires its original tensor witness");
         }
         Self::new(kind, u64::MAX, u64::MAX, dimensions)
+    }
+
+    pub(crate) fn device_operation(
+        kind: ModelWorkKind,
+        upper_dimensions: &[u64],
+        actual: u64,
+    ) -> Result<Self, &'static str> {
+        if actual == 0 || !actual.is_multiple_of(8) || actual > u64::MAX - 24 {
+            return Err("model work requires its complete aligned native device slot");
+        }
+        let mut event = Self::operation(kind, upper_dimensions)?;
+        event.actual = actual;
+        Ok(event)
     }
 
     pub(crate) fn saved(
@@ -110,6 +128,7 @@ impl ModelWorkEvent {
             tensor,
             rank: dimensions.len() as u64,
             dimensions: [0; 8],
+            actual: 0,
         };
         event.dimensions[..dimensions.len()].copy_from_slice(dimensions);
         event.units()?;
@@ -125,6 +144,7 @@ impl ModelWorkEvent {
             || (kind == ModelWorkKind::SavedCopyBytes
                 && (self.witness == u64::MAX
                     || self.tensor == u64::MAX
+                    || self.actual != 0
                     || self.rank == 0
                     || !matches!(self.dimensions[self.rank as usize - 1], 1 | 2 | 4 | 8)))
             || (kind != ModelWorkKind::SavedCopyBytes
@@ -150,6 +170,7 @@ pub(crate) struct ModelWorkRecording {
     events: Vec<ModelWorkEvent>,
     saved: HashSet<(u64, u64)>,
     bound: u64,
+    minimum: u64,
     frozen: bool,
 }
 
@@ -171,6 +192,7 @@ impl ModelWorkRecording {
             events,
             saved,
             bound: 0,
+            minimum: 0,
             frozen: false,
         })
     }
@@ -193,6 +215,10 @@ impl ModelWorkRecording {
         self.events.push(event);
         if saved {
             self.saved.insert((event.witness, event.tensor));
+        }
+        if event.actual == 0 {
+            // This exact contribution is a subset of the checked total bound.
+            self.minimum += bound - self.bound;
         }
         self.bound = bound;
         Ok(())
@@ -257,7 +283,7 @@ impl ExecutionWork {
             } else {
                 self.overflow == 0
                     && self.model_events == recording.events().len() as u64
-                    && self.model_once == self.model_bound
+                    && (recording.minimum..=self.model_bound).contains(&self.model_once)
             }
     }
 }

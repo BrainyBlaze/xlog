@@ -139,15 +139,22 @@ __device__ double receipt_importance_weight(const Receipt* receipts) {
 struct Work {
     uint64_t edit_commands,added_supports,defined_truth_changes;
 };
-struct ModelWorkEvent { uint64_t kind,witness,tensor,rank,dimensions[8]; };
+struct ModelWorkEvent { uint64_t kind,witness,tensor,rank,dimensions[8],actual; };
 struct ModelWorkInput { uint64_t events,count,bound; };
 struct ExecutionWork {
     uint64_t raw,model_once,native_attempt,model_events,model_bound,overflow;
     uint64_t native_events[9],candidates[3],active_candidate;
 };
 __device__ void semantic_content_integrity_trap();
-static_assert(sizeof(ModelWorkEvent)==96 && sizeof(ModelWorkInput)==24 && sizeof(ExecutionWork)==152,
+static_assert(sizeof(ModelWorkEvent)==104 && sizeof(ModelWorkInput)==24 && sizeof(ExecutionWork)==152,
     "original execution work ABI");
+
+// Native owns this scratch bank and records a reset before each actual producer
+// occurrence. The immutable descriptor and its upper geometry are never exported.
+extern "C" __global__ void semantic_model_work_reset(uint64_t actual,uint64_t words) {
+    auto* values=reinterpret_cast<uint64_t*>(actual);
+    for(uint64_t i=threadIdx.x;i<words;i+=blockDim.x)values[i]=0;
+}
 
 // One owning thread appends actual logical work. Failure never wraps either
 // the contribution or the common accumulator and is checked before publication.
@@ -218,11 +225,12 @@ __device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& wo
         semantic_content_integrity_trap();return;
     }
     const auto* events=reinterpret_cast<const ModelWorkEvent*>(input.events);
+    uint64_t declared_bound=0;
     for(uint64_t i=0;i<input.count;++i) {
         const auto& event=events[i];
         const bool saved=event.kind==15;
         if(event.kind<1 || event.kind>15 || event.rank>8 ||
-           (saved && (event.witness==UINT64_MAX || event.tensor==UINT64_MAX || !event.rank)) ||
+           (saved && (event.witness==UINT64_MAX || event.tensor==UINT64_MAX || !event.rank || event.actual)) ||
            (!saved && (event.witness!=UINT64_MAX || event.tensor!=UINT64_MAX))) { semantic_content_integrity_trap();return; }
         bool empty=false;
         for(uint64_t axis=0;axis<8;++axis) {
@@ -238,11 +246,25 @@ __device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& wo
             if(units>UINT64_MAX/event.dimensions[axis]) { work.overflow=1;return; }
             units*=event.dimensions[axis];
         }
+        if(units>UINT64_MAX-declared_bound) { semantic_content_integrity_trap();return; }
+        declared_bound+=units;
+        if(event.actual) {
+            if(event.actual%alignof(uint64_t) || event.actual>UINT64_MAX-3*sizeof(uint64_t)) {
+                semantic_content_integrity_trap();return;
+            }
+            // This pointer was bound to the original native-owned occurrence
+            // before capture ended. Stream/graph dependencies join all writers.
+            const auto* actual=reinterpret_cast<const uint64_t*>(event.actual);
+            if(actual[1]>1) { semantic_content_integrity_trap();return; }
+            if(actual[1]) { work.overflow=1;return; }
+            if(!actual[2] || actual[0]>units) { semantic_content_integrity_trap();return; }
+            units=actual[0];
+        }
         if(!execution_work_add(work,units,true))return;
         ++work.model_events;
         if(work.model_once>input.bound) { work.overflow=1;return; }
     }
-    if(work.model_once!=input.bound) { semantic_content_integrity_trap();return; }
+    if(declared_bound!=input.bound) { semantic_content_integrity_trap();return; }
 }
 struct TaskFacts {
     uint64_t correct[2],g,p,c;
