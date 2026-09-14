@@ -8,7 +8,10 @@ use std::sync::Arc;
 
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
-use crate::memory::{validate_logical_row_count, CudaBuffer, CudaColumn};
+use crate::device_runtime::Access;
+use crate::memory::{
+    validate_logical_row_count, with_memory_access, CudaBuffer, CudaColumn, DeviceRead,
+};
 use crate::provider::CudaKernelProvider;
 use crate::CudaDevice;
 
@@ -166,6 +169,9 @@ impl DlpackManagedTensor {
     /// # Safety
     /// `ptr` must be a valid `DLManagedTensor*` obtained from a DLPack producer, and ownership
     /// must be transferred to the caller (the returned value will call the DLPack deleter on drop).
+    /// All tensor data must be live and producer-ready at handoff. The producer
+    /// must coordinate subsequent non-XLOG accesses for the imported lifetime.
+    /// Metadata and the deleter must support use from any host thread.
     pub unsafe fn from_raw(ptr: *mut DLManagedTensor) -> Self {
         Self { ptr }
     }
@@ -208,17 +214,30 @@ unsafe fn dlpack_tensor_info(
     // SAFETY: ptr is non-null (checked above); DlpackManagedTensor holds a valid DLManagedTensor for its lifetime
     let dl = unsafe { &(*ptr).dl_tensor };
 
+    // SAFETY: the genuine managed owner retains the original descriptor arrays.
+    unsafe { dlpack_tensor_metadata(provider.device().ordinal() as i32, dl) }
+}
+
+/// Inspect the canonical rank-one DLPack metadata without reading device cells.
+///
+/// # Safety
+/// Non-null shape and stride pointers must address their original descriptor
+/// arrays for the duration of this call. No allocation ownership is transferred.
+pub(crate) unsafe fn dlpack_tensor_metadata(
+    device_id: i32,
+    dl: &DLTensor,
+) -> Result<(u64, ScalarType, cudarc::driver::sys::CUdeviceptr, usize)> {
     if dl.device.device_type != K_DLCUDA {
         return Err(XlogError::Kernel(format!(
             "Unsupported DLPack device type {} (expected CUDA)",
             dl.device.device_type
         )));
     }
-    if dl.device.device_id != provider.device().ordinal() as i32 {
+    if dl.device.device_id != device_id {
         return Err(XlogError::Kernel(format!(
             "DLPack tensor device_id {} does not match provider device_id {}",
             dl.device.device_id,
-            provider.device().ordinal()
+            device_id
         )));
     }
 
@@ -310,6 +329,8 @@ pub struct DlpackTable {
 }
 
 impl DlpackTable {
+    /// Export a column after waiting for its recorded producer uses. This legacy
+    /// managed-tensor interface has no consumer-stream argument or sync event.
     pub fn column(&self, col_idx: usize) -> Result<DlpackManagedTensor> {
         let logical_rows = dlpack_logical_row_count(&self.cuda_device, &self.buffer)?;
         let dtype =
@@ -323,6 +344,19 @@ impl DlpackTable {
             .get(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
+        let stream = col.stream();
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(stream).map_err(|error| {
+            XlogError::Kernel(format!("DLPack export stream admission: {error}"))
+        })?;
+        let view = col.device_view();
+        with_memory_access(
+            Arc::clone(stream),
+            vec![view
+                .access(Access::Read)
+                .map_err(|error| XlogError::Kernel(error.to_string()))?],
+            |_| Ok(stream.synchronize()?),
+        )
+        .map_err(|error| XlogError::Kernel(format!("DLPack producer readiness: {error}")))?;
         let device_ptr = *col.device_ptr() as usize as *mut c_void;
 
         let mut ctx = Box::new(DlpackCtx {
@@ -394,12 +428,16 @@ impl CudaKernelProvider {
             }
 
             schema_cols.push((format!("col_{}", i), ty));
-            columns.push(CudaColumn::dlpack(
-                ptr,
-                len_bytes,
-                self.device().inner().stream().clone(),
-                tensor,
-            ));
+            // SAFETY: tensor_info checked this range; tensor retains the
+            // producer allocation under from_raw's completed-handoff contract.
+            columns.push(unsafe {
+                CudaColumn::dlpack(
+                    ptr,
+                    len_bytes,
+                    self.device().inner().stream().clone(),
+                    tensor,
+                )
+            });
         }
 
         let schema = xlog_core::Schema::new(schema_cols);
@@ -450,12 +488,16 @@ impl CudaKernelProvider {
                 num_rows = Some(rows);
             }
 
-            columns.push(CudaColumn::dlpack(
-                ptr,
-                len_bytes,
-                self.device().inner().stream().clone(),
-                tensor,
-            ));
+            // SAFETY: tensor_info checked this range and the owned tensor
+            // supplies the completed, thread-safe producer handoff.
+            columns.push(unsafe {
+                CudaColumn::dlpack(
+                    ptr,
+                    len_bytes,
+                    self.device().inner().stream().clone(),
+                    tensor,
+                )
+            });
         }
 
         self.buffer_from_columns(columns, num_rows.unwrap_or(0), schema)
@@ -494,6 +536,9 @@ unsafe extern "C" fn slice_export_deleter(ptr: *mut DLManagedTensor) {
 /// owner throughout. The declared `rows x cols x dtype` view must
 /// cover the allocation exactly — a mismatched shape is a typed error,
 /// never a truncated or padded view.
+/// Recorded producer uses complete before return because this legacy managed
+/// tensor has no consumer-stream synchronization field. Registering future
+/// external producer/consumer work remains the caller's interop responsibility.
 pub fn export_slice_managed_tensor(
     slice: Arc<crate::memory::TrackedCudaSlice<u8>>,
     device_id: i32,
@@ -514,6 +559,18 @@ pub fn export_slice_managed_tensor(
         )));
     }
 
+    let stream = slice.stream();
+    let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(stream)
+        .map_err(|error| XlogError::Kernel(format!("DLPack export stream admission: {error}")))?;
+    let view = slice.view();
+    with_memory_access(
+        Arc::clone(stream),
+        vec![view
+            .access(Access::Read)
+            .map_err(|error| XlogError::Kernel(error.to_string()))?],
+        |_| Ok(stream.synchronize()?),
+    )
+    .map_err(|error| XlogError::Kernel(format!("DLPack producer readiness: {error}")))?;
     let data = *slice.device_ptr() as usize as *mut c_void;
     let mut ctx = Box::new(SliceExportCtx {
         _slice: slice,

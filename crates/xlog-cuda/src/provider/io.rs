@@ -135,12 +135,18 @@ impl super::CudaKernelProvider {
         &self,
         buffer: CudaBuffer,
     ) -> Result<crate::arrow_device::ArrowDeviceArrayOwned> {
+        use crate::device_runtime::Access;
+        use crate::memory::{with_memory_access, DeviceRead};
         use arrow::array::ArrayData;
         use arrow::datatypes::{DataType, Field};
         use arrow::ffi::to_ffi;
 
         use crate::arrow_device::{ArrowDeviceArray, ARROW_DEVICE_CUDA};
 
+        let stream = self.device.inner().stream();
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(stream).map_err(|error| {
+            XlogError::Kernel(format!("Arrow export stream admission: {error}"))
+        })?;
         let buffer = Arc::new(buffer);
         let row_cap = buffer.num_rows();
         let num_rows_u32 = u32::try_from(row_cap).map_err(|_| {
@@ -169,7 +175,17 @@ impl super::CudaKernelProvider {
             )
         }
         .map_err(|e| XlogError::Kernel(format!("d4_assert_u32_eq failed: {}", e)))?;
-        self.device.synchronize()?;
+        // A null Arrow sync_event promises ready buffers, not merely a ready
+        // row count. Admit every exported column so nonblocking producer-stream
+        // dependencies are included in the wait without copying host data.
+        let accesses = buffer
+            .columns()
+            .iter()
+            .map(|column| column.device_view().access(Access::Read))
+            .collect::<crate::device_runtime::ResourceResult<Vec<_>>>()
+            .map_err(|error| XlogError::Kernel(error.to_string()))?;
+        with_memory_access(Arc::clone(stream), accesses, |_| Ok(stream.synchronize()?))
+            .map_err(|error| XlogError::Kernel(format!("Arrow producer readiness: {error}")))?;
 
         let num_rows = usize::try_from(num_rows_u32)
             .map_err(|_| XlogError::Kernel("Arrow device export row count overflow".to_string()))?;
@@ -196,12 +212,16 @@ impl super::CudaKernelProvider {
         let array_ptr = Box::into_raw(Box::new(ffi_array));
         let schema_ptr = Box::into_raw(Box::new(ffi_schema));
 
-        Ok(ArrowDeviceArray::new(
-            ARROW_DEVICE_CUDA,
-            self.device.ordinal() as i32,
-            array_ptr,
-            schema_ptr,
-        ))
+        // SAFETY: these uniquely transferred Box allocations retain all GPU
+        // buffers through their thread-safe Arrow custom allocation owners.
+        Ok(unsafe {
+            ArrowDeviceArray::new(
+                ARROW_DEVICE_CUDA,
+                self.device.ordinal() as i32,
+                array_ptr,
+                schema_ptr,
+            )
+        })
     }
 
     /// Import Arrow C Data Interface (device-resident) into a CudaBuffer (zero-copy).
@@ -220,7 +240,7 @@ impl super::CudaKernelProvider {
         use crate::arrow_device::{ArrowDeviceImport, ARROW_DEVICE_CUDA};
         use crate::memory::CudaColumn;
 
-        let (device_type, device_id, ffi_array, ffi_schema) =
+        let (device_type, device_id, outer_owner, ffi_array, ffi_schema) =
             // SAFETY: device_array is a valid ArrowDeviceArrayOwned; into_ffi_parts transfers ownership per Arrow C Data Interface
             unsafe { device_array.into_ffi_parts() };
 
@@ -241,6 +261,9 @@ impl super::CudaKernelProvider {
         // SAFETY: ffi_array and ffi_schema conform to the Arrow C Data Interface; device and type checks passed above
         let data: ArrayData = unsafe { from_ffi(ffi_array, &ffi_schema) }
             .map_err(|e| XlogError::Kernel(format!("Arrow device import failed: {}", e)))?;
+        drop(ffi_schema);
+        let keepalive = Arc::new(ArrowDeviceImport::from_ffi(data, outer_owner));
+        let data = keepalive.data();
 
         let (fields, children) = match data.data_type() {
             DataType::Struct(fields) => (fields.clone(), data.child_data().to_vec()),
@@ -270,7 +293,6 @@ impl super::CudaKernelProvider {
             ));
         }
 
-        let keepalive = Arc::new(ArrowDeviceImport::new(data));
         let mut columns = Vec::with_capacity(children.len());
         let mut schema_cols = Vec::with_capacity(children.len());
 
@@ -314,12 +336,16 @@ impl super::CudaKernelProvider {
                 ));
             }
             let device_ptr = ptr as usize as cudarc::driver::sys::CUdeviceptr;
-            columns.push(CudaColumn::arrow_device(
-                device_ptr,
-                len_bytes,
-                self.device().inner().stream().clone(),
-                keepalive.clone(),
-            ));
+            // SAFETY: the validated FFI child is retained with its full outer
+            // producer owner; from_raw's contract supplies producer readiness.
+            columns.push(unsafe {
+                CudaColumn::arrow_device(
+                    device_ptr,
+                    len_bytes,
+                    self.device().inner().stream().clone(),
+                    keepalive.clone(),
+                )
+            });
             schema_cols.push((field.name().to_string(), scalar_type));
         }
 

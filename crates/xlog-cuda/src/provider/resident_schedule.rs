@@ -1,4 +1,3 @@
-use std::ptr::NonNull;
 use std::sync::Arc;
 
 use cudarc::driver::{sys, CudaStream, DeviceRepr, LaunchConfig};
@@ -15,7 +14,7 @@ use crate::cuda_graph::{
     CapturedCudaGraph, ConditionalCudaGraphBody, ConditionalCudaGraphSequenceBuilder, CudaGraphNode,
 };
 use crate::device_runtime::{StreamId, XlogDeviceRuntime};
-use crate::launch::LaunchRecorder;
+use crate::launch::{EnqueuedLaunch, LaunchEnqueueError, LaunchRecorder};
 use crate::memory::{
     CudaBuffer, GpuMemoryReservation, RuntimeAllocationIdentity, TrackedCudaSlice,
 };
@@ -174,7 +173,7 @@ fn validate_receipt_slot_mapping(
     Ok(validated)
 }
 
-fn validate_execution_domain(
+pub(crate) fn validate_execution_domain(
     provider: &CudaKernelProvider,
     domain: &ResidentExecutionDomain,
 ) -> Result<()> {
@@ -843,56 +842,32 @@ pub struct ResidentScheduleReceipt {
 }
 
 struct ResidentSchedulePinnedReceipt {
-    ptr: NonNull<u8>,
-    len: usize,
+    buffer: crate::device::PinnedHostBuffer,
 }
 
 impl ResidentSchedulePinnedReceipt {
-    fn allocate(len: usize) -> Result<Self> {
-        let mut ptr = std::ptr::null_mut();
-        // SAFETY: CUDA initializes `ptr` on success and this owner frees it once.
-        let code = unsafe { sys::cuMemHostAlloc(&mut ptr, len, 0) };
-        if code != sys::cudaError_enum::CUDA_SUCCESS {
-            return Err(XlogError::Kernel(format!(
-                "resident schedule pinned receipt allocation failed: {code:?}"
-            )));
-        }
-        let ptr = NonNull::new(ptr.cast()).ok_or_else(|| {
-            XlogError::Kernel("resident schedule pinned receipt allocation returned null".into())
-        })?;
-        Ok(Self { ptr, len })
+    fn allocate(stream: &CudaStream, len: usize) -> Result<Self> {
+        Ok(Self {
+            buffer: crate::device::PinnedHostBuffer::new(stream, len).map_err(|error| {
+                XlogError::Kernel(format!(
+                    "resident schedule pinned receipt allocation failed: {error}"
+                ))
+            })?,
+        })
     }
 
-    fn copy_from_device(&mut self, device_ptr: u64, stream: &CudaStream) -> Result<Vec<u8>> {
-        // SAFETY: both owners remain live for `self.len` bytes until the stream
-        // wait completes, and `&mut self` excludes concurrent host access.
-        let code = unsafe {
-            sys::cuMemcpyDtoHAsync_v2(
-                self.ptr.as_ptr().cast(),
-                device_ptr,
-                self.len,
-                stream.cu_stream(),
-            )
-        };
-        if code != sys::cudaError_enum::CUDA_SUCCESS {
-            return Err(XlogError::Kernel(format!(
-                "resident schedule final receipt copy failed: {code:?}"
-            )));
-        }
-        stream.synchronize().map_err(|error| {
-            XlogError::Kernel(format!(
-                "resident schedule final receipt wait failed: {error}"
-            ))
-        })?;
-        // SAFETY: the complete asynchronous copy and stream wait succeeded.
-        Ok(unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }.to_vec())
-    }
-}
-
-impl Drop for ResidentSchedulePinnedReceipt {
-    fn drop(&mut self) {
-        // SAFETY: this pointer was returned by `cuMemHostAlloc` and is freed once.
-        let _ = unsafe { sys::cuMemFreeHost(self.ptr.as_ptr().cast()) };
+    fn copy_from_device(
+        &mut self,
+        source: &TrackedCudaSlice<u8>,
+        stream: &Arc<CudaStream>,
+    ) -> Result<Vec<u8>> {
+        self.buffer
+            .copy_from_device(&source.view(), stream)
+            .map_err(|error| {
+                XlogError::Kernel(format!(
+                    "resident schedule final receipt copy failed: {error}"
+                ))
+            })
     }
 }
 
@@ -935,6 +910,58 @@ pub struct ResidentSchedule<'a> {
     relations: Vec<ResidentScheduleRelation<'a>>,
 }
 
+impl ResidentSchedule<'_> {
+    fn memory_accesses(
+        &self,
+    ) -> crate::device_runtime::ResourceResult<Vec<crate::memory::DeviceMemoryAccess>> {
+        use crate::device_runtime::Access;
+        use crate::memory::DeviceRead;
+        let mut accesses = vec![
+            self.header.view().access(Access::Read)?,
+            self._ops.view().access(Access::Read)?,
+            self._waves.view().access(Access::Read)?,
+            self._regions.view().access(Access::Read)?,
+            self._generation_metadata.view().access(Access::Read)?,
+            self._filter_comparisons.view().access(Access::Read)?,
+            self._project_expressions.view().access(Access::Read)?,
+            self._receipt_table.view().access(Access::Read)?,
+            self._slots.view().access(Access::ReadWrite)?,
+            self._filter_mask.view().access(Access::ReadWrite)?,
+            self._filter_prefix.view().access(Access::ReadWrite)?,
+            self._filter_block_sums.view().access(Access::ReadWrite)?,
+            self._filter_block_offsets
+                .view()
+                .access(Access::ReadWrite)?,
+            self._set_slots.view().access(Access::ReadWrite)?,
+            self._set_required.view().access(Access::ReadWrite)?,
+            self._join_buckets.view().access(Access::ReadWrite)?,
+            self._join_next.view().access(Access::ReadWrite)?,
+            self._join_required.view().access(Access::ReadWrite)?,
+            self._status.view().access(Access::ReadWrite)?,
+            self._changed.view().access(Access::ReadWrite)?,
+            self._iterations.view().access(Access::ReadWrite)?,
+            self._scan_trace.view().access(Access::ReadWrite)?,
+            self._filter_trace.view().access(Access::ReadWrite)?,
+            self._semantic_scan_trace.view().access(Access::ReadWrite)?,
+            self._semantic_filter_trace
+                .view()
+                .access(Access::ReadWrite)?,
+            self.receipt_bytes.view().access(Access::Write)?,
+        ];
+        for relation in &self.relations {
+            let (buffer, access) = match relation {
+                ResidentScheduleRelation::Source { buffer, .. } => (*buffer, Access::Read),
+                ResidentScheduleRelation::Output { buffer, .. } => (&**buffer, Access::ReadWrite),
+            };
+            for column in buffer.columns() {
+                accesses.push(column.device_view().access(access)?);
+            }
+            accesses.push(buffer.num_rows_device().view().access(access)?);
+        }
+        Ok(accesses)
+    }
+}
+
 /// Graph-free compact scheduler metadata owned by the enclosing runtime capsule.
 #[derive(Clone)]
 pub struct ResidentExecutionDomain {
@@ -947,6 +974,30 @@ pub struct ResidentExecutionDomain {
     marker: Arc<()>,
 }
 
+/// Enqueued resident operation that must be completed or cancelled exactly once.
+/// Dropping it automatically aborts through the underlying launch transaction.
+#[must_use = "an enqueued resident launch must be committed or aborted"]
+pub struct ResidentEnqueuedLaunch {
+    enqueued: EnqueuedLaunch,
+    marker: Arc<()>,
+}
+
+impl ResidentEnqueuedLaunch {
+    /// Publish the recorded resident allocation uses.
+    pub fn commit(self) -> Result<()> {
+        self.enqueued
+            .commit_bound(&self.marker)
+            .map_err(|error| XlogError::Kernel(format!("resident launch commit: {error}")))
+    }
+
+    /// Synchronize possible work and cancel the prepared resident reservations.
+    pub fn abort(self) -> Result<()> {
+        self.enqueued
+            .abort()
+            .map_err(|error| XlogError::Kernel(format!("resident launch abort: {error}")))
+    }
+}
+
 impl ResidentExecutionDomain {
     pub fn new_strict_recorder(&self) -> LaunchRecorder {
         LaunchRecorder::new_strict_bound(
@@ -956,21 +1007,38 @@ impl ResidentExecutionDomain {
         )
     }
 
-    pub fn preflight(&self, recorder: &mut LaunchRecorder) -> Result<()> {
-        recorder.require_bound_domain(&self.runtime, &self.marker, self.stream_id);
-        recorder
-            .preflight_bound(&self.runtime)
-            .map_err(|error| XlogError::Kernel(format!("resident launch preflight: {error}")))
-    }
-
-    pub fn commit(&self, recorder: LaunchRecorder) -> Result<()> {
-        recorder
-            .commit_bound(&self.runtime, &self.marker)
-            .map_err(|error| XlogError::Kernel(format!("resident launch commit: {error}")))
-    }
-
-    pub fn stream(&self) -> &Arc<CudaStream> {
-        &self.stream
+    /// Prepare the recorded resident uses and synchronously invoke one enqueue operation.
+    ///
+    /// # Safety
+    ///
+    /// `operation` must enqueue all work synchronously before it returns and use
+    /// only the supplied stream. Every XLOG-owned allocation it touches must be
+    /// registered on `recorder` with its exact access mode. Nested work must
+    /// reuse the supplied enqueue capability instead of preparing another
+    /// recorder or submitting independently on the raw stream.
+    pub unsafe fn enqueue<E, F>(
+        &self,
+        recorder: LaunchRecorder,
+        operation: F,
+    ) -> std::result::Result<ResidentEnqueuedLaunch, LaunchEnqueueError<E>>
+    where
+        F: FnOnce(&crate::launch::CudaEnqueue<'_>) -> std::result::Result<(), E>,
+    {
+        // SAFETY: the execution domain supplies the runtime, marker, stream id,
+        // and stream object that were bound together when the recorder was minted.
+        let enqueued = unsafe {
+            recorder.enqueue_bound(
+                &self.runtime,
+                &self.marker,
+                self.stream_id,
+                self.stream.as_ref(),
+                operation,
+            )?
+        };
+        Ok(ResidentEnqueuedLaunch {
+            enqueued,
+            marker: Arc::clone(&self.marker),
+        })
     }
 
     pub fn stream_id(&self) -> StreamId {
@@ -2578,7 +2646,10 @@ impl CudaKernelProvider {
         let semantic_filter_trace = self.upload_resident_schedule_metadata(&[0_u32])?;
         let receipt_table = self.upload_resident_schedule_metadata(&receipt_count_ptrs)?;
         let receipt_bytes = self.memory.alloc::<u8>(receipt_byte_count.max(1))?;
-        let pinned_receipt = ResidentSchedulePinnedReceipt::allocate(receipt_byte_count)?;
+        let pinned_receipt = ResidentSchedulePinnedReceipt::allocate(
+            self.device().inner().stream(),
+            receipt_byte_count,
+        )?;
 
         let header_value = ResidentScheduleHeader {
             slots: slots.device_ptr_value(),
@@ -3051,7 +3122,7 @@ impl CudaKernelProvider {
         schedule: &ResidentSchedule<'_>,
         region_index: u32,
         conditional_handle: u64,
-        stream: &CudaStream,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
     ) -> Result<()> {
         if region_index >= schedule.region_count {
             return Err(XlogError::Kernel(format!(
@@ -3078,30 +3149,29 @@ impl CudaKernelProvider {
         ];
         // SAFETY: parameters exactly match resident_schedule_execute, all captured
         // allocations are retained by `schedule`, and its grid is occupancy-capped.
-        unsafe {
-            function.launch_cooperative_on_stream(stream, schedule.launch_config, &mut params)
-        }
-        .map_err(|error| XlogError::Kernel(format!("resident schedule launch: {error}")))
+        unsafe { function.launch_cooperative_in(enqueue, schedule.launch_config, &mut params) }
+            .map_err(|error| XlogError::Kernel(format!("resident schedule launch: {error}")))
     }
 
     /// Record one compact scheduler region into a graph owned by the caller.
     ///
     /// # Safety
     /// The caller must register the program, every slot and external owner, and every indirect
-    /// receipt pointee with the one enclosing strict recorder before domain-bound preflight.
-    /// It must use that same execution domain for domain-bound preflight and domain-bound commit.
-    /// The program and all registered owners must remain alive through graph destruction and
-    /// completion of all in-flight work. The stream must be the exact stream retained by the
-    /// program's execution domain. For a recursive region, the conditional body passed here must
-    /// be the one minted for the enclosing graph, and this call must occur inside that body's
-    /// active `capture_on_stream` callback.
+    /// receipt pointee with the one enclosing strict recorder before consuming that recorder
+    /// through [`ResidentExecutionDomain::enqueue`]. It must enqueue on the exact stream supplied
+    /// by that same execution domain, then commit or abort the returned owner. The program and all
+    /// registered owners must remain alive through graph destruction and completion of all
+    /// in-flight work. For a recursive region, the conditional body passed here must be the one
+    /// minted for the enclosing graph, and this call must occur inside that body's active
+    /// `capture_on_stream` callback.
     pub unsafe fn record_resident_schedule_region_on_stream(
         &self,
         program: &ResidentScheduleDeviceProgram,
         region_index: u32,
         conditional_body: Option<&ConditionalCudaGraphBody>,
-        stream: &CudaStream,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
     ) -> Result<()> {
+        let stream = enqueue.stream().as_ref();
         validate_execution_domain(self, &program.domain)?;
         if program.origin_provider_identity != self.provider_identity() {
             return Err(XlogError::Kernel(
@@ -3147,7 +3217,7 @@ impl CudaKernelProvider {
             conditional_handle.as_kernel_param(),
         ];
         function
-            .launch_cooperative_on_stream(stream, program.launch_config, &mut params)
+            .launch_cooperative_in(enqueue, program.launch_config, &mut params)
             .map_err(|error| XlogError::Kernel(format!("resident schedule launch: {error}")))
     }
 
@@ -3180,6 +3250,26 @@ impl CudaKernelProvider {
         }
         let graph_error =
             |error| XlogError::Kernel(format!("resident schedule conditional graph: {error}"));
+        let record_region = |region_index, handle| {
+            crate::memory::with_memory_access(
+                Arc::clone(&stream),
+                schedule
+                    .memory_accesses()
+                    .map_err(|error| XlogError::Kernel(error.to_string()))?,
+                |memory| {
+                    self.record_resident_schedule_on_stream(
+                        &schedule,
+                        region_index,
+                        handle,
+                        &memory.cuda_enqueue()?,
+                    )
+                    .map_err(|error| {
+                        crate::device_runtime::ResourceError::Driver(error.to_string())
+                    })
+                },
+            )
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        };
         let mut builder = ConditionalCudaGraphSequenceBuilder::new(&stream).map_err(graph_error)?;
         for (index, region) in schedule.region_descriptors.iter().enumerate() {
             let region_index = checked_u32(index, "region index")?;
@@ -3188,21 +3278,12 @@ impl CudaKernelProvider {
                 builder
                     .add_conditional_while(initial_value, true, |body| {
                         let handle = body.handle();
-                        body.capture_on_stream(&stream, || {
-                            self.record_resident_schedule_on_stream(
-                                &schedule,
-                                region_index,
-                                handle,
-                                &stream,
-                            )
-                        })
+                        body.capture_on_stream(&stream, || record_region(region_index, handle))
                     })
                     .map_err(graph_error)?;
             } else {
                 builder
-                    .capture_segment_on_stream(&stream, || {
-                        self.record_resident_schedule_on_stream(&schedule, region_index, 0, &stream)
-                    })
+                    .capture_segment_on_stream(&stream, || record_region(region_index, 0))
                     .map_err(graph_error)?;
             }
         }
@@ -3219,7 +3300,7 @@ impl CudaKernelProvider {
     fn observe_resident_schedule(
         &self,
         schedule: &mut ResidentSchedule<'_>,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
     ) -> Result<ResidentScheduleReceipt> {
         if schedule.origin_provider_identity != self.provider_identity()
             || schedule.origin_memory_manager != Arc::as_ptr(&self.memory) as usize
@@ -3230,7 +3311,7 @@ impl CudaKernelProvider {
         }
         let bytes = schedule
             .pinned_receipt
-            .copy_from_device(schedule.receipt_bytes.device_ptr_value(), stream)?;
+            .copy_from_device(&schedule.receipt_bytes, stream)?;
         self.record_final_observation_transfer(bytes.len() as u64);
         let status_bytes = std::mem::size_of::<ResidentTerminalStatus>();
         let expected_bytes = status_bytes
@@ -3280,11 +3361,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use cudarc::driver::CudaStream;
     use xlog_core::MemoryBudget;
 
     use crate::cuda_graph::{CapturedCudaGraph, CudaGraphNodeKind};
-    use crate::device_runtime::XlogDeviceRuntime;
     use crate::memory::GpuMemoryManager;
     use crate::provider::resident_filter_project::{
         ResidentFilterComparison, ResidentFilterOperand, ResidentProjectExpr, ResidentScalar,
@@ -3455,8 +3534,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("compact set stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, Arc::clone(&stream))
@@ -3562,8 +3640,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("nullary compact set stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, Arc::clone(&stream))
@@ -3693,8 +3770,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("single recursive stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, Arc::clone(&stream))
@@ -3844,8 +3920,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("serial recursive stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, Arc::clone(&stream))
@@ -5440,7 +5515,7 @@ mod tests {
             &super::ResidentScheduleDeviceProgram,
             u32,
             Option<&crate::cuda_graph::ConditionalCudaGraphBody>,
-            &CudaStream,
+            &crate::launch::CudaEnqueue<'_>,
         ) -> xlog_core::Result<()> =
             super::CudaKernelProvider::record_resident_schedule_region_on_stream;
     }
@@ -5462,9 +5537,9 @@ mod tests {
             .join(" ");
         for required in [
             "register the program, every slot and external owner, and every indirect receipt pointee",
-            "before domain-bound preflight",
+            "before consuming that recorder through [`ResidentExecutionDomain::enqueue`]",
             "through graph destruction and completion of all in-flight work",
-            "domain-bound preflight and domain-bound commit",
+            "commit or abort the returned owner",
             "conditional body passed here must be the one minted for the enclosing graph",
         ] {
             assert!(
@@ -5472,27 +5547,6 @@ mod tests {
                 "missing additive safety obligation: {required}"
             );
         }
-    }
-
-    #[test]
-    fn additive_schedule_uses_one_sealed_execution_domain_and_bound_recorder() {
-        let _bind: fn(
-            &super::CudaKernelProvider,
-            Arc<XlogDeviceRuntime>,
-            crate::device_runtime::StreamId,
-            Arc<CudaStream>,
-        ) -> xlog_core::Result<super::ResidentExecutionDomain> =
-            super::CudaKernelProvider::bind_resident_execution_domain;
-        let _recorder: fn(&super::ResidentExecutionDomain) -> crate::launch::LaunchRecorder =
-            super::ResidentExecutionDomain::new_strict_recorder;
-        let _preflight: fn(
-            &super::ResidentExecutionDomain,
-            &mut crate::launch::LaunchRecorder,
-        ) -> xlog_core::Result<()> = super::ResidentExecutionDomain::preflight;
-        let _commit: fn(
-            &super::ResidentExecutionDomain,
-            crate::launch::LaunchRecorder,
-        ) -> xlog_core::Result<()> = super::ResidentExecutionDomain::commit;
     }
 
     #[test]
@@ -6016,8 +6070,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("Unit stream");
         let mut unit_graph = provider
             .capture_resident_schedule(unit_schedule, 0, Arc::clone(&unit_stream))
@@ -6057,8 +6110,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("Scan stream");
         let mut scan_graph = provider
             .capture_resident_schedule(scan_schedule, 0, scan_stream)
@@ -6104,8 +6156,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("zero-capacity Unit stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, stream)
@@ -6247,18 +6298,44 @@ mod tests {
         let relation_schema = schema("overlap", &[ScalarType::U32]);
         let mut source = buffer(&provider, relation_schema.clone(), &[vec![7]]);
         let mut output = buffer(&provider, relation_schema, &[vec![9]]);
-        let backing = provider
-            .memory
-            .alloc::<u8>(8)
-            .expect("overlap backing allocation");
+        let backing = Arc::new(
+            provider
+                .memory
+                .alloc::<u8>(8)
+                .expect("overlap backing allocation"),
+        );
         let base = backing.device_ptr_value();
         let stream = Arc::clone(provider.device().inner().stream());
-        source.columns[0] = CudaColumn::dlpack(base, 4, Arc::clone(&stream), unsafe {
-            DlpackManagedTensor::from_raw(std::ptr::null_mut())
-        });
-        output.columns[0] = CudaColumn::dlpack(base + 2, 4, stream, unsafe {
-            DlpackManagedTensor::from_raw(std::ptr::null_mut())
-        });
+        let dtype = crate::dlpack::DLDataType {
+            code: crate::dlpack::K_DLUINT,
+            bits: 8,
+            lanes: 1,
+        };
+        let source_tensor = crate::dlpack::export_slice_managed_tensor(
+            Arc::clone(&backing),
+            provider.device().ordinal() as i32,
+            dtype,
+            1,
+            8,
+        )
+        .expect("source ownership token");
+        let output_tensor = crate::dlpack::export_slice_managed_tensor(
+            Arc::clone(&backing),
+            provider.device().ordinal() as i32,
+            dtype,
+            1,
+            8,
+        )
+        .expect("output ownership token");
+        stream.synchronize().expect("producer ready");
+        // SAFETY: each real export token retains the full allocation on this
+        // context; both byte ranges are in bounds and producer work is complete.
+        source.columns[0] =
+            unsafe { CudaColumn::dlpack(base, 4, Arc::clone(&stream), source_tensor) };
+        output.columns[0] = unsafe { CudaColumn::dlpack(base + 2, 4, stream, output_tensor) };
+        let retained = Arc::downgrade(&backing);
+        drop(backing);
+        assert!(retained.upgrade().is_some());
         let relations = vec![
             super::ResidentScheduleRelation::source(&source, 1).expect("overlap source"),
             super::ResidentScheduleRelation::output(&mut output, 2),
@@ -6280,7 +6357,6 @@ mod tests {
             };
         assert!(error.to_string().contains("aliases storage"));
         assert_eq!(output.cached_row_count(), Some(1));
-        drop(backing);
     }
 
     #[test]
@@ -6701,8 +6777,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("recursive schedule stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, Arc::clone(&stream))
@@ -6908,8 +6983,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("recursive overflow stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, Arc::clone(&stream))
@@ -6972,8 +7046,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("foreign stream");
 
         let error = match provider.capture_resident_schedule(schedule, 0, foreign_stream) {
@@ -7010,8 +7083,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("non-default stream");
         assert_ne!(
             stream.cu_stream(),
@@ -7046,8 +7118,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("graph lease stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, Arc::clone(&stream))
@@ -7120,8 +7191,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("drop synchronization stream");
         let mut dropped_graph = provider
             .capture_resident_schedule(dropped_schedule, 0, dropped_stream)
@@ -7158,8 +7228,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("same-context identity stream");
 
         match sibling.capture_resident_schedule(schedule, 0, stream) {
@@ -7187,8 +7256,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("receipt accounting stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, stream)
@@ -7345,8 +7413,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("maximum compact set stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, Arc::clone(&stream))
@@ -7525,8 +7592,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("primitive stream");
         let primitive_graph = CapturedCudaGraph::capture_on_stream(&primitive_stream, || {
             provider.record_resident_control_initialize_on_stream(&control, &primitive_stream)?;
@@ -7766,8 +7832,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("compact schedule stream");
         provider.reset_host_transfer_stats();
         provider.reset_d2h_transfer_count();
@@ -7852,8 +7917,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("set overflow stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, Arc::clone(&stream))
@@ -7944,8 +8008,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("join overflow stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, Arc::clone(&stream))
@@ -8052,8 +8115,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("project overflow stream");
         let mut graph = provider
             .capture_resident_schedule(schedule, 0, Arc::clone(&stream))
@@ -8169,8 +8231,7 @@ mod tests {
             .device()
             .inner()
             .stream()
-            .context()
-            .new_stream()
+            .fork()
             .expect("overflow stream");
         provider.reset_host_transfer_stats();
         provider.reset_d2h_transfer_count();

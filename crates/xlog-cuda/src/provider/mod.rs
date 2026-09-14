@@ -4,22 +4,19 @@
 //! PTX kernels for GPU execution of relational operations (join, dedup, groupby).
 
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use std::ffi::c_void;
 use xlog_core::{resolve_bool, Result, Schema, XlogError};
 
 use crate::{
-    cuda_compat::{
-        AsKernelParam, DeviceParamStorage, DevicePtr, DeviceRepr, DeviceSlice,
-        IntoKernelParamStorage, LaunchAsync, LaunchConfig,
-    },
+    cuda_compat::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig},
     cuda_graph::{CapturedCudaGraph, CsmCudaGraphKey, CudaGraphNode},
-    memory::{validate_logical_row_count, CudaColumn, TrackedCudaSlice},
-    CudaBuffer, CudaDevice, CudaStream, CudaViewMut, GpuMemoryManager,
+    memory::{
+        validate_logical_row_count, CudaColumn, DeviceMemoryView, DeviceRead, TrackedCudaSlice,
+    },
+    CudaBuffer, CudaDevice, GpuMemoryManager,
 };
 
 static NEXT_PROVIDER_IDENTITY: AtomicU64 = AtomicU64::new(1);
@@ -260,14 +257,6 @@ pub(crate) fn load_module_sources(name: &str, cc: u32) -> Result<Vec<KernelModul
 /// lifetime, but it does not carry runtime allocation identity. Recorded
 /// launchers must register the owning slice or column directly with
 /// [`crate::launch::LaunchRecorder`] before preflight.
-#[derive(Clone)]
-pub(crate) struct RawCudaView<'a, T> {
-    ptr: cudarc::driver::sys::CUdeviceptr,
-    len: usize,
-    stream: Arc<CudaStream>,
-    _marker: PhantomData<&'a [T]>,
-}
-
 /// Preallocated scratch layout for graph-capturable u32 multi-block scans.
 ///
 /// The legacy stream-aware scan helper allocates recursive `block_sums`
@@ -303,50 +292,6 @@ pub(crate) struct CsmCudaGraphEntry {
     pub(crate) scan_scratch: MultiblockScanScratchU32,
     pub(crate) probe_capacity: u32,
     pub(crate) output_capacity: u32,
-}
-
-impl<'a, T> DeviceSlice<T> for RawCudaView<'a, T> {
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn stream(&self) -> &Arc<CudaStream> {
-        &self.stream
-    }
-}
-
-impl<'a, T> DevicePtr<T> for RawCudaView<'a, T> {
-    fn device_ptr<'b>(
-        &'b self,
-        _stream: &'b CudaStream,
-    ) -> (
-        cudarc::driver::sys::CUdeviceptr,
-        cudarc::driver::SyncOnDrop<'b>,
-    ) {
-        (self.ptr, cudarc::driver::SyncOnDrop::Sync(None))
-    }
-}
-
-impl<'a, T> RawCudaView<'a, T> {
-    pub(crate) fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
-        &self.ptr
-    }
-}
-
-impl<'a, T: DeviceRepr> AsKernelParam for &RawCudaView<'a, T> {
-    fn as_kernel_param(&self) -> *mut c_void {
-        ((*self).device_ptr() as *const cudarc::driver::sys::CUdeviceptr)
-            .cast_mut()
-            .cast()
-    }
-}
-
-impl<'a, T: DeviceRepr> IntoKernelParamStorage for &'a RawCudaView<'a, T> {
-    type Storage = DeviceParamStorage<'a>;
-
-    fn into_kernel_param_storage(self) -> Self::Storage {
-        DeviceParamStorage::unsynced(self.ptr)
-    }
 }
 
 /// Scratch buffers for stable radix sorting of u32 key/value pairs.
@@ -417,9 +362,6 @@ pub const ILP_EXACT_NARY_MODULE: &str = "xlog_ilp_exact_nary";
 pub const EPISTEMIC_MODULE: &str = "xlog_epistemic";
 pub const WCOJ_MODULE: &str = "xlog_wcoj";
 pub const JOINT_SOLVE_MODULE: &str = "xlog_joint_solve";
-
-// Compile-time check: kernel manifest lists exactly 30 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 30);
 
 /// Kernel function names in the GPU WCOJ module.
 pub mod wcoj_kernels {
@@ -1824,7 +1766,7 @@ impl CudaKernelProvider {
         Ok(())
     }
 
-    fn dtoh_sync_copy_into_tracked<T: DeviceRepr, Src: DevicePtr<T>>(
+    fn dtoh_sync_copy_into_tracked<T: DeviceRepr, Src: crate::memory::DeviceRead<T>>(
         &self,
         src: &Src,
         dst: &mut [T],
@@ -1948,7 +1890,7 @@ impl CudaKernelProvider {
     }
 
     /// Upload host data to device while recording data-plane H2D transfer stats.
-    pub fn htod_sync_copy_into_tracked<T: DeviceRepr, Dst: cudarc::driver::DevicePtrMut<T>>(
+    pub fn htod_sync_copy_into_tracked<T: DeviceRepr, Dst: crate::memory::DeviceWrite<T>>(
         &self,
         src: &[T],
         dst: &mut Dst,
@@ -1965,10 +1907,10 @@ impl CudaKernelProvider {
 
     /// Allocate a CUDA slice from host data while recording data-plane H2D
     /// transfer stats.
-    pub fn htod_sync_copy_tracked<T: DeviceRepr>(
+    pub fn htod_sync_copy_tracked<T: DeviceRepr + 'static>(
         &self,
         src: &[T],
-    ) -> Result<cudarc::driver::CudaSlice<T>> {
+    ) -> Result<crate::memory::DeviceMemoryView<T>> {
         let bytes = std::mem::size_of::<T>()
             .checked_mul(src.len())
             .ok_or_else(|| XlogError::Kernel("htod size overflow".to_string()))?;
@@ -1983,7 +1925,7 @@ impl CudaKernelProvider {
     /// the launch-metadata subcounter.
     pub fn htod_launch_metadata_sync_copy_into<
         T: DeviceRepr,
-        Dst: cudarc::driver::DevicePtrMut<T>,
+        Dst: crate::memory::DeviceWrite<T>,
     >(
         &self,
         src: &[T],
@@ -2002,32 +1944,47 @@ impl CudaKernelProvider {
             })
     }
 
-    /// Upload one launch-metadata scalar to device on a caller-owned stream
-    /// while recording the transfer in the launch-metadata H2D counters.
-    pub(crate) fn htod_launch_metadata_async_copy_one<T: DeviceRepr>(
+    /// Initialize device metadata within its admitted write. Capture stores
+    /// the scalar value, never a borrowed host source address.
+    pub(crate) fn initialize_launch_metadata_u32(
         &self,
-        src: &T,
-        dst: &TrackedCudaSlice<T>,
-        stream: &CudaStream,
+        value: u32,
+        dst: &TrackedCudaSlice<u32>,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
         context: &str,
     ) -> Result<()> {
-        let bytes = std::mem::size_of::<T>();
-        self.transfer_tracker
-            .record_htod_launch_metadata(bytes as u64);
-        unsafe {
-            let res = cudarc::driver::sys::cuMemcpyHtoDAsync_v2(
-                *dst.device_ptr(),
-                src as *const T as *const c_void,
-                bytes,
-                stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "{context}: launch metadata H2D failed: {res:?}"
-                )));
-            }
+        let destination_context = dst.stream().context().cu_ctx() as usize;
+        let range = crate::device_runtime::resource::MemoryUse::new(
+            dst.device_ptr_value(),
+            std::mem::size_of::<u32>(),
+            crate::device_runtime::Access::Write,
+        )
+        .map_err(|error| XlogError::Kernel(format!("{context}: {error}")))?;
+        if dst.is_empty()
+            || destination_context != enqueue.stream().context().cu_ctx() as usize
+            || !enqueue.manifest().covers(&[(destination_context, range)])
+        {
+            return Err(XlogError::Kernel(format!(
+                "{context}: metadata destination lacks an admitted write"
+            )));
         }
-        Ok(())
+        enqueue
+            .submit(|_| unsafe {
+                // The parent operation retains the actual destination through
+                // execution or graph replay; no host-source lifetime is involved.
+                cudarc::driver::sys::cuMemsetD32Async(
+                    dst.device_ptr_value(),
+                    value,
+                    1,
+                    enqueue.stream().cu_stream(),
+                )
+                .result()
+            })
+            .map_err(|error| {
+                XlogError::Kernel(format!(
+                    "{context}: metadata initialization failed: {error}"
+                ))
+            })
     }
 
     /// Compute exclusive prefix sum of u8 mask, returns (prefix_sum_vec, total_count)
@@ -2159,165 +2116,8 @@ impl CudaKernelProvider {
         Ok(())
     }
 
-    /// Stream-aware variant of [`Self::multiblock_scan_u32_inplace`].
-    ///
-    /// Runs every kernel of the recursive scan on `cu_stream`
-    /// (no `device.synchronize()`), and records each intermediate
-    /// `block_sums` allocation against the runtime so that when
-    /// the helper returns and the local drops, the runtime's
-    /// deallocate can queue `cuStreamWaitEvent(alloc_stream,
-    /// recorded_event)` BEFORE `cuMemFreeAsync` — the same
-    /// cross-stream lifetime safety the LaunchRecorder gives
-    /// caller-provided buffers.
-    ///
-    /// `data` is not recorded here: the caller already records
-    /// its own write of `data` against the same launch_stream
-    /// (typically via `LaunchRecorder::write` BEFORE preflight).
-    pub(crate) fn multiblock_scan_u32_inplace_on_stream(
-        &self,
-        data: &mut crate::memory::TrackedCudaSlice<u32>,
-        n: u32,
-        cu_stream: &cudarc::driver::CudaStream,
-        launch_stream: crate::device_runtime::StreamId,
-        runtime: &crate::device_runtime::XlogDeviceRuntime,
-    ) -> Result<()> {
-        if n == 0 {
-            return Ok(());
-        }
-        let device = self.device.inner();
-        let block_size = 256u32;
-
-        if n <= block_size {
-            let phase2_fn = device
-                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
-                })?;
-            // SAFETY: kernel signature matches; data is mutated in place.
-            unsafe {
-                phase2_fn.clone().launch_on_stream(
-                    cu_stream,
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (block_size, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (&mut *data, n),
-                )
-            }
-            .map_err(|e| {
-                XlogError::Kernel(format!("multiblock_scan_phase2 (on_stream) failed: {}", e))
-            })?;
-            return Ok(());
-        }
-
-        let num_blocks = n.div_ceil(block_size);
-        let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
-        // Fence alloc-ready → launch_stream for block_sums
-        // before phase1 kernel writes it. The alloc was queued
-        // on the manager's default stream; without this wait,
-        // a launch_stream-queued kernel can begin before
-        // cuMemAllocAsync completes and read pool-recycled
-        // bytes when the streams differ.
-        runtime
-            .prepare_first_use(
-                &block_sums,
-                launch_stream,
-                crate::device_runtime::Access::Write,
-            )
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "multiblock_scan_u32_inplace_on_stream: prepare block_sums failed: {}",
-                    e
-                ))
-            })?;
-
-        let phase1_u32_fn = device
-            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
-            .ok_or_else(|| {
-                XlogError::Kernel("Failed to get multiblock_scan_u32_phase1 kernel".to_string())
-            })?;
-        // SAFETY: kernel signature matches.
-        unsafe {
-            phase1_u32_fn.clone().launch_on_stream(
-                cu_stream,
-                LaunchConfig {
-                    grid_dim: (num_blocks, 1, 1),
-                    block_dim: (block_size, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (&mut *data, &mut block_sums, n),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "multiblock_scan_u32_phase1 (on_stream) failed: {}",
-                e
-            ))
-        })?;
-
-        if num_blocks > 1 {
-            self.multiblock_scan_u32_inplace_on_stream(
-                &mut block_sums,
-                num_blocks,
-                cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-        }
-
-        let phase3_fn = device
-            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
-            .ok_or_else(|| {
-                XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
-            })?;
-        // SAFETY: kernel signature matches.
-        unsafe {
-            phase3_fn.clone().launch_on_stream(
-                cu_stream,
-                LaunchConfig {
-                    grid_dim: (num_blocks, 1, 1),
-                    block_dim: (block_size, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (&mut *data, &block_sums, n),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!("multiblock_scan_phase3 (on_stream) failed: {}", e))
-        })?;
-
-        // Record `block_sums` use on `launch_stream` BEFORE it
-        // drops at end-of-scope. Without this, the runtime's
-        // deallocate would queue `cuMemFreeAsync` on alloc_stream
-        // without waiting for the launch_stream chain that's
-        // still reading/writing block_sums to complete.
-        if let Some(b) = block_sums.runtime_block() {
-            runtime
-                .finish_block_use(
-                    crate::device_runtime::BlockId::from_block(b),
-                    launch_stream,
-                    crate::device_runtime::Access::Write,
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "multiblock_scan_u32_inplace_on_stream: finish_block_use \
-                         for intermediate block_sums failed: {}",
-                        e
-                    ))
-                })?;
-        } else {
-            return Err(XlogError::Kernel(
-                "multiblock_scan_u32_inplace_on_stream: intermediate block_sums has no \
-                 runtime block — caller must use a runtime-backed manager"
-                    .to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     /// Allocate every recursive `block_sums` buffer needed by
-    /// [`Self::multiblock_scan_u32_inplace_on_stream_with_scratch`].
+    /// [`Self::multiblock_scan_u32_inplace_on_stream`].
     pub(crate) fn multiblock_scan_u32_scratch_for_len(
         &self,
         mut n: u32,
@@ -2332,32 +2132,28 @@ impl CudaKernelProvider {
         Ok(MultiblockScanScratchU32 { levels })
     }
 
-    /// Stream-aware u32 scan with caller-owned scratch.
-    ///
-    /// This is the CUDA Graph compatible counterpart to
-    /// [`Self::multiblock_scan_u32_inplace_on_stream`]: all scratch buffers are
-    /// supplied by the caller, so graph capture sees a stable scan topology and
-    /// stable intermediate addresses.
-    pub(crate) fn multiblock_scan_u32_inplace_on_stream_with_scratch(
+    /// Scan within the caller's complete admission using preallocated scratch.
+    /// Every data and scratch range must be registered by the enclosing recorder.
+    pub(crate) fn multiblock_scan_u32_inplace_on_stream<D: crate::memory::DeviceWrite<u32>>(
         &self,
-        data: &mut crate::memory::TrackedCudaSlice<u32>,
+        data: &mut D,
         n: u32,
-        cu_stream: &cudarc::driver::CudaStream,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
         scratch: &mut MultiblockScanScratchU32,
     ) -> Result<()> {
         self.multiblock_scan_u32_inplace_on_stream_with_scratch_levels(
-            data,
+            &mut data.device_view(),
             n,
-            cu_stream,
+            enqueue,
             &mut scratch.levels,
         )
     }
 
     fn multiblock_scan_u32_inplace_on_stream_with_scratch_levels(
         &self,
-        data: &mut crate::memory::TrackedCudaSlice<u32>,
+        data: &mut DeviceMemoryView<u32>,
         n: u32,
-        cu_stream: &cudarc::driver::CudaStream,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
         scratch_levels: &mut [TrackedCudaSlice<u32>],
     ) -> Result<()> {
         if n == 0 {
@@ -2374,8 +2170,8 @@ impl CudaKernelProvider {
                 })?;
             // SAFETY: kernel signature matches; data is mutated in place.
             unsafe {
-                phase2_fn.clone().launch_on_stream(
-                    cu_stream,
+                phase2_fn.clone().launch_in(
+                    enqueue,
                     LaunchConfig {
                         grid_dim: (1, 1, 1),
                         block_dim: (block_size, 1, 1),
@@ -2416,8 +2212,8 @@ impl CudaKernelProvider {
             })?;
         // SAFETY: kernel signature matches.
         unsafe {
-            phase1_u32_fn.clone().launch_on_stream(
-                cu_stream,
+            phase1_u32_fn.clone().launch_in(
+                enqueue,
                 LaunchConfig {
                     grid_dim: (num_blocks, 1, 1),
                     block_dim: (block_size, 1, 1),
@@ -2435,7 +2231,10 @@ impl CudaKernelProvider {
 
         if num_blocks > 1 {
             self.multiblock_scan_u32_inplace_on_stream_with_scratch_levels(
-                block_sums, num_blocks, cu_stream, rest,
+                &mut block_sums.view(),
+                num_blocks,
+                enqueue,
+                rest,
             )?;
         }
 
@@ -2446,8 +2245,8 @@ impl CudaKernelProvider {
             })?;
         // SAFETY: kernel signature matches.
         unsafe {
-            phase3_fn.clone().launch_on_stream(
-                cu_stream,
+            phase3_fn.clone().launch_in(
+                enqueue,
                 LaunchConfig {
                     grid_dim: (num_blocks, 1, 1),
                     block_dim: (block_size, 1, 1),
@@ -2465,158 +2264,9 @@ impl CudaKernelProvider {
         Ok(())
     }
 
-    /// Stream-aware view-inplace variant of
-    /// [`Self::multiblock_scan_u32_view_inplace`]. Same shape
-    /// as [`Self::multiblock_scan_u32_inplace_on_stream`] but
-    /// over a `CudaViewMut` (used by recorded radix sort
-    /// digit loops that scan per-digit slices of the histogram
-    /// in place). Records intermediate `block_sums` against
-    /// the runtime before they drop at end-of-scope.
-    pub(crate) fn multiblock_scan_u32_view_inplace_on_stream(
-        &self,
-        data: &mut CudaViewMut<'_, u32>,
-        n: u32,
-        cu_stream: &cudarc::driver::CudaStream,
-        launch_stream: crate::device_runtime::StreamId,
-        runtime: &crate::device_runtime::XlogDeviceRuntime,
-    ) -> Result<()> {
-        if n == 0 {
-            return Ok(());
-        }
-        let device = self.device.inner();
-        let block_size = 256u32;
-
-        if n <= block_size {
-            let phase2_fn = device
-                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
-                })?;
-            // SAFETY: phase2 kernel signature.
-            unsafe {
-                phase2_fn.clone().launch_on_stream(
-                    cu_stream,
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (block_size, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (data, n),
-                )
-            }
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "multiblock_scan_phase2 (view on_stream) failed: {}",
-                    e
-                ))
-            })?;
-            return Ok(());
-        }
-
-        let num_blocks = n.div_ceil(block_size);
-        let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
-        // Fence alloc-ready → launch_stream for block_sums
-        // before phase1 kernel writes it. See the inplace
-        // variant for the full rationale.
-        runtime
-            .prepare_first_use(
-                &block_sums,
-                launch_stream,
-                crate::device_runtime::Access::Write,
-            )
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "multiblock_scan_u32_view_inplace_on_stream: prepare block_sums failed: {}",
-                    e
-                ))
-            })?;
-
-        let phase1_u32_fn = device
-            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
-            .ok_or_else(|| {
-                XlogError::Kernel("Failed to get multiblock_scan_u32_phase1 kernel".to_string())
-            })?;
-        // SAFETY: phase1 kernel signature.
-        unsafe {
-            phase1_u32_fn.clone().launch_on_stream(
-                cu_stream,
-                LaunchConfig {
-                    grid_dim: (num_blocks, 1, 1),
-                    block_dim: (block_size, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (&mut *data, &mut block_sums, n),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "multiblock_scan_u32_phase1 (view on_stream) failed: {}",
-                e
-            ))
-        })?;
-
-        if num_blocks > 1 {
-            self.multiblock_scan_u32_inplace_on_stream(
-                &mut block_sums,
-                num_blocks,
-                cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-        }
-
-        let phase3_fn = device
-            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
-            .ok_or_else(|| {
-                XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
-            })?;
-        // SAFETY: phase3 kernel signature.
-        unsafe {
-            phase3_fn.clone().launch_on_stream(
-                cu_stream,
-                LaunchConfig {
-                    grid_dim: (num_blocks, 1, 1),
-                    block_dim: (block_size, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (&mut *data, &block_sums, n),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "multiblock_scan_phase3 (view on_stream) failed: {}",
-                e
-            ))
-        })?;
-
-        // Record block_sums use before end-of-scope drop.
-        if let Some(b) = block_sums.runtime_block() {
-            runtime
-                .finish_block_use(
-                    crate::device_runtime::BlockId::from_block(b),
-                    launch_stream,
-                    crate::device_runtime::Access::Write,
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "multiblock_scan_u32_view_inplace_on_stream: finish_block_use \
-                     for intermediate block_sums failed: {}",
-                        e
-                    ))
-                })?;
-        } else {
-            return Err(XlogError::Kernel(
-                "multiblock_scan_u32_view_inplace_on_stream: intermediate block_sums has no \
-                 runtime block — caller must use a runtime-backed manager"
-                    .to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     fn multiblock_scan_u32_view_inplace(
         &self,
-        data: &mut CudaViewMut<'_, u32>,
+        data: &mut DeviceMemoryView<u32>,
         n: u32,
     ) -> Result<()> {
         if n == 0 {
@@ -2754,11 +2404,11 @@ impl CudaKernelProvider {
         })
     }
 
-    fn column_bytes_view<'a>(
+    fn column_bytes_view(
         &self,
-        col: &'a CudaColumn,
+        col: &CudaColumn,
         num_bytes: usize,
-    ) -> Result<RawCudaView<'a, u8>> {
+    ) -> Result<DeviceMemoryView<u8>> {
         if col.num_bytes() < num_bytes {
             return Err(XlogError::Kernel(format!(
                 "Column has {} bytes but {} required",
@@ -2766,20 +2416,14 @@ impl CudaKernelProvider {
                 num_bytes
             )));
         }
-        let ptr = *col.device_ptr();
-        Ok(RawCudaView {
-            ptr,
-            len: num_bytes,
-            stream: col.stream().clone(),
-            _marker: PhantomData,
-        })
+        Ok(col.device_view().slice(..num_bytes))
     }
 
-    fn bytes_as_u32_view<'a>(
+    fn bytes_as_u32_view(
         &self,
-        bytes: &'a TrackedCudaSlice<u8>,
+        bytes: &TrackedCudaSlice<u8>,
         num_elements: usize,
-    ) -> Result<RawCudaView<'a, u32>> {
+    ) -> Result<DeviceMemoryView<u32>> {
         let required_bytes = num_elements * std::mem::size_of::<u32>();
         if bytes.len() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -2795,20 +2439,18 @@ impl CudaKernelProvider {
                 "Packed keys device pointer is not u32-aligned".to_string(),
             ));
         }
-        Ok(RawCudaView {
-            ptr,
-            len: num_elements,
-            stream: bytes.stream().clone(),
-            _marker: PhantomData,
-        })
+        // SAFETY: these scalar representations accept every bit pattern; the
+        // checked cast validates alignment and preserves the actual owner.
+        unsafe { bytes.device_view().slice(..required_bytes).cast() }
+            .ok_or_else(|| XlogError::Kernel("device column cast is invalid".into()))
     }
 
     /// Reinterpret a `CudaBuffer` column as a `u32` slice for kernel access.
-    fn column_as_u32_view<'a>(
+    fn column_as_u32_view(
         &self,
-        col: &'a CudaColumn,
+        col: &CudaColumn,
         num_elements: usize,
-    ) -> Result<RawCudaView<'a, u32>> {
+    ) -> Result<DeviceMemoryView<u32>> {
         let required_bytes = num_elements * std::mem::size_of::<u32>();
         if col.num_bytes() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -2824,19 +2466,17 @@ impl CudaKernelProvider {
                 "Column device pointer is not u32-aligned".to_string(),
             ));
         }
-        Ok(RawCudaView {
-            ptr,
-            len: num_elements,
-            stream: col.stream().clone(),
-            _marker: PhantomData,
-        })
+        // SAFETY: these scalar representations accept every bit pattern; the
+        // checked cast validates alignment and preserves the actual owner.
+        unsafe { col.device_view().slice(..required_bytes).cast() }
+            .ok_or_else(|| XlogError::Kernel("device column cast is invalid".into()))
     }
 
-    fn column_as_u64_view<'a>(
+    fn column_as_u64_view(
         &self,
-        col: &'a CudaColumn,
+        col: &CudaColumn,
         num_elements: usize,
-    ) -> Result<RawCudaView<'a, u64>> {
+    ) -> Result<DeviceMemoryView<u64>> {
         let required_bytes = num_elements * std::mem::size_of::<u64>();
         if col.num_bytes() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -2852,20 +2492,18 @@ impl CudaKernelProvider {
                 "Column device pointer is not u64-aligned".to_string(),
             ));
         }
-        Ok(RawCudaView {
-            ptr,
-            len: num_elements,
-            stream: col.stream().clone(),
-            _marker: PhantomData,
-        })
+        // SAFETY: these scalar representations accept every bit pattern; the
+        // checked cast validates alignment and preserves the actual owner.
+        unsafe { col.device_view().slice(..required_bytes).cast() }
+            .ok_or_else(|| XlogError::Kernel("device column cast is invalid".into()))
     }
 
     /// Reinterpret a `CudaBuffer` column as an `f64` slice for kernel access.
-    fn column_as_f64_view<'a>(
+    fn column_as_f64_view(
         &self,
-        col: &'a CudaColumn,
+        col: &CudaColumn,
         num_elements: usize,
-    ) -> Result<RawCudaView<'a, f64>> {
+    ) -> Result<DeviceMemoryView<f64>> {
         let required_bytes = num_elements * std::mem::size_of::<f64>();
         if col.num_bytes() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -2881,12 +2519,10 @@ impl CudaKernelProvider {
                 "Column device pointer is not f64-aligned".to_string(),
             ));
         }
-        Ok(RawCudaView {
-            ptr,
-            len: num_elements,
-            stream: col.stream().clone(),
-            _marker: PhantomData,
-        })
+        // SAFETY: these scalar representations accept every bit pattern; the
+        // checked cast validates alignment and preserves the actual owner.
+        unsafe { col.device_view().slice(..required_bytes).cast() }
+            .ok_or_else(|| XlogError::Kernel("device column cast is invalid".into()))
     }
 
     /// Create an empty buffer with the given schema (all columns are empty slices)

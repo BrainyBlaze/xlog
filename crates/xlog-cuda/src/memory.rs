@@ -4,52 +4,32 @@
 //! It wraps cudarc's allocation functions and tracks total allocated memory.
 
 use std::mem::ManuallyDrop;
-use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceSlice, SyncOnDrop};
+use cudarc::driver::{CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, DeviceSlice, SyncOnDrop};
 use xlog_core::{resolve_bool, MemoryBudget, Result, Schema, XlogError};
 
 use crate::arrow_device::ArrowDeviceImport;
 use crate::cuda_compat::{AsKernelParam, DeviceParamStorage, IntoKernelParamStorage};
+use crate::device_runtime::resource::{
+    block_use_registry, Access, AllocationAccounting, AllocationRequest, DeviceAccessDependencies,
+    MemoryStorageOwner, MemoryUse, MemoryUseGroup, RetainedStorageUse,
+};
 use crate::device_runtime::{
     AllocTag, BlockId, BlockState, DeviceBlock, ResourceError, RuntimeMemoryReservation, StreamId,
     XlogDeviceRuntime,
 };
 use crate::dlpack::DlpackManagedTensor;
+use crate::launch::RecorderTransaction;
 use crate::CudaDevice;
 
 #[cfg(test)]
 type AfterLocalReservationHook = std::sync::Mutex<Option<Arc<dyn Fn(u64) + Send + Sync + 'static>>>;
 
-/// GPU memory manager with budget enforcement
-///
-/// Tracks allocated GPU memory and enforces a memory budget.
-/// When the budget would be exceeded, returns `XlogError::ResourceExhausted`.
-///
-/// # Device-runtime routing
-///
-/// Canonical CUDA providers construct the manager via
-/// [`GpuMemoryManager::with_runtime`]. Its [`XlogDeviceRuntime`] mediates
-/// allocations through `LoggingResource` when enabled, then
-/// `GlobalDeviceBudget`, then `AsyncCudaResource`. When attached:
-///   * [`GpuMemoryManager::alloc::<T>`] routes the underlying
-///     allocation through the runtime and produces a typed view via
-///     cudarc's `upgrade_device_ptr::<T>`. The returned
-///     [`TrackedCudaSlice`] frees through the runtime on drop.
-///   * [`GpuMemoryManager::alloc_raw`] is the explicit raw-bytes
-///     entry point (no typed view), also runtime-routed.
-///
-/// Both budgets apply: the manager's local `MemoryBudget` AND any
-/// `GlobalDeviceBudget` stacked above the runtime's underlying
-/// resource.
-///
-/// The crate-private runtime-free constructor exists for focused allocator
-/// tests. Its typed allocations use cudarc directly, while `alloc_raw` refuses
-/// to run because it cannot honor the runtime ownership contract. Production
-/// provider construction never uses that path.
-/// at construction sites that need it.
+/// Budget-enforced device allocation. Every view retains actual storage.
+/// Runtime-backed managers use the canonical resource stack. Native allocations
+/// share its raw owner: post-malloc failures retain storage and budget together.
 pub struct GpuMemoryManager {
     /// The CUDA device for memory operations
     device: Arc<CudaDevice>,
@@ -95,6 +75,421 @@ struct GpuMemoryAccounting {
     /// charged locally because physical release was not proven.
     deallocation_failure_count: AtomicU64,
     deallocation_failure_bytes: AtomicU64,
+}
+
+impl GpuMemoryAccounting {
+    fn release_reserved(&self, bytes: u64) -> Result<()> {
+        let _mutation = self.mutation_lock.lock().map_err(|_| {
+            XlogError::Kernel("GPU memory accounting poisoned during reservation release".into())
+        })?;
+        let previous = self.budget_reserved.load(Ordering::SeqCst);
+        let next = previous.checked_sub(bytes).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "GPU memory reservation release underflow: current_bytes={} requested_bytes={}",
+                previous, bytes,
+            ))
+        })?;
+        self.budget_reserved.store(next, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn release_owned_allocation(&self, bytes: u64) -> Result<()> {
+        let _mutation = self.mutation_lock.lock().map_err(|_| {
+            XlogError::Kernel("GPU memory accounting poisoned during release".into())
+        })?;
+        let admitted = self.allocated.load(Ordering::SeqCst);
+        let reserved = self.budget_reserved.load(Ordering::SeqCst);
+        let next_admitted = admitted.checked_sub(bytes).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "GPU admitted allocation release underflow: current_bytes={} requested_bytes={}",
+                admitted, bytes
+            ))
+        })?;
+        let next_reserved = reserved.checked_sub(bytes).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "GPU local reservation release underflow: current_bytes={} requested_bytes={}",
+                reserved, bytes
+            ))
+        })?;
+        self.allocated.store(next_admitted, Ordering::SeqCst);
+        self.budget_reserved.store(next_reserved, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Accounting owned by one allocation attempt and then by its physical storage.
+///
+/// Resource implementations bind their accounting before malloc, call
+/// [`Self::acquired`] immediately after arming the returned pointer, and retain
+/// this owner until [`Self::confirm_physical_release`] settles physical release.
+/// Refusal and unwind guards use the persistent acquisition proof, not the
+/// shape of an error or whether a concurrent reaper already freed the storage.
+#[derive(Default)]
+pub struct AllocationReclamation {
+    state: std::sync::Mutex<AllocationReclamationState>,
+    acquired: std::sync::atomic::AtomicBool,
+    released: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Default)]
+struct AllocationReclamationState {
+    charge: Option<LocalAllocationCharge>,
+    local_published: bool,
+    resource: Option<(Arc<AllocationAccounting>, usize)>,
+    resource_published: bool,
+    pending: Option<(Arc<std::sync::atomic::AtomicUsize>, usize)>,
+}
+
+struct LocalAllocationCharge {
+    accounting: Arc<GpuMemoryAccounting>,
+    bytes: u64,
+}
+
+impl AllocationReclamation {
+    /// Transfer an already reserved local claim before any physical allocation.
+    fn attach_local(
+        &self,
+        accounting: Arc<GpuMemoryAccounting>,
+        bytes: u64,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        let charge = LocalAllocationCharge { accounting, bytes };
+        let mut state = self.state.lock().map_err(|_| {
+            ResourceError::Driver(
+                "allocation reclamation state poisoned during charge transfer".into(),
+            )
+        })?;
+        if self.was_acquired() || self.was_released() || state.charge.is_some() {
+            return Err(ResourceError::Driver(
+                "allocation charge transfer requires an unreleased, unbound owner".into(),
+            ));
+        }
+        state.charge = Some(charge);
+        Ok(())
+    }
+
+    /// Bind the backend's exact accounting domain before calling malloc.
+    pub fn attach_resource(
+        &self,
+        accounting: Arc<AllocationAccounting>,
+        bytes: usize,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        let mut state = self.state.lock().map_err(|_| {
+            ResourceError::Driver("allocation accounting poisoned during binding".into())
+        })?;
+        if self.was_acquired() || self.was_released() || state.resource.is_some() {
+            return Err(ResourceError::Driver(
+                "resource accounting requires an unacquired, unbound allocation".into(),
+            ));
+        }
+        state.resource = Some((accounting, bytes));
+        Ok(())
+    }
+
+    /// Publish acquisition after the real pointer has an armed storage owner.
+    /// Even an accounting error means storage exists: it must be retained for
+    /// physical cleanup, never reported as a definite malloc refusal.
+    pub fn acquired(&self) -> crate::device_runtime::ResourceResult<()> {
+        self.acquired.store(true, Ordering::Release);
+        let mut state = self.state.lock().map_err(|_| {
+            ResourceError::Driver("allocation accounting poisoned during acquisition".into())
+        })?;
+        if self.was_released() {
+            return Err(ResourceError::Driver(
+                "cannot acquire released storage".into(),
+            ));
+        }
+        if !state.resource_published {
+            if let Some((accounting, bytes)) = &state.resource {
+                accounting.acquire(*bytes)?;
+                state.resource_published = true;
+            }
+        }
+        if !state.local_published {
+            if let Some(charge) = &state.charge {
+                let _mutation = charge.accounting.mutation_lock.lock().map_err(|_| {
+                    ResourceError::Driver("local allocation accounting poisoned".into())
+                })?;
+                let previous = charge.accounting.allocated.load(Ordering::SeqCst);
+                let admitted = previous.checked_add(charge.bytes).ok_or_else(|| {
+                    ResourceError::Driver("local admitted allocation accounting overflow".into())
+                })?;
+                charge
+                    .accounting
+                    .allocated
+                    .store(admitted, Ordering::SeqCst);
+                charge.accounting.peak.fetch_max(admitted, Ordering::SeqCst);
+            }
+            state.local_published = true;
+        }
+        Ok(())
+    }
+
+    /// Remains true after release, so an outer error/unwind cannot refund twice.
+    pub fn was_acquired(&self) -> bool {
+        self.acquired.load(Ordering::Acquire)
+    }
+
+    /// Transfer the physical-byte tally before logical detach. The exact raw
+    /// owner settles it even if backend destruction or unwind bypasses its queue.
+    pub(crate) fn attach_pending(
+        &self,
+        accounting: Arc<std::sync::atomic::AtomicUsize>,
+        bytes: usize,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        let mut state = self.state.lock().map_err(|_| {
+            ResourceError::Driver("allocation accounting poisoned during detach".into())
+        })?;
+        if !self.was_acquired() || self.was_released() || state.pending.is_some() {
+            return Err(ResourceError::Driver(
+                "pending charge requires acquired live storage".into(),
+            ));
+        }
+        accounting
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                value.checked_add(bytes)
+            })
+            .map_err(|_| ResourceError::Driver("pending allocation accounting overflow".into()))?;
+        state.pending = Some((accounting, bytes));
+        Ok(())
+    }
+
+    /// Called only after the raw owner proves physical free. Accounting failure
+    /// retains the exact charge for retry; no CUDA wait runs under this mutex.
+    ///
+    /// # Safety
+    /// The exact allocation must have been physically freed after every device
+    /// use completed. Keep its owner and this ticket until settlement succeeds.
+    /// Publishing this proof for live storage can invalidate access exclusion.
+    pub unsafe fn confirm_physical_release(&self) -> crate::device_runtime::ResourceResult<()> {
+        self.complete()
+    }
+
+    // Internal storage owners already establish the physical-release boundary.
+    // Custom resource implementations cross the unsafe public boundary above.
+    pub(crate) fn complete(&self) -> crate::device_runtime::ResourceResult<()> {
+        if self.was_acquired() && !self.was_released() {
+            // Acquisition publication itself may have failed after malloc.
+            // Complete its unsettled bookkeeping before recording the release.
+            if let Err(error) = self.acquired() {
+                // A concurrent completion may have settled while this caller
+                // was acquiring the state lock. Its proof is authoritative.
+                if self.was_released() {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        }
+        let (charge, resource, pending) = {
+            let mut state = self.state.lock().map_err(|_| {
+                ResourceError::Driver("allocation reclamation state poisoned during release".into())
+            })?;
+            if self.was_released() {
+                return Ok(());
+            }
+            if let Some(charge) = &state.charge {
+                if !state.local_published {
+                    return Err(ResourceError::Driver(
+                        "local allocation acquisition was not published".into(),
+                    ));
+                }
+                charge
+                    .accounting
+                    .release_owned_allocation(charge.bytes)
+                    .map_err(|error| ResourceError::Driver(error.to_string()))?;
+            }
+            // Remove each settled obligation before the next fallible step.
+            // A later retry cannot refund an already settled local charge.
+            let charge = state.charge.take();
+            if let Some((accounting, bytes)) = &state.resource {
+                if !state.resource_published {
+                    return Err(ResourceError::Driver(
+                        "resource allocation acquisition was not published".into(),
+                    ));
+                }
+                accounting.release(*bytes)?;
+            }
+            let resource = state.resource.take();
+            if let Some((accounting, bytes)) = &state.pending {
+                accounting
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                        value.checked_sub(*bytes)
+                    })
+                    .map_err(|_| {
+                        ResourceError::Driver("pending allocation accounting underflow".into())
+                    })?;
+            }
+            self.released.store(true, Ordering::Release);
+            (charge, resource, state.pending.take())
+        };
+        drop((charge, resource, pending));
+        Ok(())
+    }
+
+    pub(crate) fn was_released(&self) -> bool {
+        self.released.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn release_proof(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.released)
+    }
+}
+
+/// Until malloc succeeds, a local claim belongs to this calling frame. A token
+/// refusal restores unused token bytes; an ordinary refusal returns its budget.
+/// After acquisition the raw owner, not this guard, settles the claim.
+struct LocalAllocationAttempt<'a> {
+    accounting: Arc<GpuMemoryAccounting>,
+    bytes: u64,
+    remaining: Option<&'a mut u64>,
+    reclamation: Arc<AllocationReclamation>,
+}
+
+impl<'a> LocalAllocationAttempt<'a> {
+    fn new(
+        accounting: Arc<GpuMemoryAccounting>,
+        bytes: u64,
+        remaining: Option<&'a mut u64>,
+    ) -> Self {
+        let reclamation = Arc::new(AllocationReclamation::default());
+        let attempt = Self {
+            accounting,
+            bytes,
+            remaining,
+            reclamation,
+        };
+        attempt
+            .reclamation
+            .attach_local(Arc::clone(&attempt.accounting), bytes)
+            .expect("new allocation attempt has no bound charge");
+        attempt
+    }
+}
+
+impl Drop for LocalAllocationAttempt<'_> {
+    fn drop(&mut self) {
+        if self.reclamation.was_acquired() {
+            return;
+        }
+        if let Some(remaining) = self.remaining.as_mut() {
+            **remaining = remaining
+                .checked_add(self.bytes)
+                .expect("unused allocation reservation remains representable");
+        } else if let Err(error) = self.accounting.release_reserved(self.bytes) {
+            eprintln!("local allocation reservation rollback failed: {error}");
+        }
+    }
+}
+
+/// The backend remains the physical owner while a returned block is being
+/// bound to a typed wrapper. Preserve logical-detach work through any error or
+/// unwind, using the same cold queue as final storage retirement.
+pub(crate) struct ResourceBlockRetirement {
+    payload: Option<ResourceBlockRetirementPayload>,
+}
+
+struct ResourceBlockRetirementPayload {
+    block: DeviceBlock,
+    resource: Arc<dyn crate::device_runtime::DeviceMemoryResource + Send + Sync>,
+    reclamation: Arc<AllocationReclamation>,
+    detached: bool,
+}
+
+impl ResourceBlockRetirement {
+    pub(crate) fn new(
+        block: DeviceBlock,
+        resource: Arc<dyn crate::device_runtime::DeviceMemoryResource + Send + Sync>,
+        reclamation: Arc<AllocationReclamation>,
+    ) -> Self {
+        Self {
+            payload: Some(ResourceBlockRetirementPayload {
+                block,
+                resource,
+                reclamation,
+                detached: false,
+            }),
+        }
+    }
+
+    pub(crate) fn block(&self) -> &DeviceBlock {
+        &self
+            .payload
+            .as_ref()
+            .expect("unpublished block present")
+            .block
+    }
+
+    pub(crate) fn into_block(mut self) -> DeviceBlock {
+        self.payload.take().expect("published block present").block
+    }
+
+    fn release(&mut self) -> crate::device_runtime::ResourceResult<()> {
+        reclaim_allocation(&mut self.payload, |owner| {
+            if owner.reclamation.was_released() {
+                return Ok(());
+            }
+            let mut detach_error = None;
+            let mut detach_panic = None;
+            if !owner.detached {
+                let block = &owner.block;
+                // This is a retry of exact generation-checked logical detach,
+                // not a second physical free. The backend owns that transition.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    owner.resource.deallocate(DeviceBlock {
+                        ptr: block.ptr,
+                        device_ordinal: block.device_ordinal,
+                        alloc_stream: block.alloc_stream,
+                        bytes: block.bytes,
+                        align: block.align,
+                        tag: block.tag,
+                        generation: block.generation,
+                        state: block.state,
+                    })
+                }));
+                match result {
+                    Ok(Ok(())) | Ok(Err(ResourceError::UseAfterFree { .. })) => {
+                        owner.detached = true
+                    }
+                    Ok(Err(error)) => detach_error = Some(error),
+                    Err(panic) => detach_panic = Some(panic),
+                }
+            }
+            // A decorator can unwind after the backend accepted logical
+            // detach. Still offer that exact backend its physical reap; retrying
+            // only the decorator would strand an already-pending allocation.
+            let reaped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                owner.resource.reap_pending()
+            }));
+            if let Some(panic) = detach_panic {
+                // Both operations have been attempted. Preserve the first
+                // failure even when a telemetry sink also unwinds during reap.
+                drop(reaped);
+                std::panic::resume_unwind(panic);
+            }
+            let reaped = match reaped {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            };
+            allocation_reclamation_outcome(
+                owner.reclamation.was_released(),
+                detach_error.map_or(reaped, Err),
+            )
+        })
+    }
+}
+
+impl Drop for ResourceBlockRetirement {
+    fn drop(&mut self) {
+        if let Some(payload) = self.payload.take() {
+            let mut owner = Self {
+                payload: Some(payload),
+            };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::cuda_graph::retry_retirement_after_stream_captures(move || {
+                    owner.release().is_ok()
+                });
+            }));
+        }
+    }
 }
 
 /// One atomic claim on a [`GpuMemoryManager`] budget.
@@ -166,17 +561,20 @@ impl GpuMemoryReservation {
 
         self.remaining_bytes -= bytes;
         let manager = Arc::clone(&self.manager);
+        let attempt = LocalAllocationAttempt::new(
+            Arc::clone(&manager.accounting),
+            bytes,
+            Some(&mut self.remaining_bytes),
+        );
         let runtime_reservation = self.runtime_reservation.as_mut();
-        match manager.alloc_after_local_reservation::<T>(len, bytes, runtime_reservation) {
-            Ok(allocation) => Ok(allocation),
-            Err(error) => {
-                self.remaining_bytes = self
-                    .remaining_bytes
-                    .checked_add(bytes)
-                    .expect("reservation rollback overflow");
-                Err(error)
-            }
-        }
+        manager
+            .alloc_after_local_reservation::<T>(
+                len,
+                bytes,
+                runtime_reservation,
+                Arc::clone(&attempt.reclamation),
+            )
+            .map_err(|error| map_resource_error(error, manager.peak_bytes()))
     }
 
     /// Allocate raw device bytes from this reservation through the attached
@@ -198,18 +596,21 @@ impl GpuMemoryReservation {
 
         self.remaining_bytes -= bytes_u64;
         let manager = Arc::clone(&self.manager);
+        let attempt = LocalAllocationAttempt::new(
+            Arc::clone(&manager.accounting),
+            bytes_u64,
+            Some(&mut self.remaining_bytes),
+        );
         let runtime_reservation = self.runtime_reservation.as_mut();
-        match manager.alloc_raw_after_local_reservation(bytes, bytes_u64, tag, runtime_reservation)
-        {
-            Ok(allocation) => Ok(allocation),
-            Err(error) => {
-                self.remaining_bytes = self
-                    .remaining_bytes
-                    .checked_add(bytes_u64)
-                    .expect("reservation rollback overflow");
-                Err(error)
-            }
-        }
+        manager
+            .alloc_raw_after_local_reservation(
+                bytes,
+                bytes_u64,
+                tag,
+                runtime_reservation,
+                Arc::clone(&attempt.reclamation),
+            )
+            .map_err(|error| map_resource_error(error, manager.peak_bytes()))
     }
 }
 
@@ -254,30 +655,714 @@ impl MemoryPressure {
     }
 }
 
-/// Selects which allocator owns the underlying device memory of a
-/// [`TrackedCudaSlice`]. Internal — surfaced only via the methods
-/// on `TrackedCudaSlice`. Migrated allocations carry `Runtime`
-/// backing; legacy allocations stay on `Cudarc`.
+/// The actual allocation owner, shared by every typed view and retained use.
+struct DeviceStorage {
+    backing: ManuallyDrop<Backing>,
+    stream: Arc<CudaStream>,
+    raw_ptr: cudarc::driver::sys::CUdeviceptr,
+    dependencies: Arc<DeviceAccessDependencies>,
+}
+
 enum Backing {
-    /// Legacy: cudarc owns the slice. The inner `CudaSlice<T>` is
-    /// the actual handle returned by `device.alloc::<T>(..)`, and
-    /// dropping it invokes cudarc's free path. The
-    /// `TrackedCudaSlice` `Drop` impl runs that drop explicitly so
-    /// the timing is identical to pre-migration behavior.
-    Cudarc,
-    /// v0.6 runtime-routed: the [`XlogDeviceRuntime`] owns the
-    /// allocation via its resource stack, and the inner
-    /// `CudaSlice<T>` is a typed view created by
-    /// `upgrade_device_ptr::<T>` over the runtime's raw pointer.
-    /// On drop, the inner view must be **forgotten** (cudarc must
-    /// not free) and the runtime must be told to deallocate the
-    /// `DeviceBlock`. Order of operations matters: deallocate the
-    /// block first, then forget the view, so the runtime sees the
-    /// block in its `live` map.
-    Runtime {
-        runtime: Arc<XlogDeviceRuntime>,
-        block: Option<DeviceBlock>,
+    Native(Arc<RawDeviceAllocation>),
+    Runtime(RuntimeAllocBlock),
+    Foreign {
+        _owner: Box<dyn Send + Sync>,
+        _source: Option<Arc<TrackedCudaSlice<u8>>>,
+        bytes: u64,
     },
+}
+
+/// One native allocation owner shared by the typed and runtime allocators.
+/// No cudarc CudaSlice is constructed: its post-malloc event construction and
+/// implicit Drop free cannot express retained initialization/release failures.
+pub(crate) struct RawDeviceAllocation {
+    payload: Option<RawAllocationPayload>,
+    reclamation_admission: Option<MemoryUseGroup>,
+}
+
+struct RawAllocationPayload {
+    ptr: u64,
+    acquired: bool,
+    bytes: usize,
+    stream: Arc<CudaStream>,
+    dependencies: Option<Arc<DeviceAccessDependencies>>,
+    ready_event: Option<cudarc::driver::CudaEvent>,
+    initialization_event: cudarc::driver::CudaEvent,
+    initialization_recorded: bool,
+    reclamation: Arc<AllocationReclamation>,
+    asynchronous: bool,
+    free_state: DriverReleaseState,
+    free_event: Option<cudarc::driver::CudaEvent>,
+    free_event_recorded: bool,
+    // An explicit stream preserves the actual free prefix across host threads.
+    // A per-thread default stream handle cannot provide this retry identity.
+    free_stream: Option<ReclamationStream>,
+    manager: Option<Arc<GpuMemoryManager>>,
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum DriverReleaseState {
+    #[default]
+    Owned,
+    OutcomeUnknown,
+    Submitted,
+}
+
+impl DriverReleaseState {
+    fn confirm_async(
+        &self,
+        recorded: &mut bool,
+        record: impl FnOnce() -> crate::device_runtime::ResourceResult<()>,
+        wait: impl FnOnce() -> crate::device_runtime::ResourceResult<()>,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        if *self != Self::Submitted {
+            return Err(ResourceError::Driver(
+                "completion cannot prove an unconfirmed allocation free submission".into(),
+            ));
+        }
+        if !*recorded {
+            record()?;
+            *recorded = true;
+        }
+        wait()
+    }
+
+    fn submit(
+        &mut self,
+        free: impl FnOnce() -> crate::device_runtime::ResourceResult<()>,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        match self {
+            Self::Submitted => return Ok(()),
+            Self::OutcomeUnknown => {
+                return Err(ResourceError::Driver(
+                    "previous resource release outcome is unknown; refusing a second release"
+                        .into(),
+                ))
+            }
+            Self::Owned => {}
+        }
+        *self = Self::OutcomeUnknown;
+        free()?;
+        *self = Self::Submitted;
+        Ok(())
+    }
+}
+
+/// Private stream state owned by the allocation payload, never shared with
+/// ordinary work. The payload retains its context and cannot retire until
+/// `RawDeviceAllocation::release` has destroyed this stream successfully.
+struct ReclamationStream {
+    handle: cudarc::driver::sys::CUstream,
+    destroy_state: DriverReleaseState,
+}
+
+// SAFETY: this is an explicit (not per-thread default) stream. The containing
+// allocation payload retains its context; every driver operation binds it, and
+// release requires exclusive access to the payload. No safe caller can obtain
+// this private handle or race stream destruction with submission.
+unsafe impl Send for ReclamationStream {}
+// SAFETY: shared allocation access cannot mutate or submit to this stream.
+unsafe impl Sync for ReclamationStream {}
+
+impl ReclamationStream {
+    fn create() -> crate::device_runtime::ResourceResult<Self> {
+        // The caller has bound the allocation context and excluded capture.
+        // CudaContext::new_stream would synchronize the entire context when
+        // entering multi-stream mode; fork would import a different prefix.
+        let handle = cudarc::driver::result::stream::create(
+            cudarc::driver::result::stream::StreamKind::NonBlocking,
+        )?;
+        Ok(Self {
+            handle,
+            destroy_state: DriverReleaseState::Owned,
+        })
+    }
+
+    fn destroy(&mut self) -> crate::device_runtime::ResourceResult<()> {
+        self.destroy_state.submit(|| {
+            // SAFETY: the payload bound the retained context. Its own free
+            // prefix is complete, and the handle is private to that payload.
+            // An unknown destroy result never permits a second driver call.
+            unsafe { cudarc::driver::result::stream::destroy(self.handle)? };
+            Ok(())
+        })
+    }
+}
+
+impl RawDeviceAllocation {
+    pub(crate) fn allocate(
+        stream: Arc<CudaStream>,
+        bytes: usize,
+        manager: Option<Arc<GpuMemoryManager>>,
+        reclamation: Arc<AllocationReclamation>,
+    ) -> crate::device_runtime::ResourceResult<Arc<Self>> {
+        let _capture_exclusion = crate::cuda_graph::reserve_uncaptured_stream(&stream)?;
+        let execution_id = crate::cuda_graph::stream_execution_id(&stream)?;
+        // Every fallible prerequisite precedes malloc. In particular, creating
+        // the event after malloc would leave an unowned pointer on failure.
+        let ready_event = stream.context().new_event(None)?;
+        let initialization_event = stream.context().new_event(None)?;
+        let asynchronous = stream.context().has_async_alloc();
+        stream.context().bind_to_thread()?;
+        // Arm context/events before creating the private stream or attempting
+        // malloc. Pre-allocation failures also reach the canonical cold reaper,
+        // but never acquire a physical byte charge.
+        let allocation = initialize_allocation(
+            Self {
+                reclamation_admission: None,
+                payload: Some(RawAllocationPayload {
+                    ptr: 0,
+                    acquired: false,
+                    bytes,
+                    stream,
+                    dependencies: None,
+                    ready_event: Some(ready_event),
+                    initialization_event,
+                    initialization_recorded: false,
+                    reclamation: Arc::clone(&reclamation),
+                    asynchronous,
+                    free_state: DriverReleaseState::Owned,
+                    free_event: None,
+                    free_event_recorded: false,
+                    free_stream: None,
+                    manager,
+                }),
+            },
+            bytes,
+            Arc::clone(&reclamation),
+            |allocation| {
+                let payload = allocation
+                    .payload
+                    .as_mut()
+                    .expect("allocation owner present");
+                let ready = payload
+                    .ready_event
+                    .as_ref()
+                    .expect("producer event present");
+                ready.record(&payload.stream)?;
+                payload.free_stream = Some(ReclamationStream::create()?);
+                let private_stream = payload
+                    .free_stream
+                    .as_ref()
+                    .expect("private stream present");
+                // SAFETY: both handles belong to the bound allocation context.
+                // The wait snapshots the caller-prefix recording. Re-recording
+                // this event for publication below cannot modify this wait.
+                unsafe {
+                    cudarc::driver::sys::cuStreamWaitEvent(
+                        private_stream.handle,
+                        ready.cu_event(),
+                        0,
+                    )
+                    .result()?;
+                }
+                let ptr = if bytes == 0 {
+                    0
+                } else {
+                    // SAFETY: capture is excluded and the explicit stream is
+                    // private to this already armed allocation owner.
+                    unsafe {
+                        if asynchronous {
+                            cudarc::driver::result::malloc_async(private_stream.handle, bytes)?
+                        } else {
+                            cudarc::driver::result::malloc_sync(bytes)?
+                        }
+                    }
+                };
+                payload.ptr = ptr;
+                payload.acquired = true;
+                payload.reclamation.acquired()?;
+                if payload.manager.is_some() {
+                    alloc_guard_insert(payload.ptr, bytes as u64);
+                    if bytes != 0 && poison_alloc_enabled() {
+                        // SAFETY: initialized only by this armed allocation owner.
+                        unsafe {
+                            cudarc::driver::sys::cuMemsetD8Async(
+                                payload.ptr,
+                                0xDD,
+                                bytes,
+                                private_stream.handle,
+                            )
+                            .result()?;
+                        }
+                    }
+                }
+                // SAFETY: only allocation/initialization work uses this owned
+                // stream. This fence also remains valid on another host thread.
+                unsafe {
+                    cudarc::driver::result::event::record(
+                        payload.initialization_event.cu_event(),
+                        private_stream.handle,
+                    )?;
+                }
+                payload.initialization_recorded = true;
+                payload.stream.wait(&payload.initialization_event)?;
+                let event = payload
+                    .ready_event
+                    .as_ref()
+                    .expect("producer event present");
+                event.record(&payload.stream)?;
+                payload.dependencies = Some(Arc::new(DeviceAccessDependencies::after_event(
+                    Arc::clone(&payload.stream),
+                    execution_id,
+                    payload.ready_event.take().expect("producer event present"),
+                    Arc::clone(&reclamation),
+                )));
+                Ok(())
+            },
+        )?;
+        let allocation = Arc::new(allocation);
+        let dependencies = allocation.dependencies();
+        dependencies.bind_allocation(&allocation);
+        let owner: Arc<dyn MemoryStorageOwner> =
+            Arc::clone(&allocation) as Arc<dyn MemoryStorageOwner>;
+        let payload = allocation.payload.as_ref().expect("initialized allocation");
+        let range = match MemoryUse::new(payload.ptr, payload.bytes, Access::ReadWrite) {
+            Ok(range) => range,
+            Err(error) => return Err(error.retaining(bytes, reclamation)),
+        };
+        block_use_registry()
+            .lock()
+            .expect("device block-use registry poisoned")
+            .register_storage(
+                payload.stream.context().cu_ctx() as usize,
+                range,
+                Arc::downgrade(&owner),
+                dependencies.reclamation.release_proof(),
+            );
+        Ok(allocation)
+    }
+
+    pub(crate) fn ptr(&self) -> u64 {
+        self.payload.as_ref().expect("allocation live").ptr
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.payload.as_ref().expect("allocation live").bytes
+    }
+    pub(crate) fn dependencies(&self) -> Arc<DeviceAccessDependencies> {
+        Arc::clone(
+            self.payload
+                .as_ref()
+                .expect("allocation live")
+                .dependencies
+                .as_ref()
+                .expect("allocation producer was recorded"),
+        )
+    }
+
+    pub(crate) fn reclamation(&self) -> &Arc<AllocationReclamation> {
+        &self
+            .payload
+            .as_ref()
+            .expect("allocation owner remains live")
+            .reclamation
+    }
+
+    /// Cold physical reclamation. A successful async free is never submitted a
+    /// second time, even if its following completion check fails.
+    pub(crate) fn release(&mut self) -> crate::device_runtime::ResourceResult<()> {
+        let admission = &mut self.reclamation_admission;
+        reclaim_allocation(&mut self.payload, |payload| {
+            // No memory was acquired. Only the private stream/context needs
+            // retirement; the calling frame restores its provisional budget.
+            if !payload.acquired {
+                payload.stream.context().bind_to_thread()?;
+                if let Some(stream) = payload.free_stream.as_mut() {
+                    stream.destroy()?;
+                }
+                return Ok(());
+            }
+            crate::device_runtime::resource::with_reclamation_admission(
+                block_use_registry(),
+                payload.stream.context().cu_ctx() as usize,
+                MemoryUse::new(payload.ptr, payload.bytes, Access::ReadWrite)?,
+                payload.reclamation.release_proof(),
+                admission,
+                || {
+                    // Only this payload can submit to its private explicit
+                    // stream. Do not reinterpret a caller PTDS handle on the
+                    // cold reaper thread as a capture or completion witness.
+                    let _capture_exclusion = crate::cuda_graph::reserve_capture_exclusion()?;
+                    payload.stream.context().bind_to_thread()?;
+                    if payload.free_state != DriverReleaseState::Submitted {
+                        if payload.free_state == DriverReleaseState::OutcomeUnknown {
+                            return Err(ResourceError::Driver(
+                                "previous allocation free outcome is unknown".into(),
+                            ));
+                        }
+                        if !payload.initialization_recorded {
+                            let stream = payload
+                                .free_stream
+                                .as_ref()
+                                .expect("private stream present");
+                            // SAFETY: replay only the missing fence on the same
+                            // owned explicit prefix; never repeat malloc/poison.
+                            unsafe {
+                                cudarc::driver::result::event::record(
+                                    payload.initialization_event.cu_event(),
+                                    stream.handle,
+                                )?;
+                            }
+                            payload.initialization_recorded = true;
+                        }
+                        payload.initialization_event.synchronize()?;
+                        if let Some(dependencies) = &payload.dependencies {
+                            dependencies.synchronize()?;
+                        }
+                        payload.stream.context().bind_to_thread()?;
+                        let poison = payload.manager.is_some()
+                            && payload.bytes != 0
+                            && poison_free_enabled();
+                        if payload.asynchronous && payload.bytes != 0 {
+                            payload.free_event = Some(payload.stream.context().new_event(None)?);
+                        }
+                        payload.stream.context().bind_to_thread()?;
+                        if poison {
+                            let stream = payload.free_stream.as_ref().expect("free stream present");
+                            // SAFETY: all users completed and no free was attempted.
+                            // A failed poison wait may retry only on this same owned
+                            // explicit stream, where any earlier poison is ordered.
+                            unsafe {
+                                cudarc::driver::sys::cuMemsetD8Async(
+                                    payload.ptr,
+                                    0xDD,
+                                    payload.bytes,
+                                    stream.handle,
+                                )
+                                .result()?;
+                            }
+                            // SAFETY: only this payload's poison/free work uses
+                            // the private stream, in the bound allocation context.
+                            unsafe {
+                                cudarc::driver::result::stream::synchronize(stream.handle)?;
+                            }
+                        }
+                        payload.free_state.submit(|| {
+                            if payload.bytes != 0 {
+                                // Stop advertising a logically live range before the driver
+                                // can reuse its address for another allocation. The armed
+                                // owner still retains storage/budget on an unknown outcome.
+                                if payload.manager.is_some() {
+                                    alloc_guard_remove(payload.ptr);
+                                }
+                                // SAFETY: all actual-use fences completed; free matches the
+                                // chosen allocation mode and the exact allocation context.
+                                unsafe {
+                                    if payload.asynchronous {
+                                        cudarc::driver::result::free_async(
+                                            payload.ptr,
+                                            payload
+                                                .free_stream
+                                                .as_ref()
+                                                .expect("free stream present")
+                                                .handle,
+                                        )?;
+                                    } else {
+                                        cudarc::driver::result::free_sync(payload.ptr)?;
+                                    }
+                                }
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    if payload.asynchronous && payload.bytes != 0 {
+                        let event = payload.free_event.as_ref().expect("free event present");
+                        let stream = payload.free_stream.as_ref().expect("free stream present");
+                        // Failed record retries the same explicit stream; failed wait
+                        // retries the same recorded event. Neither resubmits free.
+                        payload.free_state.confirm_async(
+                            &mut payload.free_event_recorded,
+                            || {
+                                // SAFETY: the allocation context is current and
+                                // both handles remain owned by this payload.
+                                unsafe {
+                                    cudarc::driver::result::event::record(
+                                        event.cu_event(),
+                                        stream.handle,
+                                    )?;
+                                }
+                                Ok(())
+                            },
+                            || event.synchronize().map_err(ResourceError::from),
+                        )?;
+                    }
+                    payload.reclamation.complete()?;
+                    // Physical byte release and stream-handle retirement are
+                    // separate obligations. An unknown destroy cannot keep
+                    // already freed memory charged or trigger a second free.
+                    if let Some(stream) = payload.free_stream.as_mut() {
+                        stream.destroy()?;
+                    }
+                    Ok(())
+                },
+            )
+        })
+    }
+}
+
+impl MemoryStorageOwner for RawDeviceAllocation {
+    fn dependencies(&self) -> crate::device_runtime::ResourceResult<Arc<DeviceAccessDependencies>> {
+        Ok(RawDeviceAllocation::dependencies(self))
+    }
+}
+
+/// Keep the actual payload across a failed or unwinding reclamation attempt.
+/// Only a completed physical release and its accounting may retire the owner.
+pub(crate) fn reclaim_allocation<T>(
+    payload: &mut Option<T>,
+    release: impl FnOnce(&mut T) -> crate::device_runtime::ResourceResult<()>,
+) -> crate::device_runtime::ResourceResult<()> {
+    if let Some(owner) = payload.as_mut() {
+        release(owner)?;
+        *payload = None;
+    }
+    Ok(())
+}
+
+/// Reclaim only the unique physical owner. A shared owner is returned unchanged
+/// to the existing pending queue. After uniqueness wins, the old Weak handles
+/// can no longer mint a new lease; a failed attempt restores the real payload
+/// for the next reaper, including when the driver boundary unwinds.
+pub(crate) fn reclaim_shared_allocation<T>(
+    pending: &mut Option<Arc<T>>,
+    release: impl FnOnce(&mut T) -> crate::device_runtime::ResourceResult<()>,
+) -> crate::device_runtime::ResourceResult<bool> {
+    let Some(shared) = pending.take() else {
+        return Ok(true);
+    };
+    let owner = match Arc::try_unwrap(shared) {
+        Ok(owner) => owner,
+        Err(shared) => {
+            *pending = Some(shared);
+            return Ok(false);
+        }
+    };
+    struct RestoreOwner<'a, T> {
+        pending: &'a mut Option<Arc<T>>,
+        owner: Option<T>,
+    }
+    impl<T> Drop for RestoreOwner<'_, T> {
+        fn drop(&mut self) {
+            if let Some(owner) = self.owner.take() {
+                *self.pending = Some(Arc::new(owner));
+            }
+        }
+    }
+    let mut guard = RestoreOwner {
+        pending,
+        owner: Some(owner),
+    };
+    release(guard.owner.as_mut().expect("physical owner present"))?;
+    drop(guard.owner.take());
+    Ok(true)
+}
+
+/// Restore every unfinished actual owner to its existing pending queue on
+/// return or unwind. The merge moves owners and empties the drained container.
+pub(crate) struct PendingReclamationBatch<'a, T> {
+    queue: &'a std::sync::Mutex<T>,
+    owners: ManuallyDrop<T>,
+    merge: fn(&mut T, &mut T),
+}
+
+impl<'a, T: Default> PendingReclamationBatch<'a, T> {
+    pub(crate) fn take(queue: &'a std::sync::Mutex<T>, merge: fn(&mut T, &mut T)) -> Self {
+        let owners = {
+            let mut pending = queue.lock().expect("pending allocation queue poisoned");
+            ManuallyDrop::new(std::mem::take(&mut *pending))
+        };
+        Self {
+            queue,
+            owners,
+            merge,
+        }
+    }
+}
+
+impl<T> std::ops::Deref for PendingReclamationBatch<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.owners
+    }
+}
+
+impl<T> std::ops::DerefMut for PendingReclamationBatch<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.owners
+    }
+}
+
+impl<T> Drop for PendingReclamationBatch<'_, T> {
+    fn drop(&mut self) {
+        // A failed driver wait may unwind. Return its real owner, and every
+        // unvisited owner, to the same queue before the next reaper runs.
+        // Merge functions move ownership only; a panic keeps any unmerged
+        // remainder armed rather than dropping CUDA owners under this mutex.
+        let mut queue = self.queue.lock().unwrap_or_else(|error| error.into_inner());
+        (self.merge)(&mut *queue, &mut self.owners);
+        drop(queue);
+        // SAFETY: the merge emptied the batch; its container metadata is no
+        // longer protected by the pending queue mutex.
+        unsafe { ManuallyDrop::drop(&mut self.owners) };
+    }
+}
+
+/// Both allocator backends reap the same actual owners. A leased entry is
+/// skipped without reserving a free; failures leave every unfinished slot
+/// owned by the caller's existing pending batch.
+pub(crate) fn reap_raw_allocations(
+    allocations: &mut Vec<Option<Arc<RawDeviceAllocation>>>,
+) -> crate::device_runtime::ResourceResult<()> {
+    for allocation in allocations.iter_mut() {
+        reclaim_shared_allocation(allocation, RawDeviceAllocation::release)?;
+    }
+    allocations.retain(Option::is_some);
+    Ok(())
+}
+
+impl Drop for RawDeviceAllocation {
+    fn drop(&mut self) {
+        if let Some(payload) = self.payload.take() {
+            let mut owner = Self {
+                payload: Some(payload),
+                reclamation_admission: self.reclamation_admission.take(),
+            };
+            // The canonical cold queue retains this callable physical owner
+            // across errors and unwind. Even a final Drop must not turn a
+            // retryable fence failure into an unreachable ManuallyDrop leak.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::cuda_graph::retry_retirement_after_stream_captures(move || {
+                    if let Err(error) = owner.release() {
+                        if let Some(manager) = owner
+                            .payload
+                            .as_ref()
+                            .filter(|p| !p.reclamation.was_released())
+                            .and_then(|p| p.manager.as_ref())
+                        {
+                            manager.record_deallocation_failure(owner.len() as u64);
+                        }
+                        eprintln!(
+                            "CUDA allocation cleanup incomplete; retaining unresolved memory or handle ownership in the cold reaper: {error}"
+                        );
+                        return false;
+                    }
+                    true
+                });
+            }));
+        }
+    }
+}
+
+/// Arm the real allocation before any fallible post-allocation initialization.
+/// Success transfers it to the ordinary storage owner. On error or unwind its
+/// dropping owner reaches cold retirement; the error shares only its ticket.
+fn initialize_allocation<T: Send + Sync + 'static>(
+    mut owner: T,
+    bytes: usize,
+    reclamation: Arc<AllocationReclamation>,
+    initialize: impl FnOnce(&mut T) -> crate::device_runtime::ResourceResult<()>,
+) -> crate::device_runtime::ResourceResult<T> {
+    match initialize(&mut owner) {
+        Ok(()) => Ok(owner),
+        Err(error) if reclamation.was_acquired() => Err(error.retaining(bytes, reclamation)),
+        Err(error) => Err(error),
+    }
+}
+
+// DeviceStorage never exposes the opaque payload through a shared reference.
+// All mutable bookkeeping is locked; its retirement payload is armed against
+// unwind before release. This is also the Arrow custom-allocation contract.
+impl std::panic::RefUnwindSafe for DeviceStorage {}
+
+impl DeviceStorage {
+    fn new(backing: Backing, stream: Arc<CudaStream>, raw_ptr: u64) -> Arc<Self> {
+        let dependencies = match &backing {
+            Backing::Native(allocation) => allocation.dependencies(),
+            Backing::Runtime(allocation) => Arc::clone(&allocation.dependencies),
+            Backing::Foreign { .. } => Arc::new(DeviceAccessDependencies::after_ready(Arc::clone(
+                stream.context(),
+            ))),
+        };
+        let storage = Arc::new(Self {
+            backing: ManuallyDrop::new(backing),
+            stream,
+            raw_ptr,
+            dependencies,
+        });
+        // Native and runtime storage already register the actual raw owner.
+        // A typed wrapper can disappear while its raw lease remains usable;
+        // registering that wrapper would leave a false retirement tombstone.
+        // Foreign storage instead owns the producer's actual deleter token.
+        if matches!(&*storage.backing, Backing::Foreign { .. }) {
+            let owner: Arc<dyn MemoryStorageOwner> = storage.clone();
+            let range = MemoryUse::new(raw_ptr, storage.bytes() as usize, Access::ReadWrite)
+                .expect("CUDA allocation must describe a representable device range");
+            block_use_registry()
+                .lock()
+                .expect("device block-use registry poisoned")
+                .register_storage(
+                    storage.stream.context().cu_ctx() as usize,
+                    range,
+                    Arc::downgrade(&owner),
+                    storage.dependencies.reclamation.release_proof(),
+                );
+        }
+        storage
+    }
+
+    fn manager(&self) -> Option<&Arc<GpuMemoryManager>> {
+        match &*self.backing {
+            Backing::Native(allocation) => {
+                allocation.payload.as_ref().and_then(|p| p.manager.as_ref())
+            }
+            Backing::Runtime(allocation) => Some(&allocation.manager),
+            Backing::Foreign { .. } => None,
+        }
+    }
+
+    fn bytes(&self) -> u64 {
+        match &*self.backing {
+            Backing::Native(allocation) => allocation.len() as u64,
+            Backing::Runtime(allocation) => allocation.bytes,
+            Backing::Foreign { bytes, .. } => *bytes,
+        }
+    }
+}
+
+impl MemoryStorageOwner for DeviceStorage {
+    fn dependencies(&self) -> crate::device_runtime::ResourceResult<Arc<DeviceAccessDependencies>> {
+        Ok(Arc::clone(&self.dependencies))
+    }
+}
+
+impl Drop for DeviceStorage {
+    fn drop(&mut self) {
+        let backing = unsafe { ManuallyDrop::take(&mut self.backing) };
+        let dependencies = Arc::clone(&self.dependencies);
+        let stream = Arc::clone(&self.stream);
+        match backing {
+            Backing::Foreign { .. } => crate::cuda_graph::retire_resources_after_completion(
+                (Some(backing), dependencies, stream),
+                |(_, dependencies, _)| dependencies.synchronize(),
+                |owners| {
+                    // The producer deleter must return before publishing release.
+                    // Its context and dependencies remain armed if it unwinds;
+                    // neither the callback nor its deleter may run a second time.
+                    drop(owners.0.take());
+                    Ok(())
+                },
+                |owners| owners.1.mark_allocation_released(),
+                |_, error| eprintln!("CUDA imported storage retirement incomplete: {error}"),
+            ),
+            backing => crate::cuda_graph::retire_after_stream_captures(move || {
+                // Native Drop transfers the actual raw owner to cold retirement;
+                // runtime Drop transfers it to the existing live/pending backend.
+                // Neither pending nor error keeps a second runtime-owner cycle.
+                drop(backing);
+            }),
+        }
+    }
 }
 
 /// Debug probe: poison legacy allocations with 0xDD at drop so any
@@ -357,17 +1442,953 @@ fn alloc_guard_remove(ptr: u64) {
     guard.lock().unwrap().remove(&ptr);
 }
 
-/// A `CudaSlice` that automatically updates `GpuMemoryManager`
-/// allocation tracking on drop. Inner slice is wrapped in
-/// `ManuallyDrop` so the [`Backing`] enum can choose between
-/// cudarc-side free (legacy) and runtime-side deallocate (migrated)
-/// without producing a double-free.
+/// A typed view retaining its actual device allocation and memory budget.
+///
+/// Native owning slices cannot be extracted through a safe mutable borrow:
+///
+/// ```compile_fail
+/// use xlog_cuda::memory::TrackedCudaSlice;
+/// use cudarc::driver::CudaSlice;
+/// fn native_owner(slice: &mut TrackedCudaSlice<u8>) -> &mut CudaSlice<u8> {
+///     slice
+/// }
+/// ```
+///
+/// Device access must be prepared by XLOG; a passive allocation handle cannot
+/// bypass its access reservation through cudarc's safe pointer API:
+///
+/// ```compile_fail
+/// use xlog_cuda::memory::TrackedCudaSlice;
+/// use cudarc::driver::DevicePtr;
+/// fn native_read(slice: &TrackedCudaSlice<u8>) {
+///     fn accepts_native<T: DevicePtr<u8>>(_: &T) {}
+///     accepts_native(slice);
+/// }
+/// ```
 pub struct TrackedCudaSlice<T: cudarc::driver::DeviceRepr> {
-    bytes: u64,
-    manager: Arc<GpuMemoryManager>,
-    inner: ManuallyDrop<CudaSlice<T>>,
-    raw_ptr: cudarc::driver::sys::CUdeviceptr,
-    backing: Backing,
+    storage: Arc<DeviceStorage>,
+    len: usize,
+    element: std::marker::PhantomData<T>,
+}
+
+/// A checked typed device span with a strong allocation owner. Subviews and
+/// reinterpretations preserve this same owner; none expose cudarc pointer traits.
+pub struct DeviceMemoryView<T> {
+    ptr: u64,
+    len: usize,
+    storage: Arc<DeviceStorage>,
+    element: std::marker::PhantomData<T>,
+}
+
+/// Physical provenance of a view of an allocation owned by XLOG.
+///
+/// Retains the actual allocation, not an address-derived identity. This is
+/// metadata only: it grants no device access, content validity, mutation
+/// exclusion, publication lease, or external tensor version-counter identity.
+#[derive(Clone)]
+pub struct DeviceAllocationProvenance {
+    allocation: Arc<RawDeviceAllocation>,
+    byte_offset: u64,
+    view_bytes: u64,
+}
+
+impl DeviceAllocationProvenance {
+    /// Compare the retained physical owners, independently of view geometry.
+    pub fn same_allocation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.allocation, &other.allocation)
+    }
+
+    /// Complete byte extent of the actual allocation, including padding.
+    pub fn allocation_bytes(&self) -> u64 {
+        self.allocation.len() as u64
+    }
+
+    pub fn byte_offset(&self) -> u64 {
+        self.byte_offset
+    }
+
+    pub fn view_bytes(&self) -> u64 {
+        self.view_bytes
+    }
+}
+
+impl<T> Clone for DeviceMemoryView<T> {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr,
+            len: self.len,
+            storage: Arc::clone(&self.storage),
+            element: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T> DeviceMemoryView<T> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    pub fn stream(&self) -> &Arc<CudaStream> {
+        &self.storage.stream
+    }
+    pub fn device_ptr(&self) -> &u64 {
+        &self.ptr
+    }
+
+    /// Preserve this view's actual native allocation origin. A foreign owner
+    /// supplies only its imported span, not proof of a complete allocation;
+    /// never manufacture a native allocation identity for that case.
+    pub fn allocation_provenance(&self) -> Option<DeviceAllocationProvenance> {
+        let allocation = match &*self.storage.backing {
+            Backing::Native(allocation) => allocation,
+            Backing::Runtime(block) => block.allocation.as_ref()?,
+            Backing::Foreign { .. } => return None,
+        };
+        let byte_offset = self.ptr.checked_sub(allocation.ptr())?;
+        let view_bytes = u64::try_from(self.len.checked_mul(std::mem::size_of::<T>())?).ok()?;
+        let allocation_bytes = u64::try_from(allocation.len()).ok()?;
+        if byte_offset.checked_add(view_bytes)? > allocation_bytes {
+            return None;
+        }
+        Some(DeviceAllocationProvenance {
+            allocation: Arc::clone(allocation),
+            byte_offset,
+            view_bytes,
+        })
+    }
+
+    /// Complete byte view of the same actual native allocation. Callers still
+    /// have to provide the access grant and producer/consumer ordering; physical
+    /// ownership alone does not authorize use of these bytes.
+    pub(crate) fn allocation_view(&self) -> Option<DeviceMemoryView<u8>> {
+        let provenance = self.allocation_provenance()?;
+        Some(DeviceMemoryView {
+            ptr: provenance.allocation.ptr(),
+            len: provenance.allocation.len(),
+            storage: Arc::clone(&self.storage),
+            element: std::marker::PhantomData,
+        })
+    }
+
+    pub fn try_slice(&self, range: impl std::ops::RangeBounds<usize>) -> Option<Self> {
+        use std::ops::Bound;
+        let start = match range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n.checked_add(1)?,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&n) => n.checked_add(1)?,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => self.len,
+        };
+        if start > end || end > self.len {
+            return None;
+        }
+        let offset = start.checked_mul(std::mem::size_of::<T>())?;
+        Some(Self {
+            ptr: self.ptr.checked_add(u64::try_from(offset).ok()?)?,
+            len: end - start,
+            storage: Arc::clone(&self.storage),
+            element: std::marker::PhantomData,
+        })
+    }
+
+    pub fn slice(&self, range: impl std::ops::RangeBounds<usize>) -> Self {
+        self.try_slice(range)
+            .expect("device slice range is out of bounds")
+    }
+
+    pub fn slice_mut(&mut self, range: impl std::ops::RangeBounds<usize>) -> Self {
+        self.slice(range)
+    }
+
+    /// Reinterpret the span without changing its allocation owner.
+    ///
+    /// # Safety
+    /// The initialized device bytes must have the representation required by U
+    /// before any read through the returned view. Alignment and size are checked.
+    pub unsafe fn cast<U>(&self) -> Option<DeviceMemoryView<U>> {
+        let bytes = self.len.checked_mul(std::mem::size_of::<T>())?;
+        let size = std::mem::size_of::<U>();
+        if size == 0
+            || !bytes.is_multiple_of(size)
+            || !self.ptr.is_multiple_of(std::mem::align_of::<U>() as u64)
+        {
+            return None;
+        }
+        Some(DeviceMemoryView {
+            ptr: self.ptr,
+            len: bytes / size,
+            storage: Arc::clone(&self.storage),
+            element: std::marker::PhantomData,
+        })
+    }
+}
+
+impl<T: DeviceRepr + 'static> DeviceMemoryView<T> {
+    /// Allocate through the same native owner used by runtime resources.
+    pub(crate) fn allocate(
+        stream: Arc<CudaStream>,
+        len: usize,
+    ) -> crate::device_runtime::ResourceResult<Self> {
+        let bytes = len
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| ResourceError::Driver("allocation size overflow".into()))?;
+        let allocation =
+            RawDeviceAllocation::allocate(Arc::clone(&stream), bytes, None, Arc::default())?;
+        let ptr = allocation.ptr();
+        Ok(Self {
+            ptr,
+            len,
+            storage: DeviceStorage::new(Backing::Native(allocation), stream, ptr),
+            element: std::marker::PhantomData,
+        })
+    }
+}
+
+impl<T> DeviceSlice<T> for DeviceMemoryView<T> {
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn stream(&self) -> &Arc<CudaStream> {
+        &self.storage.stream
+    }
+}
+
+/// Safe XLOG device operations accept owner-bearing spans, not native pointer
+/// adapters. The returned span must retain the actual allocation.
+pub trait DeviceRead<T>: private_access::Sealed {
+    fn device_view(&self) -> DeviceMemoryView<T>;
+}
+
+/// A span accepted as a destination by safe XLOG operations. Conflicting aliases
+/// are excluded by operation admission, including aliases of a different type.
+pub trait DeviceWrite<T>: DeviceRead<T> {}
+
+mod private_access {
+    pub trait Sealed {}
+}
+
+impl<T: DeviceRepr> private_access::Sealed for TrackedCudaSlice<T> {}
+impl<T: DeviceRepr> DeviceRead<T> for TrackedCudaSlice<T> {
+    fn device_view(&self) -> DeviceMemoryView<T> {
+        self.view()
+    }
+}
+impl<T: DeviceRepr> DeviceWrite<T> for TrackedCudaSlice<T> {}
+impl<T> private_access::Sealed for DeviceMemoryView<T> {}
+impl<T> DeviceRead<T> for DeviceMemoryView<T> {
+    fn device_view(&self) -> DeviceMemoryView<T> {
+        self.clone()
+    }
+}
+impl<T> DeviceWrite<T> for DeviceMemoryView<T> {}
+
+impl<T: DeviceRepr> AsKernelParam for &DeviceMemoryView<T> {
+    fn as_kernel_param(&self) -> *mut std::ffi::c_void {
+        (&self.ptr as *const u64).cast_mut().cast()
+    }
+}
+
+impl<T: DeviceRepr> AsKernelParam for &mut DeviceMemoryView<T> {
+    fn as_kernel_param(&self) -> *mut std::ffi::c_void {
+        (&self.ptr as *const u64).cast_mut().cast()
+    }
+}
+
+impl<'a, T: DeviceRepr> IntoKernelParamStorage for &'a DeviceMemoryView<T> {
+    type Storage = DeviceParamStorage<'a>;
+
+    fn into_kernel_param_storage(self) -> Self::Storage {
+        DeviceParamStorage::unsynced(self.ptr)
+    }
+}
+
+impl<'a, T: DeviceRepr> IntoKernelParamStorage for &'a mut DeviceMemoryView<T> {
+    type Storage = DeviceParamStorage<'a>;
+
+    fn into_kernel_param_storage(self) -> Self::Storage {
+        DeviceParamStorage::unsynced(self.ptr)
+    }
+}
+
+/// One checked span and its real backing owner. Obtaining this manifest is
+/// passive; only admission below grants access on the operation's stream.
+#[derive(Clone)]
+pub(crate) struct DeviceMemoryAccess {
+    storage: Arc<DeviceStorage>,
+    range: MemoryUse,
+}
+
+impl DeviceMemoryAccess {
+    pub(crate) fn retained_owner(&self) -> RetainedStorageUse {
+        RetainedStorageUse {
+            owner: self.storage.clone(),
+            access: self.range.access(),
+        }
+    }
+
+    pub(crate) fn context(&self) -> usize {
+        self.storage.stream.context().cu_ctx() as usize
+    }
+}
+
+impl<T> DeviceMemoryView<T> {
+    pub(crate) fn access(
+        &self,
+        access: Access,
+    ) -> crate::device_runtime::ResourceResult<DeviceMemoryAccess> {
+        let bytes = self
+            .len
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| ResourceError::StreamMisuse("device view byte size overflow".into()))?;
+        Ok(DeviceMemoryAccess {
+            storage: Arc::clone(&self.storage),
+            range: MemoryUse::new(self.ptr, bytes, access)?,
+        })
+    }
+}
+
+/// Passive storage ownership. A graph retains this immutable manifest, never
+/// an executing stream pin, access reservation, or prepared dependency state.
+#[derive(Default)]
+pub(crate) struct MemoryAccessManifest {
+    accesses: Vec<DeviceMemoryAccess>,
+    ranges: Vec<(usize, MemoryUse)>,
+    retained: Vec<RetainedStorageUse>,
+    runtimes: Vec<Arc<XlogDeviceRuntime>>,
+    runtime_dependencies: Vec<(Arc<DeviceAccessDependencies>, Access)>,
+    runtime_allocations: Vec<Arc<RawDeviceAllocation>>,
+}
+
+impl MemoryAccessManifest {
+    pub(crate) fn combine(manifests: &[Arc<Self>]) -> Arc<Self> {
+        let mut combined = Self::default();
+        for manifest in manifests {
+            combined.accesses.extend(manifest.accesses.iter().cloned());
+            combined.ranges.extend_from_slice(&manifest.ranges);
+            combined
+                .retained
+                .extend(manifest.retained.iter().map(|retained| RetainedStorageUse {
+                    owner: Arc::clone(&retained.owner),
+                    access: retained.access,
+                }));
+            combined.runtimes.extend(manifest.runtimes.iter().cloned());
+            combined
+                .runtime_dependencies
+                .extend(manifest.runtime_dependencies.iter().cloned());
+            combined
+                .runtime_allocations
+                .extend(manifest.runtime_allocations.iter().cloned());
+        }
+        Arc::new(combined)
+    }
+
+    pub(crate) fn covers(&self, ranges: &[(usize, MemoryUse)]) -> bool {
+        ranges.iter().all(|(context, range)| {
+            self.ranges
+                .iter()
+                .any(|(owned_context, owned)| context == owned_context && owned.covers(*range))
+        })
+    }
+
+    pub(crate) fn covered_by(&self, other: &Self) -> bool {
+        other.covers(&self.ranges)
+    }
+}
+
+/// Positive completion of one admitted, synchronous enqueue callback and all
+/// its nested submissions. This proof is never reused by another admission.
+/// Only a successful wait on its exact execution can publish completion.
+#[derive(Debug)]
+pub(crate) struct OperationCompletion {
+    execution_id: u64,
+    complete: std::sync::atomic::AtomicBool,
+}
+
+impl OperationCompletion {
+    pub(crate) fn new(execution_id: u64) -> Self {
+        Self {
+            execution_id,
+            complete: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn validate_submission(
+        &self,
+        execution_id: u64,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        if execution_id != self.execution_id || self.is_complete() {
+            return Err(ResourceError::StreamMisuse(
+                "memory operation requires its original uncompleted stream execution".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn synchronize_with(
+        &self,
+        execution_id: u64,
+        synchronize: impl FnOnce() -> crate::device_runtime::ResourceResult<()>,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        if execution_id != self.execution_id {
+            return Err(ResourceError::StreamMisuse(
+                "memory operation cannot synchronize another stream execution".into(),
+            ));
+        }
+        synchronize()?;
+        self.complete.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete.load(Ordering::Acquire)
+    }
+
+    /// A cold barrier on the owning context completes this closed admission,
+    /// including work on an originating thread that has since exited. This is
+    /// not a stream-identity substitution and cannot authorize another enqueue.
+    fn synchronize_retired_with(
+        &self,
+        synchronize_context: impl FnOnce() -> crate::device_runtime::ResourceResult<()>,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        if !self.is_complete() {
+            synchronize_context()?;
+            self.complete.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct MemoryOperationOwner {
+    stream: Arc<CudaStream>,
+    manifest: Arc<MemoryAccessManifest>,
+    retained: Vec<RetainedStorageUse>,
+    captured: std::sync::atomic::AtomicBool,
+    dependencies: std::sync::OnceLock<Vec<(Arc<DeviceAccessDependencies>, Access)>>,
+    completion: Arc<OperationCompletion>,
+}
+
+impl crate::launch::RecorderCleanup<MemoryUseGroup> for MemoryOperationOwner {
+    fn synchronize_retired(&self) -> crate::device_runtime::ResourceResult<()> {
+        if self.captured.load(Ordering::Acquire) {
+            // Captured nodes retain their own storage; this admission submitted
+            // no live work and must not synchronize or end that capture.
+            return Ok(());
+        }
+        let _ordinary = crate::cuda_graph::reserve_capture_exclusion()?;
+        self.completion.synchronize_retired_with(|| {
+            // Failed cleanup may reach this queue after the original PTDS host
+            // thread has exited and without a successfully recorded event. Only
+            // a barrier on the retained context can cover that missing fence.
+            // This potentially blocking wait belongs exclusively to cold error
+            // retirement; normal enqueue/commit adds no context-wide wait.
+            self.stream.context().bind_to_thread()?;
+            self.stream.context().synchronize().map_err(|error| {
+                ResourceError::Driver(format!(
+                    "retired memory operation context wait failed: {error}"
+                ))
+            })
+        })
+    }
+
+    fn cancel_retired(&self, group: MemoryUseGroup) -> crate::device_runtime::ResourceResult<()> {
+        self.cancel(&[group])
+    }
+}
+
+impl MemoryOperationOwner {
+    pub(crate) fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
+
+    pub(crate) fn manifest(&self) -> &Arc<MemoryAccessManifest> {
+        &self.manifest
+    }
+
+    pub(crate) fn completion(&self) -> &Arc<OperationCompletion> {
+        &self.completion
+    }
+
+    pub(crate) fn bind_submission(
+        self: &Arc<Self>,
+        pin: &crate::cuda_graph::StreamSubmissionPin<'_>,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        // Check before dependency preparation, including PTDS migration between
+        // admission and enqueue. Cleanup must never certify a different thread.
+        self.completion
+            .validate_submission(crate::cuda_graph::stream_execution_id(&self.stream)?)?;
+        // Retain actual storage before the first node can reach the driver.
+        // No persistent owner retains the submission pin or its capture target.
+        if pin.capture_memory(&self.manifest) {
+            self.captured.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn synchronize(&self) -> crate::device_runtime::ResourceResult<()> {
+        if self.captured.load(Ordering::Acquire) {
+            // Capture queued graph nodes, not live work. Its actual owners were
+            // transferred before enqueue; only the capture owner may end it.
+            return Ok(());
+        }
+        self.completion.synchronize_with(
+            crate::cuda_graph::stream_execution_id(&self.stream)?,
+            || {
+                self.stream.synchronize().map_err(|error| {
+                    ResourceError::Driver(format!(
+                        "device memory operation synchronization failed: {error}"
+                    ))
+                })
+            },
+        )
+    }
+
+    pub(crate) fn cancel(
+        &self,
+        groups: &[MemoryUseGroup],
+    ) -> crate::device_runtime::ResourceResult<()> {
+        let [group] = groups else {
+            return Err(ResourceError::StreamMisuse(
+                "device memory operation must own one exact reservation".into(),
+            ));
+        };
+        block_use_registry()
+            .lock()
+            .expect("device block-use registry poisoned")
+            .release_memory_uses(*group)
+    }
+
+    pub(crate) fn prepare(&self) -> crate::device_runtime::ResourceResult<()> {
+        if self.captured.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut dependencies = self.manifest.runtime_dependencies.clone();
+        for retained in &self.retained {
+            let dependency = retained.owner.dependencies()?;
+            if let Some((_, access)) = dependencies
+                .iter_mut()
+                .find(|(existing, _)| Arc::ptr_eq(existing, &dependency))
+            {
+                *access = crate::launch::combine_access(*access, retained.access);
+            } else {
+                dependencies.push((dependency, retained.access));
+            }
+        }
+        self.dependencies.set(dependencies).map_err(|_| {
+            ResourceError::StreamMisuse(
+                "device memory dependencies may be prepared only once".into(),
+            )
+        })?;
+        for (dependency, access) in self.dependencies.get().expect("dependencies installed") {
+            dependency.prepare(&self.stream, *access)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(
+        &self,
+        group: MemoryUseGroup,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        if self.captured.load(Ordering::Acquire) {
+            return self.cancel(&[group]);
+        }
+        // Keep the reservation until every overlapping allocation/import owner
+        // has the completion dependency. A partial publication failure is
+        // handled by the same synchronize/cancel/quarantine path as launches.
+        let dependencies = self.dependencies.get().ok_or_else(|| {
+            ResourceError::StreamMisuse(
+                "device memory completion requires prepared dependencies".into(),
+            )
+        })?;
+        for (dependency, access) in dependencies {
+            dependency.record_completion(Arc::clone(&self.stream), *access)?;
+        }
+        self.cancel(&[group])
+    }
+}
+
+/// Native pointers are available only while this private proof is borrowed by
+/// the enqueue closure. It cannot be constructed from a raw address or kept
+/// after the enclosing operation has published or cancelled its reservation.
+pub(crate) struct MemoryEnqueue<'a> {
+    owner: &'a Arc<MemoryOperationOwner>,
+    submission: &'a crate::cuda_graph::StreamSubmissionPin<'a>,
+}
+
+impl MemoryEnqueue<'_> {
+    pub(crate) fn cuda_enqueue(
+        &self,
+    ) -> crate::device_runtime::ResourceResult<crate::launch::CudaEnqueue<'_>> {
+        crate::launch::CudaEnqueue::from_admission(self.owner, self.submission)
+    }
+
+    fn validate<T>(
+        &self,
+        view: &DeviceMemoryView<T>,
+        access: Access,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        let range = view.access(access)?.range;
+        if !self.owner.manifest.accesses.iter().any(|admitted| {
+            Arc::ptr_eq(&admitted.storage, &view.storage) && admitted.range.covers(range)
+        }) {
+            return Err(ResourceError::StreamMisuse(
+                "native device view is not covered by the admitted access manifest".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read<'a, T>(
+        &'a self,
+        view: &'a DeviceMemoryView<T>,
+    ) -> crate::device_runtime::ResourceResult<PreparedDeviceRead<'a, T>> {
+        self.validate(view, Access::Read)?;
+        self.validate_native_context(view)?;
+        Ok(PreparedDeviceRead { view, proof: self })
+    }
+
+    pub(crate) fn write<'a, T>(
+        &'a self,
+        view: &'a DeviceMemoryView<T>,
+    ) -> crate::device_runtime::ResourceResult<PreparedDeviceWrite<'a, T>> {
+        self.validate(view, Access::Write)?;
+        self.validate_native_context(view)?;
+        Ok(PreparedDeviceWrite { view, proof: self })
+    }
+
+    fn validate_native_context<T>(
+        &self,
+        view: &DeviceMemoryView<T>,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        if view.stream().context().cu_ctx() != self.owner.stream.context().cu_ctx() {
+            return Err(ResourceError::StreamMisuse(
+                "native device access requires the allocation context".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn copy<T>(
+        &self,
+        source: &DeviceMemoryView<T>,
+        destination: &DeviceMemoryView<T>,
+    ) -> crate::device_runtime::ResourceResult<()> {
+        self.validate(source, Access::Read)?;
+        self.validate(destination, Access::Write)?;
+        self.validate_native_context(destination)?;
+        let source_context = source.stream().context().cu_ctx();
+        let destination_context = destination.stream().context().cu_ctx();
+        source.access(Access::Read)?.range.validate_copy_to(
+            source_context as usize,
+            destination.access(Access::Write)?.range,
+            destination_context as usize,
+        )?;
+        if source_context == destination_context {
+            self.owner
+                .stream
+                .memcpy_dtod(&self.read(source)?, &mut self.write(destination)?)?;
+        } else {
+            self.owner.stream.context().bind_to_thread()?;
+            // SAFETY: the one admitted operation retains both exact allocation
+            // contexts and byte ranges, with a source read and destination write.
+            // All prior dependencies were queued before this proof was borrowed.
+            // The operation's stream belongs to the destination context.
+            unsafe {
+                cudarc::driver::result::memcpy_peer_async(
+                    destination_context,
+                    destination.ptr,
+                    source_context,
+                    source.ptr,
+                    source
+                        .len
+                        .checked_mul(std::mem::size_of::<T>())
+                        .ok_or_else(|| {
+                            ResourceError::StreamMisuse("device copy byte size overflow".into())
+                        })?,
+                    self.owner.stream.cu_stream(),
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct PreparedDeviceRead<'a, T> {
+    view: &'a DeviceMemoryView<T>,
+    proof: &'a MemoryEnqueue<'a>,
+}
+
+pub(crate) struct PreparedDeviceWrite<'a, T> {
+    view: &'a DeviceMemoryView<T>,
+    proof: &'a MemoryEnqueue<'a>,
+}
+
+impl<T> DeviceSlice<T> for PreparedDeviceRead<'_, T> {
+    fn len(&self) -> usize {
+        self.view.len
+    }
+    fn stream(&self) -> &Arc<CudaStream> {
+        self.view.stream()
+    }
+}
+
+impl<T> DevicePtr<T> for PreparedDeviceRead<'_, T> {
+    fn device_ptr<'a>(&'a self, stream: &'a CudaStream) -> (u64, SyncOnDrop<'a>) {
+        assert!(
+            std::ptr::eq(stream, self.proof.owner.stream.as_ref()),
+            "prepared view used on a different stream"
+        );
+        (self.view.ptr, SyncOnDrop::Sync(None))
+    }
+}
+
+impl<T> DeviceSlice<T> for PreparedDeviceWrite<'_, T> {
+    fn len(&self) -> usize {
+        self.view.len
+    }
+    fn stream(&self) -> &Arc<CudaStream> {
+        self.view.stream()
+    }
+}
+
+impl<T> DevicePtr<T> for PreparedDeviceWrite<'_, T> {
+    fn device_ptr<'a>(&'a self, stream: &'a CudaStream) -> (u64, SyncOnDrop<'a>) {
+        assert!(
+            std::ptr::eq(stream, self.proof.owner.stream.as_ref()),
+            "prepared view used on a different stream"
+        );
+        (self.view.ptr, SyncOnDrop::Sync(None))
+    }
+}
+
+impl<T> DevicePtrMut<T> for PreparedDeviceWrite<'_, T> {
+    fn device_ptr_mut<'a>(&'a mut self, stream: &'a CudaStream) -> (u64, SyncOnDrop<'a>) {
+        assert!(
+            std::ptr::eq(stream, self.proof.owner.stream.as_ref()),
+            "prepared view used on a different stream"
+        );
+        (self.view.ptr, SyncOnDrop::Sync(None))
+    }
+}
+
+struct MemoryOperation {
+    transaction: RecorderTransaction<MemoryOperationOwner, MemoryUseGroup>,
+    // Host admission is not part of the storage quarantine on uncertain free.
+    submission: crate::cuda_graph::StreamSubmissionPhase,
+}
+
+impl Drop for MemoryOperation {
+    fn drop(&mut self) {
+        if self.transaction.is_prepared() {
+            // abort_with retains the whole owner capsule if synchronization or
+            // cancellation fails, including on unwinding from the enqueue.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.transaction.abort_with(
+                    MemoryOperationOwner::synchronize,
+                    MemoryOperationOwner::cancel,
+                )
+            }));
+        }
+    }
+}
+
+/// One admission path for copies and recorded launches. No driver wait or
+/// publication runs under the registry mutex; source and alias owners are
+/// transferred to the armed transaction before that mutex is released.
+pub(crate) fn admit_memory_access(
+    stream: Arc<CudaStream>,
+    accesses: Vec<DeviceMemoryAccess>,
+    runtime: Option<Arc<XlogDeviceRuntime>>,
+    runtime_uses: &[crate::device_runtime::BlockUse],
+) -> crate::device_runtime::ResourceResult<RecorderTransaction<MemoryOperationOwner, MemoryUseGroup>>
+{
+    let mut ranges_by_context = std::collections::BTreeMap::<usize, Vec<MemoryUse>>::new();
+    for access in &accesses {
+        ranges_by_context
+            .entry(access.context())
+            .or_default()
+            .push(access.range);
+    }
+    if let Some(runtime) = &runtime {
+        let context = runtime.device().inner().stream().context().cu_ctx() as usize;
+        for use_ in runtime_uses {
+            ranges_by_context
+                .entry(context)
+                .or_default()
+                .push(MemoryUse::new(use_.block.ptr, use_.bytes, use_.access)?);
+        }
+    } else if !runtime_uses.is_empty() {
+        return Err(ResourceError::StreamMisuse(
+            "recorded blocks require their runtime owner".into(),
+        ));
+    }
+    let ranges = ranges_by_context
+        .iter()
+        .flat_map(|(context, ranges)| ranges.iter().map(|range| (*context, *range)))
+        .collect::<Vec<_>>();
+    let mut manifest = Arc::new(MemoryAccessManifest {
+        // Even an empty span retains its actual owner; weak overlap discovery
+        // is an alias rendezvous, not proof that the source is owned.
+        retained: accesses
+            .iter()
+            .map(DeviceMemoryAccess::retained_owner)
+            .collect(),
+        accesses,
+        ranges,
+        runtimes: runtime.iter().cloned().collect(),
+        runtime_dependencies: Vec::new(),
+        runtime_allocations: Vec::new(),
+    });
+    {
+        let registry = block_use_registry()
+            .lock()
+            .expect("device block-use registry poisoned");
+        let owned = Arc::get_mut(&mut manifest).expect("new memory manifest is unique");
+        if let Some(runtime) = &runtime {
+            for use_ in runtime_uses {
+                let dependencies = runtime
+                    .allocation_dependencies(use_.block, use_.bytes)?
+                    .ok_or_else(|| {
+                        ResourceError::StreamMisuse(
+                            "recorded block backend does not expose allocation dependencies".into(),
+                        )
+                    })?;
+                owned
+                    .runtime_allocations
+                    .push(dependencies.retain_allocation()?);
+                owned.runtime_dependencies.push((dependencies, use_.access));
+            }
+        }
+        for (context, ranges) in &ranges_by_context {
+            registry.retain_storage_uses(*context, ranges, &mut owned.retained)?;
+        }
+    }
+    admit_memory_manifest(stream, manifest)
+}
+
+pub(crate) fn admit_memory_manifest(
+    stream: Arc<CudaStream>,
+    manifest: Arc<MemoryAccessManifest>,
+) -> crate::device_runtime::ResourceResult<RecorderTransaction<MemoryOperationOwner, MemoryUseGroup>>
+{
+    let completion = Arc::new(OperationCompletion::new(
+        crate::cuda_graph::stream_execution_id(&stream)?,
+    ));
+    let mut owner = Arc::new(MemoryOperationOwner {
+        stream,
+        retained: manifest
+            .retained
+            .iter()
+            .map(|retained| RetainedStorageUse {
+                owner: Arc::clone(&retained.owner),
+                access: retained.access,
+            })
+            .collect(),
+        manifest,
+        captured: std::sync::atomic::AtomicBool::new(false),
+        dependencies: std::sync::OnceLock::new(),
+        completion,
+    });
+    let transaction = {
+        let mut registry = block_use_registry()
+            .lock()
+            .expect("device block-use registry poisoned");
+        let owned = Arc::get_mut(&mut owner).expect("new memory operation owner is unique");
+        // New external aliases can arrive after capture. Discover their current
+        // dependency owners again under the same atomic admission lock.
+        for (context, range) in &owned.manifest.ranges {
+            registry.retain_storage_uses(*context, &[*range], &mut owned.retained)?;
+        }
+        let source_proofs = owned
+            .manifest
+            .accesses
+            .iter()
+            .map(|access| access.storage.dependencies.reclamation.release_proof())
+            .chain(
+                owned
+                    .manifest
+                    .runtime_dependencies
+                    .iter()
+                    .map(|(deps, _)| deps.reclamation.release_proof()),
+            )
+            .collect::<Vec<_>>();
+        let group = registry.reserve_owned_memory_uses(&owned.manifest.ranges, &source_proofs)?;
+        RecorderTransaction::from_admitted(Arc::clone(&owner), Box::new([group]))
+    };
+    Ok(transaction)
+}
+
+pub(crate) fn with_memory_access<R>(
+    stream: Arc<CudaStream>,
+    accesses: Vec<DeviceMemoryAccess>,
+    operation: impl FnOnce(&MemoryEnqueue<'_>) -> crate::device_runtime::ResourceResult<R>,
+) -> crate::device_runtime::ResourceResult<R> {
+    let submission = crate::cuda_graph::acquire_stream_submission_phase(&stream)?;
+    let guard = MemoryOperation {
+        transaction: admit_memory_access(stream, accesses, None, &[])?,
+        submission,
+    };
+    with_memory_operation(guard, |owner, submission| {
+        operation(&MemoryEnqueue { owner, submission })
+    })
+}
+
+pub(crate) fn with_memory_manifest<T>(
+    stream: Arc<CudaStream>,
+    manifest: Arc<MemoryAccessManifest>,
+    operation: impl FnOnce(&crate::launch::CudaEnqueue<'_>) -> crate::device_runtime::ResourceResult<T>,
+) -> crate::device_runtime::ResourceResult<T> {
+    let submission = crate::cuda_graph::acquire_stream_submission_phase(&stream)?;
+    let guard = MemoryOperation {
+        transaction: admit_memory_manifest(stream, manifest)?,
+        submission,
+    };
+    with_memory_operation(guard, |owner, pin| {
+        operation(&crate::launch::CudaEnqueue::from_admission(owner, pin)?)
+    })
+}
+
+fn with_memory_operation<T>(
+    mut guard: MemoryOperation,
+    operation: impl FnOnce(
+        &Arc<MemoryOperationOwner>,
+        &crate::cuda_graph::StreamSubmissionPin<'_>,
+    ) -> crate::device_runtime::ResourceResult<T>,
+) -> crate::device_runtime::ResourceResult<T> {
+    let owner = Arc::clone(
+        guard
+            .transaction
+            .prepared_owner()
+            .expect("memory operation admitted"),
+    );
+    let mut result = None;
+    guard
+        .transaction
+        .enqueue_operation_with(
+            || {
+                let pin = guard.submission.pin()?;
+                owner.bind_submission(&pin)?;
+                Ok(pin)
+            },
+            MemoryOperationOwner::prepare,
+            |pin| {
+                result = Some(pin.with_serialized_submission(|| operation(&owner, pin))?);
+                Ok::<_, ResourceError>(())
+            },
+            MemoryOperationOwner::synchronize,
+            MemoryOperationOwner::cancel,
+        )
+        .map_err(|error| ResourceError::Driver(error.to_string()))?;
+    guard.transaction.commit_with(
+        MemoryOperationOwner::finish,
+        MemoryOperationOwner::synchronize,
+        MemoryOperationOwner::cancel,
+    )?;
+    Ok(result.expect("successful memory operation produced its result"))
 }
 
 #[derive(Clone)]
@@ -381,62 +2402,70 @@ pub(crate) struct RuntimeAllocationIdentity {
     pub(crate) context: Arc<cudarc::driver::CudaContext>,
 }
 
-impl<T: cudarc::driver::DeviceRepr> Deref for TrackedCudaSlice<T> {
-    type Target = CudaSlice<T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<T: cudarc::driver::DeviceRepr> DerefMut for TrackedCudaSlice<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
 impl<T: cudarc::driver::DeviceRepr> DeviceSlice<T> for TrackedCudaSlice<T> {
     fn len(&self) -> usize {
-        self.inner.len()
+        self.len
     }
 
     fn stream(&self) -> &Arc<CudaStream> {
-        self.inner.stream()
-    }
-}
-
-impl<T: cudarc::driver::DeviceRepr> DevicePtr<T> for TrackedCudaSlice<T> {
-    fn device_ptr<'a>(
-        &'a self,
-        stream: &'a CudaStream,
-    ) -> (cudarc::driver::sys::CUdeviceptr, SyncOnDrop<'a>) {
-        // Explicit `&*` deref through ManuallyDrop — the trait
-        // method is not auto-resolved through the wrapper.
-        DevicePtr::device_ptr(&*self.inner, stream)
-    }
-}
-
-impl<T: cudarc::driver::DeviceRepr> DevicePtrMut<T> for TrackedCudaSlice<T> {
-    fn device_ptr_mut<'a>(
-        &'a mut self,
-        stream: &'a CudaStream,
-    ) -> (cudarc::driver::sys::CUdeviceptr, SyncOnDrop<'a>) {
-        DevicePtrMut::device_ptr_mut(&mut *self.inner, stream)
+        &self.storage.stream
     }
 }
 
 impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn stream(&self) -> &Arc<CudaStream> {
+        &self.storage.stream
+    }
+
     pub fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
-        &self.raw_ptr
+        &self.storage.raw_ptr
     }
 
     pub fn device_ptr_value(&self) -> cudarc::driver::sys::CUdeviceptr {
-        self.raw_ptr
+        self.storage.raw_ptr
+    }
+
+    /// A passive view retaining this allocation; obtaining it performs no device access.
+    pub fn view(&self) -> DeviceMemoryView<T> {
+        DeviceMemoryView {
+            ptr: self.storage.raw_ptr,
+            len: self.len,
+            storage: Arc::clone(&self.storage),
+            element: std::marker::PhantomData,
+        }
+    }
+
+    pub fn try_slice(
+        &self,
+        range: impl std::ops::RangeBounds<usize>,
+    ) -> Option<DeviceMemoryView<T>> {
+        self.view().try_slice(range)
+    }
+
+    pub fn slice(&self, range: impl std::ops::RangeBounds<usize>) -> DeviceMemoryView<T> {
+        self.try_slice(range)
+            .expect("device slice range is out of bounds")
+    }
+
+    pub fn slice_mut(&mut self, range: impl std::ops::RangeBounds<usize>) -> DeviceMemoryView<T> {
+        self.slice(range)
     }
 
     /// Stable address of the memory manager that owns this allocation.
     pub fn memory_manager_ptr_value(&self) -> usize {
-        Arc::as_ptr(&self.manager) as usize
+        Arc::as_ptr(
+            self.storage
+                .manager()
+                .expect("tracked allocation has a memory manager"),
+        ) as usize
     }
 
     pub(crate) fn runtime_allocation_identity(&self) -> Result<Option<RuntimeAllocationIdentity>> {
@@ -458,24 +2487,12 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
         }))
     }
 
-    /// Borrow the underlying [`DeviceBlock`] for runtime-backed
-    /// allocations. Returns `None` for legacy cudarc-backed
-    /// slices ([`Backing::Cudarc`]) — those are not tracked by
-    /// the v0.6 device runtime and therefore have no
-    /// runtime-side block to record uses against.
-    ///
-    /// Callers (notably [`crate::launch::LaunchRecorder`]) use
-    /// this to attach cross-stream uses via
-    /// [`crate::device_runtime::XlogDeviceRuntime::record_block_use`].
-    /// A `None` return signals that the slice is on the legacy
-    /// path and the recorder cannot track its lifetime — callers
-    /// must either route the allocation through
-    /// [`GpuMemoryManager::with_runtime`] or accept that no
-    /// cross-stream safety applies to this buffer.
+    /// Runtime block identity, when present. Device-native and foreign owners
+    /// have no runtime block ID but still participate in shared range admission.
     pub fn runtime_block(&self) -> Option<&crate::device_runtime::DeviceBlock> {
-        match &self.backing {
-            Backing::Cudarc => None,
-            Backing::Runtime { block, .. } => block.as_ref(),
+        match &*self.storage.backing {
+            Backing::Native(_) | Backing::Foreign { .. } => None,
+            Backing::Runtime(allocation) => Some(allocation.device_block()),
         }
     }
 
@@ -488,52 +2505,12 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
     /// runtime-routed, legacy cudarc slices remain cudarc-routed —
     /// so deallocation continues to match the original allocator.
     pub fn into_bytes(self) -> TrackedCudaSlice<u8> {
-        // Wrap `self` in `ManuallyDrop` so its `Drop` impl never
-        // runs — we are doing the cleanup manually below by either
-        // (a) leaving the original `inner` forgotten and reusing
-        // its `backing` (Runtime mode), or (b) leaving the original
-        // `inner` forgotten while the new u8 view takes ownership
-        // via `upgrade_device_ptr` (Cudarc mode — same dance as
-        // the pre-migration code).
-        let this = ManuallyDrop::new(self);
-        let bytes = this.bytes;
-        let manager = Arc::clone(&this.manager);
-        let ptr = this.raw_ptr;
-
-        let len_bytes: usize = bytes
-            .try_into()
-            .expect("TrackedCudaSlice byte size must fit into usize");
-
-        // SAFETY: `this` is `ManuallyDrop`, so its destructor will
-        // not run. We bit-copy `backing` out of the original; the
-        // original location is forgotten along with the rest of
-        // `this`. This is sound because each field is owned and not
-        // touched again.
-        let backing: Backing = unsafe { std::ptr::read(&this.backing) };
-
-        // SAFETY: the runtime / cudarc-side memory is still live —
-        // the original `inner` ManuallyDrop never had its
-        // destructor called, so cudarc has not freed. The new
-        // `CudaSlice<u8>` is a typed view over the same bytes.
-        // For Cudarc backing the new view will free on drop (one
-        // alloc, one free, balanced — same as pre-migration).
-        // For Runtime backing the new view will be `mem::forget`
-        // -ed by the new `Drop` impl, and the runtime's
-        // `deallocate(block)` (carried in `backing`) is the sole
-        // free path.
-        let new_inner = unsafe {
-            manager
-                .device
-                .inner()
-                .upgrade_device_ptr::<u8>(ptr, len_bytes)
-        };
-
+        let len = usize::try_from(self.storage.bytes())
+            .expect("tracked allocation byte size must fit into usize");
         TrackedCudaSlice {
-            bytes,
-            manager,
-            inner: ManuallyDrop::new(new_inner),
-            raw_ptr: ptr,
-            backing,
+            storage: self.storage,
+            len,
+            element: std::marker::PhantomData,
         }
     }
 }
@@ -558,8 +2535,7 @@ impl<'a, T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &'a TrackedCu
     type Storage = DeviceParamStorage<'a>;
 
     fn into_kernel_param_storage(self) -> Self::Storage {
-        let (ptr, sync) = DevicePtr::device_ptr(&*self.inner, self.inner.stream());
-        DeviceParamStorage::synced(ptr, sync)
+        DeviceParamStorage::unsynced(self.storage.raw_ptr)
     }
 }
 
@@ -567,61 +2543,7 @@ impl<T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &mut TrackedCudaS
     type Storage = DeviceParamStorage<'static>;
 
     fn into_kernel_param_storage(self) -> Self::Storage {
-        let stream = self.inner.stream().clone();
-        let (ptr, sync) = DevicePtrMut::device_ptr_mut(&mut *self.inner, &stream);
-        std::mem::forget(sync);
-        DeviceParamStorage::unsynced(ptr)
-    }
-}
-
-impl<T: cudarc::driver::DeviceRepr> Drop for TrackedCudaSlice<T> {
-    fn drop(&mut self) {
-        let released = match &mut self.backing {
-            Backing::Cudarc => {
-                // Debug probe (XLOG_DEBUG_POISON_FREE=1): overwrite the
-                // allocation with 0xDD before cudarc frees it, so any
-                // still-live alias of this memory reads the poison
-                // pattern instead of recycled contents. Diagnostic only;
-                // off unless the env var is set.
-                if poison_free_enabled() && self.bytes > 0 {
-                    unsafe {
-                        let _ = cudarc::driver::sys::cuMemsetD8_v2(
-                            self.raw_ptr,
-                            0xDD,
-                            self.bytes as usize,
-                        );
-                    }
-                }
-                alloc_guard_remove(self.raw_ptr);
-                // SAFETY: drop runs at most once per slice, and the
-                // inner CudaSlice<T> has not been moved out by any
-                // method (`into_bytes` consumes `self` by value and
-                // leaves the original ManuallyDrop forgotten).
-                unsafe { ManuallyDrop::drop(&mut self.inner) };
-                true
-            }
-            Backing::Runtime { runtime, block } => {
-                // Runtime owns the underlying memory. Tell it to
-                // deallocate the block; the inner `CudaSlice<T>` is
-                // a typed view that must NOT free on its own,
-                // which `ManuallyDrop` ensures by simply not
-                // calling its destructor here.
-                match block.take() {
-                    Some(block) => match runtime.deallocate(block) {
-                        Ok(()) => true,
-                        Err(_) => {
-                            self.manager.record_deallocation_failure(self.bytes);
-                            false
-                        }
-                    },
-                    None => false,
-                }
-            }
-        };
-        if released {
-            let release = self.manager.release_owned_allocation(self.bytes);
-            debug_assert!(release.is_ok(), "allocation release must be balanced");
-        }
+        DeviceParamStorage::unsynced(self.storage.raw_ptr)
     }
 }
 
@@ -731,9 +2653,13 @@ impl GpuMemoryManager {
     }
 
     /// Borrow the attached device runtime, if any. `None` when the
-    /// manager was constructed via [`new`]. Test/diagnostic
-    /// accessor; production call sites that need the runtime own
-    /// it directly.
+    /// manager was constructed via [`new`].
+    ///
+    /// This accessor is the supported bridge for provider operations
+    /// that receive runtime-owned allocations through the memory manager
+    /// and must submit recorded work through
+    /// [`crate::launch::LaunchRecorder`]. Code that already owns the
+    /// runtime should use that `Arc<XlogDeviceRuntime>` directly.
     pub fn runtime(&self) -> Option<&Arc<XlogDeviceRuntime>> {
         self.runtime.as_ref()
     }
@@ -745,6 +2671,7 @@ impl GpuMemoryManager {
     /// an error path so a later operation observes the restored byte budget.
     pub fn reap_pending_deallocations(&self) -> Result<()> {
         let Some(runtime) = self.runtime.as_ref() else {
+            crate::cuda_graph::reap_capture_retirements();
             return Ok(());
         };
         runtime
@@ -756,69 +2683,7 @@ impl GpuMemoryManager {
     /// underlying allocator. Admitted accounting is untouched because the
     /// request was never published there.
     fn rollback_local_reservation(&self, bytes: u64) -> Result<()> {
-        let _mutation = self
-            .accounting
-            .mutation_lock
-            .lock()
-            .expect("GPU memory accounting poisoned");
-        let previous = self.accounting.budget_reserved.load(Ordering::SeqCst);
-        let next = previous.checked_sub(bytes).ok_or_else(|| {
-            XlogError::Kernel(format!(
-                "GPU memory reservation release underflow: current_bytes={} requested_bytes={}",
-                previous, bytes
-            ))
-        })?;
-        self.accounting
-            .budget_reserved
-            .store(next, Ordering::SeqCst);
-        Ok(())
-    }
-
-    /// Publish a successful allocator admission. The local-budget reservation
-    /// already includes `bytes`; only admitted current and peak are updated.
-    fn publish_admission(&self, bytes: u64) {
-        let _mutation = self
-            .accounting
-            .mutation_lock
-            .lock()
-            .expect("GPU memory accounting poisoned");
-        let previous = self.accounting.allocated.load(Ordering::SeqCst);
-        let admitted = previous
-            .checked_add(bytes)
-            .expect("admitted allocation accounting overflow");
-        self.accounting.allocated.store(admitted, Ordering::SeqCst);
-        self.accounting.peak.fetch_max(admitted, Ordering::SeqCst);
-    }
-
-    /// Release bytes owned by a successfully destroyed tracked allocation.
-    /// Only allocation-owner drop paths may call this method.
-    fn release_owned_allocation(&self, bytes: u64) -> Result<()> {
-        let _mutation = self
-            .accounting
-            .mutation_lock
-            .lock()
-            .expect("GPU memory accounting poisoned");
-        let admitted = self.accounting.allocated.load(Ordering::SeqCst);
-        let reserved = self.accounting.budget_reserved.load(Ordering::SeqCst);
-        let next_admitted = admitted.checked_sub(bytes).ok_or_else(|| {
-            XlogError::Kernel(format!(
-                "GPU admitted allocation release underflow: current_bytes={} requested_bytes={}",
-                admitted, bytes
-            ))
-        })?;
-        let next_reserved = reserved.checked_sub(bytes).ok_or_else(|| {
-            XlogError::Kernel(format!(
-                "GPU local reservation release underflow: current_bytes={} requested_bytes={}",
-                reserved, bytes
-            ))
-        })?;
-        self.accounting
-            .allocated
-            .store(next_admitted, Ordering::SeqCst);
-        self.accounting
-            .budget_reserved
-            .store(next_reserved, Ordering::SeqCst);
-        Ok(())
+        self.accounting.release_reserved(bytes)
     }
 
     fn record_deallocation_failure(&self, bytes: u64) {
@@ -834,28 +2699,9 @@ impl GpuMemoryManager {
         );
     }
 
-    /// Allocate GPU memory for `len` elements of type `T`
-    ///
-    /// # Arguments
-    /// * `len` - Number of elements to allocate
-    ///
-    /// # Returns
-    /// A tracked `CudaSlice<T>` containing the allocated memory
-    ///
-    /// # Errors
-    /// - `XlogError::ResourceExhausted` if allocation would exceed budget
-    /// - `XlogError::Kernel` if CUDA allocation fails
-    ///
-    /// # v0.6 routing
-    /// When the manager has an attached [`XlogDeviceRuntime`]
-    /// (constructed via [`with_runtime`]), the underlying allocation
-    /// is routed through the runtime's resource stack and a typed
-    /// view is created via cudarc's `upgrade_device_ptr::<T>` over
-    /// the runtime's raw pointer. The returned [`TrackedCudaSlice`]
-    /// frees through the runtime on drop. Without a runtime
-    /// attached, the legacy cudarc `alloc::<T>` path is used and
-    /// drop frees through cudarc — bit-for-bit identical to
-    /// pre-migration behavior.
+    /// Allocate `len` elements through the attached runtime or the shared raw
+    /// allocator. Producer-ready events precede publication; retained failures
+    /// keep their actual allocation and local byte claim.
     pub fn alloc<T: cudarc::driver::DeviceRepr>(
         self: &Arc<Self>,
         len: usize,
@@ -869,13 +2715,9 @@ impl GpuMemoryManager {
             .ok_or_else(|| XlogError::Kernel("Allocation size overflow".to_string()))?;
 
         self.reserve_local_bytes(bytes, "manager_alloc")?;
-        match self.alloc_after_local_reservation::<T>(len, bytes, None) {
-            Ok(allocation) => Ok(allocation),
-            Err(error) => {
-                self.rollback_local_reservation(bytes)?;
-                Err(error)
-            }
-        }
+        let attempt = LocalAllocationAttempt::new(Arc::clone(&self.accounting), bytes, None);
+        self.alloc_after_local_reservation::<T>(len, bytes, None, Arc::clone(&attempt.reclamation))
+            .map_err(|error| map_resource_error(error, self.peak_bytes()))
     }
 
     fn alloc_after_local_reservation<T: cudarc::driver::DeviceRepr>(
@@ -883,136 +2725,47 @@ impl GpuMemoryManager {
         len: usize,
         bytes: u64,
         runtime_reservation: Option<&mut RuntimeMemoryReservation>,
-    ) -> Result<TrackedCudaSlice<T>> {
-        #[cfg(test)]
-        self.run_after_local_reservation_hook(bytes);
-
-        if let Some(runtime) = &self.runtime {
-            // Zero-byte allocations (empty Vec, empty buffer) are
-            // legitimate in production code. The v0.6 resource
-            // stack rejects zero-byte requests by contract
-            // (DirectCudaResource and AsyncCudaResource both error
-            // on `bytes == 0` because `cuMemAlloc(0)` is undefined
-            // behavior in the CUDA driver). Cudarc's `alloc::<T>(0)`
-            // does the right thing — returns an empty CudaSlice<T>
-            // without calling the driver — so route zero-byte
-            // requests through the legacy path even when a runtime
-            // is attached. The resulting slice carries
-            // `Backing::Cudarc`; its drop is a no-op against
-            // cudarc's empty handle.
-            //
-            // `len == 0` and `bytes == 0` are equivalent here only
-            // if `T` has nonzero size (the common case). For
-            // zero-sized types (rare but valid in Rust) `bytes`
-            // would also be 0 regardless of `len`; the cudarc empty
-            // path handles both consistently.
-            if bytes == 0 {
-                let slice = unsafe {
-                    self.device.inner().alloc::<T>(len).map_err(|e| {
-                        XlogError::Kernel(format!("GPU allocation failed (zero-byte): {}", e))
-                    })?
-                };
-                let (raw_ptr, sync) = DevicePtr::device_ptr(&slice, slice.stream());
-                std::mem::forget(sync);
-                self.publish_admission(bytes);
-                return Ok(TrackedCudaSlice {
-                    bytes,
-                    manager: Arc::clone(self),
-                    inner: ManuallyDrop::new(slice),
-                    raw_ptr,
-                    backing: Backing::Cudarc,
-                });
-            }
-
-            // v0.6 path: route through the runtime resource stack.
-            // Convert checked: `bytes` is u64 from
-            // `len * size_of::<T>()`, and the runtime trait surface
-            // uses `usize`. On 64-bit targets this is lossless; on
-            // 32-bit a stray `bytes as usize` would silently
-            // truncate and desync manager accounting (which still
-            // tracks the full u64) from the runtime's view. Surface
-            // the overflow as `XlogError::Kernel`; the caller retains or
-            // rolls back the local reservation as appropriate.
-            let bytes_usize = match usize::try_from(bytes) {
-                Ok(v) => v,
-                Err(_) => {
-                    return Err(XlogError::Kernel(format!(
-                        "GPU allocation size {} bytes exceeds platform usize",
-                        bytes
-                    )));
-                }
-            };
-            let block_result = match runtime_reservation {
-                Some(reservation) => {
-                    reservation.allocate(bytes_usize, StreamId::DEFAULT, AllocTag::UNTAGGED)
-                }
-                None => runtime.allocate(bytes_usize, StreamId::DEFAULT, AllocTag::UNTAGGED),
-            };
-            let block = match block_result {
-                Ok(b) => b,
-                Err(e) => {
-                    let prior_peak = self.accounting.peak.load(Ordering::SeqCst);
-                    return Err(map_resource_error(e, prior_peak));
-                }
-            };
-            self.publish_admission(bytes);
-            let raw_ptr = block.ptr;
-            // SAFETY: `block.ptr` is a live device pointer of size
-            // `bytes` returned by the runtime; `len * size_of::<T>()`
-            // == `bytes` by construction. The resulting CudaSlice<T>
-            // is a typed view; the `Backing::Runtime` Drop branch
-            // forgets it (via ManuallyDrop + no destructor call) so
-            // cudarc never frees — the runtime's deallocate is the
-            // sole free path.
-            let typed_view = unsafe { self.device.inner().upgrade_device_ptr::<T>(raw_ptr, len) };
-            return Ok(TrackedCudaSlice {
+        reclamation: Arc<AllocationReclamation>,
+    ) -> crate::device_runtime::ResourceResult<TrackedCudaSlice<T>> {
+        let extent = usize::try_from(bytes)
+            .map_err(|_| ResourceError::Driver("allocation size exceeds platform usize".into()))?;
+        if self.runtime.is_some() && bytes != 0 {
+            let allocation = self.alloc_raw_after_local_reservation(
+                extent,
                 bytes,
-                manager: Arc::clone(self),
-                inner: ManuallyDrop::new(typed_view),
-                raw_ptr,
-                backing: Backing::Runtime {
-                    runtime: Arc::clone(runtime),
-                    block: Some(block),
-                },
+                AllocTag::UNTAGGED,
+                runtime_reservation,
+                reclamation,
+            )?;
+            let raw_ptr = allocation.device_block().ptr;
+            return Ok(TrackedCudaSlice {
+                storage: DeviceStorage::new(
+                    Backing::Runtime(allocation),
+                    Arc::clone(self.device.inner().stream()),
+                    raw_ptr,
+                ),
+                len,
+                element: std::marker::PhantomData,
             });
         }
 
-        // Legacy path: cudarc allocator. SAFETY: budget reserved
-        // atomically above and the device is valid; cudarc's
-        // alloc returns properly aligned memory for type T.
-        let slice = unsafe {
-            self.device
-                .inner()
-                .alloc::<T>(len)
-                .map_err(|e| XlogError::Kernel(format!("GPU allocation failed: {}", e)))?
-        };
-        let (raw_ptr, sync) = DevicePtr::device_ptr(&slice, slice.stream());
-        std::mem::forget(sync);
-        alloc_guard_insert(raw_ptr, bytes);
-        self.publish_admission(bytes);
-
-        // Debug probe (XLOG_DEBUG_POISON_ALLOC=1): poison fresh legacy
-        // allocations with 0xDD so any read of unwritten allocation
-        // contents becomes a deterministic, recognizable pattern
-        // instead of whatever the recycled memory held. Diagnostic
-        // only; off unless the env var is set.
-        if poison_alloc_enabled() && bytes > 0 {
-            unsafe {
-                let _ = cudarc::driver::sys::cuMemsetD8Async(
-                    raw_ptr,
-                    0xDD,
-                    bytes as usize,
-                    std::ptr::null_mut(),
-                );
-            }
-        }
-
+        #[cfg(test)]
+        self.run_after_local_reservation_hook(bytes);
+        let allocation = RawDeviceAllocation::allocate(
+            Arc::clone(self.device.inner().stream()),
+            extent,
+            Some(Arc::clone(self)),
+            reclamation,
+        )?;
+        let raw_ptr = allocation.ptr();
         Ok(TrackedCudaSlice {
-            bytes,
-            manager: Arc::clone(self),
-            inner: ManuallyDrop::new(slice),
-            raw_ptr,
-            backing: Backing::Cudarc,
+            storage: DeviceStorage::new(
+                Backing::Native(allocation),
+                Arc::clone(self.device.inner().stream()),
+                raw_ptr,
+            ),
+            len,
+            element: std::marker::PhantomData,
         })
     }
 
@@ -1172,13 +2925,15 @@ impl GpuMemoryManager {
         let bytes_u64 = u64::try_from(bytes)
             .map_err(|_| XlogError::Kernel("Allocation size overflow".to_string()))?;
         self.reserve_local_bytes(bytes_u64, "manager_alloc_raw")?;
-        match self.alloc_raw_after_local_reservation(bytes, bytes_u64, tag, None) {
-            Ok(allocation) => Ok(allocation),
-            Err(error) => {
-                self.rollback_local_reservation(bytes_u64)?;
-                Err(error)
-            }
-        }
+        let attempt = LocalAllocationAttempt::new(Arc::clone(&self.accounting), bytes_u64, None);
+        self.alloc_raw_after_local_reservation(
+            bytes,
+            bytes_u64,
+            tag,
+            None,
+            Arc::clone(&attempt.reclamation),
+        )
+        .map_err(|error| map_resource_error(error, self.peak_bytes()))
     }
 
     fn alloc_raw_after_local_reservation(
@@ -1187,40 +2942,66 @@ impl GpuMemoryManager {
         bytes_u64: u64,
         tag: AllocTag,
         runtime_reservation: Option<&mut RuntimeMemoryReservation>,
-    ) -> Result<RuntimeAllocBlock> {
+        reclamation: Arc<AllocationReclamation>,
+    ) -> crate::device_runtime::ResourceResult<RuntimeAllocBlock> {
         let runtime = self.runtime.as_ref().ok_or_else(|| {
-            XlogError::Kernel(
-                "GpuMemoryManager::alloc_raw called without an attached XlogDeviceRuntime; \
-                 construct via with_runtime to enable runtime routing"
-                    .to_string(),
-            )
+            ResourceError::Driver("raw allocation requires an attached device runtime".into())
         })?;
-
         #[cfg(test)]
         self.run_after_local_reservation_hook(bytes_u64);
-
-        // Route through the runtime. Stream is the runtime's
-        // default for now; once stream-aware kernel launches start
-        // routing through alloc_raw the caller will pass an
-        // explicit StreamId.
+        let request = AllocationRequest {
+            bytes,
+            stream: StreamId::DEFAULT,
+            tag,
+            reservation_pressure_bytes: 0,
+            reclamation: Arc::clone(&reclamation),
+        };
         let allocation = match runtime_reservation {
-            Some(reservation) => reservation.allocate(bytes, StreamId::DEFAULT, tag),
-            None => runtime.allocate(bytes, StreamId::DEFAULT, tag),
+            Some(reservation) => reservation.materialize(request),
+            None => runtime.materialize(request),
         };
         match allocation {
             Ok(block) => {
-                self.publish_admission(bytes_u64);
+                // Arm the allocated block and backend before any fallible lookup.
+                let owner = ResourceBlockRetirement::new(
+                    block,
+                    runtime.retirement_resource(),
+                    Arc::clone(&reclamation),
+                );
+                let bind_charge: crate::device_runtime::ResourceResult<_> = (|| {
+                    let block = owner.block();
+                    let dependencies =
+                        runtime
+                            .allocation_dependencies(BlockId::from_block(block), block.bytes)?
+                            .ok_or_else(|| {
+                                ResourceError::Driver(
+                            "runtime allocation does not provide physical release ownership".into())
+                            })?;
+                    if !Arc::ptr_eq(&dependencies.reclamation, &reclamation) {
+                        return Err(ResourceError::Driver(
+                            "runtime allocation replaced its accounting owner".into(),
+                        ));
+                    }
+                    let allocation = dependencies.retain_allocation()?;
+                    Ok((dependencies, allocation))
+                })();
+                let (dependencies, allocation) = match bind_charge {
+                    Ok(owners) => owners,
+                    Err(error) => {
+                        return Err(error.retaining(bytes, reclamation));
+                    }
+                };
+                let block = owner.into_block();
                 Ok(RuntimeAllocBlock {
                     bytes: bytes_u64,
                     manager: Arc::clone(self),
                     runtime: Arc::clone(runtime),
                     block: Some(block),
+                    dependencies,
+                    allocation: Some(allocation),
                 })
             }
-            Err(e) => {
-                let prior_peak = self.accounting.peak.load(Ordering::SeqCst);
-                Err(map_resource_error(e, prior_peak))
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1264,6 +3045,7 @@ impl GpuMemoryManager {
 
 fn map_resource_error(e: ResourceError, prior_peak_bytes: u64) -> XlogError {
     match e {
+        error @ ResourceError::AllocationRetained(_) => XlogError::Kernel(error.to_string()),
         ResourceError::OutOfBudget {
             requested,
             current,
@@ -1292,31 +3074,67 @@ fn map_resource_error(e: ResourceError, prior_peak_bytes: u64) -> XlogError {
     }
 }
 
-/// Owned handle for a raw allocation routed through
-/// [`GpuMemoryManager::alloc_raw`] / the v0.6 device runtime.
-///
-/// Manual `Debug` impl below — the runtime / manager handles
-/// inside this struct are not `Debug`, so a derive would not
-/// compile.
-///
-/// On drop, deallocates through the runtime (returning the bytes
-/// to the runtime's bookkeeping — pending if the runtime's backend
-/// is async) and decrements the manager's local `allocated`
-/// counter. The block exposes only the raw device pointer and
-/// byte length; typed views are the caller's responsibility (this
-/// path is not yet wired into the typed `CudaSlice<T>` API — that
-/// is a follow-up slice).
+/// Owned handle for a raw allocation routed through the device runtime.
+/// Both raw allocations and typed storage views retain this handle. Drop hands
+/// its block identity to the runtime; the actual raw owner's successful physical
+/// reclamation returns the local manager charge, including on another reaper.
 pub struct RuntimeAllocBlock {
     bytes: u64,
     manager: Arc<GpuMemoryManager>,
     runtime: Arc<XlogDeviceRuntime>,
+    dependencies: Arc<DeviceAccessDependencies>,
+    allocation: Option<Arc<RawDeviceAllocation>>,
     /// `None` after Drop fires; `Some(_)` while the block is live.
     /// Wrapped in Option so `Drop` can move the block out and pass
     /// it by value to `runtime.deallocate`.
     block: Option<DeviceBlock>,
 }
 
+fn allocation_reclamation_outcome(
+    physically_released: bool,
+    queue_result: crate::device_runtime::ResourceResult<()>,
+) -> crate::device_runtime::ResourceResult<()> {
+    if physically_released {
+        return Ok(());
+    }
+    queue_result?;
+    Err(ResourceError::Driver(
+        "allocation reclamation is still owned by another pending reaper".into(),
+    ))
+}
+
 impl RuntimeAllocBlock {
+    fn release(&mut self) -> crate::device_runtime::ResourceResult<()> {
+        // The backend already owns the actual raw allocation. Dropping these
+        // bookkeeping references must not strand a runtime after a late reap.
+        // Backend Drop itself transfers unproven allocations to cold retirement.
+        let Some(block) = self.block.take() else {
+            return allocation_reclamation_outcome(
+                self.dependencies.allocation_was_released(),
+                Ok(()),
+            );
+        };
+        // The backend still owns the live allocation. Relinquish this wrapper's
+        // lease before asking the reaper whether any other real owner remains.
+        drop(self.allocation.take());
+        let mut retirement = ResourceBlockRetirement::new(
+            block,
+            self.runtime.retirement_resource(),
+            Arc::clone(&self.dependencies.reclamation),
+        );
+        let queue_result = retirement.release();
+        match allocation_reclamation_outcome(
+            self.dependencies.allocation_was_released(),
+            queue_result,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.manager.record_deallocation_failure(self.bytes);
+                Err(error)
+            }
+        }
+    }
+
     /// Raw device pointer for this allocation. Live until the
     /// block is dropped.
     pub fn ptr(&self) -> u64 {
@@ -1363,15 +3181,7 @@ impl std::fmt::Debug for RuntimeAllocBlock {
 
 impl Drop for RuntimeAllocBlock {
     fn drop(&mut self) {
-        if let Some(block) = self.block.take() {
-            match self.runtime.deallocate(block) {
-                Ok(()) => {
-                    let release = self.manager.release_owned_allocation(self.bytes);
-                    debug_assert!(release.is_ok(), "allocation release must be balanced");
-                }
-                Err(_) => self.manager.record_deallocation_failure(self.bytes),
-            }
-        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.release()));
     }
 }
 
@@ -1390,7 +3200,7 @@ pub struct DlpackColumn {
     ptr: cudarc::driver::sys::CUdeviceptr,
     len_bytes: usize,
     stream: Arc<CudaStream>,
-    _tensor: DlpackManagedTensor,
+    storage: Arc<DeviceStorage>,
     /// `Some` when this DLPack column wraps memory that xlog
     /// itself owns through the device runtime — i.e. the
     /// caller exported an xlog-allocated slice via DLPack and
@@ -1411,7 +3221,7 @@ pub struct ArrowDeviceColumn {
     ptr: cudarc::driver::sys::CUdeviceptr,
     len_bytes: usize,
     stream: Arc<CudaStream>,
-    _import: Arc<ArrowDeviceImport>,
+    storage: Arc<DeviceStorage>,
     /// Same role as [`DlpackColumn::source_slice`]: `Some` for
     /// xlog-owned Arrow device columns, `None` for true
     /// external Arrow producers.
@@ -1423,17 +3233,32 @@ impl CudaColumn {
         Self::Owned(slice)
     }
 
-    pub fn dlpack(
+    /// Construct a column over an authenticated foreign allocation.
+    ///
+    /// # Safety
+    /// The byte range must be live in `stream`'s CUDA context and retained by
+    /// `tensor`. The producer must have completed its work before handoff and
+    /// must coordinate subsequent non-XLOG accesses for the whole import lifetime.
+    pub unsafe fn dlpack(
         ptr: cudarc::driver::sys::CUdeviceptr,
         len_bytes: usize,
         stream: Arc<CudaStream>,
         tensor: DlpackManagedTensor,
     ) -> Self {
+        let storage = DeviceStorage::new(
+            Backing::Foreign {
+                _owner: Box::new(tensor),
+                _source: None,
+                bytes: len_bytes as u64,
+            },
+            Arc::clone(&stream),
+            ptr,
+        );
         Self::Dlpack(DlpackColumn {
             ptr,
             len_bytes,
             stream,
-            _tensor: tensor,
+            storage,
             source_slice: None,
         })
     }
@@ -1461,26 +3286,55 @@ impl CudaColumn {
     ) -> Self {
         let ptr = *source_slice.device_ptr();
         let len_bytes = source_slice.len();
+        assert_eq!(
+            source_slice.stream().context().cu_ctx(),
+            stream.context().cu_ctx(),
+            "import stream must belong to the source allocation context"
+        );
+        let storage = DeviceStorage::new(
+            Backing::Foreign {
+                _owner: Box::new(tensor),
+                _source: Some(Arc::clone(&source_slice)),
+                bytes: len_bytes as u64,
+            },
+            Arc::clone(&stream),
+            ptr,
+        );
         Self::Dlpack(DlpackColumn {
             ptr,
             len_bytes,
             stream,
-            _tensor: tensor,
+            storage,
             source_slice: Some(source_slice),
         })
     }
 
-    pub fn arrow_device(
+    /// Construct a column over an authenticated Arrow device allocation.
+    ///
+    /// # Safety
+    /// `import` must retain this live byte range in `stream`'s CUDA context.
+    /// Producer work must be complete and subsequent non-XLOG access coordinated
+    /// for the entire lifetime of this imported storage.
+    pub unsafe fn arrow_device(
         ptr: cudarc::driver::sys::CUdeviceptr,
         len_bytes: usize,
         stream: Arc<CudaStream>,
         import: Arc<ArrowDeviceImport>,
     ) -> Self {
+        let storage = DeviceStorage::new(
+            Backing::Foreign {
+                _owner: Box::new(import),
+                _source: None,
+                bytes: len_bytes as u64,
+            },
+            Arc::clone(&stream),
+            ptr,
+        );
         Self::ArrowDevice(ArrowDeviceColumn {
             ptr,
             len_bytes,
             stream,
-            _import: import,
+            storage,
             source_slice: None,
         })
     }
@@ -1501,11 +3355,25 @@ impl CudaColumn {
     ) -> Self {
         let ptr = *source_slice.device_ptr();
         let len_bytes = source_slice.len();
+        assert_eq!(
+            source_slice.stream().context().cu_ctx(),
+            stream.context().cu_ctx(),
+            "import stream must belong to the source allocation context"
+        );
+        let storage = DeviceStorage::new(
+            Backing::Foreign {
+                _owner: Box::new(import),
+                _source: Some(Arc::clone(&source_slice)),
+                bytes: len_bytes as u64,
+            },
+            Arc::clone(&stream),
+            ptr,
+        );
         Self::ArrowDevice(ArrowDeviceColumn {
             ptr,
             len_bytes,
             stream,
-            _import: import,
+            storage,
             source_slice: Some(source_slice),
         })
     }
@@ -1639,31 +3507,29 @@ impl DeviceSlice<u8> for CudaColumn {
     }
 }
 
-impl DevicePtr<u8> for CudaColumn {
-    fn device_ptr<'a>(
-        &'a self,
-        stream: &'a CudaStream,
-    ) -> (cudarc::driver::sys::CUdeviceptr, SyncOnDrop<'a>) {
+impl private_access::Sealed for CudaColumn {}
+
+impl DeviceRead<u8> for CudaColumn {
+    fn device_view(&self) -> DeviceMemoryView<u8> {
         match self {
-            CudaColumn::Owned(slice) => DevicePtr::device_ptr(slice, stream),
-            CudaColumn::Dlpack(col) => (col.ptr, SyncOnDrop::Sync(None)),
-            CudaColumn::ArrowDevice(col) => (col.ptr, SyncOnDrop::Sync(None)),
+            CudaColumn::Owned(slice) => slice.view(),
+            CudaColumn::Dlpack(col) => DeviceMemoryView {
+                ptr: col.ptr,
+                len: col.len_bytes,
+                storage: Arc::clone(&col.storage),
+                element: std::marker::PhantomData,
+            },
+            CudaColumn::ArrowDevice(col) => DeviceMemoryView {
+                ptr: col.ptr,
+                len: col.len_bytes,
+                storage: Arc::clone(&col.storage),
+                element: std::marker::PhantomData,
+            },
         }
     }
 }
 
-impl DevicePtrMut<u8> for CudaColumn {
-    fn device_ptr_mut<'a>(
-        &'a mut self,
-        stream: &'a CudaStream,
-    ) -> (cudarc::driver::sys::CUdeviceptr, SyncOnDrop<'a>) {
-        match self {
-            CudaColumn::Owned(slice) => DevicePtrMut::device_ptr_mut(slice, stream),
-            CudaColumn::Dlpack(col) => (col.ptr, SyncOnDrop::Sync(None)),
-            CudaColumn::ArrowDevice(col) => (col.ptr, SyncOnDrop::Sync(None)),
-        }
-    }
-}
+impl DeviceWrite<u8> for CudaColumn {}
 
 impl AsKernelParam for &CudaColumn {
     fn as_kernel_param(&self) -> *mut std::ffi::c_void {
@@ -1900,7 +3766,1323 @@ pub fn validate_logical_row_count(row_cap: u64, logical_rows: usize) -> Result<u
 }
 
 #[cfg(test)]
+pub(crate) fn test_memory_manifest(
+    on_drop: impl FnOnce() + Send + Sync + 'static,
+) -> (Arc<MemoryAccessManifest>, std::sync::Weak<[u8]>) {
+    struct Bytes<F: FnOnce()>(Arc<[u8]>, Option<F>);
+    impl<F: FnOnce()> Drop for Bytes<F> {
+        fn drop(&mut self) {
+            if let Some(on_drop) = self.1.take() {
+                on_drop();
+            }
+        }
+    }
+    impl<F: FnOnce() + Send + Sync + 'static> MemoryStorageOwner for Bytes<F> {
+        fn dependencies(
+            &self,
+        ) -> crate::device_runtime::ResourceResult<Arc<DeviceAccessDependencies>> {
+            panic!("a passive host manifest must not touch CUDA dependencies")
+        }
+    }
+    let bytes = Arc::<[u8]>::from(vec![7; 64]);
+    let weak = Arc::downgrade(&bytes);
+    let owner = Arc::new(Bytes(bytes, Some(on_drop)));
+    let mut manifest = MemoryAccessManifest::default();
+    manifest.ranges.push((
+        17,
+        MemoryUse::new(owner.0.as_ptr() as u64, owner.0.len(), Access::ReadWrite).unwrap(),
+    ));
+    manifest.retained.push(RetainedStorageUse {
+        owner,
+        access: Access::ReadWrite,
+    });
+    (Arc::new(manifest), weak)
+}
+
+#[cfg(test)]
 mod tests {
+    impl crate::launch::RecorderCleanup<u8> for OperationCompletion {
+        fn synchronize_retired(&self) -> ResourceResult<()> {
+            if self.is_complete() {
+                Ok(())
+            } else {
+                Err(ResourceError::Driver("completion remains unknown".into()))
+            }
+        }
+
+        fn cancel_retired(&self, _use: u8) -> ResourceResult<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn retired_context_completion_retries_unknown_wait_without_changing_execution_identity() {
+        let proof = OperationCompletion::new(17);
+        assert!(proof
+            .synchronize_retired_with(|| Err(ResourceError::Driver("context wait failed".into())))
+            .is_err());
+        assert!(!proof.is_complete());
+        assert_eq!(proof.execution_id, 17);
+        assert!(std::panic::catch_unwind(|| {
+            let _ = proof.synchronize_retired_with(|| panic!("context wait panic"));
+        })
+        .is_err());
+        assert!(!proof.is_complete());
+        proof.synchronize_retired_with(|| Ok(())).unwrap();
+        proof
+            .synchronize_retired_with(|| panic!("completed wait must not repeat"))
+            .unwrap();
+        assert!(proof.is_complete());
+        assert_eq!(proof.execution_id, 17);
+        assert!(proof.validate_submission(17).is_err());
+        assert!(proof.validate_submission(18).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires authorized CUDA execution"]
+    fn failed_abort_reclaims_real_allocation_after_origin_thread_exit() {
+        use crate::cuda_graph::{reap_capture_retirements, CapturedCudaGraph};
+        use crate::device_runtime::{AsyncCudaResource, GlobalDeviceBudget, StreamPool};
+        use std::sync::mpsc;
+
+        let _serial = crate::cuda_graph::capture_lifecycle_test_guard();
+        let device = Arc::new(CudaDevice::new(0).unwrap());
+        let default_stream = Arc::clone(device.inner().stream());
+        let context = Arc::clone(device.inner().stream().context());
+        assert!(
+            context.has_async_alloc(),
+            "this lifecycle regression requires real stream-ordered allocation and free"
+        );
+        let capture_stream = context.new_stream().unwrap();
+        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+        let resource = Box::new(GlobalDeviceBudget::new(
+            Box::new(AsyncCudaResource::new(
+                Arc::clone(&device),
+                0,
+                Arc::clone(&pool),
+            )),
+            4096,
+        ));
+        let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+            Arc::clone(&device),
+            0,
+            pool,
+            resource,
+        ));
+        let manager = Arc::new(GpuMemoryManager::with_runtime(
+            device,
+            MemoryBudget::with_limit(4096),
+            Arc::clone(&runtime),
+        ));
+        let (sent, received) = mpsc::channel();
+        let (abort, wait_for_abort) = mpsc::channel();
+        let worker_manager = Arc::clone(&manager);
+        let worker = std::thread::spawn(move || {
+            // Real caller-prefix work precedes the target's private allocation
+            // and initialization handoff; keep its bytes for later observation.
+            let stream = Arc::clone(worker_manager.device.inner().stream());
+            let prefix = DeviceMemoryView::<u8>::allocate(Arc::clone(&stream), 16).unwrap();
+            with_memory_access(
+                Arc::clone(&stream),
+                vec![prefix.access(Access::Write).unwrap()],
+                |_| {
+                    // SAFETY: the admitted prefix owns these exact bytes.
+                    unsafe {
+                        cudarc::driver::sys::cuMemsetD8Async(
+                            *prefix.device_ptr(),
+                            0x3c,
+                            16,
+                            stream.cu_stream(),
+                        )
+                        .result()?;
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let allocation = worker_manager.alloc::<u8>(4096).unwrap();
+            let raw = allocation.storage.dependencies.retain_allocation().unwrap();
+            let stream = Arc::clone(allocation.stream());
+            let ptr = *allocation.device_ptr();
+            let mut operation = MemoryOperation {
+                submission: crate::cuda_graph::acquire_stream_submission_phase(&stream).unwrap(),
+                transaction: admit_memory_access(
+                    Arc::clone(&stream),
+                    vec![allocation.view().access(Access::Write).unwrap()],
+                    None,
+                    &[],
+                )
+                .unwrap(),
+            };
+            let admitted = Arc::clone(operation.transaction.prepared_owner().unwrap());
+            let completion = Arc::clone(admitted.completion());
+            let owner = Arc::downgrade(&admitted);
+            operation
+                .transaction
+                .enqueue_operation_with(
+                    || {
+                        let pin = operation.submission.pin()?;
+                        admitted.bind_submission(&pin)?;
+                        Ok(pin)
+                    },
+                    MemoryOperationOwner::prepare,
+                    |pin| {
+                        pin.with_serialized_submission(
+                            || -> crate::device_runtime::ResourceResult<()> {
+                                // SAFETY: this admitted operation owns the whole allocation;
+                                // its real initialization dependencies were just prepared.
+                                unsafe {
+                                    cudarc::driver::sys::cuMemsetD8Async(
+                                        ptr,
+                                        0x5a,
+                                        4096,
+                                        stream.cu_stream(),
+                                    )
+                                    .result()?;
+                                }
+                                Ok(())
+                            },
+                        )
+                    },
+                    MemoryOperationOwner::synchronize,
+                    MemoryOperationOwner::cancel,
+                )
+                .unwrap();
+            drop(admitted);
+            drop(allocation);
+            sent.send((raw, completion, owner, prefix)).unwrap();
+            wait_for_abort.recv().unwrap();
+            // Inject only the failed original wait, not allocation, preparation,
+            // enqueue, context recovery or physical free. Active real capture
+            // defers cold recovery until this originating host thread has exited.
+            let error = operation
+                .transaction
+                .abort_with(
+                    |_| {
+                        Err(ResourceError::Driver(
+                            "injected original completion wait failure".into(),
+                        ))
+                    },
+                    MemoryOperationOwner::cancel,
+                )
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("original completion wait failure"));
+        });
+        let (raw, completion, owner, prefix) = received.recv().unwrap();
+        assert_ne!(
+            completion.execution_id,
+            crate::cuda_graph::stream_execution_id(&default_stream).unwrap(),
+            "the reaper must not identify its own PTDS as the exited producer's execution"
+        );
+        let reclamation = Arc::clone(raw.reclamation());
+        let graph = CapturedCudaGraph::capture_on_stream(&capture_stream, || {
+            abort.send(()).unwrap();
+            worker.join().unwrap();
+            reap_capture_retirements();
+            assert!(!completion.is_complete());
+            assert!(owner.upgrade().is_some());
+            assert!(!reclamation.was_released());
+            assert_eq!(manager.allocated_bytes(), 4096);
+            assert_eq!(runtime.bytes_outstanding(), 4096);
+            assert!(matches!(
+                runtime.reserve_memory(1),
+                Err(ResourceError::OutOfBudget {
+                    current: 4096,
+                    remaining: 0,
+                    ..
+                })
+            ));
+            Ok(())
+        })
+        .unwrap();
+        drop(graph);
+        runtime.reap_pending().unwrap();
+        assert!(completion.is_complete());
+        assert!(owner.upgrade().is_none());
+        // The separately retained real allocation prevents physical free even
+        // after successful operation recovery and logical runtime detachment.
+        let pending = Arc::clone(
+            &reclamation
+                .state
+                .lock()
+                .unwrap()
+                .pending
+                .as_ref()
+                .unwrap()
+                .0,
+        );
+        assert_eq!(pending.load(Ordering::Acquire), 4096);
+        assert!(!reclamation.was_released());
+        assert_eq!(manager.allocated_bytes(), 4096);
+        assert_eq!(runtime.bytes_outstanding(), 4096);
+        assert!(matches!(
+            runtime.reserve_memory(1),
+            Err(ResourceError::OutOfBudget {
+                current: 4096,
+                remaining: 0,
+                ..
+            })
+        ));
+        context.bind_to_thread().unwrap();
+        let mut observed = [0u8; 4096];
+        // SAFETY: successful context recovery completed the admitted write;
+        // raw still owns all bytes and no other operation uses this allocation.
+        unsafe {
+            cudarc::driver::sys::cuMemcpyDtoH_v2(
+                observed.as_mut_ptr().cast(),
+                raw.ptr(),
+                observed.len(),
+            )
+            .result()
+            .unwrap();
+        }
+        assert!(observed.iter().all(|byte| *byte == 0x5a));
+        let mut observed_prefix = [0u8; 16];
+        // SAFETY: the same successful context barrier covers the actual caller
+        // prefix, and its original allocation is still owned by prefix.
+        unsafe {
+            cudarc::driver::sys::cuMemcpyDtoH_v2(
+                observed_prefix.as_mut_ptr().cast(),
+                *prefix.device_ptr(),
+                observed_prefix.len(),
+            )
+            .result()
+            .unwrap();
+        }
+        assert_eq!(observed_prefix, [0x3c; 16]);
+        drop(prefix);
+        drop(raw);
+        runtime.reap_pending().unwrap();
+        assert!(reclamation.was_released());
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 4096);
+        assert_eq!(runtime.bytes_outstanding(), 0);
+        drop(runtime.reserve_memory(4096).unwrap());
+    }
+
+    #[test]
+    fn operation_completion_rejects_moved_execution_before_dependency_prepare() {
+        let proof = Arc::new(OperationCompletion::new(17));
+        let mut transaction =
+            RecorderTransaction::from_admitted(Arc::clone(&proof), Box::new([0u8]));
+        let mut cancelled = false;
+        let result = transaction.enqueue_operation_with(
+            || proof.validate_submission(18),
+            |_| panic!("moved execution must not prepare dependencies"),
+            |_| -> std::result::Result<(), &str> { panic!("moved execution must not launch") },
+            |_| panic!("refused admission must not wait on another execution"),
+            |_, _| {
+                cancelled = true;
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(crate::launch::LaunchEnqueueError::Preparation(_))
+        ));
+        assert!(cancelled);
+        assert!(!proof.is_complete());
+    }
+
+    #[test]
+    fn operation_completion_requires_exact_successful_synchronization() {
+        let proof = OperationCompletion::new(17);
+        assert!(proof.validate_submission(18).is_err());
+        assert!(proof
+            .synchronize_with(18, || panic!("wrong stream must not be waited"))
+            .is_err());
+        assert!(!proof.is_complete());
+        assert!(proof
+            .synchronize_with(17, || Err(ResourceError::Driver("wait failed".into())))
+            .is_err());
+        assert!(!proof.is_complete());
+        let unwound = std::panic::catch_unwind(|| {
+            let _ = proof.synchronize_with(17, || panic!("wait unwound"));
+        });
+        assert!(unwound.is_err());
+        assert!(!proof.is_complete());
+        proof.synchronize_with(17, || Ok(())).unwrap();
+        assert!(proof.is_complete());
+        assert!(proof.validate_submission(17).is_err());
+    }
+
+    #[test]
+    fn operation_completion_survives_failed_reservation_cancellation() {
+        let proof = Arc::new(OperationCompletion::new(17));
+        let mut transaction =
+            RecorderTransaction::from_admitted(Arc::clone(&proof), Box::new([0u8]));
+        let result = transaction.enqueue_operation_with(
+            || Ok(()),
+            |proof| proof.validate_submission(17),
+            |_| Err("record failed"),
+            |proof| proof.synchronize_with(17, || Ok(())),
+            |_, _| Err(ResourceError::Driver("cancellation failed".into())),
+        );
+        assert!(matches!(
+            result,
+            Err(crate::launch::LaunchEnqueueError::OperationAndCleanup { .. })
+        ));
+        assert!(proof.is_complete());
+    }
+
+    #[test]
+    fn passive_manifest_keeps_storage_and_context_qualified_coverage() {
+        struct Bytes(Box<[u8]>);
+        impl MemoryStorageOwner for Bytes {
+            fn dependencies(
+                &self,
+            ) -> crate::device_runtime::ResourceResult<Arc<DeviceAccessDependencies>> {
+                panic!("a passive manifest must not touch CUDA dependencies")
+            }
+        }
+        let bytes = Arc::new(Bytes(vec![7; 64].into_boxed_slice()));
+        assert_eq!(bytes.0[0], 7);
+        let weak = Arc::downgrade(&bytes);
+        let mut source = MemoryAccessManifest::default();
+        source
+            .ranges
+            .push((17, MemoryUse::new(0x1000, 64, Access::ReadWrite).unwrap()));
+        source.retained.push(RetainedStorageUse {
+            owner: bytes,
+            access: Access::ReadWrite,
+        });
+        let source = Arc::new(source);
+        let combined = MemoryAccessManifest::combine(&[source.clone()]);
+        drop(source);
+        assert!(weak.upgrade().is_some());
+        assert!(combined.covers(&[(17, MemoryUse::new(0x1010, 16, Access::Read).unwrap())]));
+        assert!(!combined.covers(&[(18, MemoryUse::new(0x1010, 16, Access::Read).unwrap())]));
+        assert!(!combined.covers(&[(17, MemoryUse::new(0x1030, 32, Access::Read).unwrap())]));
+        drop(combined);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn shared_reclamation_preserves_leases_until_the_actual_owner_can_retire() {
+        use crate::device_runtime::resource::{BlockUseRegistry, MemoryUse};
+        use std::sync::atomic::AtomicUsize;
+
+        struct PhysicalStorage {
+            bytes: Box<[u8]>,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for PhysicalStorage {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct Payload {
+            physical: Option<PhysicalStorage>,
+            reclamation: Arc<AllocationReclamation>,
+            admission: Option<crate::device_runtime::resource::MemoryUseGroup>,
+        }
+
+        let registry = Arc::new(std::sync::Mutex::new(BlockUseRegistry::default()));
+        let accounting = Arc::new(GpuMemoryAccounting::default());
+        accounting.budget_reserved.store(64, Ordering::SeqCst);
+        let reclamation = Arc::new(AllocationReclamation::default());
+        reclamation
+            .attach_local(Arc::clone(&accounting), 64)
+            .unwrap();
+        reclamation.acquired().unwrap();
+        let physical_drops = Arc::new(AtomicUsize::new(0));
+        let physical = PhysicalStorage {
+            bytes: vec![3u8; 64].into_boxed_slice(),
+            drops: Arc::clone(&physical_drops),
+        };
+        let memory = MemoryUse::new(physical.bytes.as_ptr() as u64, 64, Access::ReadWrite).unwrap();
+        let mut pending = Some(Arc::new(Payload {
+            physical: Some(physical),
+            reclamation: Arc::clone(&reclamation),
+            admission: None,
+        }));
+        let lease = Arc::clone(pending.as_ref().unwrap());
+        let observer = Arc::downgrade(&lease);
+
+        // Logical detach leaves the actual bytes available to existing leases.
+        // It must not reserve a physical free or invoke the driver boundary.
+        assert!(!reclaim_shared_allocation(&mut pending, |_| {
+            panic!("a live storage lease must prevent physical reclamation")
+        })
+        .unwrap());
+        assert!(Arc::ptr_eq(pending.as_ref().unwrap(), &lease));
+        let use_group = registry
+            .lock()
+            .unwrap()
+            .reserve_owned_memory_uses(&[(7, memory)], &[reclamation.release_proof()])
+            .unwrap();
+        assert_eq!(lease.physical.as_ref().unwrap().bytes[9], 3);
+        registry
+            .lock()
+            .unwrap()
+            .release_memory_uses(use_group)
+            .unwrap();
+        drop(lease);
+
+        // The sole real owner now enters physical reclamation. Failed and
+        // unwinding driver waits retain both its allocation and its admission.
+        let mut attempt = |owner: &mut Payload| {
+            crate::device_runtime::resource::with_reclamation_admission(
+                &registry,
+                7,
+                memory,
+                owner.reclamation.release_proof(),
+                &mut owner.admission,
+                || Err(ResourceError::Driver("physical completion pending".into())),
+            )
+        };
+        assert!(reclaim_shared_allocation(&mut pending, &mut attempt).is_err());
+        assert!(observer.upgrade().is_none());
+        let queue = std::sync::Mutex::new(vec![pending.take()]);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut batch =
+                PendingReclamationBatch::take(&queue, |queue, owners| queue.append(owners));
+            let _ = reclaim_shared_allocation(&mut batch[0], |_| panic!("wait unwound"));
+        }))
+        .is_err());
+        pending = queue
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("failed owner returned to canonical queue");
+        assert!(pending.as_ref().unwrap().physical.is_some());
+        assert_eq!(physical_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(accounting.allocated.load(Ordering::SeqCst), 64);
+        assert!(registry
+            .lock()
+            .unwrap()
+            .reserve_memory_uses(7, &[memory])
+            .is_err());
+
+        let late_registry = Arc::clone(&registry);
+        std::thread::spawn(move || {
+            assert!(reclaim_shared_allocation(&mut pending, |owner| {
+                crate::device_runtime::resource::with_reclamation_admission(
+                    &late_registry,
+                    7,
+                    memory,
+                    owner.reclamation.release_proof(),
+                    &mut owner.admission,
+                    || {
+                        assert!(late_registry.try_lock().is_ok());
+                        drop(owner.physical.take());
+                        owner.reclamation.complete()
+                    },
+                )
+            })
+            .unwrap());
+            assert!(pending.is_none());
+        })
+        .join()
+        .unwrap();
+        assert_eq!(physical_drops.load(Ordering::SeqCst), 1);
+        assert!(reclamation.was_released());
+        assert_eq!(accounting.allocated.load(Ordering::SeqCst), 0);
+        assert_eq!(accounting.budget_reserved.load(Ordering::SeqCst), 0);
+        let replacement = AllocationReclamation::default();
+        let group = registry
+            .lock()
+            .unwrap()
+            .reserve_owned_memory_uses(&[(7, memory)], &[replacement.release_proof()])
+            .unwrap();
+        registry.lock().unwrap().release_memory_uses(group).unwrap();
+    }
+
+    #[test]
+    fn late_reclamation_retires_actual_payload_charge_and_same_range_together() {
+        use crate::device_runtime::resource::{
+            with_reclamation_admission, BlockUseRegistry, MemoryStorageOwner, MemoryUse,
+        };
+        use std::sync::atomic::AtomicUsize;
+
+        struct PhysicalStorage {
+            _bytes: Box<[u8]>,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for PhysicalStorage {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct Payload {
+            physical: Option<PhysicalStorage>,
+            reclamation: Arc<AllocationReclamation>,
+            drops: Arc<AtomicUsize>,
+            admission: Option<MemoryUseGroup>,
+        }
+        impl Drop for Payload {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct StorageView;
+        impl MemoryStorageOwner for StorageView {
+            fn dependencies(
+                &self,
+            ) -> crate::device_runtime::ResourceResult<Arc<DeviceAccessDependencies>> {
+                panic!("host driver boundary must not initialize CUDA");
+            }
+        }
+
+        for enqueue_error in [false, true] {
+            let registry = std::sync::Mutex::new(BlockUseRegistry::default());
+            let accounting = Arc::new(GpuMemoryAccounting::default());
+            accounting.budget_reserved.store(64, Ordering::SeqCst);
+            let reclamation = Arc::new(AllocationReclamation::default());
+            reclamation
+                .attach_local(Arc::clone(&accounting), 64)
+                .unwrap();
+            reclamation.acquired().unwrap();
+            let physical_drops = Arc::new(AtomicUsize::new(0));
+            let payload_drops = Arc::new(AtomicUsize::new(0));
+            let bytes = vec![0u8; 64].into_boxed_slice();
+            let ptr = bytes.as_ptr() as u64;
+            let mut live = Some(Payload {
+                physical: Some(PhysicalStorage {
+                    _bytes: bytes,
+                    drops: Arc::clone(&physical_drops),
+                }),
+                reclamation: Arc::clone(&reclamation),
+                drops: Arc::clone(&payload_drops),
+                admission: None,
+            });
+            let view: Arc<dyn MemoryStorageOwner> = Arc::new(StorageView);
+            let memory = MemoryUse::new(ptr, 64, Access::ReadWrite).unwrap();
+            registry.lock().unwrap().register_storage(
+                7,
+                memory,
+                Arc::downgrade(&view),
+                reclamation.release_proof(),
+            );
+            let mut pending = live.take();
+            let owner = pending.as_mut().unwrap();
+            let result = with_reclamation_admission(
+                &registry,
+                7,
+                memory,
+                reclamation.release_proof(),
+                &mut owner.admission,
+                || {
+                    assert!(registry.try_lock().is_ok());
+                    if enqueue_error {
+                        Err(ResourceError::Driver(
+                            "pending free completion unknown".into(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result.is_err(), enqueue_error);
+            drop(view);
+            assert!(live.is_none());
+            assert!(
+                reclaim_allocation(&mut pending, |_| Err(ResourceError::Driver(
+                    "driver completion still pending".into()
+                )))
+                .is_err()
+            );
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = reclaim_allocation(&mut pending, |_| panic!("driver wait unwound"));
+            }))
+            .is_err());
+            assert!(pending.as_ref().unwrap().physical.is_some());
+            assert_eq!(physical_drops.load(Ordering::SeqCst), 0);
+            assert_eq!(payload_drops.load(Ordering::SeqCst), 0);
+            assert_eq!(accounting.allocated.load(Ordering::SeqCst), 64);
+            assert_eq!(accounting.budget_reserved.load(Ordering::SeqCst), 64);
+            assert!(!reclamation.was_released());
+            {
+                let mut registry = registry.lock().unwrap();
+                assert!(registry.reserve_memory_uses(7, &[memory]).is_err());
+                assert!(registry
+                    .retain_storage_uses(7, &[memory], &mut Vec::new())
+                    .is_err());
+            }
+
+            // The real raw-owner retirement helper runs on a different reaper.
+            // Only the physical driver operation is replaced by host storage.
+            std::thread::spawn(move || {
+                reclaim_allocation(&mut pending, |owner| {
+                    drop(owner.physical.take());
+                    owner.reclamation.complete()
+                })
+                .unwrap();
+                assert!(pending.is_none());
+                reclaim_allocation(&mut pending, |_| panic!("must not free twice")).unwrap();
+            })
+            .join()
+            .unwrap();
+            assert_eq!(physical_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(payload_drops.load(Ordering::SeqCst), 1);
+            assert!(reclamation.was_released());
+            assert_eq!(accounting.allocated.load(Ordering::SeqCst), 0);
+            assert_eq!(accounting.budget_reserved.load(Ordering::SeqCst), 0);
+            assert_eq!(Arc::strong_count(&accounting), 1);
+            let replacement: Arc<dyn MemoryStorageOwner> = Arc::new(StorageView);
+            let replacement_reclamation = AllocationReclamation::default();
+            let mut retained = Vec::new();
+            {
+                let mut registry = registry.lock().unwrap();
+                registry.register_storage(
+                    7,
+                    memory,
+                    Arc::downgrade(&replacement),
+                    replacement_reclamation.release_proof(),
+                );
+                // Reusing the address never revalidates an old source owner.
+                assert!(registry
+                    .reserve_owned_memory_uses(&[(7, memory)], &[reclamation.release_proof()],)
+                    .is_err());
+                registry
+                    .retain_storage_uses(7, &[memory], &mut retained)
+                    .unwrap();
+                let group = registry
+                    .reserve_owned_memory_uses(
+                        &[(7, memory)],
+                        &[replacement_reclamation.release_proof()],
+                    )
+                    .unwrap();
+                registry.release_memory_uses(group).unwrap();
+            }
+            assert_eq!(retained.len(), 1);
+            assert!(Arc::ptr_eq(&retained[0].owner, &replacement));
+        }
+    }
+
+    #[test]
+    fn foreign_storage_retirement_retries_completion_and_releases_the_actual_owner() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        struct Producer(Arc<AtomicUsize>);
+        impl Drop for Producer {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let _capture_test = crate::cuda_graph::capture_lifecycle_test_guard();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let producer = Arc::new(Producer(Arc::clone(&drops)));
+        let retained = Arc::downgrade(&producer);
+        let ready = Arc::new(AtomicBool::new(false));
+        let completion = Arc::clone(&ready);
+        let reclamation = Arc::new(AllocationReclamation::default());
+        let proof = Arc::clone(&reclamation);
+        crate::cuda_graph::retire_resources_after_completion(
+            Some(producer),
+            move |_| {
+                if completion.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(ResourceError::Driver(
+                        "producer use completion pending".into(),
+                    ))
+                }
+            },
+            |owner| {
+                drop(owner.take());
+                Ok(())
+            },
+            move |_| proof.complete(),
+            |_, error| panic!("unexpected producer retirement failure: {error}"),
+        );
+        assert!(retained.upgrade().is_some());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(!reclamation.was_released());
+        ready.store(true, Ordering::SeqCst);
+        crate::cuda_graph::reap_capture_retirements();
+        assert!(retained.upgrade().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(reclamation.was_released());
+        crate::cuda_graph::reap_capture_retirements();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn foreign_storage_retirement_retries_release_publication_without_repeating_deleter() {
+        use std::sync::atomic::AtomicUsize;
+        struct Producer(Arc<AtomicUsize>);
+        impl Drop for Producer {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let _capture_test = crate::cuda_graph::capture_lifecycle_test_guard();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let accounting = Arc::new(GpuMemoryAccounting::default());
+        let reclamation = Arc::new(AllocationReclamation::default());
+        reclamation
+            .attach_local(Arc::clone(&accounting), 64)
+            .unwrap();
+        reclamation.acquired().unwrap();
+        let resources = (Some(Producer(Arc::clone(&drops))), Arc::clone(&reclamation));
+        crate::cuda_graph::retire_resources_after_completion(
+            resources,
+            |_| Ok(()),
+            |owners| {
+                drop(owners.0.take());
+                Ok(())
+            },
+            |owners| owners.1.complete(),
+            |_, _| {},
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(!reclamation.was_released());
+        accounting.allocated.store(64, Ordering::SeqCst);
+        accounting.budget_reserved.store(64, Ordering::SeqCst);
+        std::thread::spawn(crate::cuda_graph::reap_capture_retirements)
+            .join()
+            .unwrap();
+        assert!(reclamation.was_released());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(accounting.allocated.load(Ordering::SeqCst), 0);
+        assert_eq!(accounting.budget_reserved.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn foreign_storage_retirement_publication_unwind_keeps_retry_without_deleter() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        let _capture_test = crate::cuda_graph::capture_lifecycle_test_guard();
+        let destroyed = Arc::new(AtomicUsize::new(0));
+        let destroy_probe = Arc::clone(&destroyed);
+        let first = Arc::new(AtomicBool::new(true));
+        let context = Arc::new(());
+        let retained = Arc::downgrade(&context);
+        let reclamation = Arc::new(AllocationReclamation::default());
+        let proof = Arc::clone(&reclamation);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::cuda_graph::retire_resources_after_completion(
+                context,
+                |_| Ok(()),
+                move |_| {
+                    destroy_probe.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                move |_| {
+                    if first.swap(false, Ordering::SeqCst) {
+                        panic!("release publication interrupted");
+                    }
+                    proof.complete()
+                },
+                |_, error| panic!("unexpected destructive failure: {error}"),
+            );
+        }));
+        assert!(result.is_err());
+        assert_eq!(destroyed.load(Ordering::SeqCst), 1);
+        assert!(retained.upgrade().is_some());
+        assert!(!reclamation.was_released());
+        std::thread::spawn(crate::cuda_graph::reap_capture_retirements)
+            .join()
+            .unwrap();
+        assert_eq!(destroyed.load(Ordering::SeqCst), 1);
+        assert!(reclamation.was_released());
+        assert!(retained.upgrade().is_none());
+    }
+
+    #[test]
+    fn foreign_storage_retirement_unwinding_deleter_keeps_context_without_retry() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct Producer(Arc<AtomicUsize>);
+        impl Drop for Producer {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("producer deleter interrupted");
+            }
+        }
+        let _capture_test = crate::cuda_graph::capture_lifecycle_test_guard();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let context = Arc::new(());
+        let retained_context = Arc::downgrade(&context);
+        let reclamation = Arc::new(AllocationReclamation::default());
+        let resources = (
+            Some(Producer(Arc::clone(&drops))),
+            Arc::clone(&reclamation),
+            context,
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::cuda_graph::retire_resources_after_completion(
+                resources,
+                |_| Ok(()),
+                |owners| {
+                    drop(owners.0.take());
+                    Ok(())
+                },
+                |owners| owners.1.complete(),
+                |_, error| panic!("unexpected retirement result: {error}"),
+            );
+        }));
+        assert!(result.is_err());
+        crate::cuda_graph::reap_capture_retirements();
+        crate::cuda_graph::reap_capture_retirements();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(retained_context.upgrade().is_some());
+        assert!(!reclamation.was_released());
+    }
+
+    #[test]
+    fn allocation_reclamation_refunds_local_charge_once_on_the_actual_reaper() {
+        let accounting = Arc::new(GpuMemoryAccounting::default());
+        accounting.budget_reserved.store(64, Ordering::SeqCst);
+        let reclamation = Arc::new(AllocationReclamation::default());
+        reclamation
+            .attach_local(Arc::clone(&accounting), 64)
+            .unwrap();
+        reclamation.acquired().unwrap();
+        let reaper = Arc::clone(&reclamation);
+        std::thread::spawn(move || reaper.complete().unwrap())
+            .join()
+            .unwrap();
+        reclamation.complete().unwrap();
+        assert!(reclamation.was_released());
+        assert_eq!(accounting.allocated.load(Ordering::SeqCst), 0);
+        assert_eq!(accounting.budget_reserved.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&accounting), 1);
+    }
+
+    #[test]
+    fn allocation_reclamation_settles_all_byte_charges_before_handle_retirement() {
+        let local = Arc::new(GpuMemoryAccounting::default());
+        local.budget_reserved.store(64, Ordering::SeqCst);
+        let ledger = Arc::new(AllocationAccounting::default());
+        let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticket = Arc::new(AllocationReclamation::default());
+        ticket.attach_local(Arc::clone(&local), 64).unwrap();
+        ticket.attach_resource(Arc::clone(&ledger), 64).unwrap();
+        let storage = vec![0_u8; 64].into_boxed_slice();
+        ticket.acquired().unwrap();
+        ticket.attach_pending(Arc::clone(&pending), 64).unwrap();
+        assert!(ticket.attach_pending(Arc::clone(&pending), 64).is_err());
+        assert_eq!(pending.load(Ordering::SeqCst), 64);
+        let mut handle_owner = Some((storage, Arc::clone(&ticket)));
+        assert!(reclaim_allocation(&mut handle_owner, |owner| {
+            // The memory allocation, not the surrounding handle owner, is freed.
+            drop(std::mem::take(&mut owner.0));
+            owner.1.complete()?;
+            Err(ResourceError::Driver(
+                "stream destruction outcome unknown".into(),
+            ))
+        })
+        .is_err());
+        assert!(handle_owner.is_some());
+        assert!(ticket.was_acquired());
+        assert!(ticket.was_released());
+        assert_eq!(local.budget_reserved.load(Ordering::SeqCst), 0);
+        assert_eq!(local.allocated.load(Ordering::SeqCst), 0);
+        assert_eq!(ledger.snapshot(), (0, 64));
+        assert_eq!(pending.load(Ordering::SeqCst), 0);
+        ticket.complete().unwrap();
+        assert_eq!(ledger.snapshot(), (0, 64));
+    }
+
+    #[test]
+    fn allocation_reclamation_concurrent_completion_settles_once() {
+        let ledger = Arc::new(AllocationAccounting::default());
+        let ticket = Arc::new(AllocationReclamation::default());
+        ticket.attach_resource(Arc::clone(&ledger), 64).unwrap();
+        let storage = vec![0_u8; 64].into_boxed_slice();
+        ticket.acquired().unwrap();
+        drop(storage);
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let ticket = Arc::clone(&ticket);
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..100 {
+                        ticket.complete().unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(ledger.snapshot(), (0, 64));
+    }
+
+    #[test]
+    fn allocation_reclamation_detach_panic_does_not_skip_physical_reap() {
+        use crate::device_runtime::{DeviceMemoryResource, ResourceResult};
+        struct InterruptedDetach(
+            crate::device_runtime::budget::tests::DeferredHostResource,
+            bool,
+        );
+        impl DeviceMemoryResource for InterruptedDetach {
+            fn materialize(&self, request: AllocationRequest) -> ResourceResult<DeviceBlock> {
+                self.0.materialize(request)
+            }
+            fn allocation_accounting(&self) -> Arc<AllocationAccounting> {
+                self.0.allocation_accounting()
+            }
+            fn device_ordinal(&self) -> u32 {
+                0
+            }
+            fn bytes_outstanding(&self) -> usize {
+                self.0.bytes_outstanding()
+            }
+            fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
+                self.0.deallocate(block)?;
+                panic!("detach telemetry interrupted");
+            }
+            fn reap_pending(&self) -> ResourceResult<()> {
+                let owners = std::mem::take(&mut *self.0.owners.lock().unwrap());
+                drop(owners);
+                if self.1 {
+                    panic!("reap telemetry interrupted");
+                }
+                Ok(())
+            }
+        }
+        for reap_panics in [false, true] {
+            let resource: Arc<dyn DeviceMemoryResource + Send + Sync> =
+                Arc::new(InterruptedDetach(Default::default(), reap_panics));
+            let ledger = resource.allocation_accounting();
+            let request = AllocationRequest::new(64, StreamId::DEFAULT, AllocTag::UNTAGGED);
+            let ticket = request.reclamation();
+            let block = resource.materialize(request).unwrap();
+            let mut owner = ResourceBlockRetirement::new(block, resource, ticket);
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| owner.release()));
+            let panic = outcome.expect_err("detach panic must be preserved");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&"detach telemetry interrupted")
+            );
+            assert_eq!(ledger.snapshot(), (0, 64));
+            owner.release().unwrap();
+        }
+    }
+
+    #[test]
+    fn allocation_reclamation_partial_settlement_does_not_refund_twice() {
+        let local = Arc::new(GpuMemoryAccounting::default());
+        local.budget_reserved.store(64, Ordering::SeqCst);
+        let ledger = Arc::new(AllocationAccounting::default());
+        let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticket = AllocationReclamation::default();
+        ticket.attach_local(Arc::clone(&local), 64).unwrap();
+        ticket.attach_resource(Arc::clone(&ledger), 64).unwrap();
+        ticket.acquired().unwrap();
+        ticket.attach_pending(Arc::clone(&pending), 64).unwrap();
+        pending.store(32, Ordering::SeqCst); // inject a failed final obligation
+        assert!(ticket.complete().is_err());
+        assert_eq!(local.allocated.load(Ordering::SeqCst), 0);
+        assert_eq!(ledger.snapshot(), (0, 64));
+        assert!(!ticket.was_released());
+        pending.store(64, Ordering::SeqCst);
+        ticket.complete().unwrap();
+        assert_eq!(ledger.snapshot(), (0, 64));
+        assert_eq!(pending.load(Ordering::SeqCst), 0);
+        assert!(ticket.was_released());
+    }
+
+    #[test]
+    fn allocation_reclamation_local_attempt_restores_only_unacquired_claims() {
+        for from_token in [false, true] {
+            for acquired in [false, true] {
+                let accounting = Arc::new(GpuMemoryAccounting::default());
+                accounting.budget_reserved.store(128, Ordering::SeqCst);
+                let mut remaining = 64;
+                let mut ticket = None;
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let attempt = LocalAllocationAttempt::new(
+                        Arc::clone(&accounting),
+                        64,
+                        if from_token {
+                            Some(&mut remaining)
+                        } else {
+                            None
+                        },
+                    );
+                    ticket = Some(Arc::clone(&attempt.reclamation));
+                    if acquired {
+                        attempt.reclamation.acquired().unwrap();
+                        // A concurrent physical release before the original frame
+                        // unwinds must not make the frame treat malloc as refused.
+                        attempt.reclamation.complete().unwrap();
+                    }
+                    panic!("allocation frame interrupted");
+                }));
+                assert!(panic.is_err());
+                assert_eq!(remaining, if from_token && !acquired { 128 } else { 64 });
+                assert_eq!(
+                    accounting.budget_reserved.load(Ordering::SeqCst),
+                    if from_token && !acquired { 128 } else { 64 }
+                );
+                assert_eq!(accounting.allocated.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn allocation_reclamation_unknown_completion_retains_canonical_charge() {
+        let accounting = Arc::new(GpuMemoryAccounting::default());
+        accounting.allocated.store(64, Ordering::SeqCst);
+        accounting.budget_reserved.store(64, Ordering::SeqCst);
+        let reclamation = AllocationReclamation::default();
+        accounting.allocated.store(0, Ordering::SeqCst);
+        reclamation
+            .attach_local(Arc::clone(&accounting), 64)
+            .unwrap();
+        reclamation.acquired().unwrap();
+        assert!(!reclamation.was_released());
+        drop(reclamation);
+        assert_eq!(accounting.allocated.load(Ordering::SeqCst), 64);
+        assert_eq!(accounting.budget_reserved.load(Ordering::SeqCst), 64);
+    }
+
+    #[test]
+    fn allocation_reclamation_failed_refund_is_atomic_and_retryable() {
+        let accounting = Arc::new(GpuMemoryAccounting::default());
+        accounting.budget_reserved.store(64, Ordering::SeqCst);
+        let reclamation = AllocationReclamation::default();
+        reclamation
+            .attach_local(Arc::clone(&accounting), 64)
+            .unwrap();
+        reclamation.acquired().unwrap();
+        accounting.allocated.store(32, Ordering::SeqCst);
+        assert!(reclamation.complete().is_err());
+        assert!(!reclamation.was_released());
+        assert_eq!(accounting.allocated.load(Ordering::SeqCst), 32);
+        assert_eq!(accounting.budget_reserved.load(Ordering::SeqCst), 64);
+        assert_eq!(Arc::strong_count(&accounting), 2);
+        accounting.allocated.store(64, Ordering::SeqCst);
+        reclamation.complete().unwrap();
+        assert!(reclamation.was_released());
+        assert_eq!(accounting.allocated.load(Ordering::SeqCst), 0);
+        assert_eq!(accounting.budget_reserved.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn physical_release_proof_is_independent_of_another_pending_failure() {
+        assert!(allocation_reclamation_outcome(
+            true,
+            Err(ResourceError::Driver("another allocation failed".into()))
+        )
+        .is_ok());
+        assert!(allocation_reclamation_outcome(false, Ok(())).is_err());
+        assert!(allocation_reclamation_outcome(
+            false,
+            Err(ResourceError::Driver("own free failed".into()))
+        )
+        .is_err());
+    }
+    #[test]
+    fn allocation_initialization_failure_reaches_the_canonical_cold_reaper() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        struct DeferredOwner {
+            storage: Option<Box<[u8]>>,
+            completed: Arc<AtomicBool>,
+            releases: Arc<AtomicUsize>,
+        }
+        impl Drop for DeferredOwner {
+            fn drop(&mut self) {
+                let mut storage = self.storage.take();
+                let completed = Arc::clone(&self.completed);
+                let releases = Arc::clone(&self.releases);
+                crate::cuda_graph::retry_retirement_after_stream_captures(move || {
+                    if !completed.load(Ordering::Acquire) {
+                        return false;
+                    }
+                    drop(storage.take());
+                    releases.fetch_add(1, Ordering::SeqCst);
+                    true
+                });
+            }
+        }
+
+        let _capture_test = crate::cuda_graph::capture_lifecycle_test_guard();
+        for unwind in [false, true] {
+            let completed = Arc::new(AtomicBool::new(false));
+            let releases = Arc::new(AtomicUsize::new(0));
+            let owner = DeferredOwner {
+                storage: Some(vec![0; 64].into_boxed_slice()),
+                completed: Arc::clone(&completed),
+                releases: Arc::clone(&releases),
+            };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let result = initialize_allocation(owner, 64, Arc::default(), |_| {
+                    if unwind {
+                        panic!("allocation initialization interrupted");
+                    }
+                    Err(ResourceError::Driver(
+                        "allocation initialization failed".into(),
+                    ))
+                });
+                assert!(result.is_err());
+            }));
+            assert_eq!(result.is_err(), unwind);
+            crate::cuda_graph::reap_capture_retirements();
+            assert_eq!(releases.load(Ordering::SeqCst), 0);
+            completed.store(true, Ordering::Release);
+            std::thread::spawn(crate::cuda_graph::reap_capture_retirements)
+                .join()
+                .unwrap();
+            assert_eq!(releases.load(Ordering::SeqCst), 1);
+            crate::cuda_graph::reap_capture_retirements();
+            assert_eq!(releases.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn allocation_initialization_failure_transfers_actual_owner_to_drop() {
+        struct Owner(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reclamation = Arc::new(AllocationReclamation::default());
+        reclamation.acquired().unwrap();
+        let error = initialize_allocation(Owner(Arc::clone(&drops)), 64, reclamation, |_| {
+            Err(ResourceError::Driver(
+                "allocation-ready record failed".into(),
+            ))
+        })
+        .err()
+        .expect("initialization must fail");
+        assert_eq!(error.retained_allocation_bytes(), 64);
+        drop(error);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn allocation_initialization_unwind_transfers_actual_owner_to_drop() {
+        struct Owner(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = std::panic::catch_unwind(|| {
+            let _ = initialize_allocation(Owner(Arc::clone(&drops)), 64, Arc::default(), |_| {
+                panic!("initialization unwound")
+            });
+        });
+        assert!(result.is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn allocation_initialization_success_transfers_owner_once() {
+        let owner = Arc::new(());
+        let initialized =
+            initialize_allocation(Arc::clone(&owner), 64, Arc::default(), |_| Ok(())).unwrap();
+        assert_eq!(Arc::strong_count(&owner), 2);
+        drop(initialized);
+        assert_eq!(Arc::strong_count(&owner), 1);
+    }
+
+    #[test]
+    fn allocation_release_retries_only_unconfirmed_fence_steps() {
+        use std::cell::Cell;
+
+        let mut state = DriverReleaseState::default();
+        let frees = Cell::new(0);
+        state
+            .submit(|| {
+                frees.set(frees.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        let records = Cell::new(0);
+        let waits = Cell::new(0);
+        let mut recorded = false;
+        assert!(state
+            .confirm_async(
+                &mut recorded,
+                || {
+                    records.set(records.get() + 1);
+                    Err(ResourceError::Driver("record failed".into()))
+                },
+                || {
+                    waits.set(waits.get() + 1);
+                    Ok(())
+                },
+            )
+            .is_err());
+        assert!(!recorded);
+        assert_eq!(waits.get(), 0, "an unrecorded event proves no free");
+        assert!(state
+            .confirm_async(
+                &mut recorded,
+                || {
+                    records.set(records.get() + 1);
+                    Ok(())
+                },
+                || {
+                    waits.set(waits.get() + 1);
+                    Err(ResourceError::Driver("wait failed".into()))
+                },
+            )
+            .is_err());
+        assert!(recorded);
+        state
+            .confirm_async(
+                &mut recorded,
+                || panic!("recorded fence must not be replaced"),
+                || {
+                    waits.set(waits.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(frees.get(), 1);
+        assert_eq!(records.get(), 2);
+        assert_eq!(waits.get(), 2);
+
+        for state in [
+            DriverReleaseState::Owned,
+            DriverReleaseState::OutcomeUnknown,
+        ] {
+            assert!(state
+                .confirm_async(
+                    &mut false,
+                    || panic!("cannot invent proof of an unconfirmed free submission"),
+                    || panic!("cannot confirm an unsubmitted free"),
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn allocation_release_does_not_resubmit_unknown_free() {
+        let attempts = std::cell::Cell::new(0);
+        let mut state = DriverReleaseState::default();
+        assert!(state
+            .submit(|| {
+                attempts.set(attempts.get() + 1);
+                Err(ResourceError::Driver("unknown free outcome".into()))
+            })
+            .is_err());
+        assert!(state
+            .submit(|| {
+                attempts.set(attempts.get() + 1);
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn allocation_release_does_not_resubmit_successful_free() {
+        let attempts = std::cell::Cell::new(0);
+        let mut state = DriverReleaseState::default();
+        for _ in 0..2 {
+            state
+                .submit(|| {
+                    attempts.set(attempts.get() + 1);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert_eq!(attempts.get(), 1);
+    }
     use super::*;
     use crate::device_runtime::{DeviceMemoryResource, DirectCudaResource, ResourceResult};
     use xlog_core::ScalarType;
@@ -1938,18 +5120,17 @@ mod tests {
     }
 
     impl DeviceMemoryResource for FailFirstAllocationResource {
-        fn allocate(
-            &self,
-            bytes: usize,
-            stream: StreamId,
-            tag: AllocTag,
-        ) -> ResourceResult<DeviceBlock> {
+        fn materialize(&self, request: AllocationRequest) -> ResourceResult<DeviceBlock> {
             if self.fail_next.swap(false, Ordering::SeqCst) {
                 return Err(ResourceError::Driver(
                     "injected allocation failure".to_string(),
                 ));
             }
-            self.inner.allocate(bytes, stream, tag)
+            self.inner.materialize(request)
+        }
+
+        fn allocation_accounting(&self) -> Arc<AllocationAccounting> {
+            self.inner.allocation_accounting()
         }
 
         fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
@@ -1966,13 +5147,12 @@ mod tests {
     }
 
     impl DeviceMemoryResource for FailAfterDeallocateResource {
-        fn allocate(
-            &self,
-            bytes: usize,
-            stream: StreamId,
-            tag: AllocTag,
-        ) -> ResourceResult<DeviceBlock> {
-            self.inner.allocate(bytes, stream, tag)
+        fn materialize(&self, request: AllocationRequest) -> ResourceResult<DeviceBlock> {
+            self.inner.materialize(request)
+        }
+
+        fn allocation_accounting(&self) -> Arc<AllocationAccounting> {
+            self.inner.allocation_accounting()
         }
 
         fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
@@ -3243,10 +6423,6 @@ mod tests {
     /// `runtime_block()` and reports `is_external() == false`.
     /// The recorder will record it normally instead of
     /// strict-rejecting.
-    ///
-    /// Uses a null-pointer `DlpackManagedTensor` purely as a
-    /// drop-safe placeholder — the recorder never derefs the
-    /// tensor, only the source slice.
     #[test]
     fn test_xlog_owned_dlpack_runtime_backed_carries_identity() {
         let Some((device, runtime)) = try_runtime() else {
@@ -3260,12 +6436,21 @@ mod tests {
         let slice = manager.alloc::<u8>(64).expect("alloc runtime-backed");
         assert!(slice.runtime_block().is_some());
         let stream = device.inner().stream().clone();
-        // SAFETY: null-pointer DlpackManagedTensor is drop-safe
-        // (the Drop impl checks for null before invoking the
-        // deleter). Acceptable for a unit fixture that exercises
-        // identity propagation, not the tensor lifecycle.
-        let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
-        let col = CudaColumn::dlpack_xlog_owned(Arc::new(slice), stream, tensor);
+        let slice = Arc::new(slice);
+        let tensor = crate::dlpack::export_slice_managed_tensor(
+            Arc::clone(&slice),
+            device.ordinal() as i32,
+            crate::dlpack::DLDataType {
+                code: crate::dlpack::K_DLUINT,
+                bits: 8,
+                lanes: 1,
+            },
+            1,
+            slice.len(),
+        )
+        .expect("real export owner");
+        stream.synchronize().expect("producer ready");
+        let col = CudaColumn::dlpack_xlog_owned(slice, stream, tensor);
         assert!(
             !col.is_external(),
             "xlog-owned DLPack column must report is_external=false"
@@ -3294,8 +6479,21 @@ mod tests {
         let slice = manager.alloc::<u8>(64).expect("alloc legacy");
         assert!(slice.runtime_block().is_none());
         let stream = device.inner().stream().clone();
-        let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
-        let col = CudaColumn::dlpack_xlog_owned(Arc::new(slice), stream, tensor);
+        let slice = Arc::new(slice);
+        let tensor = crate::dlpack::export_slice_managed_tensor(
+            Arc::clone(&slice),
+            device.ordinal() as i32,
+            crate::dlpack::DLDataType {
+                code: crate::dlpack::K_DLUINT,
+                bits: 8,
+                lanes: 1,
+            },
+            1,
+            slice.len(),
+        )
+        .expect("real export owner");
+        stream.synchronize().expect("producer ready");
+        let col = CudaColumn::dlpack_xlog_owned(slice, stream, tensor);
         assert!(
             !col.is_external(),
             "xlog-owned DLPack column is owned regardless of allocator backing"
@@ -3316,10 +6514,28 @@ mod tests {
             return;
         };
         let stream = device.inner().stream().clone();
-        let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
-        // Bogus ptr/len — never dereferenced in this unit test
-        // (we only inspect the column metadata).
-        let col = CudaColumn::dlpack(0, 0, stream, tensor);
+        let manager = Arc::new(GpuMemoryManager::new(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024),
+        ));
+        let slice = Arc::new(manager.alloc::<u8>(1).expect("external allocation"));
+        let ptr = slice.device_ptr_value();
+        let tensor = crate::dlpack::export_slice_managed_tensor(
+            slice,
+            device.ordinal() as i32,
+            crate::dlpack::DLDataType {
+                code: crate::dlpack::K_DLUINT,
+                bits: 8,
+                lanes: 1,
+            },
+            1,
+            1,
+        )
+        .expect("real external owner");
+        stream.synchronize().expect("producer ready");
+        // SAFETY: the token retains the live one-byte allocation on this context,
+        // producer work has completed, and there are no foreign accesses.
+        let col = unsafe { CudaColumn::dlpack(ptr, 1, stream, tensor) };
         assert!(
             col.is_external(),
             "true external DLPack column must report is_external=true"
@@ -3375,7 +6591,9 @@ mod tests {
         let import = Arc::new(crate::arrow_device::ArrowDeviceImport::new(
             arrow::array::ArrayData::new_null(&arrow::datatypes::DataType::UInt8, 0),
         ));
-        let col = CudaColumn::arrow_device(0, 0, stream, import);
+        // SAFETY: the empty ArrayData owns this empty span; no bytes or producer
+        // work exist, and its release is safe on any host thread.
+        let col = unsafe { CudaColumn::arrow_device(0, 0, stream, import) };
         assert!(
             col.is_external(),
             "true external Arrow column must report is_external=true"

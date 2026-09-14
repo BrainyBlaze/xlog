@@ -133,11 +133,15 @@ impl CudaKernelProvider {
         let range_lo = self.memory().alloc::<u32>(n_delta as usize)?;
         let mut wp = self.memory().alloc::<u32>(n_delta as usize + 1)?;
         {
+            let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(n_delta + 1)?;
             let mut rec = LaunchRecorder::new_strict(launch_stream);
             rec.read_column(delta_y);
             rec.read_column(edge_y);
             rec.write(&range_lo);
             rec.write(&wp);
+            for level in scan_scratch.levels() {
+                rec.read_write(level);
+            }
             rec.preflight(runtime)
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: range preflight: {e}")))?;
             let kernel = self
@@ -147,28 +151,35 @@ impl CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel("fj_delta_range_u32 not found".to_string()))?;
             let grid = n_delta.div_ceil(BLOCK_SIZE);
             // SAFETY: fj_delta_range_u32(delta_y, n_delta, edge_y, n_edge, range_lo, wp).
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (&delta_y_v, n_delta, &edge_y_v, n_edge, &range_lo, &mut wp),
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("fj_delta_range_u32 launch: {e}")))?;
-            }
-            self.multiblock_scan_u32_inplace_on_stream(
-                &mut wp,
-                n_delta + 1,
-                &cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-            rec.commit(runtime)
+            let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (&delta_y_v, n_delta, &edge_y_v, n_edge, &range_lo, &mut wp),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("fj_delta_range_u32 launch: {e}"))
+                        })?;
+                }
+                self.multiblock_scan_u32_inplace_on_stream(
+                    &mut wp,
+                    n_delta + 1,
+                    stream,
+                    &mut scan_scratch,
+                )?;
+                Ok(())
+            };
+            // SAFETY: preflight retained the accessed buffers and bound this stream.
+            let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(|error| error.into_xlog_error())?;
+            rec.commit()
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: range commit: {e}")))?;
         }
         cu_stream
@@ -203,6 +214,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("{ctx}: zero estimator: {e}")))?;
         let mut est_counts = self.memory().alloc::<u32>(EST_WORDS as usize + 1)?;
         {
+            let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(EST_WORDS + 1)?;
             let mut rec = LaunchRecorder::new_strict(launch_stream);
             rec.read_column(delta_x);
             rec.read_column(edge_z);
@@ -210,6 +222,9 @@ impl CudaKernelProvider {
             rec.read(&wp);
             rec.read_write(&est);
             rec.write(&est_counts);
+            for level in scan_scratch.levels() {
+                rec.read_write(level);
+            }
             rec.preflight(runtime)
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: estimate preflight: {e}")))?;
             let delta_x_v = self.column_as_u32_view(delta_x, n_delta as usize)?;
@@ -224,62 +239,69 @@ impl CudaKernelProvider {
             let grid = total_work.div_ceil(BLOCK_SIZE);
             // SAFETY: fj_delta_sparse_estimate(delta_x, n_delta, range_lo,
             // wp, total_work, edge_z, est_bitmap, est_bit_mask).
-            unsafe {
-                estimate
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (
-                            &delta_x_v,
-                            n_delta,
-                            &range_lo,
-                            &wp,
-                            total_work,
-                            &edge_z_v,
-                            &mut est,
-                            est_bit_mask,
-                        ),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("fj_delta_sparse_estimate launch: {e}"))
-                    })?;
-            }
-            // popcount the estimator (reuses the dense popcount kernel)
-            // → exclusive scan → total set bits at [EST_WORDS].
-            let popcount = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::FJ_DELTA_POPCOUNT)
-                .ok_or_else(|| XlogError::Kernel("fj_delta_popcount not found".to_string()))?;
-            let pgrid = EST_WORDS.div_ceil(BLOCK_SIZE);
-            // SAFETY: fj_delta_popcount(bitmap, n_words, counts).
-            unsafe {
-                popcount
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (pgrid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (&est, EST_WORDS, &mut est_counts),
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("estimator popcount launch: {e}")))?;
-            }
-            self.multiblock_scan_u32_inplace_on_stream(
-                &mut est_counts,
-                EST_WORDS + 1,
-                &cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-            rec.commit(runtime)
+            let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                unsafe {
+                    estimate
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (
+                                &delta_x_v,
+                                n_delta,
+                                &range_lo,
+                                &wp,
+                                total_work,
+                                &edge_z_v,
+                                &mut est,
+                                est_bit_mask,
+                            ),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("fj_delta_sparse_estimate launch: {e}"))
+                        })?;
+                }
+                // popcount the estimator (reuses the dense popcount kernel)
+                // → exclusive scan → total set bits at [EST_WORDS].
+                let popcount = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::FJ_DELTA_POPCOUNT)
+                    .ok_or_else(|| XlogError::Kernel("fj_delta_popcount not found".to_string()))?;
+                let pgrid = EST_WORDS.div_ceil(BLOCK_SIZE);
+                // SAFETY: fj_delta_popcount(bitmap, n_words, counts).
+                unsafe {
+                    popcount
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (pgrid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (&est, EST_WORDS, &mut est_counts),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("estimator popcount launch: {e}"))
+                        })?;
+                }
+                self.multiblock_scan_u32_inplace_on_stream(
+                    &mut est_counts,
+                    EST_WORDS + 1,
+                    stream,
+                    &mut scan_scratch,
+                )?;
+                Ok(())
+            };
+            // SAFETY: preflight retained the accessed buffers and bound this stream.
+            let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(|error| error.into_xlog_error())?;
+            rec.commit()
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: estimate commit: {e}")))?;
         }
         cu_stream
@@ -356,83 +378,91 @@ impl CudaKernelProvider {
             rec.preflight(runtime)
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: insert preflight: {e}")))?;
 
-            if n_r > 0 {
-                let r_x_v = self.column_as_u32_view(r_x, n_r as usize)?;
-                let r_z_v = self.column_as_u32_view(r_z, n_r as usize)?;
-                let load_r = self
+            let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                if n_r > 0 {
+                    let r_x_v = self.column_as_u32_view(r_x, n_r as usize)?;
+                    let r_z_v = self.column_as_u32_view(r_z, n_r as usize)?;
+                    let load_r = self
+                        .device()
+                        .inner()
+                        .get_func(WCOJ_MODULE, wcoj_kernels::FJ_DELTA_SPARSE_LOAD_R)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("fj_delta_sparse_load_r not found".to_string())
+                        })?;
+                    let grid = n_r.div_ceil(BLOCK_SIZE);
+                    // SAFETY: fj_delta_sparse_load_r(r_x, r_z, n_r, table, is_r, mask, overflow).
+                    unsafe {
+                        load_r
+                            .clone()
+                            .launch_in(
+                                stream,
+                                LaunchConfig {
+                                    grid_dim: (grid, 1, 1),
+                                    block_dim: (BLOCK_SIZE, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (
+                                    &r_x_v,
+                                    &r_z_v,
+                                    n_r,
+                                    &mut table,
+                                    &mut is_r,
+                                    mask,
+                                    &mut overflow,
+                                ),
+                            )
+                            .map_err(|e| {
+                                XlogError::Kernel(format!("fj_delta_sparse_load_r launch: {e}"))
+                            })?;
+                    }
+                }
+
+                let delta_x_v = self.column_as_u32_view(delta_x, n_delta as usize)?;
+                let edge_z_v = self.column_as_u32_view(edge_z, n_edge as usize)?;
+                let insert = self
                     .device()
                     .inner()
-                    .get_func(WCOJ_MODULE, wcoj_kernels::FJ_DELTA_SPARSE_LOAD_R)
+                    .get_func(WCOJ_MODULE, wcoj_kernels::FJ_DELTA_SPARSE_INSERT_CANDIDATES)
                     .ok_or_else(|| {
-                        XlogError::Kernel("fj_delta_sparse_load_r not found".to_string())
+                        XlogError::Kernel("fj_delta_sparse_insert_candidates not found".to_string())
                     })?;
-                let grid = n_r.div_ceil(BLOCK_SIZE);
-                // SAFETY: fj_delta_sparse_load_r(r_x, r_z, n_r, table, is_r, mask, overflow).
+                let grid = total_work.div_ceil(BLOCK_SIZE);
+                // SAFETY: fj_delta_sparse_insert_candidates(delta_x, n_delta,
+                // range_lo, wp, total_work, edge_z, table, mask, overflow).
                 unsafe {
-                    load_r
+                    insert
                         .clone()
-                        .launch_on_stream(
-                            &cu_stream,
+                        .launch_in(
+                            stream,
                             LaunchConfig {
                                 grid_dim: (grid, 1, 1),
                                 block_dim: (BLOCK_SIZE, 1, 1),
                                 shared_mem_bytes: 0,
                             },
                             (
-                                &r_x_v,
-                                &r_z_v,
-                                n_r,
+                                &delta_x_v,
+                                n_delta,
+                                &range_lo,
+                                &wp,
+                                total_work,
+                                &edge_z_v,
                                 &mut table,
-                                &mut is_r,
                                 mask,
                                 &mut overflow,
                             ),
                         )
                         .map_err(|e| {
-                            XlogError::Kernel(format!("fj_delta_sparse_load_r launch: {e}"))
+                            XlogError::Kernel(format!(
+                                "fj_delta_sparse_insert_candidates launch: {e}"
+                            ))
                         })?;
                 }
-            }
-
-            let delta_x_v = self.column_as_u32_view(delta_x, n_delta as usize)?;
-            let edge_z_v = self.column_as_u32_view(edge_z, n_edge as usize)?;
-            let insert = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::FJ_DELTA_SPARSE_INSERT_CANDIDATES)
-                .ok_or_else(|| {
-                    XlogError::Kernel("fj_delta_sparse_insert_candidates not found".to_string())
-                })?;
-            let grid = total_work.div_ceil(BLOCK_SIZE);
-            // SAFETY: fj_delta_sparse_insert_candidates(delta_x, n_delta,
-            // range_lo, wp, total_work, edge_z, table, mask, overflow).
-            unsafe {
-                insert
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (
-                            &delta_x_v,
-                            n_delta,
-                            &range_lo,
-                            &wp,
-                            total_work,
-                            &edge_z_v,
-                            &mut table,
-                            mask,
-                            &mut overflow,
-                        ),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("fj_delta_sparse_insert_candidates launch: {e}"))
-                    })?;
-            }
-            rec.commit(runtime)
+                Ok(())
+            };
+            // SAFETY: preflight retained the accessed buffers and bound this stream.
+            let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(|error| error.into_xlog_error())?;
+            rec.commit()
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: insert commit: {e}")))?;
         }
         cu_stream
@@ -450,10 +480,14 @@ impl CudaKernelProvider {
         // ---- Phase 3: mark novel slots → scan → emit.
         let mut counts = self.memory().alloc::<u32>(cap as usize + 1)?;
         {
+            let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(cap + 1)?;
             let mut rec = LaunchRecorder::new_strict(launch_stream);
             rec.read(&table);
             rec.read(&is_r);
             rec.write(&counts);
+            for level in scan_scratch.levels() {
+                rec.read_write(level);
+            }
             rec.preflight(runtime)
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: mark preflight: {e}")))?;
             let mark = self
@@ -463,27 +497,34 @@ impl CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel("fj_delta_sparse_mark not found".to_string()))?;
             let grid = cap.div_ceil(BLOCK_SIZE);
             // SAFETY: fj_delta_sparse_mark(table, is_r, cap, counts).
-            unsafe {
-                mark.clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (&table, &is_r, cap, &mut counts),
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("fj_delta_sparse_mark launch: {e}")))?;
-            }
-            self.multiblock_scan_u32_inplace_on_stream(
-                &mut counts,
-                cap + 1,
-                &cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-            rec.commit(runtime)
+            let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                unsafe {
+                    mark.clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (&table, &is_r, cap, &mut counts),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("fj_delta_sparse_mark launch: {e}"))
+                        })?;
+                }
+                self.multiblock_scan_u32_inplace_on_stream(
+                    &mut counts,
+                    cap + 1,
+                    stream,
+                    &mut scan_scratch,
+                )?;
+                Ok(())
+            };
+            // SAFETY: preflight retained the accessed buffers and bound this stream.
+            let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(|error| error.into_xlog_error())?;
+            rec.commit()
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: mark commit: {e}")))?;
         }
         cu_stream
@@ -512,20 +553,28 @@ impl CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel("fj_delta_sparse_emit not found".to_string()))?;
             let grid = cap.div_ceil(BLOCK_SIZE);
             // SAFETY: fj_delta_sparse_emit(table, is_r, offsets, cap, out_x, out_z).
-            unsafe {
-                emit.clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (&table, &is_r, &counts, cap, &out_x, &out_z),
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("fj_delta_sparse_emit launch: {e}")))?;
-            }
-            rec.commit(runtime)
+            let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                unsafe {
+                    emit.clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (&table, &is_r, &counts, cap, &out_x, &out_z),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("fj_delta_sparse_emit launch: {e}"))
+                        })?;
+                }
+                Ok(())
+            };
+            // SAFETY: preflight retained the accessed buffers and bound this stream.
+            let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(|error| error.into_xlog_error())?;
+            rec.commit()
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: emit commit: {e}")))?;
         }
         cu_stream
@@ -533,12 +582,25 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("{ctx}: emit sync: {e}")))?;
 
         let d_nr = self.memory().alloc::<u32>(1)?;
-        self.htod_launch_metadata_async_copy_one(
-            &total_novel,
-            &d_nr,
-            &cu_stream,
-            &format!("{ctx}: result num_rows"),
-        )?;
+        let mut rec_num_rows = LaunchRecorder::new_strict(launch_stream);
+        rec_num_rows.write(&d_nr);
+        rec_num_rows.preflight(runtime).map_err(|error| {
+            XlogError::Kernel(format!("{ctx}: num_rows preflight failed: {error}"))
+        })?;
+        let rec_num_rows = unsafe {
+            rec_num_rows.enqueue_prepared_with(&cu_stream, |enqueue| {
+                self.initialize_launch_metadata_u32(
+                    total_novel,
+                    &d_nr,
+                    enqueue,
+                    &format!("{ctx}: result num_rows"),
+                )
+            })
+        }
+        .map_err(crate::launch::LaunchEnqueueError::into_xlog_error)?;
+        rec_num_rows.commit().map_err(|error| {
+            XlogError::Kernel(format!("{ctx}: num_rows commit failed: {error}"))
+        })?;
         let columns = if cols.r_carry == 0 {
             vec![out_x.into_bytes().into(), out_z.into_bytes().into()]
         } else {

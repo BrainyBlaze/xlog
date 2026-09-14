@@ -295,7 +295,7 @@ pub(crate) struct ResidentReceiptPointee {
     pub(crate) ptr: u64,
     pub(crate) range_end: u64,
     pub(crate) manager_id: usize,
-    pub(crate) block: Option<crate::device_runtime::BlockId>,
+    pub(crate) block: Option<(crate::device_runtime::BlockId, usize)>,
 }
 
 fn checked_receipt_pointee(
@@ -322,7 +322,7 @@ fn checked_receipt_pointee(
                     "resident receipt pointee is outside its runtime block".into(),
                 ));
             }
-            Some(block)
+            Some((block, bytes))
         }
         None => None,
     };
@@ -362,7 +362,7 @@ fn validate_receipt_pointee_owners(
         let block = pointee.block.ok_or_else(|| {
             XlogError::Kernel("resident receipt pointee has no runtime block identity".into())
         })?;
-        if block.device_ordinal != device_ordinal {
+        if block.0.device_ordinal != device_ordinal {
             return Err(XlogError::Kernel(
                 "resident receipt pointee belongs to a foreign CUDA device".into(),
             ));
@@ -379,7 +379,7 @@ fn validate_receipt_schedule_block_mapping(
         || pointees
             .iter()
             .zip(expected_blocks)
-            .any(|(pointee, expected)| pointee.block != Some(*expected))
+            .any(|(pointee, expected)| pointee.block.map(|(block, _)| block) != Some(*expected))
     {
         return Err(XlogError::Kernel(
             "resident receipt runtime-block mapping differs from the schedule".into(),
@@ -539,24 +539,12 @@ pub struct ResidentPackedReceipt {
 /// Exact-size page-locked destination for the single final resident receipt.
 #[derive(Debug)]
 pub struct ResidentPinnedReceipt {
-    ptr: std::ptr::NonNull<u8>,
-    len: usize,
+    buffer: crate::device::PinnedHostBuffer,
 }
-
-// SAFETY: the allocation has unique ownership, exposes no host pointer, and
-// CUDA permits page-locked host allocations to be freed from another thread.
-unsafe impl Send for ResidentPinnedReceipt {}
 
 impl ResidentPinnedReceipt {
     pub fn len_bytes(&self) -> usize {
-        self.len
-    }
-}
-
-impl Drop for ResidentPinnedReceipt {
-    fn drop(&mut self) {
-        // SAFETY: `ptr` was returned by `cuMemHostAlloc` and is freed once here.
-        let _ = unsafe { sys::cuMemFreeHost(self.ptr.as_ptr().cast()) };
+        self.buffer.len()
     }
 }
 
@@ -1499,20 +1487,16 @@ impl CudaKernelProvider {
         &self,
         receipt: &ResidentPackedReceipt,
     ) -> Result<ResidentPinnedReceipt> {
-        let mut ptr = std::ptr::null_mut();
-        // SAFETY: CUDA initializes `ptr` on success; the owner frees it once.
-        let code = unsafe { sys::cuMemHostAlloc(&mut ptr, receipt.len_bytes(), 0) };
-        if code != sys::cudaError_enum::CUDA_SUCCESS {
-            return Err(XlogError::Kernel(format!(
-                "resident pinned receipt allocation failed: {code:?}"
-            )));
-        }
-        let ptr = std::ptr::NonNull::new(ptr.cast()).ok_or_else(|| {
-            XlogError::Kernel("resident pinned receipt allocation returned null".into())
-        })?;
         Ok(ResidentPinnedReceipt {
-            ptr,
-            len: receipt.len_bytes(),
+            buffer: crate::device::PinnedHostBuffer::new(
+                self.device().inner().stream(),
+                receipt.len_bytes(),
+            )
+            .map_err(|error| {
+                XlogError::Kernel(format!(
+                    "resident pinned receipt allocation failed: {error}"
+                ))
+            })?,
         })
     }
 
@@ -1524,36 +1508,22 @@ impl CudaKernelProvider {
         &self,
         receipt: &ResidentPackedReceipt,
         pinned: &mut ResidentPinnedReceipt,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
     ) -> Result<Vec<u8>> {
-        if pinned.len != receipt.len_bytes() {
+        if pinned.len_bytes() != receipt.len_bytes() {
             return Err(XlogError::Kernel(format!(
                 "resident pinned receipt size {} does not match device receipt size {}",
-                pinned.len,
+                pinned.len_bytes(),
                 receipt.len_bytes()
             )));
         }
-        // SAFETY: both allocations are live for `pinned.len` bytes and the
-        // mutable owner prevents host access until this stream is synchronized.
-        let code = unsafe {
-            sys::cuMemcpyDtoHAsync_v2(
-                pinned.ptr.as_ptr().cast(),
-                receipt.device_bytes().device_ptr_value(),
-                pinned.len,
-                stream.cu_stream(),
-            )
-        };
-        if code != sys::cudaError_enum::CUDA_SUCCESS {
-            return Err(XlogError::Kernel(format!(
-                "resident final receipt copy failed: {code:?}"
-            )));
-        }
-        stream.synchronize().map_err(|error| {
-            XlogError::Kernel(format!("resident final receipt wait failed: {error}"))
-        })?;
-        // SAFETY: the copy and stream wait succeeded for the complete owner.
-        let bytes = unsafe { std::slice::from_raw_parts(pinned.ptr.as_ptr(), pinned.len) }.to_vec();
-        self.record_final_observation_transfer(pinned.len as u64);
+        let bytes = pinned
+            .buffer
+            .copy_from_device(&receipt.device_bytes().view(), stream)
+            .map_err(|error| {
+                XlogError::Kernel(format!("resident final receipt copy failed: {error}"))
+            })?;
+        self.record_final_observation_transfer(bytes.len() as u64);
         Ok(bytes)
     }
 

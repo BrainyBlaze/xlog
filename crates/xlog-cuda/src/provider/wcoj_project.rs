@@ -24,12 +24,10 @@
 //!    writes (new columns + new `num_rows_device`).
 //! 4. Issue per-column DtoD-async copies on the launch stream,
 //!    plus one DtoD-async copy for `num_rows_device`.
-//! 5. **Failure-drain**: any error after the first queued copy
-//!    must `cu_stream.synchronize()` before returning, because
-//!    partially-allocated owned buffers are about to drop and
-//!    an in-flight DtoD copy would race the runtime dealloc.
-//!    Mirrors `wcoj.rs ≈ 2140` (skew-score histogram
-//!    queued-result discipline).
+//! 5. On any error after preflight, consume the recorder through
+//!    `abort`; once enqueue may have started, abort synchronizes
+//!    before cancelling reservations and preserves any cleanup
+//!    failure alongside the primary error.
 //! 6. Carry `cached_row_count` from `src` unchanged — logical
 //!    row count is invariant under column permutation.
 
@@ -140,11 +138,7 @@ impl CudaKernelProvider {
             ))
         })?;
 
-        // Failure-drain: from here on, any error must synchronize
-        // the stream before returning so partially-issued copies
-        // drain before the runtime deallocs `new_col0` /
-        // `new_col1` / `new_num_rows` on Err drop.
-        let queued_result: Result<()> = (|| {
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
             // SAFETY: all DtoD copies are between live device
             // pointers on a stream the runtime owns. Sizes match
             // the source columns exactly. cuMemcpyDtoDAsync_v2 is
@@ -154,7 +148,7 @@ impl CudaKernelProvider {
                     *new_col0.device_ptr(),
                     *src.column(1).expect("src.col1").device_ptr(),
                     bytes_col1,
-                    cu_stream.cu_stream(),
+                    stream.stream().cu_stream(),
                 );
                 if res != sys::cudaError_enum::CUDA_SUCCESS {
                     return Err(XlogError::Kernel(format!(
@@ -166,7 +160,7 @@ impl CudaKernelProvider {
                     *new_col1.device_ptr(),
                     *src.column(0).expect("src.col0").device_ptr(),
                     bytes_col0,
-                    cu_stream.cu_stream(),
+                    stream.stream().cu_stream(),
                 );
                 if res != sys::cudaError_enum::CUDA_SUCCESS {
                     return Err(XlogError::Kernel(format!(
@@ -178,7 +172,7 @@ impl CudaKernelProvider {
                     *new_num_rows.device_ptr(),
                     *src.num_rows_device().device_ptr(),
                     std::mem::size_of::<u32>(),
-                    cu_stream.cu_stream(),
+                    stream.stream().cu_stream(),
                 );
                 if res != sys::cudaError_enum::CUDA_SUCCESS {
                     return Err(XlogError::Kernel(format!(
@@ -188,18 +182,12 @@ impl CudaKernelProvider {
                 }
             }
             Ok(())
-        })();
+        };
+        // SAFETY: preflight retained the copied buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
 
-        if let Err(e) = queued_result {
-            let _ = cu_stream.synchronize();
-            return Err(e);
-        }
-
-        rec.commit(runtime).map_err(|e| {
-            // commit happens after CUDA work is queued; if commit
-            // fails, drain so partially-issued copies finish
-            // before the buffers drop.
-            let _ = cu_stream.synchronize();
+        rec.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "wcoj_project_2col_swap_recorded: launch recorder commit failed: {}",
                 e
@@ -315,7 +303,7 @@ impl CudaKernelProvider {
             ))
         })?;
 
-        let queued_result: Result<()> = (|| {
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
             for (i, &p) in perm.iter().enumerate() {
                 let src_col = src.column(p).expect("src column");
                 let bytes = src_col.len();
@@ -326,7 +314,7 @@ impl CudaKernelProvider {
                         *new_columns[i].device_ptr(),
                         *src_col.device_ptr(),
                         bytes,
-                        cu_stream.cu_stream(),
+                        stream.stream().cu_stream(),
                     );
                     if res != sys::cudaError_enum::CUDA_SUCCESS {
                         return Err(XlogError::Kernel(format!(
@@ -342,7 +330,7 @@ impl CudaKernelProvider {
                     *new_num_rows.device_ptr(),
                     *src.num_rows_device().device_ptr(),
                     std::mem::size_of::<u32>(),
-                    cu_stream.cu_stream(),
+                    stream.stream().cu_stream(),
                 );
                 if res != sys::cudaError_enum::CUDA_SUCCESS {
                     return Err(XlogError::Kernel(format!(
@@ -352,15 +340,12 @@ impl CudaKernelProvider {
                 }
             }
             Ok(())
-        })();
+        };
+        // SAFETY: preflight retained the copied buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
 
-        if let Err(e) = queued_result {
-            let _ = cu_stream.synchronize();
-            return Err(e);
-        }
-
-        rec.commit(runtime).map_err(|e| {
-            let _ = cu_stream.synchronize();
+        rec.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "wcoj_project_output_columns_recorded: launch recorder commit failed: {}",
                 e

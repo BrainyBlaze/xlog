@@ -198,11 +198,15 @@ impl CudaKernelProvider {
         let range_lo = self.memory().alloc::<u32>(n_delta as usize)?;
         let mut wp = self.memory().alloc::<u32>(n_delta as usize + 1)?;
         {
+            let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(n_delta + 1)?;
             let mut rec = LaunchRecorder::new_strict(launch_stream);
             rec.read_column(delta_y);
             rec.read_column(edge_y);
             rec.write(&range_lo);
             rec.write(&wp);
+            for level in scan_scratch.levels() {
+                rec.read_write(level);
+            }
             rec.preflight(runtime)
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: range preflight failed: {e}")))?;
             let kernel = self
@@ -216,30 +220,35 @@ impl CudaKernelProvider {
             // SAFETY: fj_delta_range_u32(delta_y, n_delta, edge_y,
             // n_edge, range_lo, work_prefix); buffers are
             // device-resident and preflighted.
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (&delta_y_v, n_delta, &edge_y_v, n_edge, &range_lo, &mut wp),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("fj_delta_range_u32 launch failed: {e}"))
-                    })?;
-            }
-            self.multiblock_scan_u32_inplace_on_stream(
-                &mut wp,
-                n_delta + 1,
-                &cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-            rec.commit(runtime)
+            let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (&delta_y_v, n_delta, &edge_y_v, n_edge, &range_lo, &mut wp),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("fj_delta_range_u32 launch failed: {e}"))
+                        })?;
+                }
+                self.multiblock_scan_u32_inplace_on_stream(
+                    &mut wp,
+                    n_delta + 1,
+                    stream,
+                    &mut scan_scratch,
+                )?;
+                Ok(())
+            };
+            // SAFETY: preflight retained the accessed buffers and bound this stream.
+            let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(|error| error.into_xlog_error())?;
+            rec.commit()
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: range commit failed: {e}")))?;
         }
         cu_stream
@@ -292,60 +301,23 @@ impl CudaKernelProvider {
             // SAFETY: fj_delta_mark_u32(delta_x, n_delta, range_lo,
             // work_prefix, total_work, edge_z, bitmap, words_per_row,
             // domain, error_flag); buffers preflighted.
-            unsafe {
-                mark.clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (
-                            &delta_x_v,
-                            n_delta,
-                            &range_lo,
-                            &wp,
-                            total_work,
-                            &edge_z_v,
-                            &mut bitmap,
-                            words_per_row,
-                            domain,
-                            &mut error_flag,
-                        ),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("fj_delta_mark_u32 launch failed: {e}"))
-                    })?;
-            }
-            if n_r > 0 {
-                let r_x_v = self.column_as_u32_view(r_x, n_r as usize)?;
-                let r_z_v = self.column_as_u32_view(r_z, n_r as usize)?;
-                let subtract = self
-                    .device()
-                    .inner()
-                    .get_func(WCOJ_MODULE, wcoj_kernels::FJ_DELTA_SUBTRACT_U32)
-                    .ok_or_else(|| {
-                        XlogError::Kernel("fj_delta_subtract_u32 kernel not found".to_string())
-                    })?;
-                let grid = n_r.div_ceil(BLOCK_SIZE);
-                // SAFETY: fj_delta_subtract_u32(r_x, r_z, n_r, bitmap,
-                // words_per_row, domain, error_flag); same-stream launch
-                // orders subtract after mark.
+            let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
                 unsafe {
-                    subtract
-                        .clone()
-                        .launch_on_stream(
-                            &cu_stream,
+                    mark.clone()
+                        .launch_in(
+                            stream,
                             LaunchConfig {
                                 grid_dim: (grid, 1, 1),
                                 block_dim: (BLOCK_SIZE, 1, 1),
                                 shared_mem_bytes: 0,
                             },
                             (
-                                &r_x_v,
-                                &r_z_v,
-                                n_r,
+                                &delta_x_v,
+                                n_delta,
+                                &range_lo,
+                                &wp,
+                                total_work,
+                                &edge_z_v,
                                 &mut bitmap,
                                 words_per_row,
                                 domain,
@@ -353,11 +325,56 @@ impl CudaKernelProvider {
                             ),
                         )
                         .map_err(|e| {
-                            XlogError::Kernel(format!("fj_delta_subtract_u32 launch failed: {e}"))
+                            XlogError::Kernel(format!("fj_delta_mark_u32 launch failed: {e}"))
                         })?;
                 }
-            }
-            rec.commit(runtime)
+                if n_r > 0 {
+                    let r_x_v = self.column_as_u32_view(r_x, n_r as usize)?;
+                    let r_z_v = self.column_as_u32_view(r_z, n_r as usize)?;
+                    let subtract = self
+                        .device()
+                        .inner()
+                        .get_func(WCOJ_MODULE, wcoj_kernels::FJ_DELTA_SUBTRACT_U32)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("fj_delta_subtract_u32 kernel not found".to_string())
+                        })?;
+                    let grid = n_r.div_ceil(BLOCK_SIZE);
+                    // SAFETY: fj_delta_subtract_u32(r_x, r_z, n_r, bitmap,
+                    // words_per_row, domain, error_flag); same-stream launch
+                    // orders subtract after mark.
+                    unsafe {
+                        subtract
+                            .clone()
+                            .launch_in(
+                                stream,
+                                LaunchConfig {
+                                    grid_dim: (grid, 1, 1),
+                                    block_dim: (BLOCK_SIZE, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (
+                                    &r_x_v,
+                                    &r_z_v,
+                                    n_r,
+                                    &mut bitmap,
+                                    words_per_row,
+                                    domain,
+                                    &mut error_flag,
+                                ),
+                            )
+                            .map_err(|e| {
+                                XlogError::Kernel(format!(
+                                    "fj_delta_subtract_u32 launch failed: {e}"
+                                ))
+                            })?;
+                    }
+                }
+                Ok(())
+            };
+            // SAFETY: preflight retained the accessed buffers and bound this stream.
+            let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(|error| error.into_xlog_error())?;
+            rec.commit()
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: mark commit failed: {e}")))?;
         }
         cu_stream
@@ -373,9 +390,13 @@ impl CudaKernelProvider {
         // ---- Phase 3: popcount → scan → emit at scanned offsets.
         let mut counts = self.memory().alloc::<u32>(n_words as usize + 1)?;
         {
+            let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(n_words + 1)?;
             let mut rec = LaunchRecorder::new_strict(launch_stream);
             rec.read(&bitmap);
             rec.write(&counts);
+            for level in scan_scratch.levels() {
+                rec.read_write(level);
+            }
             rec.preflight(runtime)
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: count preflight failed: {e}")))?;
             let popcount = self
@@ -387,30 +408,35 @@ impl CudaKernelProvider {
                 })?;
             let grid = n_words.div_ceil(BLOCK_SIZE);
             // SAFETY: fj_delta_popcount(bitmap, n_words, counts).
-            unsafe {
-                popcount
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (&bitmap, n_words, &mut counts),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("fj_delta_popcount launch failed: {e}"))
-                    })?;
-            }
-            self.multiblock_scan_u32_inplace_on_stream(
-                &mut counts,
-                n_words + 1,
-                &cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-            rec.commit(runtime)
+            let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                unsafe {
+                    popcount
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (&bitmap, n_words, &mut counts),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("fj_delta_popcount launch failed: {e}"))
+                        })?;
+                }
+                self.multiblock_scan_u32_inplace_on_stream(
+                    &mut counts,
+                    n_words + 1,
+                    stream,
+                    &mut scan_scratch,
+                )?;
+                Ok(())
+            };
+            // SAFETY: preflight retained the accessed buffers and bound this stream.
+            let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(|error| error.into_xlog_error())?;
+            rec.commit()
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: count commit failed: {e}")))?;
         }
         cu_stream
@@ -441,22 +467,28 @@ impl CudaKernelProvider {
             let grid = n_words.div_ceil(BLOCK_SIZE);
             // SAFETY: fj_delta_emit_u32(bitmap, words_per_row, n_words,
             // offsets, out_x, out_z); offsets are the scanned counts.
-            unsafe {
-                emit.clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (&bitmap, words_per_row, n_words, &counts, &out_x, &out_z),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("fj_delta_emit_u32 launch failed: {e}"))
-                    })?;
-            }
-            rec.commit(runtime)
+            let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                unsafe {
+                    emit.clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (&bitmap, words_per_row, n_words, &counts, &out_x, &out_z),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("fj_delta_emit_u32 launch failed: {e}"))
+                        })?;
+                }
+                Ok(())
+            };
+            // SAFETY: preflight retained the accessed buffers and bound this stream.
+            let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(|error| error.into_xlog_error())?;
+            rec.commit()
                 .map_err(|e| XlogError::Kernel(format!("{ctx}: emit commit failed: {e}")))?;
         }
         cu_stream
@@ -464,12 +496,25 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("{ctx}: emit sync failed: {e}")))?;
 
         let d_nr = self.memory().alloc::<u32>(1)?;
-        self.htod_launch_metadata_async_copy_one(
-            &total_novel,
-            &d_nr,
-            &cu_stream,
-            &format!("{ctx}: result num_rows"),
-        )?;
+        let mut rec_num_rows = LaunchRecorder::new_strict(launch_stream);
+        rec_num_rows.write(&d_nr);
+        rec_num_rows.preflight(runtime).map_err(|error| {
+            XlogError::Kernel(format!("{ctx}: num_rows preflight failed: {error}"))
+        })?;
+        let rec_num_rows = unsafe {
+            rec_num_rows.enqueue_prepared_with(&cu_stream, |enqueue| {
+                self.initialize_launch_metadata_u32(
+                    total_novel,
+                    &d_nr,
+                    enqueue,
+                    &format!("{ctx}: result num_rows"),
+                )
+            })
+        }
+        .map_err(crate::launch::LaunchEnqueueError::into_xlog_error)?;
+        rec_num_rows.commit().map_err(|error| {
+            XlogError::Kernel(format!("{ctx}: num_rows commit failed: {error}"))
+        })?;
         // Place carry/value at their head positions so the buffer is
         // schema-faithful to `full_r` (and union-compatible with it).
         let columns = if cols.r_carry == 0 {
@@ -539,23 +584,29 @@ impl CudaKernelProvider {
                 let grid = n.div_ceil(BLOCK_SIZE);
                 // SAFETY: fj_delta_max_u32(col, n, out_max); buffers
                 // device-resident and preflighted.
-                unsafe {
-                    kernel
-                        .clone()
-                        .launch_on_stream(
-                            &cu_stream,
-                            LaunchConfig {
-                                grid_dim: (grid, 1, 1),
-                                block_dim: (BLOCK_SIZE, 1, 1),
-                                shared_mem_bytes: 0,
-                            },
-                            (&view, n, &mut d_max),
-                        )
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("fj_delta_max_u32 launch failed: {e}"))
-                        })?;
-                }
-                rec.commit(runtime)
+                let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                    unsafe {
+                        kernel
+                            .clone()
+                            .launch_in(
+                                stream,
+                                LaunchConfig {
+                                    grid_dim: (grid, 1, 1),
+                                    block_dim: (BLOCK_SIZE, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (&view, n, &mut d_max),
+                            )
+                            .map_err(|e| {
+                                XlogError::Kernel(format!("fj_delta_max_u32 launch failed: {e}"))
+                            })?;
+                    }
+                    Ok(())
+                };
+                // SAFETY: preflight retained the accessed buffers and bound this stream.
+                let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                    .map_err(|error| error.into_xlog_error())?;
+                rec.commit()
                     .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
             }
         }
