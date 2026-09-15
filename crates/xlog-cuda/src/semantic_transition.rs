@@ -1900,6 +1900,8 @@ impl TextBindingStorage {
         kind: SemanticTransitionKind,
         authority_bytes: u64,
         training_selection: u64,
+        model_update_bindings: u64,
+        model_update_binding_count: u64,
     ) -> ContinuationInputs {
         ContinuationInputs {
             text: self.descriptor(),
@@ -1909,6 +1911,8 @@ impl TextBindingStorage {
             transition_kind: kind.code(),
             authority_bytes,
             training_selection,
+            model_update_bindings,
+            model_update_binding_count,
         }
     }
 }
@@ -2739,6 +2743,8 @@ struct PendingContinuation {
     text: TextBinding,
     numerical_admissibility: u64,
     training_selection: u64,
+    model_update_bindings: u64,
+    model_update_binding_count: u64,
 }
 
 #[repr(C)]
@@ -2751,6 +2757,16 @@ struct ContinuationInputs {
     transition_kind: u64,
     authority_bytes: u64,
     training_selection: u64,
+    model_update_bindings: u64,
+    model_update_binding_count: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ModelUpdateBinding {
+    source: u64,
+    bytes: u64,
+    slots: [u64; 2],
 }
 
 #[repr(C)]
@@ -3003,6 +3019,7 @@ unsafe impl DeviceRepr for PublicationBank {}
 unsafe impl DeviceRepr for PublicationRoleCount {}
 unsafe impl DeviceRepr for PublicationContract {}
 unsafe impl DeviceRepr for PendingContinuation {}
+unsafe impl DeviceRepr for ModelUpdateBinding {}
 unsafe impl DeviceRepr for PublicationCommand {}
 unsafe impl DeviceRepr for PublicationLease {}
 unsafe impl DeviceRepr for SemanticTensorLayout {}
@@ -3027,8 +3044,9 @@ const _: () = assert!(size_of::<SemanticModelContractLayout>() == 48);
 const _: () = assert!(size_of::<PublicationContract>() == 272);
 const _: () = assert!(size_of::<SemanticTextRow>() == 16);
 const _: () = assert!(size_of::<TextBinding>() == 24);
-const _: () = assert!(size_of::<PendingContinuation>() == 224);
-const _: () = assert!(size_of::<ContinuationInputs>() == 72);
+const _: () = assert!(size_of::<PendingContinuation>() == 240);
+const _: () = assert!(size_of::<ContinuationInputs>() == 88);
+const _: () = assert!(size_of::<ModelUpdateBinding>() == 32);
 const _: () = assert!(size_of::<PublicationCommand>() == 24);
 const _: () = assert!(size_of::<PublicationLease>() == 88);
 const _: () = assert!(size_of::<SemanticTensorLayout>() == 112);
@@ -5984,6 +6002,7 @@ struct PreparedStepStorage {
     digests: Option<Arc<TrackedCudaSlice<u64>>>,
     next_digest: usize,
     model_work: Option<PreparedModelWork>,
+    model_update: Option<PreparedModelUpdate>,
     admit: CudaFunction,
     kind_gate: CudaFunction,
     active_gate: CudaFunction,
@@ -6000,6 +6019,86 @@ struct PreparedStepStorage {
     training_origin: Option<DeviceMemoryView<SemanticTrainingViewOriginRecord>>,
     training_view: Option<SemanticSelectedTrainingView>,
     result_kernel: CudaFunction,
+}
+
+struct PreparedModelUpdate {
+    bindings: TrackedCudaSlice<ModelUpdateBinding>,
+    output: Option<BoundModelUpdate>,
+    copy: CudaFunction,
+}
+
+struct BoundModelUpdate {
+    values: Vec<ModelUpdateBinding>,
+    allocations: Vec<PreparedSemanticTensor>,
+    _witness: SemanticTensorContentWitness,
+}
+
+impl PreparedModelUpdate {
+    fn descriptor(&self) -> (u64, u64) {
+        (self.bindings.device_ptr_value(), self.bindings.len() as u64)
+    }
+
+    fn record(&self, recorder: &mut LaunchRecorder) {
+        recorder.read(&self.bindings);
+        if let Some(output) = &self.output {
+            for allocation in &output.allocations {
+                if let Some(source) = &allocation.source {
+                    recorder.read(source);
+                }
+            }
+        }
+    }
+
+    fn enqueue_copy(
+        &self,
+        domain: &ResidentExecutionDomain,
+        poisoned: &mut bool,
+        storage: &PublicationStorage,
+        reader: &TrackedCudaSlice<PublicationLease>,
+    ) -> Result<(), SemanticTransitionError> {
+        let output = self.output.as_ref().ok_or_else(|| {
+            publication_input_error("prepared update has no original model output binding")
+        })?;
+        let allocation_count = u32::try_from(output.values.len())
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        if allocation_count == 0 || allocation_count > 65_535 {
+            return Err(publication_input_error(
+                "prepared update model allocation roster exceeds the CUDA launch geometry",
+            ));
+        }
+        let maximum_bytes = output
+            .values
+            .iter()
+            .map(|binding| binding.bytes)
+            .max()
+            .unwrap_or(0);
+        let blocks = maximum_bytes.div_ceil(256).clamp(1, 65_535) as u32;
+        let mut recorder = domain.new_strict_recorder();
+        storage.record(&mut recorder);
+        recorder.read(reader);
+        self.record(&mut recorder);
+        let arguments = (
+            storage.control.device_ptr_value(),
+            reader.device_ptr_value(),
+        );
+        enqueue_recorded(domain, poisoned, recorder, |enqueue| {
+            // SAFETY: the continuation kernel validated this immutable binding
+            // roster first. Each CUDA grid row copies one disjoint allocation
+            // into the inactive neural bank retained by PublicationStorage.
+            unsafe {
+                self.copy.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (blocks, allocation_count, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    arguments,
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })
+    }
 }
 
 struct PreparedModelWork {
@@ -7677,6 +7776,7 @@ struct TransitionKernelIo<'a> {
     text: Option<&'a TextBindingStorage>,
     lease: Option<&'a TrackedCudaSlice<PublicationLease>>,
     model_work: Option<&'a PreparedModelWork>,
+    model_update: Option<&'a PreparedModelUpdate>,
     training_selection: Option<&'a DeviceMemoryView<SemanticTrainingViewSelection>>,
     #[cfg(feature = "semantic-policy")]
     policy: Option<&'a PolicyStorage>,
@@ -9405,12 +9505,19 @@ impl SemanticTransitionSession {
                 .checked_mul(update_count)
                 .ok_or(SemanticTransitionError::GenerationExhausted)
         })?;
+        let update_binding_bytes = update_count
+            .checked_mul(storage.model_slots.len())
+            .and_then(|count| count.checked_mul(size_of::<ModelUpdateBinding>()))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let update_binding_bytes = u64::try_from(update_binding_bytes)
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
         let bytes =
             prepared_segment_allocation_bytes(step_bytes, transition_bound, training_origin_bytes)?
                 .checked_add(
                     u64::try_from(training_view_bytes)
                         .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
                 )
+                .and_then(|bytes| bytes.checked_add(update_binding_bytes))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
         // Claim the actual local and runtime budgets before any T-sized host
         // collection or native allocation. Every fixed bank consumes this claim.
@@ -9460,6 +9567,7 @@ impl SemanticTransitionSession {
         let witness = kernel("semantic_tensor_content_witness")?;
         let content_guard = kernel("semantic_publication_content_guard")?;
         let result_kernel = kernel("semantic_publication_step_result")?;
+        let model_update_copy = kernel("semantic_publication_apply_model_update")?;
         self.prepared_segment = Some(build);
         self.next_reader = end;
         let result = (|| {
@@ -9470,6 +9578,23 @@ impl SemanticTransitionSession {
                 let result = reservation
                     .alloc(1)
                     .map_err(|error| runtime_error("prepared result allocation", error))?;
+                let model_update = if *kind == SemanticTransitionKind::Update {
+                    let bindings = reservation
+                        .alloc::<ModelUpdateBinding>(storage.model_slots.len())
+                        .map_err(|error| runtime_error("model update binding allocation", error))?;
+                    upload_publication(
+                        &self.provider,
+                        &vec![ModelUpdateBinding::default(); storage.model_slots.len()],
+                        &bindings,
+                    )?;
+                    Some(PreparedModelUpdate {
+                        bindings,
+                        output: None,
+                        copy: model_update_copy.clone(),
+                    })
+                } else {
+                    None
+                };
                 let inputs = Arc::new(PreparedStepInputs::allocate_reserved(
                     &self.provider,
                     Arc::clone(&storage),
@@ -9494,6 +9619,7 @@ impl SemanticTransitionSession {
                     digests: None,
                     next_digest: 0,
                     model_work: None,
+                    model_update,
                     admit: admit.clone(),
                     kind_gate: kind_gate.clone(),
                     active_gate: active_gate.clone(),
@@ -10849,6 +10975,13 @@ impl SemanticTransitionSession {
         let training_selection_pointer = training_selection
             .as_ref()
             .map_or(0, |selection| *selection.device_ptr());
+        let (model_update_bindings, model_update_binding_count) = owner
+            .prepared
+            .as_ref()
+            .expect("prepared model update owner")
+            .model_update
+            .as_ref()
+            .map_or((0, 0), PreparedModelUpdate::descriptor);
         let continuation = PreparedContinuation::prepare(
             &self.provider,
             storage,
@@ -10863,6 +10996,8 @@ impl SemanticTransitionSession {
                 kind,
                 authority_decisions.len() as u64,
                 training_selection_pointer,
+                model_update_bindings,
+                model_update_binding_count,
             ),
             training_selection,
             &uploads,
@@ -10875,6 +11010,131 @@ impl SemanticTransitionSession {
             .as_mut()
             .expect("prepared owner")
             .continuation = Some(continuation);
+        Ok(())
+    }
+
+    /// Bind the complete producer-owned model backing after the original
+    /// selected-view backward and optimizer update were recorded. The output is
+    /// copied into the inactive neural bank by a prepared CUDA node before the
+    /// sole publication transition commits its pointer and generation state.
+    pub fn bind_prepared_update_output(
+        &mut self,
+        step: &SemanticPreparedStep,
+        mut model_memory: SemanticModelMemory,
+        mut tensors: Vec<SemanticTensorInput>,
+        witness: &SemanticTensorContentWitness,
+        consumer_stream: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        self.check_prepared_content_stream(step, consumer_stream)?;
+        self.checked_prepared_content_witness(step, witness)?;
+        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Update {
+            return Err(publication_input_error(
+                "model update output belongs only to a prepared update",
+            ));
+        }
+        let owner = &self.steps[&step.token];
+        let prepared = owner.prepared.as_ref().expect("prepared update owner");
+        if prepared
+            .model_update
+            .as_ref()
+            .is_none_or(|update| update.output.is_some())
+        {
+            return Err(publication_input_error(
+                "prepared update output binds exactly once",
+            ));
+        }
+        if !matches!(
+            owner.content[witness.index].seals,
+            TensorContentSeals::Captured(_)
+        ) {
+            return Err(publication_input_error(
+                "model update output requires its original transient producer witness",
+            ));
+        }
+        let allocation_count = model_memory.allocations.len();
+        if allocation_count == 0 {
+            return Err(publication_input_error(
+                "model update output requires complete backing allocations",
+            ));
+        }
+        model_memory.allocations.append(&mut tensors);
+        self.verify_prepared_tensor_content(
+            step,
+            witness,
+            model_memory.allocations,
+            consumer_stream,
+        )?;
+        let storage = Arc::clone(self.publication.as_ref().expect("prepared publication"));
+        let outputs = self.steps[&step.token].content[witness.index]
+            .tensors
+            .clone();
+        let (allocations, tensors) = outputs.split_at(allocation_count);
+        let geometry = prepare_model_memory(
+            allocations,
+            model_memory.storages,
+            model_memory.views,
+            tensors,
+        )?;
+        let actual_layouts = tensors
+            .iter()
+            .map(|tensor| ((tensor.layout.role, tensor.layout.index), tensor.layout))
+            .collect::<BTreeMap<_, _>>();
+        let expected_layouts = storage
+            .layouts
+            .iter()
+            .filter(|((role, _), _)| matches!(role, 18..=25))
+            .map(|(key, layout)| (*key, *layout))
+            .collect::<BTreeMap<_, _>>();
+        if geometry != storage.model_memory || actual_layouts != expected_layouts {
+            return Err(publication_input_error(
+                "model update output differs from the acquired model memory contract",
+            ));
+        }
+        for allocation in allocations {
+            let bytes = tensor_layout_bytes(&allocation.layout)?;
+            for owned in &storage.allocations {
+                if step_input_overlap(
+                    allocation.data,
+                    bytes,
+                    owned.device_ptr_value(),
+                    owned.len(),
+                )? {
+                    return Err(publication_input_error(
+                        "model update output aliases native publication storage",
+                    ));
+                }
+            }
+        }
+        let values = allocations
+            .iter()
+            .zip(&storage.model_slots)
+            .zip(&geometry.allocation_bytes)
+            .map(|((allocation, slots), &bytes)| ModelUpdateBinding {
+                source: allocation.data,
+                bytes,
+                slots: [slots[0] as u64, slots[1] as u64],
+            })
+            .collect::<Vec<_>>();
+        let retained_allocations = allocations.to_vec();
+        let prepared = self
+            .steps
+            .get_mut(&step.token)
+            .expect("checked update step");
+        let update = prepared
+            .prepared
+            .as_mut()
+            .expect("prepared update owner")
+            .model_update
+            .as_mut()
+            .expect("prepared update binding allocation");
+        if values.len() != update.bindings.len() {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        update.output = Some(BoundModelUpdate {
+            values,
+            allocations: retained_allocations,
+            _witness: witness.clone(),
+        });
         Ok(())
     }
 
@@ -11352,15 +11612,13 @@ impl SemanticTransitionSession {
         // Upload only immutable first-recording geometry, after capture and
         // before any graph launch. The original step retains this allocation.
         for token in &build.tokens {
-            let work = self.steps[token]
+            let prepared = self.steps[token]
                 .prepared
                 .as_ref()
-                .expect("original prepared owner")
-                .model_work
-                .as_ref()
-                .ok_or_else(|| {
-                    publication_input_error("prepared body has no frozen original model work")
-                })?;
+                .expect("original prepared owner");
+            let work = prepared.model_work.as_ref().ok_or_else(|| {
+                publication_input_error("prepared body has no frozen original model work")
+            })?;
             if work.recording.frozen_bound().is_none() {
                 return Err(publication_input_error(
                     "original model work was not frozen by its transition",
@@ -11370,6 +11628,15 @@ impl SemanticTransitionSession {
             self.provider
                 .htod_launch_metadata_sync_copy_into(work.recording.events(), &mut destination)
                 .map_err(|error| runtime_error("original model work cold upload", error))?;
+            if let Some(update) = &prepared.model_update {
+                let output = update.output.as_ref().ok_or_else(|| {
+                    publication_input_error("prepared update has no original model output binding")
+                })?;
+                let mut destination = update.bindings.view();
+                self.provider
+                    .htod_launch_metadata_sync_copy_into(&output.values, &mut destination)
+                    .map_err(|error| runtime_error("model update binding cold upload", error))?;
+            }
         }
         // Failure leaves the actual graph in the caller's owner. No graph
         // destructor or driver completion can run under its Session mutex.
@@ -14763,7 +15030,7 @@ impl SemanticTransitionSession {
             Arc::clone(&storage),
             self.checked_reader(lease)?.device.view(),
             Arc::clone(&text_binding),
-            text_binding.continuation_inputs(kind, authority_bytes, 0),
+            text_binding.continuation_inputs(kind, authority_bytes, 0, 0, 0),
             None,
             &uploads,
             &pending_layouts,
@@ -15583,11 +15850,6 @@ impl SemanticTransitionSession {
     ) -> Result<(), SemanticTransitionError> {
         self.check_prepared_content_stream(step, self.stream.cu_stream() as u64)?;
         let kind = self.prepared_transition_kind(step)?;
-        if kind == SemanticTransitionKind::Update {
-            return Err(publication_input_error(
-                "prepared update publication requires its native pending output binding",
-            ));
-        }
         let freeze = self
             .steps
             .get_mut(&step.token)
@@ -15610,9 +15872,14 @@ impl SemanticTransitionSession {
         if prepared.transition_recorded
             || prepared.continuation.is_none()
             || (kind == SemanticTransitionKind::Proposal && prepared.policy.is_none())
-            || (kind == SemanticTransitionKind::Recompute && prepared.policy.is_some())
+            || (kind != SemanticTransitionKind::Proposal && prepared.policy.is_some())
+            || (kind == SemanticTransitionKind::Update
+                && prepared
+                    .model_update
+                    .as_ref()
+                    .is_none_or(|update| update.output.is_none()))
         {
-            return Err(publication_input_error("prepared transition requires its unused original continuation and a policy only for proposals"));
+            return Err(publication_input_error("prepared transition requires its unused original continuation, a policy only for proposals, and a bound model output for updates"));
         }
         let model_witnesses = owner
             .content
@@ -15675,6 +15942,14 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .expect("checked original continuation")
                 .enqueue(&self.domain, &mut self.poisoned)?;
+            if let Some(update) = &prepared.model_update {
+                update.enqueue_copy(
+                    &self.domain,
+                    &mut self.poisoned,
+                    self.publication.as_ref().expect("prepared publication"),
+                    &prepared.reader,
+                )?;
+            }
             let io = self.prepared_kernel_io(step)?;
             self.validate_ranges_with(&io)?;
             let descriptor = self.descriptor_with(&io);
@@ -16161,6 +16436,7 @@ impl SemanticTransitionSession {
             text: Some(&policy.text_binding),
             lease: None,
             model_work: None,
+            model_update: None,
             training_selection: None,
         };
         let mut descriptor = self.descriptor_with(&io);
@@ -17006,6 +17282,7 @@ impl SemanticTransitionSession {
             state: &self.state,
             text,
             model_work: None,
+            model_update: None,
             lease: self
                 .admitted_transition
                 .map(|(token, _, _)| &self.readers[&token].device),
@@ -17064,6 +17341,7 @@ impl SemanticTransitionSession {
             lease: Some(&prepared.reader),
             policy,
             model_work: prepared.model_work.as_ref(),
+            model_update: prepared.model_update.as_ref(),
             training_selection: prepared
                 .continuation
                 .as_ref()
@@ -17107,6 +17385,7 @@ impl SemanticTransitionSession {
             lease: Some(&prepared.reader),
             policy: None,
             model_work: None,
+            model_update: None,
             training_selection: None,
         })
     }
@@ -17254,6 +17533,19 @@ impl SemanticTransitionSession {
                 size_of::<SemanticTrainingViewSelection>() as u64,
             ));
         }
+        if let Some(update) = io.model_update {
+            ranges.push((
+                update.bindings.device_ptr_value(),
+                (update.bindings.len() * size_of::<ModelUpdateBinding>()) as u64,
+            ));
+            if let Some(output) = &update.output {
+                for allocation in &output.allocations {
+                    if let Some(source) = &allocation.source {
+                        ranges.push((allocation.data, source.len() as u64));
+                    }
+                }
+            }
+        }
         disjoint_ranges(&ranges)
     }
 
@@ -17268,6 +17560,9 @@ impl SemanticTransitionSession {
         if let Some(work) = io.model_work {
             recorder.read(&work.device);
             recorder.read(&work.actual);
+        }
+        if let Some(update) = io.model_update {
+            update.record(&mut recorder);
         }
         recorder.write(&self.scratch);
         recorder.write(io.receipts);

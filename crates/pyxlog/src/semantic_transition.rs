@@ -987,6 +987,43 @@ struct ParsedTensorInputs {
     producers: Vec<Py<PyAny>>,
 }
 
+fn parse_model_storages(
+    value: &Bound<'_, PyAny>,
+    budget: &mut usize,
+) -> PyResult<Vec<SemanticModelStorage>> {
+    ColdValue::read(value, budget, 0)?
+        .sequence()?
+        .iter()
+        .map(|row| {
+            let fields = row.fields(3)?;
+            Ok(SemanticModelStorage {
+                allocation: fields[0].unsigned()?,
+                byte_offset: fields[1].unsigned()?,
+                span_bytes: fields[2].unsigned()?,
+            })
+        })
+        .collect()
+}
+
+fn parse_model_views(
+    value: &Bound<'_, PyAny>,
+    budget: &mut usize,
+) -> PyResult<Vec<SemanticModelView>> {
+    ColdValue::read(value, budget, 0)?
+        .sequence()?
+        .iter()
+        .map(|row| {
+            let fields = row.fields(4)?;
+            Ok(SemanticModelView {
+                role: fields[0].unsigned()?,
+                index: fields[1].unsigned()?,
+                storage: fields[2].unsigned()?,
+                byte_offset: fields[3].unsigned()?,
+            })
+        })
+        .collect()
+}
+
 fn parse_tensor_inputs(
     value: &Bound<'_, PyAny>,
     budget: &mut usize,
@@ -7445,6 +7482,114 @@ impl PySemanticTransitionController {
         }
     }
 
+    /// Bind the complete original model backing produced by this recorded
+    /// update. The transient witness must cover allocations followed by typed
+    /// model views after the selected-view backward and optimizer update.
+    #[pyo3(signature = (task_use, *, step, tensors, model_allocations, model_storages, model_views, allocation_witness, consumer_stream))]
+    #[allow(clippy::too_many_arguments)]
+    fn bind_prepared_update_output(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        step: &PySemanticPreparedStep,
+        tensors: &Bound<'_, PyAny>,
+        model_allocations: &Bound<'_, PyAny>,
+        model_storages: &Bound<'_, PyAny>,
+        model_views: &Bound<'_, PyAny>,
+        allocation_witness: &PySemanticTensorContentWitness,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.session.borrow(py).require_creator()?;
+        self.require_read_issued(task_use)?;
+        let parent = ContentStepRef::Prepared(step);
+        let mut budget = 16 * 1024 * 1024;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let storages = parse_model_storages(model_storages, &mut budget)?;
+        let views = parse_model_views(model_views, &mut budget)?;
+        let expected = {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            let state = self.continuation_state(py, task_use, parent, &owner, None)?;
+            step.require_recording_stream(&owner, stream)?;
+            self.require_continuation_witness(py, parent, allocation_witness)?;
+            if owner
+                .prepared_transition_kind(&step.inner)
+                .map_err(xlog_err)?
+                != SemanticTransitionKind::Update
+            {
+                return Err(invalid(
+                    "model update output belongs only to a prepared update",
+                ));
+            }
+            self.continuation_binding(&state, parent, false)?
+        };
+        let check = || -> PyResult<()> {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            let state = self.continuation_state(py, task_use, parent, &owner, None)?;
+            step.require_recording_stream(&owner, stream)?;
+            self.require_continuation_witness(py, parent, allocation_witness)?;
+            if self.continuation_binding(&state, parent, false)? != expected {
+                return Err(invalid(
+                    "prepared update authority changed during producer handoff",
+                ));
+            }
+            Ok(())
+        };
+        let device = self.session.borrow(py).device_ordinal;
+        let ParsedTensorInputs {
+            handoff: allocation_handoff,
+            producers: allocation_producers,
+        } = parse_tensor_inputs_guarded(model_allocations, &mut budget, device, stream, &check)?;
+        let mut producer_owners = TensorHandoff(vec![
+            allocation_witness._inputs.clone_ref(py),
+            model_allocations.clone().unbind(),
+            tensors.clone().unbind(),
+        ]);
+        producer_owners.0.extend(
+            allocation_witness
+                ._producers
+                .iter()
+                .map(|producer| producer.clone_ref(py)),
+        );
+        producer_owners.0.extend(allocation_producers);
+        let ParsedTensorInputs {
+            handoff: tensor_handoff,
+            producers: tensor_producers,
+        } = parse_tensor_inputs_guarded(tensors, &mut budget, device, stream, &check)?;
+        producer_owners.0.extend(tensor_producers);
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        let state = self.continuation_state(py, task_use, parent, &owner, None)?;
+        self.require_continuation_witness(py, parent, allocation_witness)?;
+        if self.continuation_binding(&state, parent, false)? != expected {
+            return Err(invalid(
+                "prepared update authority changed during model output handoff",
+            ));
+        }
+        owner
+            .bind_prepared_update_output(
+                &step.inner,
+                SemanticModelMemory {
+                    allocations: allocation_handoff.into_native(),
+                    storages,
+                    views,
+                },
+                tensor_handoff.into_native(),
+                &allocation_witness.inner,
+                stream,
+            )
+            .map_err(xlog_err)?;
+        drop(state);
+        drop(owner);
+        drop(session);
+        step.continuation_producers
+            .lock()
+            .map_err(|_| invalid("prepared update producer ownership mutex is poisoned"))?
+            .append(&mut producer_owners.0);
+        Ok(())
+    }
+
     /// Bind the original policy producers while this genuine step is recording.
     /// The combined transient witness covers text logits, product support,
     /// parameters and the model-issued component baselines in that exact order.
@@ -7714,31 +7859,8 @@ impl PySemanticTransitionController {
         let mut parent = parse_parent(metadata, source, prefix, records, task_use)?;
         let device = self.session.borrow(py).device_ordinal;
         let mut budget = 16 * 1024 * 1024;
-        parent.model_memory.storages = ColdValue::read(model_storages, &mut budget, 0)?
-            .sequence()?
-            .iter()
-            .map(|row| {
-                let fields = row.fields(3)?;
-                Ok(SemanticModelStorage {
-                    allocation: fields[0].unsigned()?,
-                    byte_offset: fields[1].unsigned()?,
-                    span_bytes: fields[2].unsigned()?,
-                })
-            })
-            .collect::<PyResult<_>>()?;
-        parent.model_memory.views = ColdValue::read(model_views, &mut budget, 0)?
-            .sequence()?
-            .iter()
-            .map(|row| {
-                let fields = row.fields(4)?;
-                Ok(SemanticModelView {
-                    role: fields[0].unsigned()?,
-                    index: fields[1].unsigned()?,
-                    storage: fields[2].unsigned()?,
-                    byte_offset: fields[3].unsigned()?,
-                })
-            })
-            .collect::<PyResult<_>>()?;
+        parent.model_memory.storages = parse_model_storages(model_storages, &mut budget)?;
+        parent.model_memory.views = parse_model_views(model_views, &mut budget)?;
         let ParsedTensorInputs {
             handoff: tensors,
             producers: _producers,

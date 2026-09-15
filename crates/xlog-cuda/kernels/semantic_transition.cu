@@ -296,10 +296,11 @@ struct SourceSlot {
 };
 struct TextRow { uint64_t source_slot,logical_position; };
 struct TextBinding { uint64_t rows,count,selected; };
+struct ModelUpdateBinding { uint64_t source,bytes,slots[2]; };
 struct ContinuationInputs {
     TextBinding text;
     uint64_t active_rows,active_row_count,numerical_admissibility,transition_kind,authority_bytes;
-    uint64_t training_selection;
+    uint64_t training_selection,model_update_bindings,model_update_binding_count;
 };
 struct PublicationStorageEntry { uint64_t pointer,bytes,generation; };
 struct PublicationRange {
@@ -341,7 +342,7 @@ struct PendingContinuation {
     uint64_t abi,instance[4],base_word,model_generation,authority_generation;
     uint64_t topology_identity[4],table_identity[4],prefix_identity[4],ranges,range_count,transition_kind;
     TextBinding text;
-    uint64_t numerical_admissibility,training_selection;
+    uint64_t numerical_admissibility,training_selection,model_update_bindings,model_update_binding_count;
 };
 struct PublicationCommand { uint64_t control,lease,operation; };
 struct PublicationLease { uint64_t abi,status,instance[4],word,bank,epoch,active,transition_kind; };
@@ -426,8 +427,9 @@ static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
 static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
 static_assert(sizeof(TextRow)==16,"compact text row ABI");
 static_assert(sizeof(TextBinding)==24,"compact text binding ABI");
-static_assert(sizeof(ContinuationInputs)==72,"resident continuation inputs ABI");
-static_assert(sizeof(PendingContinuation)==224,"pending continuation ABI");
+static_assert(sizeof(ModelUpdateBinding)==32,"model update binding ABI");
+static_assert(sizeof(ContinuationInputs)==88,"resident continuation inputs ABI");
+static_assert(sizeof(PendingContinuation)==240,"pending continuation ABI");
 static_assert(sizeof(PublicationCommand)==24,"publication command ABI");
 static_assert(sizeof(PublicationLease)==88,"publication lease ABI");
 static_assert(sizeof(PublicationStepResult)==sizeof(PublicationHeader)+32,"publication step result ABI");
@@ -1124,7 +1126,7 @@ __device__ uint64_t publication_validate_destinations(const PublicationControl& 
         // or a native control/cache owner.
         if(base[i].role==1 || base[i].role==2 || base[i].role==4 || base[i].role==5 || base[i].role==31) {
             if(base[i].storage_slot!=next[i].storage_slot || base[i].offset_bytes!=next[i].offset_bytes)return 1;
-        } else for(uint64_t j=0;j<count;++j)
+        } else if(!(base[i].role>=18 && base[i].role<=25))for(uint64_t j=0;j<count;++j)
             if(next[i].storage_slot==base[j].storage_slot)return 1;
         for(uint64_t j=0;j<i;++j)
             if(publication_mutable_role(next[j].role) && next[i].storage_slot==next[j].storage_slot &&
@@ -1168,6 +1170,65 @@ __device__ bool publication_validate_active_origin(const PublicationControl& con
     }
     return cursor==table.header->active_row_count;
 }
+__device__ bool publication_model_spans_overlap(uint64_t left,uint64_t left_bytes,
+        uint64_t right,uint64_t right_bytes) {
+    return left_bytes && right_bytes && left<right+right_bytes && right<left+left_bytes;
+}
+__device__ uint64_t publication_validate_model_update(const PublicationControl& control,
+        const PublicationBank& base,const PendingContinuation& pending) {
+    if(pending.transition_kind!=4)
+        return pending.model_update_bindings || pending.model_update_binding_count;
+    if(!pending.model_update_bindings ||
+       pending.model_update_bindings%alignof(ModelUpdateBinding) ||
+       !pending.model_update_binding_count ||
+       pending.model_update_binding_count>base.header.range_count ||
+       pending.model_update_binding_count>
+           (UINT64_MAX-pending.model_update_bindings)/sizeof(ModelUpdateBinding))return 1;
+    if(base.header.neural_bank>1)return 1;
+    const uint64_t bank=base.header.neural_bank;
+    const auto* bindings=reinterpret_cast<const ModelUpdateBinding*>(pending.model_update_bindings);
+    const auto* old=reinterpret_cast<const PublicationRange*>(control.directories[base.header.publication_word&1]);
+    const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
+    uint64_t allocations=0;
+    for(uint64_t i=0;i<base.header.range_count;++i)if(old[i].role>=18 && old[i].role<=25) {
+        bool first=true;
+        for(uint64_t prior=0;prior<i;++prior)
+            if(old[prior].role>=18 && old[prior].role<=25 &&
+               old[prior].storage_slot==old[i].storage_slot)first=false;
+        if(!first)continue;
+        ++allocations;bool found=false;
+        for(uint64_t item=0;item<pending.model_update_binding_count;++item)
+            if(bindings[item].slots[bank]==old[i].storage_slot)found=true;
+        if(!found)return 1;
+    }
+    if(allocations!=pending.model_update_binding_count)return 1;
+    for(uint64_t item=0;item<pending.model_update_binding_count;++item) {
+        const auto& binding=bindings[item];
+        if(binding.slots[0]>=control.storage_count || binding.slots[1]>=control.storage_count ||
+           binding.slots[0]==binding.slots[1] || storage[binding.slots[0]].bytes!=binding.bytes ||
+           storage[binding.slots[1]].bytes!=binding.bytes ||
+           (binding.bytes && (!binding.source || binding.source>UINT64_MAX-binding.bytes ||
+            storage[binding.slots[0]].pointer==storage[binding.slots[1]].pointer)))return 1;
+        bool used=false;
+        for(uint64_t i=0;i<base.header.range_count;++i)
+            if(old[i].role>=18 && old[i].role<=25 &&
+               old[i].storage_slot==binding.slots[bank])used=true;
+        if(!used)return 1;
+        for(uint64_t slot=0;slot<control.storage_count;++slot) {
+            const auto& owned=storage[slot];
+            if(binding.bytes && owned.bytes &&
+               publication_model_spans_overlap(binding.source,binding.bytes,owned.pointer,owned.bytes))return 1;
+        }
+        for(uint64_t prior=0;prior<item;++prior)
+            if(binding.slots[0]==bindings[prior].slots[0] ||
+               binding.slots[0]==bindings[prior].slots[1] ||
+               binding.slots[1]==bindings[prior].slots[0] ||
+               binding.slots[1]==bindings[prior].slots[1] ||
+               publication_model_spans_overlap(binding.source,binding.bytes,
+                   bindings[prior].source,bindings[prior].bytes))return 1;
+    }
+    return 0;
+}
 __device__ uint64_t publication_validate_continuation(const PublicationControl& control,
         const PublicationContract& contract,const PublicationBank& base,const PendingContinuation& pending,uint64_t end) {
     if(pending.abi!=1 || !publication_identity_equal(pending.instance,base.header.instance) ||
@@ -1175,7 +1236,8 @@ __device__ uint64_t publication_validate_continuation(const PublicationControl& 
        pending.authority_generation!=base.header.authority_generation ||
        !publication_identity_equal(pending.topology_identity,contract.topology_identity) ||
        !publication_identity_equal(pending.table_identity,contract.table_identity) || !pending.ranges ||
-       pending.range_count>contract.range_capacity)return 1;
+       pending.range_count>contract.range_capacity ||
+       publication_validate_model_update(control,base,pending))return 1;
     if(!validate_text_binding(base.source,pending.text) || (pending.transition_kind!=1 && text_any_selected(pending.text)))return 1;
     const auto* bank_ranges=reinterpret_cast<const PublicationRange*>(control.directories[pending.base_word&1]);
     const auto* prefix=publication_find_range(bank_ranges,base.header.range_count,3);
@@ -1256,7 +1318,13 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
     const uint64_t requested_kind=inputs.transition_kind;
     if((requested_kind==4)!=(inputs.training_selection!=0) ||
        (inputs.training_selection && (inputs.training_selection%alignof(uint64_t) ||
-        inputs.training_selection>UINT64_MAX-sizeof(uint64_t))))return 1;
+        inputs.training_selection>UINT64_MAX-sizeof(uint64_t))) ||
+       (inputs.model_update_bindings==0)!=(inputs.model_update_binding_count==0) ||
+       (requested_kind==4)!=(inputs.model_update_bindings!=0) ||
+       (inputs.model_update_bindings &&
+        (inputs.model_update_bindings%alignof(ModelUpdateBinding) ||
+         inputs.model_update_binding_count>
+             (UINT64_MAX-inputs.model_update_bindings)/sizeof(ModelUpdateBinding))))return 1;
     if(lease.transition_kind)inputs.transition_kind=lease.transition_kind;
     if(!publication_acquired_bank(control,lease) ||
        !control.directories[lease.bank] || !control.contract || !control.continuation ||
@@ -1324,6 +1392,8 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
         reinterpret_cast<const uint64_t*>(publication_range_bytes(control,*prefix)));
     pending.text=inputs.text;pending.numerical_admissibility=inputs.numerical_admissibility;
     pending.training_selection=inputs.transition_kind==4 ? inputs.training_selection : 0;
+    pending.model_update_bindings=inputs.transition_kind==4 ? inputs.model_update_bindings : 0;
+    pending.model_update_binding_count=inputs.transition_kind==4 ? inputs.model_update_binding_count : 0;
     for(uint64_t i=0;i<pending.range_count;++i) {
         auto& range=ranges[i];
         if(range.role==1 || range.role==4 || range.role==5) {
@@ -1355,6 +1425,47 @@ extern "C" __global__ void semantic_publication_prepare_continuation(uint64_t co
        !lease_ptr || lease_ptr%alignof(PublicationLease) || lease_ptr>UINT64_MAX-sizeof(PublicationLease) ||
        publication_prepare_continuation(*reinterpret_cast<PublicationControl*>(control_ptr),
            *reinterpret_cast<const PublicationLease*>(lease_ptr),inputs))semantic_content_integrity_trap();
+}
+extern "C" __global__ void semantic_publication_apply_model_update(uint64_t control_ptr,
+        uint64_t lease_ptr) {
+    if(!control_ptr || control_ptr%alignof(PublicationControl) ||
+       control_ptr>UINT64_MAX-sizeof(PublicationControl) ||
+       !lease_ptr || lease_ptr%alignof(PublicationLease) ||
+       lease_ptr>UINT64_MAX-sizeof(PublicationLease)) {
+        semantic_content_integrity_trap();return;
+    }
+    auto& control=*reinterpret_cast<PublicationControl*>(control_ptr);
+    const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
+    const auto* base=publication_acquired_bank(control,lease);
+    if(!base || lease.transition_kind!=4 || !control.continuation ||
+       control.continuation%alignof(PendingContinuation) || !control.storage ||
+       base->header.neural_bank>1) {
+        semantic_content_integrity_trap();return;
+    }
+    const auto& pending=*reinterpret_cast<const PendingContinuation*>(control.continuation);
+    if(pending.base_word!=lease.word || pending.transition_kind!=4 ||
+       !pending.model_update_bindings ||
+       pending.model_update_bindings%alignof(ModelUpdateBinding) ||
+       blockIdx.y>=pending.model_update_binding_count) {
+        semantic_content_integrity_trap();return;
+    }
+    const auto& binding=reinterpret_cast<const ModelUpdateBinding*>(pending.model_update_bindings)[blockIdx.y];
+    const uint64_t destination_slot=binding.slots[base->header.neural_bank^1];
+    if(destination_slot>=control.storage_count ||
+       (binding.bytes && (!binding.source || binding.source>UINT64_MAX-binding.bytes))) {
+        semantic_content_integrity_trap();return;
+    }
+    const auto& destination=reinterpret_cast<const PublicationStorageEntry*>(control.storage)[destination_slot];
+    if(destination.bytes!=binding.bytes ||
+       (binding.bytes && (!destination.pointer || destination.pointer>UINT64_MAX-binding.bytes ||
+        destination.pointer==binding.source))) {
+        semantic_content_integrity_trap();return;
+    }
+    auto* output=reinterpret_cast<uint8_t*>(destination.pointer);
+    const auto* source=reinterpret_cast<const uint8_t*>(binding.source);
+    const uint64_t start=uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+    const uint64_t stride=uint64_t(gridDim.x)*blockDim.x;
+    for(uint64_t offset=start;offset<binding.bytes;offset+=stride)output[offset]=source[offset];
 }
 extern "C" __global__ void semantic_publication_prepare_drain(uint64_t control_ptr,uint64_t lease_ptr) {
     if(blockIdx.x || threadIdx.x)return;
@@ -1390,6 +1501,8 @@ extern "C" __global__ void semantic_publication_prepare_drain(uint64_t control_p
     pending.text={};
     pending.numerical_admissibility=0;
     pending.training_selection=0;
+    pending.model_update_bindings=0;
+    pending.model_update_binding_count=0;
     semantic_graph::copy_identity(pending.instance,base->header.instance);
     semantic_graph::copy_identity(pending.topology_identity,contract.topology_identity);
     semantic_graph::copy_identity(pending.table_identity,contract.table_identity);
@@ -1404,11 +1517,16 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
     const auto* from=reinterpret_cast<const PublicationRange*>(pending.ranges);
     const auto* old=reinterpret_cast<const PublicationRange*>(control.directories[pending.base_word&1]);
     auto* to=reinterpret_cast<PublicationRange*>(control.directories[(pending.base_word&1)^1]);
+    if(publication_validate_model_update(control,base,pending))return 1;
     if(pending.transition_kind==3) {
         const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
         for(uint64_t i=0;i<next.header.range_count;++i) {
             if((old[i].role!=to[i].role || old[i].index!=to[i].index) ||
                old[i].storage_slot>=control.storage_count || to[i].storage_slot>=control.storage_count)return 1;
+            if(old[i].role>=18 && old[i].role<=25) {
+                to[i]=old[i];
+                continue;
+            }
             const uint64_t destination_slot=to[i].storage_slot;
             const uint64_t destination_generation=to[i].generation;
             const uint64_t source_slot=old[i].storage_slot;
@@ -1444,16 +1562,24 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
             publication_copy_bytes(destination,source,old[i].length_bytes);
         }
         if(old[i].role>=18 && old[i].role<=25) {
-            bool copied=false;
-            for(uint64_t j=0;j<i;++j)if(old[j].storage_slot==old[i].storage_slot) { copied=true;break; }
-            if(!copied) {
-                const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
-                const auto& source=storage[old[i].storage_slot];
-                const auto& destination=storage[to[i].storage_slot];
-                if(source.bytes!=destination.bytes || (source.bytes && source.pointer==destination.pointer))return 1;
-                publication_copy_bytes(reinterpret_cast<uint8_t*>(destination.pointer),
-                    reinterpret_cast<const uint8_t*>(source.pointer),source.bytes);
+            if(pending.transition_kind!=4) {
+                to[i]=old[i];
+                continue;
             }
+            const auto* bindings=reinterpret_cast<const ModelUpdateBinding*>(pending.model_update_bindings);
+            const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
+            bool found=false;
+            for(uint64_t item=0;item<pending.model_update_binding_count;++item)
+                if(bindings[item].slots[base.header.neural_bank]==old[i].storage_slot) {
+                    const uint64_t destination_slot=bindings[item].slots[base.header.neural_bank^1];
+                    if(destination_slot>=control.storage_count)return 1;
+                    to[i]=old[i];
+                    to[i].storage_slot=destination_slot;
+                    to[i].generation=storage[destination_slot].generation;
+                    found=true;
+                    break;
+                }
+            if(!found)return 1;
         }
     }
     for(uint64_t i=0;i<pending.range_count;++i) {
@@ -3039,7 +3165,7 @@ __device__ uint64_t publication_begin(const Descriptor& descriptor,State* state,
     if(pending.base_word!=*word)return 3;
     if(contract.abi!=1 || bank.header.semantic_owner!=descriptor.arena[1] ||
        publication_validate_selected_model(control,bank) || bank.header.authority_generation!=contract.authority_generation ||
-       bank.header.model_generation>UINT32_MAX || bank.header.proposal>UINT32_MAX ||
+       bank.header.model_generation>UINT32_MAX || bank.header.neural_bank>1 || bank.header.proposal>UINT32_MAX ||
        bank.header.stream_serial>(UINT64_MAX>>8) || bank.header.family_id>255 ||
        bank.header.cache_generation==UINT64_MAX || !publication_identity_equal(contract.task_identity,
            reinterpret_cast<const uint64_t*>(descriptor.task)+2))return 1;
@@ -3226,6 +3352,14 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
     for(uint32_t i=0;i<3;++i)next.header.semantic_extents[i]=seal->words[13+i];
     next.header.proposal=state->proposal+uint64_t(!no_draw);next.header.cache_generation=base.header.cache_generation+1;
     next.header.fuel=base.header.fuel-1;
+    if(pending.transition_kind==4) {
+        if(base.header.model_generation>=UINT32_MAX || base.header.neural_bank>1 ||
+           base.header.neural_generation==UINT64_MAX || base.header.training_cursor==UINT64_MAX)return 1;
+        next.header.model_generation=base.header.model_generation+1;
+        next.header.neural_bank=base.header.neural_bank^1;
+        next.header.neural_generation=base.header.neural_generation+1;
+        next.header.training_cursor=base.header.training_cursor+1;
+    }
     if(drain)next.header.terminal=2;
     next.state=*state;next.state.next_proposal=next.header.proposal;
     for(uint32_t i=0;i<136;++i)next.receipts[i]=no_draw ? base.receipts[i] : receipts[i];
@@ -3503,7 +3637,8 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             transition_kind=pending.transition_kind;
             uint8_t numerical=1;
             if(transition_kind==3) {
-                if(pending.numerical_admissibility || pending.training_selection) {
+                if(pending.numerical_admissibility || pending.training_selection ||
+                   pending.model_update_bindings || pending.model_update_binding_count) {
                     semantic_content_integrity_trap();return;
                 }
             } else {
@@ -3517,12 +3652,14 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             uint64_t training_status=0;
             if(pending.transition_kind==4) {
                 if(!pending.training_selection || pending.training_selection%alignof(uint64_t) ||
-                   pending.training_selection>UINT64_MAX-sizeof(uint64_t)) {
+                   pending.training_selection>UINT64_MAX-sizeof(uint64_t) ||
+                   !pending.model_update_bindings || !pending.model_update_binding_count) {
                     semantic_content_integrity_trap();return;
                 }
                 training_status=*reinterpret_cast<const uint64_t*>(pending.training_selection);
                 if(training_status>3) { semantic_content_integrity_trap();return; }
-            } else if(pending.training_selection) {
+            } else if(pending.training_selection || pending.model_update_bindings ||
+                      pending.model_update_binding_count) {
                 semantic_content_integrity_trap();return;
             }
             if(training_status || !numerical || state->execution_work.overflow) {
