@@ -63,8 +63,8 @@ pub use semantic_hypergraph::{
     SemanticVersionIdentity, SemanticVersionRef, SemanticView,
 };
 pub use semantic_training_view::{
-    SemanticSelectedTrainingView, SemanticTrainingViewBasis, SemanticTrainingViewRow,
-    SemanticTrainingViewSelection,
+    SemanticSelectedTrainingView, SemanticTrainingViewBasis, SemanticTrainingViewOrigin,
+    SemanticTrainingViewOriginRecord, SemanticTrainingViewRow, SemanticTrainingViewSelection,
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::SemanticPolicyGradients;

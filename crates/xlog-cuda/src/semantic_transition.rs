@@ -28,7 +28,8 @@ use crate::semantic_hypergraph::{
     material_bytes, material_u32, material_u64, SemanticMaterialReader, SemanticRootMaterial,
 };
 use crate::semantic_training_view::{
-    SemanticSelectedTrainingView, SemanticTrainingViewArena, SemanticTrainingViewRow,
+    SemanticSelectedTrainingView, SemanticTrainingViewArena, SemanticTrainingViewOrigin,
+    SemanticTrainingViewRow,
 };
 use crate::{
     CudaFunction, CudaKernelProvider, CudaStream, DeviceRepr, LaunchAsync, LaunchConfig,
@@ -3704,6 +3705,20 @@ impl SemanticReplayMaterial {
 
     pub fn transition_kind(&self) -> SemanticTransitionKind {
         self.kind
+    }
+
+    pub fn training_view_origin(
+        &self,
+    ) -> Result<SemanticTrainingViewOrigin, SemanticTransitionError> {
+        let header = self.predecessor.bank.header;
+        Ok(SemanticTrainingViewOrigin {
+            transition: self.kind,
+            predecessor: self.predecessor_identity(),
+            successor: self.successor_identity(),
+            invocation: header.rng_binding()?,
+            model_geometry_digest: header.model_geometry_digest,
+            model_numerical_digest: header.model_numerical_digest,
+        })
     }
 
     /// Original model-owned contribution, after complete material validation.

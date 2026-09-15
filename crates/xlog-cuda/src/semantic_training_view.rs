@@ -6,7 +6,10 @@ use sha2::{Digest, Sha256};
 use crate::launch::LaunchEnqueueError;
 use crate::memory::{DeviceMemoryView, TrackedCudaSlice};
 use crate::provider::resident_schedule::{validate_execution_domain, ResidentExecutionDomain};
-use crate::semantic_transition::{Identity256, SemanticTransitionError};
+use crate::semantic_transition::{
+    Identity256, SemanticPublishedIdentity, SemanticRngBinding, SemanticTransitionError,
+    SemanticTransitionKind,
+};
 use crate::{CudaFunction, CudaKernelProvider, DeviceRepr, LaunchAsync, LaunchConfig};
 
 const MODULE: &str = "xlog_semantic_training_view";
@@ -23,12 +26,49 @@ pub enum SemanticTrainingViewBasis {
     CorpusAnchor = 2,
 }
 
+/// Authenticated native execution that produced one episode training view.
+/// Corpus anchors have no execution origin and use their independent graph.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticTrainingViewOrigin {
+    pub transition: SemanticTransitionKind,
+    pub predecessor: SemanticPublishedIdentity,
+    pub successor: SemanticPublishedIdentity,
+    pub invocation: SemanticRngBinding,
+    pub model_geometry_digest: Identity256,
+    pub model_numerical_digest: Identity256,
+}
+
 /// One already-admitted training view retained for cold device selection.
 pub struct SemanticTrainingViewRow {
     pub basis: SemanticTrainingViewBasis,
     pub content_identity: Identity256,
+    pub origin: Option<SemanticTrainingViewOrigin>,
     pub bytes: Vec<u8>,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SemanticTrainingViewOriginRecord {
+    pub present: u64,
+    pub transition: u64,
+    pub predecessor_instance: [u64; 4],
+    pub predecessor_word: u64,
+    pub predecessor_logical: [u64; 4],
+    pub predecessor_state: [u64; 4],
+    pub successor_instance: [u64; 4],
+    pub successor_word: u64,
+    pub successor_logical: [u64; 4],
+    pub successor_state: [u64; 4],
+    pub model_generation: u64,
+    pub stream_serial: u64,
+    pub family_id: u64,
+    pub proposal: u64,
+    pub model_geometry_digest: [u64; 4],
+    pub model_numerical_digest: [u64; 4],
+}
+
+// SAFETY: the fixed CUDA ABI contains only u64 words.
+unsafe impl DeviceRepr for SemanticTrainingViewOriginRecord {}
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -45,6 +85,7 @@ struct TrainingViewRowDescriptor {
     identity: [u64; 4],
     source_identity: [u64; 4],
     content_identity: [u64; 4],
+    origin: SemanticTrainingViewOriginRecord,
 }
 
 // SAFETY: the fixed CUDA ABI contains only u64 words.
@@ -66,6 +107,7 @@ pub struct SemanticTrainingViewSelection {
     pub identity: [u64; 4],
     pub source_identity: [u64; 4],
     pub content_identity: [u64; 4],
+    pub origin: SemanticTrainingViewOriginRecord,
     pub training_rng: [u64; 4],
 }
 
@@ -223,6 +265,7 @@ impl SemanticTrainingViewArena {
                 ordinal,
                 row.basis,
                 row.content_identity,
+                row.origin,
                 &row.bytes,
                 raw.len(),
             )?;
@@ -391,6 +434,7 @@ fn validate_row(
     ordinal: usize,
     basis: SemanticTrainingViewBasis,
     content_identity: Identity256,
+    origin: Option<SemanticTrainingViewOrigin>,
     bytes: &[u8],
     raw_offset: usize,
 ) -> Result<TrainingViewRowDescriptor, SemanticTransitionError> {
@@ -436,6 +480,11 @@ fn validate_row(
     }
     let identity: [u8; 32] = bytes[32..64].try_into().expect("bounded identity");
     let source_identity: [u8; 32] = bytes[64..96].try_into().expect("bounded identity");
+    if matches!(basis, SemanticTrainingViewBasis::Episode) != origin.is_some() {
+        return Err(input_error(
+            "only an episode training view has an authentic execution origin",
+        ));
+    }
     if Sha256::digest(bytes).as_slice() != identity
         || source_identity == [0; 32]
         || content_identity == Identity256::default()
@@ -460,7 +509,33 @@ fn validate_row(
         identity: identity_words(Identity256::from_bytes(identity)),
         source_identity: identity_words(Identity256::from_bytes(source_identity)),
         content_identity: identity_words(content_identity),
+        origin: origin.map(origin_record).unwrap_or_default(),
     })
+}
+
+fn origin_record(origin: SemanticTrainingViewOrigin) -> SemanticTrainingViewOriginRecord {
+    SemanticTrainingViewOriginRecord {
+        present: 1,
+        transition: match origin.transition {
+            SemanticTransitionKind::Proposal => 1,
+            SemanticTransitionKind::Recompute => 2,
+            SemanticTransitionKind::Drain => 3,
+        },
+        predecessor_instance: identity_words(origin.predecessor.instance),
+        predecessor_word: origin.predecessor.word,
+        predecessor_logical: identity_words(origin.predecessor.logical_digest),
+        predecessor_state: identity_words(origin.predecessor.state_digest),
+        successor_instance: identity_words(origin.successor.instance),
+        successor_word: origin.successor.word,
+        successor_logical: identity_words(origin.successor.logical_digest),
+        successor_state: identity_words(origin.successor.state_digest),
+        model_generation: u64::from(origin.invocation.model_generation),
+        stream_serial: origin.invocation.stream_serial,
+        family_id: u64::from(origin.invocation.family_id),
+        proposal: u64::from(origin.invocation.proposal),
+        model_geometry_digest: identity_words(origin.model_geometry_digest),
+        model_numerical_digest: identity_words(origin.model_numerical_digest),
+    }
 }
 
 fn identity_words(identity: Identity256) -> [u64; 4] {

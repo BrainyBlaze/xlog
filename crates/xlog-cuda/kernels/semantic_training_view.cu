@@ -1,5 +1,24 @@
 #include <stdint.h>
 
+struct SemanticTrainingViewOriginRecord {
+    uint64_t present;
+    uint64_t transition;
+    uint64_t predecessor_instance[4];
+    uint64_t predecessor_word;
+    uint64_t predecessor_logical[4];
+    uint64_t predecessor_state[4];
+    uint64_t successor_instance[4];
+    uint64_t successor_word;
+    uint64_t successor_logical[4];
+    uint64_t successor_state[4];
+    uint64_t model_generation;
+    uint64_t stream_serial;
+    uint64_t family_id;
+    uint64_t proposal;
+    uint64_t model_geometry_digest[4];
+    uint64_t model_numerical_digest[4];
+};
+
 struct TrainingViewRowDescriptor {
     uint64_t ordinal;
     uint64_t basis;
@@ -13,6 +32,7 @@ struct TrainingViewRowDescriptor {
     uint64_t identity[4];
     uint64_t source_identity[4];
     uint64_t content_identity[4];
+    SemanticTrainingViewOriginRecord origin;
 };
 
 struct SemanticTrainingViewSelection {
@@ -27,6 +47,7 @@ struct SemanticTrainingViewSelection {
     uint64_t identity[4];
     uint64_t source_identity[4];
     uint64_t content_identity[4];
+    SemanticTrainingViewOriginRecord origin;
     uint64_t training_rng[4];
 };
 
@@ -85,6 +106,7 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
         selection->block_size = descriptor.block_size;
         selection->prefix_extent = descriptor.prefix_extent;
         selection->answer_start = descriptor.answer_start;
+        selection->origin = descriptor.origin;
         for (uint32_t i = 0; i < 4; ++i) {
             selection->identity[i] = descriptor.identity[i];
             selection->source_identity[i] = descriptor.source_identity[i];
