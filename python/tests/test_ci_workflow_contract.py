@@ -121,7 +121,16 @@ def test_workspace_validation_runs_cpu_tests_and_compiles_every_target() -> None
 
     clippy = jobs["clippy"]
     assert isinstance(clippy, dict)
-    clippy_env = clippy["env"]
+    clippy_steps = clippy["steps"]
+    assert isinstance(clippy_steps, list)
+    clippy_step = next(
+        step
+        for step in clippy_steps
+        if isinstance(step, dict)
+        and isinstance(step.get("run"), str)
+        and "cargo clippy" in step["run"]
+    )
+    clippy_env = clippy_step["env"]
     assert isinstance(clippy_env, dict)
     feature_list = clippy_env["XLOG_CLIPPY_FEATURES"]
     assert isinstance(feature_list, str)
