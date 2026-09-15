@@ -108,6 +108,7 @@ pub struct SemanticTrainingViewSelection {
     pub source_identity: [u64; 4],
     pub content_identity: [u64; 4],
     pub origin: SemanticTrainingViewOriginRecord,
+    pub origin_candidate: u64,
     pub training_rng: [u64; 4],
 }
 
@@ -124,6 +125,8 @@ struct TrainingViewLaunch {
     selected_view_bytes: u64,
     cursor: u64,
     training_rng: [u64; 4],
+    origin_candidates: u64,
+    origin_candidate_count: u64,
     selection: u64,
     capacity: u64,
     token_ids: u64,
@@ -173,6 +176,7 @@ struct SelectedTrainingViewStorage {
 /// CUDA ports; the resident selection record supplies their logical extent.
 pub struct SemanticSelectedTrainingView {
     arena: Arc<SemanticTrainingViewArena>,
+    _origin_candidates: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
     storage: SelectedTrainingViewStorage,
 }
 
@@ -316,6 +320,7 @@ impl SemanticTrainingViewArena {
         selected_view: DeviceMemoryView<u8>,
         cursor: u64,
         training_rng: [u64; 4],
+        origin_candidates: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
     ) -> Result<SemanticSelectedTrainingView, SemanticTransitionError> {
         let output_bytes = size_of::<SemanticTrainingViewSelection>()
             .checked_add(
@@ -349,6 +354,16 @@ impl SemanticTrainingViewArena {
         if reservation.remaining_bytes() != 0 {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
+        let (origin_candidate_ptr, origin_candidate_count) =
+            if let Some(candidates) = origin_candidates.as_ref() {
+                (
+                    candidates.device_ptr_value(),
+                    u64::try_from(candidates.len())
+                        .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+                )
+            } else {
+                (0, 0)
+            };
         let launch = TrainingViewLaunch {
             descriptors: self.descriptors.device_ptr_value(),
             raw: self.raw.device_ptr_value(),
@@ -359,6 +374,8 @@ impl SemanticTrainingViewArena {
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
             cursor,
             training_rng,
+            origin_candidates: origin_candidate_ptr,
+            origin_candidate_count,
             selection: storage.selection.device_ptr_value(),
             capacity: u64::try_from(self.capacity)
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
@@ -376,6 +393,9 @@ impl SemanticTrainingViewArena {
         recorder.read(&self.descriptors);
         recorder.read(&self.raw);
         recorder.read(&selected_view);
+        if let Some(candidates) = &origin_candidates {
+            recorder.read(candidates.as_ref());
+        }
         recorder.write(&storage.selection);
         recorder.write(&storage.token_ids);
         recorder.write(&storage.mask_labels);
@@ -416,6 +436,7 @@ impl SemanticTrainingViewArena {
             .map_err(|error| runtime_error("training-view launch commit", error))?;
         Ok(SemanticSelectedTrainingView {
             arena: Arc::clone(self),
+            _origin_candidates: origin_candidates,
             storage,
         })
     }

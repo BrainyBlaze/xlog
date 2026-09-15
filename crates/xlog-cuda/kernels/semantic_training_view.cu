@@ -48,6 +48,7 @@ struct SemanticTrainingViewSelection {
     uint64_t source_identity[4];
     uint64_t content_identity[4];
     SemanticTrainingViewOriginRecord origin;
+    uint64_t origin_candidate;
     uint64_t training_rng[4];
 };
 
@@ -59,6 +60,8 @@ struct TrainingViewLaunch {
     uint64_t selected_view_bytes;
     uint64_t cursor;
     uint64_t training_rng[4];
+    uint64_t origin_candidates;
+    uint64_t origin_candidate_count;
     uint64_t selection;
     uint64_t capacity;
     uint64_t token_ids;
@@ -71,6 +74,31 @@ struct TrainingViewLaunch {
     uint64_t kinds;
     uint64_t parents;
 };
+
+__device__ bool semantic_training_origin_equal(const SemanticTrainingViewOriginRecord& left,
+                                               const SemanticTrainingViewOriginRecord& right) {
+    if (left.present != right.present || left.transition != right.transition ||
+        left.predecessor_word != right.predecessor_word ||
+        left.successor_word != right.successor_word ||
+        left.model_generation != right.model_generation ||
+        left.stream_serial != right.stream_serial || left.family_id != right.family_id ||
+        left.proposal != right.proposal) {
+        return false;
+    }
+    for (uint32_t i = 0; i < 4; ++i) {
+        if (left.predecessor_instance[i] != right.predecessor_instance[i] ||
+            left.predecessor_logical[i] != right.predecessor_logical[i] ||
+            left.predecessor_state[i] != right.predecessor_state[i] ||
+            left.successor_instance[i] != right.successor_instance[i] ||
+            left.successor_logical[i] != right.successor_logical[i] ||
+            left.successor_state[i] != right.successor_state[i] ||
+            left.model_geometry_digest[i] != right.model_geometry_digest[i] ||
+            left.model_numerical_digest[i] != right.model_numerical_digest[i]) {
+            return false;
+        }
+    }
+    return true;
+}
 
 extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch launch) {
     auto* selection = reinterpret_cast<SemanticTrainingViewSelection*>(launch.selection);
@@ -95,6 +123,26 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
             if (raw[offset] != selected[offset]) {
                 atomicCAS(reinterpret_cast<unsigned long long*>(&selection->status), 0ULL, 2ULL);
             }
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0 && selection->status == 0) {
+        selection->origin_candidate = UINT64_MAX;
+        if (descriptor.basis == 1 && descriptor.origin.present == 1) {
+            const auto* candidates = reinterpret_cast<const SemanticTrainingViewOriginRecord*>(
+                launch.origin_candidates);
+            uint64_t matches = 0;
+            for (uint64_t candidate = 0; candidate < launch.origin_candidate_count; ++candidate) {
+                if (semantic_training_origin_equal(descriptor.origin, candidates[candidate])) {
+                    selection->origin_candidate = candidate;
+                    ++matches;
+                }
+            }
+            if (matches != 1) {
+                selection->status = 3;
+            }
+        } else if (descriptor.basis != 2 || descriptor.origin.present != 0) {
+            selection->status = 3;
         }
     }
     __syncthreads();

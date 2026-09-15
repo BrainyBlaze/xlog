@@ -345,6 +345,13 @@ struct PendingContinuation {
 struct PublicationCommand { uint64_t control,lease,operation; };
 struct PublicationLease { uint64_t abi,status,instance[4],word,bank,epoch,active,transition_kind; };
 struct PublicationStepResult { uint64_t abi,word,refusal;PublicationHeader header;uint64_t advanced; };
+struct SemanticTrainingViewOriginRecord {
+    uint64_t present,transition;
+    uint64_t predecessor_instance[4],predecessor_word,predecessor_logical[4],predecessor_state[4];
+    uint64_t successor_instance[4],successor_word,successor_logical[4],successor_state[4];
+    uint64_t model_generation,stream_serial,family_id,proposal;
+    uint64_t model_geometry_digest[4],model_numerical_digest[4];
+};
 struct PublicationTensorLayout {
     uint64_t role,index,element_bytes,scalar_type,rank,logical_axis,dimensions[4],strides_bytes[4];
 };
@@ -571,6 +578,13 @@ __device__ void publication_store(uint64_t& value,uint64_t next) {
 }
 __device__ bool publication_identity_equal(const uint64_t* a,const uint64_t* b) {
     for(uint32_t i=0;i<4;++i)if(a[i]!=b[i])return false;
+    return true;
+}
+__device__ bool publication_header_equal(const PublicationHeader& a,const PublicationHeader& b) {
+    const auto* left=reinterpret_cast<const uint64_t*>(&a);
+    const auto* right=reinterpret_cast<const uint64_t*>(&b);
+    for(uint64_t i=0;i<sizeof(PublicationHeader)/sizeof(uint64_t);++i)
+        if(left[i]!=right[i])return false;
     return true;
 }
 __device__ PublicationBank* publication_bank(PublicationControl& control,uint64_t word) {
@@ -1798,11 +1812,14 @@ extern "C" __global__ void semantic_publication_step_admit(uint64_t control_ptr,
 
 // Preserve the actual result before release permits either physical bank to be
 // reused. Ordinary refusals retain the original parent and its refusal status.
-extern "C" __global__ void semantic_publication_step_result(uint64_t control_ptr,uint64_t lease_ptr,uint64_t result_ptr) {
+extern "C" __global__ void semantic_publication_step_result(uint64_t control_ptr,uint64_t lease_ptr,
+        uint64_t result_ptr,uint64_t parent_header_ptr,uint64_t training_origin_ptr) {
     if(blockIdx.x || threadIdx.x)return;
     if(!publication_pointer_span(control_ptr,sizeof(PublicationControl),alignof(PublicationControl)) ||
        !publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease)) ||
-       !publication_pointer_span(result_ptr,sizeof(PublicationStepResult),alignof(PublicationStepResult))) {
+       !publication_pointer_span(result_ptr,sizeof(PublicationStepResult),alignof(PublicationStepResult)) ||
+       (training_origin_ptr &&
+        !publication_pointer_span(parent_header_ptr,sizeof(PublicationHeader),alignof(PublicationHeader)))) {
         semantic_content_integrity_trap();return;
     }
     auto& control=*reinterpret_cast<PublicationControl*>(control_ptr);
@@ -1819,6 +1836,13 @@ extern "C" __global__ void semantic_publication_step_result(uint64_t control_ptr
        !semantic_graph::checked_mul(contract.range_capacity,sizeof(PublicationRange),&directory_bytes)) {
         semantic_content_integrity_trap();return;
     }
+    if(training_origin_ptr &&
+       (!publication_step_output_span(control,lease_ptr,parent_header_ptr,sizeof(PublicationHeader),
+            training_origin_ptr,sizeof(SemanticTrainingViewOriginRecord)) ||
+        publication_spans_overlap(result_ptr,sizeof(PublicationStepResult),training_origin_ptr,
+            sizeof(SemanticTrainingViewOriginRecord)))) {
+        semantic_content_integrity_trap();return;
+    }
     for(uint64_t bank=0;bank<2;++bank)
         if(!publication_pointer_span(control.banks[bank],sizeof(PublicationBank),alignof(PublicationBank)) ||
            !publication_pointer_span(control.directories[bank],directory_bytes,alignof(PublicationRange))) {
@@ -1829,12 +1853,43 @@ extern "C" __global__ void semantic_publication_step_result(uint64_t control_ptr
        !publication_step_output_span(control,lease_ptr,0,0,result_ptr,sizeof(PublicationStepResult))) {
         semantic_content_integrity_trap();return;
     }
+    if(training_origin_ptr &&
+       !publication_header_equal(*reinterpret_cast<const PublicationHeader*>(parent_header_ptr),
+           publication_acquired_bank(control,lease)->header)) {
+        semantic_content_integrity_trap();return;
+    }
     const uint64_t word=publication_load(control.word);
     const auto& bank=*publication_bank(control,word);
     if(!publication_bank_matches(control,bank,word) || (word!=lease.word &&
        ((lease.word>>1)==(UINT64_MAX>>1) || word!=(((lease.word>>1)+1)<<1 | ((lease.word^1)&1)) ||
         bank.header.base_word!=lease.word))) { semantic_content_integrity_trap();return; }
-    *reinterpret_cast<PublicationStepResult*>(result_ptr)={1,word,control.refusal,bank.header,uint64_t(word!=lease.word && !control.refusal)};
+    const uint64_t advanced=uint64_t(word!=lease.word && !control.refusal);
+    *reinterpret_cast<PublicationStepResult*>(result_ptr)={1,word,control.refusal,bank.header,advanced};
+    if(training_origin_ptr) {
+        auto& origin=*reinterpret_cast<SemanticTrainingViewOriginRecord*>(training_origin_ptr);
+        origin={};
+        if(advanced) {
+            const auto& parent=*reinterpret_cast<const PublicationHeader*>(parent_header_ptr);
+            origin.present=1;
+            origin.transition=lease.transition_kind;
+            origin.predecessor_word=parent.publication_word;
+            origin.successor_word=bank.header.publication_word;
+            origin.model_generation=parent.model_generation;
+            origin.stream_serial=parent.stream_serial;
+            origin.family_id=parent.family_id;
+            origin.proposal=parent.proposal;
+            for(uint32_t i=0;i<4;++i) {
+                origin.predecessor_instance[i]=parent.instance[i];
+                origin.predecessor_logical[i]=parent.logical_digest[i];
+                origin.predecessor_state[i]=parent.state_digest[i];
+                origin.successor_instance[i]=bank.header.instance[i];
+                origin.successor_logical[i]=bank.header.logical_digest[i];
+                origin.successor_state[i]=bank.header.state_digest[i];
+                origin.model_geometry_digest[i]=parent.model_geometry_digest[i];
+                origin.model_numerical_digest[i]=parent.model_numerical_digest[i];
+            }
+        }
+    }
 }
 
 // The graph places release after every admitted consumer. Failure traps instead

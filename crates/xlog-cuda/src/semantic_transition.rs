@@ -29,7 +29,7 @@ use crate::semantic_hypergraph::{
 };
 use crate::semantic_training_view::{
     SemanticSelectedTrainingView, SemanticTrainingViewArena, SemanticTrainingViewOrigin,
-    SemanticTrainingViewRow,
+    SemanticTrainingViewOriginRecord, SemanticTrainingViewRow,
 };
 use crate::{
     CudaFunction, CudaKernelProvider, CudaStream, DeviceRepr, LaunchAsync, LaunchConfig,
@@ -5965,6 +5965,7 @@ struct PreparedStepStorage {
     transition_recorded: bool,
     observed: bool,
     result: TrackedCudaSlice<PreparedStepResult>,
+    training_origin: Option<DeviceMemoryView<SemanticTrainingViewOriginRecord>>,
     result_kernel: CudaFunction,
 }
 
@@ -8526,6 +8527,7 @@ pub struct SemanticTransitionSession {
     // Private observer/checker results never enter the proposal codebooks.
     task: Option<(TaskEvaluationBinding, TrackedCudaSlice<u64>)>,
     training_views: Option<Arc<SemanticTrainingViewArena>>,
+    training_origins: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
     task_epoch: u64,
     // Terminal observation does not publish a world. Keep the chosen roots and
     // raw banks immutable until the joint publisher consumes this pending tuple.
@@ -8607,6 +8609,7 @@ fn prepared_step_allocation_bytes(
 fn prepared_segment_allocation_bytes(
     step_bytes: u64,
     transition_bound: usize,
+    training_origin_bytes: usize,
 ) -> Result<u64, SemanticTransitionError> {
     if transition_bound == 0 {
         return Err(publication_input_error(
@@ -8616,6 +8619,11 @@ fn prepared_segment_allocation_bytes(
     u64::try_from(transition_bound)
         .ok()
         .and_then(|bound| step_bytes.checked_mul(bound))
+        .and_then(|bytes| {
+            u64::try_from(training_origin_bytes)
+                .ok()
+                .and_then(|origin_bytes| bytes.checked_add(origin_bytes))
+        })
         .ok_or(SemanticTransitionError::GenerationExhausted)
 }
 
@@ -9202,6 +9210,7 @@ struct UnreleasedPublicationOwners {
     _graph: SemanticHypergraph,
     _publication: Arc<PublicationStorage>,
     _training_views: Option<Arc<SemanticTrainingViewArena>>,
+    _training_origins: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
     _readers: BTreeMap<u64, PublishedReader>,
     _steps: BTreeMap<u64, StepContentStorage>,
     _prepared_resources: Vec<Arc<dyn Send + Sync>>,
@@ -9235,6 +9244,7 @@ impl Drop for SemanticTransitionSession {
                     _graph: graph,
                     _publication: publication,
                     _training_views: self.training_views.take(),
+                    _training_origins: self.training_origins.take(),
                     _readers: std::mem::take(&mut self.readers),
                     _events: std::mem::take(&mut self.release_events),
                     _steps: std::mem::take(&mut self.steps),
@@ -9319,7 +9329,15 @@ impl SemanticTransitionSession {
             feedback_plan.bytes,
             policy_bytes,
         )?;
-        let bytes = prepared_segment_allocation_bytes(step_bytes, transition_bound)?;
+        let training_origin_bytes = if self.training_views.is_some() {
+            transition_bound
+                .checked_mul(size_of::<SemanticTrainingViewOriginRecord>())
+                .ok_or(SemanticTransitionError::GenerationExhausted)?
+        } else {
+            0
+        };
+        let bytes =
+            prepared_segment_allocation_bytes(step_bytes, transition_bound, training_origin_bytes)?;
         // Claim the actual local and runtime budgets before any T-sized host
         // collection or native allocation. Every fixed bank consumes this claim.
         let mut reservation = self
@@ -9327,6 +9345,19 @@ impl SemanticTransitionSession {
             .memory()
             .reserve_bytes(bytes)
             .map_err(|error| runtime_error("prepared segment reservation", error))?;
+        let training_origins = if training_origin_bytes == 0 {
+            None
+        } else {
+            let origins = reservation
+                .alloc::<SemanticTrainingViewOriginRecord>(transition_bound)
+                .map_err(|error| runtime_error("training origin roster allocation", error))?;
+            upload_publication(
+                &self.provider,
+                &vec![SemanticTrainingViewOriginRecord::default(); transition_bound],
+                &origins,
+            )?;
+            Some(Arc::new(origins))
+        };
         let mut tokens = Vec::new();
         tokens
             .try_reserve_exact(transition_bound)
@@ -9352,7 +9383,7 @@ impl SemanticTransitionSession {
         self.prepared_segment = Some(build);
         self.next_reader = end;
         let result = (|| {
-            for handle in &handles {
+            for (ordinal, handle) in handles.iter().enumerate() {
                 let reader = reservation
                     .alloc(1)
                     .map_err(|error| runtime_error("prepared reader allocation", error))?;
@@ -9392,6 +9423,9 @@ impl SemanticTransitionSession {
                     transition_recorded: false,
                     observed: false,
                     result,
+                    training_origin: training_origins
+                        .as_ref()
+                        .and_then(|origins| origins.view().try_slice(ordinal..ordinal + 1)),
                     result_kernel: result_kernel.clone(),
                     #[cfg(feature = "semantic-policy")]
                     policy_buffers: Some(policy_buffers),
@@ -9441,6 +9475,7 @@ impl SemanticTransitionSession {
             if reservation.remaining_bytes() != 0 {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
+            self.training_origins = training_origins;
             Ok(handles)
         })();
         if result.is_err() {
@@ -10955,7 +10990,17 @@ impl SemanticTransitionSession {
         let mut recorder = self.domain.new_strict_recorder();
         storage.record(&mut recorder);
         recorder.read_write(&prepared.reader);
+        recorder.read(
+            &self.steps[&step.token]
+                .inputs
+                .as_ref()
+                .expect("fixed input owner")
+                .header,
+        );
         recorder.write(&prepared.result);
+        if let Some(origin) = &prepared.training_origin {
+            recorder.write(origin);
+        }
         let arguments = (
             storage.control.device_ptr_value(),
             prepared.reader.device_ptr_value(),
@@ -10975,6 +11020,16 @@ impl SemanticTransitionSession {
                         storage.control.device_ptr_value(),
                         prepared.reader.device_ptr_value(),
                         prepared.result.device_ptr_value(),
+                        self.steps[&step.token]
+                            .inputs
+                            .as_ref()
+                            .expect("fixed input owner")
+                            .header
+                            .device_ptr_value(),
+                        prepared
+                            .training_origin
+                            .as_ref()
+                            .map_or(0, |origin| *origin.device_ptr()),
                     ),
                 )
             }
@@ -13110,6 +13165,7 @@ impl SemanticTransitionSession {
             selected,
             lease.header.training_cursor,
             lease.header.training_rng,
+            self.training_origins.clone(),
         );
         if matches!(
             &result,
@@ -14587,6 +14643,7 @@ impl SemanticTransitionSession {
             device_components,
             task: None,
             training_views: None,
+            training_origins: None,
             task_epoch: 0,
             task_observed: false,
             publication: None,
