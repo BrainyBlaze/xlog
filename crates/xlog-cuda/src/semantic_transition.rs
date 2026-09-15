@@ -7139,6 +7139,7 @@ fn export_owned_allocation(
     alias_guard: Arc<()>,
     publication: Arc<PublicationStorage>,
     continuation: Option<Arc<TextBindingStorage>>,
+    retained_owner: Option<Arc<dyn Send + Sync>>,
 ) -> DlpackManagedTensor {
     let mut export = Box::new(PublishedTensorExport {
         managed: crate::dlpack::DLManagedTensor {
@@ -7167,6 +7168,7 @@ fn export_owned_allocation(
         _alias_guard: alias_guard,
         _publication: publication,
         _continuation: continuation,
+        _retained_owner: retained_owner,
     });
     export.managed.dl_tensor.shape = export.shape.as_mut_ptr();
     export.managed.dl_tensor.strides = export.strides.as_mut_ptr();
@@ -7187,6 +7189,7 @@ struct PublishedTensorExport {
     _alias_guard: Arc<()>,
     _publication: Arc<PublicationStorage>,
     _continuation: Option<Arc<TextBindingStorage>>,
+    _retained_owner: Option<Arc<dyn Send + Sync>>,
 }
 
 unsafe extern "C" fn delete_published_tensor(managed: *mut crate::dlpack::DLManagedTensor) {
@@ -7710,6 +7713,7 @@ pub struct SemanticPolicyGradients {
     step_aliases: Arc<()>,
     publication: Arc<PublicationStorage>,
     continuation: Arc<TextBindingStorage>,
+    vjp_workspace: Arc<PolicyVjpWorkspace>,
     support_cells: usize,
 }
 
@@ -7720,6 +7724,7 @@ impl SemanticPolicyGradients {
     /// device error guard. Final step release joins that consumer's last use.
     pub fn into_dlpack(self) -> Result<[DlpackManagedTensor; 2], SemanticTransitionError> {
         let layouts = policy_producer_layouts(self.support_cells, self.layout.parameter_cells)?;
+        let retained_owner: Arc<dyn Send + Sync> = self.vjp_workspace;
         let export = |values: TrackedCudaSlice<f32>, layout: SemanticTensorLayout| {
             let rank = layout.rank as usize;
             let shape = layout.dimensions[..rank]
@@ -7739,6 +7744,7 @@ impl SemanticPolicyGradients {
                 Arc::clone(&self.step_aliases),
                 Arc::clone(&self.publication),
                 Some(Arc::clone(&self.continuation)),
+                Some(Arc::clone(&retained_owner)),
             )
         };
         Ok([
@@ -7793,6 +7799,18 @@ struct PolicyAdjointBuffers {
     scores: TrackedCudaSlice<f32>,
     coefficients: TrackedCudaSlice<f64>,
     status: TrackedCudaSlice<u64>,
+}
+
+/// Every allocation referenced by a recorded policy VJP but not exported as an
+/// adjoint. Exported gradient owners retain this workspace so deferred CUDA work
+/// cannot observe reclaimed scratch or producer memory.
+#[cfg(feature = "semantic-policy")]
+struct PolicyVjpWorkspace {
+    _recurrent: TrackedCudaSlice<f32>,
+    _scores: TrackedCudaSlice<f32>,
+    coefficients: TrackedCudaSlice<f64>,
+    _status: TrackedCudaSlice<u64>,
+    score_cotangents: DeviceMemoryView<f64>,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -13818,6 +13836,7 @@ impl SemanticTransitionSession {
             guard,
             storage,
             None,
+            None,
         ))
     }
 
@@ -15668,14 +15687,23 @@ impl SemanticTransitionSession {
         let PolicyAdjointBuffers {
             parameters,
             text_logits,
+            recurrent,
+            scores,
             coefficients,
-            ..
+            status,
         } = self.policy_tapes[tape_index]
             .policy
             .buffers
             .adjoints
             .take()
             .expect("checked original adjoint banks");
+        let vjp_workspace = Arc::new(PolicyVjpWorkspace {
+            _recurrent: recurrent,
+            _scores: scores,
+            coefficients,
+            _status: status,
+            score_cotangents,
+        });
         // A capsule can be deleted before its consumer finishes. The original
         // step keeps the actual outputs until its final consumer-stream join,
         // without keeping a witness (which would create a release cycle).
@@ -15694,8 +15722,8 @@ impl SemanticTransitionSession {
             recorder,
             execute,
             descriptor,
-            &coefficients,
-            &score_cotangents,
+            &vjp_workspace.coefficients,
+            &vjp_workspace.score_cotangents,
         )?;
         if let Err(error) = self.order_content_consumers(consumer_stream) {
             self.poisoned = true;
@@ -15712,6 +15740,7 @@ impl SemanticTransitionSession {
             step_aliases,
             publication,
             continuation: original,
+            vjp_workspace,
             support_cells,
         })
     }
