@@ -5683,6 +5683,8 @@ struct StepContentStorage {
     feedback: Vec<FeedbackBuffers>,
     content: Vec<TensorContentBuffers>,
     adjoints: Vec<DeviceMemoryView<u8>>,
+    #[cfg(feature = "semantic-policy")]
+    policy_vjp_workspaces: Vec<Arc<PolicyVjpWorkspace>>,
     prepared: Option<PreparedStepStorage>,
 }
 
@@ -5697,6 +5699,8 @@ impl StepContentStorage {
             feedback: Vec::new(),
             content: Vec::new(),
             adjoints: Vec::new(),
+            #[cfg(feature = "semantic-policy")]
+            policy_vjp_workspaces: Vec::new(),
             prepared: None,
         }
     }
@@ -15711,11 +15715,14 @@ impl SemanticTransitionSession {
             // SAFETY: F32 storage has an exact, aligned byte representation.
             unsafe { buffer.view().cast::<u8>() }.expect("F32 adjoint byte view")
         });
-        self.steps
+        let step_owner = self
+            .steps
             .get_mut(&original._witness.reader_token)
-            .expect("retained original step")
-            .adjoints
-            .extend(output_views);
+            .expect("retained original step");
+        step_owner.adjoints.extend(output_views);
+        step_owner
+            .policy_vjp_workspaces
+            .push(Arc::clone(&vjp_workspace));
         record_policy_vjp(
             &self.domain,
             &mut self.poisoned,
