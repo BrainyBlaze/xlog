@@ -7924,6 +7924,12 @@ struct PolicyTape {
     codebooks: DeviceMemoryView<u64>,
 }
 
+#[cfg(feature = "semantic-policy")]
+struct PolicyVjpRecording {
+    descriptor: Descriptor,
+    recorder: LaunchRecorder,
+}
+
 impl crate::cuda_compat::KernelParamStorage for Descriptor {
     fn as_kernel_param(&self) -> *mut std::ffi::c_void {
         (self as *const Self).cast_mut().cast()
@@ -15525,6 +15531,83 @@ impl SemanticTransitionSession {
     }
 
     #[cfg(feature = "semantic-policy")]
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_policy_vjp_recording(
+        &self,
+        policy: &PolicyStorage,
+        support: &TrackedCudaSlice<u8>,
+        receipts: &TrackedCudaSlice<SemanticTransitionReceipt>,
+        state: &TrackedCudaSlice<DeviceState>,
+        components: &DeviceMemoryView<SemanticComponent>,
+        codebooks: &DeviceMemoryView<u64>,
+        score_cotangents: &DeviceMemoryView<f64>,
+    ) -> Result<PolicyVjpRecording, SemanticTransitionError> {
+        if score_cotangents.len() != COMPONENT_COUNT {
+            return Err(SemanticTransitionError::InvalidInput {
+                detail: "selected-score cotangents must follow the complete component roster"
+                    .into(),
+            });
+        }
+        let PolicyAdjointBuffers {
+            parameters,
+            text_logits,
+            recurrent,
+            scores,
+            coefficients,
+            status,
+        } = policy.adjoints.as_ref().ok_or_else(|| {
+            publication_input_error("original policy adjoint banks have already been consumed")
+        })?;
+        let io = TransitionKernelIo {
+            logits: &policy.text_logits,
+            support,
+            receipts,
+            state,
+            policy: Some(policy),
+            text: Some(&policy.text_binding),
+            lease: None,
+            model_work: None,
+        };
+        let mut descriptor = self.descriptor_with(&io);
+        descriptor.components = *components.device_ptr();
+        descriptor.codebooks = *codebooks.device_ptr();
+        descriptor.publication = PublicationCommand::default();
+        descriptor.backward = PolicyBackward {
+            cotangents: coefficients.device_ptr_value(),
+            parameters: parameters.device_ptr_value(),
+            text: text_logits.device_ptr_value(),
+            recurrent: recurrent.device_ptr_value(),
+            scores: scores.device_ptr_value(),
+            status: status.device_ptr_value(),
+            parameter_cells: policy.layout.parameter_cells as u64,
+            text_cells: policy.text_logits.len() as u64,
+        };
+        self.validate_ranges_with(&io)?;
+        let mut recorder = self.domain.new_strict_recorder();
+        recorder.read(support);
+        recorder.read(receipts);
+        recorder.read(codebooks);
+        recorder.read(components);
+        recorder.read(&policy.parameters);
+        recorder.read(&policy.recurrent);
+        recorder.read(&policy.text_logits);
+        policy.text_binding.record(&mut recorder);
+        recorder.read(score_cotangents);
+        recorder.write(&self.scratch);
+        recorder.write(&policy.hidden);
+        recorder.write(&policy.scores);
+        for buffer in [parameters, text_logits, recurrent, scores] {
+            recorder.write(buffer);
+        }
+        recorder.write(coefficients);
+        recorder.write(status);
+        Ok(PolicyVjpRecording {
+            descriptor,
+            recorder,
+        })
+    }
+
+    #[cfg(feature = "semantic-policy")]
     fn backward_policy_view(
         &mut self,
         invocation: SemanticRngBinding,
@@ -15557,69 +15640,22 @@ impl SemanticTransitionSession {
         let step_aliases = Arc::clone(&self.steps[&original._witness.reader_token].aliases);
         let tape = &self.policy_tapes[tape_index];
         let policy = &tape.policy;
-        if score_cotangents.len() != COMPONENT_COUNT {
-            return Err(SemanticTransitionError::InvalidInput {
-                detail: "selected-score cotangents must follow the complete component roster"
-                    .into(),
-            });
-        }
-        let text_cells = policy.text_logits.len();
-        let PolicyAdjointBuffers {
-            parameters,
-            text_logits,
-            recurrent,
-            scores,
-            coefficients,
-            status,
-        } = policy.adjoints.as_ref().ok_or_else(|| {
-            publication_input_error("original policy adjoint banks have already been consumed")
-        })?;
-        let io = TransitionKernelIo {
-            logits: &policy.text_logits,
-            support: &tape.support,
-            receipts: &tape.receipts,
-            state: self.steps[&original._witness.reader_token]
-                .prepared
-                .as_ref()
-                .map_or(&self.state, |prepared| &prepared.state),
-            policy: Some(policy),
-            text: Some(&policy.text_binding),
-            lease: None,
-            model_work: None,
-        };
-        let mut descriptor = self.descriptor_with(&io);
-        descriptor.components = *tape.components.device_ptr();
-        descriptor.codebooks = *tape.codebooks.device_ptr();
-        descriptor.publication = PublicationCommand::default();
-        descriptor.backward = PolicyBackward {
-            cotangents: coefficients.device_ptr_value(),
-            parameters: parameters.device_ptr_value(),
-            text: text_logits.device_ptr_value(),
-            recurrent: recurrent.device_ptr_value(),
-            scores: scores.device_ptr_value(),
-            status: status.device_ptr_value(),
-            parameter_cells: policy.layout.parameter_cells as u64,
-            text_cells: text_cells as u64,
-        };
-        self.validate_ranges_with(&io)?;
-        let mut recorder = self.domain.new_strict_recorder();
-        recorder.read(&tape.support);
-        recorder.read(&tape.receipts);
-        recorder.read(&tape.codebooks);
-        recorder.read(&tape.components);
-        recorder.read(&policy.parameters);
-        recorder.read(&policy.recurrent);
-        recorder.read(&policy.text_logits);
-        policy.text_binding.record(&mut recorder);
-        recorder.read(&score_cotangents);
-        recorder.write(&self.scratch);
-        recorder.write(&policy.hidden);
-        recorder.write(&policy.scores);
-        for buffer in [parameters, text_logits, recurrent, scores] {
-            recorder.write(buffer);
-        }
-        recorder.write(coefficients);
-        recorder.write(status);
+        let state = self.steps[&original._witness.reader_token]
+            .prepared
+            .as_ref()
+            .map_or(&self.state, |prepared| &prepared.state);
+        let PolicyVjpRecording {
+            descriptor,
+            recorder,
+        } = self.prepare_policy_vjp_recording(
+            policy,
+            &tape.support,
+            &tape.receipts,
+            state,
+            &tape.components,
+            &tape.codebooks,
+            &score_cotangents,
+        )?;
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|e| runtime_error("policy backward stream admission", e))?;
         let execute = self.execute.clone();
