@@ -121,11 +121,36 @@ def test_workspace_validation_runs_cpu_tests_and_compiles_every_target() -> None
 
     clippy = jobs["clippy"]
     assert isinstance(clippy, dict)
+    clippy_env = clippy["env"]
+    assert isinstance(clippy_env, dict)
+    feature_list = clippy_env["XLOG_CLIPPY_FEATURES"]
+    assert isinstance(feature_list, str)
+    assert set(feature_list.split()) == {
+        "xlog-cuda/arrow-device-import",
+        "xlog-cuda/wcoj-phase-timing",
+        "xlog-runtime/epistemic-logic-tests",
+        "xlog-runtime/recursive-stats-trace",
+        "xlog-runtime/resident-graph-tests",
+        "xlog-runtime/wcoj-phase-timing",
+        "xlog-prob/host-io",
+        "pyxlog/arrow-device-import",
+        "pyxlog/extension-module",
+        "pyxlog/host-io",
+        "xlog-neural/pyo3",
+        "xlog-neural/python",
+        "xlog-neural/python-tests",
+        "xlog-integration/wcoj-phase-timing",
+        "xlog-cli/host-io",
+    }
+    assert "xlog-cuda/semantic-policy" not in feature_list
+    assert "pyxlog/semantic-policy" not in feature_list
     command = job_commands(clippy)
     assert (
-        "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
+        'cargo clippy --workspace --all-targets --features "$XLOG_CLIPPY_FEATURES" '
+        "--locked -- -D warnings"
         in command
     )
+    assert "--all-features" not in command
     assert "--no-deps" not in command
     assert "-A clippy::" not in command
 
