@@ -195,10 +195,10 @@ extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch laun
         output_mask_weights[index] = 0.0f;
         output_ar_labels[index] = -100;
         output_retention_labels[index] = -100;
-        output_source_slots[index] = -1;
+        output_source_slots[index] = static_cast<int64_t>(index);
         output_logical_positions[index] = -1;
         output_kinds[index] = 0;
-        output_parents[index] = -1;
+        output_parents[index] = -2;
     }
     __syncthreads();
     if (selection->status != 0) {
