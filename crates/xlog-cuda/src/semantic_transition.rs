@@ -7656,6 +7656,47 @@ struct PolicyBackward {
     text_cells: u64,
 }
 
+#[cfg(feature = "semantic-policy")]
+fn record_policy_vjp(
+    domain: &ResidentExecutionDomain,
+    poisoned: &mut bool,
+    recorder: LaunchRecorder,
+    execute: CudaFunction,
+    descriptor: Descriptor,
+    coefficients: &TrackedCudaSlice<f64>,
+    score_cotangents: &DeviceMemoryView<f64>,
+) -> Result<(), SemanticTransitionError> {
+    enqueue_recorded(domain, poisoned, recorder, |enqueue| {
+        // SAFETY: the recorder retains the original cotangent producer and
+        // every forward/output allocation. The destination is the fixed F64
+        // bank owned by this exact invocation. This routine deliberately makes
+        // no assumption about capture state: its caller supplies the resident
+        // execution domain whose stream owns both operations.
+        unsafe {
+            sys::cuMemcpyDtoDAsync_v2(
+                coefficients.device_ptr_value(),
+                *score_cotangents.device_ptr(),
+                COMPONENT_COUNT * 8,
+                enqueue.stream().cu_stream(),
+            )
+            .result()
+            .map_err(|error| XlogError::Kernel(format!("policy cotangent snapshot: {error}")))?;
+            execute
+                .launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (descriptor,),
+                )
+                .map_err(|error| XlogError::Kernel(format!("policy backward launch: {error}")))?;
+        }
+        Ok::<(), XlogError>(())
+    })
+}
+
 /// Dedicated device-owned adjoints for one exact policy invocation. Their tracked
 /// allocations can be consumed on another recorded stream without host copies.
 #[cfg(feature = "semantic-policy")]
@@ -15611,32 +15652,15 @@ impl SemanticTransitionSession {
             .expect("retained original step")
             .adjoints
             .extend(output_views);
-        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
-            // SAFETY: the recorder joins the supplied coefficient producer and
-            // retains every distinct forward/output allocation for this batch.
-            unsafe {
-                sys::cuMemcpyDtoDAsync_v2(
-                    coefficients.device_ptr_value(),
-                    *score_cotangents.device_ptr(),
-                    COMPONENT_COUNT * 8,
-                    enqueue.stream().cu_stream(),
-                )
-                .result()
-                .map_err(|e| XlogError::Kernel(format!("policy cotangent snapshot: {e}")))?;
-                execute
-                    .launch_in(
-                        enqueue,
-                        LaunchConfig {
-                            grid_dim: (1, 1, 1),
-                            block_dim: (256, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (descriptor,),
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("policy backward launch: {e}")))?;
-            }
-            Ok::<(), XlogError>(())
-        })?;
+        record_policy_vjp(
+            &self.domain,
+            &mut self.poisoned,
+            recorder,
+            execute,
+            descriptor,
+            &coefficients,
+            &score_cotangents,
+        )?;
         if let Err(error) = self.order_content_consumers(consumer_stream) {
             self.poisoned = true;
             return Err(error);
