@@ -30,6 +30,7 @@ use crate::semantic_hypergraph::{
 use crate::semantic_training_view::{
     SemanticSelectedTrainingView, SemanticTrainingViewArena, SemanticTrainingViewOrigin,
     SemanticTrainingViewOriginRecord, SemanticTrainingViewPort, SemanticTrainingViewRow,
+    SemanticTrainingViewSelection,
 };
 use crate::{
     CudaFunction, CudaKernelProvider, CudaStream, DeviceRepr, LaunchAsync, LaunchConfig,
@@ -1898,6 +1899,7 @@ impl TextBindingStorage {
         &self,
         kind: SemanticTransitionKind,
         authority_bytes: u64,
+        training_selection: u64,
     ) -> ContinuationInputs {
         ContinuationInputs {
             text: self.descriptor(),
@@ -1906,6 +1908,7 @@ impl TextBindingStorage {
             numerical_admissibility: self.inputs[5].data,
             transition_kind: kind.code(),
             authority_bytes,
+            training_selection,
         }
     }
 }
@@ -2735,6 +2738,7 @@ struct PendingContinuation {
     transition_kind: u64,
     text: TextBinding,
     numerical_admissibility: u64,
+    training_selection: u64,
 }
 
 #[repr(C)]
@@ -2746,6 +2750,7 @@ struct ContinuationInputs {
     numerical_admissibility: u64,
     transition_kind: u64,
     authority_bytes: u64,
+    training_selection: u64,
 }
 
 #[repr(C)]
@@ -3022,8 +3027,8 @@ const _: () = assert!(size_of::<SemanticModelContractLayout>() == 48);
 const _: () = assert!(size_of::<PublicationContract>() == 272);
 const _: () = assert!(size_of::<SemanticTextRow>() == 16);
 const _: () = assert!(size_of::<TextBinding>() == 24);
-const _: () = assert!(size_of::<PendingContinuation>() == 216);
-const _: () = assert!(size_of::<ContinuationInputs>() == 64);
+const _: () = assert!(size_of::<PendingContinuation>() == 224);
+const _: () = assert!(size_of::<ContinuationInputs>() == 72);
 const _: () = assert!(size_of::<PublicationCommand>() == 24);
 const _: () = assert!(size_of::<PublicationLease>() == 88);
 const _: () = assert!(size_of::<SemanticTensorLayout>() == 112);
@@ -4679,6 +4684,7 @@ struct PreparedContinuation {
     sources: Vec<PreparedSemanticTensor>,
     copies: Vec<(u64, u64, usize)>,
     inputs: ContinuationInputs,
+    training_selection: Option<DeviceMemoryView<SemanticTrainingViewSelection>>,
     execute: CudaFunction,
 }
 
@@ -4758,6 +4764,7 @@ impl PreparedContinuation {
         reader: DeviceMemoryView<PublicationLease>,
         text_binding: Arc<TextBindingStorage>,
         inputs: ContinuationInputs,
+        training_selection: Option<DeviceMemoryView<SemanticTrainingViewSelection>>,
         uploads: &[(usize, PublicationPayload)],
         layouts: &BTreeMap<(u64, u64), SemanticTensorLayout>,
     ) -> Result<Self, SemanticTransitionError> {
@@ -4818,6 +4825,7 @@ impl PreparedContinuation {
             sources,
             copies,
             inputs,
+            training_selection,
             execute,
         })
     }
@@ -4833,6 +4841,9 @@ impl PreparedContinuation {
         self.storage.record(&mut recorder);
         recorder.read(&self.reader);
         self.text_binding.record(&mut recorder);
+        if let Some(selection) = &self.training_selection {
+            recorder.read(selection);
+        }
         for tensor in &self.sources {
             if let Some(source) = &tensor.source {
                 recorder.read(source);
@@ -7662,6 +7673,7 @@ struct TransitionKernelIo<'a> {
     text: Option<&'a TextBindingStorage>,
     lease: Option<&'a TrackedCudaSlice<PublicationLease>>,
     model_work: Option<&'a PreparedModelWork>,
+    training_selection: Option<&'a DeviceMemoryView<SemanticTrainingViewSelection>>,
     #[cfg(feature = "semantic-policy")]
     policy: Option<&'a PolicyStorage>,
 }
@@ -8221,6 +8233,7 @@ pub enum SemanticTransitionRefusal {
     InvalidFinalSupport { completed_draws: u64 },
     NonFinitePolicyInput { completed_draws: u64 },
     WorkCounterOverflow { completed_draws: u64 },
+    InvalidTrainingView { status: u64 },
 }
 
 impl SemanticTransitionRefusal {
@@ -8234,6 +8247,9 @@ impl SemanticTransitionRefusal {
             }
             Self::WorkCounterOverflow { completed_draws } => {
                 SemanticTransitionError::WorkCounterOverflow { completed_draws }
+            }
+            Self::InvalidTrainingView { status } => {
+                SemanticTransitionError::InvalidTrainingView { status }
             }
         }
     }
@@ -8270,6 +8286,11 @@ fn refused_terminal(
         11 if state.execution_work.overflow == 1 => {
             Ok(SemanticTransitionRefusal::WorkCounterOverflow {
                 completed_draws: state.blocks,
+            })
+        }
+        12..=14 if state.execution_work.overflow == 0 && state.blocks == 0 => {
+            Ok(SemanticTransitionRefusal::InvalidTrainingView {
+                status: state.status - 11,
             })
         }
         _ => Err(SemanticTransitionError::ObservationMismatch),
@@ -8423,6 +8444,9 @@ pub enum SemanticTransitionError {
         completed_draws: u64,
     },
     InvalidPolicyGradient {
+        status: u64,
+    },
+    InvalidTrainingView {
         status: u64,
     },
     InvalidTaskBank,
@@ -9009,7 +9033,7 @@ impl SemanticTransitionSession {
                 status: result.refusal,
             });
         }
-        if matches!(state.status, 2 | 5 | 11) {
+        if matches!(state.status, 2 | 5 | 11 | 12..=14) {
             let refusal = refused_terminal(
                 &state,
                 invocation,
@@ -10784,6 +10808,36 @@ impl SemanticTransitionSession {
             &original[..tensor_count],
             &authority_decisions,
         )?;
+        let kind = self
+            .prepared_segment
+            .as_ref()
+            .expect("prepared scope")
+            .requested_kind(step, &self.publication_issuer)?;
+        let training_selection = match (
+            kind,
+            owner
+                .prepared
+                .as_ref()
+                .expect("prepared selection owner")
+                .training_view
+                .as_ref(),
+        ) {
+            (SemanticTransitionKind::Update, Some(view)) => Some(view.selection()),
+            (SemanticTransitionKind::Update, None) => {
+                return Err(publication_input_error(
+                    "prepared update continuation has no native training selection",
+                ));
+            }
+            (_, None) => None,
+            (_, Some(_)) => {
+                return Err(publication_input_error(
+                    "non-update continuation owns an unexpected training selection",
+                ));
+            }
+        };
+        let training_selection_pointer = training_selection
+            .as_ref()
+            .map_or(0, |selection| *selection.device_ptr());
         let continuation = PreparedContinuation::prepare(
             &self.provider,
             storage,
@@ -10795,12 +10849,11 @@ impl SemanticTransitionSession {
                 .view(),
             Arc::clone(&binding),
             binding.continuation_inputs(
-                self.prepared_segment
-                    .as_ref()
-                    .expect("prepared scope")
-                    .requested_kind(step, &self.publication_issuer)?,
+                kind,
                 authority_decisions.len() as u64,
+                training_selection_pointer,
             ),
+            training_selection,
             &uploads,
             &layouts,
         )?;
@@ -14605,7 +14658,8 @@ impl SemanticTransitionSession {
             Arc::clone(&storage),
             self.checked_reader(lease)?.device.view(),
             Arc::clone(&text_binding),
-            text_binding.continuation_inputs(kind, authority_bytes),
+            text_binding.continuation_inputs(kind, authority_bytes, 0),
+            None,
             &uploads,
             &pending_layouts,
         )?;
@@ -15930,6 +15984,7 @@ impl SemanticTransitionSession {
             text: Some(&policy.text_binding),
             lease: None,
             model_work: None,
+            training_selection: None,
         };
         let mut descriptor = self.descriptor_with(&io);
         descriptor.components = *components.device_ptr();
@@ -16310,7 +16365,7 @@ impl SemanticTransitionSession {
         self.provider.record_final_observation_transfer(
             (COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>()) as u64,
         );
-        if matches!(state.status, 2 | 5 | 11) && self.publication.is_some() {
+        if matches!(state.status, 2 | 5 | 11 | 12..=14) && self.publication.is_some() {
             let refusal = self.reconcile_refusal(&state, expected_proposal)?;
             return Ok(SemanticTransitionOutcome::Refused(refusal));
         }
@@ -16327,6 +16382,11 @@ impl SemanticTransitionSession {
         if state.status == 11 {
             return Err(SemanticTransitionError::WorkCounterOverflow {
                 completed_draws: state.blocks,
+            });
+        }
+        if matches!(state.status, 12..=14) {
+            return Err(SemanticTransitionError::InvalidTrainingView {
+                status: state.status - 11,
             });
         }
         match state.status {
@@ -16774,6 +16834,7 @@ impl SemanticTransitionSession {
                 .map(|(token, _, _)| &self.readers[&token].device),
             #[cfg(feature = "semantic-policy")]
             policy: self.policy.as_ref(),
+            training_selection: None,
         }
     }
 
@@ -16826,6 +16887,10 @@ impl SemanticTransitionSession {
             lease: Some(&prepared.reader),
             policy,
             model_work: prepared.model_work.as_ref(),
+            training_selection: prepared
+                .continuation
+                .as_ref()
+                .and_then(|continuation| continuation.training_selection.as_ref()),
         })
     }
 
@@ -16966,6 +17031,12 @@ impl SemanticTransitionSession {
                 }
             }
         }
+        if let Some(selection) = io.training_selection {
+            ranges.push((
+                *selection.device_ptr(),
+                size_of::<SemanticTrainingViewSelection>() as u64,
+            ));
+        }
         disjoint_ranges(&ranges)
     }
 
@@ -17005,6 +17076,9 @@ impl SemanticTransitionSession {
         }
         if let Some(text) = io.text {
             text.record(&mut recorder);
+        }
+        if let Some(selection) = io.training_selection {
+            recorder.read(selection);
         }
         recorder
     }

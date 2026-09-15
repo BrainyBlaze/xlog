@@ -244,6 +244,9 @@ fn transition_refusal(
             SemanticTransitionRefusal::WorkCounterOverflow { completed_draws } => {
                 ("work_counter_overflow", *completed_draws)
             }
+            SemanticTransitionRefusal::InvalidTrainingView { status } => {
+                ("invalid_training_view", *status)
+            }
         }),
     }
 }
@@ -4906,8 +4909,9 @@ impl PySemanticPolicyInvocation {
         ))
     }
 
-    /// None for publication, otherwise the native refusal reason and completed draws.
-    /// Reasons are ``invalid_final_support`` and ``non_finite_policy_input``.
+    /// None for publication, otherwise the native refusal reason and detail value.
+    /// ``invalid_training_view`` carries its resident selection status; other
+    /// refusal reasons carry completed draws.
     /// A refusal contains no published result or differentiable receipt bank.
     #[getter]
     fn refusal(&self, py: Python<'_>) -> PyResult<Option<(&'static str, u64)>> {

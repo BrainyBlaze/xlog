@@ -299,6 +299,7 @@ struct TextBinding { uint64_t rows,count,selected; };
 struct ContinuationInputs {
     TextBinding text;
     uint64_t active_rows,active_row_count,numerical_admissibility,transition_kind,authority_bytes;
+    uint64_t training_selection;
 };
 struct PublicationStorageEntry { uint64_t pointer,bytes,generation; };
 struct PublicationRange {
@@ -340,7 +341,7 @@ struct PendingContinuation {
     uint64_t abi,instance[4],base_word,model_generation,authority_generation;
     uint64_t topology_identity[4],table_identity[4],prefix_identity[4],ranges,range_count,transition_kind;
     TextBinding text;
-    uint64_t numerical_admissibility;
+    uint64_t numerical_admissibility,training_selection;
 };
 struct PublicationCommand { uint64_t control,lease,operation; };
 struct PublicationLease { uint64_t abi,status,instance[4],word,bank,epoch,active,transition_kind; };
@@ -425,8 +426,8 @@ static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
 static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
 static_assert(sizeof(TextRow)==16,"compact text row ABI");
 static_assert(sizeof(TextBinding)==24,"compact text binding ABI");
-static_assert(sizeof(ContinuationInputs)==64,"resident continuation inputs ABI");
-static_assert(sizeof(PendingContinuation)==216,"pending continuation ABI");
+static_assert(sizeof(ContinuationInputs)==72,"resident continuation inputs ABI");
+static_assert(sizeof(PendingContinuation)==224,"pending continuation ABI");
 static_assert(sizeof(PublicationCommand)==24,"publication command ABI");
 static_assert(sizeof(PublicationLease)==88,"publication lease ABI");
 static_assert(sizeof(PublicationStepResult)==sizeof(PublicationHeader)+32,"publication step result ABI");
@@ -1252,6 +1253,10 @@ __device__ uint64_t publication_validate_continuation(const PublicationControl& 
 }
 __device__ uint64_t publication_prepare_continuation(PublicationControl& control,
         const PublicationLease& lease,ContinuationInputs inputs) {
+    const uint64_t requested_kind=inputs.transition_kind;
+    if((requested_kind==4)!=(inputs.training_selection!=0) ||
+       (inputs.training_selection && (inputs.training_selection%alignof(uint64_t) ||
+        inputs.training_selection>UINT64_MAX-sizeof(uint64_t))))return 1;
     if(lease.transition_kind)inputs.transition_kind=lease.transition_kind;
     if(!publication_acquired_bank(control,lease) ||
        !control.directories[lease.bank] || !control.contract || !control.continuation ||
@@ -1318,6 +1323,7 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
     semantic_graph::copy_identity(pending.prefix_identity,
         reinterpret_cast<const uint64_t*>(publication_range_bytes(control,*prefix)));
     pending.text=inputs.text;pending.numerical_admissibility=inputs.numerical_admissibility;
+    pending.training_selection=inputs.transition_kind==4 ? inputs.training_selection : 0;
     for(uint64_t i=0;i<pending.range_count;++i) {
         auto& range=ranges[i];
         if(range.role==1 || range.role==4 || range.role==5) {
@@ -3409,7 +3415,18 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             }
             const uint8_t numerical=*reinterpret_cast<const uint8_t*>(pending.numerical_admissibility);
             if(numerical>1) { semantic_content_integrity_trap();return; }
-            if(!numerical || state->execution_work.overflow) {
+            uint64_t training_status=0;
+            if(pending.transition_kind==4) {
+                if(!pending.training_selection || pending.training_selection%alignof(uint64_t) ||
+                   pending.training_selection>UINT64_MAX-sizeof(uint64_t)) {
+                    semantic_content_integrity_trap();return;
+                }
+                training_status=*reinterpret_cast<const uint64_t*>(pending.training_selection);
+                if(training_status>3) { semantic_content_integrity_trap();return; }
+            } else if(pending.training_selection) {
+                semantic_content_integrity_trap();return;
+            }
+            if(training_status || !numerical || state->execution_work.overflow) {
                 if(!descriptor.publication.lease || !control.contract) {
                     semantic_content_integrity_trap();return;
                 }
@@ -3439,7 +3456,8 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 state->model_generation=uint32_t(header.model_generation);state->family_id=uint32_t(header.family_id);
                 state->stream_serial=header.stream_serial;state->proposal=state->next_proposal=header.proposal;
                 publication_refusal_snapshot(descriptor,base,acquired_bank,state);
-                numerical_refused=true;failed=1;state->status=state->execution_work.overflow ? 11 : 5;
+                numerical_refused=true;failed=1;
+                state->status=state->execution_work.overflow ? 11 : (training_status ? 11+training_status : 5);
             }
         }
         if(!failed && descriptor.publication.control) {
