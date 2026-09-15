@@ -1721,7 +1721,8 @@ __device__ void inspect_version(const Layout &layout, const Command *command,
     fill_version(receipt, layout, slot);
 }
 
-__device__ void execute(uint64_t *arena, LaunchDescriptor descriptor, NativeWorkTally *work = nullptr) {
+__device__ __forceinline__ void execute(uint64_t *arena, const LaunchDescriptor &descriptor,
+                                        NativeWorkTally *work = nullptr) {
     charge_native(work, NativeWorkEvent::Command, 1);
     if (descriptor.abi_generation != kAbiGeneration) {
         if (descriptor.receipt_ptr != 0) {
