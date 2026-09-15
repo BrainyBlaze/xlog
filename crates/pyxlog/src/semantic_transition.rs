@@ -4061,13 +4061,13 @@ pub(crate) struct PySemanticPreparedStep {
 #[cfg(feature = "semantic-policy")]
 struct PreparedPolicyInputs {
     model_output: Py<PyAny>,
-    inputs: [Py<PyAny>; 3],
+    inputs: [Py<PyAny>; 4],
     invocation_issued: bool,
 }
 
 #[cfg(feature = "semantic-policy")]
 impl PreparedPolicyInputs {
-    fn issue_originals(&mut self, py: Python<'_>) -> PyResult<(Py<PyAny>, [Py<PyAny>; 3])> {
+    fn issue_originals(&mut self, py: Python<'_>) -> PyResult<(Py<PyAny>, [Py<PyAny>; 4])> {
         if self.invocation_issued {
             return Err(invalid("prepared policy invocation was already issued"));
         }
@@ -4809,7 +4809,7 @@ pub(crate) struct PySemanticPolicyInvocation {
     _task_use: Py<PySemanticTransitionTaskUse>,
     _parent: ContentStepOwner,
     _model_output: Py<PyAny>,
-    _inputs: [Py<PyAny>; 3],
+    _inputs: [Py<PyAny>; 4],
     rng: SemanticRngBinding,
     outcome: xlog_cuda::SemanticTransitionOutcome,
     training: bool,
@@ -7266,12 +7266,13 @@ impl PySemanticTransitionController {
     }
 
     /// Bind the original policy producers while this genuine step is recording.
-    /// The combined transient witness covers text logits, product support and
-    /// parameters in that exact order. This records no host publication or RNG
-    /// identity and returns no invocation; only actual completed execution can
-    /// expose the original result and its retained late-backward tape.
+    /// The combined transient witness covers text logits, product support,
+    /// parameters and the model-issued component baselines in that exact order.
+    /// This records no host publication or RNG identity and returns no invocation;
+    /// only actual completed execution can expose the original result and its
+    /// retained late-backward tape.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, step, binding, model_output, text_logits, product_support, parameters, producer_witness, consumer_stream))]
+    #[pyo3(signature = (task_use, *, step, binding, model_output, text_logits, product_support, parameters, component_baselines, producer_witness, consumer_stream))]
     #[allow(clippy::too_many_arguments)]
     fn bind_prepared_policy(
         &self,
@@ -7283,6 +7284,7 @@ impl PySemanticTransitionController {
         text_logits: Py<PyAny>,
         product_support: Py<PyAny>,
         parameters: Py<PyAny>,
+        component_baselines: Py<PyAny>,
         producer_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
@@ -7319,7 +7321,12 @@ impl PySemanticTransitionController {
             }
             self.continuation_binding(&state, parent, false)?
         };
-        let inputs = [text_logits, product_support, parameters];
+        let inputs = [
+            text_logits,
+            product_support,
+            parameters,
+            component_baselines,
+        ];
         let device = self.session.borrow(py).device_ordinal;
         let mut handoff = TensorHandoff(Vec::with_capacity(inputs.len()));
         let producer_stream = i64::try_from(stream)
@@ -7354,7 +7361,7 @@ impl PySemanticTransitionController {
                 "prepared policy authority changed during producer handoff",
             ));
         }
-        let [text, support, parameters]: [_; 3] = handoff
+        let [text, support, parameters, component_baselines]: [_; 4] = handoff
             .into_native()
             .try_into()
             .unwrap_or_else(|_| unreachable!("exact policy producer roster"));
@@ -7365,6 +7372,7 @@ impl PySemanticTransitionController {
                 text,
                 support,
                 parameters,
+                component_baselines,
                 &producer_witness.inner,
                 stream,
             )
@@ -7390,12 +7398,13 @@ impl PySemanticTransitionController {
     /// Snapshot one original full-MASK policy, execute all draws and the sole device
     /// publication, and retain its late tape. ``binding`` is the exact pair
     /// returned with the packing layout. Inputs are contiguous one-dimensional
-    /// F32[32,V], Bool8[support_cells], FP32[parameter_cells], respectively.
+    /// F32[32,V], Bool8[support_cells], FP32[parameter_cells] and
+    /// FP32[1,136], respectively.
     /// ``model_output`` is the caller-authenticated original output, retained
     /// without invoking a getter; rows/selected bits come only from the already
     /// admitted continuation. Acquire of the result remains explicit.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, parent, binding, model_output, text_logits, product_support, parameters))]
+    #[pyo3(signature = (task_use, *, parent, binding, model_output, text_logits, product_support, parameters, component_baselines))]
     #[allow(clippy::too_many_arguments)]
     fn execute_policy(
         &self,
@@ -7407,6 +7416,7 @@ impl PySemanticTransitionController {
         text_logits: Py<PyAny>,
         product_support: Py<PyAny>,
         parameters: Py<PyAny>,
+        component_baselines: Py<PyAny>,
     ) -> PyResult<PySemanticPolicyInvocation> {
         self.session.borrow(py).require_creator()?;
         self.require_issued(&task_use.borrow(py))?;
@@ -7419,6 +7429,7 @@ impl PySemanticTransitionController {
             text_logits,
             product_support,
             parameters,
+            component_baselines,
             None,
         )
     }
@@ -7892,8 +7903,8 @@ impl PySemanticTransitionController {
                     };
                     self.check_import_callback(py, &issued, &acquired, import, &expected)?;
                     let policy = object_sequence(&policy, &mut budget)?;
-                    if policy.len() != 4 {
-                        return Err(invalid("Runtime replay policy requires binding, logits, parameters and actual product support"));
+                    if policy.len() != 5 {
+                        return Err(invalid("Runtime replay policy requires binding, logits, parameters, actual product support and component baselines"));
                     }
                     let invocation = self.execute_policy_in_execution(
                         py,
@@ -7904,6 +7915,7 @@ impl PySemanticTransitionController {
                         policy[1].clone().unbind(),
                         policy[3].clone().unbind(),
                         policy[2].clone().unbind(),
+                        policy[4].clone().unbind(),
                         Some(import),
                     )?;
                     // Keep the complete original invocation in existing failure
@@ -8384,6 +8396,7 @@ impl PySemanticTransitionController {
         text_logits: Py<PyAny>,
         product_support: Py<PyAny>,
         parameters: Py<PyAny>,
+        component_baselines: Py<PyAny>,
         import: Option<&ColdImportGuard<'_>>,
     ) -> PyResult<PySemanticPolicyInvocation> {
         let issued = task_use.borrow(py);
@@ -8416,7 +8429,12 @@ impl PySemanticTransitionController {
                 training,
             )
         };
-        let inputs = [text_logits, product_support, parameters];
+        let inputs = [
+            text_logits,
+            product_support,
+            parameters,
+            component_baselines,
+        ];
         let device = self.session.borrow(py).device_ordinal;
         let check = || {
             let session = self.session.borrow(py);
@@ -8435,7 +8453,7 @@ impl PySemanticTransitionController {
         for input in &inputs {
             validate_producer_device_guarded(input.bind(py), device, &check)?;
         }
-        let mut handoff = TensorHandoff(Vec::with_capacity(3));
+        let mut handoff = TensorHandoff(Vec::with_capacity(inputs.len()));
         for input in &inputs {
             handoff.0.push(crate::dlpack_from_py_for_stream_guarded(
                 input.bind(py),
@@ -8454,12 +8472,12 @@ impl PySemanticTransitionController {
         {
             return Err(invalid("policy invocation changed during producer handoff"));
         }
-        let [text, support, parameters]: [_; 3] = handoff
+        let [text, support, parameters, component_baselines]: [_; 4] = handoff
             .into_native()
             .try_into()
             .unwrap_or_else(|_| unreachable!("exact policy producer roster"));
         owner
-            .bind_policy_dlpack(binding, rng, text, support, parameters)
+            .bind_policy_dlpack(binding, rng, text, support, parameters, component_baselines)
             .map_err(xlog_err)?;
         owner.capture().map_err(xlog_err)?;
         owner.launch().map_err(xlog_err)?;
@@ -10566,7 +10584,7 @@ else:
         run_python(
             r#"
 try:
-    SemanticTransitionController.bind_prepared_policy(object(), object(), step=object(), binding=(1, bytes(32)), model_output=object(), text_logits=object(), product_support=object(), parameters=object(), producer_witness=object(), consumer_stream=1)
+    SemanticTransitionController.bind_prepared_policy(object(), object(), step=object(), binding=(1, bytes(32)), model_output=object(), text_logits=object(), product_support=object(), parameters=object(), component_baselines=object(), producer_witness=object(), consumer_stream=1)
 except TypeError:
     pass
 else:

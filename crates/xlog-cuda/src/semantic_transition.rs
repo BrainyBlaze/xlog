@@ -7762,7 +7762,7 @@ impl SemanticPolicyGradients {
 fn policy_producer_layouts(
     support_cells: usize,
     parameter_cells: usize,
-) -> Result<[SemanticTensorLayout; 3], SemanticTransitionError> {
+) -> Result<[SemanticTensorLayout; 4], SemanticTransitionError> {
     let layout = |index, scalar_type, element_bytes, rank, dimensions| {
         canonical_tensor_layout(SemanticTensorLayout {
             role: 0,
@@ -7779,6 +7779,7 @@ fn policy_producer_layouts(
         layout(0, 6, 4, 2, [32, TEXT_CARDINALITY as u64, 0, 0])?,
         layout(1, 8, 1, 1, [support_cells as u64, 0, 0, 0])?,
         layout(2, 6, 4, 1, [parameter_cells as u64, 0, 0, 0])?,
+        layout(3, 6, 4, 2, [1, COMPONENT_COUNT as u64, 0, 0])?,
     ])
 }
 
@@ -7790,6 +7791,7 @@ struct PolicyBuffers {
     scores: TrackedCudaSlice<f32>,
     recurrent: TrackedCudaSlice<f32>,
     text_logits: TrackedCudaSlice<f32>,
+    component_baselines: TrackedCudaSlice<f32>,
     adjoints: Option<PolicyAdjointBuffers>,
 }
 
@@ -7838,13 +7840,14 @@ struct PolicyProducerViews {
     text_logits: DeviceMemoryView<f32>,
     product_support: DeviceMemoryView<u8>,
     parameters: DeviceMemoryView<f32>,
+    component_baselines: DeviceMemoryView<f32>,
 }
 
 #[cfg(feature = "semantic-policy")]
 fn policy_source_views(
     originals: &[PreparedSemanticTensor],
 ) -> Result<PolicyProducerViews, SemanticTransitionError> {
-    if originals.len() != 3 {
+    if originals.len() != 4 {
         return Err(publication_input_error(
             "policy requires its complete original producer roster",
         ));
@@ -7864,10 +7867,16 @@ fn policy_source_views(
     let parameters = unsafe { source(2)?.cast::<f32>() }.ok_or_else(|| {
         publication_input_error("original policy parameters are not aligned F32 storage")
     })?;
+    // SAFETY: the fourth admitted producer is the exact rank-two FP32
+    // component-baseline row issued by the original model invocation.
+    let component_baselines = unsafe { source(3)?.cast::<f32>() }.ok_or_else(|| {
+        publication_input_error("original component baselines are not aligned F32 storage")
+    })?;
     Ok(PolicyProducerViews {
         text_logits,
         product_support: source(1)?,
         parameters,
+        component_baselines,
     })
 }
 
@@ -7882,6 +7891,7 @@ fn enqueue_policy_snapshots(
     if original.text_logits.len() != buffers.text_logits.len()
         || original.product_support.len() != support.len()
         || original.parameters.len() != buffers.parameters.len()
+        || original.component_baselines.len() != buffers.component_baselines.len()
     {
         return Err(publication_input_error(
             "original policy producers differ from their fixed native capacities",
@@ -7891,9 +7901,11 @@ fn enqueue_policy_snapshots(
     recorder.read(&original.text_logits);
     recorder.read(&original.product_support);
     recorder.read(&original.parameters);
+    recorder.read(&original.component_baselines);
     recorder.write(&buffers.text_logits);
     recorder.write(support);
     recorder.write(&buffers.parameters);
+    recorder.write(&buffers.component_baselines);
     enqueue_recorded(domain, poisoned, recorder, |enqueue| {
         for (destination, source, bytes) in [
             (
@@ -7910,6 +7922,11 @@ fn enqueue_policy_snapshots(
                 buffers.parameters.device_ptr_value(),
                 *original.parameters.device_ptr(),
                 original.parameters.len() * 4,
+            ),
+            (
+                buffers.component_baselines.device_ptr_value(),
+                *original.component_baselines.device_ptr(),
+                original.component_baselines.len() * 4,
             ),
         ] {
             // SAFETY: fixed typed capacities bound each original source and
@@ -8597,9 +8614,11 @@ fn policy_buffer_bytes(layout: &SemanticPolicyLayout) -> Result<usize, SemanticT
             .ok_or(SemanticTransitionError::GenerationExhausted)
     })?
     // Each primal bank has a dedicated adjoint bank. Only the forward hidden
-    // vector is shared scratch; coefficients and status keep their own types.
+    // vector is shared scratch. Baselines are immutable model outputs without
+    // an adjoint bank; coefficients and status keep their own types.
     .checked_mul(2)
     .and_then(|cells| cells.checked_add(128))
+    .and_then(|cells| cells.checked_add(COMPONENT_COUNT))
     .and_then(|cells| cells.checked_mul(size_of::<f32>()))
     .and_then(|bytes| bytes.checked_add(COMPONENT_COUNT * size_of::<f64>()))
     .and_then(|bytes| bytes.checked_add(size_of::<u64>()))
@@ -14822,6 +14841,7 @@ impl SemanticTransitionSession {
         text_logits: &TrackedCudaSlice<f32>,
         product_support: &TrackedCudaSlice<u8>,
         parameters: &TrackedCudaSlice<f32>,
+        component_baselines: &TrackedCudaSlice<f32>,
     ) -> Result<(), SemanticTransitionError> {
         self.bind_policy_views(
             binding,
@@ -14829,6 +14849,7 @@ impl SemanticTransitionSession {
             text_logits.view(),
             product_support.view(),
             parameters.view(),
+            component_baselines.view(),
         )
     }
 
@@ -14836,7 +14857,8 @@ impl SemanticTransitionSession {
     ///
     /// All tensors are contiguous CUDA storage on this session's device:
     /// F32 `[32, text_cardinality()]`, Bool8 `[policy_support_layout().1]`,
-    /// and F32 `[policy_layout().parameter_cells]`. Both lanes share the original
+    /// F32 `[policy_layout().parameter_cells]`, and FP32 `[1, 136]` component
+    /// baselines. Both lanes share the original
     /// mapped MASK rows; unused capacity is not a categorical factor.
     /// Support contains only active TEXT and the structural rows in roster order;
     /// inactive TEXT has no address. The roster itself still has 136 factors.
@@ -14855,11 +14877,17 @@ impl SemanticTransitionSession {
         text_logits: DlpackManagedTensor,
         product_support: DlpackManagedTensor,
         parameters: DlpackManagedTensor,
+        component_baselines: DlpackManagedTensor,
     ) -> Result<(), SemanticTransitionError> {
         // Own all actual producers before the first fallible binding/shape check.
         // A failed handoff retains the entire set through canonical retirement.
         let mut handoff = RetainedTensorAdmission {
-            inputs: Some(vec![text_logits, product_support, parameters]),
+            inputs: Some(vec![
+                text_logits,
+                product_support,
+                parameters,
+                component_baselines,
+            ]),
             stream: Arc::clone(self.provider.device().inner().stream()),
             ready: false,
         };
@@ -14899,7 +14927,7 @@ impl SemanticTransitionSession {
                     .ok_or_else(|| publication_input_error("policy producer storage is empty"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let [text_logits, product_support, parameters]: [_; 3] = views
+        let [text_logits, product_support, parameters, component_baselines]: [_; 4] = views
             .try_into()
             .unwrap_or_else(|_| unreachable!("exact policy producer roster"));
         // SAFETY: the original typed metadata establishes F32 representation,
@@ -14915,7 +14943,22 @@ impl SemanticTransitionSession {
                 detail: "policy parameter DLPack span is not aligned F32 storage".into(),
             }
         })?;
-        self.bind_policy_views(binding, rng, text_logits, product_support, parameters)
+        // SAFETY: the fourth original producer has exact contiguous
+        // FP32[1, COMPONENT_COUNT] metadata from policy_producer_layouts.
+        let component_baselines =
+            unsafe { component_baselines.cast::<f32>() }.ok_or_else(|| {
+                SemanticTransitionError::InvalidInput {
+                    detail: "component baseline DLPack span is not aligned F32 storage".into(),
+                }
+            })?;
+        self.bind_policy_views(
+            binding,
+            rng,
+            text_logits,
+            product_support,
+            parameters,
+            component_baselines,
+        )
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -14952,6 +14995,9 @@ impl SemanticTransitionSession {
             text_logits: reservation
                 .alloc::<f32>(text_cells)
                 .map_err(|error| runtime_error("original text snapshot allocation", error))?,
+            component_baselines: reservation
+                .alloc::<f32>(COMPONENT_COUNT)
+                .map_err(|error| runtime_error("component baseline snapshot allocation", error))?,
             adjoints: Some(PolicyAdjointBuffers {
                 parameters: reservation
                     .alloc::<f32>(layout.parameter_cells)
@@ -15012,6 +15058,7 @@ impl SemanticTransitionSession {
         text_logits: DlpackManagedTensor,
         product_support: DlpackManagedTensor,
         parameters: DlpackManagedTensor,
+        component_baselines: DlpackManagedTensor,
         witness: &SemanticTensorContentWitness,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
@@ -15028,17 +15075,22 @@ impl SemanticTransitionSession {
             self.codebooks.input_cells,
             self.policy_layout()?.parameter_cells,
         )?;
-        let tensors = [text_logits, product_support, parameters]
-            .into_iter()
-            .zip(layouts)
-            .map(|(tensor, layout)| SemanticTensorInput {
-                layout,
-                logical_begin: 0,
-                logical_end: 0,
-                tensor,
-                native_allocation: None,
-            })
-            .collect();
+        let tensors = [
+            text_logits,
+            product_support,
+            parameters,
+            component_baselines,
+        ]
+        .into_iter()
+        .zip(layouts)
+        .map(|(tensor, layout)| SemanticTensorInput {
+            layout,
+            logical_begin: 0,
+            logical_end: 0,
+            tensor,
+            native_allocation: None,
+        })
+        .collect();
         self.verify_prepared_tensor_content(step, witness, tensors, consumer_stream)?;
         let sources = self.steps[&step.token].content[witness.index]
             .tensors
@@ -15280,6 +15332,7 @@ impl SemanticTransitionSession {
         text_logits: DeviceMemoryView<f32>,
         product_support: DeviceMemoryView<u8>,
         parameters: DeviceMemoryView<f32>,
+        component_baselines: DeviceMemoryView<f32>,
     ) -> Result<(), SemanticTransitionError> {
         self.ensure_rebindable()?;
         if binding != self.binding() {
@@ -15316,6 +15369,7 @@ impl SemanticTransitionSession {
             || text_logits.len() != text_cells
             || product_support.len() != support_cells
             || parameters.len() != layout.parameter_cells
+            || component_baselines.len() != COMPONENT_COUNT
         {
             return Err(SemanticTransitionError::InvalidInput {
                 detail:
@@ -15356,6 +15410,7 @@ impl SemanticTransitionSession {
                 text_logits,
                 product_support,
                 parameters,
+                component_baselines,
             },
         )?;
         if let Err(error) = self.order_content_consumers(original.consumer_stream) {
@@ -17220,6 +17275,7 @@ mod tests {
             .memory()
             .alloc::<f32>(layout.parameter_cells)
             .unwrap();
+        let mut component_baselines = provider.memory().alloc::<f32>(COMPONENT_COUNT).unwrap();
         provider
             .htod_sync_copy_into_tracked(&vec![2.0; logits.len()], &mut logits)
             .unwrap();
@@ -17228,6 +17284,12 @@ mod tests {
             .unwrap();
         provider
             .htod_sync_copy_into_tracked(&vec![3.0; parameters.len()], &mut parameters)
+            .unwrap();
+        provider
+            .htod_sync_copy_into_tracked(
+                &vec![0.5; component_baselines.len()],
+                &mut component_baselines,
+            )
             .unwrap();
         let mut original_logit = logits.view().slice(0..1);
         let mut original_support = support.view().slice(0..1);
@@ -17260,12 +17322,31 @@ mod tests {
             ScalarType::F32,
             layout.parameter_cells,
         );
+        let component_baselines = crate::dlpack::export_slice_managed_tensor(
+            Arc::new(component_baselines.into_bytes()),
+            provider.device().ordinal() as i32,
+            crate::dlpack::DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            1,
+            COMPONENT_COUNT,
+        )
+        .unwrap();
         let rng = session.continuation_rng(&parent).unwrap();
         let original_components = session.device_components.device_ptr_value();
         let original_codebooks = session.device_codebooks.device_ptr_value();
         let before_policy_binding = session.host_io_stats();
         session
-            .bind_policy_dlpack(session.binding(), rng, logits, support, parameters)
+            .bind_policy_dlpack(
+                session.binding(),
+                rng,
+                logits,
+                support,
+                parameters,
+                component_baselines,
+            )
             .unwrap();
         assert_eq!(
             session.host_io_stats(),

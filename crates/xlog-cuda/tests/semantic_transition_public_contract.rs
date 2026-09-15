@@ -77,12 +77,13 @@ fn device_policy_snapshots_inputs_and_computes_late_text_vjp() {
     let mut reservation = provider
         .memory()
         .reserve_bytes(
-            (text_cells * 4 + layout.parameter_cells * 4 + support.len() + 136 * 8) as u64,
+            (text_cells * 4 + layout.parameter_cells * 4 + support.len() + 136 * 12) as u64,
         )
         .unwrap();
     let mut text = reservation.alloc::<f32>(text_cells).unwrap();
     let mut parameters = reservation.alloc::<f32>(layout.parameter_cells).unwrap();
     let mut product_support = reservation.alloc::<u8>(support.len()).unwrap();
+    let mut component_baselines = reservation.alloc::<f32>(136).unwrap();
     let mut cotangents = reservation.alloc::<f64>(136).unwrap();
     provider
         .htod_sync_copy_into_tracked(&vec![f32::NAN; text_cells], &mut text)
@@ -92,6 +93,9 @@ fn device_policy_snapshots_inputs_and_computes_late_text_vjp() {
         .unwrap();
     provider
         .htod_sync_copy_into_tracked(&support, &mut product_support)
+        .unwrap();
+    provider
+        .htod_sync_copy_into_tracked(&vec![0.0; 136], &mut component_baselines)
         .unwrap();
     provider
         .htod_sync_copy_into_tracked(&vec![1.0; 136], &mut cotangents)
@@ -147,6 +151,7 @@ fn device_policy_snapshots_inputs_and_computes_late_text_vjp() {
             &text,
             &product_support,
             &parameters,
+            &component_baselines,
         )
         .unwrap();
     // The completed D2D snapshot, not these mutable caller buffers, is sampled.
@@ -221,6 +226,7 @@ fn device_policy_snapshots_inputs_and_computes_late_text_vjp() {
             &text,
             &product_support,
             &parameters,
+            &component_baselines,
         )
         .unwrap();
     session.capture().unwrap();
@@ -342,11 +348,12 @@ fn policy_recurrent_vjp_crosses_slots_and_forced_null_fields() {
     }
     let mut reservation = provider
         .memory()
-        .reserve_bytes((text_cells * 4 + values.len() * 4 + support.len() + 136 * 8) as u64)
+        .reserve_bytes((text_cells * 4 + values.len() * 4 + support.len() + 136 * 12) as u64)
         .unwrap();
     let mut text = reservation.alloc::<f32>(text_cells).unwrap();
     let mut parameters = reservation.alloc::<f32>(values.len()).unwrap();
     let mut product_support = reservation.alloc::<u8>(support.len()).unwrap();
+    let mut component_baselines = reservation.alloc::<f32>(136).unwrap();
     let mut cotangents = reservation.alloc::<f64>(136).unwrap();
     provider
         .htod_sync_copy_into_tracked(&vec![0.0; text_cells], &mut text)
@@ -356,6 +363,9 @@ fn policy_recurrent_vjp_crosses_slots_and_forced_null_fields() {
         .unwrap();
     provider
         .htod_sync_copy_into_tracked(&support, &mut product_support)
+        .unwrap();
+    provider
+        .htod_sync_copy_into_tracked(&vec![0.0; 136], &mut component_baselines)
         .unwrap();
     let mut coefficients = vec![0.0; 136];
     coefficients[67] = 1.0;
@@ -375,6 +385,7 @@ fn policy_recurrent_vjp_crosses_slots_and_forced_null_fields() {
             &text,
             &product_support,
             &parameters,
+            &component_baselines,
         )
         .unwrap();
     session.capture().unwrap();
@@ -432,6 +443,7 @@ fn policy_recurrent_vjp_crosses_slots_and_forced_null_fields() {
                     &text,
                     &product_support,
                     &parameters,
+                    &component_baselines,
                 )
                 .unwrap();
             session.capture().unwrap();
