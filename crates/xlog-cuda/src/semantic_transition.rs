@@ -27,6 +27,9 @@ use crate::provider::resident_schedule::{validate_execution_domain, ResidentExec
 use crate::semantic_hypergraph::{
     material_bytes, material_u32, material_u64, SemanticMaterialReader, SemanticRootMaterial,
 };
+use crate::semantic_training_view::{
+    SemanticSelectedTrainingView, SemanticTrainingViewArena, SemanticTrainingViewRow,
+};
 use crate::{
     CudaFunction, CudaKernelProvider, CudaStream, DeviceRepr, LaunchAsync, LaunchConfig,
     SemanticAdmission, SemanticAdmissionLimits, SemanticAdmissionRecords, SemanticHypergraph,
@@ -8507,6 +8510,7 @@ pub struct SemanticTransitionSession {
     device_components: TrackedCudaSlice<SemanticComponent>,
     // Private observer/checker results never enter the proposal codebooks.
     task: Option<(TaskEvaluationBinding, TrackedCudaSlice<u64>)>,
+    training_views: Option<Arc<SemanticTrainingViewArena>>,
     task_epoch: u64,
     // Terminal observation does not publish a world. Keep the chosen roots and
     // raw banks immutable until the joint publisher consumes this pending tuple.
@@ -9182,6 +9186,7 @@ mod prepared_completion_tests {
 struct UnreleasedPublicationOwners {
     _graph: SemanticHypergraph,
     _publication: Arc<PublicationStorage>,
+    _training_views: Option<Arc<SemanticTrainingViewArena>>,
     _readers: BTreeMap<u64, PublishedReader>,
     _steps: BTreeMap<u64, StepContentStorage>,
     _prepared_resources: Vec<Arc<dyn Send + Sync>>,
@@ -9214,6 +9219,7 @@ impl Drop for SemanticTransitionSession {
                 let owners = UnreleasedPublicationOwners {
                     _graph: graph,
                     _publication: publication,
+                    _training_views: self.training_views.take(),
                     _readers: std::mem::take(&mut self.readers),
                     _events: std::mem::take(&mut self.release_events),
                     _steps: std::mem::take(&mut self.steps),
@@ -13043,6 +13049,65 @@ impl SemanticTransitionSession {
         self.export_publication_range(lease, range, layout, consumer_stream)
     }
 
+    /// Select the exact published training view from the cold resident arena.
+    /// The host supplies neither an ordinal nor an identity: both the cursor and
+    /// RNG coordinates come from this acquired publication, while CUDA verifies
+    /// the complete role-29 bytes before exposing fixed output ports.
+    pub fn select_training_view(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<SemanticSelectedTrainingView, SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        let arena = Arc::clone(
+            self.training_views
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let range = *lease
+            .directory
+            .iter()
+            .find(|range| range.role == SemanticStateRole::TrainingView as u64 && range.index == 0)
+            .ok_or_else(|| publication_input_error("acquired training-view range is absent"))?;
+        let storage = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let allocation = storage
+            .allocations
+            .get(
+                usize::try_from(range.storage_slot)
+                    .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+            )
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let begin = usize::try_from(range.offset_bytes)
+            .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let length = usize::try_from(range.length_bytes)
+            .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let end = begin
+            .checked_add(length)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let selected = allocation
+            .view()
+            .try_slice(begin..end)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let result = arena.enqueue_selection(
+            selected,
+            lease.header.training_cursor,
+            lease.header.training_rng,
+        );
+        if matches!(
+            &result,
+            Err(SemanticTransitionError::Runtime {
+                operation: "training-view device selection" | "training-view launch commit",
+                ..
+            })
+        ) {
+            self.poisoned = true;
+        }
+        result
+    }
+
     /// Allocation origin and complete backing bytes of the exact view exported
     /// by `published_tensor`, retaining that view's reader/step access grant.
     /// Exported capacity is not evidence that unused contents are model inputs.
@@ -14506,6 +14571,7 @@ impl SemanticTransitionSession {
             device_codebooks,
             device_components,
             task: None,
+            training_views: None,
             task_epoch: 0,
             task_observed: false,
             publication: None,
@@ -14668,6 +14734,26 @@ impl SemanticTransitionSession {
     /// Identity of the immutable task data bank, not a use-authority token.
     pub fn task_evaluation_identity(&self) -> Option<Identity256> {
         self.task.as_ref().map(|(binding, _)| binding.identity())
+    }
+
+    /// Bind every admitted training view once while the task is still cold.
+    /// No row is selected here and the arena cannot be replaced after binding.
+    pub fn bind_training_view_arena(
+        &mut self,
+        rows: Vec<SemanticTrainingViewRow>,
+    ) -> Result<(), SemanticTransitionError> {
+        self.ensure_rebindable()?;
+        if self.publication.is_some() || self.training_views.is_some() || self.task.is_none() {
+            return Err(publication_input_error(
+                "training-view arena requires one cold task binding and cannot be replaced",
+            ));
+        }
+        self.training_views = Some(SemanticTrainingViewArena::allocate(
+            &self.provider,
+            &self.domain,
+            rows,
+        )?);
+        Ok(())
     }
 
     /// Exact original admission selections in task query order, not inferred

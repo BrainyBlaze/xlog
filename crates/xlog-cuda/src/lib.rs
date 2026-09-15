@@ -15,6 +15,7 @@ pub mod memory;
 pub mod multi_gpu_memory;
 pub mod provider;
 mod semantic_hypergraph;
+mod semantic_training_view;
 mod semantic_transition;
 mod semantic_work;
 pub mod type_seam;
@@ -60,6 +61,10 @@ pub use semantic_hypergraph::{
     SemanticSupportEvent, SemanticSupportHandle, SemanticSupportIdentity, SemanticSupportRecord,
     SemanticSupportRef, SemanticTruth, SemanticTypedRecord, SemanticVersionHandle,
     SemanticVersionIdentity, SemanticVersionRef, SemanticView,
+};
+pub use semantic_training_view::{
+    SemanticSelectedTrainingView, SemanticTrainingViewBasis, SemanticTrainingViewRow,
+    SemanticTrainingViewSelection,
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::SemanticPolicyGradients;

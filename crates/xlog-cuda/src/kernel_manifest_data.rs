@@ -40,6 +40,7 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
     "resident_filter_project",
     "resident_schedule",
     "semantic_hypergraph",
+    "semantic_training_view",
     "semantic_transition",
 ];
 
@@ -655,6 +656,14 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
         cu_name: "semantic_hypergraph",
         module_name: "xlog_semantic_hypergraph",
         kernels: &["semantic_hypergraph_execute"],
+    },
+    KernelModuleSpec {
+        cu_name: "semantic_training_view",
+        module_name: "xlog_semantic_training_view",
+        kernels: &[
+            "semantic_training_view_select",
+            "semantic_training_view_gather",
+        ],
     },
     KernelModuleSpec {
         cu_name: "semantic_transition",

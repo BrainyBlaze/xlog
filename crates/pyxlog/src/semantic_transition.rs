@@ -18,7 +18,8 @@ use xlog_cuda::{
     SemanticPreparedStep, SemanticPublishedLease, SemanticRecordRole, SemanticRngBinding,
     SemanticSourceMapping, SemanticStateRecord, SemanticStateRole, SemanticSupportRecord,
     SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout, SemanticTextSlot,
-    SemanticTransitionKind, SemanticTransitionSession, SemanticTypedRecord,
+    SemanticTrainingViewBasis, SemanticTrainingViewRow, SemanticTransitionKind,
+    SemanticTransitionSession, SemanticTypedRecord,
 };
 use xlog_cuda::{
     SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
@@ -2090,6 +2091,32 @@ struct NativeReplayBinding {
 }
 
 impl ReplayRow {
+    fn training_view_row(&self) -> PyResult<SemanticTrainingViewRow> {
+        let mut materials = self
+            .materials
+            .iter()
+            .filter(|material| material.kind == "training-view");
+        let material = materials
+            .next()
+            .ok_or_else(|| invalid("replay row has no admitted training view"))?;
+        if materials.next().is_some() {
+            return Err(invalid(
+                "replay row has more than one admitted training view",
+            ));
+        }
+        let bytes = material
+            .bytes
+            .as_deref()
+            .ok_or_else(|| invalid("training view has no original bytes"))?;
+        Ok(SemanticTrainingViewRow {
+            basis: match &self.basis {
+                ReplayBasis::Episode { .. } => SemanticTrainingViewBasis::Episode,
+                ReplayBasis::CorpusAnchor => SemanticTrainingViewBasis::CorpusAnchor,
+            },
+            bytes: bytes.to_vec(),
+        })
+    }
+
     fn native_replay(&self) -> PyResult<NativeReplayBinding> {
         let ReplayBasis::Episode { execution } = &self.basis else {
             return Err(invalid(
@@ -6839,6 +6866,11 @@ impl PySemanticTransitionController {
         })
         .collect::<PyResult<Vec<_>>>()?;
         let mut authority = TaskAuthority::parse(&values)?;
+        let training_views = authority
+            .replay
+            .iter()
+            .map(ReplayRow::training_view_row)
+            .collect::<PyResult<Vec<_>>>()?;
         authority.bind_initial_sources(
             &ColdValue::read(initial_sources, &mut budget, 0)?,
             &ColdValue::read(source_mapping, &mut budget, 0)?,
@@ -6915,6 +6947,11 @@ impl PySemanticTransitionController {
         let (identity, task_epoch) = {
             let mut owner = session.owner()?;
             owner.bind_task_evaluation(spec).map_err(xlog_err)?;
+            if !training_views.is_empty() {
+                owner
+                    .bind_training_view_arena(training_views)
+                    .map_err(xlog_err)?;
+            }
             if let Some(material) = &selected_material {
                 owner
                     .restore_replay_material(&material.material)
