@@ -2108,11 +2108,13 @@ impl ReplayRow {
             .bytes
             .as_deref()
             .ok_or_else(|| invalid("training view has no original bytes"))?;
+        let identity = self.identity.fields(6)?;
         Ok(SemanticTrainingViewRow {
             basis: match &self.basis {
                 ReplayBasis::Episode { .. } => SemanticTrainingViewBasis::Episode,
                 ReplayBasis::CorpusAnchor => SemanticTrainingViewBasis::CorpusAnchor,
             },
+            content_identity: replay_digest_identity(identity[2].text()?)?,
             bytes: bytes.to_vec(),
         })
     }

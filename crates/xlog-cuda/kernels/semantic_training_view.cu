@@ -12,6 +12,7 @@ struct TrainingViewRowDescriptor {
     uint64_t answer_start;
     uint64_t identity[4];
     uint64_t source_identity[4];
+    uint64_t content_identity[4];
 };
 
 struct SemanticTrainingViewSelection {
@@ -25,6 +26,7 @@ struct SemanticTrainingViewSelection {
     uint64_t answer_start;
     uint64_t identity[4];
     uint64_t source_identity[4];
+    uint64_t content_identity[4];
     uint64_t training_rng[4];
 };
 
@@ -86,6 +88,7 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
         for (uint32_t i = 0; i < 4; ++i) {
             selection->identity[i] = descriptor.identity[i];
             selection->source_identity[i] = descriptor.source_identity[i];
+            selection->content_identity[i] = descriptor.content_identity[i];
             selection->training_rng[i] = launch.training_rng[i];
         }
     }

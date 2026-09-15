@@ -26,6 +26,7 @@ pub enum SemanticTrainingViewBasis {
 /// One already-admitted training view retained for cold device selection.
 pub struct SemanticTrainingViewRow {
     pub basis: SemanticTrainingViewBasis,
+    pub content_identity: Identity256,
     pub bytes: Vec<u8>,
 }
 
@@ -43,6 +44,7 @@ struct TrainingViewRowDescriptor {
     answer_start: u64,
     identity: [u64; 4],
     source_identity: [u64; 4],
+    content_identity: [u64; 4],
 }
 
 // SAFETY: the fixed CUDA ABI contains only u64 words.
@@ -63,6 +65,7 @@ pub struct SemanticTrainingViewSelection {
     pub answer_start: u64,
     pub identity: [u64; 4],
     pub source_identity: [u64; 4],
+    pub content_identity: [u64; 4],
     pub training_rng: [u64; 4],
 }
 
@@ -216,7 +219,13 @@ impl SemanticTrainingViewArena {
         let mut descriptors = Vec::with_capacity(rows.len());
         let mut capacity = 0usize;
         for (ordinal, row) in rows.into_iter().enumerate() {
-            let descriptor = validate_row(ordinal, row.basis, &row.bytes, raw.len())?;
+            let descriptor = validate_row(
+                ordinal,
+                row.basis,
+                row.content_identity,
+                &row.bytes,
+                raw.len(),
+            )?;
             capacity = capacity.max(descriptor.window as usize);
             raw.extend_from_slice(&row.bytes);
             descriptors.push(descriptor);
@@ -381,6 +390,7 @@ fn allocate_port<T: DeviceRepr>(
 fn validate_row(
     ordinal: usize,
     basis: SemanticTrainingViewBasis,
+    content_identity: Identity256,
     bytes: &[u8],
     raw_offset: usize,
 ) -> Result<TrainingViewRowDescriptor, SemanticTransitionError> {
@@ -426,9 +436,12 @@ fn validate_row(
     }
     let identity: [u8; 32] = bytes[32..64].try_into().expect("bounded identity");
     let source_identity: [u8; 32] = bytes[64..96].try_into().expect("bounded identity");
-    if Sha256::digest(bytes).as_slice() != identity || source_identity == [0; 32] {
+    if Sha256::digest(bytes).as_slice() != identity
+        || source_identity == [0; 32]
+        || content_identity == Identity256::default()
+    {
         return Err(input_error(
-            "training-view row identity differs from its bytes or source",
+            "training-view row identity differs from its bytes, source or replay content",
         ));
     }
     Ok(TrainingViewRowDescriptor {
@@ -446,6 +459,7 @@ fn validate_row(
         answer_start: word(128),
         identity: identity_words(Identity256::from_bytes(identity)),
         source_identity: identity_words(Identity256::from_bytes(source_identity)),
+        content_identity: identity_words(content_identity),
     })
 }
 
