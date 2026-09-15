@@ -192,7 +192,7 @@ impl CudaEnqueue<'_> {
         Ok(CudaEnqueue {
             owner,
             submission,
-            execution_id: crate::cuda_graph::stream_execution_id(owner.stream())?,
+            execution_id: submission.validate_execution(owner.stream())?,
         })
     }
     pub fn stream(&self) -> &Arc<CudaStream> {
@@ -213,7 +213,7 @@ impl CudaEnqueue<'_> {
             Option<&crate::cuda_graph::CaptureOwners>,
         ) -> Result<T, cudarc::driver::DriverError>,
     ) -> Result<T, cudarc::driver::DriverError> {
-        if crate::cuda_graph::stream_execution_id(self.stream())? != self.execution_id {
+        if self.submission.validate_execution(self.stream())? != self.execution_id {
             return Err(cudarc::driver::DriverError(
                 cudarc::driver::sys::CUresult::CUDA_ERROR_INVALID_CONTEXT,
             ));
@@ -838,6 +838,7 @@ impl LaunchRecorder {
             self.accesses.clone(),
             Some(Arc::clone(runtime)),
             &dedup_uses(&self.uses),
+            submission.execution_id(),
         )?;
         self.submission = Some(submission);
         Ok(())
@@ -958,7 +959,7 @@ impl LaunchRecorder {
         let result = enqueued.recorder.transaction.enqueue_operation_with(
             || {
                 let pin = submission.pin()?;
-                let execution_id = crate::cuda_graph::stream_execution_id(owner.stream())?;
+                let execution_id = pin.validate_execution(owner.stream())?;
                 owner.bind_submission(&pin)?;
                 Ok((pin, execution_id))
             },

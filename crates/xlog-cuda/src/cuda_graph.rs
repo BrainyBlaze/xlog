@@ -244,6 +244,7 @@ fn retain_child_capture_owners(
 
 struct CaptureSubmissionEntry {
     owners: CaptureOwners,
+    execution_id: u64,
     closing: bool,
     executing: Arc<CaptureExecutingSubmissions>,
 }
@@ -305,6 +306,7 @@ pub(crate) struct StreamSubmissionPhase {
 pub(crate) struct StreamSubmissionPin<'a> {
     _executing: Option<CaptureExecutingSubmission>,
     owners: Option<&'a CaptureOwners>,
+    execution_id: u64,
 }
 
 fn capture_outcome<T, E>(
@@ -337,6 +339,21 @@ fn capture_outcome<T, E>(
 }
 
 impl StreamSubmissionPin<'_> {
+    pub(crate) fn validate_execution(
+        &self,
+        stream: &CudaStream,
+    ) -> std::result::Result<u64, DriverError> {
+        let execution_id = if self.owners.is_some() {
+            self.execution_id
+        } else {
+            stream_execution_id(stream)?
+        };
+        if execution_id != self.execution_id {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_CONTEXT));
+        }
+        Ok(execution_id)
+    }
+
     pub(crate) fn with_serialized_submission<T, E>(
         &self,
         submit: impl FnOnce() -> std::result::Result<T, E>,
@@ -384,11 +401,13 @@ impl StreamSubmissionPin<'_> {
 enum StreamSubmissionState {
     Ordinary {
         _reservation: CaptureExclusionReservation,
+        execution_id: u64,
     },
     Captured {
         context: usize,
         id: u64,
         owners: CaptureOwners,
+        execution_id: u64,
     },
 }
 
@@ -398,6 +417,7 @@ impl StreamSubmissionPhase {
         context: usize,
         status: sys::CUstreamCaptureStatus,
         id: u64,
+        ordinary_execution_id: Option<u64>,
     ) -> std::result::Result<Self, DriverError> {
         let state = match status {
             sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE => {
@@ -405,6 +425,8 @@ impl StreamSubmissionPhase {
                 // proved this stream ordinary; exclude any new managed begin.
                 StreamSubmissionState::Ordinary {
                     _reservation: CaptureExclusionReservation::acquire(&mut registry),
+                    execution_id: ordinary_execution_id
+                        .ok_or(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE))?,
                 }
             }
             sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE => {
@@ -420,6 +442,7 @@ impl StreamSubmissionPhase {
                     context,
                     id,
                     owners: entry.owners.clone(),
+                    execution_id: entry.execution_id,
                 }
             }
             _ => {
@@ -436,14 +459,16 @@ impl StreamSubmissionPhase {
     /// driver submission code, and unwind releases the executing pin as well.
     pub(crate) fn pin(&self) -> std::result::Result<StreamSubmissionPin<'_>, DriverError> {
         match &self.state {
-            StreamSubmissionState::Ordinary { .. } => Ok(StreamSubmissionPin {
+            StreamSubmissionState::Ordinary { execution_id, .. } => Ok(StreamSubmissionPin {
                 _executing: None,
                 owners: None,
+                execution_id: *execution_id,
             }),
             StreamSubmissionState::Captured {
                 context,
                 id,
                 owners,
+                execution_id,
             } => {
                 let executing = {
                     let registry = stream_capture_registry();
@@ -459,8 +484,16 @@ impl StreamSubmissionPhase {
                 Ok(StreamSubmissionPin {
                     _executing: Some(executing),
                     owners: Some(owners),
+                    execution_id: *execution_id,
                 })
             }
+        }
+    }
+
+    pub(crate) fn execution_id(&self) -> u64 {
+        match &self.state {
+            StreamSubmissionState::Ordinary { execution_id, .. }
+            | StreamSubmissionState::Captured { execution_id, .. } => *execution_id,
         }
     }
 
@@ -494,11 +527,18 @@ pub(crate) fn acquire_stream_submission_phase(
         )
         .result()?;
     }
+    let ordinary_execution_id =
+        if status == sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE {
+            Some(stream_execution_id(stream)?)
+        } else {
+            None
+        };
     StreamSubmissionPhase::from_capture_info(
         registry,
         stream.context().cu_ctx() as usize,
         status,
         id,
+        ordinary_execution_id,
     )
 }
 
@@ -718,6 +758,7 @@ impl StreamCaptureLease {
             (self.key.context, id),
             CaptureSubmissionEntry {
                 owners: self.modules.clone(),
+                execution_id: self.key.stream,
                 closing: false,
                 executing: Arc::default(),
             },
@@ -3021,6 +3062,7 @@ mod tests {
             key.context,
             sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE,
             id,
+            None,
         )
         .unwrap();
         (lease, phase)
@@ -3599,6 +3641,7 @@ mod tests {
             0x111,
             sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE,
             0,
+            Some(0x112),
         )
         .unwrap();
         ordinary
@@ -3618,6 +3661,7 @@ mod tests {
                     context,
                     id,
                     owners,
+                    execution_id: id,
                 },
             };
             let mut called = false;
@@ -3634,6 +3678,7 @@ mod tests {
             0x111,
             sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE,
             0x117,
+            None,
         )
         .is_err());
         second
@@ -3654,6 +3699,7 @@ mod tests {
             0x121,
             sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE,
             0,
+            Some(0x122),
         )
         .unwrap();
         assert!(matches!(

@@ -1920,7 +1920,7 @@ impl MemoryOperationOwner {
         // Check before dependency preparation, including PTDS migration between
         // admission and enqueue. Cleanup must never certify a different thread.
         self.completion
-            .validate_submission(crate::cuda_graph::stream_execution_id(&self.stream)?)?;
+            .validate_submission(pin.validate_execution(&self.stream)?)?;
         // Retain actual storage before the first node can reach the driver.
         // No persistent owner retains the submission pin or its capture target.
         if pin.capture_memory(&self.manifest) {
@@ -2204,6 +2204,7 @@ pub(crate) fn admit_memory_access(
     accesses: Vec<DeviceMemoryAccess>,
     runtime: Option<Arc<XlogDeviceRuntime>>,
     runtime_uses: &[crate::device_runtime::BlockUse],
+    execution_id: u64,
 ) -> crate::device_runtime::ResourceResult<RecorderTransaction<MemoryOperationOwner, MemoryUseGroup>>
 {
     let mut ranges_by_context = std::collections::BTreeMap::<usize, Vec<MemoryUse>>::new();
@@ -2267,17 +2268,16 @@ pub(crate) fn admit_memory_access(
             registry.retain_storage_uses(*context, ranges, &mut owned.retained)?;
         }
     }
-    admit_memory_manifest(stream, manifest)
+    admit_memory_manifest(stream, manifest, execution_id)
 }
 
 pub(crate) fn admit_memory_manifest(
     stream: Arc<CudaStream>,
     manifest: Arc<MemoryAccessManifest>,
+    execution_id: u64,
 ) -> crate::device_runtime::ResourceResult<RecorderTransaction<MemoryOperationOwner, MemoryUseGroup>>
 {
-    let completion = Arc::new(OperationCompletion::new(
-        crate::cuda_graph::stream_execution_id(&stream)?,
-    ));
+    let completion = Arc::new(OperationCompletion::new(execution_id));
     let mut owner = Arc::new(MemoryOperationOwner {
         stream,
         retained: manifest
@@ -2328,8 +2328,9 @@ pub(crate) fn with_memory_access<R>(
     operation: impl FnOnce(&MemoryEnqueue<'_>) -> crate::device_runtime::ResourceResult<R>,
 ) -> crate::device_runtime::ResourceResult<R> {
     let submission = crate::cuda_graph::acquire_stream_submission_phase(&stream)?;
+    let execution_id = submission.execution_id();
     let guard = MemoryOperation {
-        transaction: admit_memory_access(stream, accesses, None, &[])?,
+        transaction: admit_memory_access(stream, accesses, None, &[], execution_id)?,
         submission,
     };
     with_memory_operation(guard, |owner, submission| {
@@ -2343,8 +2344,9 @@ pub(crate) fn with_memory_manifest<T>(
     operation: impl FnOnce(&crate::launch::CudaEnqueue<'_>) -> crate::device_runtime::ResourceResult<T>,
 ) -> crate::device_runtime::ResourceResult<T> {
     let submission = crate::cuda_graph::acquire_stream_submission_phase(&stream)?;
+    let execution_id = submission.execution_id();
     let guard = MemoryOperation {
-        transaction: admit_memory_manifest(stream, manifest)?,
+        transaction: admit_memory_manifest(stream, manifest, execution_id)?,
         submission,
     };
     with_memory_operation(guard, |owner, pin| {
@@ -3904,13 +3906,16 @@ mod tests {
             let raw = allocation.storage.dependencies.retain_allocation().unwrap();
             let stream = Arc::clone(allocation.stream());
             let ptr = *allocation.device_ptr();
+            let submission = crate::cuda_graph::acquire_stream_submission_phase(&stream).unwrap();
+            let execution_id = submission.execution_id();
             let mut operation = MemoryOperation {
-                submission: crate::cuda_graph::acquire_stream_submission_phase(&stream).unwrap(),
+                submission,
                 transaction: admit_memory_access(
                     Arc::clone(&stream),
                     vec![allocation.view().access(Access::Write).unwrap()],
                     None,
                     &[],
+                    execution_id,
                 )
                 .unwrap(),
             };
