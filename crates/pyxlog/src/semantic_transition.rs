@@ -18,8 +18,8 @@ use xlog_cuda::{
     SemanticPreparedStep, SemanticPublishedLease, SemanticRecordRole, SemanticRngBinding,
     SemanticSourceMapping, SemanticStateRecord, SemanticStateRole, SemanticSupportRecord,
     SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout, SemanticTextSlot,
-    SemanticTrainingViewBasis, SemanticTrainingViewRow, SemanticTransitionKind,
-    SemanticTransitionSession, SemanticTypedRecord,
+    SemanticTrainingViewBasis, SemanticTrainingViewPort, SemanticTrainingViewRow,
+    SemanticTransitionKind, SemanticTransitionSession, SemanticTypedRecord,
 };
 use xlog_cuda::{
     SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
@@ -289,7 +289,10 @@ fn transition_kind(value: &ColdValue) -> PyResult<SemanticTransitionKind> {
         "proposal" => Ok(SemanticTransitionKind::Proposal),
         "recompute" => Ok(SemanticTransitionKind::Recompute),
         "drain" => Ok(SemanticTransitionKind::Drain),
-        _ => Err(invalid("transition must be proposal, recompute, or drain")),
+        "update" => Ok(SemanticTransitionKind::Update),
+        _ => Err(invalid(
+            "transition must be proposal, recompute, update, or drain",
+        )),
     }
 }
 
@@ -299,7 +302,7 @@ fn prepared_transition(
 ) -> PyResult<SemanticTransitionKind> {
     if !value.is_exact_instance_of::<PyString>() {
         return Err(invalid(
-            "a prepared transition must be an exact proposal or recompute string",
+            "a prepared transition must be an exact proposal, recompute, or update string",
         ));
     }
     let kind = transition_kind(&ColdValue::read(value, budget, 0)?)?;
@@ -316,7 +319,7 @@ fn prepared_transitions<'py>(
 ) -> PyResult<impl ExactSizeIterator<Item = SemanticTransitionKind> + Clone + 'py> {
     if !value.is_exact_instance_of::<PyTuple>() {
         return Err(invalid(
-            "segment transitions must be an exact tuple of proposal or recompute modes",
+            "segment transitions must be an exact tuple of proposal, recompute, or update modes",
         ));
     }
     let values = value.cast::<PyTuple>()?.clone();
@@ -4240,6 +4243,7 @@ impl PySemanticPreparedStep {
         {
             SemanticTransitionKind::Proposal => Ok("proposal"),
             SemanticTransitionKind::Recompute => Ok("recompute"),
+            SemanticTransitionKind::Update => Ok("update"),
             SemanticTransitionKind::Drain => {
                 Err(invalid("drain is not a cold scheduled transition"))
             }
@@ -4353,6 +4357,37 @@ impl PySemanticPreparedStep {
         )
             .into_pyobject(py)?
             .unbind())
+    }
+
+    /// Fixed device outputs of this Update step's native replay selection.
+    /// The first U64 tensor is the selection/status record. Remaining ports are
+    /// token IDs, mask labels, mask weights, autoregressive labels, retention
+    /// labels, source slots, logical positions, kinds, and parents.
+    #[pyo3(signature = (*, consumer_stream))]
+    fn training_view(
+        &self,
+        py: Python<'_>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        let ports = [
+            SemanticTrainingViewPort::Selection,
+            SemanticTrainingViewPort::TokenIds,
+            SemanticTrainingViewPort::MaskLabels,
+            SemanticTrainingViewPort::MaskWeights,
+            SemanticTrainingViewPort::AutoregressiveLabels,
+            SemanticTrainingViewPort::RetentionLabels,
+            SemanticTrainingViewPort::SourceSlots,
+            SemanticTrainingViewPort::LogicalPositions,
+            SemanticTrainingViewPort::Kinds,
+            SemanticTrainingViewPort::Parents,
+        ];
+        let mut values = Vec::with_capacity(ports.len());
+        for port in ports {
+            values.push(self.export(py, consumer_stream, |owner, step, stream| {
+                owner.prepared_training_view_port(step, port, stream)
+            })?);
+        }
+        Ok(PyTuple::new(py, values)?.unbind())
     }
 
     /// Export an admitted immutable record; bank-varying records require their
@@ -6396,6 +6431,7 @@ impl PySemanticTransitionController {
                     let label = match transition {
                         SemanticTransitionKind::Proposal => "proposal",
                         SemanticTransitionKind::Recompute => "recompute",
+                        SemanticTransitionKind::Update => "update",
                         SemanticTransitionKind::Drain => "drain",
                     };
                     let refusal = transition_refusal(&outcome);
@@ -7897,6 +7933,7 @@ impl PySemanticTransitionController {
             let transition = match kind {
                 SemanticTransitionKind::Proposal => "proposal",
                 SemanticTransitionKind::Recompute => "recompute",
+                SemanticTransitionKind::Update => "update",
                 SemanticTransitionKind::Drain => "drain",
             };
             let restored = {

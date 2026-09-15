@@ -125,6 +125,7 @@ struct TrainingViewLaunch {
     selected_view_bytes: u64,
     cursor: u64,
     training_rng: [u64; 4],
+    coordinates: u64,
     origin_candidates: u64,
     origin_candidate_count: u64,
     selection: u64,
@@ -180,6 +181,21 @@ pub struct SemanticSelectedTrainingView {
     storage: SelectedTrainingViewStorage,
 }
 
+/// Fixed device port of one native-selected training view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticTrainingViewPort {
+    Selection,
+    TokenIds,
+    MaskLabels,
+    MaskWeights,
+    AutoregressiveLabels,
+    RetentionLabels,
+    SourceSlots,
+    LogicalPositions,
+    Kinds,
+    Parents,
+}
+
 impl SemanticSelectedTrainingView {
     pub fn capacity(&self) -> usize {
         self.arena.capacity
@@ -224,6 +240,183 @@ impl SemanticSelectedTrainingView {
     pub fn parents(&self) -> DeviceMemoryView<i64> {
         self.storage.parents.view()
     }
+
+    pub(crate) fn port(
+        &self,
+        port: SemanticTrainingViewPort,
+    ) -> Result<(DeviceMemoryView<u8>, Vec<i64>, Vec<i64>, (u8, u8)), SemanticTransitionError> {
+        let (view, cells, dtype) = match port {
+            SemanticTrainingViewPort::Selection => (
+                unsafe { self.storage.selection.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                size_of::<SemanticTrainingViewSelection>() / size_of::<u64>(),
+                (1, 64),
+            ),
+            SemanticTrainingViewPort::TokenIds => (
+                unsafe { self.storage.token_ids.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                self.capacity(),
+                (0, 64),
+            ),
+            SemanticTrainingViewPort::MaskLabels => (
+                unsafe { self.storage.mask_labels.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                self.capacity(),
+                (0, 64),
+            ),
+            SemanticTrainingViewPort::MaskWeights => (
+                unsafe { self.storage.mask_weights.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                self.capacity(),
+                (2, 32),
+            ),
+            SemanticTrainingViewPort::AutoregressiveLabels => (
+                unsafe { self.storage.ar_labels.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                self.capacity(),
+                (0, 64),
+            ),
+            SemanticTrainingViewPort::RetentionLabels => (
+                unsafe { self.storage.retention_labels.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                self.capacity(),
+                (0, 64),
+            ),
+            SemanticTrainingViewPort::SourceSlots => (
+                unsafe { self.storage.source_slots.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                self.capacity(),
+                (0, 64),
+            ),
+            SemanticTrainingViewPort::LogicalPositions => (
+                unsafe { self.storage.logical_positions.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                self.capacity(),
+                (0, 64),
+            ),
+            SemanticTrainingViewPort::Kinds => (
+                unsafe { self.storage.kinds.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                self.capacity(),
+                (0, 64),
+            ),
+            SemanticTrainingViewPort::Parents => (
+                unsafe { self.storage.parents.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                self.capacity(),
+                (0, 64),
+            ),
+        };
+        let cells =
+            i64::try_from(cells).map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        Ok((view, vec![cells], vec![1], dtype))
+    }
+
+    pub(crate) fn enqueue_device_selection(
+        &self,
+        selected_view: DeviceMemoryView<u8>,
+        coordinates: DeviceMemoryView<u64>,
+    ) -> Result<(), SemanticTransitionError> {
+        if coordinates.len() != 5 {
+            return Err(input_error(
+                "prepared training-view coordinates require cursor and four RNG words",
+            ));
+        }
+        self.enqueue(selected_view, 0, [0; 4], Some(coordinates))
+    }
+
+    fn enqueue(
+        &self,
+        selected_view: DeviceMemoryView<u8>,
+        cursor: u64,
+        training_rng: [u64; 4],
+        coordinates: Option<DeviceMemoryView<u64>>,
+    ) -> Result<(), SemanticTransitionError> {
+        let (origin_candidate_ptr, origin_candidate_count) =
+            if let Some(candidates) = self._origin_candidates.as_ref() {
+                (
+                    candidates.device_ptr_value(),
+                    u64::try_from(candidates.len())
+                        .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+                )
+            } else {
+                (0, 0)
+            };
+        let launch = TrainingViewLaunch {
+            descriptors: self.arena.descriptors.device_ptr_value(),
+            raw: self.arena.raw.device_ptr_value(),
+            row_count: u64::try_from(self.arena.row_count)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            selected_view: *selected_view.device_ptr(),
+            selected_view_bytes: u64::try_from(selected_view.len())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            cursor,
+            training_rng,
+            coordinates: coordinates.as_ref().map_or(0, |view| *view.device_ptr()),
+            origin_candidates: origin_candidate_ptr,
+            origin_candidate_count,
+            selection: self.storage.selection.device_ptr_value(),
+            capacity: u64::try_from(self.arena.capacity)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            token_ids: self.storage.token_ids.device_ptr_value(),
+            mask_labels: self.storage.mask_labels.device_ptr_value(),
+            mask_weights: self.storage.mask_weights.device_ptr_value(),
+            ar_labels: self.storage.ar_labels.device_ptr_value(),
+            retention_labels: self.storage.retention_labels.device_ptr_value(),
+            source_slots: self.storage.source_slots.device_ptr_value(),
+            logical_positions: self.storage.logical_positions.device_ptr_value(),
+            kinds: self.storage.kinds.device_ptr_value(),
+            parents: self.storage.parents.device_ptr_value(),
+        };
+        let mut recorder = self.arena.domain.new_strict_recorder();
+        recorder.read(&self.arena.descriptors);
+        recorder.read(&self.arena.raw);
+        recorder.read(&selected_view);
+        if let Some(candidates) = &self._origin_candidates {
+            recorder.read(candidates.as_ref());
+        }
+        if let Some(coordinates) = &coordinates {
+            recorder.read(coordinates);
+        }
+        recorder.write(&self.storage.selection);
+        recorder.write(&self.storage.token_ids);
+        recorder.write(&self.storage.mask_labels);
+        recorder.write(&self.storage.mask_weights);
+        recorder.write(&self.storage.ar_labels);
+        recorder.write(&self.storage.retention_labels);
+        recorder.write(&self.storage.source_slots);
+        recorder.write(&self.storage.logical_positions);
+        recorder.write(&self.storage.kinds);
+        recorder.write(&self.storage.parents);
+        let select = self.arena.select.clone();
+        let gather = self.arena.gather.clone();
+        let enqueued = unsafe {
+            self.arena.domain.enqueue(recorder, |stream| {
+                select.clone().launch_in(
+                    stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (launch,),
+                )?;
+                gather.clone().launch_in(
+                    stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (launch,),
+                )
+            })
+        }
+        .map_err(map_enqueue_error)?;
+        enqueued
+            .commit()
+            .map_err(|error| runtime_error("training-view launch commit", error))
+    }
 }
 
 /// Immutable cold roster used by the native Update selector.
@@ -239,6 +432,42 @@ pub(crate) struct SemanticTrainingViewArena {
 }
 
 impl SemanticTrainingViewArena {
+    pub(crate) fn selection_bytes(&self) -> Result<usize, SemanticTransitionError> {
+        size_of::<SemanticTrainingViewSelection>()
+            .checked_add(
+                self.capacity
+                    .checked_mul(TRAINING_VIEW_ROW_BYTES)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?,
+            )
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    }
+
+    pub(crate) fn allocate_selection_reserved(
+        self: &Arc<Self>,
+        reservation: &mut crate::memory::GpuMemoryReservation,
+        origin_candidates: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
+    ) -> Result<SemanticSelectedTrainingView, SemanticTransitionError> {
+        let storage = SelectedTrainingViewStorage {
+            selection: reservation
+                .alloc::<SemanticTrainingViewSelection>(1)
+                .map_err(|error| runtime_error("training-view selection allocation", error))?,
+            token_ids: allocate_port(reservation, self.capacity)?,
+            mask_labels: allocate_port(reservation, self.capacity)?,
+            mask_weights: allocate_port(reservation, self.capacity)?,
+            ar_labels: allocate_port(reservation, self.capacity)?,
+            retention_labels: allocate_port(reservation, self.capacity)?,
+            source_slots: allocate_port(reservation, self.capacity)?,
+            logical_positions: allocate_port(reservation, self.capacity)?,
+            kinds: allocate_port(reservation, self.capacity)?,
+            parents: allocate_port(reservation, self.capacity)?,
+        };
+        Ok(SemanticSelectedTrainingView {
+            arena: Arc::clone(self),
+            _origin_candidates: origin_candidates,
+            storage,
+        })
+    }
+
     pub(crate) fn allocate(
         provider: &Arc<CudaKernelProvider>,
         domain: &ResidentExecutionDomain,
@@ -322,13 +551,7 @@ impl SemanticTrainingViewArena {
         training_rng: [u64; 4],
         origin_candidates: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
     ) -> Result<SemanticSelectedTrainingView, SemanticTransitionError> {
-        let output_bytes = size_of::<SemanticTrainingViewSelection>()
-            .checked_add(
-                self.capacity
-                    .checked_mul(TRAINING_VIEW_ROW_BYTES)
-                    .ok_or(SemanticTransitionError::GenerationExhausted)?,
-            )
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let output_bytes = self.selection_bytes()?;
         let mut reservation = self
             .provider
             .memory()
@@ -337,108 +560,12 @@ impl SemanticTrainingViewArena {
                     .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
             )
             .map_err(|error| runtime_error("selected training-view reservation", error))?;
-        let storage = SelectedTrainingViewStorage {
-            selection: reservation
-                .alloc::<SemanticTrainingViewSelection>(1)
-                .map_err(|error| runtime_error("training-view selection allocation", error))?,
-            token_ids: allocate_port(&mut reservation, self.capacity)?,
-            mask_labels: allocate_port(&mut reservation, self.capacity)?,
-            mask_weights: allocate_port(&mut reservation, self.capacity)?,
-            ar_labels: allocate_port(&mut reservation, self.capacity)?,
-            retention_labels: allocate_port(&mut reservation, self.capacity)?,
-            source_slots: allocate_port(&mut reservation, self.capacity)?,
-            logical_positions: allocate_port(&mut reservation, self.capacity)?,
-            kinds: allocate_port(&mut reservation, self.capacity)?,
-            parents: allocate_port(&mut reservation, self.capacity)?,
-        };
+        let selected = self.allocate_selection_reserved(&mut reservation, origin_candidates)?;
         if reservation.remaining_bytes() != 0 {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        let (origin_candidate_ptr, origin_candidate_count) =
-            if let Some(candidates) = origin_candidates.as_ref() {
-                (
-                    candidates.device_ptr_value(),
-                    u64::try_from(candidates.len())
-                        .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
-                )
-            } else {
-                (0, 0)
-            };
-        let launch = TrainingViewLaunch {
-            descriptors: self.descriptors.device_ptr_value(),
-            raw: self.raw.device_ptr_value(),
-            row_count: u64::try_from(self.row_count)
-                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
-            selected_view: *selected_view.device_ptr(),
-            selected_view_bytes: u64::try_from(selected_view.len())
-                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
-            cursor,
-            training_rng,
-            origin_candidates: origin_candidate_ptr,
-            origin_candidate_count,
-            selection: storage.selection.device_ptr_value(),
-            capacity: u64::try_from(self.capacity)
-                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
-            token_ids: storage.token_ids.device_ptr_value(),
-            mask_labels: storage.mask_labels.device_ptr_value(),
-            mask_weights: storage.mask_weights.device_ptr_value(),
-            ar_labels: storage.ar_labels.device_ptr_value(),
-            retention_labels: storage.retention_labels.device_ptr_value(),
-            source_slots: storage.source_slots.device_ptr_value(),
-            logical_positions: storage.logical_positions.device_ptr_value(),
-            kinds: storage.kinds.device_ptr_value(),
-            parents: storage.parents.device_ptr_value(),
-        };
-        let mut recorder = self.domain.new_strict_recorder();
-        recorder.read(&self.descriptors);
-        recorder.read(&self.raw);
-        recorder.read(&selected_view);
-        if let Some(candidates) = &origin_candidates {
-            recorder.read(candidates.as_ref());
-        }
-        recorder.write(&storage.selection);
-        recorder.write(&storage.token_ids);
-        recorder.write(&storage.mask_labels);
-        recorder.write(&storage.mask_weights);
-        recorder.write(&storage.ar_labels);
-        recorder.write(&storage.retention_labels);
-        recorder.write(&storage.source_slots);
-        recorder.write(&storage.logical_positions);
-        recorder.write(&storage.kinds);
-        recorder.write(&storage.parents);
-        let select = self.select.clone();
-        let gather = self.gather.clone();
-        let enqueued = unsafe {
-            self.domain.enqueue(recorder, |stream| {
-                select.clone().launch_in(
-                    stream,
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (256, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (launch,),
-                )?;
-                gather.clone().launch_in(
-                    stream,
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (256, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (launch,),
-                )
-            })
-        }
-        .map_err(map_enqueue_error)?;
-        enqueued
-            .commit()
-            .map_err(|error| runtime_error("training-view launch commit", error))?;
-        Ok(SemanticSelectedTrainingView {
-            arena: Arc::clone(self),
-            _origin_candidates: origin_candidates,
-            storage,
-        })
+        selected.enqueue(selected_view, cursor, training_rng, None)?;
+        Ok(selected)
     }
 }
 
@@ -541,6 +668,7 @@ fn origin_record(origin: SemanticTrainingViewOrigin) -> SemanticTrainingViewOrig
             SemanticTransitionKind::Proposal => 1,
             SemanticTransitionKind::Recompute => 2,
             SemanticTransitionKind::Drain => 3,
+            SemanticTransitionKind::Update => 4,
         },
         predecessor_instance: identity_words(origin.predecessor.instance),
         predecessor_word: origin.predecessor.word,

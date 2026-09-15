@@ -60,6 +60,7 @@ struct TrainingViewLaunch {
     uint64_t selected_view_bytes;
     uint64_t cursor;
     uint64_t training_rng[4];
+    uint64_t coordinates;
     uint64_t origin_candidates;
     uint64_t origin_candidate_count;
     uint64_t selection;
@@ -102,19 +103,23 @@ __device__ bool semantic_training_origin_equal(const SemanticTrainingViewOriginR
 
 extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch launch) {
     auto* selection = reinterpret_cast<SemanticTrainingViewSelection*>(launch.selection);
+    const auto* coordinates = launch.coordinates
+        ? reinterpret_cast<const uint64_t*>(launch.coordinates)
+        : &launch.cursor;
+    const uint64_t cursor = coordinates[0];
     if (threadIdx.x == 0) {
-        selection->status = launch.cursor < launch.row_count ? 0 : 1;
+        selection->status = cursor < launch.row_count ? 0 : 1;
     }
     __syncthreads();
     if (selection->status != 0) {
         return;
     }
     const auto* descriptors = reinterpret_cast<const TrainingViewRowDescriptor*>(launch.descriptors);
-    const auto descriptor = descriptors[launch.cursor];
+    const auto descriptor = descriptors[cursor];
     const auto* raw = reinterpret_cast<const uint8_t*>(launch.raw) + descriptor.raw_offset;
     const auto* selected = reinterpret_cast<const uint8_t*>(launch.selected_view);
     if (threadIdx.x == 0 &&
-        (descriptor.ordinal != launch.cursor || descriptor.raw_bytes != launch.selected_view_bytes)) {
+        (descriptor.ordinal != cursor || descriptor.raw_bytes != launch.selected_view_bytes)) {
         selection->status = 2;
     }
     __syncthreads();
@@ -159,7 +164,8 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
             selection->identity[i] = descriptor.identity[i];
             selection->source_identity[i] = descriptor.source_identity[i];
             selection->content_identity[i] = descriptor.content_identity[i];
-            selection->training_rng[i] = launch.training_rng[i];
+            selection->training_rng[i] =
+                launch.coordinates ? coordinates[i + 1] : launch.training_rng[i];
         }
     }
 }

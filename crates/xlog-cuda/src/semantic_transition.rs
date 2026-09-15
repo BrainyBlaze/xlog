@@ -29,7 +29,7 @@ use crate::semantic_hypergraph::{
 };
 use crate::semantic_training_view::{
     SemanticSelectedTrainingView, SemanticTrainingViewArena, SemanticTrainingViewOrigin,
-    SemanticTrainingViewOriginRecord, SemanticTrainingViewRow,
+    SemanticTrainingViewOriginRecord, SemanticTrainingViewPort, SemanticTrainingViewRow,
 };
 use crate::{
     CudaFunction, CudaKernelProvider, CudaStream, DeviceRepr, LaunchAsync, LaunchConfig,
@@ -1949,6 +1949,7 @@ pub enum SemanticTransitionKind {
     Proposal,
     Recompute,
     Drain,
+    Update,
 }
 
 impl SemanticTransitionKind {
@@ -1957,6 +1958,7 @@ impl SemanticTransitionKind {
             Self::Proposal => 1,
             Self::Recompute => 2,
             Self::Drain => 3,
+            Self::Update => 4,
         }
     }
 }
@@ -5501,6 +5503,21 @@ impl PreparedStepInputs {
         }
     }
 
+    fn training_coordinates_view(&self) -> Result<DeviceMemoryView<u64>, SemanticTransitionError> {
+        let begin = std::mem::offset_of!(PublicationHeader, training_cursor);
+        let end = begin
+            .checked_add(5 * size_of::<u64>())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        unsafe {
+            self.header
+                .view()
+                .cast::<u8>()
+                .map(|view| view.slice(begin..end))
+                .and_then(|view| view.cast::<u64>())
+                .ok_or(SemanticTransitionError::ObservationMismatch)
+        }
+    }
+
     fn owns_tensor(
         &self,
         tensor: &PreparedSemanticTensor,
@@ -5803,7 +5820,7 @@ impl PreparedSegmentState {
                 .clone()
                 .any(|kind| kind == SemanticTransitionKind::Drain)
         {
-            return Err(publication_input_error("a prepared segment requires distinct owned steps and one frozen proposal or recompute mode per step"));
+            return Err(publication_input_error("a prepared segment requires distinct owned steps and one frozen proposal, recompute, or update mode per step"));
         }
         let mut owned = Vec::new();
         owned
@@ -5966,6 +5983,7 @@ struct PreparedStepStorage {
     observed: bool,
     result: TrackedCudaSlice<PreparedStepResult>,
     training_origin: Option<DeviceMemoryView<SemanticTrainingViewOriginRecord>>,
+    training_view: Option<SemanticSelectedTrainingView>,
     result_kernel: CudaFunction,
 }
 
@@ -8712,6 +8730,7 @@ fn validate_prepared_completion(
         1 => Ok(SemanticTransitionKind::Proposal),
         2 => Ok(SemanticTransitionKind::Recompute),
         3 => Ok(SemanticTransitionKind::Drain),
+        4 => Ok(SemanticTransitionKind::Update),
         _ => Err(SemanticTransitionError::ObservationMismatch),
     }
 }
@@ -9272,22 +9291,38 @@ impl Drop for SemanticTransitionSession {
 
 impl SemanticTransitionSession {
     /// Allocate every native step owner before the first capture begins.
-    /// Freeze ordinary modes and reserve the complete segment before creating
+    /// Freeze requested modes and reserve the complete segment before creating
     /// per-step storage. Device admission alone selects terminal drain.
     pub fn prepare_segment_steps(
         &mut self,
         transitions: impl ExactSizeIterator<Item = SemanticTransitionKind> + Clone,
     ) -> Result<Vec<SemanticPreparedStep>, SemanticTransitionError> {
         self.ensure_rebindable()?;
-        if transitions.len() == 0
+        let transitions = transitions.collect::<Vec<_>>();
+        if transitions.is_empty()
             || transitions
-                .clone()
-                .any(|kind| kind == SemanticTransitionKind::Drain)
+                .iter()
+                .any(|kind| *kind == SemanticTransitionKind::Drain)
         {
             return Err(publication_input_error(
-                "a prepared segment requires frozen proposal or recompute steps",
+                "a prepared segment requires frozen proposal, recompute, or update steps",
             ));
         }
+        let update_count = transitions
+            .iter()
+            .filter(|kind| **kind == SemanticTransitionKind::Update)
+            .count();
+        let training_view = if update_count == 0 {
+            None
+        } else {
+            Some(Arc::clone(self.training_views.as_ref().ok_or_else(
+                || {
+                    publication_input_error(
+                        "prepared updates require the native training-view arena",
+                    )
+                },
+            )?))
+        };
         if self.prepared_segment.is_some()
             || !self.readers.is_empty()
             || self.captured.is_some()
@@ -9336,8 +9371,19 @@ impl SemanticTransitionSession {
         } else {
             0
         };
+        let training_view_bytes = training_view.as_ref().map_or(Ok(0usize), |arena| {
+            arena
+                .selection_bytes()?
+                .checked_mul(update_count)
+                .ok_or(SemanticTransitionError::GenerationExhausted)
+        })?;
         let bytes =
-            prepared_segment_allocation_bytes(step_bytes, transition_bound, training_origin_bytes)?;
+            prepared_segment_allocation_bytes(step_bytes, transition_bound, training_origin_bytes)?
+                .checked_add(
+                    u64::try_from(training_view_bytes)
+                        .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+                )
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
         // Claim the actual local and runtime budgets before any T-sized host
         // collection or native allocation. Every fixed bank consumes this claim.
         let mut reservation = self
@@ -9363,8 +9409,11 @@ impl SemanticTransitionSession {
             .try_reserve_exact(transition_bound)
             .map_err(|error| runtime_error("prepared token reservation", error))?;
         tokens.extend((self.next_reader..end).map(|token| token + 1));
-        let build =
-            PreparedSegmentState::new(Arc::clone(&self.publication_issuer), tokens, transitions)?;
+        let build = PreparedSegmentState::new(
+            Arc::clone(&self.publication_issuer),
+            tokens,
+            transitions.iter().copied(),
+        )?;
         let handles = build.handles()?;
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("segment preparation stream admission", error))?;
@@ -9383,7 +9432,7 @@ impl SemanticTransitionSession {
         self.prepared_segment = Some(build);
         self.next_reader = end;
         let result = (|| {
-            for (ordinal, handle) in handles.iter().enumerate() {
+            for (ordinal, (handle, kind)) in handles.iter().zip(&transitions).enumerate() {
                 let reader = reservation
                     .alloc(1)
                     .map_err(|error| runtime_error("prepared reader allocation", error))?;
@@ -9426,6 +9475,19 @@ impl SemanticTransitionSession {
                     training_origin: training_origins
                         .as_ref()
                         .and_then(|origins| origins.view().try_slice(ordinal..ordinal + 1)),
+                    training_view: if *kind == SemanticTransitionKind::Update {
+                        Some(
+                            training_view
+                                .as_ref()
+                                .expect("validated update training-view owner")
+                                .allocate_selection_reserved(
+                                    &mut reservation,
+                                    training_origins.clone(),
+                                )?,
+                        )
+                    } else {
+                        None
+                    },
                     result_kernel: result_kernel.clone(),
                     #[cfg(feature = "semantic-policy")]
                     policy_buffers: Some(policy_buffers),
@@ -9980,6 +10042,31 @@ impl SemanticTransitionSession {
             8 => (6, 8),
             _ => return Err(SemanticTransitionError::ObservationMismatch),
         };
+        self.export_prepared_view(step, view, shape, strides, dtype, consumer_stream)
+    }
+
+    /// Export one fixed device port produced by this Update step's native
+    /// selection. Its status word remains device-resident and gates consumers.
+    pub fn prepared_training_view_port(
+        &mut self,
+        step: &SemanticPreparedStep,
+        port: SemanticTrainingViewPort,
+        consumer_stream: u64,
+    ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
+        self.check_prepared_cold(step)?;
+        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Update {
+            return Err(publication_input_error(
+                "native selected training views belong only to prepared updates",
+            ));
+        }
+        let (view, shape, strides, dtype) = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("prepared owner")
+            .training_view
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .port(port)?;
         self.export_prepared_view(step, view, shape, strides, dtype, consumer_stream)
     }
 
@@ -10901,6 +10988,36 @@ impl SemanticTransitionSession {
                     true,
                 )?;
             }
+        }
+        let selection = if let Some(selected) = owner
+            .prepared
+            .as_ref()
+            .expect("prepared selection owner")
+            .training_view
+            .as_ref()
+        {
+            let selected_view = owner
+                .inputs
+                .as_ref()
+                .expect("fixed input owner")
+                .views
+                .get(&(SemanticStateRole::TrainingView as u64, 0))
+                .cloned()
+                .ok_or_else(|| {
+                    publication_input_error("prepared update has no acquired training-view input")
+                })?;
+            let coordinates = owner
+                .inputs
+                .as_ref()
+                .expect("fixed input owner")
+                .training_coordinates_view()?;
+            selected.enqueue_device_selection(selected_view, coordinates)
+        } else {
+            Ok(())
+        };
+        if selection.is_err() {
+            self.poisoned = true;
+            return selection;
         }
         self.steps
             .get_mut(&step.token)
@@ -14315,6 +14432,11 @@ impl SemanticTransitionSession {
         kind: SemanticTransitionKind,
     ) -> Result<(), SemanticTransitionError> {
         self.checked_reader(lease)?;
+        if kind == SemanticTransitionKind::Update {
+            return Err(publication_input_error(
+                "updates require a prepared step with native training and pending-output owners",
+            ));
+        }
         if self.admitted_transition.is_some() || self.continuation_base.is_some() {
             return Err(publication_input_error(
                 "an admitted transition already owns the pending invocation",
@@ -15223,7 +15345,7 @@ impl SemanticTransitionSession {
         self.check_prepared_content_stream(step, consumer_stream)?;
         if self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
             return Err(publication_input_error(
-                "a recompute step does not bind a learned policy",
+                "only a proposal step binds a learned policy",
             ));
         }
         if binding != self.binding() {
@@ -15301,6 +15423,12 @@ impl SemanticTransitionSession {
         step: &SemanticPreparedStep,
     ) -> Result<(), SemanticTransitionError> {
         self.check_prepared_content_stream(step, self.stream.cu_stream() as u64)?;
+        let kind = self.prepared_transition_kind(step)?;
+        if kind == SemanticTransitionKind::Update {
+            return Err(publication_input_error(
+                "prepared update publication requires its native pending output binding",
+            ));
+        }
         let freeze = self
             .steps
             .get_mut(&step.token)
@@ -15318,7 +15446,6 @@ impl SemanticTransitionSession {
             self.poisoned = true;
             return Err(error);
         }
-        let kind = self.prepared_transition_kind(step)?;
         let owner = &self.steps[&step.token];
         let prepared = owner.prepared.as_ref().expect("prepared transition owner");
         if prepared.transition_recorded

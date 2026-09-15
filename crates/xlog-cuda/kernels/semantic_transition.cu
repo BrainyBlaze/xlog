@@ -611,7 +611,7 @@ __device__ uint64_t publication_header_eligibility(const PublicationControl& con
     if(control.reader_counts[(word&1)^1])return 2;
     if((word>>1)==(UINT64_MAX>>1))return 5;
     if(bank.header.terminal>1)return 4;
-    if(transition_kind<1 || transition_kind>3 ||
+    if(transition_kind<1 || transition_kind>4 ||
        (bank.header.terminal==1)!=(transition_kind==3))return 1;
     return bank.header.fuel<(transition_kind==1 ? 2 : 1) ? 5 : 0;
 }
@@ -1265,7 +1265,7 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
     if(!publication_bank_matches(control,base,lease.word) || contract.abi!=1 ||
        base.header.range_count>contract.range_capacity || publication_validate_selected_model(control,base) ||
        base.header.authority_generation!=contract.authority_generation || pending.abi!=1 ||
-       inputs.transition_kind<1 || inputs.transition_kind>3 || !inputs.authority_bytes || !pending.ranges ||
+       inputs.transition_kind<1 || inputs.transition_kind>4 || !inputs.authority_bytes || !pending.ranges ||
        pending.ranges%alignof(PublicationRange) || pending.range_count>contract.range_capacity ||
        pending.range_count>(UINT64_MAX-pending.ranges)/sizeof(PublicationRange) ||
        !semantic_graph::checked_add(32,contract.feedback_capacity,&capacity) ||
@@ -1805,7 +1805,7 @@ extern "C" __global__ void semantic_publication_step_admit(uint64_t control_ptr,
         if(!publication_pointer_span(control.banks[bank],sizeof(PublicationBank),alignof(PublicationBank))) {
             semantic_content_integrity_trap();return;
         }
-    const uint64_t status=requested_kind>=1 && requested_kind<=3 ? publication_acquire(control,lease,requested_kind,expected_word) : 1;
+    const uint64_t status=requested_kind>=1 && requested_kind<=4 ? publication_acquire(control,lease,requested_kind,expected_word) : 1;
     lease.status=status;control.refusal=status;
     if(!status)cudaGraphSetConditional(static_cast<cudaGraphConditionalHandle>(conditional_handle),1);
 }
@@ -3430,7 +3430,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 if(header.semantic_owner!=descriptor.arena[1] || publication_validate_selected_model(control,*acquired_bank) ||
                    header.authority_generation!=contract.authority_generation ||
                    pending.model_generation!=header.model_generation || pending.authority_generation!=header.authority_generation ||
-                   pending.transition_kind<1 || pending.transition_kind>3 ||
+                   pending.transition_kind<1 || pending.transition_kind>4 ||
                    header.model_generation>UINT32_MAX || header.proposal>UINT32_MAX ||
                    header.stream_serial>(UINT64_MAX>>8) || header.family_id>255) {
                     semantic_content_integrity_trap();return;
