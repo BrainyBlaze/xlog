@@ -622,7 +622,7 @@ __device__ uint64_t publication_acquire(PublicationControl& control,PublicationL
     const uint64_t word=publication_load(control.word),bank=word&1;
     uint64_t status=0;
     const auto& parent=*publication_bank(control,word);
-    const uint64_t kind=requested_kind>=1 && requested_kind<=2 && parent.header.terminal==1 ? 3 : requested_kind;
+    const uint64_t kind=requested_kind>=1 && requested_kind<=4 && parent.header.terminal==1 ? 3 : requested_kind;
     if(requested_kind)status=expected_word!=UINT64_MAX && word!=expected_word ? 3 : publication_header_eligibility(control,parent,word,kind);
     else if(!publication_bank_matches(control,parent,word) ||
        (parent.header.terminal==1 && !parent.header.fuel))status=1;

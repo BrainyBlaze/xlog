@@ -103,12 +103,20 @@ __device__ bool semantic_training_origin_equal(const SemanticTrainingViewOriginR
 
 extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch launch) {
     auto* selection = reinterpret_cast<SemanticTrainingViewSelection*>(launch.selection);
+    auto* selection_words = reinterpret_cast<uint64_t*>(selection);
+    for (uint64_t word = threadIdx.x;
+         word < sizeof(SemanticTrainingViewSelection) / sizeof(uint64_t);
+         word += blockDim.x) {
+        selection_words[word] = 0;
+    }
+    __syncthreads();
     const auto* coordinates = launch.coordinates
         ? reinterpret_cast<const uint64_t*>(launch.coordinates)
         : &launch.cursor;
     const uint64_t cursor = coordinates[0];
     if (threadIdx.x == 0) {
         selection->status = cursor < launch.row_count ? 0 : 1;
+        selection->origin_candidate = UINT64_MAX;
     }
     __syncthreads();
     if (selection->status != 0) {
@@ -172,6 +180,27 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
 
 extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch launch) {
     const auto* selection = reinterpret_cast<const SemanticTrainingViewSelection*>(launch.selection);
+    auto* output_token_ids = reinterpret_cast<int64_t*>(launch.token_ids);
+    auto* output_mask_labels = reinterpret_cast<int64_t*>(launch.mask_labels);
+    auto* output_mask_weights = reinterpret_cast<float*>(launch.mask_weights);
+    auto* output_ar_labels = reinterpret_cast<int64_t*>(launch.ar_labels);
+    auto* output_retention_labels = reinterpret_cast<int64_t*>(launch.retention_labels);
+    auto* output_source_slots = reinterpret_cast<int64_t*>(launch.source_slots);
+    auto* output_logical_positions = reinterpret_cast<int64_t*>(launch.logical_positions);
+    auto* output_kinds = reinterpret_cast<int64_t*>(launch.kinds);
+    auto* output_parents = reinterpret_cast<int64_t*>(launch.parents);
+    for (uint64_t index = threadIdx.x; index < launch.capacity; index += blockDim.x) {
+        output_token_ids[index] = 0;
+        output_mask_labels[index] = -100;
+        output_mask_weights[index] = 0.0f;
+        output_ar_labels[index] = -100;
+        output_retention_labels[index] = -100;
+        output_source_slots[index] = -1;
+        output_logical_positions[index] = -1;
+        output_kinds[index] = 0;
+        output_parents[index] = -1;
+    }
+    __syncthreads();
     if (selection->status != 0) {
         return;
     }
@@ -189,25 +218,17 @@ extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch laun
     const auto* logical_positions = source_slots + window;
     const auto* kinds = logical_positions + window;
     const auto* parents = kinds + window;
-    auto* output_token_ids = reinterpret_cast<int64_t*>(launch.token_ids);
-    auto* output_mask_labels = reinterpret_cast<int64_t*>(launch.mask_labels);
-    auto* output_mask_weights = reinterpret_cast<float*>(launch.mask_weights);
-    auto* output_ar_labels = reinterpret_cast<int64_t*>(launch.ar_labels);
-    auto* output_retention_labels = reinterpret_cast<int64_t*>(launch.retention_labels);
-    auto* output_source_slots = reinterpret_cast<int64_t*>(launch.source_slots);
-    auto* output_logical_positions = reinterpret_cast<int64_t*>(launch.logical_positions);
-    auto* output_kinds = reinterpret_cast<int64_t*>(launch.kinds);
-    auto* output_parents = reinterpret_cast<int64_t*>(launch.parents);
     for (uint64_t index = threadIdx.x; index < launch.capacity; index += blockDim.x) {
-        const bool active = index < window;
-        output_token_ids[index] = active ? token_ids[index] : 0;
-        output_mask_labels[index] = active ? mask_labels[index] : -100;
-        output_mask_weights[index] = active ? mask_weights[index] : 0.0f;
-        output_ar_labels[index] = active ? ar_labels[index] : -100;
-        output_retention_labels[index] = active ? retention_labels[index] : -100;
-        output_source_slots[index] = active ? source_slots[index] : -1;
-        output_logical_positions[index] = active ? logical_positions[index] : -1;
-        output_kinds[index] = active ? kinds[index] : 0;
-        output_parents[index] = active ? parents[index] : -1;
+        if (index < window) {
+            output_token_ids[index] = token_ids[index];
+            output_mask_labels[index] = mask_labels[index];
+            output_mask_weights[index] = mask_weights[index];
+            output_ar_labels[index] = ar_labels[index];
+            output_retention_labels[index] = retention_labels[index];
+            output_source_slots[index] = source_slots[index];
+            output_logical_positions[index] = logical_positions[index];
+            output_kinds[index] = kinds[index];
+            output_parents[index] = parents[index];
+        }
     }
 }
