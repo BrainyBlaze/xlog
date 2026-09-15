@@ -6228,8 +6228,8 @@ impl PySemanticTransitionController {
             for step in &steps {
                 check()?;
                 let native = step.borrow(py).inner.clone();
-                let error = std::cell::RefCell::new(None);
-                let result = capture.add_conditional_if(
+                let admission_error = std::cell::RefCell::new(None);
+                let admission = capture.add_conditional_if(
                     &stream,
                     |handle| -> PyResult<()> {
                         let result = session
@@ -6237,17 +6237,45 @@ impl PySemanticTransitionController {
                             .record_prepared_step_admission(&native, handle)
                             .map_err(xlog_err);
                         if let Err(value) = &result {
-                            *error.borrow_mut() = Some(value.clone_ref(py));
+                            *admission_error.borrow_mut() = Some(value.clone_ref(py));
+                        }
+                        result
+                    },
+                    |body| {
+                        body.capture_on_stream(&stream, || -> PyResult<()> {
+                            let result = session
+                                .owner()?
+                                .record_prepared_step_inputs(&native)
+                                .map_err(xlog_err);
+                            if let Err(value) = &result {
+                                *admission_error.borrow_mut() = Some(value.clone_ref(py));
+                            }
+                            result
+                        })
+                    },
+                );
+                if let Err(graph_error) = admission {
+                    return Err(admission_error
+                        .into_inner()
+                        .unwrap_or_else(|| xlog_err(graph_error)));
+                }
+
+                let requested_error = std::cell::RefCell::new(None);
+                let requested = capture.add_conditional_if(
+                    &stream,
+                    |handle| -> PyResult<()> {
+                        let result = session
+                            .owner()?
+                            .record_prepared_step_requested_gate(&native, handle)
+                            .map_err(xlog_err);
+                        if let Err(value) = &result {
+                            *requested_error.borrow_mut() = Some(value.clone_ref(py));
                         }
                         result
                     },
                     |body| {
                         body.capture_on_stream(&stream, || -> PyResult<()> {
                             let result = (|| {
-                                session
-                                    .owner()?
-                                    .record_prepared_step_inputs(&native)
-                                    .map_err(xlog_err)?;
                                 let enqueue =
                                     recording_callback(check, || prepared.getattr("enqueue_step"))?;
                                 recording_callback(check, || {
@@ -6259,23 +6287,86 @@ impl PySemanticTransitionController {
                                     }
                                     Ok(())
                                 })?;
-                                let mut owner = session.owner()?;
-                                owner
+                                session
+                                    .owner()?
                                     .enqueue_prepared_transition(&native)
-                                    .map_err(xlog_err)?;
-                                owner
-                                    .record_prepared_step_release(&native)
                                     .map_err(xlog_err)
                             })();
                             if let Err(value) = &result {
-                                *error.borrow_mut() = Some(value.clone_ref(py));
+                                *requested_error.borrow_mut() = Some(value.clone_ref(py));
                             }
                             result
                         })
                     },
                 );
-                if let Err(graph_error) = result {
-                    return Err(error.into_inner().unwrap_or_else(|| xlog_err(graph_error)));
+                if let Err(graph_error) = requested {
+                    return Err(requested_error
+                        .into_inner()
+                        .unwrap_or_else(|| xlog_err(graph_error)));
+                }
+
+                let drain_error = std::cell::RefCell::new(None);
+                let drain = capture.add_conditional_if(
+                    &stream,
+                    |handle| -> PyResult<()> {
+                        let result = session
+                            .owner()?
+                            .record_prepared_step_drain_gate(&native, handle)
+                            .map_err(xlog_err);
+                        if let Err(value) = &result {
+                            *drain_error.borrow_mut() = Some(value.clone_ref(py));
+                        }
+                        result
+                    },
+                    |body| {
+                        body.capture_on_stream(&stream, || -> PyResult<()> {
+                            let result = session
+                                .owner()?
+                                .enqueue_prepared_drain(&native)
+                                .map_err(xlog_err);
+                            if let Err(value) = &result {
+                                *drain_error.borrow_mut() = Some(value.clone_ref(py));
+                            }
+                            result
+                        })
+                    },
+                );
+                if let Err(graph_error) = drain {
+                    return Err(drain_error
+                        .into_inner()
+                        .unwrap_or_else(|| xlog_err(graph_error)));
+                }
+
+                let release_error = std::cell::RefCell::new(None);
+                let release = capture.add_conditional_if(
+                    &stream,
+                    |handle| -> PyResult<()> {
+                        let result = session
+                            .owner()?
+                            .record_prepared_step_active_gate(&native, handle)
+                            .map_err(xlog_err);
+                        if let Err(value) = &result {
+                            *release_error.borrow_mut() = Some(value.clone_ref(py));
+                        }
+                        result
+                    },
+                    |body| {
+                        body.capture_on_stream(&stream, || -> PyResult<()> {
+                            let result = session
+                                .owner()?
+                                .record_prepared_step_release(&native)
+                                .map_err(xlog_err);
+                            if let Err(value) = &result {
+                                *release_error.borrow_mut() = Some(value.clone_ref(py));
+                            }
+                            result
+                        })
+                    },
+                );
+                if let Err(graph_error) = release {
+                    return Err(release_error
+                        .into_inner()
+                        .unwrap_or_else(|| xlog_err(graph_error)));
                 }
                 check()?;
             }

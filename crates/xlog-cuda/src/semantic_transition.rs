@@ -5985,12 +5985,16 @@ struct PreparedStepStorage {
     next_digest: usize,
     model_work: Option<PreparedModelWork>,
     admit: CudaFunction,
+    kind_gate: CudaFunction,
+    active_gate: CudaFunction,
+    drain_prepare: CudaFunction,
     release: CudaFunction,
     witness: CudaFunction,
     content_guard: CudaFunction,
     inputs_recorded: bool,
     continuation: Option<PreparedContinuation>,
     transition_recorded: bool,
+    drain_recorded: bool,
     observed: bool,
     result: TrackedCudaSlice<PreparedStepResult>,
     training_origin: Option<DeviceMemoryView<SemanticTrainingViewOriginRecord>>,
@@ -9449,6 +9453,9 @@ impl SemanticTransitionSession {
                 .ok_or_else(|| runtime_error("kernel lookup", format!("{name} unavailable")))
         };
         let admit = kernel("semantic_publication_step_admit")?;
+        let kind_gate = kernel("semantic_publication_step_kind_gate")?;
+        let active_gate = kernel("semantic_publication_step_active_gate")?;
+        let drain_prepare = kernel("semantic_publication_prepare_drain")?;
         let release = kernel("semantic_publication_step_release")?;
         let witness = kernel("semantic_tensor_content_witness")?;
         let content_guard = kernel("semantic_publication_content_guard")?;
@@ -9488,12 +9495,16 @@ impl SemanticTransitionSession {
                     next_digest: 0,
                     model_work: None,
                     admit: admit.clone(),
+                    kind_gate: kind_gate.clone(),
+                    active_gate: active_gate.clone(),
+                    drain_prepare: drain_prepare.clone(),
                     release: release.clone(),
                     witness: witness.clone(),
                     content_guard: content_guard.clone(),
                     inputs_recorded: false,
                     continuation: None,
                     transition_recorded: false,
+                    drain_recorded: false,
                     observed: false,
                     result,
                     training_origin: training_origins
@@ -11082,6 +11093,100 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
+    fn record_prepared_step_kind_gate(
+        &mut self,
+        step: &SemanticPreparedStep,
+        expected_kind: SemanticTransitionKind,
+        conditional_handle: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_prepared_step(step, true)?;
+        if conditional_handle == 0 {
+            return Err(publication_input_error(
+                "prepared kind gate requires the actual conditional capture handle",
+            ));
+        }
+        let prepared = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("prepared lease owner");
+        let mut recorder = self.domain.new_strict_recorder();
+        recorder.read(&prepared.reader);
+        let arguments = (
+            prepared.reader.device_ptr_value(),
+            expected_kind.code(),
+            conditional_handle,
+        );
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            // SAFETY: the lease and conditional handle belong to this original
+            // prepared step and remain live throughout the captured segment.
+            unsafe {
+                prepared.kind_gate.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    arguments,
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })
+    }
+
+    pub fn record_prepared_step_requested_gate(
+        &mut self,
+        step: &SemanticPreparedStep,
+        conditional_handle: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        let expected = self.prepared_transition_kind(step)?;
+        self.record_prepared_step_kind_gate(step, expected, conditional_handle)
+    }
+
+    pub fn record_prepared_step_drain_gate(
+        &mut self,
+        step: &SemanticPreparedStep,
+        conditional_handle: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        self.record_prepared_step_kind_gate(step, SemanticTransitionKind::Drain, conditional_handle)
+    }
+
+    pub fn record_prepared_step_active_gate(
+        &mut self,
+        step: &SemanticPreparedStep,
+        conditional_handle: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_prepared_step(step, true)?;
+        if conditional_handle == 0 {
+            return Err(publication_input_error(
+                "prepared release gate requires the actual conditional capture handle",
+            ));
+        }
+        let prepared = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("prepared lease owner");
+        let mut recorder = self.domain.new_strict_recorder();
+        recorder.read(&prepared.reader);
+        let arguments = (prepared.reader.device_ptr_value(), conditional_handle);
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            // SAFETY: this device predicate exposes no lease value to the host;
+            // it only releases an actually acquired original step.
+            unsafe {
+                prepared.active_gate.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    arguments,
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })
+    }
+
     pub fn guard_prepared_content(
         &mut self,
         step: &SemanticPreparedStep,
@@ -11152,9 +11257,9 @@ impl SemanticTransitionSession {
             .prepared
             .as_ref()
             .expect("prepared lease");
-        if !prepared.transition_recorded {
+        if !prepared.transition_recorded || !prepared.drain_recorded {
             return Err(publication_input_error(
-                "release must follow this prepared step's complete native transition",
+                "release must follow this prepared step's complete native transition and drain branches",
             ));
         }
         let mut recorder = self.domain.new_strict_recorder();
@@ -15607,6 +15712,78 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
+    /// Record the device-selected terminal drain without executing the model,
+    /// continuation producer, optimizer, or training-output path.
+    #[cfg(feature = "semantic-policy")]
+    pub fn enqueue_prepared_drain(
+        &mut self,
+        step: &SemanticPreparedStep,
+    ) -> Result<(), SemanticTransitionError> {
+        self.check_prepared_content_stream(step, self.stream.cu_stream() as u64)?;
+        let prepared = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("prepared drain owner");
+        if !prepared.transition_recorded || prepared.drain_recorded {
+            return Err(publication_input_error(
+                "prepared drain requires its recorded requested branch and unused drain branch",
+            ));
+        }
+        let publication = self.publication.as_ref().expect("prepared publication");
+        let mut recorder = self.domain.new_strict_recorder();
+        publication.record(&mut recorder);
+        recorder.read(&prepared.reader);
+        let arguments = (
+            publication.control.device_ptr_value(),
+            prepared.reader.device_ptr_value(),
+        );
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            // SAFETY: the device-selected drain uses the same acquired lease and
+            // publication owner as the following canonical transition kernel.
+            unsafe {
+                prepared.drain_prepare.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    arguments,
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })?;
+        let io = self.prepared_drain_kernel_io(step)?;
+        self.validate_ranges_with(&io)?;
+        let descriptor = self.descriptor_with(&io);
+        let recorder = self.kernel_recorder_with(&io);
+        let execute = self.execute.clone();
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            // SAFETY: the drain descriptor retains the canonical publication,
+            // task, graph arena, result, and lease owners but no model outputs.
+            unsafe {
+                execute.launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (descriptor,),
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })?;
+        self.steps
+            .get_mut(&step.token)
+            .expect("prepared drain owner")
+            .prepared
+            .as_mut()
+            .expect("prepared drain storage")
+            .drain_recorded = true;
+        Ok(())
+    }
+
     /// Move an actually observed proposal's original banks into late backward
     /// ownership. The caller supplies coordinates from its saved native header.
     #[cfg(feature = "semantic-policy")]
@@ -16891,6 +17068,46 @@ impl SemanticTransitionSession {
                 .continuation
                 .as_ref()
                 .and_then(|continuation| continuation.training_selection.as_ref()),
+        })
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn prepared_drain_kernel_io(
+        &self,
+        step: &SemanticPreparedStep,
+    ) -> Result<TransitionKernelIo<'_>, SemanticTransitionError> {
+        let prepared = self
+            .steps
+            .get(&step.token)
+            .and_then(|owner| owner.prepared.as_ref())
+            .ok_or_else(|| publication_input_error("prepared drain has no original storage"))?;
+        let logits = if let Some(policy) = prepared.policy.as_ref() {
+            &policy.text_logits
+        } else {
+            &prepared
+                .policy_buffers
+                .as_ref()
+                .ok_or_else(|| {
+                    publication_input_error("prepared drain has no retained cold buffers")
+                })?
+                .text_logits
+        };
+        Ok(TransitionKernelIo {
+            logits,
+            support: prepared
+                .support
+                .as_ref()
+                .ok_or_else(|| publication_input_error("prepared support has retired"))?,
+            receipts: prepared
+                .receipts
+                .as_ref()
+                .ok_or_else(|| publication_input_error("prepared receipts have retired"))?,
+            state: &prepared.state,
+            text: None,
+            lease: Some(&prepared.reader),
+            policy: None,
+            model_work: None,
+            training_selection: None,
         })
     }
 

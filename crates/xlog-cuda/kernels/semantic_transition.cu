@@ -1356,6 +1356,46 @@ extern "C" __global__ void semantic_publication_prepare_continuation(uint64_t co
        publication_prepare_continuation(*reinterpret_cast<PublicationControl*>(control_ptr),
            *reinterpret_cast<const PublicationLease*>(lease_ptr),inputs))semantic_content_integrity_trap();
 }
+extern "C" __global__ void semantic_publication_prepare_drain(uint64_t control_ptr,uint64_t lease_ptr) {
+    if(blockIdx.x || threadIdx.x)return;
+    if(!control_ptr || control_ptr%alignof(PublicationControl) ||
+       control_ptr>UINT64_MAX-sizeof(PublicationControl) ||
+       !lease_ptr || lease_ptr%alignof(PublicationLease) ||
+       lease_ptr>UINT64_MAX-sizeof(PublicationLease)) {
+        semantic_content_integrity_trap();return;
+    }
+    auto& control=*reinterpret_cast<PublicationControl*>(control_ptr);
+    const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
+    const auto* base=publication_acquired_bank(control,lease);
+    if(!base || lease.transition_kind!=3 || !control.contract || !control.continuation ||
+       control.contract%alignof(PublicationContract) || control.continuation%alignof(PendingContinuation) ||
+       publication_validate_storage(control)) {
+        semantic_content_integrity_trap();return;
+    }
+    const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
+    auto& pending=*reinterpret_cast<PendingContinuation*>(control.continuation);
+    const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[lease.bank]);
+    const auto* prefix=publication_find_range(ranges,base->header.range_count,3);
+    const auto* prefix_bytes=prefix ? publication_range_bytes(control,*prefix) : nullptr;
+    if(contract.abi!=1 || pending.abi!=1 || !pending.ranges ||
+       pending.range_count>contract.range_capacity || !prefix || prefix->length_bytes!=32 || !prefix_bytes ||
+       publication_validate_selected_model(control,*base) ||
+       base->header.authority_generation!=contract.authority_generation) {
+        semantic_content_integrity_trap();return;
+    }
+    pending.base_word=lease.word;
+    pending.model_generation=base->header.model_generation;
+    pending.authority_generation=base->header.authority_generation;
+    pending.transition_kind=3;
+    pending.text={};
+    pending.numerical_admissibility=0;
+    pending.training_selection=0;
+    semantic_graph::copy_identity(pending.instance,base->header.instance);
+    semantic_graph::copy_identity(pending.topology_identity,contract.topology_identity);
+    semantic_graph::copy_identity(pending.table_identity,contract.table_identity);
+    semantic_graph::copy_identity(pending.prefix_identity,
+        reinterpret_cast<const uint64_t*>(prefix_bytes));
+}
 __device__ void publication_copy_bytes(uint8_t* to,const uint8_t* from,uint64_t count) {
     for(uint64_t i=0;i<count;++i)to[i]=from[i];
 }
@@ -1364,6 +1404,27 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
     const auto* from=reinterpret_cast<const PublicationRange*>(pending.ranges);
     const auto* old=reinterpret_cast<const PublicationRange*>(control.directories[pending.base_word&1]);
     auto* to=reinterpret_cast<PublicationRange*>(control.directories[(pending.base_word&1)^1]);
+    if(pending.transition_kind==3) {
+        const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
+        for(uint64_t i=0;i<next.header.range_count;++i) {
+            if((old[i].role!=to[i].role || old[i].index!=to[i].index) ||
+               old[i].storage_slot>=control.storage_count || to[i].storage_slot>=control.storage_count)return 1;
+            const uint64_t destination_slot=to[i].storage_slot;
+            const uint64_t destination_generation=to[i].generation;
+            const uint64_t source_slot=old[i].storage_slot;
+            to[i]=old[i];to[i].storage_slot=destination_slot;to[i].generation=destination_generation;
+            if(destination_slot==source_slot)continue;
+            bool copied=false;
+            for(uint64_t j=0;j<i;++j)if(to[j].storage_slot==destination_slot) { copied=true;break; }
+            if(copied)continue;
+            const auto& source=storage[source_slot];
+            const auto& destination=storage[destination_slot];
+            if(source.bytes!=destination.bytes || (source.bytes && source.pointer==destination.pointer))return 1;
+            publication_copy_bytes(reinterpret_cast<uint8_t*>(destination.pointer),
+                reinterpret_cast<const uint8_t*>(source.pointer),source.bytes);
+        }
+        return 0;
+    }
     TensorLayoutTableView pending_table{};
     if(!publication_tensor_table(control,from,pending.range_count,&pending_table))return 1;
     for(uint64_t i=0;i<next.header.range_count;++i) {
@@ -1814,6 +1875,33 @@ extern "C" __global__ void semantic_publication_step_admit(uint64_t control_ptr,
     const uint64_t status=requested_kind>=1 && requested_kind<=4 ? publication_acquire(control,lease,requested_kind,expected_word) : 1;
     lease.status=status;control.refusal=status;
     if(!status)cudaGraphSetConditional(static_cast<cudaGraphConditionalHandle>(conditional_handle),1);
+}
+
+extern "C" __global__ void semantic_publication_step_kind_gate(uint64_t lease_ptr,
+        uint64_t expected_kind,uint64_t conditional_handle) {
+    if(blockIdx.x || threadIdx.x)return;
+    if(!conditional_handle) { semantic_content_integrity_trap();return; }
+    cudaGraphSetConditional(static_cast<cudaGraphConditionalHandle>(conditional_handle),0);
+    if(!publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease))) {
+        semantic_content_integrity_trap();return;
+    }
+    const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
+    if(lease.abi!=1 || lease.status || expected_kind<1 || expected_kind>4)return;
+    if(lease.active==1 && lease.transition_kind==expected_kind)
+        cudaGraphSetConditional(static_cast<cudaGraphConditionalHandle>(conditional_handle),1);
+}
+
+extern "C" __global__ void semantic_publication_step_active_gate(uint64_t lease_ptr,
+        uint64_t conditional_handle) {
+    if(blockIdx.x || threadIdx.x)return;
+    if(!conditional_handle) { semantic_content_integrity_trap();return; }
+    cudaGraphSetConditional(static_cast<cudaGraphConditionalHandle>(conditional_handle),0);
+    if(!publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease))) {
+        semantic_content_integrity_trap();return;
+    }
+    const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
+    if(lease.abi==1 && lease.active==1)
+        cudaGraphSetConditional(static_cast<cudaGraphConditionalHandle>(conditional_handle),1);
 }
 
 // Preserve the actual result before release permits either physical bank to be
@@ -2961,7 +3049,8 @@ __device__ uint64_t publication_begin(const Descriptor& descriptor,State* state,
        publication_validate_directory(control,contract,ranges,bank.header.range_count,false) ||
        publication_validate_directory(control,contract,destinations,bank.header.range_count,false) ||
        publication_validate_destinations(control,ranges,destinations,bank.header.range_count) ||
-       publication_validate_continuation(control,contract,bank,pending,*end))return 1;
+       (pending.transition_kind!=3 &&
+        publication_validate_continuation(control,contract,bank,pending,*end)))return 1;
     if(bank.header.terminal==1 && *end!=bank.header.terminal_position+1)return 1;
     const auto* source=publication_find_range(ranges,bank.header.range_count,1);
     const auto* provenance=publication_find_range(ranges,bank.header.range_count,2);
@@ -3165,7 +3254,7 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
     // they follow candidate selection. Snapshot their actual accumulated work.
     next.state.execution_work=state->execution_work;
     if(publication_range_digest(control,*source,nullptr,reinterpret_cast<uint64_t*>(publication_range_bytes(control,*prefix))) ||
-       publication_write_coverage(control,contract,next,&pending) || publication_seal_ranges(control,next,&base) ||
+       publication_write_coverage(control,contract,next,drain ? nullptr : &pending) || publication_seal_ranges(control,next,&base) ||
        publication_logical_digest(control,next))return 1;
     if(drain && publication_append_final_intent(control,base,next))return 1;
     if(publication_write_attempt(control,next,base,no_draw))return 1;
@@ -3393,9 +3482,10 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         state->importance_weight=0.0;
         state->retired_roots_mask=0;
         state->task_evaluation=TaskEvaluation{};
-        // This body runs only for the actually acquired original step, once.
-        // Numerical refusals still consumed the common original model forward.
-        consume_model_work(descriptor.model_work,state->execution_work);
+        // Drain never executes the model body. Other modes consume the common
+        // original forward, including numerical refusals.
+        state->execution_work=ExecutionWork{};
+        if(!descriptor.publication.control)consume_model_work(descriptor.model_work,state->execution_work);
         for(uint32_t i=0;i<3;++i)semantic_graph::clear_receipt(&state->cleanup_receipts[i]);
         lane_live=0;
         for(uint32_t i=0;i<7;++i)semantic_graph::clear_receipt(&state->semantic_receipts[i]);
@@ -3410,11 +3500,20 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
             if(!control.continuation) { semantic_content_integrity_trap();return; }
             const auto& pending=*reinterpret_cast<const PendingContinuation*>(control.continuation);
-            if(!pending.numerical_admissibility || pending.numerical_admissibility==UINT64_MAX) {
-                semantic_content_integrity_trap();return;
+            transition_kind=pending.transition_kind;
+            uint8_t numerical=1;
+            if(transition_kind==3) {
+                if(pending.numerical_admissibility || pending.training_selection) {
+                    semantic_content_integrity_trap();return;
+                }
+            } else {
+                if(!pending.numerical_admissibility || pending.numerical_admissibility==UINT64_MAX) {
+                    semantic_content_integrity_trap();return;
+                }
+                numerical=*reinterpret_cast<const uint8_t*>(pending.numerical_admissibility);
+                if(numerical>1) { semantic_content_integrity_trap();return; }
+                consume_model_work(descriptor.model_work,state->execution_work);
             }
-            const uint8_t numerical=*reinterpret_cast<const uint8_t*>(pending.numerical_admissibility);
-            if(numerical>1) { semantic_content_integrity_trap();return; }
             uint64_t training_status=0;
             if(pending.transition_kind==4) {
                 if(!pending.training_selection || pending.training_selection%alignof(uint64_t) ||

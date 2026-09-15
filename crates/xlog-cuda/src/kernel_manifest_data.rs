@@ -679,10 +679,13 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "semantic_publication_step_inputs",
             "semantic_publication_step_input_guard",
             "semantic_publication_step_admit",
+            "semantic_publication_step_kind_gate",
+            "semantic_publication_step_active_gate",
             "semantic_publication_step_release",
             "semantic_publication_model_seals",
             "semantic_publication_step_result",
             "semantic_publication_prepare_continuation",
+            "semantic_publication_prepare_drain",
         ],
     },
 ];
