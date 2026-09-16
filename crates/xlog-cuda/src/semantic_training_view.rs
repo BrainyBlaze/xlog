@@ -433,20 +433,24 @@ impl SemanticSelectedTrainingView {
         self.storage.roster_rows.view()
     }
 
+    #[cfg(feature = "semantic-policy")]
     pub(crate) fn objective(&self) -> DeviceMemoryView<SemanticTrainingObjectiveRecord> {
         self.arena.objective.view()
     }
 
+    #[cfg(feature = "semantic-policy")]
     pub(crate) fn objective_groups(
         &self,
     ) -> DeviceMemoryView<SemanticTrainingObjectiveGroupRecord> {
         self.arena.groups.view()
     }
 
+    #[cfg(feature = "semantic-policy")]
     pub(crate) fn objective_group_members(&self) -> DeviceMemoryView<u64> {
         self.arena.group_members.view()
     }
 
+    #[cfg(feature = "semantic-policy")]
     pub(crate) fn canaries(&self) -> DeviceMemoryView<SemanticTrainingCanaryRecord> {
         self.arena.canaries.view()
     }

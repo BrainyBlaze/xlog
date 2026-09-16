@@ -27,11 +27,12 @@ use crate::provider::resident_schedule::{validate_execution_domain, ResidentExec
 use crate::semantic_hypergraph::{
     material_bytes, material_u32, material_u64, SemanticMaterialReader, SemanticRootMaterial,
 };
+#[cfg(feature = "semantic-policy")]
+use crate::semantic_training_view::SemanticTrainingCanaryRefusalReason;
 use crate::semantic_training_view::{
-    SemanticSelectedTrainingView, SemanticTrainingCanaryRefusalReason,
-    SemanticTrainingCanaryRefusalRecord, SemanticTrainingObjective, SemanticTrainingViewArena,
-    SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
-    SemanticTrainingViewRow, SemanticTrainingViewSelection,
+    SemanticSelectedTrainingView, SemanticTrainingCanaryRefusalRecord, SemanticTrainingObjective,
+    SemanticTrainingViewArena, SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord,
+    SemanticTrainingViewPort, SemanticTrainingViewRow, SemanticTrainingViewSelection,
 };
 use crate::{
     CudaFunction, CudaKernelProvider, CudaStream, DeviceRepr, LaunchAsync, LaunchConfig,
@@ -6476,6 +6477,7 @@ struct PreparedStepResult {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(feature = "semantic-policy")]
 struct PreparedTransitionEvidence {
     transition: SemanticTransitionKind,
     canary_refusal: Option<SemanticTrainingCanaryRefusalRecord>,
@@ -8792,6 +8794,7 @@ impl SemanticTransitionRefusal {
     }
 }
 
+#[cfg(feature = "semantic-policy")]
 fn decode_canary_refusal(
     record: SemanticTrainingCanaryRefusalRecord,
 ) -> Result<Option<SemanticTrainingCanaryRefusalRecord>, SemanticTransitionError> {
