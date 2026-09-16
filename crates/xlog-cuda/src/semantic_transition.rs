@@ -2161,6 +2161,48 @@ fn continuation_capacity_layout(
     }
 }
 
+fn continuation_allocation_layout(
+    model: SemanticTensorLayout,
+) -> Result<SemanticTensorLayout, SemanticTransitionError> {
+    continuation_capacity_layout(model)?;
+    if matches!(model.role, 4 | 5) {
+        canonical_tensor_layout(model)
+    } else {
+        continuation_capacity_layout(model)
+    }
+}
+
+fn continuation_tensor_layout_for_kind(
+    actual: &SemanticTensorLayout,
+    begin: u64,
+    end: u64,
+    model: &SemanticTensorLayout,
+    kind: SemanticTransitionKind,
+) -> Result<SemanticTensorLayout, SemanticTransitionError> {
+    if kind != SemanticTransitionKind::Update || !matches!(model.role, 4 | 5) {
+        return continuation_tensor_layout(actual, begin, end, model);
+    }
+    let expected = canonical_tensor_layout(*model)?;
+    let destination = canonical_tensor_layout(*actual)?;
+    if destination != expected {
+        return Err(publication_input_error(
+            "continuation tensor differs from its transition-specific fixed-capacity layout",
+        ));
+    }
+    tensor_layout_bytes(actual)?;
+    let capacity = if expected.logical_axis == u64::MAX {
+        0
+    } else {
+        expected.dimensions[expected.logical_axis as usize]
+    };
+    if (begin, end) != (0, capacity) {
+        return Err(publication_input_error(
+            "continuation transport differs from its transition-specific fixed-capacity output",
+        ));
+    }
+    Ok(destination)
+}
+
 fn continuation_tensor_layout(
     actual: &SemanticTensorLayout,
     begin: u64,
@@ -4609,7 +4651,7 @@ impl PublicationStorage {
         let pending_layouts = layouts
             .values()
             .filter(|layout| continuation_role(layout.role))
-            .map(|layout| continuation_capacity_layout(*layout))
+            .map(|layout| continuation_allocation_layout(*layout))
             .collect::<Result<Vec<_>, _>>()?;
         let pending_table = tensor_table_bytes(&pending_layouts, true, &[])?;
         let mut continuation_templates = Vec::new();
@@ -4621,7 +4663,7 @@ impl PublicationStorage {
             } else if plan.role == 55 {
                 tensor_table_capacity(pending_layouts.len(), 32 + contract.feedback_capacity)?
             } else {
-                tensor_layout_bytes(&continuation_capacity_layout(
+                tensor_layout_bytes(&continuation_allocation_layout(
                     layouts[&(plan.role, plan.index)],
                 )?)?
             };
@@ -4722,6 +4764,7 @@ fn prepare_continuation_payloads(
     storage: &PublicationStorage,
     original: &[PreparedSemanticTensor],
     authority_decisions: &[u8],
+    kind: SemanticTransitionKind,
 ) -> Result<
     (
         Vec<(usize, PublicationPayload)>,
@@ -4741,11 +4784,12 @@ fn prepare_continuation_payloads(
                 "continuation tensor type or role differs from the model",
             ));
         }
-        let destination = continuation_tensor_layout(
+        let destination = continuation_tensor_layout_for_kind(
             &tensor.layout,
             tensor.logical_begin,
             tensor.logical_end,
             model,
+            kind,
         )?;
         pending_layouts.insert(key, destination);
         inputs.insert(key, tensor.clone());
@@ -7443,7 +7487,7 @@ fn initial_intent_records(
 }
 
 fn publication_mutable_role(role: u64) -> bool {
-    matches!(role, 3 | 6..=15 | 18..=25 | 30 | 33 | 39 | 44 | 51..=55)
+    matches!(role, 3..=15 | 18..=25 | 30 | 33 | 39 | 44 | 51..=55)
 }
 
 fn continuation_role(role: u64) -> bool {
@@ -10954,16 +10998,17 @@ impl SemanticTransitionSession {
                 owner.inputs.as_ref().expect("fixed inputs"),
             )),
         });
-        let (uploads, layouts) = prepare_continuation_payloads(
-            &storage,
-            &original[..tensor_count],
-            &authority_decisions,
-        )?;
         let kind = self
             .prepared_segment
             .as_ref()
             .expect("prepared scope")
             .requested_kind(step, &self.publication_issuer)?;
+        let (uploads, layouts) = prepare_continuation_payloads(
+            &storage,
+            &original[..tensor_count],
+            &authority_decisions,
+            kind,
+        )?;
         let training_selection = match (
             kind,
             owner
@@ -15039,6 +15084,7 @@ impl SemanticTransitionSession {
             &storage,
             &original[..tensor_count],
             &authority_decisions,
+            kind,
         )?;
         let prepared = PreparedContinuation::prepare(
             &self.provider,

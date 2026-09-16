@@ -1124,7 +1124,7 @@ __device__ uint64_t publication_validate_destinations(const PublicationControl& 
         // Prefix and provenance arenas are append-only. Model views may share
         // a declared backing within their bank, never with the acquired bank
         // or a native control/cache owner.
-        if(base[i].role==1 || base[i].role==2 || base[i].role==4 || base[i].role==5 || base[i].role==31) {
+        if(base[i].role==1 || base[i].role==2 || base[i].role==31) {
             if(base[i].storage_slot!=next[i].storage_slot || base[i].offset_bytes!=next[i].offset_bytes)return 1;
         } else if(!(base[i].role>=18 && base[i].role<=25))for(uint64_t j=0;j<count;++j)
             if(next[i].storage_slot==base[j].storage_slot)return 1;
@@ -1273,8 +1273,10 @@ __device__ uint64_t publication_validate_continuation(const PublicationControl& 
             if(r.length_bytes>storage[original->storage_slot].bytes-original->offset_bytes)return 1;
             continue;
         }
-        if((r.role==1 || r.role==4 || r.role==5) &&
-           (r.logical_begin!=base.header.prefix_extent || r.logical_end!=end))return 1;
+        if(r.role==1 && (r.logical_begin!=base.header.prefix_extent || r.logical_end!=end))return 1;
+        if((r.role==4 || r.role==5) &&
+           (r.logical_begin!=(pending.transition_kind==4 ? 0 : base.header.prefix_extent) ||
+            r.logical_end!=end))return 1;
         if(r.role>=6 && r.role<=13 && (r.logical_begin || r.logical_end))return 1;
         if(active && (r.logical_begin!=0 || r.logical_end!=table.header->active_row_count))return 1;
         const auto* original=publication_find_range(bank_ranges,base.header.range_count,r.role,r.index);
@@ -1305,7 +1307,8 @@ __device__ uint64_t publication_validate_continuation(const PublicationControl& 
             PublicationTensorBytes view{};uint64_t bytes=0;
             if(publication_tensor_view(control,r,from,&view,&bytes,&table))return 1;
             if(r.role==4 || r.role==5) {
-                if(from->logical_axis!=2 || from->dimensions[2]!=32 ||
+                const uint64_t expected_rows=pending.transition_kind==4 ? contract.prefix_capacity : 32;
+                if(from->logical_axis!=2 || from->dimensions[2]!=expected_rows ||
                    to->logical_axis!=2 || to->dimensions[2]!=contract.prefix_capacity ||
                    original->logical_begin || original->logical_end!=base.header.prefix_extent)return 1;
             }
@@ -1397,7 +1400,9 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
     for(uint64_t i=0;i<pending.range_count;++i) {
         auto& range=ranges[i];
         if(range.role==1 || range.role==4 || range.role==5) {
-            range.logical_begin=base.header.prefix_extent;range.logical_end=end;
+            range.logical_begin=(inputs.transition_kind==4 && (range.role==4 || range.role==5)) ?
+                0 : base.header.prefix_extent;
+            range.logical_end=end;
         } else if(range.role>=51 && range.role<=54) {
             range.logical_begin=0;range.logical_end=active_count;
         } else range.logical_begin=range.logical_end=0;
@@ -1547,7 +1552,17 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
     if(!publication_tensor_table(control,from,pending.range_count,&pending_table))return 1;
     for(uint64_t i=0;i<next.header.range_count;++i) {
         if(!publication_mutable_role(old[i].role))to[i]=old[i];
-        if(old[i].role==1 || old[i].role==2 || old[i].role==4 || old[i].role==5 || old[i].role==31)to[i]=old[i];
+        if(old[i].role==1 || old[i].role==2 || old[i].role==31)to[i]=old[i];
+        if((old[i].role==4 || old[i].role==5) && pending.transition_kind!=4) {
+            const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
+            if(old[i].storage_slot>=control.storage_count || to[i].storage_slot>=control.storage_count ||
+               old[i].storage_slot==to[i].storage_slot)return 1;
+            const auto& source=storage[old[i].storage_slot];
+            const auto& destination=storage[to[i].storage_slot];
+            if(source.bytes!=destination.bytes || (source.bytes && source.pointer==destination.pointer))return 1;
+            publication_copy_bytes(reinterpret_cast<uint8_t*>(destination.pointer),
+                reinterpret_cast<const uint8_t*>(source.pointer),source.bytes);
+        }
         if(old[i].role==44) {
             // Ordinary continuations preserve the model schema. The selected
             // record stays read-leased; only this bank's private copy is sealed.
@@ -1609,7 +1624,8 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
                 uint64_t rest=cell,offset=0;
                 for(int axis=int(source_layout->rank)-1;axis>=0;--axis) {
                     uint64_t coordinate=rest%view.dimensions[axis];rest/=view.dimensions[axis];
-                    if((source.role==4 || source.role==5) && uint64_t(axis)==source_layout->logical_axis)coordinate+=base.header.prefix_extent;
+                    if((source.role==4 || source.role==5) && pending.transition_kind!=4 &&
+                       uint64_t(axis)==source_layout->logical_axis)coordinate+=base.header.prefix_extent;
                     if(source.role>=51 && source.role<=54 && uint64_t(axis)==source_layout->logical_axis)
                         coordinate=pending_table.rows[coordinate].physical_row;
                     offset+=coordinate*destination_layout->strides_bytes[axis];
