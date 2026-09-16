@@ -301,6 +301,7 @@ struct ContinuationInputs {
     TextBinding text;
     uint64_t active_rows,active_row_count,numerical_admissibility,transition_kind,authority_bytes;
     uint64_t training_selection,model_update_bindings,model_update_binding_count,model_update_admissibility;
+    uint64_t model_update_refusal;
 };
 struct PublicationStorageEntry { uint64_t pointer,bytes,generation; };
 struct PublicationRange {
@@ -343,7 +344,7 @@ struct PendingContinuation {
     uint64_t topology_identity[4],table_identity[4],prefix_identity[4],ranges,range_count,transition_kind;
     TextBinding text;
     uint64_t numerical_admissibility,training_selection,model_update_bindings,model_update_binding_count;
-    uint64_t model_update_admissibility;
+    uint64_t model_update_admissibility,model_update_refusal;
 };
 struct PublicationCommand { uint64_t control,lease,operation; };
 struct PublicationLease { uint64_t abi,status,instance[4],word,bank,epoch,active,transition_kind; };
@@ -417,6 +418,10 @@ struct SemanticTrainingCanaryRecord {
 struct SemanticTrainingCanaryResultRecord {
     uint64_t kind,row_ordinal,measurement_bits,memory_used,fuel_used,identity[4];
 };
+struct SemanticTrainingCanaryRefusalRecord {
+    uint64_t abi,reason,kind,row_ordinal,measurement_bits,lower_bound_bits,upper_bound_bits;
+    uint64_t memory_used,memory_limit,fuel_used,fuel_limit,identity[4],selection_identity[4];
+};
 struct PolicyBackward {
     uint64_t cotangents,parameters,text,baselines,recurrent,scores,status,parameter_cells,text_cells;
     uint64_t selection,objective,objective_groups,objective_group_members,origin_candidate,mode;
@@ -444,7 +449,33 @@ static_assert(sizeof(SemanticTrainingObjectiveRecord)==200,"training objective A
 static_assert(sizeof(SemanticTrainingObjectiveGroupRecord)==32,"training objective group ABI");
 static_assert(sizeof(SemanticTrainingCanaryRecord)==80,"training canary ABI");
 static_assert(sizeof(SemanticTrainingCanaryResultRecord)==72,"training canary result ABI");
+static_assert(sizeof(SemanticTrainingCanaryRefusalRecord)==152,"training canary refusal ABI");
 static_assert(sizeof(PolicyBackward)==120,"policy backward ABI");
+
+__device__ bool semantic_training_canary_refusal_valid(
+        const SemanticTrainingCanaryRefusalRecord& refusal) {
+    if(refusal.abi!=1 || refusal.reason>4)return false;
+    if(!refusal.reason) {
+        if(refusal.kind || refusal.row_ordinal || refusal.measurement_bits ||
+           refusal.lower_bound_bits || refusal.upper_bound_bits || refusal.memory_used ||
+           refusal.memory_limit || refusal.fuel_used || refusal.fuel_limit)return false;
+        for(uint32_t word=0;word<4;++word)
+            if(refusal.identity[word] || refusal.selection_identity[word])return false;
+        return true;
+    }
+    if(refusal.kind<1 || refusal.kind>5)return false;
+    const double lower=__longlong_as_double((long long)refusal.lower_bound_bits);
+    const double upper=__longlong_as_double((long long)refusal.upper_bound_bits);
+    const double measurement=__longlong_as_double((long long)refusal.measurement_bits);
+    if(!isfinite(lower) || !isfinite(upper) || lower>upper ||
+       !refusal.memory_limit || !refusal.fuel_limit)return false;
+    if(refusal.reason==1)return !isfinite(measurement);
+    if(!isfinite(measurement))return false;
+    if(refusal.reason==2)return measurement<lower || measurement>upper;
+    if(measurement<lower || measurement>upper)return false;
+    if(refusal.reason==3)return refusal.memory_used>refusal.memory_limit;
+    return refusal.memory_used<=refusal.memory_limit && refusal.fuel_used>refusal.fuel_limit;
+}
 static_assert(sizeof(SourceSlot)==64,"source slot ABI");
 static_assert(sizeof(PublicationStorageEntry)==24,"owned storage ABI");
 static_assert(sizeof(PublicationRange)==128,"publication range ABI");
@@ -453,11 +484,11 @@ static_assert(sizeof(PublicationControl)==144,"publication control ABI");
 static_assert(sizeof(PublicationBank)==45392,"publication bank ABI");
 static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
 static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
+static_assert(sizeof(PendingContinuation)==256,"pending continuation ABI");
+static_assert(sizeof(ContinuationInputs)==104,"continuation input ABI");
 static_assert(sizeof(TextRow)==16,"compact text row ABI");
 static_assert(sizeof(TextBinding)==24,"compact text binding ABI");
 static_assert(sizeof(ModelUpdateBinding)==32,"model update binding ABI");
-static_assert(sizeof(ContinuationInputs)==96,"resident continuation inputs ABI");
-static_assert(sizeof(PendingContinuation)==248,"pending continuation ABI");
 static_assert(sizeof(PublicationCommand)==24,"publication command ABI");
 static_assert(sizeof(PublicationLease)==88,"publication lease ABI");
 static_assert(sizeof(PublicationStepResult)==sizeof(PublicationHeader)+32,"publication step result ABI");
@@ -1206,7 +1237,7 @@ __device__ uint64_t publication_validate_model_update(const PublicationControl& 
         const PublicationBank& base,const PendingContinuation& pending) {
     if(pending.transition_kind!=4)
         return pending.model_update_bindings || pending.model_update_binding_count ||
-            pending.model_update_admissibility;
+            pending.model_update_admissibility || pending.model_update_refusal;
     if(!pending.model_update_bindings ||
        pending.model_update_bindings%alignof(ModelUpdateBinding) ||
        !pending.model_update_binding_count ||
@@ -1215,6 +1246,9 @@ __device__ uint64_t publication_validate_model_update(const PublicationControl& 
            (UINT64_MAX-pending.model_update_bindings)/sizeof(ModelUpdateBinding))return 1;
     if(!pending.model_update_admissibility || pending.model_update_admissibility==UINT64_MAX ||
        *reinterpret_cast<const uint8_t*>(pending.model_update_admissibility)>1)return 1;
+    if(!pending.model_update_refusal ||
+       pending.model_update_refusal%alignof(SemanticTrainingCanaryRefusalRecord) ||
+       pending.model_update_refusal>UINT64_MAX-sizeof(SemanticTrainingCanaryRefusalRecord))return 1;
     if(base.header.neural_bank>1)return 1;
     const uint64_t bank=base.header.neural_bank;
     const auto* bindings=reinterpret_cast<const ModelUpdateBinding*>(pending.model_update_bindings);
@@ -1354,8 +1388,9 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
        (inputs.training_selection && (inputs.training_selection%alignof(uint64_t) ||
         inputs.training_selection>UINT64_MAX-sizeof(uint64_t))) ||
        (inputs.model_update_bindings==0)!=(inputs.model_update_binding_count==0) ||
-       (requested_kind==4)!=(inputs.model_update_bindings!=0) ||
-       (requested_kind==4)!=(inputs.model_update_admissibility!=0) ||
+        (requested_kind==4)!=(inputs.model_update_bindings!=0) ||
+        (requested_kind==4)!=(inputs.model_update_admissibility!=0) ||
+        (requested_kind==4)!=(inputs.model_update_refusal!=0) ||
        (inputs.model_update_bindings &&
         (inputs.model_update_bindings%alignof(ModelUpdateBinding) ||
          inputs.model_update_binding_count>
@@ -1430,6 +1465,7 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
     pending.model_update_bindings=inputs.transition_kind==4 ? inputs.model_update_bindings : 0;
     pending.model_update_binding_count=inputs.transition_kind==4 ? inputs.model_update_binding_count : 0;
     pending.model_update_admissibility=inputs.transition_kind==4 ? inputs.model_update_admissibility : 0;
+    pending.model_update_refusal=inputs.transition_kind==4 ? inputs.model_update_refusal : 0;
     for(uint64_t i=0;i<pending.range_count;++i) {
         auto& range=ranges[i];
         if(range.role==1 || range.role==4 || range.role==5) {
@@ -1466,7 +1502,8 @@ extern "C" __global__ void semantic_publication_prepare_continuation(uint64_t co
 }
 extern "C" __global__ void semantic_publication_prepare_model_update_admissibility(
         uint64_t selection_ptr,uint64_t canaries_ptr,uint64_t canary_count,
-        uint64_t source_ptr,uint64_t results_ptr,uint64_t destination_ptr) {
+        uint64_t source_ptr,uint64_t results_ptr,uint64_t destination_ptr,
+        uint64_t refusal_destination_ptr) {
     if(blockIdx.x || threadIdx.x)return;
     if(!selection_ptr || selection_ptr%alignof(SemanticTrainingViewSelection) ||
        selection_ptr>UINT64_MAX-sizeof(SemanticTrainingViewSelection) ||
@@ -1475,7 +1512,10 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
        !source_ptr || source_ptr==UINT64_MAX ||
        !results_ptr || results_ptr%alignof(SemanticTrainingCanaryResultRecord) ||
        results_ptr>UINT64_MAX-canary_count*sizeof(SemanticTrainingCanaryResultRecord) ||
-       !destination_ptr || destination_ptr==UINT64_MAX) {
+       !destination_ptr || destination_ptr==UINT64_MAX ||
+       !refusal_destination_ptr ||
+       refusal_destination_ptr%alignof(SemanticTrainingCanaryRefusalRecord) ||
+       refusal_destination_ptr>UINT64_MAX-sizeof(SemanticTrainingCanaryRefusalRecord)) {
         semantic_content_integrity_trap();return;
     }
     const uint8_t value=*reinterpret_cast<const uint8_t*>(source_ptr);
@@ -1483,6 +1523,7 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
     const auto& selection=*reinterpret_cast<const SemanticTrainingViewSelection*>(selection_ptr);
     const auto* canaries=reinterpret_cast<const SemanticTrainingCanaryRecord*>(canaries_ptr);
     const auto* results=reinterpret_cast<const SemanticTrainingCanaryResultRecord*>(results_ptr);
+    SemanticTrainingCanaryRefusalRecord refusal{};refusal.abi=1;
     uint64_t seen=0;
     uint8_t admissible=value && selection.status==0;
     for(uint64_t item=0;item<canary_count;++item) {
@@ -1510,10 +1551,29 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
            !canary->fuel_limit) {
             semantic_content_integrity_trap();return;
         }
-        admissible &= isfinite(measurement) && measurement>=lower && measurement<=upper &&
-            result.memory_used<=canary->memory_limit && result.fuel_used<=canary->fuel_limit;
+        const uint64_t reason=!isfinite(measurement) ? 1 :
+            (measurement<lower || measurement>upper) ? 2 :
+            result.memory_used>canary->memory_limit ? 3 :
+            result.fuel_used>canary->fuel_limit ? 4 : 0;
+        if(value && selection.status==0 && reason &&
+           (!refusal.reason || reason<refusal.reason ||
+            (reason==refusal.reason && result.kind<refusal.kind))) {
+            refusal.reason=reason;refusal.kind=result.kind;refusal.row_ordinal=result.row_ordinal;
+            refusal.measurement_bits=result.measurement_bits;
+            refusal.lower_bound_bits=canary->lower_bound_bits;
+            refusal.upper_bound_bits=canary->upper_bound_bits;
+            refusal.memory_used=result.memory_used;refusal.memory_limit=canary->memory_limit;
+            refusal.fuel_used=result.fuel_used;refusal.fuel_limit=canary->fuel_limit;
+            for(uint32_t word=0;word<4;++word) {
+                refusal.identity[word]=result.identity[word];
+                refusal.selection_identity[word]=selection.identity[word];
+            }
+        }
+        admissible &= !reason;
     }
     if(seen!=31) { semantic_content_integrity_trap();return; }
+    if(!semantic_training_canary_refusal_valid(refusal)) { semantic_content_integrity_trap();return; }
+    *reinterpret_cast<SemanticTrainingCanaryRefusalRecord*>(refusal_destination_ptr)=refusal;
     *reinterpret_cast<uint8_t*>(destination_ptr)=admissible;
 }
 extern "C" __global__ void semantic_publication_apply_model_update(uint64_t control_ptr,
@@ -3887,8 +3947,8 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             uint8_t numerical=1;
             if(transition_kind==3) {
                 if(pending.numerical_admissibility || pending.training_selection ||
-                   pending.model_update_bindings || pending.model_update_binding_count ||
-                   pending.model_update_admissibility) {
+                    pending.model_update_bindings || pending.model_update_binding_count ||
+                    pending.model_update_admissibility || pending.model_update_refusal) {
                     semantic_content_integrity_trap();return;
                 }
             } else {
@@ -3900,12 +3960,17 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 consume_model_work(descriptor.model_work,state->execution_work);
             }
             uint64_t training_status=0;
+            uint8_t original_numerical=numerical;
+            const SemanticTrainingCanaryRefusalRecord* update_refusal=nullptr;
             if(pending.transition_kind==4) {
                 if(!pending.training_selection || pending.training_selection%alignof(uint64_t) ||
                     pending.training_selection>UINT64_MAX-sizeof(uint64_t) ||
                     !pending.model_update_bindings || !pending.model_update_binding_count ||
                     !pending.model_update_admissibility ||
-                    pending.model_update_admissibility==UINT64_MAX) {
+                    pending.model_update_admissibility==UINT64_MAX ||
+                    !pending.model_update_refusal ||
+                    pending.model_update_refusal%alignof(SemanticTrainingCanaryRefusalRecord) ||
+                    pending.model_update_refusal>UINT64_MAX-sizeof(SemanticTrainingCanaryRefusalRecord)) {
                     semantic_content_integrity_trap();return;
                 }
                 training_status=*reinterpret_cast<const uint64_t*>(pending.training_selection);
@@ -3913,9 +3978,16 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 const uint8_t update_admissibility=
                     *reinterpret_cast<const uint8_t*>(pending.model_update_admissibility);
                 if(update_admissibility>1) { semantic_content_integrity_trap();return; }
+                update_refusal=reinterpret_cast<const SemanticTrainingCanaryRefusalRecord*>(
+                    pending.model_update_refusal);
+                if(!semantic_training_canary_refusal_valid(*update_refusal) ||
+                   (update_admissibility && update_refusal->reason)) {
+                    semantic_content_integrity_trap();return;
+                }
                 numerical &= update_admissibility;
             } else if(pending.training_selection || pending.model_update_bindings ||
-                      pending.model_update_binding_count || pending.model_update_admissibility) {
+                      pending.model_update_binding_count || pending.model_update_admissibility ||
+                      pending.model_update_refusal) {
                 semantic_content_integrity_trap();return;
             }
             if(training_status || !numerical || state->execution_work.overflow) {
@@ -3949,7 +4021,10 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 state->stream_serial=header.stream_serial;state->proposal=state->next_proposal=header.proposal;
                 publication_refusal_snapshot(descriptor,base,acquired_bank,state);
                 numerical_refused=true;failed=1;
-                state->status=state->execution_work.overflow ? 11 : (training_status ? 11+training_status : 5);
+                state->status=state->execution_work.overflow ? 11 :
+                    training_status ? 11+training_status :
+                    !original_numerical ? 5 :
+                    (update_refusal && update_refusal->reason) ? 15 : 5;
             }
         }
         if(!failed && descriptor.publication.control) {

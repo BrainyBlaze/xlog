@@ -28,7 +28,8 @@ use crate::semantic_hypergraph::{
     material_bytes, material_u32, material_u64, SemanticMaterialReader, SemanticRootMaterial,
 };
 use crate::semantic_training_view::{
-    SemanticSelectedTrainingView, SemanticTrainingObjective, SemanticTrainingViewArena,
+    SemanticSelectedTrainingView, SemanticTrainingCanaryRefusalReason,
+    SemanticTrainingCanaryRefusalRecord, SemanticTrainingObjective, SemanticTrainingViewArena,
     SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
     SemanticTrainingViewRow, SemanticTrainingViewSelection,
 };
@@ -1926,9 +1927,7 @@ impl TextBindingStorage {
         kind: SemanticTransitionKind,
         authority_bytes: u64,
         training_selection: u64,
-        model_update_bindings: u64,
-        model_update_binding_count: u64,
-        model_update_admissibility: u64,
+        model_update: ModelUpdateContinuationInputs,
     ) -> ContinuationInputs {
         ContinuationInputs {
             text: self.descriptor(),
@@ -1938,9 +1937,10 @@ impl TextBindingStorage {
             transition_kind: kind.code(),
             authority_bytes,
             training_selection,
-            model_update_bindings,
-            model_update_binding_count,
-            model_update_admissibility,
+            model_update_bindings: model_update.bindings,
+            model_update_binding_count: model_update.binding_count,
+            model_update_admissibility: model_update.admissibility,
+            model_update_refusal: model_update.refusal,
         }
     }
 }
@@ -2831,6 +2831,7 @@ struct PendingContinuation {
     model_update_bindings: u64,
     model_update_binding_count: u64,
     model_update_admissibility: u64,
+    model_update_refusal: u64,
 }
 
 #[repr(C)]
@@ -2846,6 +2847,15 @@ struct ContinuationInputs {
     model_update_bindings: u64,
     model_update_binding_count: u64,
     model_update_admissibility: u64,
+    model_update_refusal: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ModelUpdateContinuationInputs {
+    bindings: u64,
+    binding_count: u64,
+    admissibility: u64,
+    refusal: u64,
 }
 
 #[repr(C)]
@@ -3135,8 +3145,6 @@ const _: () = assert!(size_of::<SemanticModelContractLayout>() == 48);
 const _: () = assert!(size_of::<PublicationContract>() == 272);
 const _: () = assert!(size_of::<SemanticTextRow>() == 16);
 const _: () = assert!(size_of::<TextBinding>() == 24);
-const _: () = assert!(size_of::<PendingContinuation>() == 248);
-const _: () = assert!(size_of::<ContinuationInputs>() == 96);
 const _: () = assert!(size_of::<ModelUpdateBinding>() == 32);
 const _: () = assert!(size_of::<PublicationCommand>() == 24);
 const _: () = assert!(size_of::<PublicationLease>() == 88);
@@ -6193,6 +6201,7 @@ struct PreparedStepStorage {
 struct PreparedModelUpdate {
     bindings: TrackedCudaSlice<ModelUpdateBinding>,
     admissibility: TrackedCudaSlice<u8>,
+    refusal: TrackedCudaSlice<SemanticTrainingCanaryRefusalRecord>,
     output: Option<BoundModelUpdate>,
     #[cfg_attr(
         not(feature = "semantic-policy"),
@@ -6221,17 +6230,19 @@ struct BoundModelUpdate {
 }
 
 impl PreparedModelUpdate {
-    fn descriptor(&self) -> (u64, u64, u64) {
-        (
-            self.bindings.device_ptr_value(),
-            self.bindings.len() as u64,
-            self.admissibility.device_ptr_value(),
-        )
+    fn descriptor(&self) -> ModelUpdateContinuationInputs {
+        ModelUpdateContinuationInputs {
+            bindings: self.bindings.device_ptr_value(),
+            binding_count: self.bindings.len() as u64,
+            admissibility: self.admissibility.device_ptr_value(),
+            refusal: self.refusal.device_ptr_value(),
+        }
     }
 
     fn record(&self, recorder: &mut LaunchRecorder) {
         recorder.read(&self.bindings);
         recorder.read(&self.admissibility);
+        recorder.read(&self.refusal);
         if let Some(output) = &self.output {
             for allocation in &output.allocations {
                 if let Some(source) = &allocation.source {
@@ -6282,9 +6293,11 @@ impl PreparedModelUpdate {
         recorder.read(&selection);
         recorder.read(&canaries);
         recorder.write(&self.admissibility);
+        recorder.write(&self.refusal);
         let admissibility_source = output.admissibility.data;
         let canary_results = output.canary_results.data;
         let admissibility_destination = self.admissibility.device_ptr_value();
+        let refusal_destination = self.refusal.device_ptr_value();
         let arguments = (
             storage.control.device_ptr_value(),
             reader.device_ptr_value(),
@@ -6308,6 +6321,7 @@ impl PreparedModelUpdate {
                         admissibility_source,
                         canary_results,
                         admissibility_destination,
+                        refusal_destination,
                     ),
                 )
             }
@@ -6459,6 +6473,12 @@ struct PreparedStepResult {
     refusal: u64,
     header: PublicationHeader,
     advanced: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PreparedTransitionEvidence {
+    transition: SemanticTransitionKind,
+    canary_refusal: Option<SemanticTrainingCanaryRefusalRecord>,
 }
 
 // SAFETY: the C ABI contains initialized padding-free U64 fields and the
@@ -8544,6 +8564,8 @@ content_kernel_parameter!(PublicationRange);
 content_kernel_parameter!(SemanticTensorLayout);
 content_kernel_parameter!(ContinuationInputs);
 
+const _: () = assert!(size_of::<PendingContinuation>() == 256);
+const _: () = assert!(size_of::<ContinuationInputs>() == 104);
 const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 264);
 const _: () = assert!(size_of::<SemanticTaskFacts>() == 64);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3256);
@@ -8619,7 +8641,7 @@ mod task_state_contract {
             ..DeviceState::default()
         };
         assert_eq!(
-            refused_terminal(&original, rng, binding, binding.digest).unwrap(),
+            refused_terminal(&original, rng, binding, binding.digest, None).unwrap(),
             SemanticTransitionRefusal::NonFinitePolicyInput { completed_draws: 0 }
         );
         for mutation in 0..8 {
@@ -8634,33 +8656,33 @@ mod task_state_contract {
                 6 => state.cleanup_receipts[0][0] = 1,
                 _ => state.retired_roots_mask = 4,
             }
-            assert!(refused_terminal(&state, rng, binding, binding.digest).is_err());
+            assert!(refused_terminal(&state, rng, binding, binding.digest, None).is_err());
         }
         for status in [0, 1, 3, 4, 6, 7, 8, 9, 10] {
             let mut state = original;
             state.status = status;
-            assert!(refused_terminal(&state, rng, binding, binding.digest).is_err());
+            assert!(refused_terminal(&state, rng, binding, binding.digest, None).is_err());
         }
         let mut state = original;
         state.status = 2;
         state.blocks = 50;
         assert_eq!(
-            refused_terminal(&state, rng, binding, binding.digest).unwrap(),
+            refused_terminal(&state, rng, binding, binding.digest, None).unwrap(),
             SemanticTransitionRefusal::InvalidFinalSupport {
                 completed_draws: 50
             }
         );
         state.status = 11;
-        assert!(refused_terminal(&state, rng, binding, binding.digest).is_err());
+        assert!(refused_terminal(&state, rng, binding, binding.digest, None).is_err());
         state.execution_work.overflow = 1;
         assert_eq!(
-            refused_terminal(&state, rng, binding, binding.digest).unwrap(),
+            refused_terminal(&state, rng, binding, binding.digest, None).unwrap(),
             SemanticTransitionRefusal::WorkCounterOverflow {
                 completed_draws: 50
             }
         );
         state.next_proposal += 1;
-        assert!(refused_terminal(&state, rng, binding, binding.digest).is_err());
+        assert!(refused_terminal(&state, rng, binding, binding.digest, None).is_err());
     }
 
     #[test]
@@ -8729,10 +8751,21 @@ impl SemanticTransitionOutcome {
 /// Ordinary device refusal after authentic parent and cleanup reconciliation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticTransitionRefusal {
-    InvalidFinalSupport { completed_draws: u64 },
-    NonFinitePolicyInput { completed_draws: u64 },
-    WorkCounterOverflow { completed_draws: u64 },
-    InvalidTrainingView { status: u64 },
+    InvalidFinalSupport {
+        completed_draws: u64,
+    },
+    NonFinitePolicyInput {
+        completed_draws: u64,
+    },
+    WorkCounterOverflow {
+        completed_draws: u64,
+    },
+    InvalidTrainingView {
+        status: u64,
+    },
+    RejectedModelUpdate {
+        evidence: SemanticTrainingCanaryRefusalRecord,
+    },
 }
 
 impl SemanticTransitionRefusal {
@@ -8750,8 +8783,65 @@ impl SemanticTransitionRefusal {
             Self::InvalidTrainingView { status } => {
                 SemanticTransitionError::InvalidTrainingView { status }
             }
+            Self::RejectedModelUpdate { evidence } => {
+                SemanticTransitionError::RejectedModelUpdate {
+                    evidence: Box::new(evidence),
+                }
+            }
         }
     }
+}
+
+fn decode_canary_refusal(
+    record: SemanticTrainingCanaryRefusalRecord,
+) -> Result<Option<SemanticTrainingCanaryRefusalRecord>, SemanticTransitionError> {
+    if record.abi != 1 {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
+    if record.reason == 0 {
+        let success = SemanticTrainingCanaryRefusalRecord {
+            abi: 1,
+            ..SemanticTrainingCanaryRefusalRecord::default()
+        };
+        return (record == success)
+            .then_some(None)
+            .ok_or(SemanticTransitionError::ObservationMismatch);
+    }
+    let reason = record
+        .reason()
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    let lower = f64::from_bits(record.lower_bound_bits);
+    let upper = f64::from_bits(record.upper_bound_bits);
+    let measurement = f64::from_bits(record.measurement_bits);
+    if !(1..=5).contains(&record.kind)
+        || !lower.is_finite()
+        || !upper.is_finite()
+        || lower > upper
+        || record.memory_limit == 0
+        || record.fuel_limit == 0
+        || match reason {
+            SemanticTrainingCanaryRefusalReason::NonFiniteMeasurement => measurement.is_finite(),
+            SemanticTrainingCanaryRefusalReason::OutsideBounds => {
+                !measurement.is_finite() || (measurement >= lower && measurement <= upper)
+            }
+            SemanticTrainingCanaryRefusalReason::MemoryLimitExceeded => {
+                !measurement.is_finite()
+                    || measurement < lower
+                    || measurement > upper
+                    || record.memory_used <= record.memory_limit
+            }
+            SemanticTrainingCanaryRefusalReason::FuelLimitExceeded => {
+                !measurement.is_finite()
+                    || measurement < lower
+                    || measurement > upper
+                    || record.memory_used > record.memory_limit
+                    || record.fuel_used <= record.fuel_limit
+            }
+        }
+    {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
+    Ok(Some(record))
 }
 
 fn refused_terminal(
@@ -8759,6 +8849,7 @@ fn refused_terminal(
     rng: SemanticRngBinding,
     catalogue: SemanticCatalogueBinding,
     binding_digest: Identity256,
+    canary_refusal: Option<SemanticTrainingCanaryRefusalRecord>,
 ) -> Result<SemanticTransitionRefusal, SemanticTransitionError> {
     if state.model_generation != rng.model_generation
         || state.family_id != u32::from(rng.family_id)
@@ -8790,6 +8881,11 @@ fn refused_terminal(
         12..=14 if state.execution_work.overflow == 0 && state.blocks == 0 => {
             Ok(SemanticTransitionRefusal::InvalidTrainingView {
                 status: state.status - 11,
+            })
+        }
+        15 if state.execution_work.overflow == 0 && state.blocks == 0 => {
+            Ok(SemanticTransitionRefusal::RejectedModelUpdate {
+                evidence: canary_refusal.ok_or(SemanticTransitionError::ObservationMismatch)?,
             })
         }
         _ => Err(SemanticTransitionError::ObservationMismatch),
@@ -8947,6 +9043,9 @@ pub enum SemanticTransitionError {
     },
     InvalidTrainingView {
         status: u64,
+    },
+    RejectedModelUpdate {
+        evidence: Box<SemanticTrainingCanaryRefusalRecord>,
     },
     InvalidTaskBank,
     InvalidTaskBase,
@@ -9427,6 +9526,10 @@ impl SemanticTransitionSession {
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
             let reader = prepared.reader.view();
             let result_view = prepared.result.view();
+            let update_refusal_view = prepared
+                .model_update
+                .as_ref()
+                .map(|update| update.refusal.view());
             let lease = self.publication_read(reader)?[0];
             let result = self.publication_read(result_view)?[0];
             if result.abi == 0 {
@@ -9463,6 +9566,15 @@ impl SemanticTransitionSession {
             }
             let transition =
                 validate_prepared_completion(&lease, &parent, &result, storage.instance)?;
+            let canary_refusal = match (transition, update_refusal_view) {
+                (SemanticTransitionKind::Update, Some(view)) => {
+                    decode_canary_refusal(self.publication_read(view)?[0])?
+                }
+                (SemanticTransitionKind::Update, None) | (_, Some(_)) => {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                (_, None) => None,
+            };
             let state = self.publication_read(state_view)?[0];
             if transition != SemanticTransitionKind::Drain {
                 let work = self.steps[&step.token]
@@ -9486,7 +9598,15 @@ impl SemanticTransitionSession {
             };
             let invocation = parent.rng_binding()?;
             let outcome = self.reconcile_prepared_transition(
-                &parent, &result, state, components, invocation, transition,
+                &parent,
+                &result,
+                state,
+                components,
+                invocation,
+                PreparedTransitionEvidence {
+                    transition,
+                    canary_refusal,
+                },
             )?;
             previous = Some(result.header);
             #[cfg(feature = "semantic-policy")]
@@ -9532,19 +9652,29 @@ impl SemanticTransitionSession {
         state: DeviceState,
         components: Vec<SemanticTransitionReceipt>,
         invocation: SemanticRngBinding,
-        transition: SemanticTransitionKind,
+        evidence: PreparedTransitionEvidence,
     ) -> Result<SemanticTransitionOutcome, SemanticTransitionError> {
+        let PreparedTransitionEvidence {
+            transition,
+            canary_refusal,
+        } = evidence;
         if result.refusal != 0 || state.status == 10 {
             return Err(SemanticTransitionError::PublicationRefused {
                 status: result.refusal,
             });
         }
-        if matches!(state.status, 2 | 5 | 11 | 12..=14) {
+        if matches!(state.status, 2 | 5 | 11 | 12..=15) {
+            let canary_refusal = if state.status == 15 {
+                Some(canary_refusal.ok_or(SemanticTransitionError::ObservationMismatch)?)
+            } else {
+                None
+            };
             let refusal = refused_terminal(
                 &state,
                 invocation,
                 SemanticActionCatalogue::current().binding(),
                 self.binding().digest,
+                canary_refusal,
             )?;
             if result.word != parent.publication_word || result.header != *parent {
                 return Err(SemanticTransitionError::ObservationMismatch);
@@ -9929,6 +10059,11 @@ impl SemanticTransitionSession {
         let update_binding_bytes = update_count
             .checked_mul(storage.model_slots.len())
             .and_then(|count| count.checked_mul(size_of::<ModelUpdateBinding>()))
+            .and_then(|bytes| {
+                update_count
+                    .checked_mul(1 + size_of::<SemanticTrainingCanaryRefusalRecord>())
+                    .and_then(|metadata| bytes.checked_add(metadata))
+            })
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let update_binding_bytes = u64::try_from(update_binding_bytes)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
@@ -10015,9 +10150,18 @@ impl SemanticTransitionSession {
                         runtime_error("model update admissibility allocation", error)
                     })?;
                     upload_publication(&self.provider, &[0u8], &admissibility)?;
+                    let refusal = reservation
+                        .alloc::<SemanticTrainingCanaryRefusalRecord>(1)
+                        .map_err(|error| runtime_error("model update refusal allocation", error))?;
+                    upload_publication(
+                        &self.provider,
+                        &[SemanticTrainingCanaryRefusalRecord::default()],
+                        &refusal,
+                    )?;
                     Some(PreparedModelUpdate {
                         bindings,
                         admissibility,
+                        refusal,
                         output: None,
                         admissibility_copy: model_update_admissibility_copy.clone(),
                         copy: model_update_copy.clone(),
@@ -11426,13 +11570,14 @@ impl SemanticTransitionSession {
         let training_selection_pointer = training_selection
             .as_ref()
             .map_or(0, |selection| *selection.device_ptr());
-        let (model_update_bindings, model_update_binding_count, model_update_admissibility) = owner
+        let model_update = owner
             .prepared
             .as_ref()
             .expect("prepared model update owner")
             .model_update
             .as_ref()
-            .map_or((0, 0, 0), PreparedModelUpdate::descriptor);
+            .map(PreparedModelUpdate::descriptor)
+            .unwrap_or_default();
         let continuation = PreparedContinuation::prepare(
             &self.provider,
             storage,
@@ -11447,9 +11592,7 @@ impl SemanticTransitionSession {
                 kind,
                 authority_decisions.len() as u64,
                 training_selection_pointer,
-                model_update_bindings,
-                model_update_binding_count,
-                model_update_admissibility,
+                model_update,
             ),
             training_selection,
             &uploads,
@@ -15719,7 +15862,12 @@ impl SemanticTransitionSession {
             Arc::clone(&storage),
             self.checked_reader(lease)?.device.view(),
             Arc::clone(&text_binding),
-            text_binding.continuation_inputs(kind, authority_bytes, 0, 0, 0, 0),
+            text_binding.continuation_inputs(
+                kind,
+                authority_bytes,
+                0,
+                ModelUpdateContinuationInputs::default(),
+            ),
             None,
             &uploads,
             &pending_layouts,
@@ -17991,6 +18139,7 @@ impl SemanticTransitionSession {
             rng,
             SemanticActionCatalogue::current().binding(),
             self.binding().digest,
+            None,
         )?;
         let storage = Arc::clone(
             self.publication

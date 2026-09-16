@@ -182,6 +182,54 @@ pub struct SemanticTrainingCanaryResultRecord {
 // SAFETY: the fixed CUDA ABI contains only u64 words.
 unsafe impl DeviceRepr for SemanticTrainingCanaryResultRecord {}
 
+/// Closed device reason for refusing a candidate model update canary.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticTrainingCanaryRefusalReason {
+    NonFiniteMeasurement = 1,
+    OutsideBounds = 2,
+    MemoryLimitExceeded = 3,
+    FuelLimitExceeded = 4,
+}
+
+/// Device-authored evidence for the highest-precedence failed update canary.
+///
+/// A successful canary join has ABI one and every other word zero. A refusal
+/// retains the exact measured value, frozen comparison bounds, resource use and
+/// limits, and both the canary and selected-view identities.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SemanticTrainingCanaryRefusalRecord {
+    pub abi: u64,
+    pub reason: u64,
+    pub kind: u64,
+    pub row_ordinal: u64,
+    pub measurement_bits: u64,
+    pub lower_bound_bits: u64,
+    pub upper_bound_bits: u64,
+    pub memory_used: u64,
+    pub memory_limit: u64,
+    pub fuel_used: u64,
+    pub fuel_limit: u64,
+    pub identity: [u64; 4],
+    pub selection_identity: [u64; 4],
+}
+
+impl SemanticTrainingCanaryRefusalRecord {
+    pub fn reason(&self) -> Option<SemanticTrainingCanaryRefusalReason> {
+        match self.reason {
+            1 => Some(SemanticTrainingCanaryRefusalReason::NonFiniteMeasurement),
+            2 => Some(SemanticTrainingCanaryRefusalReason::OutsideBounds),
+            3 => Some(SemanticTrainingCanaryRefusalReason::MemoryLimitExceeded),
+            4 => Some(SemanticTrainingCanaryRefusalReason::FuelLimitExceeded),
+            _ => None,
+        }
+    }
+}
+
+// SAFETY: the fixed CUDA ABI contains only u64 words.
+unsafe impl DeviceRepr for SemanticTrainingCanaryRefusalRecord {}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SemanticTrainingViewOriginRecord {

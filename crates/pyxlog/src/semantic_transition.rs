@@ -260,8 +260,65 @@ fn transition_refusal(
             SemanticTransitionRefusal::InvalidTrainingView { status } => {
                 ("invalid_training_view", *status)
             }
+            SemanticTransitionRefusal::RejectedModelUpdate { evidence } => {
+                let reason = match evidence.reason() {
+                    Some(xlog_cuda::SemanticTrainingCanaryRefusalReason::NonFiniteMeasurement) => {
+                        "canary_non_finite_measurement"
+                    }
+                    Some(xlog_cuda::SemanticTrainingCanaryRefusalReason::OutsideBounds) => {
+                        "canary_outside_bounds"
+                    }
+                    Some(xlog_cuda::SemanticTrainingCanaryRefusalReason::MemoryLimitExceeded) => {
+                        "canary_memory_limit_exceeded"
+                    }
+                    Some(xlog_cuda::SemanticTrainingCanaryRefusalReason::FuelLimitExceeded) => {
+                        "canary_fuel_limit_exceeded"
+                    }
+                    None => "invalid_canary_refusal",
+                };
+                (reason, evidence.row_ordinal)
+            }
         }),
     }
+}
+
+#[cfg(feature = "semantic-policy")]
+fn transition_refusal_report(
+    py: Python<'_>,
+    outcome: &xlog_cuda::SemanticTransitionOutcome,
+) -> PyResult<Option<Py<PyDict>>> {
+    use xlog_cuda::{SemanticTransitionOutcome, SemanticTransitionRefusal};
+    let SemanticTransitionOutcome::Refused(refusal) = outcome else {
+        return Ok(None);
+    };
+    let report = PyDict::new(py);
+    let (reason, detail) = transition_refusal(outcome)
+        .ok_or_else(|| invalid("native refusal has no public reason"))?;
+    report.set_item("reason", reason)?;
+    match refusal {
+        SemanticTransitionRefusal::InvalidFinalSupport { .. }
+        | SemanticTransitionRefusal::NonFinitePolicyInput { .. }
+        | SemanticTransitionRefusal::WorkCounterOverflow { .. } => {
+            report.set_item("completed_draws", detail)?;
+        }
+        SemanticTransitionRefusal::InvalidTrainingView { .. } => {
+            report.set_item("training_view_status", detail)?;
+        }
+        SemanticTransitionRefusal::RejectedModelUpdate { evidence } => {
+            report.set_item("canary_kind", evidence.kind)?;
+            report.set_item("row_ordinal", evidence.row_ordinal)?;
+            report.set_item("measurement_bits", evidence.measurement_bits)?;
+            report.set_item("lower_bound_bits", evidence.lower_bound_bits)?;
+            report.set_item("upper_bound_bits", evidence.upper_bound_bits)?;
+            report.set_item("memory_used", evidence.memory_used)?;
+            report.set_item("memory_limit", evidence.memory_limit)?;
+            report.set_item("fuel_used", evidence.fuel_used)?;
+            report.set_item("fuel_limit", evidence.fuel_limit)?;
+            report.set_item("canary_identity", evidence.identity)?;
+            report.set_item("selection_identity", evidence.selection_identity)?;
+        }
+    }
+    Ok(Some(report.unbind()))
 }
 
 fn require_creator_thread(creator: ThreadId) -> PyResult<()> {
@@ -5078,15 +5135,15 @@ impl PySemanticPolicyInvocation {
         ))
     }
 
-    /// None for publication, otherwise the native refusal reason and detail value.
-    /// ``invalid_training_view`` carries its resident selection status; other
-    /// refusal reasons carry completed draws.
+    /// None for publication, otherwise a typed native refusal dictionary.
+    /// Canary refusal dictionaries retain exact device-authored measurement,
+    /// frozen-bound, resource and identity evidence.
     /// A refusal contains no published result or differentiable receipt bank.
     #[getter]
-    fn refusal(&self, py: Python<'_>) -> PyResult<Option<(&'static str, u64)>> {
+    fn refusal(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
         self.session.borrow(py).require_creator()?;
         self.require_public_result(py)?;
-        Ok(transition_refusal(&self.outcome))
+        transition_refusal_report(py, &self.outcome)
     }
 
     /// Actual native evaluator output and full unclipped tuple weight.
@@ -6752,7 +6809,7 @@ impl PySemanticTransitionController {
     /// and drain). No producer callback runs between submission and completion.
     /// Return (genuine final parent, ordered step rows). Each row is
     /// (prepared_step, transition_or_None, skipped_status, refusal_or_None,
-    /// policy_invocation_or_None). Refusal is the native reason and completed draws.
+    /// policy_invocation_or_None). Refusal is a typed native evidence dictionary.
     /// A completed drain has no policy invocation or fabricated RNG draw.
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (task_use, *, operation, snapshot, refresh_snapshot))]
@@ -6884,7 +6941,7 @@ impl PySemanticTransitionController {
                         SemanticTransitionKind::Update => "update",
                         SemanticTransitionKind::Drain => "drain",
                     };
-                    let refusal = transition_refusal(&outcome);
+                    let refusal = transition_refusal_report(py, &outcome)?;
                     let invocation = if transition == SemanticTransitionKind::Proposal {
                         Py::new(
                             py,

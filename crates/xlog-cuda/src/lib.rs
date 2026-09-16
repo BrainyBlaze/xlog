@@ -64,8 +64,9 @@ pub use semantic_hypergraph::{
 };
 pub use semantic_training_view::{
     SemanticSelectedTrainingView, SemanticTrainingCanary, SemanticTrainingCanaryKind,
-    SemanticTrainingCanaryRecord, SemanticTrainingCanaryResultRecord, SemanticTrainingObjective,
-    SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind,
+    SemanticTrainingCanaryRecord, SemanticTrainingCanaryRefusalReason,
+    SemanticTrainingCanaryRefusalRecord, SemanticTrainingCanaryResultRecord,
+    SemanticTrainingObjective, SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind,
     SemanticTrainingObjectiveGroupRecord, SemanticTrainingObjectiveRecord,
     SemanticTrainingRosterRow, SemanticTrainingViewBasis, SemanticTrainingViewOrigin,
     SemanticTrainingViewOriginRecord, SemanticTrainingViewPort, SemanticTrainingViewRow,
