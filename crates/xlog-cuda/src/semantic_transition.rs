@@ -28,9 +28,9 @@ use crate::semantic_hypergraph::{
     material_bytes, material_u32, material_u64, SemanticMaterialReader, SemanticRootMaterial,
 };
 use crate::semantic_training_view::{
-    SemanticSelectedTrainingView, SemanticTrainingViewArena, SemanticTrainingViewOrigin,
-    SemanticTrainingViewOriginRecord, SemanticTrainingViewPort, SemanticTrainingViewRow,
-    SemanticTrainingViewSelection,
+    SemanticSelectedTrainingView, SemanticTrainingObjective, SemanticTrainingViewArena,
+    SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
+    SemanticTrainingViewRow, SemanticTrainingViewSelection,
 };
 use crate::{
     CudaFunction, CudaKernelProvider, CudaStream, DeviceRepr, LaunchAsync, LaunchConfig,
@@ -15900,6 +15900,7 @@ impl SemanticTransitionSession {
     pub fn bind_training_view_arena(
         &mut self,
         rows: Vec<SemanticTrainingViewRow>,
+        objective: SemanticTrainingObjective,
     ) -> Result<(), SemanticTransitionError> {
         self.ensure_rebindable()?;
         if self.publication.is_some() || self.training_views.is_some() || self.task.is_none() {
@@ -15911,6 +15912,7 @@ impl SemanticTransitionSession {
             &self.provider,
             &self.domain,
             rows,
+            objective,
         )?);
         Ok(())
     }

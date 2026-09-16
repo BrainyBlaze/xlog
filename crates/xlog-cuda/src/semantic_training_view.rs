@@ -13,6 +13,12 @@ use crate::semantic_transition::{
 use crate::{CudaFunction, CudaKernelProvider, DeviceRepr, LaunchAsync, LaunchConfig};
 
 type TrainingViewPort = (DeviceMemoryView<u8>, Vec<i64>, Vec<i64>, (u8, u8));
+type ValidatedTrainingObjective = (
+    SemanticTrainingObjectiveRecord,
+    Vec<SemanticTrainingObjectiveGroupRecord>,
+    Vec<u64>,
+    Vec<SemanticTrainingCanaryRecord>,
+);
 
 const MODULE: &str = "xlog_semantic_training_view";
 const SELECT_KERNEL: &str = "semantic_training_view_select";
@@ -47,6 +53,112 @@ pub struct SemanticTrainingViewRow {
     pub origin: Option<SemanticTrainingViewOrigin>,
     pub bytes: Vec<u8>,
 }
+
+/// Frozen evaluator term attached to the complete device-resident training roster.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticTrainingObjectiveGroupKind {
+    MaskedLanguage = 1,
+    AutoregressiveLanguage = 2,
+    Semantic = 3,
+    Edit = 4,
+    Execution = 5,
+    RetentionLanguage = 6,
+    RetentionSymbolic = 7,
+    ActorCriticCost = 8,
+}
+
+/// One nonempty reduction group in the frozen training objective.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticTrainingObjectiveGroup {
+    pub kind: SemanticTrainingObjectiveGroupKind,
+    pub denominator: u64,
+    pub row_ordinals: Vec<u64>,
+}
+
+/// Mandatory acceptance gate evaluated after a candidate update.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticTrainingCanaryKind {
+    SymbolicUtility = 1,
+    RetainedBehavior = 2,
+    LogitDrift = 3,
+    GoalChain = 4,
+    ResourceLimits = 5,
+}
+
+/// Frozen bounds and resource ceilings for one candidate-update canary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SemanticTrainingCanary {
+    pub kind: SemanticTrainingCanaryKind,
+    pub row_ordinal: u64,
+    pub lower_bound: f64,
+    pub upper_bound: f64,
+    pub memory_limit: u64,
+    pub fuel_limit: u64,
+    pub identity: Identity256,
+}
+
+/// Complete frozen objective carried by the canonical replay-roster owner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticTrainingObjective {
+    pub identity: Identity256,
+    pub evaluator_min: f64,
+    pub evaluator_max: f64,
+    /// Masked-language, autoregressive, semantic, edit, execution, retention,
+    /// actor, critic and cost coefficients, in that order.
+    pub coefficients: [f32; 9],
+    pub cost_unit: Identity256,
+    pub cost_cap: u64,
+    pub groups: Vec<SemanticTrainingObjectiveGroup>,
+    pub canaries: Vec<SemanticTrainingCanary>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SemanticTrainingObjectiveRecord {
+    pub identity: [u64; 4],
+    pub row_count: u64,
+    pub capacity: u64,
+    pub group_count: u64,
+    pub group_member_count: u64,
+    pub canary_count: u64,
+    pub evaluator_min_bits: u64,
+    pub evaluator_max_bits: u64,
+    pub coefficient_bits: [u64; 9],
+    pub cost_unit: [u64; 4],
+    pub cost_cap: u64,
+}
+
+// SAFETY: the fixed CUDA ABI contains only u64 words.
+unsafe impl DeviceRepr for SemanticTrainingObjectiveRecord {}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SemanticTrainingObjectiveGroupRecord {
+    pub kind: u64,
+    pub denominator: u64,
+    pub member_offset: u64,
+    pub member_count: u64,
+}
+
+// SAFETY: the fixed CUDA ABI contains only u64 words.
+unsafe impl DeviceRepr for SemanticTrainingObjectiveGroupRecord {}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SemanticTrainingCanaryRecord {
+    pub kind: u64,
+    pub row_ordinal: u64,
+    pub lower_bound_bits: u64,
+    pub upper_bound_bits: u64,
+    pub memory_limit: u64,
+    pub fuel_limit: u64,
+    pub identity: [u64; 4],
+}
+
+// SAFETY: the fixed CUDA ABI contains only u64 words.
+unsafe impl DeviceRepr for SemanticTrainingCanaryRecord {}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -93,12 +205,34 @@ struct TrainingViewRowDescriptor {
 // SAFETY: the fixed CUDA ABI contains only u64 words.
 unsafe impl DeviceRepr for TrainingViewRowDescriptor {}
 
+/// Device-written metadata for every row in the selected objective roster.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SemanticTrainingRosterRow {
+    pub ordinal: u64,
+    pub basis: u64,
+    pub window: u64,
+    pub source_length: u64,
+    pub block_size: u64,
+    pub prefix_extent: u64,
+    pub answer_start: u64,
+    pub origin_candidate: u64,
+    pub identity: [u64; 4],
+    pub source_identity: [u64; 4],
+    pub content_identity: [u64; 4],
+}
+
+// SAFETY: the fixed CUDA ABI contains only u64 words.
+unsafe impl DeviceRepr for SemanticTrainingRosterRow {}
+
 /// Device-written selection coordinates. Status zero is the only admissible
 /// result; downstream Update work must predicate on this resident word.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SemanticTrainingViewSelection {
     pub status: u64,
+    pub row_count: u64,
+    pub capacity: u64,
     pub ordinal: u64,
     pub basis: u64,
     pub window: u64,
@@ -131,6 +265,7 @@ struct TrainingViewLaunch {
     origin_candidates: u64,
     origin_candidate_count: u64,
     selection: u64,
+    roster_rows: u64,
     capacity: u64,
     token_ids: u64,
     mask_labels: u64,
@@ -164,6 +299,7 @@ impl crate::cuda_compat::IntoKernelParamStorage for TrainingViewLaunch {
 
 struct SelectedTrainingViewStorage {
     selection: TrackedCudaSlice<SemanticTrainingViewSelection>,
+    roster_rows: TrackedCudaSlice<SemanticTrainingRosterRow>,
     token_ids: TrackedCudaSlice<i64>,
     mask_labels: TrackedCudaSlice<i64>,
     mask_weights: TrackedCudaSlice<f32>,
@@ -183,10 +319,15 @@ pub struct SemanticSelectedTrainingView {
     storage: SelectedTrainingViewStorage,
 }
 
-/// Fixed device port of one native-selected training view.
+/// Fixed device port of the native-selected complete training roster.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticTrainingViewPort {
     Selection,
+    RosterRows,
+    Objective,
+    ObjectiveGroups,
+    ObjectiveGroupMembers,
+    Canaries,
     TokenIds,
     MaskLabels,
     MaskWeights,
@@ -203,8 +344,16 @@ impl SemanticSelectedTrainingView {
         self.arena.capacity
     }
 
+    pub fn row_count(&self) -> usize {
+        self.arena.row_count
+    }
+
     pub fn selection(&self) -> DeviceMemoryView<SemanticTrainingViewSelection> {
         self.storage.selection.view()
+    }
+
+    pub fn roster_rows(&self) -> DeviceMemoryView<SemanticTrainingRosterRow> {
+        self.storage.roster_rows.view()
     }
 
     pub fn token_ids(&self) -> DeviceMemoryView<i64> {
@@ -247,71 +396,143 @@ impl SemanticSelectedTrainingView {
         &self,
         port: SemanticTrainingViewPort,
     ) -> Result<TrainingViewPort, SemanticTransitionError> {
-        let (view, cells, dtype) = match port {
+        let words = |bytes: usize| {
+            i64::try_from(bytes / size_of::<u64>())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)
+        };
+        let rows = i64::try_from(self.row_count())
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        let capacity = i64::try_from(self.capacity())
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        let extent = |length: usize| {
+            i64::try_from(length).map_err(|_| SemanticTransitionError::GenerationExhausted)
+        };
+        let matrix = |view, dtype| (view, vec![rows, capacity], vec![capacity, 1], dtype);
+        let result = match port {
             SemanticTrainingViewPort::Selection => (
                 unsafe { self.storage.selection.view().cast::<u8>() }
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                size_of::<SemanticTrainingViewSelection>() / size_of::<u64>(),
+                vec![words(size_of::<SemanticTrainingViewSelection>())?],
+                vec![1],
                 (1, 64),
             ),
+            SemanticTrainingViewPort::RosterRows => (
+                unsafe { self.storage.roster_rows.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                vec![rows, words(size_of::<SemanticTrainingRosterRow>())?],
+                vec![words(size_of::<SemanticTrainingRosterRow>())?, 1],
+                (1, 64),
+            ),
+            SemanticTrainingViewPort::Objective => (
+                unsafe { self.arena.objective.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                vec![words(size_of::<SemanticTrainingObjectiveRecord>())?],
+                vec![1],
+                (1, 64),
+            ),
+            SemanticTrainingViewPort::ObjectiveGroups => {
+                let width = words(size_of::<SemanticTrainingObjectiveGroupRecord>())?;
+                (
+                    unsafe { self.arena.groups.view().cast::<u8>() }
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                    vec![extent(self.arena.groups.len())?, width],
+                    vec![width, 1],
+                    (1, 64),
+                )
+            }
+            SemanticTrainingViewPort::ObjectiveGroupMembers => (
+                unsafe { self.arena.group_members.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                vec![extent(self.arena.group_members.len())?],
+                vec![1],
+                (1, 64),
+            ),
+            SemanticTrainingViewPort::Canaries => {
+                let width = words(size_of::<SemanticTrainingCanaryRecord>())?;
+                (
+                    unsafe { self.arena.canaries.view().cast::<u8>() }
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                    vec![extent(self.arena.canaries.len())?, width],
+                    vec![width, 1],
+                    (1, 64),
+                )
+            }
             SemanticTrainingViewPort::TokenIds => (
                 unsafe { self.storage.token_ids.view().cast::<u8>() }
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                self.capacity(),
+                vec![],
+                vec![],
                 (0, 64),
             ),
             SemanticTrainingViewPort::MaskLabels => (
                 unsafe { self.storage.mask_labels.view().cast::<u8>() }
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                self.capacity(),
+                vec![],
+                vec![],
                 (0, 64),
             ),
             SemanticTrainingViewPort::MaskWeights => (
                 unsafe { self.storage.mask_weights.view().cast::<u8>() }
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                self.capacity(),
+                vec![],
+                vec![],
                 (2, 32),
             ),
             SemanticTrainingViewPort::AutoregressiveLabels => (
                 unsafe { self.storage.ar_labels.view().cast::<u8>() }
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                self.capacity(),
+                vec![],
+                vec![],
                 (0, 64),
             ),
             SemanticTrainingViewPort::RetentionLabels => (
                 unsafe { self.storage.retention_labels.view().cast::<u8>() }
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                self.capacity(),
+                vec![],
+                vec![],
                 (0, 64),
             ),
             SemanticTrainingViewPort::SourceSlots => (
                 unsafe { self.storage.source_slots.view().cast::<u8>() }
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                self.capacity(),
+                vec![],
+                vec![],
                 (0, 64),
             ),
             SemanticTrainingViewPort::LogicalPositions => (
                 unsafe { self.storage.logical_positions.view().cast::<u8>() }
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                self.capacity(),
+                vec![],
+                vec![],
                 (0, 64),
             ),
             SemanticTrainingViewPort::Kinds => (
                 unsafe { self.storage.kinds.view().cast::<u8>() }
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                self.capacity(),
+                vec![],
+                vec![],
                 (0, 64),
             ),
             SemanticTrainingViewPort::Parents => (
                 unsafe { self.storage.parents.view().cast::<u8>() }
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                self.capacity(),
+                vec![],
+                vec![],
                 (0, 64),
             ),
         };
-        let cells =
-            i64::try_from(cells).map_err(|_| SemanticTransitionError::GenerationExhausted)?;
-        Ok((view, vec![cells], vec![1], dtype))
+        Ok(match port {
+            SemanticTrainingViewPort::TokenIds
+            | SemanticTrainingViewPort::MaskLabels
+            | SemanticTrainingViewPort::MaskWeights
+            | SemanticTrainingViewPort::AutoregressiveLabels
+            | SemanticTrainingViewPort::RetentionLabels
+            | SemanticTrainingViewPort::SourceSlots
+            | SemanticTrainingViewPort::LogicalPositions
+            | SemanticTrainingViewPort::Kinds
+            | SemanticTrainingViewPort::Parents => matrix(result.0, result.3),
+            _ => result,
+        })
     }
 
     pub(crate) fn enqueue_device_selection(
@@ -358,6 +579,7 @@ impl SemanticSelectedTrainingView {
             origin_candidates: origin_candidate_ptr,
             origin_candidate_count,
             selection: self.storage.selection.device_ptr_value(),
+            roster_rows: self.storage.roster_rows.device_ptr_value(),
             capacity: u64::try_from(self.arena.capacity)
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
             token_ids: self.storage.token_ids.device_ptr_value(),
@@ -381,6 +603,7 @@ impl SemanticSelectedTrainingView {
             recorder.read(coordinates);
         }
         recorder.write(&self.storage.selection);
+        recorder.write(&self.storage.roster_rows);
         recorder.write(&self.storage.token_ids);
         recorder.write(&self.storage.mask_labels);
         recorder.write(&self.storage.mask_weights);
@@ -392,6 +615,8 @@ impl SemanticSelectedTrainingView {
         recorder.write(&self.storage.parents);
         let select = self.arena.select.clone();
         let gather = self.arena.gather.clone();
+        let gather_grid = u32::try_from(self.arena.row_count)
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
         let enqueued = unsafe {
             self.arena.domain.enqueue(recorder, |stream| {
                 select.clone().launch_in(
@@ -406,7 +631,7 @@ impl SemanticSelectedTrainingView {
                 gather.clone().launch_in(
                     stream,
                     LaunchConfig {
-                        grid_dim: (1, 1, 1),
+                        grid_dim: (gather_grid, 1, 1),
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
@@ -429,18 +654,28 @@ pub(crate) struct SemanticTrainingViewArena {
     gather: CudaFunction,
     descriptors: TrackedCudaSlice<TrainingViewRowDescriptor>,
     raw: TrackedCudaSlice<u8>,
+    objective: TrackedCudaSlice<SemanticTrainingObjectiveRecord>,
+    groups: TrackedCudaSlice<SemanticTrainingObjectiveGroupRecord>,
+    group_members: TrackedCudaSlice<u64>,
+    canaries: TrackedCudaSlice<SemanticTrainingCanaryRecord>,
     row_count: usize,
     capacity: usize,
 }
 
 impl SemanticTrainingViewArena {
     pub(crate) fn selection_bytes(&self) -> Result<usize, SemanticTransitionError> {
+        let roster_bytes = self
+            .row_count
+            .checked_mul(size_of::<SemanticTrainingRosterRow>())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let port_bytes = self
+            .capacity
+            .checked_mul(self.row_count)
+            .and_then(|cells| cells.checked_mul(TRAINING_VIEW_ROW_BYTES))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
         size_of::<SemanticTrainingViewSelection>()
-            .checked_add(
-                self.capacity
-                    .checked_mul(TRAINING_VIEW_ROW_BYTES)
-                    .ok_or(SemanticTransitionError::GenerationExhausted)?,
-            )
+            .checked_add(roster_bytes)
+            .and_then(|bytes| bytes.checked_add(port_bytes))
             .ok_or(SemanticTransitionError::GenerationExhausted)
     }
 
@@ -453,15 +688,18 @@ impl SemanticTrainingViewArena {
             selection: reservation
                 .alloc::<SemanticTrainingViewSelection>(1)
                 .map_err(|error| runtime_error("training-view selection allocation", error))?,
-            token_ids: allocate_port(reservation, self.capacity)?,
-            mask_labels: allocate_port(reservation, self.capacity)?,
-            mask_weights: allocate_port(reservation, self.capacity)?,
-            ar_labels: allocate_port(reservation, self.capacity)?,
-            retention_labels: allocate_port(reservation, self.capacity)?,
-            source_slots: allocate_port(reservation, self.capacity)?,
-            logical_positions: allocate_port(reservation, self.capacity)?,
-            kinds: allocate_port(reservation, self.capacity)?,
-            parents: allocate_port(reservation, self.capacity)?,
+            roster_rows: reservation
+                .alloc::<SemanticTrainingRosterRow>(self.row_count)
+                .map_err(|error| runtime_error("training-view roster allocation", error))?,
+            token_ids: allocate_port(reservation, self.row_count, self.capacity)?,
+            mask_labels: allocate_port(reservation, self.row_count, self.capacity)?,
+            mask_weights: allocate_port(reservation, self.row_count, self.capacity)?,
+            ar_labels: allocate_port(reservation, self.row_count, self.capacity)?,
+            retention_labels: allocate_port(reservation, self.row_count, self.capacity)?,
+            source_slots: allocate_port(reservation, self.row_count, self.capacity)?,
+            logical_positions: allocate_port(reservation, self.row_count, self.capacity)?,
+            kinds: allocate_port(reservation, self.row_count, self.capacity)?,
+            parents: allocate_port(reservation, self.row_count, self.capacity)?,
         };
         Ok(SemanticSelectedTrainingView {
             arena: Arc::clone(self),
@@ -474,6 +712,7 @@ impl SemanticTrainingViewArena {
         provider: &Arc<CudaKernelProvider>,
         domain: &ResidentExecutionDomain,
         rows: Vec<SemanticTrainingViewRow>,
+        objective: SemanticTrainingObjective,
     ) -> Result<Arc<Self>, SemanticTransitionError> {
         validate_execution_domain(provider, domain)
             .map_err(|error| runtime_error("training-view domain validation", error))?;
@@ -508,10 +747,31 @@ impl SemanticTrainingViewArena {
             raw.extend_from_slice(&row.bytes);
             descriptors.push(descriptor);
         }
+        let (objective, groups, group_members, canaries) =
+            validate_objective(objective, &descriptors, capacity)?;
         let bytes = descriptors
             .len()
             .checked_mul(size_of::<TrainingViewRowDescriptor>())
             .and_then(|bytes| bytes.checked_add(raw.len()))
+            .and_then(|bytes| bytes.checked_add(size_of::<SemanticTrainingObjectiveRecord>()))
+            .and_then(|bytes| {
+                groups
+                    .len()
+                    .checked_mul(size_of::<SemanticTrainingObjectiveGroupRecord>())
+                    .and_then(|group_bytes| bytes.checked_add(group_bytes))
+            })
+            .and_then(|bytes| {
+                group_members
+                    .len()
+                    .checked_mul(size_of::<u64>())
+                    .and_then(|member_bytes| bytes.checked_add(member_bytes))
+            })
+            .and_then(|bytes| {
+                canaries
+                    .len()
+                    .checked_mul(size_of::<SemanticTrainingCanaryRecord>())
+                    .and_then(|canary_bytes| bytes.checked_add(canary_bytes))
+            })
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let mut reservation = provider
             .memory()
@@ -525,6 +785,18 @@ impl SemanticTrainingViewArena {
         let mut device_raw = reservation
             .alloc::<u8>(raw.len())
             .map_err(|error| runtime_error("training-view byte allocation", error))?;
+        let mut device_objective = reservation
+            .alloc::<SemanticTrainingObjectiveRecord>(1)
+            .map_err(|error| runtime_error("training objective allocation", error))?;
+        let mut device_groups = reservation
+            .alloc::<SemanticTrainingObjectiveGroupRecord>(groups.len())
+            .map_err(|error| runtime_error("training objective group allocation", error))?;
+        let mut device_group_members = reservation
+            .alloc::<u64>(group_members.len())
+            .map_err(|error| runtime_error("training objective member allocation", error))?;
+        let mut device_canaries = reservation
+            .alloc::<SemanticTrainingCanaryRecord>(canaries.len())
+            .map_err(|error| runtime_error("training canary allocation", error))?;
         if reservation.remaining_bytes() != 0 {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
@@ -534,6 +806,18 @@ impl SemanticTrainingViewArena {
         provider
             .htod_sync_copy_into_tracked(&raw, &mut device_raw)
             .map_err(|error| runtime_error("training-view byte upload", error))?;
+        provider
+            .htod_sync_copy_into_tracked(&[objective], &mut device_objective)
+            .map_err(|error| runtime_error("training objective upload", error))?;
+        provider
+            .htod_sync_copy_into_tracked(&groups, &mut device_groups)
+            .map_err(|error| runtime_error("training objective group upload", error))?;
+        provider
+            .htod_sync_copy_into_tracked(&group_members, &mut device_group_members)
+            .map_err(|error| runtime_error("training objective member upload", error))?;
+        provider
+            .htod_sync_copy_into_tracked(&canaries, &mut device_canaries)
+            .map_err(|error| runtime_error("training canary upload", error))?;
         Ok(Arc::new(Self {
             provider: Arc::clone(provider),
             domain: domain.clone(),
@@ -541,6 +825,10 @@ impl SemanticTrainingViewArena {
             gather,
             descriptors: device_descriptors,
             raw: device_raw,
+            objective: device_objective,
+            groups: device_groups,
+            group_members: device_group_members,
+            canaries: device_canaries,
             row_count: descriptors.len(),
             capacity,
         }))
@@ -573,11 +861,218 @@ impl SemanticTrainingViewArena {
 
 fn allocate_port<T: DeviceRepr>(
     reservation: &mut crate::memory::GpuMemoryReservation,
+    row_count: usize,
     capacity: usize,
 ) -> Result<TrackedCudaSlice<T>, SemanticTransitionError> {
     reservation
-        .alloc::<T>(capacity)
+        .alloc::<T>(
+            row_count
+                .checked_mul(capacity)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?,
+        )
         .map_err(|error| runtime_error("selected training-view port allocation", error))
+}
+
+fn validate_objective(
+    objective: SemanticTrainingObjective,
+    rows: &[TrainingViewRowDescriptor],
+    capacity: usize,
+) -> Result<ValidatedTrainingObjective, SemanticTransitionError> {
+    if objective.groups.len() != 8 || objective.canaries.len() != 5 {
+        return Err(input_error(
+            "training objective requires all eight reduction groups and five canaries",
+        ));
+    }
+    if !objective.evaluator_min.is_finite()
+        || !objective.evaluator_max.is_finite()
+        || objective.evaluator_min > objective.evaluator_max
+        || objective
+            .coefficients
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        || objective.cost_unit == Identity256::default()
+        || objective.cost_cap == 0
+    {
+        return Err(input_error(
+            "training objective has invalid evaluator, coefficient or cost bounds",
+        ));
+    }
+    let mut seen_groups = [false; 8];
+    let mut referenced_rows = vec![false; rows.len()];
+    let mut groups = Vec::with_capacity(objective.groups.len());
+    let mut group_members = Vec::new();
+    for group in &objective.groups {
+        let index = group.kind as usize - 1;
+        if seen_groups[index] || group.denominator == 0 || group.row_ordinals.is_empty() {
+            return Err(input_error(
+                "training objective groups must be unique, nonempty and have positive denominators",
+            ));
+        }
+        seen_groups[index] = true;
+        let member_offset = group_members.len();
+        let mut previous = None;
+        for &ordinal in &group.row_ordinals {
+            let row_ordinal = usize::try_from(ordinal)
+                .map_err(|_| input_error("training objective row exceeds host address space"))?;
+            let row = rows
+                .get(row_ordinal)
+                .ok_or_else(|| input_error("training objective names an unknown replay row"))?;
+            if previous.is_some_and(|value| value >= ordinal) {
+                return Err(input_error(
+                    "training objective row ordinals must be strictly increasing",
+                ));
+            }
+            let anchor_group = matches!(
+                group.kind,
+                SemanticTrainingObjectiveGroupKind::RetentionLanguage
+                    | SemanticTrainingObjectiveGroupKind::RetentionSymbolic
+            );
+            let policy_group = group.kind == SemanticTrainingObjectiveGroupKind::ActorCriticCost;
+            if (anchor_group && row.basis != SemanticTrainingViewBasis::CorpusAnchor as u64)
+                || (policy_group && row.basis != SemanticTrainingViewBasis::Episode as u64)
+            {
+                return Err(input_error(
+                    "training objective group refers to an incompatible replay basis",
+                ));
+            }
+            referenced_rows[row_ordinal] = true;
+            group_members.push(ordinal);
+            previous = Some(ordinal);
+        }
+        groups.push(SemanticTrainingObjectiveGroupRecord {
+            kind: group.kind as u64,
+            denominator: group.denominator,
+            member_offset: u64::try_from(member_offset)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            member_count: u64::try_from(group.row_ordinals.len())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+        });
+    }
+    if seen_groups.iter().any(|seen| !seen) || referenced_rows.iter().any(|seen| !seen) {
+        return Err(input_error(
+            "training objective must cover every mandatory group and replay row",
+        ));
+    }
+    let return_scale = objective
+        .evaluator_min
+        .abs()
+        .max(objective.evaluator_max.abs())
+        .max(1.0);
+    let actor_coefficient = (1.0 / return_scale) as f32;
+    let critic_coefficient = (1.0 / (return_scale * return_scale)) as f32;
+    if objective.coefficients[6].to_bits() != actor_coefficient.to_bits()
+        || objective.coefficients[7].to_bits() != critic_coefficient.to_bits()
+    {
+        return Err(input_error(
+            "actor and critic coefficients differ from the frozen evaluator scale",
+        ));
+    }
+    let mut seen_canaries = [false; 5];
+    let mut canaries = Vec::with_capacity(objective.canaries.len());
+    for canary in &objective.canaries {
+        let index = canary.kind as usize - 1;
+        if seen_canaries[index]
+            || !canary.lower_bound.is_finite()
+            || !canary.upper_bound.is_finite()
+            || canary.lower_bound > canary.upper_bound
+            || canary.memory_limit == 0
+            || canary.fuel_limit == 0
+            || canary.identity == Identity256::default()
+            || usize::try_from(canary.row_ordinal)
+                .ok()
+                .is_none_or(|ordinal| ordinal >= rows.len())
+        {
+            return Err(input_error(
+                "training canaries require unique kinds, valid rows, bounds and resource ceilings",
+            ));
+        }
+        seen_canaries[index] = true;
+        canaries.push(SemanticTrainingCanaryRecord {
+            kind: canary.kind as u64,
+            row_ordinal: canary.row_ordinal,
+            lower_bound_bits: canary.lower_bound.to_bits(),
+            upper_bound_bits: canary.upper_bound.to_bits(),
+            memory_limit: canary.memory_limit,
+            fuel_limit: canary.fuel_limit,
+            identity: identity_words(canary.identity),
+        });
+    }
+    if seen_canaries.iter().any(|seen| !seen)
+        || objective_identity(&objective) != objective.identity
+    {
+        return Err(input_error(
+            "training objective is incomplete or differs from its frozen identity",
+        ));
+    }
+    Ok((
+        SemanticTrainingObjectiveRecord {
+            identity: identity_words(objective.identity),
+            row_count: u64::try_from(rows.len())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            capacity: u64::try_from(capacity)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            group_count: u64::try_from(groups.len())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            group_member_count: u64::try_from(group_members.len())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            canary_count: u64::try_from(canaries.len())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            evaluator_min_bits: objective.evaluator_min.to_bits(),
+            evaluator_max_bits: objective.evaluator_max.to_bits(),
+            coefficient_bits: objective
+                .coefficients
+                .map(|value| u64::from(value.to_bits())),
+            cost_unit: identity_words(objective.cost_unit),
+            cost_cap: objective.cost_cap,
+        },
+        groups,
+        group_members,
+        canaries,
+    ))
+}
+
+fn objective_identity(objective: &SemanticTrainingObjective) -> Identity256 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"xlog.semantic.training-objective.v1\0");
+    hasher.update(objective.evaluator_min.to_bits().to_le_bytes());
+    hasher.update(objective.evaluator_max.to_bits().to_le_bytes());
+    for coefficient in objective.coefficients {
+        hasher.update(coefficient.to_bits().to_le_bytes());
+    }
+    hasher.update(objective.cost_unit.as_bytes());
+    hasher.update(objective.cost_cap.to_le_bytes());
+    hasher.update(
+        u64::try_from(objective.groups.len())
+            .expect("validated training objective group count")
+            .to_le_bytes(),
+    );
+    for group in &objective.groups {
+        hasher.update((group.kind as u64).to_le_bytes());
+        hasher.update(group.denominator.to_le_bytes());
+        hasher.update(
+            u64::try_from(group.row_ordinals.len())
+                .expect("validated training objective group extent")
+                .to_le_bytes(),
+        );
+        for ordinal in &group.row_ordinals {
+            hasher.update(ordinal.to_le_bytes());
+        }
+    }
+    hasher.update(
+        u64::try_from(objective.canaries.len())
+            .expect("validated training canary count")
+            .to_le_bytes(),
+    );
+    for canary in &objective.canaries {
+        hasher.update((canary.kind as u64).to_le_bytes());
+        hasher.update(canary.row_ordinal.to_le_bytes());
+        hasher.update(canary.lower_bound.to_bits().to_le_bytes());
+        hasher.update(canary.upper_bound.to_bits().to_le_bytes());
+        hasher.update(canary.memory_limit.to_le_bytes());
+        hasher.update(canary.fuel_limit.to_le_bytes());
+        hasher.update(canary.identity.as_bytes());
+    }
+    Identity256::from_bytes(hasher.finalize().into())
 }
 
 fn validate_row(

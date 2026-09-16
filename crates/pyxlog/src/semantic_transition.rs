@@ -26,8 +26,10 @@ use xlog_cuda::{
     SemanticPreparedStep, SemanticPublishedLease, SemanticRecordRole, SemanticRngBinding,
     SemanticSourceMapping, SemanticStateRecord, SemanticStateRole, SemanticSupportRecord,
     SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout, SemanticTextSlot,
-    SemanticTrainingViewBasis, SemanticTrainingViewPort, SemanticTrainingViewRow,
-    SemanticTransitionKind, SemanticTransitionSession, SemanticTypedRecord,
+    SemanticTrainingCanary, SemanticTrainingCanaryKind, SemanticTrainingObjective,
+    SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind, SemanticTrainingViewBasis,
+    SemanticTrainingViewPort, SemanticTrainingViewRow, SemanticTransitionKind,
+    SemanticTransitionSession, SemanticTypedRecord,
 };
 use xlog_cuda::{
     SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
@@ -2127,6 +2129,86 @@ struct ReplayRow {
 enum ReplayBasis {
     Episode { execution: serde_json::Value },
     CorpusAnchor,
+}
+
+fn read_training_objective(value: &ColdValue) -> PyResult<Option<SemanticTrainingObjective>> {
+    if *value == ColdValue::None {
+        return Ok(None);
+    }
+    let fields = value.fields(6)?;
+    let bounds = fields[1].fields(2)?;
+    let coefficient_values = fields[2].fields(9)?;
+    let mut coefficients = [0.0f32; 9];
+    for (index, value) in coefficient_values.iter().enumerate() {
+        let bits = u32::try_from(value.unsigned()?)
+            .map_err(|_| invalid("training objective coefficient is not an f32 bit pattern"))?;
+        coefficients[index] = f32::from_bits(bits);
+    }
+    let cost = fields[3].fields(2)?;
+    let groups = fields[4]
+        .sequence()?
+        .iter()
+        .map(|value| {
+            let fields = value.fields(3)?;
+            let kind = match fields[0].text()? {
+                "masked-language" => SemanticTrainingObjectiveGroupKind::MaskedLanguage,
+                "autoregressive-language" => {
+                    SemanticTrainingObjectiveGroupKind::AutoregressiveLanguage
+                }
+                "semantic" => SemanticTrainingObjectiveGroupKind::Semantic,
+                "edit" => SemanticTrainingObjectiveGroupKind::Edit,
+                "execution" => SemanticTrainingObjectiveGroupKind::Execution,
+                "retention-language" => SemanticTrainingObjectiveGroupKind::RetentionLanguage,
+                "retention-symbolic" => SemanticTrainingObjectiveGroupKind::RetentionSymbolic,
+                "actor-critic-cost" => SemanticTrainingObjectiveGroupKind::ActorCriticCost,
+                _ => return Err(invalid("unknown training objective group kind")),
+            };
+            let row_ordinals = fields[2]
+                .sequence()?
+                .iter()
+                .map(ColdValue::unsigned)
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(SemanticTrainingObjectiveGroup {
+                kind,
+                denominator: fields[1].unsigned()?,
+                row_ordinals,
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let canaries = fields[5]
+        .sequence()?
+        .iter()
+        .map(|value| {
+            let fields = value.fields(7)?;
+            let kind = match fields[0].text()? {
+                "symbolic-utility" => SemanticTrainingCanaryKind::SymbolicUtility,
+                "retained-behavior" => SemanticTrainingCanaryKind::RetainedBehavior,
+                "logit-drift" => SemanticTrainingCanaryKind::LogitDrift,
+                "goal-chain" => SemanticTrainingCanaryKind::GoalChain,
+                "resource-limits" => SemanticTrainingCanaryKind::ResourceLimits,
+                _ => return Err(invalid("unknown training canary kind")),
+            };
+            Ok(SemanticTrainingCanary {
+                kind,
+                row_ordinal: fields[1].unsigned()?,
+                lower_bound: f64::from_bits(fields[2].unsigned()?),
+                upper_bound: f64::from_bits(fields[3].unsigned()?),
+                memory_limit: fields[4].unsigned()?,
+                fuel_limit: fields[5].unsigned()?,
+                identity: replay_digest_identity(fields[6].text()?)?,
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Some(SemanticTrainingObjective {
+        identity: replay_digest_identity(fields[0].text()?)?,
+        evaluator_min: f64::from_bits(bounds[0].unsigned()?),
+        evaluator_max: f64::from_bits(bounds[1].unsigned()?),
+        coefficients,
+        cost_unit: replay_digest_identity(cost[0].text()?)?,
+        cost_cap: cost[1].unsigned()?,
+        groups,
+        canaries,
+    }))
 }
 
 impl ReplayBasis {
@@ -4424,9 +4506,11 @@ impl PySemanticPreparedStep {
     }
 
     /// Fixed device outputs of this Update step's native replay selection.
-    /// The first U64 tensor is the selection/status record. Remaining ports are
-    /// token IDs, mask labels, mask weights, autoregressive labels, retention
-    /// labels, source slots, logical positions, kinds, and parents.
+    /// The first U64 tensor is the selection/status record. It is followed by the
+    /// complete roster metadata, frozen objective, reduction groups, group member
+    /// ordinals and canaries. Remaining rank-two ports are token IDs, mask labels,
+    /// mask weights, autoregressive labels, retention labels, source slots, logical
+    /// positions, kinds, and parents for every replay row.
     #[pyo3(signature = (*, consumer_stream))]
     fn training_view(
         &self,
@@ -4435,6 +4519,11 @@ impl PySemanticPreparedStep {
     ) -> PyResult<Py<PyTuple>> {
         let ports = [
             SemanticTrainingViewPort::Selection,
+            SemanticTrainingViewPort::RosterRows,
+            SemanticTrainingViewPort::Objective,
+            SemanticTrainingViewPort::ObjectiveGroups,
+            SemanticTrainingViewPort::ObjectiveGroupMembers,
+            SemanticTrainingViewPort::Canaries,
             SemanticTrainingViewPort::TokenIds,
             SemanticTrainingViewPort::MaskLabels,
             SemanticTrainingViewPort::MaskWeights,
@@ -7002,6 +7091,16 @@ impl PySemanticTransitionController {
     /// refusal, spent) unsigned weights. ``admissible_truth_masks`` supplies three
     /// bit masks over (neither, true, false, both), in that bit order.
     ///
+    /// ``training_objective`` is None only when replay_rows is empty. Otherwise it
+    /// is ``(identity, evaluator_f64_bits, coefficient_f32_bits, cost, groups,
+    /// canaries)``. The evaluator pair and nine coefficient words are exact IEEE
+    /// bit patterns. Cost is ``(unit_identity, positive_cap)``. Each group is
+    /// ``(kind, positive_denominator, strictly_increasing_row_ordinals)`` and the
+    /// complete mandatory group roster must cover every row. Each canary is
+    /// ``(kind, row_ordinal, lower_f64_bits, upper_f64_bits, memory_limit,
+    /// fuel_limit, identity)``. Native recomputes the objective identity and owns
+    /// the fixed-shape roster on device.
+    ///
     /// ``live_authorities`` rows are ``(LiveProvenance.canonical(),
     /// retention_deadline_utc_us)``. ``replay_rows`` rows are
     /// ``(basis, identity, canonical_record_line, materials, evidence_bytes)``.
@@ -7108,7 +7207,7 @@ impl PySemanticTransitionController {
     /// Only then does this same TaskUse become Imported. Any failed import
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
-    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, live_authorities, replay_rows, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot))]
+    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, live_authorities, replay_rows, training_objective, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot))]
     #[expect(
         clippy::too_many_arguments,
         reason = "task import binds the complete authority, replay, and callback contract"
@@ -7126,6 +7225,7 @@ impl PySemanticTransitionController {
         admissible_truth_masks: &Bound<'_, PyAny>,
         live_authorities: &Bound<'_, PyAny>,
         replay_rows: &Bound<'_, PyAny>,
+        training_objective: &Bound<'_, PyAny>,
         max_material_bytes: &Bound<'_, PyAny>,
         max_total_material_bytes: &Bound<'_, PyAny>,
         max_evidence_bytes: &Bound<'_, PyAny>,
@@ -7187,6 +7287,13 @@ impl PySemanticTransitionController {
             .iter()
             .map(ReplayRow::training_view_row)
             .collect::<PyResult<Vec<_>>>()?;
+        let training_objective =
+            read_training_objective(&ColdValue::read(training_objective, &mut budget, 0)?)?;
+        if training_views.is_empty() != training_objective.is_none() {
+            return Err(invalid(
+                "training objective must exist exactly when replay rows exist",
+            ));
+        }
         authority.bind_initial_sources(
             &ColdValue::read(initial_sources, &mut budget, 0)?,
             &ColdValue::read(source_mapping, &mut budget, 0)?,
@@ -7263,9 +7370,9 @@ impl PySemanticTransitionController {
         let (identity, task_epoch) = {
             let mut owner = session.owner()?;
             owner.bind_task_evaluation(spec).map_err(xlog_err)?;
-            if !training_views.is_empty() {
+            if let Some(objective) = training_objective {
                 owner
-                    .bind_training_view_arena(training_views)
+                    .bind_training_view_arena(training_views, objective)
                     .map_err(xlog_err)?;
             }
             if let Some(material) = &selected_material {

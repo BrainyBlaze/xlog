@@ -37,6 +37,8 @@ struct TrainingViewRowDescriptor {
 
 struct SemanticTrainingViewSelection {
     uint64_t status;
+    uint64_t row_count;
+    uint64_t capacity;
     uint64_t ordinal;
     uint64_t basis;
     uint64_t window;
@@ -52,6 +54,20 @@ struct SemanticTrainingViewSelection {
     uint64_t training_rng[4];
 };
 
+struct SemanticTrainingRosterRow {
+    uint64_t ordinal;
+    uint64_t basis;
+    uint64_t window;
+    uint64_t source_length;
+    uint64_t block_size;
+    uint64_t prefix_extent;
+    uint64_t answer_start;
+    uint64_t origin_candidate;
+    uint64_t identity[4];
+    uint64_t source_identity[4];
+    uint64_t content_identity[4];
+};
+
 struct TrainingViewLaunch {
     uint64_t descriptors;
     uint64_t raw;
@@ -64,6 +80,7 @@ struct TrainingViewLaunch {
     uint64_t origin_candidates;
     uint64_t origin_candidate_count;
     uint64_t selection;
+    uint64_t roster_rows;
     uint64_t capacity;
     uint64_t token_ids;
     uint64_t mask_labels;
@@ -116,6 +133,8 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
     const uint64_t cursor = coordinates[0];
     if (threadIdx.x == 0) {
         selection->status = cursor < launch.row_count ? 0 : 1;
+        selection->row_count = launch.row_count;
+        selection->capacity = launch.capacity;
         selection->origin_candidate = UINT64_MAX;
     }
     __syncthreads();
@@ -140,22 +159,42 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
     }
     __syncthreads();
     if (threadIdx.x == 0 && selection->status == 0) {
-        selection->origin_candidate = UINT64_MAX;
-        if (descriptor.basis == 1 && descriptor.origin.present == 1) {
-            const auto* candidates = reinterpret_cast<const SemanticTrainingViewOriginRecord*>(
-                launch.origin_candidates);
-            uint64_t matches = 0;
-            for (uint64_t candidate = 0; candidate < launch.origin_candidate_count; ++candidate) {
-                if (semantic_training_origin_equal(descriptor.origin, candidates[candidate])) {
-                    selection->origin_candidate = candidate;
-                    ++matches;
+        auto* roster = reinterpret_cast<SemanticTrainingRosterRow*>(launch.roster_rows);
+        const auto* candidates = reinterpret_cast<const SemanticTrainingViewOriginRecord*>(
+            launch.origin_candidates);
+        for (uint64_t row = 0; row < launch.row_count; ++row) {
+            const auto item = descriptors[row];
+            uint64_t origin_candidate = UINT64_MAX;
+            if (item.basis == 1 && item.origin.present == 1) {
+                uint64_t matches = 0;
+                for (uint64_t candidate = 0; candidate < launch.origin_candidate_count; ++candidate) {
+                    if (semantic_training_origin_equal(item.origin, candidates[candidate])) {
+                        origin_candidate = candidate;
+                        ++matches;
+                    }
                 }
-            }
-            if (matches != 1) {
+                if (matches != 1) {
+                    selection->status = 3;
+                }
+            } else if (item.basis != 2 || item.origin.present != 0) {
                 selection->status = 3;
             }
-        } else if (descriptor.basis != 2 || descriptor.origin.present != 0) {
-            selection->status = 3;
+            roster[row].ordinal = item.ordinal;
+            roster[row].basis = item.basis;
+            roster[row].window = item.window;
+            roster[row].source_length = item.source_length;
+            roster[row].block_size = item.block_size;
+            roster[row].prefix_extent = item.prefix_extent;
+            roster[row].answer_start = item.answer_start;
+            roster[row].origin_candidate = origin_candidate;
+            for (uint32_t i = 0; i < 4; ++i) {
+                roster[row].identity[i] = item.identity[i];
+                roster[row].source_identity[i] = item.source_identity[i];
+                roster[row].content_identity[i] = item.content_identity[i];
+            }
+            if (row == cursor) {
+                selection->origin_candidate = origin_candidate;
+            }
         }
     }
     __syncthreads();
@@ -189,23 +228,28 @@ extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch laun
     auto* output_logical_positions = reinterpret_cast<int64_t*>(launch.logical_positions);
     auto* output_kinds = reinterpret_cast<int64_t*>(launch.kinds);
     auto* output_parents = reinterpret_cast<int64_t*>(launch.parents);
+    const uint64_t row = blockIdx.x;
+    if (row >= launch.row_count) {
+        return;
+    }
+    const uint64_t output_offset = row * launch.capacity;
     for (uint64_t index = threadIdx.x; index < launch.capacity; index += blockDim.x) {
-        output_token_ids[index] = 0;
-        output_mask_labels[index] = -100;
-        output_mask_weights[index] = 0.0f;
-        output_ar_labels[index] = -100;
-        output_retention_labels[index] = -100;
-        output_source_slots[index] = static_cast<int64_t>(index);
-        output_logical_positions[index] = -1;
-        output_kinds[index] = 0;
-        output_parents[index] = -2;
+        output_token_ids[output_offset + index] = 0;
+        output_mask_labels[output_offset + index] = -100;
+        output_mask_weights[output_offset + index] = 0.0f;
+        output_ar_labels[output_offset + index] = -100;
+        output_retention_labels[output_offset + index] = -100;
+        output_source_slots[output_offset + index] = static_cast<int64_t>(index);
+        output_logical_positions[output_offset + index] = -1;
+        output_kinds[output_offset + index] = 0;
+        output_parents[output_offset + index] = -2;
     }
     __syncthreads();
     if (selection->status != 0) {
         return;
     }
     const auto* descriptors = reinterpret_cast<const TrainingViewRowDescriptor*>(launch.descriptors);
-    const auto descriptor = descriptors[selection->ordinal];
+    const auto descriptor = descriptors[row];
     const auto* raw = reinterpret_cast<const uint8_t*>(launch.raw) + descriptor.raw_offset;
     const uint64_t window = descriptor.window;
     const uint64_t padding = (window & 1ULL) * 4ULL;
@@ -220,15 +264,15 @@ extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch laun
     const auto* parents = kinds + window;
     for (uint64_t index = threadIdx.x; index < launch.capacity; index += blockDim.x) {
         if (index < window) {
-            output_token_ids[index] = token_ids[index];
-            output_mask_labels[index] = mask_labels[index];
-            output_mask_weights[index] = mask_weights[index];
-            output_ar_labels[index] = ar_labels[index];
-            output_retention_labels[index] = retention_labels[index];
-            output_source_slots[index] = source_slots[index];
-            output_logical_positions[index] = logical_positions[index];
-            output_kinds[index] = kinds[index];
-            output_parents[index] = parents[index];
+            output_token_ids[output_offset + index] = token_ids[index];
+            output_mask_labels[output_offset + index] = mask_labels[index];
+            output_mask_weights[output_offset + index] = mask_weights[index];
+            output_ar_labels[output_offset + index] = ar_labels[index];
+            output_retention_labels[output_offset + index] = retention_labels[index];
+            output_source_slots[output_offset + index] = source_slots[index];
+            output_logical_positions[output_offset + index] = logical_positions[index];
+            output_kinds[output_offset + index] = kinds[index];
+            output_parents[output_offset + index] = parents[index];
         }
     }
 }

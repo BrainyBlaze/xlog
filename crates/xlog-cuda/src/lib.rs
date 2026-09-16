@@ -63,9 +63,12 @@ pub use semantic_hypergraph::{
     SemanticVersionIdentity, SemanticVersionRef, SemanticView,
 };
 pub use semantic_training_view::{
-    SemanticSelectedTrainingView, SemanticTrainingViewBasis, SemanticTrainingViewOrigin,
-    SemanticTrainingViewOriginRecord, SemanticTrainingViewPort, SemanticTrainingViewRow,
-    SemanticTrainingViewSelection,
+    SemanticSelectedTrainingView, SemanticTrainingCanary, SemanticTrainingCanaryKind,
+    SemanticTrainingCanaryRecord, SemanticTrainingObjective, SemanticTrainingObjectiveGroup,
+    SemanticTrainingObjectiveGroupKind, SemanticTrainingObjectiveGroupRecord,
+    SemanticTrainingObjectiveRecord, SemanticTrainingRosterRow, SemanticTrainingViewBasis,
+    SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
+    SemanticTrainingViewRow, SemanticTrainingViewSelection,
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::SemanticPolicyGradients;
