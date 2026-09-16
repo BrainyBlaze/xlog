@@ -685,6 +685,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "semantic_publication_model_seals",
             "semantic_publication_step_result",
             "semantic_publication_prepare_continuation",
+            "semantic_publication_prepare_model_update_admissibility",
             "semantic_publication_apply_model_update",
             "semantic_publication_prepare_drain",
         ],

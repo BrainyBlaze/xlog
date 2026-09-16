@@ -1914,6 +1914,7 @@ impl TextBindingStorage {
         training_selection: u64,
         model_update_bindings: u64,
         model_update_binding_count: u64,
+        model_update_admissibility: u64,
     ) -> ContinuationInputs {
         ContinuationInputs {
             text: self.descriptor(),
@@ -1925,6 +1926,7 @@ impl TextBindingStorage {
             training_selection,
             model_update_bindings,
             model_update_binding_count,
+            model_update_admissibility,
         }
     }
 }
@@ -2814,6 +2816,7 @@ struct PendingContinuation {
     training_selection: u64,
     model_update_bindings: u64,
     model_update_binding_count: u64,
+    model_update_admissibility: u64,
 }
 
 #[repr(C)]
@@ -2828,6 +2831,7 @@ struct ContinuationInputs {
     training_selection: u64,
     model_update_bindings: u64,
     model_update_binding_count: u64,
+    model_update_admissibility: u64,
 }
 
 #[repr(C)]
@@ -3113,8 +3117,8 @@ const _: () = assert!(size_of::<SemanticModelContractLayout>() == 48);
 const _: () = assert!(size_of::<PublicationContract>() == 272);
 const _: () = assert!(size_of::<SemanticTextRow>() == 16);
 const _: () = assert!(size_of::<TextBinding>() == 24);
-const _: () = assert!(size_of::<PendingContinuation>() == 240);
-const _: () = assert!(size_of::<ContinuationInputs>() == 88);
+const _: () = assert!(size_of::<PendingContinuation>() == 248);
+const _: () = assert!(size_of::<ContinuationInputs>() == 96);
 const _: () = assert!(size_of::<ModelUpdateBinding>() == 32);
 const _: () = assert!(size_of::<PublicationCommand>() == 24);
 const _: () = assert!(size_of::<PublicationLease>() == 88);
@@ -6094,28 +6098,39 @@ struct PreparedStepStorage {
 
 struct PreparedModelUpdate {
     bindings: TrackedCudaSlice<ModelUpdateBinding>,
+    admissibility: TrackedCudaSlice<u8>,
     output: Option<BoundModelUpdate>,
+    admissibility_copy: CudaFunction,
     copy: CudaFunction,
 }
 
 struct BoundModelUpdate {
     values: Vec<ModelUpdateBinding>,
     allocations: Vec<PreparedSemanticTensor>,
+    admissibility: PreparedSemanticTensor,
     _witness: SemanticTensorContentWitness,
 }
 
 impl PreparedModelUpdate {
-    fn descriptor(&self) -> (u64, u64) {
-        (self.bindings.device_ptr_value(), self.bindings.len() as u64)
+    fn descriptor(&self) -> (u64, u64, u64) {
+        (
+            self.bindings.device_ptr_value(),
+            self.bindings.len() as u64,
+            self.admissibility.device_ptr_value(),
+        )
     }
 
     fn record(&self, recorder: &mut LaunchRecorder) {
         recorder.read(&self.bindings);
+        recorder.read(&self.admissibility);
         if let Some(output) = &self.output {
             for allocation in &output.allocations {
                 if let Some(source) = &allocation.source {
                     recorder.read(source);
                 }
+            }
+            if let Some(source) = &output.admissibility.source {
+                recorder.read(source);
             }
         }
     }
@@ -6148,11 +6163,29 @@ impl PreparedModelUpdate {
         storage.record(&mut recorder);
         recorder.read(reader);
         self.record(&mut recorder);
+        recorder.write(&self.admissibility);
+        let admissibility_source = output.admissibility.data;
+        let admissibility_destination = self.admissibility.device_ptr_value();
         let arguments = (
             storage.control.device_ptr_value(),
             reader.device_ptr_value(),
         );
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
+            // SAFETY: the producer gate was checked by the same captured
+            // content witness as the complete update backing. The native byte
+            // is the stable predicate consumed by both copy and publication.
+            unsafe {
+                self.admissibility_copy.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (admissibility_source, admissibility_destination),
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))?;
             // SAFETY: the continuation kernel validated this immutable binding
             // roster first. Each CUDA grid row copies one disjoint allocation
             // into the inactive neural bank retained by PublicationStorage.
@@ -9640,6 +9673,8 @@ impl SemanticTransitionSession {
         let witness = kernel("semantic_tensor_content_witness")?;
         let content_guard = kernel("semantic_publication_content_guard")?;
         let result_kernel = kernel("semantic_publication_step_result")?;
+        let model_update_admissibility_copy =
+            kernel("semantic_publication_prepare_model_update_admissibility")?;
         let model_update_copy = kernel("semantic_publication_apply_model_update")?;
         self.prepared_segment = Some(build);
         self.next_reader = end;
@@ -9660,9 +9695,15 @@ impl SemanticTransitionSession {
                         &vec![ModelUpdateBinding::default(); storage.model_slots.len()],
                         &bindings,
                     )?;
+                    let admissibility = reservation.alloc::<u8>(1).map_err(|error| {
+                        runtime_error("model update admissibility allocation", error)
+                    })?;
+                    upload_publication(&self.provider, &[0u8], &admissibility)?;
                     Some(PreparedModelUpdate {
                         bindings,
+                        admissibility,
                         output: None,
+                        admissibility_copy: model_update_admissibility_copy.clone(),
                         copy: model_update_copy.clone(),
                     })
                 } else {
@@ -11049,13 +11090,13 @@ impl SemanticTransitionSession {
         let training_selection_pointer = training_selection
             .as_ref()
             .map_or(0, |selection| *selection.device_ptr());
-        let (model_update_bindings, model_update_binding_count) = owner
+        let (model_update_bindings, model_update_binding_count, model_update_admissibility) = owner
             .prepared
             .as_ref()
             .expect("prepared model update owner")
             .model_update
             .as_ref()
-            .map_or((0, 0), PreparedModelUpdate::descriptor);
+            .map_or((0, 0, 0), PreparedModelUpdate::descriptor);
         let continuation = PreparedContinuation::prepare(
             &self.provider,
             storage,
@@ -11072,6 +11113,7 @@ impl SemanticTransitionSession {
                 training_selection_pointer,
                 model_update_bindings,
                 model_update_binding_count,
+                model_update_admissibility,
             ),
             training_selection,
             &uploads,
@@ -11096,6 +11138,7 @@ impl SemanticTransitionSession {
         step: &SemanticPreparedStep,
         mut model_memory: SemanticModelMemory,
         mut tensors: Vec<SemanticTensorInput>,
+        admissibility: SemanticTensorInput,
         witness: &SemanticTensorContentWitness,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
@@ -11131,7 +11174,9 @@ impl SemanticTransitionSession {
                 "model update output requires complete backing allocations",
             ));
         }
+        let tensor_count = tensors.len();
         model_memory.allocations.append(&mut tensors);
+        model_memory.allocations.push(admissibility);
         self.verify_prepared_tensor_content(
             step,
             witness,
@@ -11142,7 +11187,33 @@ impl SemanticTransitionSession {
         let outputs = self.steps[&step.token].content[witness.index]
             .tensors
             .clone();
-        let (allocations, tensors) = outputs.split_at(allocation_count);
+        let (allocations, outputs) = outputs.split_at(allocation_count);
+        let (tensors, admissibility) = outputs.split_at(tensor_count);
+        let [admissibility] = admissibility else {
+            return Err(publication_input_error(
+                "model update output requires one numerical admissibility predicate",
+            ));
+        };
+        let allocation_index = u64::try_from(allocation_count)
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        if admissibility.layout
+            != (SemanticTensorLayout {
+                role: 0,
+                index: allocation_index,
+                element_bytes: 1,
+                scalar_type: 8,
+                rank: 1,
+                logical_axis: u64::MAX,
+                dimensions: [1, 0, 0, 0],
+                strides_bytes: [1, 0, 0, 0],
+            })
+            || admissibility.logical_begin != 0
+            || admissibility.logical_end != 0
+        {
+            return Err(publication_input_error(
+                "model update numerical admissibility must be Bool8[1]",
+            ));
+        }
         let geometry = prepare_model_memory(
             allocations,
             model_memory.storages,
@@ -11166,6 +11237,11 @@ impl SemanticTransitionSession {
         }
         for allocation in allocations {
             let bytes = tensor_layout_bytes(&allocation.layout)?;
+            if step_input_overlap(allocation.data, bytes, admissibility.data, 1)? {
+                return Err(publication_input_error(
+                    "model update numerical admissibility aliases an output allocation",
+                ));
+            }
             for owned in &storage.allocations {
                 if step_input_overlap(
                     allocation.data,
@@ -11207,6 +11283,7 @@ impl SemanticTransitionSession {
         update.output = Some(BoundModelUpdate {
             values,
             allocations: retained_allocations,
+            admissibility: admissibility.clone(),
             _witness: witness.clone(),
         });
         Ok(())
@@ -15204,7 +15281,7 @@ impl SemanticTransitionSession {
             Arc::clone(&storage),
             self.checked_reader(lease)?.device.view(),
             Arc::clone(&text_binding),
-            text_binding.continuation_inputs(kind, authority_bytes, 0, 0, 0),
+            text_binding.continuation_inputs(kind, authority_bytes, 0, 0, 0, 0),
             None,
             &uploads,
             &pending_layouts,

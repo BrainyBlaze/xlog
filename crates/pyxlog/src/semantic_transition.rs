@@ -7589,8 +7589,9 @@ impl PySemanticTransitionController {
 
     /// Bind the complete original model backing produced by this recorded
     /// update. The transient witness must cover allocations followed by typed
-    /// model views after the selected-view backward and optimizer update.
-    #[pyo3(signature = (task_use, *, step, tensors, model_allocations, model_storages, model_views, allocation_witness, consumer_stream))]
+    /// model views and the Bool8[1] numerical admissibility produced after the
+    /// selected-view backward and optimizer update.
+    #[pyo3(signature = (task_use, *, step, tensors, model_allocations, model_storages, model_views, numerical_admissibility, allocation_witness, consumer_stream))]
     #[allow(clippy::too_many_arguments)]
     fn bind_prepared_update_output(
         &self,
@@ -7601,6 +7602,7 @@ impl PySemanticTransitionController {
         model_allocations: &Bound<'_, PyAny>,
         model_storages: &Bound<'_, PyAny>,
         model_views: &Bound<'_, PyAny>,
+        numerical_admissibility: &Bound<'_, PyAny>,
         allocation_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
@@ -7663,6 +7665,33 @@ impl PySemanticTransitionController {
             producers: tensor_producers,
         } = parse_tensor_inputs_guarded(tensors, &mut budget, device, stream, &check)?;
         producer_owners.0.extend(tensor_producers);
+        validate_producer_device_guarded(numerical_admissibility, device, &check)?;
+        producer_owners
+            .0
+            .push(numerical_admissibility.clone().unbind());
+        let allocation_index = u64::try_from(allocation_handoff.0.len())
+            .map_err(|_| invalid("model update allocation roster is too large"))?;
+        let numerical_admissibility = SemanticTensorInput {
+            tensor: crate::dlpack_from_py_for_stream_guarded(
+                numerical_admissibility,
+                i64::try_from(stream)
+                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
+                &check,
+            )?,
+            layout: SemanticTensorLayout {
+                role: 0,
+                index: allocation_index,
+                element_bytes: 1,
+                scalar_type: 8,
+                rank: 1,
+                logical_axis: u64::MAX,
+                dimensions: [1, 0, 0, 0],
+                strides_bytes: [1, 0, 0, 0],
+            },
+            logical_begin: 0,
+            logical_end: 0,
+            native_allocation: None,
+        };
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         let state = self.continuation_state(py, task_use, parent, &owner, None)?;
@@ -7681,6 +7710,7 @@ impl PySemanticTransitionController {
                     views,
                 },
                 tensor_handoff.into_native(),
+                numerical_admissibility,
                 &allocation_witness.inner,
                 stream,
             )

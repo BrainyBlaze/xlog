@@ -300,7 +300,7 @@ struct ModelUpdateBinding { uint64_t source,bytes,slots[2]; };
 struct ContinuationInputs {
     TextBinding text;
     uint64_t active_rows,active_row_count,numerical_admissibility,transition_kind,authority_bytes;
-    uint64_t training_selection,model_update_bindings,model_update_binding_count;
+    uint64_t training_selection,model_update_bindings,model_update_binding_count,model_update_admissibility;
 };
 struct PublicationStorageEntry { uint64_t pointer,bytes,generation; };
 struct PublicationRange {
@@ -343,6 +343,7 @@ struct PendingContinuation {
     uint64_t topology_identity[4],table_identity[4],prefix_identity[4],ranges,range_count,transition_kind;
     TextBinding text;
     uint64_t numerical_admissibility,training_selection,model_update_bindings,model_update_binding_count;
+    uint64_t model_update_admissibility;
 };
 struct PublicationCommand { uint64_t control,lease,operation; };
 struct PublicationLease { uint64_t abi,status,instance[4],word,bank,epoch,active,transition_kind; };
@@ -428,8 +429,8 @@ static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
 static_assert(sizeof(TextRow)==16,"compact text row ABI");
 static_assert(sizeof(TextBinding)==24,"compact text binding ABI");
 static_assert(sizeof(ModelUpdateBinding)==32,"model update binding ABI");
-static_assert(sizeof(ContinuationInputs)==88,"resident continuation inputs ABI");
-static_assert(sizeof(PendingContinuation)==240,"pending continuation ABI");
+static_assert(sizeof(ContinuationInputs)==96,"resident continuation inputs ABI");
+static_assert(sizeof(PendingContinuation)==248,"pending continuation ABI");
 static_assert(sizeof(PublicationCommand)==24,"publication command ABI");
 static_assert(sizeof(PublicationLease)==88,"publication lease ABI");
 static_assert(sizeof(PublicationStepResult)==sizeof(PublicationHeader)+32,"publication step result ABI");
@@ -1177,13 +1178,16 @@ __device__ bool publication_model_spans_overlap(uint64_t left,uint64_t left_byte
 __device__ uint64_t publication_validate_model_update(const PublicationControl& control,
         const PublicationBank& base,const PendingContinuation& pending) {
     if(pending.transition_kind!=4)
-        return pending.model_update_bindings || pending.model_update_binding_count;
+        return pending.model_update_bindings || pending.model_update_binding_count ||
+            pending.model_update_admissibility;
     if(!pending.model_update_bindings ||
        pending.model_update_bindings%alignof(ModelUpdateBinding) ||
        !pending.model_update_binding_count ||
        pending.model_update_binding_count>base.header.range_count ||
        pending.model_update_binding_count>
            (UINT64_MAX-pending.model_update_bindings)/sizeof(ModelUpdateBinding))return 1;
+    if(!pending.model_update_admissibility || pending.model_update_admissibility==UINT64_MAX ||
+       *reinterpret_cast<const uint8_t*>(pending.model_update_admissibility)>1)return 1;
     if(base.header.neural_bank>1)return 1;
     const uint64_t bank=base.header.neural_bank;
     const auto* bindings=reinterpret_cast<const ModelUpdateBinding*>(pending.model_update_bindings);
@@ -1324,6 +1328,7 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
         inputs.training_selection>UINT64_MAX-sizeof(uint64_t))) ||
        (inputs.model_update_bindings==0)!=(inputs.model_update_binding_count==0) ||
        (requested_kind==4)!=(inputs.model_update_bindings!=0) ||
+       (requested_kind==4)!=(inputs.model_update_admissibility!=0) ||
        (inputs.model_update_bindings &&
         (inputs.model_update_bindings%alignof(ModelUpdateBinding) ||
          inputs.model_update_binding_count>
@@ -1397,6 +1402,7 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
     pending.training_selection=inputs.transition_kind==4 ? inputs.training_selection : 0;
     pending.model_update_bindings=inputs.transition_kind==4 ? inputs.model_update_bindings : 0;
     pending.model_update_binding_count=inputs.transition_kind==4 ? inputs.model_update_binding_count : 0;
+    pending.model_update_admissibility=inputs.transition_kind==4 ? inputs.model_update_admissibility : 0;
     for(uint64_t i=0;i<pending.range_count;++i) {
         auto& range=ranges[i];
         if(range.role==1 || range.role==4 || range.role==5) {
@@ -1431,6 +1437,16 @@ extern "C" __global__ void semantic_publication_prepare_continuation(uint64_t co
        publication_prepare_continuation(*reinterpret_cast<PublicationControl*>(control_ptr),
            *reinterpret_cast<const PublicationLease*>(lease_ptr),inputs))semantic_content_integrity_trap();
 }
+extern "C" __global__ void semantic_publication_prepare_model_update_admissibility(
+        uint64_t source_ptr,uint64_t destination_ptr) {
+    if(blockIdx.x || threadIdx.x)return;
+    if(!source_ptr || source_ptr==UINT64_MAX || !destination_ptr || destination_ptr==UINT64_MAX) {
+        semantic_content_integrity_trap();return;
+    }
+    const uint8_t value=*reinterpret_cast<const uint8_t*>(source_ptr);
+    if(value>1) { semantic_content_integrity_trap();return; }
+    *reinterpret_cast<uint8_t*>(destination_ptr)=value;
+}
 extern "C" __global__ void semantic_publication_apply_model_update(uint64_t control_ptr,
         uint64_t lease_ptr) {
     if(!control_ptr || control_ptr%alignof(PublicationControl) ||
@@ -1451,9 +1467,14 @@ extern "C" __global__ void semantic_publication_apply_model_update(uint64_t cont
     if(pending.base_word!=lease.word || pending.transition_kind!=4 ||
        !pending.model_update_bindings ||
        pending.model_update_bindings%alignof(ModelUpdateBinding) ||
+       !pending.model_update_admissibility || pending.model_update_admissibility==UINT64_MAX ||
        blockIdx.y>=pending.model_update_binding_count) {
         semantic_content_integrity_trap();return;
     }
+    const uint8_t admissibility=
+        *reinterpret_cast<const uint8_t*>(pending.model_update_admissibility);
+    if(admissibility>1) { semantic_content_integrity_trap();return; }
+    if(!admissibility)return;
     const auto& binding=reinterpret_cast<const ModelUpdateBinding*>(pending.model_update_bindings)[blockIdx.y];
     const uint64_t destination_slot=binding.slots[base->header.neural_bank^1];
     if(destination_slot>=control.storage_count ||
@@ -1508,6 +1529,7 @@ extern "C" __global__ void semantic_publication_prepare_drain(uint64_t control_p
     pending.training_selection=0;
     pending.model_update_bindings=0;
     pending.model_update_binding_count=0;
+    pending.model_update_admissibility=0;
     semantic_graph::copy_identity(pending.instance,base->header.instance);
     semantic_graph::copy_identity(pending.topology_identity,contract.topology_identity);
     semantic_graph::copy_identity(pending.table_identity,contract.table_identity);
@@ -3659,7 +3681,8 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             uint8_t numerical=1;
             if(transition_kind==3) {
                 if(pending.numerical_admissibility || pending.training_selection ||
-                   pending.model_update_bindings || pending.model_update_binding_count) {
+                   pending.model_update_bindings || pending.model_update_binding_count ||
+                   pending.model_update_admissibility) {
                     semantic_content_integrity_trap();return;
                 }
             } else {
@@ -3673,14 +3696,20 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             uint64_t training_status=0;
             if(pending.transition_kind==4) {
                 if(!pending.training_selection || pending.training_selection%alignof(uint64_t) ||
-                   pending.training_selection>UINT64_MAX-sizeof(uint64_t) ||
-                   !pending.model_update_bindings || !pending.model_update_binding_count) {
+                    pending.training_selection>UINT64_MAX-sizeof(uint64_t) ||
+                    !pending.model_update_bindings || !pending.model_update_binding_count ||
+                    !pending.model_update_admissibility ||
+                    pending.model_update_admissibility==UINT64_MAX) {
                     semantic_content_integrity_trap();return;
                 }
                 training_status=*reinterpret_cast<const uint64_t*>(pending.training_selection);
                 if(training_status>3) { semantic_content_integrity_trap();return; }
+                const uint8_t update_admissibility=
+                    *reinterpret_cast<const uint8_t*>(pending.model_update_admissibility);
+                if(update_admissibility>1) { semantic_content_integrity_trap();return; }
+                numerical &= update_admissibility;
             } else if(pending.training_selection || pending.model_update_bindings ||
-                      pending.model_update_binding_count) {
+                      pending.model_update_binding_count || pending.model_update_admissibility) {
                 semantic_content_integrity_trap();return;
             }
             if(training_status || !numerical || state->execution_work.overflow) {
