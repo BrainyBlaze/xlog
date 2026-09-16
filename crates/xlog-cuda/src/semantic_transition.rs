@@ -1962,6 +1962,21 @@ pub struct SemanticModelContext {
     pub capacities: (u64, u64, u64),
 }
 
+/// Direct read-only aliases of the selected resident neural bank. Each backing
+/// allocation is exported exactly once; storages, views and layouts preserve
+/// the producer's original alias geometry. The acquired reader remains the use
+/// owner and therefore prevents reuse of this physical bank through final use.
+pub struct SemanticResidentModelMemory {
+    pub parent: SemanticPublishedIdentity,
+    /// Model generation, neural bank and neural generation.
+    pub generations: (u64, u64, u64),
+    /// Original storage/view geometry and sealed numerical contents.
+    pub numerical_state: (Identity256, Identity256),
+    pub allocations: Vec<(DeviceAllocationProvenance, DlpackManagedTensor)>,
+    pub storages: Vec<SemanticModelStorage>,
+    pub views: Vec<(SemanticModelView, SemanticTensorLayout)>,
+}
+
 /// Admission cost of the next operation, checked against one acquired parent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticTransitionKind {
@@ -13552,6 +13567,104 @@ impl SemanticTransitionSession {
                 contract.feedback_capacity,
                 contract.max_position,
             ),
+        })
+    }
+
+    /// Export the selected resident neural bank without the private step copy
+    /// used by per-tensor late-backward exports. Full backing allocations occur
+    /// once and retain the acquired reader, while the returned geometry names
+    /// every typed view in roles 18..=25. Callers must keep these aliases
+    /// read-only and release the parent only after every consumer stream joins.
+    pub fn published_resident_model_memory(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        consumer_stream: u64,
+    ) -> Result<SemanticResidentModelMemory, SemanticTransitionError> {
+        dlpack_consumer_stream(consumer_stream)?;
+        self.checked_reader(lease)?;
+        let header = lease.model_context_header()?;
+        let storage = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        storage.model_memory.validate(&storage.layouts)?;
+        if storage.model_slots.len() != storage.model_memory.allocation_bytes.len() {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let keys = lease
+            .directory
+            .iter()
+            .filter(|range| matches!(range.role, 18..=25))
+            .map(|range| {
+                SemanticStateRole::from_code(range.role)
+                    .map(|role| (role, range.index))
+                    .ok_or(SemanticTransitionError::ObservationMismatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if keys.len() != storage.model_memory.views.len() {
+            return Err(publication_input_error(
+                "resident model memory requires the complete selected model roster",
+            ));
+        }
+        self.guard_published_content(lease, &keys, consumer_stream)?;
+
+        let bank = (lease.identity.word & 1) as usize;
+        let mut allocations = Vec::with_capacity(storage.model_slots.len());
+        for (&bytes, slots) in storage
+            .model_memory
+            .allocation_bytes
+            .iter()
+            .zip(&storage.model_slots)
+        {
+            let allocation = storage
+                .allocations
+                .get(slots[bank])
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            if allocation.len() as u64 != bytes {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            let view = allocation.view();
+            let provenance = view.allocation_provenance().ok_or_else(|| {
+                publication_input_error("resident model backing has no native allocation owner")
+            })?;
+            let extent =
+                i64::try_from(bytes).map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+            let tensor = self.export_reader_view(
+                lease,
+                view,
+                vec![extent],
+                vec![1],
+                (1, 8),
+                consumer_stream,
+            )?;
+            allocations.push((provenance, tensor));
+        }
+        let views = storage
+            .model_memory
+            .views
+            .iter()
+            .cloned()
+            .map(|view| {
+                let layout = storage
+                    .layouts
+                    .get(&(view.role, view.index))
+                    .copied()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                Ok((view, layout))
+            })
+            .collect::<Result<Vec<_>, SemanticTransitionError>>()?;
+        Ok(SemanticResidentModelMemory {
+            parent: lease.identity,
+            generations: (
+                header.model_generation,
+                header.neural_bank,
+                header.neural_generation,
+            ),
+            numerical_state: (header.model_geometry_digest, header.model_numerical_digest),
+            allocations,
+            storages: storage.model_memory.storages.clone(),
+            views,
         })
     }
 

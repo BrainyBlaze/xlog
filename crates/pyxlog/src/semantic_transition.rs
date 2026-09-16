@@ -5618,6 +5618,103 @@ impl PySemanticPublishedParent {
             .unbind())
     }
 
+    /// Export the exact selected resident neural bank without a device copy.
+    /// Returns (parent_identity, generations, numerical_state, allocations,
+    /// storages, views). Each allocation row is (native_provenance, U8 DLPack)
+    /// and occurs exactly once. Storage rows are (allocation, byte_offset,
+    /// span_bytes). View rows are (role, index, storage, byte_offset, layout),
+    /// where layout preserves element size, scalar type, rank, logical axis,
+    /// four dimensions and four byte strides.
+    ///
+    /// These aliases are read-only views of the actually selected bank, not the
+    /// private late-backward copies returned by tensor_allocation(). Retain the
+    /// parent and all framework aliases through final use, then release with all
+    /// consumer streams. The retained reader prevents native bank reuse; matching
+    /// metadata alone grants no authority and must not be rebound to other bytes.
+    #[pyo3(signature = (*, consumer_stream))]
+    fn resident_model_memory(
+        &self,
+        py: Python<'_>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let stream = ColdValue::read(consumer_stream, &mut 128, 0)?.unsigned()?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        self.task_use.borrow(py).require_current(&owner)?;
+        let memory = owner
+            .published_resident_model_memory(&*self.lease()?, stream)
+            .map_err(xlog_err)?;
+        let parent = memory.parent;
+        let mut allocations = Vec::with_capacity(memory.allocations.len());
+        for (provenance, tensor) in memory.allocations {
+            let tensor =
+                retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
+            allocations.push(
+                (
+                    Py::new(py, PyNativeTensorAllocation { provenance })?,
+                    crate::dlpack_capsule_from_tensor(py, tensor)?,
+                )
+                    .into_pyobject(py)?
+                    .unbind(),
+            );
+        }
+        let storages = PyTuple::new(
+            py,
+            memory
+                .storages
+                .into_iter()
+                .map(|storage| (storage.allocation, storage.byte_offset, storage.span_bytes)),
+        )?;
+        let views = PyTuple::new(
+            py,
+            memory.views.into_iter().map(|(view, layout)| {
+                (
+                    view.role,
+                    view.index,
+                    view.storage,
+                    view.byte_offset,
+                    (
+                        layout.element_bytes,
+                        layout.scalar_type,
+                        layout.rank,
+                        layout.logical_axis,
+                        (
+                            layout.dimensions[0],
+                            layout.dimensions[1],
+                            layout.dimensions[2],
+                            layout.dimensions[3],
+                        ),
+                        (
+                            layout.strides_bytes[0],
+                            layout.strides_bytes[1],
+                            layout.strides_bytes[2],
+                            layout.strides_bytes[3],
+                        ),
+                    ),
+                )
+            }),
+        )?;
+        Ok((
+            (
+                PyBytes::new(py, parent.instance.as_bytes()),
+                parent.word,
+                PyBytes::new(py, parent.logical_digest.as_bytes()),
+                PyBytes::new(py, parent.state_digest.as_bytes()),
+            ),
+            memory.generations,
+            (
+                PyBytes::new(py, memory.numerical_state.0.as_bytes()),
+                PyBytes::new(py, memory.numerical_state.1.as_bytes()),
+            ),
+            PyTuple::new(py, allocations)?,
+            storages,
+            views,
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+
     /// Resolve one descriptor in this live parent's native catalogue.
     ///
     /// Returns ((catalogue_generation, digest), meaning). Descriptor fields are
