@@ -837,7 +837,7 @@ impl SemanticRootMaterial {
     pub(crate) fn task_observation_roots(
         &self,
         admission: &SemanticAdmission,
-        query_records: [u32; 2],
+        query_records: [u32; 3],
     ) -> Result<crate::semantic_transition::SemanticTaskObservationRoots, SemanticHypergraphError>
     {
         self.validate_lineage(admission)?;
@@ -5319,24 +5319,24 @@ pub(crate) mod tests {
             );
             binding
         };
-        let first = bind([0, 1], vec![0]).words(1);
-        let equal_occurrence = bind([0, 1], vec![3]).words(1);
+        let first = bind([0, 1, 1], vec![0]).words(1);
+        let equal_occurrence = bind([0, 1, 1], vec![3]).words(1);
         assert_ne!(
             first[6..],
             equal_occurrence[6..],
             "resident task bank collapsed equal support occurrences"
         );
-        assert_eq!(first[17..19], [0, 1]);
-        assert_eq!(first[27], 0);
-        assert_eq!(equal_occurrence[27], 3);
-        let both = bind([0, 1], vec![0, 3]).words(1);
-        assert_eq!(both[16], 2);
-        assert_eq!([both[27], both[32]], [0, 3]);
+        assert_eq!(first[22..25], [0, 1, 1]);
+        assert_eq!(first[34], 0);
+        assert_eq!(equal_occurrence[34], 3);
+        let both = bind([0, 1, 1], vec![0, 3]).words(1);
+        assert_eq!(both[21], 2);
+        assert_eq!([both[34], both[39]], [0, 3]);
         for (left, right) in [
-            (bind([0, 1], vec![]), bind([7, 1], vec![])),
-            (bind([0, 1], vec![0]), bind([0, 1], vec![3])),
-            (bind([0, 1], vec![0, 3]), bind([0, 1], vec![3, 0])),
-            (bind([0, 1], vec![0, 0]), bind([0, 1], vec![0])),
+            (bind([0, 1, 1], vec![]), bind([7, 1, 1], vec![])),
+            (bind([0, 1, 1], vec![0]), bind([0, 1, 1], vec![3])),
+            (bind([0, 1, 1], vec![0, 3]), bind([0, 1, 1], vec![3, 0])),
+            (bind([0, 1, 1], vec![0, 0]), bind([0, 1, 1], vec![0])),
         ] {
             // Same semantic query/support operands are not the same original
             // admitted source selections for restoration and read provenance.
@@ -5469,22 +5469,32 @@ pub(crate) mod tests {
         let material =
             SemanticRootMaterial::decode(&material.encode().unwrap(), root_material_limits())
                 .unwrap();
-        let roots = material.task_observation_roots(&admission, [0, 8]).unwrap();
-        assert_eq!(roots.query_records, [0, 8]);
+        let roots = material
+            .task_observation_roots(&admission, [0, 8, 8])
+            .unwrap();
+        assert_eq!(roots.query_records, [0, 8, 8]);
         assert_eq!(roots.root_digest.as_bytes(), &material.digest);
         assert_eq!(roots.root_extents, [2, 3, 3]);
         assert_eq!(roots.contributors, [(0, Some(7), 0), (0, Some(7), 1)]);
-        let reverse = material.task_observation_roots(&admission, [8, 0]).unwrap();
+        let reverse = material
+            .task_observation_roots(&admission, [8, 0, 8])
+            .unwrap();
         assert_eq!(reverse.contributors, [(1, Some(7), 0), (1, Some(7), 1)]);
         let mut corrupt = material.clone();
         corrupt.insertions[0].version[0] ^= 1;
-        assert!(corrupt.task_observation_roots(&admission, [0, 8]).is_err());
-        assert!(material.task_observation_roots(&admission, [0, 2]).is_err());
+        assert!(corrupt
+            .task_observation_roots(&admission, [0, 8, 8])
+            .is_err());
+        assert!(material
+            .task_observation_roots(&admission, [0, 2, 2])
+            .is_err());
         let mut derived = material;
         derived.insertions[0].statement = None;
         derived.insertions[0].reconstruction = [0; 10];
         derived.insertions[0].reconstruction[9] = u32::MAX;
-        let roots = derived.task_observation_roots(&admission, [0, 8]).unwrap();
+        let roots = derived
+            .task_observation_roots(&admission, [0, 8, 8])
+            .unwrap();
         assert_eq!(roots.contributors, [(0, None, 0), (0, Some(7), 1)]);
     }
 

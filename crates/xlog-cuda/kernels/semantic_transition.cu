@@ -267,13 +267,13 @@ __device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& wo
     if(declared_bound!=input.bound) { semantic_content_integrity_trap();return; }
 }
 struct TaskFacts {
-    uint64_t correct[2],g,p,c;
+    uint64_t correct[3],g,p,c;
     int64_t v;
     uint64_t eligible;
 };
 struct TaskEvaluation {
     uint64_t lane_refusal[2]; // 0 accepted, 1 scope, 2 hard constraint.
-    semantic_graph::Receipt query_receipts[3][2];
+    semantic_graph::Receipt query_receipts[3][3];
     uint64_t query_count,winner;
     int64_t return_value;
     TaskFacts facts[3]; // Base, first learned lane, second learned lane.
@@ -411,9 +411,9 @@ struct Descriptor {
 static_assert(sizeof(U192)==24,"integer ABI");
 static_assert(sizeof(Receipt)==264,"receipt ABI");
 static_assert(sizeof(Work)==24,"semantic work ABI");
-static_assert(sizeof(TaskFacts)==56,"task facts ABI");
-static_assert(sizeof(TaskEvaluation)==2224,"task evaluation ABI");
-static_assert(sizeof(State)==5920,"state ABI");
+static_assert(sizeof(TaskFacts)==64,"task facts ABI");
+static_assert(sizeof(TaskEvaluation)==3256,"task evaluation ABI");
+static_assert(sizeof(State)==6952,"state ABI");
 static_assert(sizeof(PolicyField)==24,"policy field ABI");
 static_assert(sizeof(PolicyDescriptor)==480,"policy ABI");
 static_assert(sizeof(PolicyBackward)==64,"policy backward ABI");
@@ -422,7 +422,7 @@ static_assert(sizeof(PublicationStorageEntry)==24,"owned storage ABI");
 static_assert(sizeof(PublicationRange)==128,"publication range ABI");
 static_assert(sizeof(PublicationHeader)==488,"publication header ABI");
 static_assert(sizeof(PublicationControl)==144,"publication control ABI");
-static_assert(sizeof(PublicationBank)==44360,"publication bank ABI");
+static_assert(sizeof(PublicationBank)==45392,"publication bank ABI");
 static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
 static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
 static_assert(sizeof(TextRow)==16,"compact text row ABI");
@@ -1055,7 +1055,7 @@ __device__ uint64_t publication_validate_directory(const PublicationControl& con
     for(uint64_t i=0;i<55;++i) {
         if(roles[i].role!=i+1 || !semantic_graph::checked_add(expected,roles[i].count,&expected))return 1;
         if(publication_tensor_role(i+1))tensor_count+=roles[i].count;
-        else if(roles[i].count!=(i+1==16 ? 2 : 1))return 1;
+        else if(roles[i].count!=(i+1==16 ? 3 : 1))return 1;
     }
     if(expected!=count || roles[3].count!=roles[4].count || roles[5].count!=roles[6].count ||
        roles[50].count!=roles[3].count || roles[51].count!=roles[4].count ||
@@ -1078,7 +1078,7 @@ __device__ uint64_t publication_validate_directory(const PublicationControl& con
         if(publication_tensor_role(role)!=bool(layout))return 1;
         if(!publication_tensor_role(role) && role!=1 && role!=2 && !range.length_bytes)return 1;
         if(role==14 && range.length_bytes!=sizeof(CompletionCoverage))return 1;
-        if(role==15 && (contract.feedback_capacity<2 || contract.feedback_capacity>UINT64_MAX/sizeof(RawFeedbackRecord) ||
+        if(role==15 && (contract.feedback_capacity<3 || contract.feedback_capacity>UINT64_MAX/sizeof(RawFeedbackRecord) ||
             range.length_bytes!=contract.feedback_capacity*sizeof(RawFeedbackRecord)))return 1;
         if(role==33 && range.length_bytes!=sizeof(AttemptReceipt))return 1;
         if(layout && (role==4 || role==5 || role==51 || role==52) &&
@@ -2707,17 +2707,21 @@ __device__ void decode_action(const uint64_t* books,const uint32_t* choices,
 __device__ bool task_allows(const uint64_t* task,
         semantic_graph::DecodedStatement& statement,
         const semantic_graph::DecodedSupport& support) {
-    if(!task || task[0]!=3)return false;
+    if(!task || task[0]!=4)return false;
     uint64_t identity[4];semantic_graph::decode_identity(statement.identity_words,identity);
-    bool first_query=true,second_query=true;
-    for(uint32_t i=0;i<4;++i){first_query &= identity[i]==task[6+i];second_query &= identity[i]==task[10+i];}
-    if(!first_query && !second_query)return false;
+    uint32_t query_index=3;
+    for(uint32_t query=0;query<3 && query_index==3;++query) {
+        bool equal=true;
+        for(uint32_t i=0;i<4;++i)equal &= identity[i]==task[6+4*query+i];
+        if(equal)query_index=query;
+    }
+    if(query_index==3)return false;
     uint64_t digest[4];semantic_graph::support_digest(identity,support,digest);
-    for(uint64_t event=0;event<task[16];++event) {
-        bool equal=task[27+5*event]==support.record;
-        for(uint32_t i=0;i<4;++i)equal &= digest[i]==task[28+5*event+i];
+    for(uint64_t event=0;event<task[21];++event) {
+        bool equal=task[34+5*event]==support.record;
+        for(uint32_t i=0;i<4;++i)equal &= digest[i]==task[35+5*event+i];
         if(equal) {
-            statement.record=uint32_t(task[first_query ? 17 : 18]);
+            statement.record=uint32_t(task[22+query_index]);
             for(uint32_t i=0;i<10;++i)statement.reconstruction[i]=0;
             return true;
         }
@@ -2731,7 +2735,7 @@ __device__ void task_cost(State* state,uint32_t slot,const uint64_t* task) {
         const auto& work=state->work[slot-1];
         facts.c=work.edit_commands+work.added_supports+work.defined_truth_changes;
     }
-    facts.v=int64_t(task[19]*facts.g+task[20]*facts.p)-int64_t(task[21]*facts.c);
+    facts.v=int64_t(task[25]*facts.g+task[26]*facts.p)-int64_t(task[27]*facts.c);
 }
 
 __device__ bool task_queries(const Descriptor& d,const uint64_t* task,uint32_t slot,
@@ -2740,9 +2744,9 @@ __device__ bool task_queries(const Descriptor& d,const uint64_t* task,uint32_t s
     auto& evaluation=state->task_evaluation;
     auto& facts=evaluation.facts[slot];
     bool valid=true,hard=true;
-    for(uint32_t query=0;query<2;++query) {
+    for(uint32_t query=0;query<3;++query) {
         semantic_graph::DecodedStatement statement{};
-        statement.record=uint32_t(task[17+query]);
+        statement.record=uint32_t(task[22+query]);
         for(uint32_t i=0;i<8;++i)
             statement.identity_words[i]=uint32_t(task[6+4*query+i/2]>>(32*(i%2)));
         auto output=&evaluation.query_receipts[slot][query];
@@ -2751,12 +2755,12 @@ __device__ bool task_queries(const Descriptor& d,const uint64_t* task,uint32_t s
         semantic_call(d,slot ? semantic_graph::kResidentForkTruthAdmission :
             semantic_graph::kResidentRootTruthAdmission,root,candidate,output,&statement,nullptr,&state->execution_work);
         valid &= output->words[0]==semantic_graph::kOk && output->words[2]<=3;
-        hard &= output->words[2]<=3 && (task[25+query] & (uint64_t(1)<<output->words[2]))!=0;
+        hard &= output->words[2]<=3 && (task[31+query] & (uint64_t(1)<<output->words[2]))!=0;
         facts.correct[query]=output->words[0]==semantic_graph::kOk &&
-            output->words[2]==task[14+query];
+            output->words[2]==task[18+query];
     }
-    facts.g=facts.correct[0]+facts.correct[1];
-    facts.p=facts.correct[0] && facts.correct[1];
+    facts.g=facts.correct[0]+facts.correct[1]+facts.correct[2];
+    facts.p=facts.correct[0] && facts.correct[1] && facts.correct[2];
     facts.eligible=valid && hard;
     task_cost(state,slot,task);
     return valid;
@@ -2775,8 +2779,8 @@ __device__ void select_task(State* state,const uint64_t* task) {
         if(lane+1!=winner)spent+=state->work[lane].edit_commands+state->work[lane].defined_truth_changes;
     }
     evaluation.winner=winner;
-    evaluation.return_value=int64_t(task[22])*(evaluation.facts[winner].v-evaluation.facts[0].v)
-        -int64_t(task[23])*int64_t(refusals)-int64_t(task[24])*int64_t(spent);
+    evaluation.return_value=int64_t(task[28])*(evaluation.facts[winner].v-evaluation.facts[0].v)
+        -int64_t(task[29])*int64_t(refusals)-int64_t(task[30])*int64_t(spent);
 }
 __device__ void semantic_policy_backward_status_guard(uint64_t status_ptr) {
     if(!status_ptr || status_ptr%alignof(uint64_t) || status_ptr>UINT64_MAX-sizeof(uint64_t) ||
@@ -2969,11 +2973,11 @@ __device__ uint64_t publication_write_feedback(const Descriptor& descriptor,Publ
     }
     const auto* task=reinterpret_cast<const uint64_t*>(descriptor.task);
     if(!task)return 1;
-    for(uint32_t index=0;index<2;++index) {
+    for(uint32_t index=0;index<3;++index) {
         const auto* statement_range=publication_find_range(ranges,bank.header.range_count,16,index);
         if(!statement_range || !publication_range_bytes(control,*statement_range))return 1;
         semantic_graph::DecodedStatement statement{};
-        statement.record=uint32_t(task[17+index]);
+        statement.record=uint32_t(task[22+index]);
         for(uint32_t word=0;word<8;++word)statement.identity_words[word]=uint32_t(task[6+index*4+word/2]>>(32*(word%2)));
         RawFeedbackRecord expected{};
         semantic_call(descriptor,semantic_graph::kResidentRootTruthAdmission,&root,nullptr,&expected.query_receipt,&statement,nullptr,work);
@@ -2992,7 +2996,7 @@ __device__ uint64_t publication_write_feedback(const Descriptor& descriptor,Publ
                    saved.query_receipt.words[word]!=expected.query_receipt.words[word])return 6;
         } else output[index]=expected;
     }
-    output_range->logical_begin=0;output_range->logical_end=2;
+    output_range->logical_begin=0;output_range->logical_end=3;
     return 0;
 }
 __device__ uint64_t publication_write_coverage(const PublicationControl& control,const PublicationContract& contract,
@@ -3066,7 +3070,7 @@ __device__ uint64_t publication_initialize(const Descriptor& descriptor,Publicat
        !contract.model_generation || bank.header.model_generation>UINT32_MAX ||
        (restored ? bank.header.model_generation<contract.model_generation : bank.header.model_generation!=contract.model_generation) ||
        bank.header.authority_generation!=contract.authority_generation ||
-       !publication_identity_equal(contract.task_identity,task+2) || task[0]!=3 || task[1]!=descriptor.arena[1] ||
+        !publication_identity_equal(contract.task_identity,task+2) || task[0]!=4 || task[1]!=descriptor.arena[1] ||
        !publication_identity_equal(control.instance,bank.header.instance) || bank.header.range_count!=inactive.header.range_count ||
        (contract.terminal_token_count && !contract.terminal_tokens))return 1;
     uint64_t end=0;
@@ -3423,7 +3427,7 @@ struct FeedbackSupportCollector {
 struct PublicationFeedbackInputs {
     const PublicationBank* bank;
     const RawFeedbackRecord* records;
-    semantic_feedback::Statement statements[2];
+    semantic_feedback::Statement statements[3];
     uint64_t statement_capacity;
 };
 
@@ -3434,7 +3438,7 @@ __device__ uint64_t publication_feedback_inputs(uint64_t control_ptr,
     const uint64_t lease_ptr=reinterpret_cast<uint64_t>(lease);
     if(!control_ptr || control_ptr%alignof(PublicationControl) || control_ptr>UINT64_MAX-sizeof(PublicationControl) ||
        !lease_ptr || lease_ptr%alignof(PublicationLease) || lease_ptr>UINT64_MAX-sizeof(PublicationLease) ||
-       slots<2 || slots>UINT64_MAX/sizeof(RawFeedbackRecord))return 1;
+        slots<3 || slots>UINT64_MAX/sizeof(RawFeedbackRecord))return 1;
     const auto& control=*reinterpret_cast<const PublicationControl*>(control_ptr);
     if(lease->bank>1 || !control.contract || control.contract%alignof(PublicationContract) ||
        control.contract>UINT64_MAX-sizeof(PublicationContract) ||
@@ -3460,7 +3464,7 @@ __device__ uint64_t publication_feedback_inputs(uint64_t control_ptr,
     inputs->bank=bank;
     inputs->records=reinterpret_cast<const RawFeedbackRecord*>(bytes);
     inputs->statement_capacity=0;
-    for(uint64_t index=0;index<2;++index) {
+    for(uint64_t index=0;index<3;++index) {
         const auto* statement=publication_find_range(ranges,bank->header.range_count,16,index);
         if(!statement || !statement->length_bytes)return 1;
         const auto* data=publication_range_bytes(control,*statement);
@@ -3484,7 +3488,8 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
     PublicationFeedbackInputs inputs{};
     if(publication_feedback_inputs(descriptor.publication.control,lease,slots,&inputs) || !descriptor.task)return 1;
     const auto* task=reinterpret_cast<const uint64_t*>(descriptor.task);
-    if(task[0]!=3 || task[1]!=descriptor.arena[1] || task[17]>=UINT32_MAX || task[18]>=UINT32_MAX)return 1;
+    if(task[0]!=4 || task[1]!=descriptor.arena[1] ||
+       task[22]>=UINT32_MAX || task[23]>=UINT32_MAX || task[24]>=UINT32_MAX)return 1;
     const auto& bank=*inputs.bank;
     semantic_graph::Layout layout{};
     if(!semantic_graph::build_layout(reinterpret_cast<uint64_t*>(descriptor.arena[0]),
@@ -3497,9 +3502,9 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
         offsets[slot]=collector.count;
         const auto& saved=inputs.records[slot];
         if(saved.valid==0) { offsets[slot+1]=collector.count;continue; }
-        if(saved.valid!=1 || saved.statement_index>1 || saved.pro>1 || saved.contra>1)return 1;
+        if(saved.valid!=1 || saved.statement_index>2 || saved.pro>1 || saved.contra>1)return 1;
         semantic_graph::DecodedStatement statement{};
-        statement.record=uint32_t(task[17+saved.statement_index]);
+        statement.record=uint32_t(task[22+saved.statement_index]);
         for(uint32_t i=0;i<8;++i)
             statement.identity_words[i]=uint32_t(task[6+4*saved.statement_index+i/2]>>(32*(i%2)));
         auto& query=queries[slot];
@@ -3675,7 +3680,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                    !publication_identity_equal(pending.instance,lease.instance) || contract.abi!=1 ||
                    !publication_identity_equal(pending.topology_identity,contract.topology_identity) ||
                    !publication_identity_equal(pending.table_identity,contract.table_identity) ||
-                   !task || task[0]!=3 || task[1]!=descriptor.arena[1] ||
+                    !task || task[0]!=4 || task[1]!=descriptor.arena[1] ||
                    !publication_identity_equal(contract.task_identity,task+2)) {
                     semantic_content_integrity_trap();return;
                 }
@@ -3710,8 +3715,8 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 transition_kind=reinterpret_cast<const PendingContinuation*>(control.continuation)->transition_kind;
             }
         }
-        if(!failed && task && (task[0]!=3 || task[1]!=descriptor.arena[1] ||
-           task[14]>3 || task[15]>3)) {
+        if(!failed && task && (task[0]!=4 || task[1]!=descriptor.arena[1] ||
+           task[18]>3 || task[19]>3 || task[20]>3)) {
             failed=1;state->status=7;
         }
         if(!failed) {

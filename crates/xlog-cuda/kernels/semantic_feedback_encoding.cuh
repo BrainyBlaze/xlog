@@ -15,7 +15,7 @@ struct Statement { const uint8_t* bytes; uint64_t length; };
 template<class Record>
 XLOG_FEEDBACK_INLINE uint64_t validate(const Record& record, const Statement* statements, uint64_t capacity) {
     if (record.valid == 0) return 0;
-    if (record.valid != 1 || record.statement_index >= 2 || !statements ||
+    if (record.valid != 1 || record.statement_index >= 3 || !statements ||
         record.pro > 1 || record.contra > 1 || record.statement_length_bytes == 0 ||
         record.statement_length_bytes > capacity) return 1;
     const auto& statement = statements[record.statement_index];

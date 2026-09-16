@@ -11,7 +11,7 @@ struct Record {
 
 int main() {
     const uint8_t bytes[] = {0x00, 0x01, 0x80, 0xa5};
-    const semantic_feedback::Statement statements[] = {{bytes, 4}, {bytes, 1}};
+    const semantic_feedback::Statement statements[] = {{bytes, 4}, {bytes, 1}, {bytes + 1, 2}};
     for (uint64_t pro = 0; pro != 2; ++pro) {
         for (uint64_t contra = 0; contra != 2; ++contra) {
             Record record{1, 0, 0, 4, pro, contra};
@@ -44,7 +44,7 @@ int main() {
     for (int field = 0; field != 6; ++field) {
         Record bad{1, 0, 0, 4, 0, 0};
         if (field == 0) bad.valid = 2;
-        if (field == 1) bad.statement_index = 2;
+        if (field == 1) bad.statement_index = 3;
         if (field == 2) bad.statement_offset_bytes = garbage;
         if (field == 3) bad.statement_length_bytes = 5;
         if (field == 4) bad.pro = 2;

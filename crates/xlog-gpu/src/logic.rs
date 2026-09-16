@@ -1052,14 +1052,14 @@ pub struct LogicProgram {
     epistemic_provenance: Option<EpistemicProvenance>,
 }
 
-/// A self-contained XLOG program whose two selected Boolean queries define a
+/// A self-contained XLOG program whose three selected Boolean queries define a
 /// semantic task's expected truth. Compilation preserves the authored source;
 /// observation executes the canonical GPU evaluator before deriving any result.
 /// Source facts are the complete concrete inputs, and query ordinals retain the
 /// caller's order. No caller-supplied answers enter this adapter.
 pub struct SemanticLogicTaskProgram {
     source: String,
-    query_ordinals: [usize; 2],
+    query_ordinals: [usize; 3],
     program: LogicProgram,
 }
 
@@ -1074,10 +1074,10 @@ impl std::fmt::Debug for SemanticLogicTaskProgram {
 }
 
 impl SemanticLogicTaskProgram {
-    /// Compile a complete source program and select two zero-arity query results.
+    /// Compile a complete source program and select three zero-arity query results.
     /// This performs no GPU execution; the native semantic owner calls `observe`
     /// during cold binding, including when restoring a retained task.
-    pub fn compile(source: String, query_ordinals: [usize; 2]) -> Result<Self> {
+    pub fn compile(source: String, query_ordinals: [usize; 3]) -> Result<Self> {
         let program = LogicProgram::compile(&source)?;
         if !program.source_program.imports.is_empty() {
             return Err(XlogError::Compilation(
@@ -1131,7 +1131,7 @@ impl xlog_cuda::SemanticTaskProgram for SemanticLogicTaskProgram {
         })?;
         let mut input_bytes = b"xlog.semantic-task.query-selection.v1\0".to_vec();
         let mut result_bytes = b"xlog.semantic-task.boolean-results.v1\0".to_vec();
-        let mut expected_truth = [xlog_cuda::SemanticTruth::False; 2];
+        let mut expected_truth = [xlog_cuda::SemanticTruth::False; 3];
         for (slot, ordinal) in self.query_ordinals.into_iter().enumerate() {
             let query = result.queries.get(ordinal).ok_or_else(|| {
                 execution_error(XlogError::Execution(format!(
@@ -6131,18 +6131,20 @@ mod tests {
             "pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2).",
             "pred connected(u32,u32). connected(3,4). ?- connected(3,4). ?- connected(4,3).",
         ] {
-            let observer = SemanticLogicTaskProgram::compile(source.to_owned(), [1, 0]).unwrap();
+            let observer = SemanticLogicTaskProgram::compile(source.to_owned(), [1, 0, 1]).unwrap();
             assert_eq!(observer.source, source);
-            assert_eq!(observer.query_ordinals, [1, 0]);
+            assert_eq!(observer.query_ordinals, [1, 0, 1]);
         }
     }
 
     #[test]
     fn semantic_task_program_rejects_non_boolean_or_missing_queries() {
         let source = "pred rainfall(u32). rainfall(8). ?- rainfall(X). ?- rainfall(8).";
-        assert!(SemanticLogicTaskProgram::compile(source.to_owned(), [0, 1]).is_err());
-        assert!(SemanticLogicTaskProgram::compile(source.to_owned(), [1, 2]).is_err());
-        assert!(SemanticLogicTaskProgram::compile("invalid program".to_owned(), [0, 1]).is_err());
+        assert!(SemanticLogicTaskProgram::compile(source.to_owned(), [0, 1, 1]).is_err());
+        assert!(SemanticLogicTaskProgram::compile(source.to_owned(), [1, 2, 1]).is_err());
+        assert!(
+            SemanticLogicTaskProgram::compile("invalid program".to_owned(), [0, 1, 0]).is_err()
+        );
     }
 
     use xlog_core::{symbol, MemoryBudget, ScalarType};
@@ -6260,8 +6262,8 @@ mod tests {
             XlogError::Execution("authorized CUDA observer test requires a working provider".into())
         })?;
         let source = "pred connected(u32,u32). pred reachable(u32,u32). connected(3,4). reachable(X,Y) :- connected(X,Y). ?- reachable(3,4). ?- reachable(4,3).";
-        let forward = SemanticLogicTaskProgram::compile(source.to_owned(), [0, 1])?;
-        let reversed = SemanticLogicTaskProgram::compile(source.to_owned(), [1, 0])?;
+        let forward = SemanticLogicTaskProgram::compile(source.to_owned(), [0, 1, 1])?;
+        let reversed = SemanticLogicTaskProgram::compile(source.to_owned(), [1, 0, 0])?;
         let observed = xlog_cuda::SemanticTaskProgram::observe(&forward, Arc::clone(&provider))
             .map_err(|error| XlogError::Execution(error.to_string()))?;
         let reordered = xlog_cuda::SemanticTaskProgram::observe(&reversed, provider)
@@ -6270,14 +6272,16 @@ mod tests {
             observed.expected_truth,
             [
                 xlog_cuda::SemanticTruth::True,
-                xlog_cuda::SemanticTruth::False
+                xlog_cuda::SemanticTruth::False,
+                xlog_cuda::SemanticTruth::False,
             ]
         );
         assert_eq!(
             reordered.expected_truth,
             [
                 xlog_cuda::SemanticTruth::False,
-                xlog_cuda::SemanticTruth::True
+                xlog_cuda::SemanticTruth::True,
+                xlog_cuda::SemanticTruth::True,
             ]
         );
         assert_eq!(observed.program_source, source.as_bytes());

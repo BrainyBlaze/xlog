@@ -1326,7 +1326,7 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
             &self,
             _: Arc<xlog_cuda::CudaKernelProvider>,
         ) -> Result<SemanticTaskObservation, SemanticTransitionError> {
-            let inputs = [[1u32, 1u32], [0u32, 1u32]];
+            let inputs = [[1u32, 1u32], [0u32, 1u32], [1u32, 0u32]];
             let results = inputs.map(|[left, right]| (left + right) / 2);
             Ok(SemanticTaskObservation {
                 program_source: b"fn observe(left: u32, right: u32) -> u32 { (left + right) / 2 }"
@@ -1348,7 +1348,7 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
         }
     }
     let task_spec = || SemanticTaskEvaluationSpec {
-        statement_records: [0, 1],
+        statement_records: [0, 1, 1],
         allowed_support_records: vec![0, 1, 2, 3],
         program: Arc::new(ArithmeticProgram),
         scoring: SemanticTaskScoring {
@@ -1359,7 +1359,7 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
             refusal_weight: 15,
             spent_weight: 1,
         },
-        admissible_truth_masks: [7, 7],
+        admissible_truth_masks: [7, 7, 7],
     };
     #[derive(Debug)]
     struct FailingProgram;
@@ -1441,32 +1441,32 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
         (
             "no edit",
             [[None, None], [None, None]],
-            -6,
-            6,
+            -9,
+            9,
             [None, None],
             [(0, 0, 0), (0, 0, 0)],
         ),
         (
             "two wrong losers",
             [[Some(([0, 1], 0)), None], [Some(([1, 1], 1)), None]],
-            -8,
-            6,
+            -11,
+            9,
             [None, None],
             [(1, 1, 0), (1, 1, 0)],
         ),
         (
             "opposite supports violate the hard constraint",
             [[Some(([1, 1], 0)), Some(([1, 1], 1))], [None, None]],
-            -24,
-            6,
+            -27,
+            9,
             [Some(Refusal::HardConstraint), None],
             [(2, 2, 1), (0, 0, 0)],
         ),
         (
             "one early scope refusal",
             [[Some(([0, 0], 0)), Some(([1, 1], 0))], [None, None]],
-            -19,
-            4,
+            -21,
+            6,
             [Some(Refusal::Scope), None],
             [(0, 0, 0), (0, 0, 0)],
         ),
@@ -1476,16 +1476,16 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
                 [Some(([0, 0], 0)), Some(([1, 1], 0))],
                 [Some(([1, 0], 0)), Some(([0, 1], 1))],
             ],
-            -32,
-            2,
+            -33,
+            3,
             [Some(Refusal::Scope), Some(Refusal::Scope)],
             [(0, 0, 0), (0, 0, 0)],
         ),
         (
-            "both answers become correct",
+            "all answers become correct",
             [[Some(([1, 1], 0)), Some(([0, 1], 1))], [None, None]],
-            1389,
-            6,
+            2016,
+            9,
             [None, None],
             [(2, 2, 0), (0, 0, 0)],
         ),
@@ -1644,7 +1644,7 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
         assert_eq!(evaluation.binding, binding, "{name}");
         assert_eq!(evaluation.return_value, expected_return, "{name}");
         assert_eq!(evaluation.query_count, expected_queries, "{name}");
-        assert_eq!(evaluation.facts[0].correct, [0, 0], "{name}");
+        assert_eq!(evaluation.facts[0].correct, [0, 0, 0], "{name}");
         assert_eq!(evaluation.facts[0].v, 0, "{name}");
         assert_eq!(evaluation.winner, u64::from(expected_return > 0), "{name}");
         for (index, lane) in observation.lanes.iter().enumerate() {
@@ -1667,7 +1667,7 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
             let facts = evaluation.facts[1];
             assert_eq!(
                 (facts.correct, facts.g, facts.p, facts.c, facts.v),
-                ([1, 1], 2, 1, 4, 31)
+                ([1, 1, 1], 3, 1, 4, 45)
             );
         }
         drop(session);

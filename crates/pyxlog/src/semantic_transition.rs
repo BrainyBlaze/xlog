@@ -2794,12 +2794,16 @@ fn read_task_evaluation_spec(
     budget: &mut usize,
 ) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
     let statements = ColdValue::read(statements, budget, 0)?;
-    let statements = statements.fields(2)?;
+    let statements = statements.fields(3)?;
     let record_index = |value: &ColdValue| {
         u32::try_from(value.unsigned()?)
             .map_err(|_| invalid("native admitted record index exceeds u32"))
     };
-    let statement_records = [record_index(&statements[0])?, record_index(&statements[1])?];
+    let statement_records = [
+        record_index(&statements[0])?,
+        record_index(&statements[1])?,
+        record_index(&statements[2])?,
+    ];
     let allowed_support_records = ColdValue::read(supports, budget, 0)?
         .sequence()?
         .iter()
@@ -2807,12 +2811,16 @@ fn read_task_evaluation_spec(
         .collect::<PyResult<Vec<_>>>()?;
     let source = ColdValue::read(source, budget, 0)?.text()?.to_owned();
     let queries = ColdValue::read(queries, budget, 0)?;
-    let queries = queries.fields(2)?;
+    let queries = queries.fields(3)?;
     let query_ordinal = |value: &ColdValue| {
         usize::try_from(value.unsigned()?)
             .map_err(|_| invalid("native task query ordinal exceeds host address space"))
     };
-    let query_ordinals = [query_ordinal(&queries[0])?, query_ordinal(&queries[1])?];
+    let query_ordinals = [
+        query_ordinal(&queries[0])?,
+        query_ordinal(&queries[1])?,
+        query_ordinal(&queries[2])?,
+    ];
     let scoring = ColdValue::read(scoring, budget, 0)?;
     let scoring = scoring.fields(6)?;
     let weight = |value: &ColdValue| {
@@ -2828,11 +2836,11 @@ fn read_task_evaluation_spec(
         spent_weight: weight(&scoring[5])?,
     };
     let masks = ColdValue::read(truth_masks, budget, 0)?;
-    let masks = masks.fields(2)?;
+    let masks = masks.fields(3)?;
     let mask = |value: &ColdValue| {
         u8::try_from(value.unsigned()?).map_err(|_| invalid("native task truth mask exceeds u8"))
     };
-    let admissible_truth_masks = [mask(&masks[0])?, mask(&masks[1])?];
+    let admissible_truth_masks = [mask(&masks[0])?, mask(&masks[1])?, mask(&masks[2])?];
     let program = Arc::new(
         xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)
             .map_err(xlog_err)?,
@@ -6859,14 +6867,14 @@ impl PySemanticTransitionController {
     ///
     /// All arguments are mandatory. ``task_scope`` is ``(controller, tenant,
     /// security_scope, request_scope, repository_scope)``. ``statement_records``
-    /// contains the two admitted native observer statement indices;
+    /// contains the three admitted native observer statement indices;
     /// ``allowed_support_records`` contains admitted support indices.
     /// ``task_program_source`` is the complete authored XLOG observer program,
-    /// including all concrete input facts. ``task_query_ordinals`` maps its two
+    /// including all concrete input facts. ``task_query_ordinals`` maps its three
     /// selected zero-arity query results to the ordered statement records.
     /// The native owner executes that program during every cold task binding.
     /// ``task_scoring`` supplies (correct, all_correct, work, improvement,
-    /// refusal, spent) unsigned weights. ``admissible_truth_masks`` supplies two
+    /// refusal, spent) unsigned weights. ``admissible_truth_masks`` supplies three
     /// bit masks over (neither, true, false, both), in that bit order.
     ///
     /// ``live_authorities`` rows are ``(LiveProvenance.canonical(),
@@ -10622,23 +10630,23 @@ mapping = [('source', 1, 7)]
 
     #[test]
     fn feedback_schema_depends_on_layout_not_statement_values() {
-        let first = FeedbackSchema::new([&[0, 1], &[2]]).unwrap();
-        let other = FeedbackSchema::new([&[255, 3], &[4]]).unwrap();
+        let first = FeedbackSchema::new([&[0, 1], &[2], &[3]]).unwrap();
+        let other = FeedbackSchema::new([&[255, 3], &[4], &[5]]).unwrap();
         assert_eq!(first.statement_bytes, 2);
         assert_eq!(first.feature_width, 22);
         assert_eq!(first.identity, other.identity);
         assert_ne!(
             first.identity,
-            FeedbackSchema::new([&[0], &[1]]).unwrap().identity
+            FeedbackSchema::new([&[0], &[1], &[2]]).unwrap().identity
         );
-        assert!(FeedbackSchema::new([&[], &[1]]).is_err());
+        assert!(FeedbackSchema::new([&[], &[1], &[2]]).is_err());
     }
 
     #[test]
     fn feedback_schema_seals_flat_bit_and_presence_order() {
         use sha2::{Digest, Sha256};
 
-        let schema = FeedbackSchema::new([&[0, 1], &[2]]).unwrap();
+        let schema = FeedbackSchema::new([&[0, 1], &[2], &[3]]).unwrap();
         let mut hash = Sha256::new();
         hash.update(b"xlog.feedback.flat-bit-presence.v1\0");
         hash.update(2u64.to_le_bytes());
@@ -10981,7 +10989,7 @@ else:
         let (values, snapshot) = task_inputs("");
         let authority = TaskAuthority::parse(&values).unwrap();
         authority
-            .bind_native_reads(&observation_roots([0, 1], vec![]), &[])
+            .bind_native_reads(&observation_roots([0, 1, 1], vec![]), &[])
             .unwrap();
         let view = authority.replay[0].identity.fields(6).unwrap()[0]
             .fields(9)
@@ -11149,25 +11157,25 @@ else:
         let (values, _) = task_inputs("inputs=inputs[:5]+((),)+inputs[6:]");
         let authority = TaskAuthority::parse(&values).unwrap();
         authority
-            .bind_native_reads(&observation_roots([0, 1], vec![]), &[])
+            .bind_native_reads(&observation_roots([0, 1, 1], vec![]), &[])
             .unwrap();
         assert!(authority
-            .bind_native_reads(&observation_roots([0, 2], vec![]), &[])
+            .bind_native_reads(&observation_roots([0, 2, 2], vec![]), &[])
             .is_err());
         assert!(authority
-            .bind_native_reads(&observation_roots([0, 1], vec![]), &[0])
+            .bind_native_reads(&observation_roots([0, 1, 1], vec![]), &[0])
             .is_err());
         let (values, _) = task_inputs("nodes=nodes[:5]+(('observer','derived',('source',),('target',),(),None,('observer',0)),); inputs=inputs[:4]+(nodes,(),)+inputs[6:]");
         assert!(TaskAuthority::parse(&values).is_err());
         let (values, _) = task_inputs("nodes=nodes[:5]+(('observer','derived',('source',),(),(),None,None),); inputs=inputs[:4]+(nodes,)+inputs[5:]");
         assert!(TaskAuthority::parse(&values)
             .unwrap()
-            .bind_native_reads(&observation_roots([0, 1], vec![]), &[])
+            .bind_native_reads(&observation_roots([0, 1, 1], vec![]), &[])
             .is_err());
     }
 
     fn observation_roots(
-        query_records: [u32; 2],
+        query_records: [u32; 3],
         contributors: Vec<(u32, Option<u32>, u32)>,
     ) -> xlog_cuda::SemanticTaskObservationRoots {
         // This authority-unit input grants nothing. The native material tests
@@ -11185,7 +11193,7 @@ else:
         let extra = "nodes += (('original','derived',('source',),(),(),None,('statement',7)), ('pro','derived',('original',),(),(),None,('support',0)), ('contra','derived',('original',),(),(),None,('support',1))); inputs=inputs[:4]+(nodes,)+inputs[5:]";
         let (values, _) = task_inputs(extra);
         let authority = TaskAuthority::parse(&values).unwrap();
-        let observations = observation_roots([0, 1], vec![(0, Some(7), 0), (0, Some(7), 1)]);
+        let observations = observation_roots([0, 1, 1], vec![(0, Some(7), 0), (0, Some(7), 1)]);
         authority.bind_native_reads(&observations, &[]).unwrap();
         assert!(authority.bind_native_reads(&observations, &[2]).is_err());
         let mut missing = observations.clone();

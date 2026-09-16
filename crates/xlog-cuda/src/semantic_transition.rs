@@ -72,7 +72,7 @@ pub struct SemanticTaskObservation {
     pub program_source: Vec<u8>,
     pub input_bytes: Vec<u8>,
     pub result_bytes: Vec<u8>,
-    pub expected_truth: [crate::SemanticTruth; 2],
+    pub expected_truth: [crate::SemanticTruth; 3],
 }
 
 /// Explicit nonnegative coefficients for query agreement and measured work.
@@ -102,15 +102,16 @@ impl SemanticTaskScoring {
     }
 
     fn validate(self) -> Result<(), SemanticTransitionError> {
-        // Two candidate edits each perform at most one command, attachment, and
-        // defined truth change. At most six queries and four discarded edits
-        // contribute to spent work. Check the entire signed return before upload.
-        let value_span = 2 * u128::from(self.correct_weight)
+        // Two learned candidates each perform at most two commands, attachments,
+        // and defined truth changes. At most nine queries plus eight discarded
+        // command/truth units contribute to spent work. Check the entire signed
+        // return before upload.
+        let value_span = 3 * u128::from(self.correct_weight)
             + u128::from(self.all_correct_weight)
             + 6 * u128::from(self.work_weight);
         let return_bound = value_span * u128::from(self.improvement_weight)
             + 2 * u128::from(self.refusal_weight)
-            + 14 * u128::from(self.spent_weight);
+            + 17 * u128::from(self.spent_weight);
         if return_bound > i64::MAX as u128 {
             return Err(publication_input_error(
                 "task scoring can overflow the signed return",
@@ -120,20 +121,20 @@ impl SemanticTaskScoring {
     }
 }
 
-/// Two ordered query selections for the bounded transition ABI. Predicate,
+/// Three ordered query selections for the bounded transition ABI. Predicate,
 /// arguments, observer program, eligibility, and scoring are application inputs.
 /// This specification carries no authority; only the application controller may
 /// attach an authorized task to its retained semantic session.
 #[derive(Clone, Debug)]
 pub struct SemanticTaskEvaluationSpec {
     /// Original statement records in the retained admission, in observer order.
-    pub statement_records: [u32; 2],
+    pub statement_records: [u32; 3],
     /// Admitted support records, each retaining its original statement association.
     pub allowed_support_records: Vec<u32>,
     pub program: Arc<dyn SemanticTaskProgram>,
     pub scoring: SemanticTaskScoring,
     /// Bit n permits Truth4 value n for the corresponding candidate query.
-    pub admissible_truth_masks: [u8; 2],
+    pub admissible_truth_masks: [u8; 3],
 }
 
 /// Owner-validated cold read coverage for a task's queried semantic heads.
@@ -145,7 +146,7 @@ pub struct SemanticTaskObservationRoots {
     pub root_digest: Identity256,
     pub root_extents: [u32; 3],
     /// Original admitted query selections, retaining their order.
-    pub query_records: [u32; 2],
+    pub query_records: [u32; 3],
     /// Query ordinal, genuine original insertion target (absent for a derived
     /// target), and original support record. Ordered by query, then insertion.
     /// A matching query value never supplies an absent original target.
@@ -253,7 +254,7 @@ pub(crate) struct TaskEvaluationBinding {
     admission_identity: Identity256,
     schema_generation: Identity256,
     spec: SemanticTaskEvaluationSpec,
-    statements: [crate::SemanticStatementKey; 2],
+    statements: [crate::SemanticStatementKey; 3],
     statement_bytes: BTreeMap<u32, Vec<u8>>,
     allowed_supports: Vec<(u32, [u8; 32])>,
     observation: SemanticTaskObservation,
@@ -273,6 +274,9 @@ impl TaskEvaluationBinding {
             admission
                 .statement_key(spec.statement_records[1])
                 .map_err(SemanticTransitionError::Semantic)?,
+            admission
+                .statement_key(spec.statement_records[2])
+                .map_err(SemanticTransitionError::Semantic)?,
         ];
         let statement_bytes = BTreeMap::from([
             (
@@ -289,6 +293,14 @@ impl TaskEvaluationBinding {
                     admission.records(),
                     &admission.encoded_records,
                     spec.statement_records[1],
+                )?,
+            ),
+            (
+                spec.statement_records[2],
+                feedback_statement_payload(
+                    admission.records(),
+                    &admission.encoded_records,
+                    spec.statement_records[2],
                 )?,
             ),
         ]);
@@ -321,7 +333,7 @@ impl TaskEvaluationBinding {
 
     pub(crate) fn identity(&self) -> Identity256 {
         let mut hash = Sha256::new();
-        hash.update(b"xlog.semantic.task-evaluation.v4\0");
+        hash.update(b"xlog.semantic.task-evaluation.v5\0");
         hash.update(self.admission_identity.as_bytes());
         hash.update(self.schema_generation.as_bytes());
         // Keep source occurrence and explicit selection order separate from
@@ -363,7 +375,7 @@ impl TaskEvaluationBinding {
     }
 
     pub(crate) fn words(&self, owner: u64) -> Vec<u64> {
-        let mut words = vec![3, owner];
+        let mut words = vec![4, owner];
         words.extend(identity_words(*self.identity().as_bytes()));
         for statement in self.statements {
             words.extend(identity_words(*statement.identity().as_bytes()));
@@ -950,15 +962,15 @@ fn canonical_text_null(receipt: &SemanticTransitionReceipt) -> bool {
         && receipt.mass == 1 << 63
 }
 
-/// Device-computed facts, using the two actual canonical truth-query results.
+/// Device-computed facts, using the three actual canonical truth-query results.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SemanticTaskFacts {
     /// Equality of each actual Truth4 answer to the protected observer result.
-    pub correct: [u64; 2],
-    /// Number of correct subgoals, in the inclusive range zero to two.
+    pub correct: [u64; 3],
+    /// Number of correct subgoals, in the inclusive range zero to three.
     pub g: u64,
-    /// Parent completion: both subgoals are correct (zero or one).
+    /// Parent completion: all three subgoals are correct (zero or one).
     pub p: u64,
     /// Actual edit commands plus added supports plus defined truth changes.
     pub c: u64,
@@ -972,7 +984,7 @@ pub struct SemanticTaskFacts {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DeviceTaskEvaluation {
     lane_refusal: [u64; 2],
-    query_receipts: [[[u64; 42]; 2]; 3],
+    query_receipts: [[[u64; 42]; 3]; 3],
     query_count: u64,
     winner: u64,
     return_value: i64,
@@ -1978,7 +1990,7 @@ fn validate_publication_counts(counts: &[u64; 55]) -> Result<usize, SemanticTran
     let mut total = 0u64;
     for (index, &count) in counts.iter().enumerate() {
         let role = index as u64 + 1;
-        if (!is_tensor_role(role) && count != if role == 16 { 2 } else { 1 })
+        if (!is_tensor_role(role) && count != if role == 16 { 3 } else { 1 })
             || (matches!(role, 8..=13) && count != 1)
             || (role == 18 && count == 0)
         {
@@ -3038,7 +3050,7 @@ const _: () = assert!(size_of::<PublicationStorageEntry>() == 24);
 const _: () = assert!(size_of::<PublicationRange>() == 128);
 const _: () = assert!(size_of::<PublicationHeader>() == 488);
 const _: () = assert!(size_of::<PublicationControl>() == 144);
-const _: () = assert!(size_of::<PublicationBank>() == 44360);
+const _: () = assert!(size_of::<PublicationBank>() == 45392);
 const _: () = assert!(size_of::<PublicationRoleCount>() == 16);
 const _: () = assert!(size_of::<SemanticModelContractLayout>() == 48);
 const _: () = assert!(size_of::<PublicationContract>() == 272);
@@ -6861,10 +6873,10 @@ pub struct SemanticFeedbackSchema {
 }
 
 impl SemanticFeedbackSchema {
-    pub fn new(statements: [&[u8]; 2]) -> Result<Self, SemanticTransitionError> {
+    pub fn new(statements: [&[u8]; 3]) -> Result<Self, SemanticTransitionError> {
         if statements.iter().any(|statement| statement.is_empty()) {
             return Err(publication_input_error(
-                "native feedback requires two nonempty typed statements",
+                "native feedback requires three nonempty typed statements",
             ));
         }
         let statement_bytes = statements
@@ -7452,7 +7464,7 @@ fn validate_parent_records(
         parent.ring_head,
         parent.provenance_records,
     )?;
-    if parent.feedback_capacity < 2
+    if parent.feedback_capacity < 3
         || parent.rng.stream_serial >= 1 << 56
         || u64::from(parent.rng.model_generation) != parent.model_generation
         || parent.pad_token >= TEXT_CARDINALITY as u64
@@ -8154,9 +8166,9 @@ content_kernel_parameter!(SemanticTensorLayout);
 content_kernel_parameter!(ContinuationInputs);
 
 const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 264);
-const _: () = assert!(size_of::<SemanticTaskFacts>() == 56);
-const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 2224);
-const _: () = assert!(size_of::<DeviceState>() == 5920);
+const _: () = assert!(size_of::<SemanticTaskFacts>() == 64);
+const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3256);
+const _: () = assert!(size_of::<DeviceState>() == 6952);
 const _: () = assert!(size_of::<PolicyField>() == 24);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 480);
 const _: () = assert!(size_of::<PolicyBackward>() == 64);
@@ -8202,7 +8214,7 @@ mod task_state_contract {
 
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
-        assert_eq!(size_of::<DeviceState>(), 5920);
+        assert_eq!(size_of::<DeviceState>(), 6952);
         assert_eq!(size_of::<Descriptor>(), 736);
     }
 
@@ -9064,18 +9076,20 @@ impl SemanticTransitionSession {
             let transition =
                 validate_prepared_completion(&lease, &parent, &result, storage.instance)?;
             let state = self.publication_read(state_view)?[0];
-            let work = self.steps[&step.token]
-                .prepared
-                .as_ref()
-                .expect("original prepared owner")
-                .model_work
-                .as_ref()
-                .ok_or(SemanticTransitionError::ObservationMismatch)?;
-            if !state
-                .execution_work
-                .validate_model(&work.recording, state.status == 11)
-            {
-                return Err(SemanticTransitionError::ObservationMismatch);
+            if transition != SemanticTransitionKind::Drain {
+                let work = self.steps[&step.token]
+                    .prepared
+                    .as_ref()
+                    .expect("original prepared owner")
+                    .model_work
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                if !state
+                    .execution_work
+                    .validate_model(&work.recording, state.status == 11)
+                {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
             }
             let components = if transition == SemanticTransitionKind::Proposal {
                 self.publication_read(receipts)?
@@ -9206,7 +9220,7 @@ mod prepared_completion_tests {
 
     #[test]
     fn prepared_allocation_plan_counts_original_banks_before_expanding_bound() {
-        let schema = SemanticFeedbackSchema::new([&[1u8; 64], &[2u8; 64]]).unwrap();
+        let schema = SemanticFeedbackSchema::new([&[1u8; 64], &[2u8; 64], &[3u8; 64]]).unwrap();
         let feedback = FeedbackAllocationPlan::new(&schema, 2, 3).unwrap();
         let expected_feedback = 2 * schema.feature_width * size_of::<f32>()
             + 2 * 9
@@ -9256,11 +9270,11 @@ mod prepared_completion_tests {
                 + size_of::<PreparedStepResult>()) as u64
         );
         assert_eq!(
-            prepared_segment_allocation_bytes(step_bytes, 3).unwrap(),
+            prepared_segment_allocation_bytes(step_bytes, 3, 0).unwrap(),
             3 * step_bytes
         );
-        assert!(prepared_segment_allocation_bytes(step_bytes, 0).is_err());
-        assert!(prepared_segment_allocation_bytes(step_bytes, usize::MAX).is_err());
+        assert!(prepared_segment_allocation_bytes(step_bytes, 0, 0).is_err());
+        assert!(prepared_segment_allocation_bytes(step_bytes, usize::MAX, 0).is_err());
     }
 
     #[test]
@@ -11969,6 +11983,7 @@ impl SemanticTransitionSession {
             (15, 0, vec![0; feedback_capacity], feedback_capacity, 0),
             (16, 0, statements[0].clone(), statements[0].len(), 0),
             (16, 1, statements[1].clone(), statements[1].len(), 0),
+            (16, 2, statements[2].clone(), statements[2].len(), 0),
             (
                 33,
                 0,
@@ -15390,13 +15405,13 @@ impl SemanticTransitionSession {
         Ok(task.spec())
     }
 
-    /// Native learned-value projection for the two fixed queries, in query order.
+    /// Native learned-value projection for the three fixed queries, in query order.
     /// Each payload is a length-delimited canonical predicate/arity/argument
     /// byte sequence followed by the ordered, length-delimited qualifier values.
     /// Encoding-domain and schema-digest service headers are excluded. The
     /// original qualified key identity remains separately bound to the task.
     /// These schema bytes contain no observer answers or use authority.
-    pub fn feedback_statement_bytes(&self) -> Result<[&[u8]; 2], SemanticTransitionError> {
+    pub fn feedback_statement_bytes(&self) -> Result<[&[u8]; 3], SemanticTransitionError> {
         let selected = self.task_evaluation_spec()?.statement_records;
         let (task, _) = self
             .task
@@ -16967,9 +16982,9 @@ impl SemanticTransitionSession {
         let mut integrity_error = None;
         let task_evaluation = if let Some((binding, _)) = &self.task {
             let task = &state.task_evaluation;
-            if task.query_count < 2
-                || task.query_count > 6
-                || task.query_count % 2 != 0
+            if task.query_count < 3
+                || task.query_count > 9
+                || task.query_count % 3 != 0
                 || task.winner > 2
                 || task.facts[task.winner as usize].eligible != 1
                 || task.lane_refusal.iter().any(|&code| code > 2)
@@ -19569,7 +19584,7 @@ mod text_parent_tests {
             .unwrap();
         let mut session = SemanticTransitionSession::from_hypergraph(graph).unwrap();
         session
-            .bind_task_evaluation(task_binding_tests::task_spec([0, 1], vec![]))
+            .bind_task_evaluation(task_binding_tests::task_spec([0, 1, 1], vec![]))
             .unwrap();
         session
     }
@@ -21265,7 +21280,7 @@ mod text_parent_tests {
             Err(SemanticTransitionError::Poisoned)
         ));
         assert!(matches!(
-            session.bind_task_evaluation(task_binding_tests::task_spec([0, 1], vec![])),
+            session.bind_task_evaluation(task_binding_tests::task_spec([0, 1, 1], vec![])),
             Err(SemanticTransitionError::Poisoned)
         ));
         assert!(session.is_poisoned());
@@ -22466,7 +22481,7 @@ mod text_parent_tests {
             .chain(3..=13)
             .chain(15..=17)
             .chain(std::iter::once(44))
-            .flat_map(|role| (0..if role == 16 { 2 } else { 1 }).map(move |index| (role, index)))
+            .flat_map(|role| (0..if role == 16 { 3 } else { 1 }).map(move |index| (role, index)))
         {
             let layout = if role == 1 {
                 SemanticTensorLayout {
@@ -23852,7 +23867,7 @@ pub(crate) mod task_binding_tests {
     }
 
     pub(crate) fn arithmetic_observation() -> SemanticTaskObservation {
-        let inputs = [[1u32, 1u32], [0u32, 1u32]];
+        let inputs = [[1u32, 1u32], [0u32, 1u32], [1u32, 0u32]];
         let results = inputs.map(|[left, right]| (left + right) / 2);
         SemanticTaskObservation {
             program_source: b"fn observe(left: u32, right: u32) -> u32 { (left + right) / 2 }"
@@ -23874,7 +23889,7 @@ pub(crate) mod task_binding_tests {
     }
 
     pub(crate) fn task_spec(
-        statement_records: [u32; 2],
+        statement_records: [u32; 3],
         allowed_support_records: Vec<u32>,
     ) -> SemanticTaskEvaluationSpec {
         SemanticTaskEvaluationSpec {
@@ -23889,7 +23904,7 @@ pub(crate) mod task_binding_tests {
                 refusal_weight: 15,
                 spent_weight: 1,
             },
-            admissible_truth_masks: [7, 7],
+            admissible_truth_masks: [7, 7, 7],
         }
     }
 
@@ -23954,7 +23969,7 @@ pub(crate) mod task_binding_tests {
     fn task_query_validation_does_not_interpret_argument_values() {
         let mut records = carry_records();
         records.records[0].arguments = vec![SemanticArgument::U32(17), SemanticArgument::U32(23)];
-        task_spec([0, 1], vec![0])
+        task_spec([0, 1, 1], vec![0])
             .validate_records(&records)
             .unwrap();
     }
@@ -23964,12 +23979,19 @@ pub(crate) mod task_binding_tests {
         let observation = arithmetic_observation();
         assert_eq!(
             observation.input_bytes,
-            [1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]
+            [1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,]
         );
-        assert_eq!(observation.result_bytes, [1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            observation.result_bytes,
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
         assert_eq!(
             observation.expected_truth,
-            [crate::SemanticTruth::True, crate::SemanticTruth::False]
+            [
+                crate::SemanticTruth::True,
+                crate::SemanticTruth::False,
+                crate::SemanticTruth::False,
+            ]
         );
     }
 
@@ -23981,14 +24003,14 @@ pub(crate) mod task_binding_tests {
                 .unwrap()
                 .identity()
         };
-        let original = identity(task_spec([0, 1], vec![0]), arithmetic_observation());
+        let original = identity(task_spec([0, 1, 1], vec![0]), arithmetic_observation());
         assert_eq!(
             original,
-            identity(task_spec([0, 1], vec![0]), arithmetic_observation()),
+            identity(task_spec([0, 1, 1], vec![0]), arithmetic_observation()),
             "independent bindings with identical bytes must have the same identity"
         );
-        for changed in 0..13 {
-            let mut spec = task_spec([0, 1], vec![0]);
+        for changed in 0..15 {
+            let mut spec = task_spec([0, 1, 1], vec![0]);
             let mut observation = arithmetic_observation();
             let field = match changed {
                 0 => {
@@ -24012,36 +24034,44 @@ pub(crate) mod task_binding_tests {
                     "second expected truth"
                 }
                 5 => {
+                    observation.expected_truth[2] = crate::SemanticTruth::Neither;
+                    "third expected truth"
+                }
+                6 => {
                     spec.scoring.correct_weight += 1;
                     "correct weight"
                 }
-                6 => {
+                7 => {
                     spec.scoring.all_correct_weight += 1;
                     "all-correct weight"
                 }
-                7 => {
+                8 => {
                     spec.scoring.work_weight += 1;
                     "work weight"
                 }
-                8 => {
+                9 => {
                     spec.scoring.improvement_weight += 1;
                     "improvement weight"
                 }
-                9 => {
+                10 => {
                     spec.scoring.refusal_weight += 1;
                     "refusal weight"
                 }
-                10 => {
+                11 => {
                     spec.scoring.spent_weight += 1;
                     "spent weight"
                 }
-                11 => {
+                12 => {
                     spec.admissible_truth_masks[0] = 15;
                     "first truth mask"
                 }
-                _ => {
+                13 => {
                     spec.admissible_truth_masks[1] = 15;
                     "second truth mask"
+                }
+                _ => {
+                    spec.admissible_truth_masks[2] = 15;
+                    "third truth mask"
                 }
             };
             assert_ne!(
@@ -24055,9 +24085,9 @@ pub(crate) mod task_binding_tests {
     #[test]
     fn task_truth_eligibility_requires_nonempty_four_valued_masks() {
         let admission = crate::semantic_hypergraph::tests::admit_material_records(carry_records());
-        for slot in 0..2 {
+        for slot in 0..3 {
             for mask in [0, 16, 128, 255] {
-                let mut spec = task_spec([0, 1], vec![0]);
+                let mut spec = task_spec([0, 1, 1], vec![0]);
                 spec.admissible_truth_masks[slot] = mask;
                 let result =
                     TaskEvaluationBinding::bind(&admission, spec, arithmetic_observation());
@@ -24068,7 +24098,7 @@ pub(crate) mod task_binding_tests {
                 );
             }
             for mask in 1..=15 {
-                let mut spec = task_spec([0, 1], vec![0]);
+                let mut spec = task_spec([0, 1, 1], vec![0]);
                 spec.admissible_truth_masks[slot] = mask;
                 TaskEvaluationBinding::bind(&admission, spec, arithmetic_observation()).unwrap();
             }
@@ -24316,7 +24346,7 @@ pub(crate) mod task_binding_tests {
 
     #[test]
     fn task_scoring_rejects_signed_return_overflow() {
-        let mut spec = task_spec([0, 1], vec![0]);
+        let mut spec = task_spec([0, 1, 1], vec![0]);
         spec.scoring.correct_weight = u32::MAX;
         spec.scoring.improvement_weight = u32::MAX;
         assert!(spec.validate_records(&carry_records()).is_err());
@@ -24324,7 +24354,7 @@ pub(crate) mod task_binding_tests {
 
     #[test]
     fn cold_task_binding_requires_admitted_statement_scope() {
-        let spec = task_spec([0, 1], vec![0]);
+        let spec = task_spec([0, 1, 1], vec![0]);
         spec.validate_records(&carry_records()).unwrap();
         for invalid in 0..4 {
             let mut records = carry_records();
@@ -24336,10 +24366,10 @@ pub(crate) mod task_binding_tests {
             }
             assert!(spec.validate_records(&records).is_err(), "case {invalid}");
         }
-        assert!(task_spec([0, 2], vec![])
+        assert!(task_spec([0, 2, 2], vec![])
             .validate_records(&carry_records())
             .is_err());
-        assert!(task_spec([0, 1], vec![1])
+        assert!(task_spec([0, 1, 1], vec![1])
             .validate_records(&carry_records())
             .is_err());
     }
