@@ -12,6 +12,8 @@ use crate::semantic_transition::{
 };
 use crate::{CudaFunction, CudaKernelProvider, DeviceRepr, LaunchAsync, LaunchConfig};
 
+type TrainingViewPort = (DeviceMemoryView<u8>, Vec<i64>, Vec<i64>, (u8, u8));
+
 const MODULE: &str = "xlog_semantic_training_view";
 const SELECT_KERNEL: &str = "semantic_training_view_select";
 const GATHER_KERNEL: &str = "semantic_training_view_gather";
@@ -244,7 +246,7 @@ impl SemanticSelectedTrainingView {
     pub(crate) fn port(
         &self,
         port: SemanticTrainingViewPort,
-    ) -> Result<(DeviceMemoryView<u8>, Vec<i64>, Vec<i64>, (u8, u8)), SemanticTransitionError> {
+    ) -> Result<TrainingViewPort, SemanticTransitionError> {
         let (view, cells, dtype) = match port {
             SemanticTrainingViewPort::Selection => (
                 unsafe { self.storage.selection.view().cast::<u8>() }
@@ -611,7 +613,7 @@ fn validate_row(
         || word(128) == 0
         || word(128) > word(104)
         || expected != Some(bytes.len())
-        || raw_offset % 8 != 0
+        || !raw_offset.is_multiple_of(8)
     {
         return Err(input_error(
             "training-view row has invalid extent or geometry",

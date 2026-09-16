@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
 use xlog_prob::compilation::gpu_cache::hash_cnf_gpu;
 use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};

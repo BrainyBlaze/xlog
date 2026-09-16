@@ -4155,7 +4155,7 @@ mod tests {
             access: Access::ReadWrite,
         });
         let source = Arc::new(source);
-        let combined = MemoryAccessManifest::combine(&[source.clone()]);
+        let combined = MemoryAccessManifest::combine(std::slice::from_ref(&source));
         drop(source);
         assert!(weak.upgrade().is_some());
         assert!(combined.covers(&[(17, MemoryUse::new(0x1010, 16, Access::Read).unwrap())]));
@@ -4229,7 +4229,7 @@ mod tests {
 
         // The sole real owner now enters physical reclamation. Failed and
         // unwinding driver waits retain both its allocation and its admission.
-        let mut attempt = |owner: &mut Payload| {
+        let attempt = |owner: &mut Payload| {
             crate::device_runtime::resource::with_reclamation_admission(
                 &registry,
                 7,
@@ -4239,7 +4239,7 @@ mod tests {
                 || Err(ResourceError::Driver("physical completion pending".into())),
             )
         };
-        assert!(reclaim_shared_allocation(&mut pending, &mut attempt).is_err());
+        assert!(reclaim_shared_allocation(&mut pending, attempt).is_err());
         assert!(observer.upgrade().is_none());
         let queue = std::sync::Mutex::new(vec![pending.take()]);
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

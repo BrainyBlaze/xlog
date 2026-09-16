@@ -224,6 +224,7 @@ impl ModelWorkRecording {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "semantic-policy"))]
     pub(crate) fn freeze(&mut self) -> Result<u64, &'static str> {
         if self.frozen || self.events.is_empty() || self.bound == 0 {
             return Err("model work requires one nonempty original recording and a single freeze");
@@ -260,6 +261,7 @@ pub(crate) struct ExecutionWork {
 }
 
 impl ExecutionWork {
+    #[cfg(any(test, feature = "semantic-policy"))]
     pub(crate) fn validate_model(
         &self,
         recording: &ModelWorkRecording,

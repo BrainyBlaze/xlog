@@ -3268,10 +3268,6 @@ impl EpistemicGpuRuntimeWcojCertification {
     }
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "variants borrow the exact typed GPU column owners required by each arity; boxing would add allocation and indirection to every launch"
-)]
 enum TupleSourceLaunch<'a> {
     ArityZero {
         literal_index: u32,

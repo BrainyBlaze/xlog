@@ -277,6 +277,7 @@ pub(crate) fn guarded_python_callback<T>(
 }
 
 /// Export storage after the caller selected the consumer's DLPack stream.
+#[cfg(test)]
 pub(crate) fn dlpack_export_for_stream(
     obj: &Bound<'_, PyAny>,
     stream: Option<i64>,

@@ -18,10 +18,6 @@ pub struct IlpRegistry {
 }
 
 /// A registered ILP mask — Dense (imported via DLPack) or Sparse (candidate entries only).
-#[expect(
-    clippy::large_enum_variant,
-    reason = "registered masks own their GPU buffers inline so lookup does not add allocation or indirection"
-)]
 pub enum IlpMask {
     /// Dense mask with hard and soft weight buffers.
     Dense {

@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::DeviceSlice;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::CudaKernelProvider;

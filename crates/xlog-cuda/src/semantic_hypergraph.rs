@@ -367,6 +367,7 @@ impl SemanticRootMaterial {
     }
 
     /// Resolves retained text once for the existing cold typed-admission path.
+    #[cfg(test)]
     pub(crate) fn admission_records(
         &self,
     ) -> Result<SemanticAdmissionRecords, SemanticHypergraphError> {
@@ -2310,6 +2311,13 @@ pub(crate) struct SemanticResidentCandidateHandle<'a> {
 }
 
 /// Explicit query source; roots never require acquiring a mutable candidate.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "root and fork construction is exercised by the CUDA resident-query qualification"
+    )
+)]
 pub(crate) enum SemanticResidentView<'a> {
     Root(SemanticResidentRootHandle<'a>),
     Fork(SemanticResidentCandidateHandle<'a>),

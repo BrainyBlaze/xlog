@@ -1874,6 +1874,10 @@ struct TextBindingStorage {
     parent: TextBindingParent,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the published header stays inline on the latency-sensitive export path"
+)]
 enum TextBindingParent {
     Published {
         bank: usize,
@@ -2057,7 +2061,7 @@ fn tensor_layout_bytes(layout: &SemanticTensorLayout) -> Result<usize, SemanticT
     let mut span = layout.element_bytes;
     for axis in axes {
         let stride = layout.strides_bytes[axis];
-        if stride < span || stride % layout.element_bytes != 0 {
+        if stride < span || !stride.is_multiple_of(layout.element_bytes) {
             return Err(publication_input_error(
                 "overlapping or unaligned tensor layout",
             ));
@@ -3185,7 +3189,10 @@ impl PublicationMaterialRange {
             || self.range.logical_begin != 0
             || (self.range.role != 15 && self.range.logical_end != 0)
             || (self.range.role == 15
-                && (self.bytes.len() % size_of::<RawFeedbackRecord>() != 0
+                && (!self
+                    .bytes
+                    .len()
+                    .is_multiple_of(size_of::<RawFeedbackRecord>())
                     || self.range.logical_end
                         > (self.bytes.len() / size_of::<RawFeedbackRecord>()) as u64))
             || self.original_record_digest() != self.range.digest
@@ -3346,7 +3353,7 @@ fn publication_action_receipts_digest(
     // publication_logical_codebook_digest and PublicationActionReceiptBytes:
     // owner/slot/generation and the runtime admission binding are audit data.
     let bytes = &codebook.bytes;
-    if codebook.range.role != 48 || bytes.len() < 25 * 8 || bytes.len() % 8 != 0 {
+    if codebook.range.role != 48 || bytes.len() < 25 * 8 || !bytes.len().is_multiple_of(8) {
         return Err(publication_input_error(
             "replay action codebook has another native extent",
         ));
@@ -3987,6 +3994,10 @@ fn runtime_contract_bytes(
     Ok(bytes)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the authenticated model mode is defined by independent publication owners"
+)]
 fn verified_runtime_model_mode<'a>(
     bytes: &'a [u8],
     contract: PublicationContract,
@@ -4539,7 +4550,10 @@ fn upload_publication<T: DeviceRepr>(
 }
 
 impl PublicationStorage {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the guard records each authenticated publication coordinate explicitly"
+    )]
     fn enqueue_content_guard(
         &self,
         domain: &ResidentExecutionDomain,
@@ -4590,6 +4604,10 @@ impl PublicationStorage {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "cold allocation consumes the complete independently owned publication contract"
+    )]
     fn allocate(
         provider: &CudaKernelProvider,
         plans: &[PublicationAllocationPlan],
@@ -4779,18 +4797,17 @@ struct PreparedContinuation {
     execute: CudaFunction,
 }
 
+type ContinuationPayloadPlan = (
+    Vec<(usize, PublicationPayload)>,
+    BTreeMap<(u64, u64), SemanticTensorLayout>,
+);
+
 fn prepare_continuation_payloads(
     storage: &PublicationStorage,
     original: &[PreparedSemanticTensor],
     authority_decisions: &[u8],
     kind: SemanticTransitionKind,
-) -> Result<
-    (
-        Vec<(usize, PublicationPayload)>,
-        BTreeMap<(u64, u64), SemanticTensorLayout>,
-    ),
-    SemanticTransitionError,
-> {
+) -> Result<ContinuationPayloadPlan, SemanticTransitionError> {
     let mut pending_layouts = BTreeMap::new();
     let mut inputs = BTreeMap::new();
     for tensor in original {
@@ -4851,6 +4868,10 @@ fn prepare_continuation_payloads(
 impl PreparedContinuation {
     // Cold geometry and owner preparation. Counts remain original device
     // pointers in inputs; this never snapshots their values or changes layout.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "continuation preparation binds all retained producer and publication owners"
+    )]
     fn prepare(
         provider: &CudaKernelProvider,
         storage: Arc<PublicationStorage>,
@@ -5229,7 +5250,7 @@ impl PreparedStepInputs {
 
     fn allocation_bytes(plans: &[StepInputPlan]) -> Result<usize, SemanticTransitionError> {
         let fixed =
-            size_of::<PublicationHeader>() + 32 * size_of::<SourceSlot>() + 8 * size_of::<u64>();
+            size_of::<PublicationHeader>() + 32 * size_of::<SourceSlot>() + u64::BITS as usize;
         let bytes = plans
             .len()
             .checked_mul(size_of::<PublicationRange>() + size_of::<PublicationStepInput>())
@@ -5400,10 +5421,7 @@ impl PreparedStepInputs {
                 self.ranges.device_ptr_value(),
                 self.ranges.len() * size_of::<PublicationRange>(),
             ),
-            (
-                self.metadata_digests.device_ptr_value(),
-                8 * size_of::<u64>(),
-            ),
+            (self.metadata_digests.device_ptr_value(), u64::BITS as usize),
             (
                 self.bindings.device_ptr_value(),
                 self.bindings.len() * size_of::<PublicationStepInput>(),
@@ -5720,8 +5738,8 @@ impl PreparedStepInputs {
         for input in &self.plans {
             let view = &self.views[&(input.role, input.index)];
             let start = *view.device_ptr();
-            if !step_input_overlap(tensor.data, bytes, start, view.len())?
-                && !(input.role == 1 && bytes == 0 && tensor.data == start)
+            if !(step_input_overlap(tensor.data, bytes, start, view.len())?
+                || input.role == 1 && bytes == 0 && tensor.data == start)
             {
                 continue;
             }
@@ -5821,6 +5839,13 @@ struct StepContentStorage {
     // recorded consumer before clearing any of these actual output owners.
     feedback: Vec<FeedbackBuffers>,
     content: Vec<TensorContentBuffers>,
+    #[cfg_attr(
+        not(feature = "semantic-policy"),
+        expect(
+            dead_code,
+            reason = "adjoints are consumed by the semantic-policy VJP path"
+        )
+    )]
     adjoints: Vec<DeviceMemoryView<u8>>,
     #[cfg(feature = "semantic-policy")]
     policy_vjp_workspaces: Vec<Arc<PolicyVjpWorkspace>>,
@@ -5906,6 +5931,13 @@ struct PreparedSegmentState {
     active: bool,
     finished: bool,
     capturing: bool,
+    #[cfg_attr(
+        not(any(test, feature = "semantic-policy")),
+        expect(
+            dead_code,
+            reason = "submission is owned by the semantic-policy graph path"
+        )
+    )]
     submitted: bool,
     completed: bool,
 }
@@ -5917,7 +5949,7 @@ impl PreparedSegmentState {
         transitions: impl ExactSizeIterator<Item = SemanticTransitionKind> + Clone,
     ) -> Result<Self, SemanticTransitionError> {
         if tokens.is_empty()
-            || tokens.iter().any(|&token| token == 0)
+            || tokens.contains(&0)
             || tokens.iter().copied().collect::<BTreeSet<_>>().len() != tokens.len()
             || tokens.len() != transitions.len()
             || transitions
@@ -6042,6 +6074,7 @@ impl PreparedSegmentState {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "semantic-policy"))]
     fn submit(&mut self) -> Result<(), SemanticTransitionError> {
         if !self.finished
             || self.active
@@ -6081,6 +6114,13 @@ struct PreparedStepStorage {
     admit: CudaFunction,
     kind_gate: CudaFunction,
     active_gate: CudaFunction,
+    #[cfg_attr(
+        not(feature = "semantic-policy"),
+        expect(
+            dead_code,
+            reason = "drain preparation is captured by the semantic-policy graph"
+        )
+    )]
     drain_prepare: CudaFunction,
     release: CudaFunction,
     witness: CudaFunction,
@@ -6100,7 +6140,21 @@ struct PreparedModelUpdate {
     bindings: TrackedCudaSlice<ModelUpdateBinding>,
     admissibility: TrackedCudaSlice<u8>,
     output: Option<BoundModelUpdate>,
+    #[cfg_attr(
+        not(feature = "semantic-policy"),
+        expect(
+            dead_code,
+            reason = "update admissibility is copied by the semantic-policy graph"
+        )
+    )]
     admissibility_copy: CudaFunction,
+    #[cfg_attr(
+        not(feature = "semantic-policy"),
+        expect(
+            dead_code,
+            reason = "model updates are copied by the semantic-policy graph"
+        )
+    )]
     copy: CudaFunction,
 }
 
@@ -6135,6 +6189,7 @@ impl PreparedModelUpdate {
         }
     }
 
+    #[cfg(feature = "semantic-policy")]
     fn enqueue_copy(
         &self,
         domain: &ResidentExecutionDomain,
@@ -6874,7 +6929,9 @@ fn committed_prefix_layout(
         || range.logical_end > prefix_capacity
         || range.logical_end.checked_mul(row_bytes) != Some(range.length_bytes)
         || i64::try_from(prefix_capacity).is_err()
-        || range.offset_bytes % std::mem::align_of::<SemanticTextSlot>() as u64 != 0
+        || !range
+            .offset_bytes
+            .is_multiple_of(std::mem::align_of::<SemanticTextSlot>() as u64)
     {
         return Err(SemanticTransitionError::ObservationMismatch);
     }
@@ -6908,7 +6965,7 @@ fn publication_export_span(
     let capacity = matches!(range.role, 1 | 4 | 5 | 51..=54);
     if range.generation != 1
         || (range.role, range.index) != (layout.role, layout.index)
-        || range.offset_bytes % layout.element_bytes != 0
+        || !range.offset_bytes.is_multiple_of(layout.element_bytes)
         || begin
             .checked_add(sealed_bytes)
             .is_none_or(|end| end > allocation_bytes)
@@ -7284,7 +7341,10 @@ impl FeedbackBuffers {
     // The caller retains these prepared outputs before the first may-enqueue
     // boundary, including failures and unwinding. This path does not allocate
     // device storage, export tensors, synchronize or insert stream joins.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "feedback execution records every retained native owner explicitly"
+    )]
     fn enqueue(
         &self,
         domain: &ResidentExecutionDomain,
@@ -7388,7 +7448,10 @@ impl SemanticPublishedLease {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "DLPack export retains independent shape, type, alias, and publication owners"
+)]
 fn export_owned_allocation(
     view: DeviceMemoryView<u8>,
     shape: Vec<i64>,
@@ -8412,6 +8475,10 @@ mod task_state_contract {
 /// Completed device outcome. A refusal carries no successor, selected-score
 /// receipts, or derivative authority; it is not a successful observation.
 #[derive(Debug, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "published outcomes retain the original invocation owner without another allocation"
+)]
 pub enum SemanticTransitionOutcome {
     Published(SemanticTransitionObservation),
     Refused(SemanticTransitionRefusal),
@@ -8819,6 +8886,10 @@ pub struct SemanticTransitionSession {
 /// Intermediate root records are historical receipts; a later step may retire
 /// their slots. Acquire the canonical final reader for the current publication.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "completed outcomes retain their original invocation and step owners"
+)]
 pub enum SemanticPreparedStepOutcome {
     Skipped {
         step: SemanticPreparedStep,
@@ -9322,7 +9393,7 @@ mod prepared_completion_tests {
         let input_bytes = PreparedStepInputs::allocation_bytes(&[]).unwrap();
         assert_eq!(
             input_bytes,
-            size_of::<PublicationHeader>() + 32 * size_of::<SourceSlot>() + 8 * size_of::<u64>()
+            size_of::<PublicationHeader>() + 32 * size_of::<SourceSlot>() + u64::BITS as usize
         );
         let plans = [
             StepInputPlan {
@@ -9533,11 +9604,7 @@ impl SemanticTransitionSession {
     ) -> Result<Vec<SemanticPreparedStep>, SemanticTransitionError> {
         self.ensure_rebindable()?;
         let transitions = transitions.collect::<Vec<_>>();
-        if transitions.is_empty()
-            || transitions
-                .iter()
-                .any(|kind| *kind == SemanticTransitionKind::Drain)
-        {
+        if transitions.is_empty() || transitions.contains(&SemanticTransitionKind::Drain) {
             return Err(publication_input_error(
                 "a prepared segment requires frozen proposal, recompute, or update steps",
             ));
@@ -11843,6 +11910,7 @@ impl SemanticTransitionSession {
         Ok(resources)
     }
 
+    #[cfg(feature = "semantic-policy")]
     fn prepared_segment_recorder(&self) -> Result<LaunchRecorder, SemanticTransitionError> {
         let build = self
             .prepared_segment
@@ -12470,7 +12538,7 @@ impl SemanticTransitionSession {
             for allocation in &storage.allocations {
                 // A genuine empty model buffer retains an owner and layout,
                 // but has no device pointer on which to submit a memory write.
-                if allocation.len() == 0 {
+                if allocation.is_empty() {
                     continue;
                 }
                 // SAFETY: all actual fixed allocations were recorded before this
@@ -14162,7 +14230,7 @@ impl SemanticTransitionSession {
             }
             role_counts[index] = count.count;
         }
-        let terminals = if storage.terminals.len() == 0 {
+        let terminals = if storage.terminals.is_empty() {
             Vec::new()
         } else {
             self.publication_read(storage.terminals.view())?
@@ -14171,7 +14239,7 @@ impl SemanticTransitionSession {
         let mut model_allocations = Vec::with_capacity(storage.model_slots.len());
         for slots in &storage.model_slots {
             let allocation = &storage.allocations[slots[(lease.identity.word & 1) as usize]];
-            model_allocations.push(if allocation.len() == 0 {
+            model_allocations.push(if allocation.is_empty() {
                 Vec::new()
             } else {
                 self.publication_read(allocation.view())?
@@ -14680,7 +14748,10 @@ impl SemanticTransitionSession {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "publication export keeps authenticated role and DLPack geometry explicit"
+    )]
     fn export_publication_tensor_view(
         &mut self,
         lease: &SemanticPublishedLease,
@@ -14755,7 +14826,6 @@ impl SemanticTransitionSession {
         self.export_owned_view(view, shape, strides, dtype, guard, consumer_stream)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn export_owned_view(
         &mut self,
         view: DeviceMemoryView<u8>,
@@ -15559,9 +15629,8 @@ impl SemanticTransitionSession {
         let observation = spec
             .program
             .observe(Arc::clone(&self.provider))
-            .map_err(|error| {
+            .inspect_err(|_error| {
                 self.poisoned = true;
-                error
             })?;
         let binding = TaskEvaluationBinding::bind(admission, spec, observation)?;
         let words = binding.words(self.graph.transition_arena()[1]);
@@ -17220,7 +17289,7 @@ impl SemanticTransitionSession {
             let task = &state.task_evaluation;
             if task.query_count < 3
                 || task.query_count > 9
-                || task.query_count % 3 != 0
+                || !task.query_count.is_multiple_of(3)
                 || task.winner > 2
                 || task.facts[task.winner as usize].eligible != 1
                 || task.lane_refusal.iter().any(|&code| code > 2)
@@ -17754,8 +17823,7 @@ impl SemanticTransitionSession {
             ranges.push((device.device_ptr_value(), (device.len() * 8) as u64));
         }
         #[cfg(feature = "semantic-policy")]
-        let ranges = {
-            let mut ranges = ranges;
+        {
             if let Some(policy) = io.policy {
                 for buffer in [
                     &policy.parameters,
@@ -17768,9 +17836,7 @@ impl SemanticTransitionSession {
                     }
                 }
             }
-            ranges
-        };
-        let mut ranges = ranges;
+        }
         if let Some(text) = io.text {
             for input in &text.inputs {
                 if let Some(source) = &input.source {
@@ -19323,7 +19389,7 @@ mod tests {
                 }
                 assert!(session.graph.observe_transition_edit(words).is_err());
             }
-            if failure < 3 || failure >= 5 {
+            if !(3..5).contains(&failure) {
                 assert!(session.is_poisoned());
                 assert!(matches!(
                     session.launch(),
@@ -22705,11 +22771,13 @@ mod text_parent_tests {
         assert!(relocate_publication_codebooks(&[], &[]).is_err());
     }
 
-    fn step_input_geometry_fixture() -> (
+    type StepInputGeometryFixture = (
         [Vec<PublicationRange>; 2],
         BTreeMap<(u64, u64), SemanticTensorLayout>,
         Vec<usize>,
-    ) {
+    );
+
+    fn step_input_geometry_fixture() -> StepInputGeometryFixture {
         let mut layouts = BTreeMap::new();
         let mut banks = [Vec::new(), Vec::new()];
         let mut sizes = Vec::new();
@@ -22800,7 +22868,7 @@ mod text_parent_tests {
         assert_eq!(plan[0].span.len(), 64 * size_of::<SourceSlot>());
         assert_eq!(plan[1].span.len(), 32);
         for input in plan.iter().filter(|input| matches!(input.role, 4 | 5)) {
-            assert_eq!(input.span.len(), 1 * 2 * 64 * 3 * 4);
+            assert_eq!(input.span.len(), 2 * 64 * 3 * 4);
         }
         assert_eq!(size_of::<PublicationStepInput>(), 160);
     }
@@ -23827,7 +23895,7 @@ mod text_parent_tests {
             let end = bytes.len();
             SemanticRecordEncoding {
                 bytes,
-                arguments: vec![start..end],
+                arguments: std::iter::once(start..end).collect(),
             }
         };
         let record = |qualifiers| SemanticTypedRecord {

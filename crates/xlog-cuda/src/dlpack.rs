@@ -272,7 +272,7 @@ pub(crate) unsafe fn dlpack_tensor_metadata(
 
     let scalar = dl_dtype_to_scalar(dl.dtype)?;
     let elem_size = scalar.size_bytes();
-    if dl.byte_offset % (elem_size as u64) != 0 {
+    if !dl.byte_offset.is_multiple_of(elem_size as u64) {
         return Err(XlogError::Kernel(format!(
             "DLPack byte_offset {} is not aligned to element size {}",
             dl.byte_offset, elem_size

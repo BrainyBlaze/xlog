@@ -1,3 +1,11 @@
+#![cfg_attr(
+    not(feature = "semantic-policy"),
+    expect(
+        dead_code,
+        reason = "prepared graph bindings are activated by the semantic-policy feature"
+    )
+)]
+
 //! Python ownership of the canonical admitted semantic session and cold policy layout.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -101,7 +109,10 @@ impl PySemanticTransitionSession {
 impl PySemanticTransitionSession {
     #[new]
     #[pyo3(signature = (*, predicates, records, supports, capacities, admission_limits, device_ordinal, memory_bytes))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "session construction receives independent admission and device budgets"
+    )]
     fn new(
         py: Python<'_>,
         predicates: Vec<PredicateInput>,
@@ -466,7 +477,7 @@ impl<'py> PreparedMemoryScope<'py> {
                 .call1((self.py.None(), self.py.None(), self.py.None()))?
         };
         if !result.is_none()
-            && !(result.is_exact_instance_of::<PyBool>() && !result.extract::<bool>()?)
+            && (!result.is_exact_instance_of::<PyBool>() || result.extract::<bool>()?)
         {
             return Err(invalid(
                 "recording memory scope must not suppress producer or capture failure",
@@ -1104,6 +1115,7 @@ fn parse_tensor_inputs_guarded(
     })
 }
 
+#[cfg(test)]
 fn validate_continuation_producer(
     producer: &Bound<'_, PyAny>,
     expected_device: usize,
@@ -3325,17 +3337,11 @@ impl TaskAuthority {
                     if node.data_parents.is_empty()
                         && node.control_parents.is_empty()
                         && node.live_envelopes.is_empty()
-                        && node.target.is_none() =>
-                {
-                    ()
-                }
+                        && node.target.is_none() => {}
                 "source"
                     if node.data_parents.is_empty()
                         && node.control_parents.is_empty()
-                        && node.target.is_none() =>
-                {
-                    ()
-                }
+                        && node.target.is_none() => {}
                 "mask" | "target_value"
                     if node.target.is_some() && !node.data_parents.is_empty() =>
                 {
@@ -3351,10 +3357,7 @@ impl TaskAuthority {
                 }
                 "derived"
                     if node.target.is_none()
-                        && (!node.data_parents.is_empty() || !node.control_parents.is_empty()) =>
-                {
-                    ()
-                }
+                        && (!node.data_parents.is_empty() || !node.control_parents.is_empty()) => {}
                 _ => {
                     return Err(invalid(
                         "dependency kind does not match its source and target fields",
@@ -6898,7 +6901,10 @@ impl PySemanticTransitionController {
     /// its value equals an admitted query. import_task independently recomputes
     /// this coverage and requires original targets before issuing its TaskUse.
     #[pyo3(signature = (*, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, replay_rows, replay_selection, max_material_bytes, max_total_material_bytes, max_evidence_bytes))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "observation coverage retains every independent task and replay input"
+    )]
     fn task_observation_roots(
         &self,
         py: Python<'_>,
@@ -7081,7 +7087,10 @@ impl PySemanticTransitionController {
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
     #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, live_authorities, replay_rows, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "task import binds the complete authority, replay, and callback contract"
+    )]
     fn import_task(
         &self,
         py: Python<'_>,
@@ -7532,7 +7541,10 @@ impl PySemanticTransitionController {
     /// Native validation checks the acquired source, prefix, services and
     /// generations before pending ranges enter the sole publication CAS.
     #[pyo3(signature = (task_use, *, parent, text_rows, text_row_count, selected_text, active_rows, active_row_count, numerical_admissibility, tensors, producer_witness, consumer_stream))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "continuation binding retains each typed producer and its witness"
+    )]
     fn bind_continuation(
         &self,
         py: Python<'_>,
@@ -7592,7 +7604,10 @@ impl PySemanticTransitionController {
     /// model views and the Bool8[1] numerical admissibility produced after the
     /// selected-view backward and optimizer update.
     #[pyo3(signature = (task_use, *, step, tensors, model_allocations, model_storages, model_views, numerical_admissibility, allocation_witness, consumer_stream))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "prepared update binding retains model geometry and numerical admissibility"
+    )]
     fn bind_prepared_update_output(
         &self,
         py: Python<'_>,
@@ -7733,7 +7748,10 @@ impl PySemanticTransitionController {
     /// retained late-backward tape.
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (task_use, *, step, binding, model_output, text_logits, product_support, parameters, component_baselines, producer_witness, consumer_stream))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "parent binding retains complete publication and model ownership"
+    )]
     fn bind_prepared_policy(
         &self,
         py: Python<'_>,
@@ -7865,7 +7883,10 @@ impl PySemanticTransitionController {
     /// admitted continuation. Acquire of the result remains explicit.
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (task_use, *, parent, binding, model_output, text_logits, product_support, parameters, component_baselines))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "replay import carries independent material and lifecycle callbacks"
+    )]
     fn execute_policy(
         &self,
         py: Python<'_>,
@@ -7966,7 +7987,10 @@ impl PySemanticTransitionController {
     /// ``(role, index, storage, byte_offset)`` in role/index order. View offsets
     /// are relative to that storage, independently of tensor version identity.
     #[pyo3(signature = (task_use, *, metadata, source, prefix, records, tensors, model_allocations, model_storages, model_views))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "execution continuation retains each typed producer and callback guard"
+    )]
     fn bind_parent(
         &self,
         py: Python<'_>,
@@ -8241,7 +8265,10 @@ impl PySemanticTransitionController {
         Ok(state)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "replay import carries independent material and lifecycle callbacks"
+    )]
     fn replay_import(
         &self,
         py: Python<'_>,
@@ -8546,7 +8573,10 @@ impl PySemanticTransitionController {
         finish_with_cleanup(py, comparison, release)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "execution continuation retains each typed producer and callback guard"
+    )]
     fn bind_continuation_in_execution(
         &self,
         py: Python<'_>,
@@ -11632,9 +11662,8 @@ else:
         let callback = Arc::clone(&called);
         let refused = std::thread::spawn(move || {
             super::require_creator_thread(creator)
-                .and_then(|()| {
+                .map(|()| {
                     callback.store(true, Ordering::Release);
-                    Ok(())
                 })
                 .is_err()
         })

@@ -7,7 +7,7 @@ use xlog_core::resolve_bool;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{sat_kernels, SAT_MODULE};
-use xlog_cuda::{AsKernelParam, CudaKernelProvider, DeviceSlice, LaunchAsync};
+use xlog_cuda::{AsKernelParam, CudaKernelProvider, LaunchAsync};
 
 use crate::gpu_cnf::GpuCnf;
 
