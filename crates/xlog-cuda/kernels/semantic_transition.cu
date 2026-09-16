@@ -2055,6 +2055,20 @@ extern "C" __global__ void semantic_publication_step_kind_gate(uint64_t lease_pt
         cudaGraphSetConditional(static_cast<cudaGraphConditionalHandle>(conditional_handle),1);
 }
 
+extern "C" __global__ void semantic_publication_step_kind_bank_gate(uint64_t lease_ptr,
+        uint64_t expected_kind,uint64_t expected_bank,uint64_t conditional_handle) {
+    if(blockIdx.x || threadIdx.x)return;
+    if(!conditional_handle) { semantic_content_integrity_trap();return; }
+    cudaGraphSetConditional(static_cast<cudaGraphConditionalHandle>(conditional_handle),0);
+    if(!publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease))) {
+        semantic_content_integrity_trap();return;
+    }
+    const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
+    if(lease.abi!=1 || lease.status || expected_kind<1 || expected_kind>4 || expected_bank>1)return;
+    if(lease.active==1 && lease.transition_kind==expected_kind && lease.bank==expected_bank)
+        cudaGraphSetConditional(static_cast<cudaGraphConditionalHandle>(conditional_handle),1);
+}
+
 extern "C" __global__ void semantic_publication_step_active_gate(uint64_t lease_ptr,
         uint64_t conditional_handle) {
     if(blockIdx.x || threadIdx.x)return;

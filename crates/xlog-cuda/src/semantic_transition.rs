@@ -39,6 +39,14 @@ use crate::{
     SemanticRecordRole, SemanticRootHandle, SemanticRootSnapshot,
 };
 
+#[cfg(feature = "semantic-policy")]
+type PreparedPolicyStorage = (
+    PolicyBuffers,
+    TrackedCudaSlice<u8>,
+    TrackedCudaSlice<SemanticTransitionReceipt>,
+    TrackedCudaSlice<DeviceState>,
+);
+
 /// Canonical 256-bit identity, preserving byte order without native-word conversion.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -6151,6 +6159,7 @@ struct PreparedStepStorage {
     model_update: Option<PreparedModelUpdate>,
     admit: CudaFunction,
     kind_gate: CudaFunction,
+    kind_bank_gate: CudaFunction,
     active_gate: CudaFunction,
     #[cfg_attr(
         not(feature = "semantic-policy"),
@@ -6165,7 +6174,7 @@ struct PreparedStepStorage {
     content_guard: CudaFunction,
     inputs_recorded: bool,
     continuation: Option<PreparedContinuation>,
-    transition_recorded: bool,
+    transition_recorded: u8,
     drain_recorded: bool,
     observed: bool,
     result: TrackedCudaSlice<PreparedStepResult>,
@@ -6303,7 +6312,11 @@ struct PreparedModelWork {
     device: TrackedCudaSlice<ModelWorkEvent>,
     actual: TrackedCudaSlice<u64>,
     reset: CudaFunction,
+    capture_bank: Option<usize>,
+    replay_cursor: usize,
 }
+
+const PREPARED_TRANSITION_BANKS: u8 = 0b11;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -6314,6 +6327,59 @@ struct ModelWorkInput {
 }
 
 impl PreparedModelWork {
+    #[cfg(feature = "semantic-policy")]
+    fn begin_capture(&mut self, bank: usize, recorded: u8) -> Result<(), &'static str> {
+        if bank > 1 || self.capture_bank.is_some() {
+            return Err("model work capture requires one inactive bank recording");
+        }
+        if (bank == 0 && (recorded != 0 || self.recording.frozen_bound().is_some()))
+            || (bank == 1 && (recorded != 1 || self.recording.frozen_bound().is_none()))
+        {
+            return Err("model work banks must record in zero then one order");
+        }
+        self.capture_bank = Some(bank);
+        self.replay_cursor = 0;
+        Ok(())
+    }
+
+    fn next_slot(&self) -> Result<usize, &'static str> {
+        match self.capture_bank {
+            Some(0) => Ok(self.recording.events().len()),
+            Some(1) => Ok(self.replay_cursor),
+            _ => Err("model work event requires an active prepared bank capture"),
+        }
+    }
+
+    fn record_event(&mut self, event: ModelWorkEvent) -> Result<usize, &'static str> {
+        let slot = self.next_slot()?;
+        match self.capture_bank {
+            Some(0) => self.recording.push(event)?,
+            Some(1) => {
+                if self.recording.events().get(slot) != Some(&event) {
+                    return Err("second model branch differs from original work geometry");
+                }
+                self.replay_cursor += 1;
+            }
+            _ => return Err("model work event requires an active prepared bank capture"),
+        }
+        Ok(slot)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn finish_capture(&mut self, bank: usize) -> Result<(), &'static str> {
+        if self.capture_bank != Some(bank) {
+            return Err("prepared transition differs from its active model work bank");
+        }
+        if bank == 0 {
+            self.recording.freeze()?;
+        } else if self.replay_cursor != self.recording.events().len() {
+            return Err("second model branch omitted original work occurrences");
+        }
+        self.capture_bank = None;
+        self.replay_cursor = 0;
+        Ok(())
+    }
+
     fn reset_slots(
         &self,
         domain: &ResidentExecutionDomain,
@@ -9113,7 +9179,7 @@ impl SemanticTransitionSession {
                 .continuation
                 .as_ref()
                 .ok_or(SemanticTransitionError::NotBound)?;
-            if !prepared.transition_recorded
+            if prepared.transition_recorded != PREPARED_TRANSITION_BANKS
                 || continuation.inputs.authority_bytes != authority_decisions.len() as u64
             {
                 return Err(publication_input_error(
@@ -9795,6 +9861,7 @@ impl SemanticTransitionSession {
         };
         let admit = kernel("semantic_publication_step_admit")?;
         let kind_gate = kernel("semantic_publication_step_kind_gate")?;
+        let kind_bank_gate = kernel("semantic_publication_step_kind_bank_gate")?;
         let active_gate = kernel("semantic_publication_step_active_gate")?;
         let drain_prepare = kernel("semantic_publication_prepare_drain")?;
         let release = kernel("semantic_publication_step_release")?;
@@ -9864,6 +9931,7 @@ impl SemanticTransitionSession {
                     model_update,
                     admit: admit.clone(),
                     kind_gate: kind_gate.clone(),
+                    kind_bank_gate: kind_bank_gate.clone(),
                     active_gate: active_gate.clone(),
                     drain_prepare: drain_prepare.clone(),
                     release: release.clone(),
@@ -9871,7 +9939,7 @@ impl SemanticTransitionSession {
                     content_guard: content_guard.clone(),
                     inputs_recorded: false,
                     continuation: None,
-                    transition_recorded: false,
+                    transition_recorded: 0,
                     drain_recorded: false,
                     observed: false,
                     result,
@@ -10102,6 +10170,8 @@ impl SemanticTransitionSession {
             device,
             actual,
             reset,
+            capture_bank: None,
+            replay_cursor: 0,
         };
         // Initialize the complete exported scratch allocation cold. Each real
         // producer occurrence additionally records its own reset before use.
@@ -10176,7 +10246,7 @@ impl SemanticTransitionSession {
                 .ok_or_else(|| {
                     publication_input_error("model work requires its cold reservation")
                 })?;
-            let slot = work.recording.events().len();
+            let slot = work.next_slot().map_err(publication_input_error)?;
             if slot >= work.actual.len() / 3 {
                 return Err(publication_input_error(
                     "model work exceeds its cold event capacity",
@@ -10189,9 +10259,8 @@ impl SemanticTransitionSession {
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
             let event = ModelWorkEvent::device_operation(kind, upper_dimensions, actual)
                 .map_err(publication_input_error)?;
-            work.recording
-                .push(event)
-                .map_err(publication_input_error)?;
+            let recorded = work.record_event(event).map_err(publication_input_error)?;
+            debug_assert_eq!(recorded, slot);
             work.reset_slots(&self.domain, &mut self.poisoned, slot, 1)?;
             Ok(slot)
         })();
@@ -10214,7 +10283,8 @@ impl SemanticTransitionSession {
         let result = (|| {
             let event =
                 ModelWorkEvent::operation(kind, dimensions).map_err(publication_input_error)?;
-            self.steps
+            let work = self
+                .steps
                 .get_mut(&step.token)
                 .expect("checked original step")
                 .prepared
@@ -10224,9 +10294,9 @@ impl SemanticTransitionSession {
                 .as_mut()
                 .ok_or_else(|| {
                     publication_input_error("model work requires its original cold reservation")
-                })?
-                .recording
-                .push(event)
+                })?;
+            work.record_event(event)
+                .map(|_| ())
                 .map_err(publication_input_error)
         })();
         if result.is_err() {
@@ -10260,7 +10330,7 @@ impl SemanticTransitionSession {
             let content = owner.content.get(witness.index).ok_or_else(|| {
                 publication_input_error("saved work has no retained original tensor occurrence")
             })?;
-            let recording = &mut owner
+            let work = owner
                 .prepared
                 .as_mut()
                 .expect("prepared owner")
@@ -10268,8 +10338,7 @@ impl SemanticTransitionSession {
                 .as_mut()
                 .ok_or_else(|| {
                     publication_input_error("saved work requires its original cold reservation")
-                })?
-                .recording;
+                })?;
             for (index, tensor) in content.tensors.iter().enumerate() {
                 let layout = &tensor.layout;
                 let dimensions = layout
@@ -10283,7 +10352,7 @@ impl SemanticTransitionSession {
                     layout.element_bytes,
                 )
                 .map_err(publication_input_error)?;
-                recording.push(event).map_err(publication_input_error)?;
+                work.record_event(event).map_err(publication_input_error)?;
             }
             Ok(())
         })();
@@ -11693,13 +11762,76 @@ impl SemanticTransitionSession {
         })
     }
 
-    pub fn record_prepared_step_requested_gate(
+    pub fn record_prepared_step_requested_bank_gate(
         &mut self,
         step: &SemanticPreparedStep,
+        bank: usize,
         conditional_handle: u64,
     ) -> Result<(), SemanticTransitionError> {
         let expected = self.prepared_transition_kind(step)?;
-        self.record_prepared_step_kind_gate(step, expected, conditional_handle)
+        self.checked_prepared_step(step, true)?;
+        if bank > 1 || conditional_handle == 0 {
+            return Err(publication_input_error(
+                "prepared bank gate requires bank zero or one and the actual conditional capture handle",
+            ));
+        }
+        let prepared = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("prepared lease owner");
+        let mut recorder = self.domain.new_strict_recorder();
+        recorder.read(&prepared.reader);
+        let arguments = (
+            prepared.reader.device_ptr_value(),
+            expected.code(),
+            bank as u64,
+            conditional_handle,
+        );
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            // SAFETY: the device lease selects exactly one resident input bank;
+            // this conditional exposes neither the lease nor its bank to host code.
+            unsafe {
+                prepared.kind_bank_gate.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    arguments,
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub fn begin_prepared_step_bank_capture(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+    ) -> Result<(), SemanticTransitionError> {
+        self.check_prepared_content_stream(step, self.stream.cu_stream() as u64)?;
+        let prepared = self
+            .steps
+            .get_mut(&step.token)
+            .expect("checked prepared bank step")
+            .prepared
+            .as_mut()
+            .expect("prepared bank owner");
+        let recorded = prepared.transition_recorded;
+        let result = prepared
+            .model_work
+            .as_mut()
+            .ok_or_else(|| publication_input_error("prepared bank requires original model work"))
+            .and_then(|work| {
+                work.begin_capture(bank, recorded)
+                    .map_err(publication_input_error)
+            });
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
     }
 
     pub fn record_prepared_step_drain_gate(
@@ -11816,7 +11948,7 @@ impl SemanticTransitionSession {
             .prepared
             .as_ref()
             .expect("prepared lease");
-        if !prepared.transition_recorded || !prepared.drain_recorded {
+        if prepared.transition_recorded != PREPARED_TRANSITION_BANKS || !prepared.drain_recorded {
             return Err(publication_input_error(
                 "release must follow this prepared step's complete native transition and drain branches",
             ));
@@ -16139,15 +16271,7 @@ impl SemanticTransitionSession {
     fn prepare_step_policy_storage(
         &self,
         reservation: &mut GpuMemoryReservation,
-    ) -> Result<
-        (
-            PolicyBuffers,
-            TrackedCudaSlice<u8>,
-            TrackedCudaSlice<SemanticTransitionReceipt>,
-            TrackedCudaSlice<DeviceState>,
-        ),
-        SemanticTransitionError,
-    > {
+    ) -> Result<PreparedPolicyStorage, SemanticTransitionError> {
         let buffers = self.allocate_policy_buffers_reserved(reservation)?;
         let support = reservation
             .alloc(self.codebooks.input_cells)
@@ -16164,6 +16288,10 @@ impl SemanticTransitionSession {
     /// Retain the original policy producers and bind their already reserved
     /// native banks. No host publication identity or policy draw is created.
     #[cfg(feature = "semantic-policy")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "prepared policy binding retains each typed producer and witness explicitly"
+    )]
     pub fn bind_prepared_policy(
         &mut self,
         step: &SemanticPreparedStep,
@@ -16254,10 +16382,16 @@ impl SemanticTransitionSession {
     pub fn enqueue_prepared_transition(
         &mut self,
         step: &SemanticPreparedStep,
+        bank: usize,
     ) -> Result<(), SemanticTransitionError> {
         self.check_prepared_content_stream(step, self.stream.cu_stream() as u64)?;
+        if bank > 1 {
+            return Err(publication_input_error(
+                "prepared transition bank must be zero or one",
+            ));
+        }
         let kind = self.prepared_transition_kind(step)?;
-        let freeze = self
+        let finish = self
             .steps
             .get_mut(&step.token)
             .expect("checked original step")
@@ -16269,14 +16403,14 @@ impl SemanticTransitionSession {
             .ok_or_else(|| {
                 publication_input_error("prepared transition requires original model work")
             })
-            .and_then(|work| work.recording.freeze().map_err(publication_input_error));
-        if let Err(error) = freeze {
+            .and_then(|work| work.finish_capture(bank).map_err(publication_input_error));
+        if let Err(error) = finish {
             self.poisoned = true;
             return Err(error);
         }
         let owner = &self.steps[&step.token];
         let prepared = owner.prepared.as_ref().expect("prepared transition owner");
-        if prepared.transition_recorded
+        if prepared.transition_recorded & (1 << bank) != 0
             || prepared.continuation.is_none()
             || (kind == SemanticTransitionKind::Proposal && prepared.policy.is_none())
             || (kind != SemanticTransitionKind::Proposal && prepared.policy.is_some())
@@ -16292,15 +16426,12 @@ impl SemanticTransitionSession {
             .content
             .iter()
             .enumerate()
-            .filter_map(|(index, content)| {
-                matches!(content.seals, TensorContentSeals::Model(_)).then(|| {
-                    SemanticTensorContentWitness {
-                        issuer: Arc::clone(&self.publication_issuer),
-                        reader_token: step.token,
-                        index,
-                        _witness: Arc::clone(&owner.content_witnesses),
-                    }
-                })
+            .filter(|(_, content)| matches!(content.seals, TensorContentSeals::Model(_)))
+            .map(|(index, _)| SemanticTensorContentWitness {
+                issuer: Arc::clone(&self.publication_issuer),
+                reader_token: step.token,
+                index,
+                _witness: Arc::clone(&owner.content_witnesses),
             })
             .collect::<Vec<_>>();
         if model_witnesses.is_empty() {
@@ -16390,7 +16521,7 @@ impl SemanticTransitionSession {
             .prepared
             .as_mut()
             .expect("retained original prepared step");
-        prepared.transition_recorded = true;
+        prepared.transition_recorded |= 1 << bank;
         Ok(())
     }
 
@@ -16406,7 +16537,7 @@ impl SemanticTransitionSession {
             .prepared
             .as_ref()
             .expect("prepared drain owner");
-        if !prepared.transition_recorded || prepared.drain_recorded {
+        if prepared.transition_recorded != PREPARED_TRANSITION_BANKS || prepared.drain_recorded {
             return Err(publication_input_error(
                 "prepared drain requires its recorded requested branch and unused drain branch",
             ));
@@ -16493,7 +16624,7 @@ impl SemanticTransitionSession {
             .ok_or_else(|| {
                 publication_input_error("observed prepared policy has no retained original step")
             })?;
-        if !prepared.transition_recorded
+        if prepared.transition_recorded != PREPARED_TRANSITION_BANKS
             || prepared.policy.is_none()
             || prepared.support.is_none()
             || prepared.receipts.is_none()
@@ -16807,7 +16938,10 @@ impl SemanticTransitionSession {
     }
 
     #[cfg(feature = "semantic-policy")]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "policy VJP recording retains each native owner explicitly"
+    )]
     fn prepare_policy_vjp_recording(
         &self,
         policy: &PolicyStorage,

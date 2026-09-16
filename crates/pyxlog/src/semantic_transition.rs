@@ -6256,10 +6256,12 @@ impl PySemanticTransitionController {
 
     /// Record one fixed bounded segment without submitting it. The original
     /// producer prepares cold storage on consumer_stream and returns an owner
-    /// with memory_scope, enqueue_step(step), and finish_segment() methods.
+    /// with memory_scope, enqueue_step(step, bank), and finish_segment() methods.
     /// memory_scope spans allocation/recording through EndCapture/instantiate;
-    /// enqueue_step runs once per slot only while recording and returns None.
-    /// It binds original content, continuation and policy through this controller.
+    /// enqueue_step records both fixed bank branches per slot and returns None.
+    /// Bank zero binds original content, continuation and policy through this
+    /// controller. Bank one replays the same work geometry into those reserved
+    /// output owners without a second binding or allocation.
     /// Python receives neither the graph nor authority to report its completion.
     /// transitions is a nonempty exact tuple of "proposal" or "recompute" modes;
     /// its length fixes the bound and each mode is retained before any callback.
@@ -6418,49 +6420,56 @@ impl PySemanticTransitionController {
                         .unwrap_or_else(|| xlog_err(graph_error)));
                 }
 
-                let requested_error = std::cell::RefCell::new(None);
-                let requested = capture.add_conditional_if(
-                    &stream,
-                    |handle| -> PyResult<()> {
-                        let result = session
-                            .owner()?
-                            .record_prepared_step_requested_gate(&native, handle)
-                            .map_err(xlog_err);
-                        if let Err(value) = &result {
-                            *requested_error.borrow_mut() = Some(value.clone_ref(py));
-                        }
-                        result
-                    },
-                    |body| {
-                        body.capture_on_stream(&stream, || -> PyResult<()> {
-                            let result = (|| {
-                                let enqueue =
-                                    recording_callback(check, || prepared.getattr("enqueue_step"))?;
-                                recording_callback(check, || {
-                                    let value = enqueue.call1((step.clone_ref(py),))?;
-                                    if !value.is_none() {
-                                        return Err(invalid(
-                                            "enqueue_step must return None, not a host result",
-                                        ));
-                                    }
-                                    Ok(())
-                                })?;
-                                session
-                                    .owner()?
-                                    .enqueue_prepared_transition(&native)
-                                    .map_err(xlog_err)
-                            })();
+                for bank in 0..2 {
+                    let requested_error = std::cell::RefCell::new(None);
+                    let requested = capture.add_conditional_if(
+                        &stream,
+                        |handle| -> PyResult<()> {
+                            let result = session
+                                .owner()?
+                                .record_prepared_step_requested_bank_gate(&native, bank, handle)
+                                .map_err(xlog_err);
                             if let Err(value) = &result {
                                 *requested_error.borrow_mut() = Some(value.clone_ref(py));
                             }
                             result
-                        })
-                    },
-                );
-                if let Err(graph_error) = requested {
-                    return Err(requested_error
-                        .into_inner()
-                        .unwrap_or_else(|| xlog_err(graph_error)));
+                        },
+                        |body| {
+                            body.capture_on_stream(&stream, || -> PyResult<()> {
+                                let result = (|| {
+                                    session
+                                        .owner()?
+                                        .begin_prepared_step_bank_capture(&native, bank)
+                                        .map_err(xlog_err)?;
+                                    let enqueue = recording_callback(check, || {
+                                        prepared.getattr("enqueue_step")
+                                    })?;
+                                    recording_callback(check, || {
+                                        let value = enqueue.call1((step.clone_ref(py), bank))?;
+                                        if !value.is_none() {
+                                            return Err(invalid(
+                                                "enqueue_step must return None, not a host result",
+                                            ));
+                                        }
+                                        Ok(())
+                                    })?;
+                                    session
+                                        .owner()?
+                                        .enqueue_prepared_transition(&native, bank)
+                                        .map_err(xlog_err)
+                                })();
+                                if let Err(value) = &result {
+                                    *requested_error.borrow_mut() = Some(value.clone_ref(py));
+                                }
+                                result
+                            })
+                        },
+                    );
+                    if let Err(graph_error) = requested {
+                        return Err(requested_error
+                            .into_inner()
+                            .unwrap_or_else(|| xlog_err(graph_error)));
+                    }
                 }
 
                 let drain_error = std::cell::RefCell::new(None);
@@ -8809,7 +8818,6 @@ impl PySemanticTransitionController {
     }
 
     #[cfg(feature = "semantic-policy")]
-    #[allow(clippy::too_many_arguments)]
     fn issue_prepared_policy_invocation(
         &self,
         py: Python<'_>,
@@ -8866,7 +8874,10 @@ impl PySemanticTransitionController {
     }
 
     #[cfg(feature = "semantic-policy")]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "policy execution binds each typed numerical producer explicitly"
+    )]
     fn execute_policy_in_execution(
         &self,
         py: Python<'_>,
