@@ -165,6 +165,10 @@ unsafe impl DeviceRepr for SemanticTrainingCanaryRecord {}
 pub struct SemanticTrainingViewOriginRecord {
     pub present: u64,
     pub transition: u64,
+    /// Stable historical predecessor identity. Historical rows use their
+    /// original instance; a fresh replay candidate derives it from the restored
+    /// predecessor's recovered-instance seal.
+    pub lineage_instance: [u64; 4],
     pub predecessor_instance: [u64; 4],
     pub predecessor_word: u64,
     pub predecessor_logical: [u64; 4],
@@ -220,6 +224,9 @@ pub struct SemanticTrainingRosterRow {
     pub identity: [u64; 4],
     pub source_identity: [u64; 4],
     pub content_identity: [u64; 4],
+    /// Authenticated historical execution origin for episode rows. The separate
+    /// candidate ordinal, when present, names a successful fresh re-execution.
+    pub origin: SemanticTrainingViewOriginRecord,
 }
 
 // SAFETY: the fixed CUDA ABI contains only u64 words.
@@ -1167,6 +1174,7 @@ fn origin_record(origin: SemanticTrainingViewOrigin) -> SemanticTrainingViewOrig
             SemanticTransitionKind::Drain => 3,
             SemanticTransitionKind::Update => 4,
         },
+        lineage_instance: identity_words(origin.predecessor.instance),
         predecessor_instance: identity_words(origin.predecessor.instance),
         predecessor_word: origin.predecessor.word,
         predecessor_logical: identity_words(origin.predecessor.logical_digest),

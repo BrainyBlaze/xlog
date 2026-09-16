@@ -350,6 +350,7 @@ struct PublicationLease { uint64_t abi,status,instance[4],word,bank,epoch,active
 struct PublicationStepResult { uint64_t abi,word,refusal;PublicationHeader header;uint64_t advanced; };
 struct SemanticTrainingViewOriginRecord {
     uint64_t present,transition;
+    uint64_t lineage_instance[4];
     uint64_t predecessor_instance[4],predecessor_word,predecessor_logical[4],predecessor_state[4];
     uint64_t successor_instance[4],successor_word,successor_logical[4],successor_state[4];
     uint64_t model_generation,stream_serial,family_id,proposal;
@@ -2144,6 +2145,8 @@ extern "C" __global__ void semantic_publication_step_result(uint64_t control_ptr
             const auto& parent=*reinterpret_cast<const PublicationHeader*>(parent_header_ptr);
             origin.present=1;
             origin.transition=lease.transition_kind;
+            uint64_t recovered=0;
+            for(uint32_t i=0;i<4;++i)recovered|=parent.recovered_instance[i];
             origin.predecessor_word=parent.publication_word;
             origin.successor_word=bank.header.publication_word;
             origin.model_generation=parent.model_generation;
@@ -2151,6 +2154,7 @@ extern "C" __global__ void semantic_publication_step_result(uint64_t control_ptr
             origin.family_id=parent.family_id;
             origin.proposal=parent.proposal;
             for(uint32_t i=0;i<4;++i) {
+                origin.lineage_instance[i]=recovered ? parent.recovered_instance[i] : parent.instance[i];
                 origin.predecessor_instance[i]=parent.instance[i];
                 origin.predecessor_logical[i]=parent.logical_digest[i];
                 origin.predecessor_state[i]=parent.state_digest[i];

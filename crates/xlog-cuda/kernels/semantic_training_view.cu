@@ -3,6 +3,7 @@
 struct SemanticTrainingViewOriginRecord {
     uint64_t present;
     uint64_t transition;
+    uint64_t lineage_instance[4];
     uint64_t predecessor_instance[4];
     uint64_t predecessor_word;
     uint64_t predecessor_logical[4];
@@ -66,6 +67,7 @@ struct SemanticTrainingRosterRow {
     uint64_t identity[4];
     uint64_t source_identity[4];
     uint64_t content_identity[4];
+    SemanticTrainingViewOriginRecord origin;
 };
 
 struct TrainingViewLaunch {
@@ -93,25 +95,55 @@ struct TrainingViewLaunch {
     uint64_t parents;
 };
 
-__device__ bool semantic_training_origin_equal(const SemanticTrainingViewOriginRecord& left,
-                                               const SemanticTrainingViewOriginRecord& right) {
-    if (left.present != right.present || left.transition != right.transition ||
-        left.predecessor_word != right.predecessor_word ||
-        left.successor_word != right.successor_word ||
-        left.model_generation != right.model_generation ||
-        left.stream_serial != right.stream_serial || left.family_id != right.family_id ||
-        left.proposal != right.proposal) {
+__device__ bool semantic_training_identity_equal(const uint64_t* left, const uint64_t* right) {
+    for (uint32_t i = 0; i < 4; ++i) {
+        if (left[i] != right[i]) return false;
+    }
+    return true;
+}
+
+__device__ bool semantic_training_identity_present(const uint64_t* identity) {
+    return identity[0] || identity[1] || identity[2] || identity[3];
+}
+
+__device__ bool semantic_training_historical_origin_valid(
+        const SemanticTrainingViewOriginRecord& origin) {
+    if (origin.present != 1 || !semantic_training_identity_present(origin.lineage_instance) ||
+        !semantic_training_identity_equal(origin.lineage_instance, origin.predecessor_instance) ||
+        !semantic_training_identity_equal(origin.predecessor_instance, origin.successor_instance) ||
+        (origin.predecessor_word >> 1) == (UINT64_MAX >> 1)) {
+        return false;
+    }
+    const uint64_t successor_word = (((origin.predecessor_word >> 1) + 1) << 1) |
+        ((origin.predecessor_word & 1) ^ 1);
+    return origin.successor_word == successor_word;
+}
+
+__device__ bool semantic_training_fresh_origin_valid(
+        const SemanticTrainingViewOriginRecord& origin) {
+    return origin.present == 1 && semantic_training_identity_present(origin.lineage_instance) &&
+        semantic_training_identity_equal(origin.predecessor_instance, origin.successor_instance) &&
+        !semantic_training_identity_equal(origin.predecessor_instance, origin.lineage_instance) &&
+        origin.predecessor_word == 0 && origin.successor_word == 3;
+}
+
+__device__ bool semantic_training_origin_matches(const SemanticTrainingViewOriginRecord& historical,
+                                                 const SemanticTrainingViewOriginRecord& fresh) {
+    if (!semantic_training_historical_origin_valid(historical) ||
+        !semantic_training_fresh_origin_valid(fresh) || historical.transition != fresh.transition ||
+        historical.model_generation != fresh.model_generation ||
+        historical.stream_serial != fresh.stream_serial || historical.family_id != fresh.family_id ||
+        historical.proposal != fresh.proposal ||
+        !semantic_training_identity_equal(historical.lineage_instance, fresh.lineage_instance)) {
         return false;
     }
     for (uint32_t i = 0; i < 4; ++i) {
-        if (left.predecessor_instance[i] != right.predecessor_instance[i] ||
-            left.predecessor_logical[i] != right.predecessor_logical[i] ||
-            left.predecessor_state[i] != right.predecessor_state[i] ||
-            left.successor_instance[i] != right.successor_instance[i] ||
-            left.successor_logical[i] != right.successor_logical[i] ||
-            left.successor_state[i] != right.successor_state[i] ||
-            left.model_geometry_digest[i] != right.model_geometry_digest[i] ||
-            left.model_numerical_digest[i] != right.model_numerical_digest[i]) {
+        if (historical.predecessor_logical[i] != fresh.predecessor_logical[i] ||
+            historical.predecessor_state[i] != fresh.predecessor_state[i] ||
+            historical.successor_logical[i] != fresh.successor_logical[i] ||
+            historical.successor_state[i] != fresh.successor_state[i] ||
+            historical.model_geometry_digest[i] != fresh.model_geometry_digest[i] ||
+            historical.model_numerical_digest[i] != fresh.model_numerical_digest[i]) {
             return false;
         }
     }
@@ -165,15 +197,15 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
         for (uint64_t row = 0; row < launch.row_count; ++row) {
             const auto item = descriptors[row];
             uint64_t origin_candidate = UINT64_MAX;
-            if (item.basis == 1 && item.origin.present == 1) {
+            if (item.basis == 1 && semantic_training_historical_origin_valid(item.origin)) {
                 uint64_t matches = 0;
                 for (uint64_t candidate = 0; candidate < launch.origin_candidate_count; ++candidate) {
-                    if (semantic_training_origin_equal(item.origin, candidates[candidate])) {
+                    if (semantic_training_origin_matches(item.origin, candidates[candidate])) {
                         origin_candidate = candidate;
                         ++matches;
                     }
                 }
-                if (matches != 1) {
+                if (matches > 1 || (row == cursor && matches != 1)) {
                     selection->status = 3;
                 }
             } else if (item.basis != 2 || item.origin.present != 0) {
@@ -192,6 +224,7 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
                 roster[row].source_identity[i] = item.source_identity[i];
                 roster[row].content_identity[i] = item.content_identity[i];
             }
+            roster[row].origin = item.origin;
             if (row == cursor) {
                 selection->origin_candidate = origin_candidate;
             }
