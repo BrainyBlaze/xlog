@@ -9002,7 +9002,7 @@ mod tests {
     fn task_program_transport_preserves_explicit_configuration_without_cuda() {
         Python::initialize();
         Python::attach(|py| {
-            let arguments = py.eval(c"((9,4),(8,3),'pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2).',(1,0),(5,4,3,2,1,0),(15,7))", None, None).unwrap();
+            let arguments = py.eval(c"((9,4,2),(8,3),'pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2). ?- rainfall(9).',(1,0,2),(5,4,3,2,1,0),(15,7,3))", None, None).unwrap();
             let arguments = arguments.cast::<PyTuple>().unwrap();
             let fields = arguments.iter().collect::<Vec<_>>();
             let spec = super::read_task_evaluation_spec(
@@ -9015,9 +9015,9 @@ mod tests {
                 &mut (16 * 1024 * 1024),
             )
             .unwrap();
-            assert_eq!(spec.statement_records, [9, 4]);
+            assert_eq!(spec.statement_records, [9, 4, 2]);
             assert_eq!(spec.allowed_support_records, [8, 3]);
-            assert_eq!(spec.admissible_truth_masks, [15, 7]);
+            assert_eq!(spec.admissible_truth_masks, [15, 7, 3]);
             assert_eq!(spec.scoring.correct_weight, 5);
             assert_eq!(spec.scoring.spent_weight, 0);
         });
