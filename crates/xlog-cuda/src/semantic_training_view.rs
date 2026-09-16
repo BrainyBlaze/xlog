@@ -25,6 +25,7 @@ const SELECT_KERNEL: &str = "semantic_training_view_select";
 const GATHER_KERNEL: &str = "semantic_training_view_gather";
 const TRAINING_VIEW_HEADER_BYTES: usize = 136;
 const TRAINING_VIEW_ROW_BYTES: usize = 68;
+const PROPOSAL_TRANSITION: u64 = 1;
 
 /// Origin of one authentic replay training view.
 #[repr(u64)]
@@ -361,6 +362,20 @@ impl SemanticSelectedTrainingView {
 
     pub fn roster_rows(&self) -> DeviceMemoryView<SemanticTrainingRosterRow> {
         self.storage.roster_rows.view()
+    }
+
+    pub(crate) fn objective(&self) -> DeviceMemoryView<SemanticTrainingObjectiveRecord> {
+        self.arena.objective.view()
+    }
+
+    pub(crate) fn objective_groups(
+        &self,
+    ) -> DeviceMemoryView<SemanticTrainingObjectiveGroupRecord> {
+        self.arena.groups.view()
+    }
+
+    pub(crate) fn objective_group_members(&self) -> DeviceMemoryView<u64> {
+        self.arena.group_members.view()
     }
 
     pub fn token_ids(&self) -> DeviceMemoryView<i64> {
@@ -936,7 +951,9 @@ fn validate_objective(
             );
             let policy_group = group.kind == SemanticTrainingObjectiveGroupKind::ActorCriticCost;
             if (anchor_group && row.basis != SemanticTrainingViewBasis::CorpusAnchor as u64)
-                || (policy_group && row.basis != SemanticTrainingViewBasis::Episode as u64)
+                || (policy_group
+                    && (row.basis != SemanticTrainingViewBasis::Episode as u64
+                        || row.origin.transition != PROPOSAL_TRANSITION))
             {
                 return Err(input_error(
                     "training objective group refers to an incompatible replay basis",

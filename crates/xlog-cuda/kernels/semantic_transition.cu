@@ -398,8 +398,22 @@ struct PolicyDescriptor {
     uint64_t z,recurrence,positions,hidden,scores,recurrent;
     PolicyField fields[18];
 };
+struct SemanticTrainingViewSelection {
+    uint64_t status,row_count,capacity,ordinal,basis,window,source_length,block_size,prefix_extent,answer_start;
+    uint64_t identity[4],source_identity[4],content_identity[4];
+    SemanticTrainingViewOriginRecord origin;
+    uint64_t origin_candidate,training_rng[4];
+};
+struct SemanticTrainingObjectiveRecord {
+    uint64_t identity[4],row_count,capacity,group_count,group_member_count,canary_count;
+    uint64_t evaluator_min_bits,evaluator_max_bits,coefficient_bits[9],cost_unit[4],cost_cap;
+};
+struct SemanticTrainingObjectiveGroupRecord {
+    uint64_t kind,denominator,member_offset,member_count;
+};
 struct PolicyBackward {
-    uint64_t cotangents,parameters,text,recurrent,scores,status,parameter_cells,text_cells;
+    uint64_t cotangents,parameters,text,baselines,recurrent,scores,status,parameter_cells,text_cells;
+    uint64_t selection,objective,objective_groups,objective_group_members,origin_candidate,mode;
 };
 struct Descriptor {
     uint64_t logits,support,scratch,receipts,state,components,codebooks,arena[7];
@@ -418,7 +432,11 @@ static_assert(sizeof(TaskEvaluation)==3256,"task evaluation ABI");
 static_assert(sizeof(State)==6952,"state ABI");
 static_assert(sizeof(PolicyField)==24,"policy field ABI");
 static_assert(sizeof(PolicyDescriptor)==480,"policy ABI");
-static_assert(sizeof(PolicyBackward)==64,"policy backward ABI");
+static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origin ABI");
+static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
+static_assert(sizeof(SemanticTrainingObjectiveRecord)==200,"training objective ABI");
+static_assert(sizeof(SemanticTrainingObjectiveGroupRecord)==32,"training objective group ABI");
+static_assert(sizeof(PolicyBackward)==120,"policy backward ABI");
 static_assert(sizeof(SourceSlot)==64,"source slot ABI");
 static_assert(sizeof(PublicationStorageEntry)==24,"owned storage ABI");
 static_assert(sizeof(PublicationRange)==128,"publication range ABI");
@@ -442,7 +460,7 @@ static_assert(sizeof(AttemptReceipt)==344,"attempt receipt ABI");
 static_assert(sizeof(TokenProvenanceRecord)==184,"token provenance ABI");
 static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
-static_assert(sizeof(Descriptor)==736,"launch ABI");
+static_assert(sizeof(Descriptor)==792,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 
 __device__ uint64_t text_row_count(TextBinding binding) {
@@ -2848,15 +2866,20 @@ __device__ void semantic_policy_backward_status_guard(uint64_t status_ptr) {
        *reinterpret_cast<const uint64_t*>(status_ptr)!=0)semantic_content_integrity_trap();
 }
 #ifdef XLOG_SEMANTIC_POLICY
+__device__ bool semantic_policy_identity_present(const uint64_t identity[4]) {
+    return identity[0] || identity[1] || identity[2] || identity[3];
+}
+
 // Late differentiation reads the original receipt and tape. It never enters
 // semantic admission, generates random words, or writes forward state.
 __device__ void semantic_policy_backward(const Descriptor& descriptor) {
     const auto p=descriptor.policy;
     const auto b=descriptor.backward;
     auto status=reinterpret_cast<uint64_t*>(b.status);
-    auto coefficients=reinterpret_cast<const double*>(b.cotangents);
+    auto coefficients=reinterpret_cast<double*>(b.cotangents);
     auto gradients=reinterpret_cast<float*>(b.parameters);
     auto text_gradients=reinterpret_cast<float*>(b.text);
+    auto baseline_gradients=reinterpret_cast<float*>(b.baselines);
     auto recurrent_gradients=reinterpret_cast<float*>(b.recurrent);
     auto components=reinterpret_cast<const Component*>(descriptor.components);
     auto receipts=reinterpret_cast<const Receipt*>(descriptor.receipts);
@@ -2864,20 +2887,125 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
     auto books=reinterpret_cast<const uint64_t*>(descriptor.codebooks);
     auto viability=reinterpret_cast<uint32_t*>(descriptor.scratch)+2*262144;
     __shared__ uint32_t actions[4][2],choices[18];
-    __shared__ uint32_t legal_count,active_count,selected_active;
-    __shared__ float maximum;
+    __shared__ uint32_t legal_count,active_count,selected_active,apply_selected;
+    __shared__ uint64_t actor_denominator;
+    __shared__ float maximum,reward_f32,critic_scale;
     __shared__ U192 threshold;
-    __shared__ double scale;
+    __shared__ double scale,reward,actor_scale,cost_scale;
     if(threadIdx.x==0) {
         *status=0;
-        for(uint32_t i=0;i<COMPONENT_COUNT;++i)
-            if(!isfinite(coefficients[i]))*status=1;
+        apply_selected=1;
+        actor_denominator=0;
+        reward=actor_scale=cost_scale=0.0;
+        reward_f32=critic_scale=0.0f;
+        if(b.mode==0) {
+            for(uint32_t i=0;i<COMPONENT_COUNT;++i)
+                if(!isfinite(coefficients[i]))*status=1;
+        } else if(b.mode==1) {
+            if(!b.selection || b.selection%alignof(SemanticTrainingViewSelection) ||
+               !b.objective || b.objective%alignof(SemanticTrainingObjectiveRecord) ||
+               !b.objective_groups || b.objective_groups%alignof(SemanticTrainingObjectiveGroupRecord) ||
+               !b.objective_group_members || b.objective_group_members%alignof(uint64_t)) {
+                *status=1;
+            } else {
+                const auto& selection=*reinterpret_cast<const SemanticTrainingViewSelection*>(b.selection);
+                const auto& objective=*reinterpret_cast<const SemanticTrainingObjectiveRecord*>(b.objective);
+                const auto* groups=reinterpret_cast<const SemanticTrainingObjectiveGroupRecord*>(b.objective_groups);
+                const auto* members=reinterpret_cast<const uint64_t*>(b.objective_group_members);
+                if(selection.status || selection.basis!=1 || selection.origin.present!=1 ||
+                   selection.origin.transition!=1 || selection.origin_candidate==UINT64_MAX ||
+                   selection.ordinal>=selection.row_count || selection.row_count!=objective.row_count ||
+                   selection.capacity!=objective.capacity || objective.group_count!=8 ||
+                   !objective.group_member_count || !objective.cost_cap ||
+                   !semantic_policy_identity_present(objective.identity) ||
+                   !semantic_policy_identity_present(objective.cost_unit)) {
+                    *status=1;
+                }
+                const double evaluator_min=__longlong_as_double((long long)objective.evaluator_min_bits);
+                const double evaluator_max=__longlong_as_double((long long)objective.evaluator_max_bits);
+                float objective_coefficients[9];
+                for(uint32_t i=0;i<9;++i) {
+                    objective_coefficients[i]=__uint_as_float(uint32_t(objective.coefficient_bits[i]));
+                    if((objective.coefficient_bits[i]>>32) || !isfinite(objective_coefficients[i]) ||
+                       objective_coefficients[i]<=0.0f)*status=1;
+                }
+                if(!isfinite(evaluator_min) || !isfinite(evaluator_max) || evaluator_min>evaluator_max)*status=1;
+                uint64_t actor_groups=0;
+                bool selected_member=false;
+                for(uint64_t i=0;i<objective.group_count && !*status;++i) {
+                    const auto group=groups[i];
+                    if(!group.denominator || !group.member_count ||
+                       group.member_offset>objective.group_member_count ||
+                       group.member_count>objective.group_member_count-group.member_offset) {
+                        *status=1;break;
+                    }
+                    if(group.kind==8) {
+                        ++actor_groups;
+                        actor_denominator=group.denominator;
+                        for(uint64_t member=0;member<group.member_count;++member)
+                            selected_member |= members[group.member_offset+member]==selection.ordinal;
+                    }
+                }
+                if(actor_groups!=1 || !selected_member)*status=1;
+                apply_selected=b.origin_candidate==selection.origin_candidate;
+                if(apply_selected && !*status) {
+                    const auto* state=reinterpret_cast<const State*>(descriptor.state);
+                    if(!state || state->status || state->model_generation!=selection.origin.model_generation ||
+                       state->stream_serial!=selection.origin.stream_serial ||
+                       state->family_id!=selection.origin.family_id ||
+                       state->proposal!=selection.origin.proposal ||
+                       !isfinite(state->importance_weight) || state->importance_weight<=0.0 ||
+                       state->task_evaluation.winner>=3 ||
+                       state->task_evaluation.facts[state->task_evaluation.winner].c>objective.cost_cap) {
+                        *status=1;
+                    } else {
+                        reward=__ll2double_rn((long long)state->task_evaluation.return_value);
+                        reward_f32=__ll2float_rn((long long)state->task_evaluation.return_value);
+                        if(reward<evaluator_min || reward>evaluator_max || !isfinite(reward))*status=1;
+                        const double denominator=__ull2double_rn(actor_denominator);
+                        const double weight=state->importance_weight;
+                        const double cost=__ddiv_rn(
+                            __ull2double_rn(state->task_evaluation.facts[state->task_evaluation.winner].c),
+                            __ull2double_rn(objective.cost_cap));
+                        actor_scale=__ddiv_rn(__dmul_rn(double(objective_coefficients[6]),weight),denominator);
+                        cost_scale=__ddiv_rn(__dmul_rn(__dmul_rn(double(objective_coefficients[8]),weight),cost),denominator);
+                        critic_scale=__fdiv_rn(__fmul_rn(2.0f,objective_coefficients[7]),
+                            __ull2float_rn(actor_denominator));
+                        if(!isfinite(actor_scale) || !isfinite(cost_scale) || !isfinite(critic_scale))*status=1;
+                    }
+                }
+            }
+        } else {
+            *status=1;
+        }
     }
     __syncthreads();
     if(*status)return;
     for(uint64_t i=threadIdx.x;i<b.parameter_cells;i+=blockDim.x)gradients[i]=0.0f;
     for(uint64_t i=threadIdx.x;i<b.text_cells;i+=blockDim.x)text_gradients[i]=0.0f;
     for(uint32_t i=threadIdx.x;i<2*37*128;i+=blockDim.x)recurrent_gradients[i]=0.0f;
+    for(uint32_t i=threadIdx.x;i<COMPONENT_COUNT;i+=blockDim.x) {
+        if(b.mode==0) {
+            baseline_gradients[i]=0.0f;
+        } else {
+            const float baseline=baseline_gradients[i];
+            coefficients[i]=0.0;
+            baseline_gradients[i]=0.0f;
+            if(apply_selected) {
+                const float difference=__fsub_rn(baseline,reward_f32);
+                const float raw_square=__fmul_rn(difference,difference);
+                const double advantage=__dsub_rn(reward,double(baseline));
+                coefficients[i]=__dadd_rn(-__dmul_rn(actor_scale,advantage),cost_scale);
+                if(receipts[i].legal_count>1)
+                    baseline_gradients[i]=__fmul_rn(critic_scale,difference);
+                if(!isfinite(baseline) || !isfinite(raw_square) ||
+                   !isfinite(coefficients[i]) || !isfinite(baseline_gradients[i]))
+                    atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
+            }
+        }
+    }
+    __syncthreads();
+    if(*status || (b.mode==1 && !apply_selected))return;
     for(uint32_t edit=0;edit<4;++edit) {
         uint32_t start=32+(edit/2)*68+(edit%2)*18;
         uint32_t* viable=viability+edit*books[1];
@@ -2989,6 +3117,8 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
         if(!isfinite(gradients[i]))atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
     for(uint64_t i=threadIdx.x;i<b.text_cells;i+=blockDim.x)
         if(!isfinite(text_gradients[i]))atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
+    for(uint32_t i=threadIdx.x;i<COMPONENT_COUNT;i+=blockDim.x)
+        if(!isfinite(baseline_gradients[i]))atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
 }
 #endif
 

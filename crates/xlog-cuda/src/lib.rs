@@ -70,8 +70,6 @@ pub use semantic_training_view::{
     SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
     SemanticTrainingViewRow, SemanticTrainingViewSelection,
 };
-#[cfg(feature = "semantic-policy")]
-pub use semantic_transition::SemanticPolicyGradients;
 pub use semantic_transition::{
     Identity256, SemanticActionCatalogue, SemanticActionDescriptor, SemanticActiveRow,
     SemanticActiveRows, SemanticCatalogueBinding, SemanticCatalogueField,
@@ -92,6 +90,8 @@ pub use semantic_transition::{
     SEMANTIC_FEEDBACK_SUPPORT_FIELDS, SEMANTIC_TRANSITION_COMPONENT_COUNT,
     SEMANTIC_TRANSITION_GENERATION,
 };
+#[cfg(feature = "semantic-policy")]
+pub use semantic_transition::{SemanticPolicyGradients, SemanticSelectedPolicyGradients};
 pub use semantic_work::ModelWorkKind;
 
 pub use wcoj_metadata::{

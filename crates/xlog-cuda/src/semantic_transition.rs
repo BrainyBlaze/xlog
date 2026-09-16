@@ -8080,14 +8080,25 @@ struct PolicyBackward {
     cotangents: u64,
     parameters: u64,
     text: u64,
+    baselines: u64,
     recurrent: u64,
     scores: u64,
     status: u64,
     parameter_cells: u64,
     text_cells: u64,
+    selection: u64,
+    objective: u64,
+    objective_groups: u64,
+    objective_group_members: u64,
+    origin_candidate: u64,
+    mode: u64,
 }
 
 #[cfg(feature = "semantic-policy")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "policy VJP launch retains each original producer and destination explicitly"
+)]
 fn record_policy_vjp(
     domain: &ResidentExecutionDomain,
     poisoned: &mut bool,
@@ -8095,23 +8106,38 @@ fn record_policy_vjp(
     execute: CudaFunction,
     descriptor: Descriptor,
     coefficients: &TrackedCudaSlice<f64>,
-    score_cotangents: &DeviceMemoryView<f64>,
+    score_cotangents: Option<&DeviceMemoryView<f64>>,
+    baseline_snapshot: Option<&DeviceMemoryView<f32>>,
 ) -> Result<(), SemanticTransitionError> {
     enqueue_recorded(domain, poisoned, recorder, |enqueue| {
-        // SAFETY: the recorder retains the original cotangent producer and
-        // every forward/output allocation. The destination is the fixed F64
-        // bank owned by this exact invocation. This routine deliberately makes
-        // no assumption about capture state: its caller supplies the resident
-        // execution domain whose stream owns both operations.
+        // SAFETY: the recorder retains every forward/output allocation and,
+        // for the external mode, the original cotangent producer. The
+        // destination is the fixed F64 bank owned by this exact invocation.
+        // The selected mode fills that bank inside the kernel from resident
+        // objective/state owners and therefore performs no producer copy.
         unsafe {
-            sys::cuMemcpyDtoDAsync_v2(
-                coefficients.device_ptr_value(),
-                *score_cotangents.device_ptr(),
-                COMPONENT_COUNT * 8,
-                enqueue.stream().cu_stream(),
-            )
-            .result()
-            .map_err(|error| XlogError::Kernel(format!("policy cotangent snapshot: {error}")))?;
+            if let Some(score_cotangents) = score_cotangents {
+                sys::cuMemcpyDtoDAsync_v2(
+                    coefficients.device_ptr_value(),
+                    *score_cotangents.device_ptr(),
+                    COMPONENT_COUNT * 8,
+                    enqueue.stream().cu_stream(),
+                )
+                .result()
+                .map_err(|error| {
+                    XlogError::Kernel(format!("policy cotangent snapshot: {error}"))
+                })?;
+            }
+            if let Some(baseline_snapshot) = baseline_snapshot {
+                sys::cuMemcpyDtoDAsync_v2(
+                    descriptor.backward.baselines,
+                    *baseline_snapshot.device_ptr(),
+                    COMPONENT_COUNT * 4,
+                    enqueue.stream().cu_stream(),
+                )
+                .result()
+                .map_err(|error| XlogError::Kernel(format!("policy baseline snapshot: {error}")))?;
+            }
             execute
                 .launch_in(
                     enqueue,
@@ -8182,6 +8208,64 @@ impl SemanticPolicyGradients {
     }
 }
 
+/// Device-selected actor, critic and cost adjoints for one exact prepared
+/// policy invocation. Every invocation in the prepared proposal roster may
+/// consume its original tape; the resident selection predicates all but the
+/// selected candidate to graph-connected zeros.
+#[cfg(feature = "semantic-policy")]
+pub struct SemanticSelectedPolicyGradients {
+    pub binding: SemanticCatalogueBinding,
+    pub invocation: SemanticRngBinding,
+    pub layout: SemanticPolicyLayout,
+    pub parameters: TrackedCudaSlice<f32>,
+    pub text_logits: TrackedCudaSlice<f32>,
+    pub component_baselines: TrackedCudaSlice<f32>,
+    provider: Arc<CudaKernelProvider>,
+    step_aliases: Arc<()>,
+    publication: Arc<PublicationStorage>,
+    continuation: Arc<TextBindingStorage>,
+    vjp_workspace: Arc<PolicyVjpWorkspace>,
+    support_cells: usize,
+}
+
+#[cfg(feature = "semantic-policy")]
+impl SemanticSelectedPolicyGradients {
+    /// Export parameter, full MASK and component-baseline adjoints, in that
+    /// order. The baseline result is the direct critic root for the retained
+    /// original model graph; actor and cost share the exact policy tape.
+    pub fn into_dlpack(self) -> Result<[DlpackManagedTensor; 3], SemanticTransitionError> {
+        let layouts = policy_producer_layouts(self.support_cells, self.layout.parameter_cells)?;
+        let retained_owner: Arc<dyn Send + Sync> = self.vjp_workspace;
+        let export = |values: TrackedCudaSlice<f32>, layout: SemanticTensorLayout| {
+            let rank = layout.rank as usize;
+            let shape = layout.dimensions[..rank]
+                .iter()
+                .map(|&value| value as i64)
+                .collect();
+            let strides = layout.strides_bytes[..rank]
+                .iter()
+                .map(|&value| (value / layout.element_bytes) as i64)
+                .collect();
+            export_owned_allocation(
+                values.into_bytes().view(),
+                shape,
+                strides,
+                (2, 32),
+                self.provider.device().ordinal() as i32,
+                Arc::clone(&self.step_aliases),
+                Arc::clone(&self.publication),
+                Some(Arc::clone(&self.continuation)),
+                Some(Arc::clone(&retained_owner)),
+            )
+        };
+        Ok([
+            export(self.parameters, layouts[2]),
+            export(self.text_logits, layouts[0]),
+            export(self.component_baselines, layouts[3]),
+        ])
+    }
+}
+
 #[cfg(feature = "semantic-policy")]
 fn policy_producer_layouts(
     support_cells: usize,
@@ -8225,6 +8309,7 @@ struct PolicyBuffers {
 struct PolicyAdjointBuffers {
     parameters: TrackedCudaSlice<f32>,
     text_logits: TrackedCudaSlice<f32>,
+    component_baselines: TrackedCudaSlice<f32>,
     recurrent: TrackedCudaSlice<f32>,
     scores: TrackedCudaSlice<f32>,
     coefficients: TrackedCudaSlice<f64>,
@@ -8236,11 +8321,12 @@ struct PolicyAdjointBuffers {
 /// cannot observe reclaimed scratch or producer memory.
 #[cfg(feature = "semantic-policy")]
 struct PolicyVjpWorkspace {
+    _component_baselines: Option<TrackedCudaSlice<f32>>,
     _recurrent: TrackedCudaSlice<f32>,
     _scores: TrackedCudaSlice<f32>,
     coefficients: TrackedCudaSlice<f64>,
     _status: TrackedCudaSlice<u64>,
-    score_cotangents: DeviceMemoryView<f64>,
+    score_cotangents: Option<DeviceMemoryView<f64>>,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -8393,6 +8479,16 @@ struct PolicyVjpRecording {
     recorder: LaunchRecorder,
 }
 
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone, Copy)]
+enum PolicyVjpInput<'a> {
+    External(&'a DeviceMemoryView<f64>),
+    Selected {
+        training: &'a SemanticSelectedTrainingView,
+        origin_candidate: u64,
+    },
+}
+
 impl crate::cuda_compat::KernelParamStorage for Descriptor {
     fn as_kernel_param(&self) -> *mut std::ffi::c_void {
         (self as *const Self).cast_mut().cast()
@@ -8430,8 +8526,8 @@ const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3256);
 const _: () = assert!(size_of::<DeviceState>() == 6952);
 const _: () = assert!(size_of::<PolicyField>() == 24);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 480);
-const _: () = assert!(size_of::<PolicyBackward>() == 64);
-const _: () = assert!(size_of::<Descriptor>() == 736);
+const _: () = assert!(size_of::<PolicyBackward>() == 120);
+const _: () = assert!(size_of::<Descriptor>() == 792);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -9065,11 +9161,12 @@ fn policy_buffer_bytes(layout: &SemanticPolicyLayout) -> Result<usize, SemanticT
         sum.checked_add(cells)
             .ok_or(SemanticTransitionError::GenerationExhausted)
     })?
-    // Each primal bank has a dedicated adjoint bank. Only the forward hidden
-    // vector is shared scratch. Baselines are immutable model outputs without
-    // an adjoint bank; coefficients and status keep their own types.
+    // Each differentiable primal bank has a dedicated adjoint bank. Only the
+    // forward hidden vector is shared scratch. Coefficients and status keep
+    // their own types.
     .checked_mul(2)
     .and_then(|cells| cells.checked_add(128))
+    .and_then(|cells| cells.checked_add(COMPONENT_COUNT))
     .and_then(|cells| cells.checked_add(COMPONENT_COUNT))
     .and_then(|cells| cells.checked_mul(size_of::<f32>()))
     .and_then(|bytes| bytes.checked_add(COMPONENT_COUNT * size_of::<f64>()))
@@ -16252,6 +16349,9 @@ impl SemanticTransitionSession {
                 text_logits: reservation
                     .alloc::<f32>(text_cells)
                     .map_err(|error| runtime_error("text adjoint allocation", error))?,
+                component_baselines: reservation
+                    .alloc::<f32>(COMPONENT_COUNT)
+                    .map_err(|error| runtime_error("baseline adjoint allocation", error))?,
                 recurrent: reservation
                     .alloc::<f32>(layout.recurrent_cells())
                     .map_err(|error| runtime_error("recurrent adjoint allocation", error))?,
@@ -16883,6 +16983,185 @@ impl SemanticTransitionSession {
         self.backward_policy_dlpack(invocation, score_cotangents, consumer_stream)
     }
 
+    /// Differentiate one original prepared proposal from the Update step's
+    /// resident actor/critic/cost objective. Call this once for every proposal
+    /// invocation in the frozen segment. The kernel compares the proposal's
+    /// schedule ordinal to the selected origin candidate, so all unselected
+    /// invocations return graph-connected zero adjoints without host readback.
+    #[cfg(feature = "semantic-policy")]
+    pub fn backward_selected_prepared_policy(
+        &mut self,
+        step: &SemanticPreparedStep,
+        update_step: &SemanticPreparedStep,
+        invocation: SemanticRngBinding,
+        consumer_stream: u64,
+    ) -> Result<SemanticSelectedPolicyGradients, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        dlpack_consumer_stream(consumer_stream)?;
+        let tape_index = self.checked_prepared_policy_tape(step, invocation)?;
+        if let Some(refusal) = self.policy_tapes[tape_index].refusal {
+            return Err(refusal.into_error());
+        }
+        let update_owner = self.checked_prepared_step(update_step, false)?;
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .expect("checked prepared segment");
+        if !build.completed
+            || !update_owner
+                .prepared
+                .as_ref()
+                .is_some_and(|prepared| prepared.observed)
+        {
+            return Err(publication_input_error(
+                "selected policy backward requires the actual completed Update step",
+            ));
+        }
+        if build.requested_kind(update_step, &self.publication_issuer)?
+            != SemanticTransitionKind::Update
+        {
+            return Err(publication_input_error(
+                "selected policy backward requires a prepared Update step",
+            ));
+        }
+        let origin_candidate = build
+            .tokens
+            .iter()
+            .position(|token| *token == step.token)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let update_ordinal = build
+            .tokens
+            .iter()
+            .position(|token| *token == update_step.token)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if origin_candidate >= update_ordinal {
+            return Err(publication_input_error(
+                "selected policy backward requires a preceding proposal candidate",
+            ));
+        }
+        let origin_candidate = u64::try_from(origin_candidate)
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        let original = Arc::clone(&self.policy_tapes[tape_index].policy.text_binding);
+        self.guard_continuation_content(&original)?;
+        if let Err(error) =
+            self.order_step_content_inputs(original._witness.reader_token, consumer_stream)
+        {
+            self.poisoned = true;
+            return Err(error);
+        }
+        let publication = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let step_aliases = Arc::clone(&self.steps[&original._witness.reader_token].aliases);
+        let tape = &self.policy_tapes[tape_index];
+        let policy = &tape.policy;
+        let state = &self.steps[&original._witness.reader_token]
+            .prepared
+            .as_ref()
+            .expect("checked prepared policy owner")
+            .state;
+        let training = self.steps[&update_step.token]
+            .prepared
+            .as_ref()
+            .expect("checked prepared Update owner")
+            .training_view
+            .as_ref()
+            .ok_or_else(|| {
+                publication_input_error(
+                    "selected policy backward requires the Update training-view owner",
+                )
+            })?;
+        let PolicyVjpRecording {
+            descriptor,
+            recorder,
+        } = self.prepare_policy_vjp_recording(
+            policy,
+            &tape.support,
+            &tape.receipts,
+            state,
+            &tape.components,
+            &tape.codebooks,
+            PolicyVjpInput::Selected {
+                training,
+                origin_candidate,
+            },
+        )?;
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+            .map_err(|error| runtime_error("selected policy backward stream admission", error))?;
+        let execute = self.execute.clone();
+        let layout = policy.layout.clone();
+        let binding = tape.binding;
+        let support_cells = tape.support.len();
+        let baseline_snapshot = policy.component_baselines.view();
+        let PolicyAdjointBuffers {
+            parameters,
+            text_logits,
+            component_baselines,
+            recurrent,
+            scores,
+            coefficients,
+            status,
+        } = self.policy_tapes[tape_index]
+            .policy
+            .buffers
+            .adjoints
+            .take()
+            .expect("checked original adjoint banks");
+        let vjp_workspace = Arc::new(PolicyVjpWorkspace {
+            _component_baselines: None,
+            _recurrent: recurrent,
+            _scores: scores,
+            coefficients,
+            _status: status,
+            score_cotangents: None,
+        });
+        let output_views = [&parameters, &text_logits, &component_baselines]
+            .into_iter()
+            .map(|buffer| {
+                // SAFETY: F32 storage has an exact, aligned byte representation.
+                unsafe { buffer.view().cast::<u8>() }.expect("F32 adjoint byte view")
+            });
+        let step_owner = self
+            .steps
+            .get_mut(&original._witness.reader_token)
+            .expect("retained original step");
+        step_owner.adjoints.extend(output_views);
+        step_owner
+            .policy_vjp_workspaces
+            .push(Arc::clone(&vjp_workspace));
+        record_policy_vjp(
+            &self.domain,
+            &mut self.poisoned,
+            recorder,
+            execute,
+            descriptor,
+            &vjp_workspace.coefficients,
+            None,
+            Some(&baseline_snapshot),
+        )?;
+        if let Err(error) = self.order_content_consumers(consumer_stream) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        self.policy_tapes.remove(tape_index);
+        Ok(SemanticSelectedPolicyGradients {
+            binding,
+            invocation,
+            layout,
+            parameters,
+            text_logits,
+            component_baselines,
+            provider: Arc::clone(&self.provider),
+            step_aliases,
+            publication,
+            continuation: original,
+            vjp_workspace,
+            support_cells,
+        })
+    }
+
     #[cfg(feature = "semantic-policy")]
     pub fn finish_prepared_policy_invocation(
         &mut self,
@@ -16952,17 +17231,20 @@ impl SemanticTransitionSession {
         state: &TrackedCudaSlice<DeviceState>,
         components: &DeviceMemoryView<SemanticComponent>,
         codebooks: &DeviceMemoryView<u64>,
-        score_cotangents: &DeviceMemoryView<f64>,
+        input: PolicyVjpInput<'_>,
     ) -> Result<PolicyVjpRecording, SemanticTransitionError> {
-        if score_cotangents.len() != COMPONENT_COUNT {
-            return Err(SemanticTransitionError::InvalidInput {
-                detail: "selected-score cotangents must follow the complete component roster"
-                    .into(),
-            });
+        if let PolicyVjpInput::External(score_cotangents) = input {
+            if score_cotangents.len() != COMPONENT_COUNT {
+                return Err(SemanticTransitionError::InvalidInput {
+                    detail: "selected-score cotangents must follow the complete component roster"
+                        .into(),
+                });
+            }
         }
         let PolicyAdjointBuffers {
             parameters,
             text_logits,
+            component_baselines,
             recurrent,
             scores,
             coefficients,
@@ -16986,15 +17268,43 @@ impl SemanticTransitionSession {
         descriptor.components = *components.device_ptr();
         descriptor.codebooks = *codebooks.device_ptr();
         descriptor.publication = PublicationCommand::default();
+        let (
+            selection,
+            objective,
+            objective_groups,
+            objective_group_members,
+            origin_candidate,
+            mode,
+        ) = match input {
+            PolicyVjpInput::External(_) => (0, 0, 0, 0, 0, 0),
+            PolicyVjpInput::Selected {
+                training,
+                origin_candidate,
+            } => (
+                *training.selection().device_ptr(),
+                *training.objective().device_ptr(),
+                *training.objective_groups().device_ptr(),
+                *training.objective_group_members().device_ptr(),
+                origin_candidate,
+                1,
+            ),
+        };
         descriptor.backward = PolicyBackward {
             cotangents: coefficients.device_ptr_value(),
             parameters: parameters.device_ptr_value(),
             text: text_logits.device_ptr_value(),
+            baselines: component_baselines.device_ptr_value(),
             recurrent: recurrent.device_ptr_value(),
             scores: scores.device_ptr_value(),
             status: status.device_ptr_value(),
             parameter_cells: policy.layout.parameter_cells as u64,
             text_cells: policy.text_logits.len() as u64,
+            selection,
+            objective,
+            objective_groups,
+            objective_group_members,
+            origin_candidate,
+            mode,
         };
         self.validate_ranges_with(&io)?;
         let mut recorder = self.domain.new_strict_recorder();
@@ -17005,12 +17315,30 @@ impl SemanticTransitionSession {
         recorder.read(&policy.parameters);
         recorder.read(&policy.recurrent);
         recorder.read(&policy.text_logits);
+        recorder.read(&policy.component_baselines);
         policy.text_binding.record(&mut recorder);
-        recorder.read(score_cotangents);
+        match input {
+            PolicyVjpInput::External(score_cotangents) => {
+                recorder.read(score_cotangents);
+            }
+            PolicyVjpInput::Selected { training, .. } => {
+                recorder.read(&training.selection());
+                recorder.read(&training.objective());
+                recorder.read(&training.objective_groups());
+                recorder.read(&training.objective_group_members());
+                recorder.read(state);
+            }
+        }
         recorder.write(&self.scratch);
         recorder.write(&policy.hidden);
         recorder.write(&policy.scores);
-        for buffer in [parameters, text_logits, recurrent, scores] {
+        for buffer in [
+            parameters,
+            text_logits,
+            component_baselines,
+            recurrent,
+            scores,
+        ] {
             recorder.write(buffer);
         }
         recorder.write(coefficients);
@@ -17068,7 +17396,7 @@ impl SemanticTransitionSession {
             state,
             &tape.components,
             &tape.codebooks,
-            &score_cotangents,
+            PolicyVjpInput::External(&score_cotangents),
         )?;
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|e| runtime_error("policy backward stream admission", e))?;
@@ -17082,6 +17410,7 @@ impl SemanticTransitionSession {
         let PolicyAdjointBuffers {
             parameters,
             text_logits,
+            component_baselines,
             recurrent,
             scores,
             coefficients,
@@ -17093,11 +17422,12 @@ impl SemanticTransitionSession {
             .take()
             .expect("checked original adjoint banks");
         let vjp_workspace = Arc::new(PolicyVjpWorkspace {
+            _component_baselines: Some(component_baselines),
             _recurrent: recurrent,
             _scores: scores,
             coefficients,
             _status: status,
-            score_cotangents,
+            score_cotangents: Some(score_cotangents),
         });
         // A capsule can be deleted before its consumer finishes. The original
         // step keeps the actual outputs until its final consumer-stream join,
@@ -17121,7 +17451,8 @@ impl SemanticTransitionSession {
             execute,
             descriptor,
             &vjp_workspace.coefficients,
-            &vjp_workspace.score_cotangents,
+            vjp_workspace.score_cotangents.as_ref(),
+            None,
         )?;
         if let Err(error) = self.order_content_consumers(consumer_stream) {
             self.poisoned = true;

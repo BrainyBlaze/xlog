@@ -5227,6 +5227,86 @@ impl PySemanticPolicyInvocation {
             .unbind())
     }
 
+    /// Consume this prepared proposal's exact retained tape against the
+    /// prepared Update step's resident actor/critic/cost objective. The caller
+    /// invokes this method for every proposal invocation in the frozen segment
+    /// and joins every returned root into one GraphTask. Native selection makes
+    /// unselected invocations graph-connected zeros; Python never reads the
+    /// selected ordinal, reconstructs selected scores, or runs a second primal.
+    ///
+    /// Returns FP32 parameter, full MASK and component-baseline adjoint
+    /// capsules, in that order. This is a single-use handoff, including
+    /// uncertain native failures.
+    #[pyo3(signature = (update_step, *, consumer_stream))]
+    fn backward_selected(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        self.require_public_result(py)?;
+        let policy_step = match &self._parent {
+            ContentStepOwner::Prepared(step) => step,
+            ContentStepOwner::Published(_) => {
+                return Err(invalid(
+                    "device-selected policy backward requires an original prepared proposal",
+                ));
+            }
+        };
+        let expected = {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            self.final_use_binding(py, &owner)?
+        };
+        if !self.training {
+            return Err(invalid(
+                "device-selected policy backward requires the original training use",
+            ));
+        }
+        self.published_observation()?;
+        let mut budget = 4096;
+        let consumer_stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        {
+            let update = update_step.borrow(py);
+            if self.session.as_ptr() != update.session.as_ptr() {
+                return Err(invalid(
+                    "device-selected policy backward requires an Update from the same Session",
+                ));
+            }
+            let task_use = self._task_use.borrow(py);
+            update.require_task(py, &task_use)?;
+        }
+        self.start_final_use()?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        if self.final_use_binding(py, &owner)? != expected {
+            return Err(invalid(
+                "policy backward authority changed before resident objective use",
+            ));
+        }
+        let gradients = owner
+            .backward_selected_prepared_policy(
+                &policy_step.borrow(py).inner,
+                &update_step.borrow(py).inner,
+                self.rng,
+                consumer_stream,
+            )
+            .map_err(xlog_err)?;
+        let [parameters, text, baselines] = gradients.into_dlpack().map_err(xlog_err)?;
+        let export_owner = || policy_step.clone_ref(py);
+        let parameters = retain_export_owner(parameters, export_owner(), session.owner_thread)?;
+        let text = retain_export_owner(text, export_owner(), session.owner_thread)?;
+        let baselines = retain_export_owner(baselines, export_owner(), session.owner_thread)?;
+        Ok((
+            crate::dlpack_capsule_from_tensor(py, parameters)?,
+            crate::dlpack_capsule_from_tensor(py, text)?,
+            crate::dlpack_capsule_from_tensor(py, baselines)?,
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+
     /// Finish the original published or refused inference use after consumers are enqueued.
     ///
     /// ``consumer_stream`` must be the explicit CUDA stream containing those
