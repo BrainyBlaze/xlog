@@ -411,6 +411,12 @@ struct SemanticTrainingObjectiveRecord {
 struct SemanticTrainingObjectiveGroupRecord {
     uint64_t kind,denominator,member_offset,member_count;
 };
+struct SemanticTrainingCanaryRecord {
+    uint64_t kind,row_ordinal,lower_bound_bits,upper_bound_bits,memory_limit,fuel_limit,identity[4];
+};
+struct SemanticTrainingCanaryResultRecord {
+    uint64_t kind,row_ordinal,measurement_bits,memory_used,fuel_used,identity[4];
+};
 struct PolicyBackward {
     uint64_t cotangents,parameters,text,baselines,recurrent,scores,status,parameter_cells,text_cells;
     uint64_t selection,objective,objective_groups,objective_group_members,origin_candidate,mode;
@@ -436,6 +442,8 @@ static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origi
 static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
 static_assert(sizeof(SemanticTrainingObjectiveRecord)==200,"training objective ABI");
 static_assert(sizeof(SemanticTrainingObjectiveGroupRecord)==32,"training objective group ABI");
+static_assert(sizeof(SemanticTrainingCanaryRecord)==80,"training canary ABI");
+static_assert(sizeof(SemanticTrainingCanaryResultRecord)==72,"training canary result ABI");
 static_assert(sizeof(PolicyBackward)==120,"policy backward ABI");
 static_assert(sizeof(SourceSlot)==64,"source slot ABI");
 static_assert(sizeof(PublicationStorageEntry)==24,"owned storage ABI");
@@ -1457,14 +1465,56 @@ extern "C" __global__ void semantic_publication_prepare_continuation(uint64_t co
            *reinterpret_cast<const PublicationLease*>(lease_ptr),inputs))semantic_content_integrity_trap();
 }
 extern "C" __global__ void semantic_publication_prepare_model_update_admissibility(
-        uint64_t source_ptr,uint64_t destination_ptr) {
+        uint64_t selection_ptr,uint64_t canaries_ptr,uint64_t canary_count,
+        uint64_t source_ptr,uint64_t results_ptr,uint64_t destination_ptr) {
     if(blockIdx.x || threadIdx.x)return;
-    if(!source_ptr || source_ptr==UINT64_MAX || !destination_ptr || destination_ptr==UINT64_MAX) {
+    if(!selection_ptr || selection_ptr%alignof(SemanticTrainingViewSelection) ||
+       selection_ptr>UINT64_MAX-sizeof(SemanticTrainingViewSelection) ||
+       !canaries_ptr || canaries_ptr%alignof(SemanticTrainingCanaryRecord) ||
+       canary_count!=5 || canaries_ptr>UINT64_MAX-canary_count*sizeof(SemanticTrainingCanaryRecord) ||
+       !source_ptr || source_ptr==UINT64_MAX ||
+       !results_ptr || results_ptr%alignof(SemanticTrainingCanaryResultRecord) ||
+       results_ptr>UINT64_MAX-canary_count*sizeof(SemanticTrainingCanaryResultRecord) ||
+       !destination_ptr || destination_ptr==UINT64_MAX) {
         semantic_content_integrity_trap();return;
     }
     const uint8_t value=*reinterpret_cast<const uint8_t*>(source_ptr);
     if(value>1) { semantic_content_integrity_trap();return; }
-    *reinterpret_cast<uint8_t*>(destination_ptr)=value;
+    const auto& selection=*reinterpret_cast<const SemanticTrainingViewSelection*>(selection_ptr);
+    const auto* canaries=reinterpret_cast<const SemanticTrainingCanaryRecord*>(canaries_ptr);
+    const auto* results=reinterpret_cast<const SemanticTrainingCanaryResultRecord*>(results_ptr);
+    uint64_t seen=0;
+    uint8_t admissible=value && selection.status==0;
+    for(uint64_t item=0;item<canary_count;++item) {
+        const auto& result=results[item];
+        if(result.kind<1 || result.kind>canary_count || (seen&(uint64_t(1)<<(result.kind-1)))) {
+            semantic_content_integrity_trap();return;
+        }
+        seen|=uint64_t(1)<<(result.kind-1);
+        const SemanticTrainingCanaryRecord* canary=nullptr;
+        for(uint64_t candidate=0;candidate<canary_count;++candidate)
+            if(canaries[candidate].kind==result.kind) {
+                if(canary) { semantic_content_integrity_trap();return; }
+                canary=&canaries[candidate];
+            }
+        if(!canary || canary->row_ordinal!=result.row_ordinal) {
+            semantic_content_integrity_trap();return;
+        }
+        for(uint32_t word=0;word<4;++word)if(canary->identity[word]!=result.identity[word]) {
+            semantic_content_integrity_trap();return;
+        }
+        const double lower=__longlong_as_double((long long)canary->lower_bound_bits);
+        const double upper=__longlong_as_double((long long)canary->upper_bound_bits);
+        const double measurement=__longlong_as_double((long long)result.measurement_bits);
+        if(!isfinite(lower) || !isfinite(upper) || lower>upper || !canary->memory_limit ||
+           !canary->fuel_limit) {
+            semantic_content_integrity_trap();return;
+        }
+        admissible &= isfinite(measurement) && measurement>=lower && measurement<=upper &&
+            result.memory_used<=canary->memory_limit && result.fuel_used<=canary->fuel_limit;
+    }
+    if(seen!=31) { semantic_content_integrity_trap();return; }
+    *reinterpret_cast<uint8_t*>(destination_ptr)=admissible;
 }
 extern "C" __global__ void semantic_publication_apply_model_update(uint64_t control_ptr,
         uint64_t lease_ptr) {

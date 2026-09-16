@@ -64,11 +64,12 @@ pub use semantic_hypergraph::{
 };
 pub use semantic_training_view::{
     SemanticSelectedTrainingView, SemanticTrainingCanary, SemanticTrainingCanaryKind,
-    SemanticTrainingCanaryRecord, SemanticTrainingObjective, SemanticTrainingObjectiveGroup,
-    SemanticTrainingObjectiveGroupKind, SemanticTrainingObjectiveGroupRecord,
-    SemanticTrainingObjectiveRecord, SemanticTrainingRosterRow, SemanticTrainingViewBasis,
-    SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
-    SemanticTrainingViewRow, SemanticTrainingViewSelection,
+    SemanticTrainingCanaryRecord, SemanticTrainingCanaryResultRecord, SemanticTrainingObjective,
+    SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind,
+    SemanticTrainingObjectiveGroupRecord, SemanticTrainingObjectiveRecord,
+    SemanticTrainingRosterRow, SemanticTrainingViewBasis, SemanticTrainingViewOrigin,
+    SemanticTrainingViewOriginRecord, SemanticTrainingViewPort, SemanticTrainingViewRow,
+    SemanticTrainingViewSelection,
 };
 pub use semantic_transition::{
     Identity256, SemanticActionCatalogue, SemanticActionDescriptor, SemanticActiveRow,

@@ -7810,9 +7810,10 @@ impl PySemanticTransitionController {
 
     /// Bind the complete original model backing produced by this recorded
     /// update. The transient witness must cover allocations followed by typed
-    /// model views and the Bool8[1] numerical admissibility produced after the
-    /// selected-view backward and optimizer update.
-    #[pyo3(signature = (task_use, *, step, tensors, model_allocations, model_storages, model_views, numerical_admissibility, allocation_witness, consumer_stream))]
+    /// model views, Bool8[1] numerical admissibility and the five U64[5,9]
+    /// frozen canary result records produced after the selected-view backward,
+    /// optimizer update and candidate cache rebuild.
+    #[pyo3(signature = (task_use, *, step, tensors, model_allocations, model_storages, model_views, numerical_admissibility, canary_results, allocation_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "prepared update binding retains model geometry and numerical admissibility"
@@ -7827,6 +7828,7 @@ impl PySemanticTransitionController {
         model_storages: &Bound<'_, PyAny>,
         model_views: &Bound<'_, PyAny>,
         numerical_admissibility: &Bound<'_, PyAny>,
+        canary_results: &Bound<'_, PyAny>,
         allocation_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
@@ -7876,6 +7878,7 @@ impl PySemanticTransitionController {
             allocation_witness._inputs.clone_ref(py),
             model_allocations.clone().unbind(),
             tensors.clone().unbind(),
+            canary_results.clone().unbind(),
         ]);
         producer_owners.0.extend(
             allocation_witness
@@ -7916,6 +7919,31 @@ impl PySemanticTransitionController {
             logical_end: 0,
             native_allocation: None,
         };
+        validate_producer_device_guarded(canary_results, device, &check)?;
+        let canary_index = allocation_index
+            .checked_add(1)
+            .ok_or_else(|| invalid("model update canary index exceeds native address space"))?;
+        let canary_results = SemanticTensorInput {
+            tensor: crate::dlpack_from_py_for_stream_guarded(
+                canary_results,
+                i64::try_from(stream)
+                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
+                &check,
+            )?,
+            layout: SemanticTensorLayout {
+                role: 0,
+                index: canary_index,
+                element_bytes: 8,
+                scalar_type: 3,
+                rank: 2,
+                logical_axis: u64::MAX,
+                dimensions: [5, 9, 0, 0],
+                strides_bytes: [72, 8, 0, 0],
+            },
+            logical_begin: 0,
+            logical_end: 0,
+            native_allocation: None,
+        };
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         let state = self.continuation_state(py, task_use, parent, &owner, None)?;
@@ -7935,6 +7963,7 @@ impl PySemanticTransitionController {
                 },
                 tensor_handoff.into_native(),
                 numerical_admissibility,
+                canary_results,
                 &allocation_witness.inner,
                 stream,
             )

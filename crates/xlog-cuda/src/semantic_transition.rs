@@ -6209,6 +6209,7 @@ struct BoundModelUpdate {
     values: Vec<ModelUpdateBinding>,
     allocations: Vec<PreparedSemanticTensor>,
     admissibility: PreparedSemanticTensor,
+    canary_results: PreparedSemanticTensor,
     _witness: SemanticTensorContentWitness,
 }
 
@@ -6233,6 +6234,9 @@ impl PreparedModelUpdate {
             if let Some(source) = &output.admissibility.source {
                 recorder.read(source);
             }
+            if let Some(source) = &output.canary_results.source {
+                recorder.read(source);
+            }
         }
     }
 
@@ -6243,6 +6247,7 @@ impl PreparedModelUpdate {
         poisoned: &mut bool,
         storage: &PublicationStorage,
         reader: &TrackedCudaSlice<PublicationLease>,
+        training_view: &SemanticSelectedTrainingView,
     ) -> Result<(), SemanticTransitionError> {
         let output = self.output.as_ref().ok_or_else(|| {
             publication_input_error("prepared update has no original model output binding")
@@ -6265,8 +6270,13 @@ impl PreparedModelUpdate {
         storage.record(&mut recorder);
         recorder.read(reader);
         self.record(&mut recorder);
+        let selection = training_view.selection();
+        let canaries = training_view.canaries();
+        recorder.read(&selection);
+        recorder.read(&canaries);
         recorder.write(&self.admissibility);
         let admissibility_source = output.admissibility.data;
+        let canary_results = output.canary_results.data;
         let admissibility_destination = self.admissibility.device_ptr_value();
         let arguments = (
             storage.control.device_ptr_value(),
@@ -6284,7 +6294,14 @@ impl PreparedModelUpdate {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (admissibility_source, admissibility_destination),
+                    (
+                        *selection.device_ptr(),
+                        *canaries.device_ptr(),
+                        canaries.len() as u64,
+                        admissibility_source,
+                        canary_results,
+                        admissibility_destination,
+                    ),
                 )
             }
             .map_err(|error| XlogError::Kernel(error.to_string()))?;
@@ -11445,12 +11462,17 @@ impl SemanticTransitionSession {
     /// selected-view backward and optimizer update were recorded. The output is
     /// copied into the inactive neural bank by a prepared CUDA node before the
     /// sole publication transition commits its pointer and generation state.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the native update handoff binds model geometry, numerical validity and canary evidence"
+    )]
     pub fn bind_prepared_update_output(
         &mut self,
         step: &SemanticPreparedStep,
         mut model_memory: SemanticModelMemory,
         mut tensors: Vec<SemanticTensorInput>,
         admissibility: SemanticTensorInput,
+        canary_results: SemanticTensorInput,
         witness: &SemanticTensorContentWitness,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
@@ -11489,6 +11511,7 @@ impl SemanticTransitionSession {
         let tensor_count = tensors.len();
         model_memory.allocations.append(&mut tensors);
         model_memory.allocations.push(admissibility);
+        model_memory.allocations.push(canary_results);
         self.verify_prepared_tensor_content(
             step,
             witness,
@@ -11500,10 +11523,10 @@ impl SemanticTransitionSession {
             .tensors
             .clone();
         let (allocations, outputs) = outputs.split_at(allocation_count);
-        let (tensors, admissibility) = outputs.split_at(tensor_count);
-        let [admissibility] = admissibility else {
+        let (tensors, update_metadata) = outputs.split_at(tensor_count);
+        let [admissibility, canary_results] = update_metadata else {
             return Err(publication_input_error(
-                "model update output requires one numerical admissibility predicate",
+                "model update output requires numerical admissibility and five canary results",
             ));
         };
         let allocation_index = u64::try_from(allocation_count)
@@ -11524,6 +11547,27 @@ impl SemanticTransitionSession {
         {
             return Err(publication_input_error(
                 "model update numerical admissibility must be Bool8[1]",
+            ));
+        }
+        let canary_index = allocation_index
+            .checked_add(1)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        if canary_results.layout
+            != (SemanticTensorLayout {
+                role: 0,
+                index: canary_index,
+                element_bytes: 8,
+                scalar_type: 3,
+                rank: 2,
+                logical_axis: u64::MAX,
+                dimensions: [5, 9, 0, 0],
+                strides_bytes: [72, 8, 0, 0],
+            })
+            || canary_results.logical_begin != 0
+            || canary_results.logical_end != 0
+        {
+            return Err(publication_input_error(
+                "model update canary results must be U64[5,9] frozen result records",
             ));
         }
         let geometry = prepare_model_memory(
@@ -11596,6 +11640,7 @@ impl SemanticTransitionSession {
             values,
             allocations: retained_allocations,
             admissibility: admissibility.clone(),
+            canary_results: canary_results.clone(),
             _witness: witness.clone(),
         });
         Ok(())
@@ -16583,11 +16628,15 @@ impl SemanticTransitionSession {
                 .expect("checked original continuation")
                 .enqueue(&self.domain, &mut self.poisoned)?;
             if let Some(update) = &prepared.model_update {
+                let training_view = prepared.training_view.as_ref().ok_or_else(|| {
+                    publication_input_error("prepared update has no native training view")
+                })?;
                 update.enqueue_copy(
                     &self.domain,
                     &mut self.poisoned,
                     self.publication.as_ref().expect("prepared publication"),
                     &prepared.reader,
+                    training_view,
                 )?;
             }
             let io = self.prepared_kernel_io(step)?;
@@ -18414,6 +18463,12 @@ impl SemanticTransitionSession {
                     if let Some(source) = &allocation.source {
                         ranges.push((allocation.data, source.len() as u64));
                     }
+                }
+                if let Some(source) = &output.admissibility.source {
+                    ranges.push((output.admissibility.data, source.len() as u64));
+                }
+                if let Some(source) = &output.canary_results.source {
+                    ranges.push((output.canary_results.data, source.len() as u64));
                 }
             }
         }

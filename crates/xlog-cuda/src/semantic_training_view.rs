@@ -161,6 +161,26 @@ pub struct SemanticTrainingCanaryRecord {
 // SAFETY: the fixed CUDA ABI contains only u64 words.
 unsafe impl DeviceRepr for SemanticTrainingCanaryRecord {}
 
+/// Device-produced measurement for one frozen candidate-update canary.
+///
+/// The result repeats the frozen kind, row and identity so the native update
+/// gate can reject a measurement produced for any other roster entry. The
+/// measurement is carried as raw FP64 bits; memory and fuel are exact integer
+/// tallies checked against the frozen ceilings.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SemanticTrainingCanaryResultRecord {
+    pub kind: u64,
+    pub row_ordinal: u64,
+    pub measurement_bits: u64,
+    pub memory_used: u64,
+    pub fuel_used: u64,
+    pub identity: [u64; 4],
+}
+
+// SAFETY: the fixed CUDA ABI contains only u64 words.
+unsafe impl DeviceRepr for SemanticTrainingCanaryResultRecord {}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SemanticTrainingViewOriginRecord {
@@ -376,6 +396,10 @@ impl SemanticSelectedTrainingView {
 
     pub(crate) fn objective_group_members(&self) -> DeviceMemoryView<u64> {
         self.arena.group_members.view()
+    }
+
+    pub(crate) fn canaries(&self) -> DeviceMemoryView<SemanticTrainingCanaryRecord> {
+        self.arena.canaries.view()
     }
 
     pub fn token_ids(&self) -> DeviceMemoryView<i64> {
