@@ -197,7 +197,9 @@ fn device_policy_snapshots_inputs_and_computes_late_text_vjp() {
         .dtoh_sync_copy(&gradients.text_logits)
         .unwrap();
     for (row, receipt) in text_gradient
-        .chunks_exact(SemanticActionCatalogue::current().text_cardinality())
+        .as_chunks::<{ SemanticActionCatalogue::current().text_cardinality() }>()
+        .0
+        .iter()
         .zip(forward.components.iter().filter(|r| r.ordinal % 68 < 32))
     {
         assert_eq!(receipt.legal_count, 2);

@@ -683,7 +683,7 @@ fn material_root_digest(previous: [u8; 32], version: [u8; 32], extents: [u32; 3]
     bytes[..22].copy_from_slice(b"xlog.semantic.root.v1\0");
     bytes[32..64].copy_from_slice(&previous);
     bytes[64..96].copy_from_slice(&version);
-    for (chunk, extent) in bytes[96..].chunks_exact_mut(4).zip(extents) {
+    for (chunk, extent) in bytes[96..].as_chunks_mut::<4>().0.iter_mut().zip(extents) {
         chunk.copy_from_slice(&extent.to_le_bytes());
     }
     Sha256::digest(bytes).into()
@@ -953,7 +953,7 @@ fn material_from_arena(
     }
     let identity = |words: &[u64]| -> [u8; 32] {
         let mut bytes = [0; 32];
-        for (chunk, word) in bytes.chunks_exact_mut(8).zip(words) {
+        for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(words) {
             chunk.copy_from_slice(&word.to_le_bytes());
         }
         bytes
@@ -4903,7 +4903,7 @@ pub(crate) mod tests {
 
     fn identity_bytes_from_dwords(words: [u32; 8]) -> [u8; 32] {
         let mut bytes = [0; 32];
-        for (chunk, word) in bytes.chunks_exact_mut(4).zip(words) {
+        for (chunk, word) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(words) {
             chunk.copy_from_slice(&word.to_le_bytes());
         }
         bytes
@@ -5172,8 +5172,10 @@ pub(crate) mod tests {
                 let bytes = std::fs::read(&output_path).unwrap();
                 assert_eq!(bytes.len() % 8, 0);
                 let words: Vec<_> = bytes
-                    .chunks_exact(8)
-                    .map(|word| u64::from_ne_bytes(word.try_into().unwrap()))
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|word| u64::from_ne_bytes(*word))
                     .collect();
                 let root = SemanticRootHandle::new(91, words[3] as u32, words[4]);
                 let digest =

@@ -852,8 +852,10 @@ impl ActionCodebooks {
         bytes.resize(bytes.len().div_ceil(8) * 8, 0);
         words.extend(
             bytes
-                .chunks_exact(8)
-                .map(|v| u64::from_le_bytes(v.try_into().unwrap())),
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|v| u64::from_le_bytes(*v)),
         );
         let mut hash = Sha256::new();
         hash.update(b"xlog.semantic.action-binding.v3\0");
@@ -3070,7 +3072,9 @@ fn decode_tensor_table(
     let layouts_end =
         size_of::<TensorLayoutTableHeader>() + count * size_of::<SemanticTensorLayout>();
     let layouts = bytes[size_of::<TensorLayoutTableHeader>()..layouts_end]
-        .chunks_exact(size_of::<SemanticTensorLayout>())
+        .as_chunks::<{ size_of::<SemanticTensorLayout>() }>()
+        .0
+        .iter()
         // SAFETY: each chunk is a complete integer-only C record.
         .map(|chunk| unsafe {
             chunk
@@ -3080,7 +3084,9 @@ fn decode_tensor_table(
         })
         .collect();
     let rows = bytes[layouts_end..]
-        .chunks_exact(size_of::<SemanticActiveRow>())
+        .as_chunks::<{ size_of::<SemanticActiveRow>() }>()
+        .0
+        .iter()
         // SAFETY: each chunk is a complete integer-only C record.
         .map(|chunk| unsafe { chunk.as_ptr().cast::<SemanticActiveRow>().read_unaligned() })
         .collect();
@@ -3295,7 +3301,8 @@ impl PublicationMaterialRange {
                     ));
                 }
                 for entry in bytes[size_of::<IntentQueueHeader>()..]
-                    .chunks_exact_mut(size_of::<IntentEntry>())
+                    .as_chunks_mut::<{ size_of::<IntentEntry>() }>()
+                    .0
                 {
                     entry[30 * 8..35 * 8].fill(0);
                 }
@@ -3382,7 +3389,7 @@ fn publication_action_receipts_digest(
     hash.update(b"xlog.semantic.logical-codebooks.v1\0");
     hash.update(CATALOGUE_DIGEST);
     hash.update(((bytes.len() / 8) as u64).to_le_bytes());
-    for (index, bytes) in bytes.chunks_exact(8).enumerate() {
+    for (index, bytes) in bytes.as_chunks::<8>().0.iter().enumerate() {
         hash.update(if matches!(index, 14..=16 | 21..=24) {
             &[0; 8]
         } else {
@@ -3881,10 +3888,8 @@ fn relocate_publication_codebooks(
             "restored codebook has another actual extent",
         ));
     }
-    for (index, (saved, &actual)) in saved.chunks_exact(8).zip(actual).enumerate() {
-        if !matches!(index, 14..=16 | 21..=24)
-            && u64::from_le_bytes(saved.try_into().unwrap()) != actual
-        {
+    for (index, (saved, &actual)) in saved.as_chunks::<8>().0.iter().zip(actual).enumerate() {
+        if !matches!(index, 14..=16 | 21..=24) && u64::from_le_bytes(*saved) != actual {
             return Err(publication_input_error(
                 "restored codebook changes its admitted logical content or original base",
             ));
@@ -4250,8 +4255,10 @@ impl PublicationMaterial {
             ));
         }
         let terminals = terminal_bytes
-            .chunks_exact(8)
-            .map(|item| u64::from_le_bytes(item.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|item| u64::from_le_bytes(*item))
             .collect();
         let count = reader
             .count(4 + size_of::<SemanticTensorLayout>())
@@ -20831,7 +20838,9 @@ mod text_parent_tests {
             append(physical as u64, slot as u64, source.logical_position, 1);
         }
         for (slot, record) in feedback
-            .chunks_exact(size_of::<RawFeedbackRecord>())
+            .as_chunks::<{ size_of::<RawFeedbackRecord>() }>()
+            .0
+            .iter()
             .enumerate()
         {
             let valid = u64::from_ne_bytes(record[..8].try_into().unwrap());
@@ -22787,8 +22796,10 @@ mod text_parent_tests {
             provenance_record: 19,
         };
         let words = publication_abi_bytes(&[row])
-            .chunks_exact(8)
-            .map(|bytes| u64::from_ne_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|bytes| u64::from_ne_bytes(*bytes))
             .collect::<Vec<_>>();
         assert_eq!(words, [71, 1, 1, 2, 1, 1, 1, 19]);
         let empty = committed_prefix_layout(
