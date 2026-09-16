@@ -32,7 +32,8 @@ const PROPOSAL_TRANSITION: u64 = 1;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticTrainingViewBasis {
     Episode = 1,
-    CorpusAnchor = 2,
+    CorpusLanguageAnchor = 2,
+    CorpusSymbolicAnchor = 3,
 }
 
 /// Authenticated native execution that produced one episode training view.
@@ -949,9 +950,14 @@ fn validate_objective(
     let mut group_members = Vec::new();
     for group in &objective.groups {
         let index = group.kind as usize - 1;
-        if seen_groups[index] || group.denominator == 0 || group.row_ordinals.is_empty() {
+        if seen_groups[index]
+            || group.row_ordinals.is_empty()
+            || group.denominator
+                != u64::try_from(group.row_ordinals.len())
+                    .map_err(|_| SemanticTransitionError::GenerationExhausted)?
+        {
             return Err(input_error(
-                "training objective groups must be unique, nonempty and have positive denominators",
+                "training objective groups must be unique, nonempty and use their exact member count as denominator",
             ));
         }
         seen_groups[index] = true;
@@ -968,13 +974,17 @@ fn validate_objective(
                     "training objective row ordinals must be strictly increasing",
                 ));
             }
-            let anchor_group = matches!(
-                group.kind,
-                SemanticTrainingObjectiveGroupKind::RetentionLanguage
-                    | SemanticTrainingObjectiveGroupKind::RetentionSymbolic
-            );
             let policy_group = group.kind == SemanticTrainingObjectiveGroupKind::ActorCriticCost;
-            if (anchor_group && row.basis != SemanticTrainingViewBasis::CorpusAnchor as u64)
+            let expected_anchor = match group.kind {
+                SemanticTrainingObjectiveGroupKind::RetentionLanguage => {
+                    Some(SemanticTrainingViewBasis::CorpusLanguageAnchor)
+                }
+                SemanticTrainingObjectiveGroupKind::RetentionSymbolic => {
+                    Some(SemanticTrainingViewBasis::CorpusSymbolicAnchor)
+                }
+                _ => None,
+            };
+            if expected_anchor.is_some_and(|basis| row.basis != basis as u64)
                 || (policy_group
                     && (row.basis != SemanticTrainingViewBasis::Episode as u64
                         || row.origin.transition != PROPOSAL_TRANSITION))
@@ -1008,11 +1018,14 @@ fn validate_objective(
         .max(1.0);
     let actor_coefficient = (1.0 / return_scale) as f32;
     let critic_coefficient = (1.0 / (return_scale * return_scale)) as f32;
-    if objective.coefficients[6].to_bits() != actor_coefficient.to_bits()
+    if [0, 1, 2, 3, 4, 5, 8]
+        .into_iter()
+        .any(|index| objective.coefficients[index].to_bits() != 1.0f32.to_bits())
+        || objective.coefficients[6].to_bits() != actor_coefficient.to_bits()
         || objective.coefficients[7].to_bits() != critic_coefficient.to_bits()
     {
         return Err(input_error(
-            "actor and critic coefficients differ from the frozen evaluator scale",
+            "training coefficients differ from the frozen primary and evaluator-scaled law",
         ));
     }
     let mut seen_canaries = [false; 5];

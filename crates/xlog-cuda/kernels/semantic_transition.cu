@@ -2979,12 +2979,15 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     if((objective.coefficient_bits[i]>>32) || !isfinite(objective_coefficients[i]) ||
                        objective_coefficients[i]<=0.0f)*status=1;
                 }
+                const uint32_t fixed_coefficients[]={0,1,2,3,4,5,8};
+                for(uint32_t i=0;i<7;++i)
+                    if(objective_coefficients[fixed_coefficients[i]]!=1.0f)*status=1;
                 if(!isfinite(evaluator_min) || !isfinite(evaluator_max) || evaluator_min>evaluator_max)*status=1;
                 uint64_t actor_groups=0;
                 bool selected_member=false;
                 for(uint64_t i=0;i<objective.group_count && !*status;++i) {
                     const auto group=groups[i];
-                    if(!group.denominator || !group.member_count ||
+                    if(!group.denominator || group.denominator!=group.member_count ||
                        group.member_offset>objective.group_member_count ||
                        group.member_count>objective.group_member_count-group.member_offset) {
                         *status=1;break;

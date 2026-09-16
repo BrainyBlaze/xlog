@@ -2128,7 +2128,13 @@ struct ReplayRow {
 #[derive(Clone, Debug)]
 enum ReplayBasis {
     Episode { execution: serde_json::Value },
-    CorpusAnchor,
+    CorpusAnchor { group: ReplayAnchorGroup },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReplayAnchorGroup {
+    Language,
+    Symbolic,
 }
 
 fn read_training_objective(value: &ColdValue) -> PyResult<Option<SemanticTrainingObjective>> {
@@ -2215,7 +2221,7 @@ impl ReplayBasis {
     fn name(&self) -> &'static str {
         match self {
             Self::Episode { .. } => "episode",
-            Self::CorpusAnchor => "anchor",
+            Self::CorpusAnchor { .. } => "anchor",
         }
     }
 }
@@ -2253,12 +2259,17 @@ impl ReplayRow {
                     .training_view_origin()
                     .map_err(xlog_err)?,
             ),
-            ReplayBasis::CorpusAnchor => None,
+            ReplayBasis::CorpusAnchor { .. } => None,
         };
         Ok(SemanticTrainingViewRow {
             basis: match &self.basis {
                 ReplayBasis::Episode { .. } => SemanticTrainingViewBasis::Episode,
-                ReplayBasis::CorpusAnchor => SemanticTrainingViewBasis::CorpusAnchor,
+                ReplayBasis::CorpusAnchor {
+                    group: ReplayAnchorGroup::Language,
+                } => SemanticTrainingViewBasis::CorpusLanguageAnchor,
+                ReplayBasis::CorpusAnchor {
+                    group: ReplayAnchorGroup::Symbolic,
+                } => SemanticTrainingViewBasis::CorpusSymbolicAnchor,
             },
             content_identity: replay_digest_identity(identity[2].text()?)?,
             origin,
@@ -2415,7 +2426,7 @@ impl ReplayRow {
             return Err(invalid("replay evidence bytes are empty"));
         }
         if basis == "anchor" {
-            let source = validate_anchor_admission(identity, &record, evidence)?;
+            let (source, group) = validate_anchor_admission(identity, &record, evidence)?;
             let transported = fields[3].fields(1)?;
             let material = ReplayMaterial::parse(&transported[0], &BTreeSet::new())?;
             if material.kind != "training-view"
@@ -2428,7 +2439,7 @@ impl ReplayRow {
             }
             validate_replay_training_payload(&material, identity, &source, true)?;
             return Ok(Self {
-                basis: ReplayBasis::CorpusAnchor,
+                basis: ReplayBasis::CorpusAnchor { group },
                 identity: fields[1].clone(),
                 record_line,
                 record,
@@ -2627,7 +2638,7 @@ fn validate_anchor_admission(
     identity: &[ColdValue],
     record: &ReplayJsonObject,
     evidence: &[u8],
-) -> PyResult<String> {
+) -> PyResult<(String, ReplayAnchorGroup)> {
     let keys = [
         "content_sha256",
         "example_id",
@@ -2639,11 +2650,16 @@ fn validate_anchor_admission(
         return Err(invalid("corpus anchor record field set differs"));
     }
     let view = identity[0].fields(9)?;
-    if view[2].text()? != "train"
-        || replay_json_value(replay_json_field(record, "group")?)?
-            .as_str()
-            .is_none_or(str::is_empty)
-    {
+    let group = match replay_json_value(replay_json_field(record, "group")?)?.as_str() {
+        Some("language") => ReplayAnchorGroup::Language,
+        Some("symbolic") => ReplayAnchorGroup::Symbolic,
+        _ => {
+            return Err(invalid(
+                "corpus anchor requires the exact language or symbolic retention group",
+            ));
+        }
+    };
+    if view[2].text()? != "train" {
         return Err(invalid(
             "corpus anchor requires its admitted train partition and original retention group",
         ));
@@ -2701,10 +2717,13 @@ fn validate_anchor_admission(
     // This checks the transported producer record, not a signature or a grant.
     // TaskAuthority still requires the trusted application's full dependency
     // closure and fresh permission for every use of these retained bytes.
-    Ok(entry[4]
-        .as_str()
-        .expect("checked original normalized record digest")
-        .to_owned())
+    Ok((
+        entry[4]
+            .as_str()
+            .expect("checked original normalized record digest")
+            .to_owned(),
+        group,
+    ))
 }
 
 fn validate_replay_training_payload(
@@ -2862,7 +2881,7 @@ fn decode_selected_replay(
     let selection = select_replay_row(rows, selection)?;
     let mut selected = None;
     for (ordinal, row) in rows.iter().enumerate() {
-        if matches!(row.basis, ReplayBasis::CorpusAnchor) {
+        if matches!(row.basis, ReplayBasis::CorpusAnchor { .. }) {
             if selection == Some(ordinal) {
                 return Err(invalid(
                     "native execution replay cannot select a corpus anchor",
