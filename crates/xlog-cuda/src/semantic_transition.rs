@@ -5023,14 +5023,18 @@ struct PublicationStepInput {
 unsafe impl DeviceRepr for PublicationStepInput {}
 const _: () = assert!(size_of::<PublicationStepInput>() == 160);
 
+#[derive(Clone, Debug)]
+struct StepInputBankPlan {
+    storage_slot: usize,
+    span: std::ops::Range<usize>,
+}
+
 #[derive(Clone)]
 struct StepInputPlan {
     role: u64,
     index: u64,
     layout: SemanticTensorLayout,
-    storage_slot: usize,
-    allocation_bytes: usize,
-    span: std::ops::Range<usize>,
+    banks: [StepInputBankPlan; 2],
 }
 
 fn step_input_overlap(
@@ -5172,25 +5176,33 @@ fn plan_step_inputs(
             spans.push((bank, role, index, slot, span.clone()));
             resolved.push((slot, span, capacity));
         }
-        if matches!(role, 1 | 4 | 5) && resolved[0] != resolved[1] {
+        if role == 1 && resolved[0] != resolved[1] {
             return Err(publication_input_error(
-                "prefix and key/value step inputs must share their original capacity allocation",
+                "prefix step inputs must share their original capacity allocation",
             ));
         }
-        if matches!(role, 15 | 18..=25 | 44)
+        if matches!(role, 4 | 5 | 15 | 18..=25 | 44)
             && (resolved[0].0 == resolved[1].0
                 || resolved[0].1 != resolved[1].1
                 || resolved[0].2 != resolved[1].2)
         {
-            return Err(publication_input_error("mutable step inputs require disjoint banks with the same complete backing geometry"));
+            return Err(publication_input_error("bank-selected step inputs require disjoint banks with the same complete backing geometry"));
         }
         plan.push(StepInputPlan {
             role,
             index,
             layout,
-            storage_slot: resolved[0].0,
-            allocation_bytes: resolved[0].2,
-            span: resolved[0].1.clone(),
+            banks: resolved
+                .into_iter()
+                .map(
+                    |(storage_slot, span, _allocation_bytes)| StepInputBankPlan {
+                        storage_slot,
+                        span,
+                    },
+                )
+                .collect::<Vec<_>>()
+                .try_into()
+                .expect("two publication banks"),
         });
     }
     for (ordinal, (bank, role, index, slot, span)) in spans.iter().enumerate() {
@@ -5198,7 +5210,9 @@ fn plan_step_inputs(
             let same_shared = bank != other_bank
                 && role == other_role
                 && index == other_index
-                && matches!(*role, 1 | 4 | 5 | 16 | 17);
+                && slot == other_slot
+                && span == other_span
+                && matches!(*role, 1 | 16 | 17);
             let same_model =
                 bank == other_bank && matches!(*role, 18..=25) && matches!(*other_role, 18..=25);
             if slot == other_slot
@@ -5225,10 +5239,10 @@ struct PreparedStepInputs {
     source: TrackedCudaSlice<SourceSlot>,
     ranges: TrackedCudaSlice<PublicationRange>,
     metadata_digests: TrackedCudaSlice<u64>,
-    bindings: TrackedCudaSlice<PublicationStepInput>,
-    binding_values: Vec<PublicationStepInput>,
+    bindings: [TrackedCudaSlice<PublicationStepInput>; 2],
+    binding_values: [Vec<PublicationStepInput>; 2],
     plans: Vec<StepInputPlan>,
-    views: BTreeMap<(u64, u64), DeviceMemoryView<u8>>,
+    views: [BTreeMap<(u64, u64), DeviceMemoryView<u8>>; 2],
     private: Vec<TrackedCudaSlice<u8>>,
     execute: CudaFunction,
     guard: CudaFunction,
@@ -5253,23 +5267,14 @@ impl PreparedStepInputs {
             size_of::<PublicationHeader>() + 32 * size_of::<SourceSlot>() + u64::BITS as usize;
         let bytes = plans
             .len()
-            .checked_mul(size_of::<PublicationRange>() + size_of::<PublicationStepInput>())
+            .checked_mul(size_of::<PublicationRange>() + 2 * size_of::<PublicationStepInput>())
             .and_then(|n| n.checked_add(fixed))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let mut model_roots = BTreeSet::new();
         plans
             .iter()
-            .filter(|input| !matches!(input.role, 1 | 4 | 5))
+            .filter(|input| !matches!(input.role, 1 | 4 | 5 | 18..=25))
             .try_fold(bytes, |sum, input| {
-                let extent = if matches!(input.role, 18..=25) {
-                    if !model_roots.insert(input.storage_slot) {
-                        return Ok(sum);
-                    }
-                    input.allocation_bytes
-                } else {
-                    input.span.len()
-                };
-                sum.checked_add(extent)
+                sum.checked_add(input.banks[0].span.len())
                     .ok_or(SemanticTransitionError::GenerationExhausted)
             })
     }
@@ -5328,58 +5333,62 @@ impl PreparedStepInputs {
                 runtime_error("kernel lookup", "publication step input guard unavailable")
             })?;
         let mut private = Vec::new();
-        let mut views = BTreeMap::new();
-        let mut binding_values = Vec::with_capacity(plans.len());
-        let mut model_roots = BTreeMap::new();
+        let mut views = [BTreeMap::new(), BTreeMap::new()];
+        let mut binding_values = [
+            Vec::with_capacity(plans.len()),
+            Vec::with_capacity(plans.len()),
+        ];
         for input in &plans {
-            let view = if matches!(input.role, 1 | 4 | 5) {
-                storage.allocations[input.storage_slot]
-                    .view()
-                    .slice(input.span.clone())
-            } else if matches!(input.role, 18..=25) {
-                let ordinal =
-                    if let Some(&ordinal) = model_roots.get(&input.storage_slot) {
-                        ordinal
+            if matches!(input.role, 1 | 4 | 5 | 18..=25) {
+                for bank in 0..2 {
+                    let plan = &input.banks[bank];
+                    let view = storage.allocations[plan.storage_slot]
+                        .view()
+                        .slice(plan.span.clone());
+                    let backing = if matches!(input.role, 18..=25) {
+                        view.allocation_view()
+                            .ok_or(SemanticTransitionError::ObservationMismatch)?
                     } else {
-                        let ordinal = private.len();
-                        private.push(reservation.alloc::<u8>(input.allocation_bytes).map_err(
-                            |error| runtime_error("step model backing allocation", error),
-                        )?);
-                        model_roots.insert(input.storage_slot, ordinal);
-                        ordinal
+                        view.clone()
                     };
-                private[ordinal].view().slice(input.span.clone())
+                    binding_values[bank].push(PublicationStepInput {
+                        role: input.role,
+                        index: input.index,
+                        destination: *view.device_ptr(),
+                        capacity_bytes: view.len() as u64,
+                        backing: *backing.device_ptr(),
+                        backing_bytes: backing.len() as u64,
+                        layout: input.layout,
+                    });
+                    views[bank].insert((input.role, input.index), view);
+                }
             } else {
                 private.push(
                     reservation
-                        .alloc::<u8>(input.span.len())
+                        .alloc::<u8>(input.banks[0].span.len())
                         .map_err(|error| runtime_error("step private input allocation", error))?,
                 );
-                private
+                let view = private
                     .last()
                     .expect("retained private input allocation")
-                    .view()
-            };
-            let backing = if matches!(input.role, 18..=25) {
-                view.allocation_view()
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?
-            } else {
-                view.clone()
-            };
-            binding_values.push(PublicationStepInput {
-                role: input.role,
-                index: input.index,
-                destination: *view.device_ptr(),
-                capacity_bytes: view.len() as u64,
-                backing: *backing.device_ptr(),
-                backing_bytes: backing.len() as u64,
-                layout: if matches!(input.role, 3 | 15..=17 | 44) {
-                    SemanticTensorLayout::default()
-                } else {
-                    input.layout
-                },
-            });
-            views.insert((input.role, input.index), view);
+                    .view();
+                for bank in 0..2 {
+                    binding_values[bank].push(PublicationStepInput {
+                        role: input.role,
+                        index: input.index,
+                        destination: *view.device_ptr(),
+                        capacity_bytes: view.len() as u64,
+                        backing: *view.device_ptr(),
+                        backing_bytes: view.len() as u64,
+                        layout: if matches!(input.role, 3 | 15..=17 | 44) {
+                            SemanticTensorLayout::default()
+                        } else {
+                            input.layout
+                        },
+                    });
+                    views[bank].insert((input.role, input.index), view.clone());
+                }
+            }
         }
         let owner = Self {
             header: reservation
@@ -5394,9 +5403,14 @@ impl PreparedStepInputs {
             metadata_digests: reservation
                 .alloc(8)
                 .map_err(|error| runtime_error("step digest allocation", error))?,
-            bindings: reservation
-                .alloc(plans.len())
-                .map_err(|error| runtime_error("step binding allocation", error))?,
+            bindings: [
+                reservation
+                    .alloc(plans.len())
+                    .map_err(|error| runtime_error("step binding allocation", error))?,
+                reservation
+                    .alloc(plans.len())
+                    .map_err(|error| runtime_error("step binding allocation", error))?,
+            ],
             storage,
             reader,
             plans,
@@ -5423,8 +5437,12 @@ impl PreparedStepInputs {
             ),
             (self.metadata_digests.device_ptr_value(), u64::BITS as usize),
             (
-                self.bindings.device_ptr_value(),
-                self.bindings.len() * size_of::<PublicationStepInput>(),
+                self.bindings[0].device_ptr_value(),
+                self.bindings[0].len() * size_of::<PublicationStepInput>(),
+            ),
+            (
+                self.bindings[1].device_ptr_value(),
+                self.bindings[1].len() * size_of::<PublicationStepInput>(),
             ),
         ];
         output.extend(
@@ -5498,7 +5516,10 @@ impl PreparedStepInputs {
     // Session installs this owner before uploading fixed pointer/layout metadata.
     // No numerical values or expected digests travel through the host.
     fn initialize(&self, provider: &CudaKernelProvider) -> Result<(), SemanticTransitionError> {
-        upload_publication(provider, &self.binding_values, &self.bindings)
+        for bank in 0..2 {
+            upload_publication(provider, &self.binding_values[bank], &self.bindings[bank])?;
+        }
+        Ok(())
     }
 
     fn enqueue(
@@ -5522,7 +5543,9 @@ impl PreparedStepInputs {
         for allocation in &self.storage.allocations {
             recorder.read(allocation);
         }
-        recorder.read(&self.bindings);
+        for bindings in &self.bindings {
+            recorder.read(bindings);
+        }
         recorder.write(&self.header);
         recorder.write(&self.source);
         recorder.write(&self.ranges);
@@ -5533,8 +5556,9 @@ impl PreparedStepInputs {
         let arguments = (
             self.storage.control.device_ptr_value(),
             *self.reader.device_ptr(),
-            self.bindings.device_ptr_value(),
-            self.bindings.len() as u64,
+            self.bindings[0].device_ptr_value(),
+            self.bindings[1].device_ptr_value(),
+            self.bindings[0].len() as u64,
             self.header.device_ptr_value(),
             self.source.device_ptr_value(),
             self.ranges.device_ptr_value(),
@@ -5567,19 +5591,26 @@ impl PreparedStepInputs {
         recorder.read(&self.header);
         recorder.read(&self.source);
         recorder.read(&self.ranges);
-        recorder.read(&self.bindings);
+        recorder.read(&self.reader);
+        for bindings in &self.bindings {
+            recorder.read(bindings);
+        }
         recorder.read(&self.metadata_digests);
-        for view in self.views.values() {
-            recorder.read(view);
+        for bank in &self.views {
+            for view in bank.values() {
+                recorder.read(view);
+            }
         }
         for allocation in &self.private {
             recorder.read(allocation);
         }
         let arguments = (
+            *self.reader.device_ptr(),
             self.header.device_ptr_value(),
             self.source.device_ptr_value(),
-            self.bindings.device_ptr_value(),
-            self.bindings.len() as u64,
+            self.bindings[0].device_ptr_value(),
+            self.bindings[1].device_ptr_value(),
+            self.bindings[0].len() as u64,
             self.ranges.device_ptr_value(),
             self.metadata_digests.device_ptr_value(),
         );
@@ -5643,7 +5674,6 @@ impl PreparedStepInputs {
     fn owns_tensor(
         &self,
         tensor: &PreparedSemanticTensor,
-        directory: &[PublicationRange],
     ) -> Result<bool, SemanticTransitionError> {
         let bytes = tensor.source.as_ref().map_or(0, DeviceMemoryView::len);
         for field in [
@@ -5697,8 +5727,12 @@ impl PreparedStepInputs {
                 self.ranges.len() * size_of::<PublicationRange>(),
             ),
             (
-                self.bindings.device_ptr_value(),
-                self.bindings.len() * size_of::<PublicationStepInput>(),
+                self.bindings[0].device_ptr_value(),
+                self.bindings[0].len() * size_of::<PublicationStepInput>(),
+            ),
+            (
+                self.bindings[1].device_ptr_value(),
+                self.bindings[1].len() * size_of::<PublicationStepInput>(),
             ),
             (
                 self.metadata_digests.device_ptr_value(),
@@ -5716,50 +5750,54 @@ impl PreparedStepInputs {
             .iter()
             .find(|input| (input.role, input.index) == (tensor.layout.role, tensor.layout.index))
         {
-            let view = &self.views[&(input.role, input.index)];
-            let range = directory
-                .iter()
-                .find(|range| (range.role, range.index) == (input.role, input.index))
-                .ok_or(SemanticTransitionError::ObservationMismatch)?;
             if (18..=25).contains(&input.role) && bytes == 0 && tensor.native_allocation.is_none() {
                 return Err(publication_input_error("empty prepared model inputs require their original native allocation provenance"));
             }
-            if step_input_alias_matches(
-                input,
-                range,
-                *view.device_ptr(),
-                view.len(),
-                tensor_content_identity(tensor),
-            ) && step_input_allocation_matches(tensor, view)
-            {
-                return Ok(true);
-            }
-        }
-        for input in &self.plans {
-            let view = &self.views[&(input.role, input.index)];
-            let start = *view.device_ptr();
-            if !(step_input_overlap(tensor.data, bytes, start, view.len())?
-                || input.role == 1 && bytes == 0 && tensor.data == start)
-            {
-                continue;
-            }
-            let range = directory
-                .iter()
-                .find(|range| (range.role, range.index) == (input.role, input.index))
-                .ok_or(SemanticTransitionError::ObservationMismatch)?;
-            if input.role == 1
-                && step_input_alias_matches(
+            for bank in 0..2 {
+                let view = &self.views[bank][&(input.role, input.index)];
+                let range = self.storage.bank_templates[bank]
+                    .iter()
+                    .find(|range| (range.role, range.index) == (input.role, input.index))
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                if step_input_alias_matches(
                     input,
                     range,
-                    start,
+                    *view.device_ptr(),
                     view.len(),
                     tensor_content_identity(tensor),
-                )
-                && step_input_allocation_matches(tensor, view)
-            {
-                return Ok(true);
+                ) && step_input_allocation_matches(tensor, view)
+                {
+                    return Ok(true);
+                }
             }
-            return Err(publication_input_error("native step aliases must retain their original type, capacity, interval and coordinate"));
+        }
+        for bank in 0..2 {
+            for input in &self.plans {
+                let view = &self.views[bank][&(input.role, input.index)];
+                let start = *view.device_ptr();
+                if !(step_input_overlap(tensor.data, bytes, start, view.len())?
+                    || input.role == 1 && bytes == 0 && tensor.data == start)
+                {
+                    continue;
+                }
+                let range = self.storage.bank_templates[bank]
+                    .iter()
+                    .find(|range| (range.role, range.index) == (input.role, input.index))
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                if input.role == 1
+                    && step_input_alias_matches(
+                        input,
+                        range,
+                        start,
+                        view.len(),
+                        tensor_content_identity(tensor),
+                    )
+                    && step_input_allocation_matches(tensor, view)
+                {
+                    return Ok(true);
+                }
+                return Err(publication_input_error("native step aliases must retain their original type, capacity, interval and coordinate"));
+            }
         }
         for allocation in &self.private {
             let retained_origin = tensor.native_allocation.as_ref().is_some_and(|origin| {
@@ -9400,27 +9438,50 @@ mod prepared_completion_tests {
                 role: 1,
                 index: 0,
                 layout: SemanticTensorLayout::default(),
-                storage_slot: 0,
-                allocation_bytes: 1024,
-                span: 0..1024,
+                banks: [
+                    StepInputBankPlan {
+                        storage_slot: 0,
+                        span: 0..1024,
+                    },
+                    StepInputBankPlan {
+                        storage_slot: 0,
+                        span: 0..1024,
+                    },
+                ],
             },
             StepInputPlan {
                 role: 2,
                 index: 0,
                 layout: SemanticTensorLayout::default(),
-                storage_slot: 1,
-                allocation_bytes: 32,
-                span: 0..32,
+                banks: [
+                    StepInputBankPlan {
+                        storage_slot: 1,
+                        span: 0..32,
+                    },
+                    StepInputBankPlan {
+                        storage_slot: 2,
+                        span: 0..32,
+                    },
+                ],
             },
         ];
         assert_eq!(
             PreparedStepInputs::allocation_bytes(&plans).unwrap(),
             input_bytes
-                + 2 * (size_of::<PublicationRange>() + size_of::<PublicationStepInput>())
+                + 2 * (size_of::<PublicationRange>() + 2 * size_of::<PublicationStepInput>())
                 + 32
         );
         assert!(PreparedStepInputs::allocation_bytes(&[StepInputPlan {
-            span: 0..usize::MAX,
+            banks: [
+                StepInputBankPlan {
+                    storage_slot: 1,
+                    span: 0..usize::MAX,
+                },
+                StepInputBankPlan {
+                    storage_slot: 2,
+                    span: 0..usize::MAX,
+                },
+            ],
             ..plans[1].clone()
         }])
         .is_err());
@@ -10269,9 +10330,16 @@ impl SemanticTransitionSession {
     pub fn prepared_prefix(
         &mut self,
         step: &SemanticPreparedStep,
+        bank: usize,
         consumer_stream: u64,
     ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
-        self.prepared_tensor(step, SemanticStateRole::PrefixSource, 0, consumer_stream)
+        self.prepared_tensor(
+            step,
+            SemanticStateRole::PrefixSource,
+            0,
+            bank,
+            consumer_stream,
+        )
     }
 
     pub fn prepared_record(
@@ -10298,7 +10366,7 @@ impl SemanticTransitionSession {
             .inputs
             .as_ref()
             .expect("fixed inputs");
-        let view = if let Some(view) = inputs.views.get(&key) {
+        let view = if let Some(view) = inputs.views[0].get(&key) {
             view.clone()
         } else {
             let original = storage.bank_templates[0]
@@ -10357,9 +10425,10 @@ impl SemanticTransitionSession {
         step: &SemanticPreparedStep,
         role: SemanticStateRole,
         index: u64,
+        bank: usize,
         consumer_stream: u64,
     ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
-        let (view, layout) = self.prepared_tensor_view(step, role, index)?;
+        let (view, layout) = self.prepared_tensor_view(step, role, index, bank)?;
         let shape = layout.dimensions[..layout.rank as usize]
             .iter()
             .map(|&value| {
@@ -10420,10 +10489,11 @@ impl SemanticTransitionSession {
         step: &SemanticPreparedStep,
         role: SemanticStateRole,
         index: u64,
+        bank: usize,
         consumer_stream: u64,
     ) -> Result<(DeviceAllocationProvenance, DlpackManagedTensor), SemanticTransitionError> {
         dlpack_consumer_stream(consumer_stream)?;
-        let (view, _) = self.prepared_tensor_view(step, role, index)?;
+        let (view, _) = self.prepared_tensor_view(step, role, index, bank)?;
         let provenance = view.allocation_provenance().ok_or_else(|| {
             publication_input_error("prepared tensor has no complete native allocation owner")
         })?;
@@ -10448,8 +10518,14 @@ impl SemanticTransitionSession {
         step: &SemanticPreparedStep,
         role: SemanticStateRole,
         index: u64,
+        bank: usize,
     ) -> Result<(DeviceMemoryView<u8>, SemanticTensorLayout), SemanticTransitionError> {
         self.check_prepared_cold(step)?;
+        if bank > 1 {
+            return Err(publication_input_error(
+                "prepared tensor bank must be zero or one",
+            ));
+        }
         let inputs = self.steps[&step.token]
             .inputs
             .as_ref()
@@ -10461,7 +10537,10 @@ impl SemanticTransitionSession {
             .ok_or_else(|| {
                 publication_input_error("prepared tensor has no fixed original input owner")
             })?;
-        Ok((inputs.views[&(role as u64, index)].clone(), plan.layout))
+        Ok((
+            inputs.views[bank][&(role as u64, index)].clone(),
+            plan.layout,
+        ))
     }
 
     pub fn prepared_terminal(
@@ -10705,6 +10784,8 @@ impl SemanticTransitionSession {
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
             let view = inputs
                 .views
+                .first()
+                .expect("two publication input banks")
                 .get(&(range.role, range.index))
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
             let bytes = self.publication_read(view.clone())?;
@@ -10924,7 +11005,7 @@ impl SemanticTransitionSession {
                 let mut native = owner.feedback_origin_digest(tensor)?;
                 if native.is_none() {
                     let inputs = owner.inputs.as_ref().expect("fixed step inputs");
-                    if inputs.owns_tensor(tensor, &inputs.storage.bank_templates[0])? {
+                    if inputs.owns_tensor(tensor)? {
                         native = Some(CapturedTensorDigest::Publication(Arc::clone(inputs)));
                     }
                 }
@@ -10937,9 +11018,7 @@ impl SemanticTransitionSession {
                         continue;
                     }
                     let other_input = match &other.inputs {
-                        Some(inputs) => {
-                            inputs.owns_tensor(tensor, &inputs.storage.bank_templates[0])?
-                        }
+                        Some(inputs) => inputs.owns_tensor(tensor)?,
                         None => false,
                     };
                     if other.feedback_origin_digest(tensor)?.is_some() || other_input {
@@ -11543,6 +11622,8 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .expect("fixed input owner")
                 .views
+                .first()
+                .expect("two publication input banks")
                 .get(&(SemanticStateRole::TrainingView as u64, 0))
                 .cloned()
                 .ok_or_else(|| {
@@ -11945,7 +12026,9 @@ impl SemanticTransitionSession {
                 .inputs
                 .as_ref()
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
-            recorder.read(&inputs.bindings);
+            for bindings in &inputs.bindings {
+                recorder.read(bindings);
+            }
             recorder.write(&inputs.header);
             recorder.write(&inputs.source);
             recorder.write(&inputs.ranges);
@@ -11953,8 +12036,10 @@ impl SemanticTransitionSession {
             for allocation in &inputs.private {
                 recorder.write(allocation);
             }
-            for view in inputs.views.values() {
-                recorder.read_write(view);
+            for bank in &inputs.views {
+                for view in bank.values() {
+                    recorder.read_write(view);
+                }
             }
             for feedback in &owner.feedback {
                 recorder.write(&feedback.status);
@@ -13299,7 +13384,7 @@ impl SemanticTransitionSession {
                 // too. Match the actual current step before checking foreign
                 // private owners, preserving its original logical interval.
                 if let Some(inputs) = &reader.inputs {
-                    if inputs.owns_tensor(tensor, &lease.directory)? {
+                    if inputs.owns_tensor(tensor)? {
                         original = Some(Arc::clone(inputs));
                     }
                 }
@@ -13309,7 +13394,7 @@ impl SemanticTransitionSession {
                             continue;
                         }
                         if let Some(inputs) = &owner.inputs {
-                            if inputs.owns_tensor(tensor, &lease.directory)? {
+                            if inputs.owns_tensor(tensor)? {
                                 return Err(publication_input_error(
                                     "native step content belongs to another acquired reader",
                                 ));
@@ -14679,6 +14764,8 @@ impl SemanticTransitionSession {
             let inputs = self.ensure_step_inputs(lease)?;
             let view = inputs
                 .views
+                .get((lease.header.publication_word & 1) as usize)
+                .expect("two publication input banks")
                 .get(&(range.role, range.index))
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
             let local = PublicationRange {
@@ -18033,9 +18120,16 @@ mod tests {
             role: 1,
             index: 0,
             layout: committed_prefix_layout(&range, 4).unwrap(),
-            storage_slot: 0,
-            allocation_bytes: 256,
-            span: 0..256,
+            banks: [
+                StepInputBankPlan {
+                    storage_slot: 0,
+                    span: 0..256,
+                },
+                StepInputBankPlan {
+                    storage_slot: 0,
+                    span: 0..256,
+                },
+            ],
         };
         let raw = publication_record_layout(&range);
         let exported = publication_export_span(&range, &raw, 256).unwrap();
@@ -22825,7 +22919,7 @@ mod text_parent_tests {
             } else {
                 tensor_layout_bytes(&layout).unwrap()
             };
-            let shared = matches!(role, 1 | 4 | 5 | 16 | 17);
+            let shared = matches!(role, 1 | 16 | 17);
             let first_slot = sizes.len();
             sizes.push(capacity);
             if !shared {
@@ -22865,10 +22959,10 @@ mod text_parent_tests {
                 .chain([(15, 0), (16, 0), (16, 1), (17, 0), (44, 0)])
                 .collect::<Vec<_>>()
         );
-        assert_eq!(plan[0].span.len(), 64 * size_of::<SourceSlot>());
-        assert_eq!(plan[1].span.len(), 32);
+        assert_eq!(plan[0].banks[0].span.len(), 64 * size_of::<SourceSlot>());
+        assert_eq!(plan[1].banks[0].span.len(), 32);
         for input in plan.iter().filter(|input| matches!(input.role, 4 | 5)) {
-            assert_eq!(input.span.len(), 2 * 64 * 3 * 4);
+            assert_eq!(input.banks[0].span.len(), 2 * 64 * 3 * 4);
         }
         assert_eq!(size_of::<PublicationStepInput>(), 160);
     }
@@ -22884,7 +22978,7 @@ mod text_parent_tests {
         assert_eq!(
             records
                 .iter()
-                .map(|input| (input.role, input.index, input.span.len()))
+                .map(|input| (input.role, input.index, input.banks[0].span.len()))
                 .collect::<Vec<_>>(),
             vec![(15, 0, 768), (16, 0, 40), (16, 1, 48), (17, 0, 40)]
         );
@@ -22968,9 +23062,10 @@ mod text_parent_tests {
     }
 
     #[test]
-    fn step_input_geometry_requires_shared_prefix_and_key_value_but_isolated_caches() {
+    fn step_input_geometry_requires_shared_prefix_and_isolated_key_value_caches() {
         let (banks, layouts, sizes) = step_input_geometry_fixture();
-        for role in [1, 4, 5] {
+        {
+            let role = 1;
             let mut changed = banks.clone();
             changed[1]
                 .iter_mut()
@@ -22979,7 +23074,7 @@ mod text_parent_tests {
                 .storage_slot += 1;
             assert!(plan_step_inputs(&changed, &layouts, 64, &sizes).is_err());
         }
-        for role in std::iter::once(3).chain(6..=13) {
+        for role in [4, 5].into_iter().chain(std::iter::once(3)).chain(6..=13) {
             let mut changed = banks.clone();
             let slot = changed[0]
                 .iter()
@@ -23004,7 +23099,7 @@ mod text_parent_tests {
             (
                 bf16.layout.scalar_type,
                 bf16.layout.element_bytes,
-                bf16.span.len()
+                bf16.banks[0].span.len()
             ),
             (5, 2, 768)
         );
@@ -23044,6 +23139,8 @@ mod text_parent_tests {
         let mut feedback_before = Vec::new();
         for (&(role, index), view) in inputs
             .views
+            .first()
+            .expect("two publication input banks")
             .iter()
             .filter(|(key, _)| matches!(key.0, 15..=17))
         {
@@ -23144,7 +23241,7 @@ mod text_parent_tests {
             lease.identity.word
         );
         for (key, bytes) in feedback_before {
-            assert_eq!(session.publication_read(inputs.views[&key].clone()).unwrap(), bytes,
+            assert_eq!(session.publication_read(inputs.views[0][&key].clone()).unwrap(), bytes,
                 "raw feedback and its original statements/provenance must survive physical bank reuse");
         }
         let before = session.host_io_stats();

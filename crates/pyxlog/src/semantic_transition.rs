@@ -4311,14 +4311,21 @@ impl PySemanticPreparedStep {
         )
     }
 
-    /// Cold full-capacity prefix view. Only the device prefix extent is live.
-    #[pyo3(signature = (*, consumer_stream))]
-    fn prefix(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.export(
-            py,
-            consumer_stream,
-            SemanticTransitionSession::prepared_prefix,
-        )
+    /// Cold full-capacity prefix view for one capture-time bank branch. Only
+    /// the device-selected branch and prefix extent are live during execution.
+    #[pyo3(signature = (bank, *, consumer_stream))]
+    fn prefix(
+        &self,
+        py: Python<'_>,
+        bank: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        self.session.borrow(py).require_creator()?;
+        let bank = usize::try_from(ColdValue::read(bank, &mut 128, 0)?.unsigned()?)
+            .map_err(|_| invalid("prepared tensor bank exceeds native address space"))?;
+        self.export(py, consumer_stream, |owner, step, stream| {
+            owner.prepared_prefix(step, bank, stream)
+        })
     }
 
     #[pyo3(signature = (*, consumer_stream))]
@@ -4358,12 +4365,13 @@ impl PySemanticPreparedStep {
         )
     }
 
-    #[pyo3(signature = (role, index, *, consumer_stream))]
+    #[pyo3(signature = (role, index, bank, *, consumer_stream))]
     fn tensor(
         &self,
         py: Python<'_>,
         role: &Bound<'_, PyAny>,
         index: &Bound<'_, PyAny>,
+        bank: &Bound<'_, PyAny>,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
         self.session.borrow(py).require_creator()?;
@@ -4371,8 +4379,10 @@ impl PySemanticPreparedStep {
         let role = SemanticStateRole::from_code(role)
             .ok_or_else(|| invalid("unknown native publication tensor role"))?;
         let index = ColdValue::read(index, &mut 128, 0)?.unsigned()?;
+        let bank = usize::try_from(ColdValue::read(bank, &mut 128, 0)?.unsigned()?)
+            .map_err(|_| invalid("prepared tensor bank exceeds native address space"))?;
         self.export(py, consumer_stream, |owner, step, stream| {
-            owner.prepared_tensor(step, role, index, stream)
+            owner.prepared_tensor(step, role, index, bank, stream)
         })
     }
 
@@ -4382,24 +4392,27 @@ impl PySemanticPreparedStep {
     /// Its full backing is read-only by contract, never an update destination.
     /// Capacity does not certify live input content. Version-counter origins
     /// belong to the model producer, independently of this physical owner.
-    #[pyo3(signature = (role, index, *, consumer_stream))]
+    #[pyo3(signature = (role, index, bank, *, consumer_stream))]
     fn tensor_allocation(
         &self,
         py: Python<'_>,
         role: &Bound<'_, PyAny>,
         index: &Bound<'_, PyAny>,
+        bank: &Bound<'_, PyAny>,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyTuple>> {
         self.session.borrow(py).require_creator()?;
         let role = SemanticStateRole::from_code(ColdValue::read(role, &mut 128, 0)?.unsigned()?)
             .ok_or_else(|| invalid("unknown native publication tensor role"))?;
         let index = ColdValue::read(index, &mut 128, 0)?.unsigned()?;
+        let bank = usize::try_from(ColdValue::read(bank, &mut 128, 0)?.unsigned()?)
+            .map_err(|_| invalid("prepared tensor bank exceeds native address space"))?;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
         let (provenance, tensor) = owner
-            .prepared_tensor_allocation(&self.inner, role, index, stream)
+            .prepared_tensor_allocation(&self.inner, role, index, bank, stream)
             .map_err(xlog_err)?;
         let tensor = retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
         Ok((

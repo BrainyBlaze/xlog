@@ -2240,13 +2240,12 @@ extern "C" __global__ void semantic_publication_model_seals(uint64_t control_ptr
     publication_copy_bytes(reinterpret_cast<uint8_t*>(output_contract_ptr),publication_range_bytes(control,*original_contract),contract_capacity);
 }
 
-// Capture binds these private destinations once. Every execution resolves the
-// actual acquired parent and validates all originals before mutating any output.
-// Prefix and attention stay in their shared append-only capacity allocations;
-// copied caches, full model backings, Source, header and seals survive release
-// and physical bank reuse. Aliased model views retain one shared private root.
+// Capture binds both resident input banks once. Every execution resolves the
+// actual acquired parent and validates all originals before mutating any private
+// output. Prefix, attention caches and model tensors remain direct device aliases;
+// Source, feedback records, header and seals are retained private snapshots.
 extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr,uint64_t lease_ptr,
-        uint64_t bindings_ptr,uint64_t binding_count,uint64_t header_output_ptr,
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t header_output_ptr,
         uint64_t source_output_ptr,uint64_t range_output_ptr,uint64_t metadata_digests_ptr) {
     if(blockIdx.x || threadIdx.x)return;
     uint64_t binding_bytes=0,range_bytes=0;
@@ -2254,7 +2253,8 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
        !publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease)) ||
        !semantic_graph::checked_mul(binding_count,sizeof(PublicationStepInput),&binding_bytes) ||
        !semantic_graph::checked_mul(binding_count,sizeof(PublicationRange),&range_bytes) ||
-       !publication_pointer_span(bindings_ptr,binding_bytes,alignof(PublicationStepInput)) ||
+       !publication_pointer_span(bindings0_ptr,binding_bytes,alignof(PublicationStepInput)) ||
+       !publication_pointer_span(bindings1_ptr,binding_bytes,alignof(PublicationStepInput)) ||
        !publication_pointer_span(header_output_ptr,sizeof(PublicationHeader),alignof(PublicationHeader)) ||
        !publication_pointer_span(source_output_ptr,32*sizeof(SourceSlot),alignof(SourceSlot)) ||
        !publication_pointer_span(range_output_ptr,range_bytes,alignof(PublicationRange)) ||
@@ -2263,6 +2263,7 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
     }
     const auto& control=*reinterpret_cast<const PublicationControl*>(control_ptr);
     const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
+    const uint64_t bindings_ptr=lease.bank ? bindings1_ptr : bindings0_ptr;
     uint64_t storage_bytes=0;
     if(lease.bank>1 || !publication_pointer_span(control.contract,sizeof(PublicationContract),alignof(PublicationContract)) ||
        !semantic_graph::checked_mul(control.storage_count,sizeof(PublicationStorageEntry),&storage_bytes) ||
@@ -2304,7 +2305,8 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
     const uint64_t output_pointers[]={header_output_ptr,source_output_ptr,range_output_ptr,metadata_digests_ptr};
     const uint64_t output_bytes[]={sizeof(PublicationHeader),32*sizeof(SourceSlot),range_bytes,8*sizeof(uint64_t)};
     for(uint64_t i=0;i<4;++i) {
-        if(!publication_step_output_span(control,lease_ptr,bindings_ptr,binding_bytes,output_pointers[i],output_bytes[i])) {
+        if(!publication_step_output_span(control,lease_ptr,bindings0_ptr,binding_bytes,output_pointers[i],output_bytes[i]) ||
+           !publication_step_output_span(control,lease_ptr,bindings1_ptr,binding_bytes,output_pointers[i],output_bytes[i])) {
             semantic_content_integrity_trap();return;
         }
         for(uint64_t j=0;j<i;++j)
@@ -2328,10 +2330,11 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
                 semantic_content_integrity_trap();return;
             }
             const auto* original=publication_range_bytes(control,*range);
-            const bool alias=role==1 || role==4 || role==5;
+            const bool alias=role==1 || role==4 || role==5 || model;
             if(model) {
                 uint64_t destination=0;
-                if(binding.backing_bytes!=storage[range->storage_slot].bytes ||
+                if(binding.backing!=storage[range->storage_slot].pointer ||
+                   binding.backing_bytes!=storage[range->storage_slot].bytes ||
                    !semantic_graph::checked_add(binding.backing,range->offset_bytes,&destination) ||
                    binding.destination!=destination ||
                    (binding.backing_bytes && !publication_pointer_span(binding.backing,binding.backing_bytes))) {
@@ -2392,7 +2395,9 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
                 }
             }
             if(alias)continue;
-            if(binding.backing_bytes && !publication_step_output_span(control,lease_ptr,bindings_ptr,binding_bytes,binding.backing,binding.backing_bytes)) {
+            if(binding.backing_bytes &&
+               (!publication_step_output_span(control,lease_ptr,bindings0_ptr,binding_bytes,binding.backing,binding.backing_bytes) ||
+                !publication_step_output_span(control,lease_ptr,bindings1_ptr,binding_bytes,binding.backing,binding.backing_bytes))) {
                 semantic_content_integrity_trap();return;
             }
             for(uint64_t i=0;i<4;++i)
@@ -2417,31 +2422,31 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
     for(uint64_t i=0;i<binding_count;++i) {
         const auto& binding=bindings[i];const auto* range=publication_find_range(ranges,count,binding.role,binding.index);
         output_ranges[i]=*range;
-        if(binding.role>=18 && binding.role<=25) {
-            bool copied=false;
-            for(uint64_t previous=0;previous<i;++previous)
-                if(output_ranges[previous].storage_slot==range->storage_slot) { copied=true;break; }
-            if(!copied)publication_copy_bytes(reinterpret_cast<uint8_t*>(binding.backing),
-                reinterpret_cast<const uint8_t*>(storage[range->storage_slot].pointer),binding.backing_bytes);
-        } else if(binding.role==3 || binding.role>=6)
+        if(binding.role==3 || (binding.role>=6 && (binding.role<18 || binding.role>25)))
             publication_copy_bytes(reinterpret_cast<uint8_t*>(binding.destination),publication_range_bytes(control,*range),range->length_bytes);
     }
 }
 
-// This verification uses the original private copies and seals after the device
-// lease has been released. Shared append-only arenas are hashed only through the
-// original logical interval, so later appended rows do not change this input.
-extern "C" __global__ void semantic_publication_step_input_guard(uint64_t header_ptr,uint64_t source_ptr,
-        uint64_t bindings_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
+// This verification runs before release against the device-selected resident
+// aliases and retained private copies. Shared append-only arenas are hashed only
+// through the original logical interval.
+extern "C" __global__ void semantic_publication_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
     if(blockIdx.x || threadIdx.x)return;
     uint64_t binding_bytes=0,range_bytes=0;
-    if(!publication_pointer_span(header_ptr,sizeof(PublicationHeader),alignof(PublicationHeader)) ||
+    if(!publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease)) ||
+       !publication_pointer_span(header_ptr,sizeof(PublicationHeader),alignof(PublicationHeader)) ||
        !publication_pointer_span(source_ptr,32*sizeof(SourceSlot),alignof(SourceSlot)) ||
        !semantic_graph::checked_mul(binding_count,sizeof(PublicationStepInput),&binding_bytes) ||
        !semantic_graph::checked_mul(binding_count,sizeof(PublicationRange),&range_bytes) ||
-       !publication_pointer_span(bindings_ptr,binding_bytes,alignof(PublicationStepInput)) ||
+       !publication_pointer_span(bindings0_ptr,binding_bytes,alignof(PublicationStepInput)) ||
+       !publication_pointer_span(bindings1_ptr,binding_bytes,alignof(PublicationStepInput)) ||
        !publication_pointer_span(ranges_ptr,range_bytes,alignof(PublicationRange)) ||
        !publication_pointer_span(metadata_digests_ptr,8*sizeof(uint64_t),alignof(uint64_t))) {
+        semantic_content_integrity_trap();return;
+    }
+    const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
+    if(lease.abi!=1 || lease.status || lease.active!=1 || lease.bank>1) {
         semantic_content_integrity_trap();return;
     }
     const auto& header=*reinterpret_cast<const PublicationHeader*>(header_ptr);
@@ -2452,7 +2457,7 @@ extern "C" __global__ void semantic_publication_step_input_guard(uint64_t header
        !publication_identity_equal(actual[0],expected) || !publication_identity_equal(actual[1],expected+4)) {
         semantic_content_integrity_trap();return;
     }
-    const auto* bindings=reinterpret_cast<const PublicationStepInput*>(bindings_ptr);
+    const auto* bindings=reinterpret_cast<const PublicationStepInput*>(lease.bank ? bindings1_ptr : bindings0_ptr);
     const auto* ranges=reinterpret_cast<const PublicationRange*>(ranges_ptr);
     uint64_t fixed_role=8;
     for(uint64_t i=0;i<binding_count;++i) {
