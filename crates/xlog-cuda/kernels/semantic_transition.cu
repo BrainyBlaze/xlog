@@ -3744,11 +3744,11 @@ __device__ uint64_t publication_write_feedback(const Descriptor& descriptor,Publ
     auto* output_range=const_cast<PublicationRange*>(publication_find_range(ranges,bank.header.range_count,15));
     if(!output_range)return 1;
     auto* output=reinterpret_cast<RawFeedbackRecord*>(publication_range_bytes(control,*output_range));
-    if(!output || output_range->length_bytes<2*sizeof(RawFeedbackRecord) ||
+    if(!output || output_range->length_bytes<3*sizeof(RawFeedbackRecord) ||
        output_range->length_bytes%sizeof(RawFeedbackRecord))return 1;
     if(restored) {
-        if(output_range->logical_begin || output_range->logical_end!=2)return 1;
-        for(uint64_t i=2;i<output_range->length_bytes/sizeof(RawFeedbackRecord);++i) {
+        if(output_range->logical_begin || output_range->logical_end!=3)return 1;
+        for(uint64_t i=3;i<output_range->length_bytes/sizeof(RawFeedbackRecord);++i) {
             const auto* bytes=reinterpret_cast<const uint8_t*>(&output[i]);
             for(uint64_t byte=0;byte<sizeof(RawFeedbackRecord);++byte)if(bytes[byte])return 1;
         }

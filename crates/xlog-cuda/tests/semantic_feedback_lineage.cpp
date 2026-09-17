@@ -1176,6 +1176,9 @@ struct StepPublicationFixture {
     static constexpr uint64_t kFeedbackCapacity=kTaskQueryCount;
     static constexpr uint64_t kActiveRowCapacity=32+kFeedbackCapacity;
     static constexpr uint64_t kStepInputCount=26;
+    static constexpr uint64_t kModelSchemaBegin=104;
+    static constexpr std::array<uint8_t,8> kModelSchema{44,0,0x80,0xff,0,0,0,0};
+    static constexpr uint64_t kModelContractBytes=kModelSchemaBegin+kModelSchema.size();
     RefusalExecution execution;
     std::vector<std::vector<uint64_t>> allocations;
     std::vector<PublicationStorageEntry> storage;
@@ -1232,6 +1235,7 @@ struct StepPublicationFixture {
                 if(role==30){length=sizeof(IntentQueueHeader);capacity=length+(drain_required ? sizeof(IntentEntry) : 0);}
                 if(role==31){length=1;if(drain_required)capacity=32;}
                 if(role==33)capacity=length=sizeof(AttemptReceipt);
+                if(role==44)capacity=length=kModelContractBytes;
                 if(role==48)capacity=length=sizeof(execution.books);
                 if(role==55){length=sizeof(TensorLayoutTableHeader)+tensor_count*sizeof(PublicationTensorLayout);
                     capacity=length+kActiveRowCapacity*sizeof(ActiveRow);}
@@ -1263,6 +1267,8 @@ struct StepPublicationFixture {
             auto* queue=static_cast<IntentQueueHeader*>(data(range(bank,30)));
             queue->abi=1;queue->payload_used_bytes=queue->effect_length_bytes=1;queue->payload_capacity_bytes=8;
             if(drain_required){queue->capacity=1;queue->payload_capacity_bytes=32;}
+            std::copy(kModelSchema.begin(),kModelSchema.end(),
+                static_cast<uint8_t*>(data(range(bank,44)))+kModelSchemaBegin);
             std::memcpy(data(range(bank,48)),execution.books.data(),sizeof(execution.books));
             banks[bank].header.range_count=directories[bank].size();
             banks[bank].header.semantic_owner=91;banks[bank].header.semantic_generation=1;
@@ -1285,6 +1291,7 @@ struct StepPublicationFixture {
         contract.abi=1;contract.range_capacity=directories[0].size();contract.prefix_capacity=64;
         contract.window_capacity=32;contract.feedback_capacity=kFeedbackCapacity;contract.max_position=96;
         contract.model_generation=3;contract.authority_generation=4;contract.semantic_owner=91;
+        contract.model_contract_layout={kModelSchemaBegin,kModelSchema.size(),0,32,40,72};
         if(drain_required){contract.terminal_tokens=reinterpret_cast<uint64_t>(&terminal_token);contract.terminal_token_count=1;}
         contract.role_count=roles.size();contract.role_counts=reinterpret_cast<uint64_t>(roles.data());
         for(const auto& original:directories[0])if(original.role==1 || original.role==39 || original.role==55 ||
