@@ -6245,6 +6245,13 @@ struct PreparedBranchStorage {
 struct PreparedModelUpdate {
     bindings: TrackedCudaSlice<ModelUpdateBinding>,
     admissibility: TrackedCudaSlice<u8>,
+    #[cfg_attr(
+        not(feature = "semantic-policy"),
+        expect(
+            dead_code,
+            reason = "canary results are produced by the semantic-policy graph"
+        )
+    )]
     canary_results: TrackedCudaSlice<SemanticTrainingCanaryResultRecord>,
     refusal: TrackedCudaSlice<SemanticTrainingCanaryRefusalRecord>,
     output: Option<BoundModelUpdate>,
