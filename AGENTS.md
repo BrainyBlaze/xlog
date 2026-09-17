@@ -73,7 +73,11 @@ These rules bias toward caution and clarity over speed. For truly trivial tasks,
 ## RunPod / Remote Execution Rules (if relevant to the goal)
 
 - Do not run pilots, training, CUDA probes, model runs, or official evaluations locally when the goal requires RunPod or remote execution.
-- Launch RunPod/GPU work only with current explicit authorization.
+- RunPod/GPU work required to complete XLOG engineering, provider checks, and
+  production-path qualification has standing human authorization. Do not ask
+  again for per-run permission. This authority covers creating and deleting
+  agent-owned ephemeral pods and CI runners for the current XLOG slice; it does
+  not authorize touching resources owned by another project or actor.
 - For each authorized run, create only the owned ephemeral resource needed for that run, copy code/dependencies, run the job, pull logs/results/evidence, delete the resource, and confirm it is gone.
 - Never touch RunPod pods, endpoints, or resources not created by this agent for the current authorized slice.
 - Avoid expensive GPUs such as H100 unless memory/runtime evidence justifies them and the user authorizes that cost.
