@@ -420,6 +420,9 @@ struct SemanticTrainingRosterRow {
 struct SemanticTrainingCanaryRecord {
     uint64_t kind,row_ordinal,lower_bound_bits,upper_bound_bits,memory_limit,fuel_limit,identity[4];
 };
+struct SemanticTrainingCanaryOutputRecord {
+    uint64_t baseline_bits,candidate_bits,memory_used,fuel_used;
+};
 struct SemanticTrainingCanaryResultRecord {
     uint64_t kind,row_ordinal,measurement_bits,memory_used,fuel_used,identity[4];
 };
@@ -455,6 +458,7 @@ static_assert(sizeof(SemanticTrainingObjectiveRecord)==200,"training objective A
 static_assert(sizeof(SemanticTrainingObjectiveGroupRecord)==32,"training objective group ABI");
 static_assert(sizeof(SemanticTrainingRosterRow)==512,"training roster row ABI");
 static_assert(sizeof(SemanticTrainingCanaryRecord)==80,"training canary ABI");
+static_assert(sizeof(SemanticTrainingCanaryOutputRecord)==32,"training canary output ABI");
 static_assert(sizeof(SemanticTrainingCanaryResultRecord)==72,"training canary result ABI");
 static_assert(sizeof(SemanticTrainingCanaryRefusalRecord)==152,"training canary refusal ABI");
 static_assert(sizeof(PolicyBackward)==144,"policy backward ABI");
@@ -1509,7 +1513,7 @@ extern "C" __global__ void semantic_publication_prepare_continuation(uint64_t co
 }
 extern "C" __global__ void semantic_publication_prepare_model_update_admissibility(
         uint64_t selection_ptr,uint64_t canaries_ptr,uint64_t canary_count,
-        uint64_t source_ptr,uint64_t results_ptr,uint64_t destination_ptr,
+        uint64_t source_ptr,uint64_t outputs_ptr,uint64_t results_ptr,uint64_t destination_ptr,
         uint64_t refusal_destination_ptr) {
     if(blockIdx.x || threadIdx.x)return;
     if(!selection_ptr || selection_ptr%alignof(SemanticTrainingViewSelection) ||
@@ -1517,6 +1521,8 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
        !canaries_ptr || canaries_ptr%alignof(SemanticTrainingCanaryRecord) ||
        canary_count!=5 || canaries_ptr>UINT64_MAX-canary_count*sizeof(SemanticTrainingCanaryRecord) ||
        !source_ptr || source_ptr==UINT64_MAX ||
+       !outputs_ptr || outputs_ptr%alignof(SemanticTrainingCanaryOutputRecord) ||
+       outputs_ptr>UINT64_MAX-canary_count*sizeof(SemanticTrainingCanaryOutputRecord) ||
        !results_ptr || results_ptr%alignof(SemanticTrainingCanaryResultRecord) ||
        results_ptr>UINT64_MAX-canary_count*sizeof(SemanticTrainingCanaryResultRecord) ||
        !destination_ptr || destination_ptr==UINT64_MAX ||
@@ -1529,48 +1535,56 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
     if(value>1) { semantic_content_integrity_trap();return; }
     const auto& selection=*reinterpret_cast<const SemanticTrainingViewSelection*>(selection_ptr);
     const auto* canaries=reinterpret_cast<const SemanticTrainingCanaryRecord*>(canaries_ptr);
-    const auto* results=reinterpret_cast<const SemanticTrainingCanaryResultRecord*>(results_ptr);
+    const auto* outputs=reinterpret_cast<const SemanticTrainingCanaryOutputRecord*>(outputs_ptr);
+    auto* results=reinterpret_cast<SemanticTrainingCanaryResultRecord*>(results_ptr);
     SemanticTrainingCanaryRefusalRecord refusal{};refusal.abi=1;
     uint64_t seen=0;
     uint8_t admissible=value && selection.status==0;
     for(uint64_t item=0;item<canary_count;++item) {
-        const auto& result=results[item];
-        if(result.kind<1 || result.kind>canary_count || (seen&(uint64_t(1)<<(result.kind-1)))) {
+        const auto& canary=canaries[item];
+        if(canary.kind<1 || canary.kind>canary_count ||
+           (seen&(uint64_t(1)<<(canary.kind-1)))) {
             semantic_content_integrity_trap();return;
         }
-        seen|=uint64_t(1)<<(result.kind-1);
-        const SemanticTrainingCanaryRecord* canary=nullptr;
-        for(uint64_t candidate=0;candidate<canary_count;++candidate)
-            if(canaries[candidate].kind==result.kind) {
-                if(canary) { semantic_content_integrity_trap();return; }
-                canary=&canaries[candidate];
+        seen|=uint64_t(1)<<(canary.kind-1);
+        const double lower=__longlong_as_double((long long)canary.lower_bound_bits);
+        const double upper=__longlong_as_double((long long)canary.upper_bound_bits);
+        if(!isfinite(lower) || !isfinite(upper) || lower>upper || !canary.memory_limit ||
+           !canary.fuel_limit) {
+            semantic_content_integrity_trap();return;
+        }
+        const auto& output=outputs[canary.kind-1];
+        const double baseline=__longlong_as_double((long long)output.baseline_bits);
+        const double candidate=__longlong_as_double((long long)output.candidate_bits);
+        double measurement=0.0;
+        if(canary.kind==5) {
+            if(output.baseline_bits || output.candidate_bits) {
+                semantic_content_integrity_trap();return;
             }
-        if(!canary || canary->row_ordinal!=result.row_ordinal) {
-            semantic_content_integrity_trap();return;
-        }
-        for(uint32_t word=0;word<4;++word)if(canary->identity[word]!=result.identity[word]) {
-            semantic_content_integrity_trap();return;
-        }
-        const double lower=__longlong_as_double((long long)canary->lower_bound_bits);
-        const double upper=__longlong_as_double((long long)canary->upper_bound_bits);
-        const double measurement=__longlong_as_double((long long)result.measurement_bits);
-        if(!isfinite(lower) || !isfinite(upper) || lower>upper || !canary->memory_limit ||
-           !canary->fuel_limit) {
-            semantic_content_integrity_trap();return;
-        }
+            const double memory_ratio=double(output.memory_used)/double(canary.memory_limit);
+            const double fuel_ratio=double(output.fuel_used)/double(canary.fuel_limit);
+            measurement=memory_ratio>fuel_ratio ? memory_ratio : fuel_ratio;
+        } else if(canary.kind==3) measurement=fabs(candidate-baseline);
+        else measurement=candidate-baseline;
+        SemanticTrainingCanaryResultRecord result{};
+        result.kind=canary.kind;result.row_ordinal=canary.row_ordinal;
+        result.measurement_bits=(uint64_t)__double_as_longlong(measurement);
+        result.memory_used=output.memory_used;result.fuel_used=output.fuel_used;
+        for(uint32_t word=0;word<4;++word)result.identity[word]=canary.identity[word];
+        results[item]=result;
         const uint64_t reason=!isfinite(measurement) ? 1 :
             (measurement<lower || measurement>upper) ? 2 :
-            result.memory_used>canary->memory_limit ? 3 :
-            result.fuel_used>canary->fuel_limit ? 4 : 0;
+            result.memory_used>canary.memory_limit ? 3 :
+            result.fuel_used>canary.fuel_limit ? 4 : 0;
         if(value && selection.status==0 && reason &&
            (!refusal.reason || reason<refusal.reason ||
             (reason==refusal.reason && result.kind<refusal.kind))) {
             refusal.reason=reason;refusal.kind=result.kind;refusal.row_ordinal=result.row_ordinal;
             refusal.measurement_bits=result.measurement_bits;
-            refusal.lower_bound_bits=canary->lower_bound_bits;
-            refusal.upper_bound_bits=canary->upper_bound_bits;
-            refusal.memory_used=result.memory_used;refusal.memory_limit=canary->memory_limit;
-            refusal.fuel_used=result.fuel_used;refusal.fuel_limit=canary->fuel_limit;
+            refusal.lower_bound_bits=canary.lower_bound_bits;
+            refusal.upper_bound_bits=canary.upper_bound_bits;
+            refusal.memory_used=result.memory_used;refusal.memory_limit=canary.memory_limit;
+            refusal.fuel_used=result.fuel_used;refusal.fuel_limit=canary.fuel_limit;
             for(uint32_t word=0;word<4;++word) {
                 refusal.identity[word]=result.identity[word];
                 refusal.selection_identity[word]=selection.identity[word];

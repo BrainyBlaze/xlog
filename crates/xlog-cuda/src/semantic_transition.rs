@@ -30,9 +30,10 @@ use crate::semantic_hypergraph::{
 #[cfg(feature = "semantic-policy")]
 use crate::semantic_training_view::SemanticTrainingCanaryRefusalReason;
 use crate::semantic_training_view::{
-    SemanticSelectedTrainingView, SemanticTrainingCanaryRefusalRecord, SemanticTrainingObjective,
-    SemanticTrainingViewArena, SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord,
-    SemanticTrainingViewPort, SemanticTrainingViewRow, SemanticTrainingViewSelection,
+    SemanticSelectedTrainingView, SemanticTrainingCanaryRefusalRecord,
+    SemanticTrainingCanaryResultRecord, SemanticTrainingObjective, SemanticTrainingViewArena,
+    SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
+    SemanticTrainingViewRow, SemanticTrainingViewSelection,
 };
 use crate::{
     CudaFunction, CudaKernelProvider, CudaStream, DeviceRepr, LaunchAsync, LaunchConfig,
@@ -6244,6 +6245,7 @@ struct PreparedBranchStorage {
 struct PreparedModelUpdate {
     bindings: TrackedCudaSlice<ModelUpdateBinding>,
     admissibility: TrackedCudaSlice<u8>,
+    canary_results: TrackedCudaSlice<SemanticTrainingCanaryResultRecord>,
     refusal: TrackedCudaSlice<SemanticTrainingCanaryRefusalRecord>,
     output: Option<BoundModelUpdate>,
     #[cfg_attr(
@@ -6268,7 +6270,7 @@ struct BoundModelUpdate {
     values: Vec<ModelUpdateBinding>,
     allocations: Vec<PreparedSemanticTensor>,
     admissibility: PreparedSemanticTensor,
-    canary_results: PreparedSemanticTensor,
+    canary_outputs: PreparedSemanticTensor,
     _witness: SemanticTensorContentWitness,
 }
 
@@ -6295,7 +6297,7 @@ impl PreparedModelUpdate {
             if let Some(source) = &output.admissibility.source {
                 recorder.read(source);
             }
-            if let Some(source) = &output.canary_results.source {
+            if let Some(source) = &output.canary_outputs.source {
                 recorder.read(source);
             }
         }
@@ -6335,10 +6337,12 @@ impl PreparedModelUpdate {
         let canaries = training_view.canaries();
         recorder.read(&selection);
         recorder.read(&canaries);
+        recorder.write(&self.canary_results);
         recorder.write(&self.admissibility);
         recorder.write(&self.refusal);
         let admissibility_source = output.admissibility.data;
-        let canary_results = output.canary_results.data;
+        let canary_outputs = output.canary_outputs.data;
+        let canary_results = self.canary_results.device_ptr_value();
         let admissibility_destination = self.admissibility.device_ptr_value();
         let refusal_destination = self.refusal.device_ptr_value();
         let arguments = (
@@ -6362,6 +6366,7 @@ impl PreparedModelUpdate {
                         *canaries.device_ptr(),
                         canaries.len() as u64,
                         admissibility_source,
+                        canary_outputs,
                         canary_results,
                         admissibility_destination,
                         refusal_destination,
@@ -10198,7 +10203,10 @@ impl SemanticTransitionSession {
                 update_count
                     .checked_mul(2)
                     .and_then(|count| {
-                        count.checked_mul(1 + size_of::<SemanticTrainingCanaryRefusalRecord>())
+                        count.checked_mul(
+                            1 + 5 * size_of::<SemanticTrainingCanaryResultRecord>()
+                                + size_of::<SemanticTrainingCanaryRefusalRecord>(),
+                        )
                     })
                     .and_then(|metadata| bytes.checked_add(metadata))
             })
@@ -10291,6 +10299,16 @@ impl SemanticTransitionSession {
                         runtime_error("model update admissibility allocation", error)
                     })?;
                     upload_publication(&self.provider, &[0u8], &admissibility)?;
+                    let canary_results = reservation
+                        .alloc::<SemanticTrainingCanaryResultRecord>(5)
+                        .map_err(|error| {
+                            runtime_error("model update canary result allocation", error)
+                        })?;
+                    upload_publication(
+                        &self.provider,
+                        &[SemanticTrainingCanaryResultRecord::default(); 5],
+                        &canary_results,
+                    )?;
                     let refusal = reservation
                         .alloc::<SemanticTrainingCanaryRefusalRecord>(1)
                         .map_err(|error| runtime_error("model update refusal allocation", error))?;
@@ -10302,6 +10320,7 @@ impl SemanticTransitionSession {
                     Ok(Some(PreparedModelUpdate {
                         bindings,
                         admissibility,
+                        canary_results,
                         refusal,
                         output: None,
                         admissibility_copy: model_update_admissibility_copy.clone(),
@@ -11907,7 +11926,7 @@ impl SemanticTransitionSession {
         mut model_memory: SemanticModelMemory,
         mut tensors: Vec<SemanticTensorInput>,
         admissibility: SemanticTensorInput,
-        canary_results: SemanticTensorInput,
+        canary_outputs: SemanticTensorInput,
         witness: &SemanticTensorContentWitness,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
@@ -11951,7 +11970,7 @@ impl SemanticTransitionSession {
         let tensor_count = tensors.len();
         model_memory.allocations.append(&mut tensors);
         model_memory.allocations.push(admissibility);
-        model_memory.allocations.push(canary_results);
+        model_memory.allocations.push(canary_outputs);
         self.verify_prepared_tensor_content(
             step,
             witness,
@@ -11964,9 +11983,9 @@ impl SemanticTransitionSession {
             .clone();
         let (allocations, outputs) = outputs.split_at(allocation_count);
         let (tensors, update_metadata) = outputs.split_at(tensor_count);
-        let [admissibility, canary_results] = update_metadata else {
+        let [admissibility, canary_outputs] = update_metadata else {
             return Err(publication_input_error(
-                "model update output requires numerical admissibility and five canary results",
+                "model update output requires numerical admissibility and five canary output pairs",
             ));
         };
         let allocation_index = u64::try_from(allocation_count)
@@ -11992,7 +12011,7 @@ impl SemanticTransitionSession {
         let canary_index = allocation_index
             .checked_add(1)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        if canary_results.layout
+        if canary_outputs.layout
             != (SemanticTensorLayout {
                 role: 0,
                 index: canary_index,
@@ -12000,14 +12019,14 @@ impl SemanticTransitionSession {
                 scalar_type: 3,
                 rank: 2,
                 logical_axis: u64::MAX,
-                dimensions: [5, 9, 0, 0],
-                strides_bytes: [72, 8, 0, 0],
+                dimensions: [5, 4, 0, 0],
+                strides_bytes: [32, 8, 0, 0],
             })
-            || canary_results.logical_begin != 0
-            || canary_results.logical_end != 0
+            || canary_outputs.logical_begin != 0
+            || canary_outputs.logical_end != 0
         {
             return Err(publication_input_error(
-                "model update canary results must be U64[5,9] frozen result records",
+                "model update canary outputs must be U64[5,4] baseline bits, candidate bits, memory use and fuel use",
             ));
         }
         let geometry = prepare_model_memory(
@@ -12038,6 +12057,11 @@ impl SemanticTransitionSession {
                     "model update numerical admissibility aliases an output allocation",
                 ));
             }
+            if step_input_overlap(allocation.data, bytes, canary_outputs.data, 5 * 4 * 8)? {
+                return Err(publication_input_error(
+                    "model update canary outputs alias an output allocation",
+                ));
+            }
             for owned in &storage.allocations {
                 if step_input_overlap(
                     allocation.data,
@@ -12049,6 +12073,23 @@ impl SemanticTransitionSession {
                         "model update output aliases native publication storage",
                     ));
                 }
+            }
+        }
+        if step_input_overlap(admissibility.data, 1, canary_outputs.data, 5 * 4 * 8)? {
+            return Err(publication_input_error(
+                "model update canary outputs alias numerical admissibility",
+            ));
+        }
+        for owned in &storage.allocations {
+            if step_input_overlap(
+                canary_outputs.data,
+                5 * 4 * 8,
+                owned.device_ptr_value(),
+                owned.len(),
+            )? {
+                return Err(publication_input_error(
+                    "model update canary outputs alias native publication storage",
+                ));
             }
         }
         let values = allocations
@@ -12081,7 +12122,7 @@ impl SemanticTransitionSession {
             values,
             allocations: retained_allocations,
             admissibility: admissibility.clone(),
-            canary_results: canary_results.clone(),
+            canary_outputs: canary_outputs.clone(),
             _witness: witness.clone(),
         });
         Ok(())
@@ -19209,8 +19250,8 @@ impl SemanticTransitionSession {
                 if let Some(source) = &output.admissibility.source {
                     ranges.push((output.admissibility.data, source.len() as u64));
                 }
-                if let Some(source) = &output.canary_results.source {
-                    ranges.push((output.canary_results.data, source.len() as u64));
+                if let Some(source) = &output.canary_outputs.source {
+                    ranges.push((output.canary_outputs.data, source.len() as u64));
                 }
             }
         }

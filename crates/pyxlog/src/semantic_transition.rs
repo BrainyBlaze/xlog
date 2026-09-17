@@ -8406,11 +8406,17 @@ impl PySemanticTransitionController {
 
     /// Bind the complete original model backing produced by this recorded
     /// update. The transient witness must cover allocations followed by typed
-    /// model views, Bool8[1] numerical admissibility and the five U64[5,9]
-    /// frozen canary result records produced after the selected-view backward,
-    /// optimizer update and candidate cache rebuild. ``bank`` identifies the
+    /// model views, Bool8[1] numerical admissibility and U64[5,4] canary
+    /// baseline/candidate outputs plus exact memory/fuel use produced after the
+    /// selected-view backward, optimizer update and candidate cache rebuild.
+    /// Rows are ordered by frozen canary kind; columns are baseline FP64 bits,
+    /// candidate FP64 bits, memory use and fuel use. Symbolic utility, retained
+    /// behavior and goal-chain measurements are candidate-minus-baseline;
+    /// logit drift is their absolute difference. Resource-limit score fields
+    /// must be zero and XLOG derives the maximum memory/fuel utilization ratio.
+    /// XLOG stamps and owns the final result records. ``bank`` identifies the
     /// recorded branch that owns these original output producers.
-    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, canary_results, allocation_witness, consumer_stream))]
+    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, canary_outputs, allocation_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "prepared update binding retains model geometry and numerical admissibility"
@@ -8426,7 +8432,7 @@ impl PySemanticTransitionController {
         model_storages: &Bound<'_, PyAny>,
         model_views: &Bound<'_, PyAny>,
         numerical_admissibility: &Bound<'_, PyAny>,
-        canary_results: &Bound<'_, PyAny>,
+        canary_outputs: &Bound<'_, PyAny>,
         allocation_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
@@ -8479,7 +8485,7 @@ impl PySemanticTransitionController {
             allocation_witness._inputs.clone_ref(py),
             model_allocations.clone().unbind(),
             tensors.clone().unbind(),
-            canary_results.clone().unbind(),
+            canary_outputs.clone().unbind(),
         ]);
         producer_owners.0.extend(
             allocation_witness
@@ -8520,13 +8526,13 @@ impl PySemanticTransitionController {
             logical_end: 0,
             native_allocation: None,
         };
-        validate_producer_device_guarded(canary_results, device, &check)?;
+        validate_producer_device_guarded(canary_outputs, device, &check)?;
         let canary_index = allocation_index
             .checked_add(1)
             .ok_or_else(|| invalid("model update canary index exceeds native address space"))?;
-        let canary_results = SemanticTensorInput {
+        let canary_outputs = SemanticTensorInput {
             tensor: crate::dlpack_from_py_for_stream_guarded(
-                canary_results,
+                canary_outputs,
                 i64::try_from(stream)
                     .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
                 &check,
@@ -8538,8 +8544,8 @@ impl PySemanticTransitionController {
                 scalar_type: 3,
                 rank: 2,
                 logical_axis: u64::MAX,
-                dimensions: [5, 9, 0, 0],
-                strides_bytes: [72, 8, 0, 0],
+                dimensions: [5, 4, 0, 0],
+                strides_bytes: [32, 8, 0, 0],
             },
             logical_begin: 0,
             logical_end: 0,
@@ -8565,7 +8571,7 @@ impl PySemanticTransitionController {
                 },
                 tensor_handoff.into_native(),
                 numerical_admissibility,
-                canary_results,
+                canary_outputs,
                 &allocation_witness.inner,
                 stream,
             )

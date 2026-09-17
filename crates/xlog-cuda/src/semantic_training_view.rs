@@ -79,6 +79,11 @@ pub struct SemanticTrainingObjectiveGroup {
 }
 
 /// Mandatory acceptance gate evaluated after a candidate update.
+///
+/// Symbolic utility, retained behavior and goal-chain bounds apply to the
+/// candidate-minus-baseline score. Logit-drift bounds apply to the absolute
+/// score difference. Resource-limit bounds apply to the maximum of exact
+/// memory and fuel utilization ratios; their score inputs are canonical zero.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticTrainingCanaryKind {
@@ -162,7 +167,7 @@ pub struct SemanticTrainingCanaryRecord {
 // SAFETY: the fixed CUDA ABI contains only u64 words.
 unsafe impl DeviceRepr for SemanticTrainingCanaryRecord {}
 
-/// Device-produced measurement for one frozen candidate-update canary.
+/// Native device-produced measurement for one frozen candidate-update canary.
 ///
 /// The result repeats the frozen kind, row and identity so the native update
 /// gate can reject a measurement produced for any other roster entry. The
@@ -170,7 +175,7 @@ unsafe impl DeviceRepr for SemanticTrainingCanaryRecord {}
 /// tallies checked against the frozen ceilings.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct SemanticTrainingCanaryResultRecord {
+pub(crate) struct SemanticTrainingCanaryResultRecord {
     pub kind: u64,
     pub row_ordinal: u64,
     pub measurement_bits: u64,
@@ -1146,7 +1151,7 @@ fn validate_objective(
 
 fn objective_identity(objective: &SemanticTrainingObjective) -> Identity256 {
     let mut hasher = Sha256::new();
-    hasher.update(b"xlog.semantic.training-objective.v1\0");
+    hasher.update(b"xlog.semantic.training-objective.v2\0");
     hasher.update(objective.evaluator_min.to_bits().to_le_bytes());
     hasher.update(objective.evaluator_max.to_bits().to_le_bytes());
     for coefficient in objective.coefficients {
