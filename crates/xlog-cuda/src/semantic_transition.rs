@@ -6155,24 +6155,10 @@ impl PreparedSegmentState {
 
 struct PreparedStepStorage {
     reader: TrackedCudaSlice<PublicationLease>,
-    #[cfg(feature = "semantic-policy")]
-    policy_buffers: Option<PolicyBuffers>,
-    #[cfg(feature = "semantic-policy")]
-    policy: Option<PolicyStorage>,
-    #[cfg(feature = "semantic-policy")]
-    support: Option<TrackedCudaSlice<u8>>,
-    #[cfg(feature = "semantic-policy")]
-    receipts: Option<TrackedCudaSlice<SemanticTransitionReceipt>>,
-    #[cfg(feature = "semantic-policy")]
-    state: TrackedCudaSlice<DeviceState>,
-    #[cfg(feature = "semantic-policy")]
-    policy_sources: Vec<PreparedSemanticTensor>,
-    #[cfg(feature = "semantic-policy")]
-    policy_witness: Option<SemanticTensorContentWitness>,
+    branches: [PreparedBranchStorage; 2],
     digests: Option<Arc<TrackedCudaSlice<u64>>>,
     next_digest: usize,
     model_work: Option<PreparedModelWork>,
-    model_update: Option<PreparedModelUpdate>,
     admit: CudaFunction,
     kind_gate: CudaFunction,
     kind_bank_gate: CudaFunction,
@@ -6189,7 +6175,8 @@ struct PreparedStepStorage {
     witness: CudaFunction,
     content_guard: CudaFunction,
     inputs_recorded: bool,
-    continuation: Option<PreparedContinuation>,
+    #[cfg(feature = "semantic-policy")]
+    model_content_recorded: u8,
     transition_recorded: u8,
     drain_recorded: bool,
     observed: bool,
@@ -6197,6 +6184,25 @@ struct PreparedStepStorage {
     training_origin: Option<DeviceMemoryView<SemanticTrainingViewOriginRecord>>,
     training_view: Option<SemanticSelectedTrainingView>,
     result_kernel: CudaFunction,
+}
+
+struct PreparedBranchStorage {
+    model_update: Option<PreparedModelUpdate>,
+    continuation: Option<PreparedContinuation>,
+    #[cfg(feature = "semantic-policy")]
+    policy_buffers: Option<PolicyBuffers>,
+    #[cfg(feature = "semantic-policy")]
+    policy: Option<PolicyStorage>,
+    #[cfg(feature = "semantic-policy")]
+    support: Option<TrackedCudaSlice<u8>>,
+    #[cfg(feature = "semantic-policy")]
+    receipts: Option<TrackedCudaSlice<SemanticTransitionReceipt>>,
+    #[cfg(feature = "semantic-policy")]
+    state: TrackedCudaSlice<DeviceState>,
+    #[cfg(feature = "semantic-policy")]
+    policy_sources: Vec<PreparedSemanticTensor>,
+    #[cfg(feature = "semantic-policy")]
+    policy_witness: Option<SemanticTensorContentWitness>,
 }
 
 struct PreparedModelUpdate {
@@ -6242,8 +6248,8 @@ impl PreparedModelUpdate {
 
     fn record(&self, recorder: &mut LaunchRecorder) {
         recorder.read(&self.bindings);
-        recorder.read(&self.admissibility);
-        recorder.read(&self.refusal);
+        recorder.read_write(&self.admissibility);
+        recorder.read_write(&self.refusal);
         if let Some(output) = &self.output {
             for allocation in &output.allocations {
                 if let Some(source) = &allocation.source {
@@ -6523,9 +6529,14 @@ struct ModelContentSeals {
 }
 
 struct PreparedModelContentSeals {
+    #[cfg(feature = "semantic-policy")]
+    bank: usize,
+    #[cfg(feature = "semantic-policy")]
     storage: Arc<PublicationStorage>,
+    #[cfg(feature = "semantic-policy")]
     reader: DeviceMemoryView<PublicationLease>,
     roster: TrackedCudaSlice<u64>,
+    #[cfg(feature = "semantic-policy")]
     execute: CudaFunction,
 }
 
@@ -6619,6 +6630,7 @@ impl ModelContentSeals {
         })
     }
 
+    #[cfg(feature = "semantic-policy")]
     fn snapshot_prepared(
         &self,
         domain: &ResidentExecutionDomain,
@@ -8513,6 +8525,7 @@ struct PolicyTape {
     policy: PolicyStorage,
     support: TrackedCudaSlice<u8>,
     receipts: TrackedCudaSlice<SemanticTransitionReceipt>,
+    prepared_bank: Option<usize>,
     // Immutable cold catalogue allocations remain shared by their original
     // invocation tapes; no later binding overwrites their bytes.
     components: DeviceMemoryView<SemanticComponent>,
@@ -9398,12 +9411,12 @@ impl SemanticTransitionSession {
                 .get(token)
                 .and_then(|step| step.prepared.as_ref())
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
-            let continuation = prepared
-                .continuation
-                .as_ref()
-                .ok_or(SemanticTransitionError::NotBound)?;
             if prepared.transition_recorded != PREPARED_TRANSITION_BANKS
-                || continuation.inputs.authority_bytes != authority_decisions.len() as u64
+                || prepared.branches.iter().any(|branch| {
+                    branch.continuation.as_ref().is_none_or(|continuation| {
+                        continuation.inputs.authority_bytes != authority_decisions.len() as u64
+                    })
+                })
             {
                 return Err(publication_input_error(
                     "fresh authority snapshot differs from the captured continuation byte extent",
@@ -9529,10 +9542,6 @@ impl SemanticTransitionSession {
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
             let reader = prepared.reader.view();
             let result_view = prepared.result.view();
-            let update_refusal_view = prepared
-                .model_update
-                .as_ref()
-                .map(|update| update.refusal.view());
             let lease = self.publication_read(reader)?[0];
             let result = self.publication_read(result_view)?[0];
             if result.abi == 0 {
@@ -9549,26 +9558,40 @@ impl SemanticTransitionSession {
                 });
                 continue;
             }
-            let owner = &self.steps[&step.token];
-            let prepared = owner.prepared.as_ref().expect("original prepared owner");
             let inputs = Arc::clone(
-                owner
+                self.steps[&step.token]
                     .inputs
                     .as_ref()
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
             );
-            let state_view = prepared.state.view();
-            let receipts = prepared
-                .receipts
-                .as_ref()
-                .ok_or(SemanticTransitionError::ObservationMismatch)?
-                .view();
             let parent = self.publication_read(inputs.header.view())?[0];
             if previous.is_some_and(|header| header != parent) {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
             let transition =
                 validate_prepared_completion(&lease, &parent, &result, storage.instance)?;
+            let (state_view, receipts, update_refusal_view) = {
+                let prepared = self.steps[&step.token]
+                    .prepared
+                    .as_ref()
+                    .expect("original prepared owner");
+                let branch = prepared
+                    .branches
+                    .get(lease.bank as usize)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                (
+                    branch.state.view(),
+                    branch
+                        .receipts
+                        .as_ref()
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?
+                        .view(),
+                    branch
+                        .model_update
+                        .as_ref()
+                        .map(|update| update.refusal.view()),
+                )
+            };
             let canary_refusal = match (transition, update_refusal_view) {
                 (SemanticTransitionKind::Update, Some(view)) => {
                     decode_canary_refusal(self.publication_read(view)?[0])?
@@ -9616,6 +9639,7 @@ impl SemanticTransitionSession {
             if transition == SemanticTransitionKind::Proposal {
                 self.take_prepared_policy_tape(
                     &step,
+                    lease.bank as usize,
                     invocation,
                     match &outcome {
                         SemanticTransitionOutcome::Refused(refusal) => Some(*refusal),
@@ -10040,6 +10064,7 @@ impl SemanticTransitionSession {
             .checked_add(self.codebooks.input_cells)
             .and_then(|n| n.checked_add(COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>()))
             .and_then(|n| n.checked_add(size_of::<DeviceState>()))
+            .and_then(|n| n.checked_mul(2))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let step_bytes = prepared_step_allocation_bytes(
             PreparedStepInputs::allocation_bytes(&input_plans)?,
@@ -10060,11 +10085,15 @@ impl SemanticTransitionSession {
                 .ok_or(SemanticTransitionError::GenerationExhausted)
         })?;
         let update_binding_bytes = update_count
-            .checked_mul(storage.model_slots.len())
+            .checked_mul(2)
+            .and_then(|count| count.checked_mul(storage.model_slots.len()))
             .and_then(|count| count.checked_mul(size_of::<ModelUpdateBinding>()))
             .and_then(|bytes| {
                 update_count
-                    .checked_mul(1 + size_of::<SemanticTrainingCanaryRefusalRecord>())
+                    .checked_mul(2)
+                    .and_then(|count| {
+                        count.checked_mul(1 + size_of::<SemanticTrainingCanaryRefusalRecord>())
+                    })
                     .and_then(|metadata| bytes.checked_add(metadata))
             })
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
@@ -10140,7 +10169,10 @@ impl SemanticTransitionSession {
                 let result = reservation
                     .alloc(1)
                     .map_err(|error| runtime_error("prepared result allocation", error))?;
-                let model_update = if *kind == SemanticTransitionKind::Update {
+                let mut allocate_model_update = || {
+                    if *kind != SemanticTransitionKind::Update {
+                        return Ok(None);
+                    }
                     let bindings = reservation
                         .alloc::<ModelUpdateBinding>(storage.model_slots.len())
                         .map_err(|error| runtime_error("model update binding allocation", error))?;
@@ -10161,17 +10193,17 @@ impl SemanticTransitionSession {
                         &[SemanticTrainingCanaryRefusalRecord::default()],
                         &refusal,
                     )?;
-                    Some(PreparedModelUpdate {
+                    Ok(Some(PreparedModelUpdate {
                         bindings,
                         admissibility,
                         refusal,
                         output: None,
                         admissibility_copy: model_update_admissibility_copy.clone(),
                         copy: model_update_copy.clone(),
-                    })
-                } else {
-                    None
+                    }))
                 };
+                let model_updates: [Option<PreparedModelUpdate>; 2] =
+                    [allocate_model_update()?, allocate_model_update()?];
                 let inputs = Arc::new(PreparedStepInputs::allocate_reserved(
                     &self.provider,
                     Arc::clone(&storage),
@@ -10186,17 +10218,62 @@ impl SemanticTransitionSession {
                     &mut reservation,
                 )?;
                 #[cfg(feature = "semantic-policy")]
-                let (policy_buffers, support, receipts, state) =
-                    self.prepare_step_policy_storage(&mut reservation)?;
+                let [branch_zero, branch_one] = [
+                    self.prepare_step_policy_storage(&mut reservation)?,
+                    self.prepare_step_policy_storage(&mut reservation)?,
+                ];
+                let [model_update_zero, model_update_one] = model_updates;
+                #[cfg(feature = "semantic-policy")]
+                let (policy_buffers_zero, support_zero, receipts_zero, state_zero) = branch_zero;
+                #[cfg(feature = "semantic-policy")]
+                let (policy_buffers_one, support_one, receipts_one, state_one) = branch_one;
+                let branches = [
+                    PreparedBranchStorage {
+                        model_update: model_update_zero,
+                        continuation: None,
+                        #[cfg(feature = "semantic-policy")]
+                        policy_buffers: Some(policy_buffers_zero),
+                        #[cfg(feature = "semantic-policy")]
+                        policy: None,
+                        #[cfg(feature = "semantic-policy")]
+                        support: Some(support_zero),
+                        #[cfg(feature = "semantic-policy")]
+                        receipts: Some(receipts_zero),
+                        #[cfg(feature = "semantic-policy")]
+                        state: state_zero,
+                        #[cfg(feature = "semantic-policy")]
+                        policy_sources: Vec::new(),
+                        #[cfg(feature = "semantic-policy")]
+                        policy_witness: None,
+                    },
+                    PreparedBranchStorage {
+                        model_update: model_update_one,
+                        continuation: None,
+                        #[cfg(feature = "semantic-policy")]
+                        policy_buffers: Some(policy_buffers_one),
+                        #[cfg(feature = "semantic-policy")]
+                        policy: None,
+                        #[cfg(feature = "semantic-policy")]
+                        support: Some(support_one),
+                        #[cfg(feature = "semantic-policy")]
+                        receipts: Some(receipts_one),
+                        #[cfg(feature = "semantic-policy")]
+                        state: state_one,
+                        #[cfg(feature = "semantic-policy")]
+                        policy_sources: Vec::new(),
+                        #[cfg(feature = "semantic-policy")]
+                        policy_witness: None,
+                    },
+                ];
                 let mut step = StepContentStorage::new();
                 step.inputs = Some(Arc::clone(&inputs));
                 step.feedback.push(feedback);
                 step.prepared = Some(PreparedStepStorage {
                     reader,
+                    branches,
                     digests: None,
                     next_digest: 0,
                     model_work: None,
-                    model_update,
                     admit: admit.clone(),
                     kind_gate: kind_gate.clone(),
                     kind_bank_gate: kind_bank_gate.clone(),
@@ -10206,7 +10283,8 @@ impl SemanticTransitionSession {
                     witness: witness.clone(),
                     content_guard: content_guard.clone(),
                     inputs_recorded: false,
-                    continuation: None,
+                    #[cfg(feature = "semantic-policy")]
+                    model_content_recorded: 0,
                     transition_recorded: 0,
                     drain_recorded: false,
                     observed: false,
@@ -10228,20 +10306,6 @@ impl SemanticTransitionSession {
                         None
                     },
                     result_kernel: result_kernel.clone(),
-                    #[cfg(feature = "semantic-policy")]
-                    policy_buffers: Some(policy_buffers),
-                    #[cfg(feature = "semantic-policy")]
-                    policy: None,
-                    #[cfg(feature = "semantic-policy")]
-                    support: Some(support),
-                    #[cfg(feature = "semantic-policy")]
-                    receipts: Some(receipts),
-                    #[cfg(feature = "semantic-policy")]
-                    state,
-                    #[cfg(feature = "semantic-policy")]
-                    policy_sources: Vec::new(),
-                    #[cfg(feature = "semantic-policy")]
-                    policy_witness: None,
                 });
                 self.steps.insert(handle.token, step);
                 let prepared = self.steps[&handle.token]
@@ -10251,16 +10315,18 @@ impl SemanticTransitionSession {
                 // Only immutable catalogue identity is initialized on the host;
                 // actual invocation coordinates come from device admission.
                 #[cfg(feature = "semantic-policy")]
-                upload_publication(
-                    &self.provider,
-                    &[DeviceState {
-                        catalogue_generation: self.binding().generation,
-                        catalogue_digest: Identity256::from_bytes(CATALOGUE_DIGEST),
-                        binding_digest: self.binding().digest,
-                        ..DeviceState::default()
-                    }],
-                    &prepared.state,
-                )?;
+                for branch in &prepared.branches {
+                    upload_publication(
+                        &self.provider,
+                        &[DeviceState {
+                            catalogue_generation: self.binding().generation,
+                            catalogue_digest: Identity256::from_bytes(CATALOGUE_DIGEST),
+                            binding_digest: self.binding().digest,
+                            ..DeviceState::default()
+                        }],
+                        &branch.state,
+                    )?;
+                }
                 upload_publication(
                     &self.provider,
                     &[PublicationLease::default()],
@@ -11212,14 +11278,20 @@ impl SemanticTransitionSession {
     pub fn bind_prepared_model_content(
         &mut self,
         step: &SemanticPreparedStep,
+        bank: usize,
         tensors: Vec<SemanticTensorInput>,
         consumer_stream: u64,
     ) -> Result<SemanticTensorContentWitness, SemanticTransitionError> {
         self.check_prepared_cold(step)?;
         dlpack_consumer_stream(consumer_stream)?;
+        if bank > 1 {
+            return Err(publication_input_error(
+                "prepared model content bank must be zero or one",
+            ));
+        }
         let storage = Arc::clone(self.publication.as_ref().expect("prepared publication"));
         let original = prepare_semantic_tensors(&self.provider, tensors)?;
-        let directory = &storage.bank_templates[0];
+        let directory = &storage.bank_templates[bank];
         let indices = model_content_ranges(
             directory,
             &storage.layouts,
@@ -11247,6 +11319,7 @@ impl SemanticTransitionSession {
             .flat_map(|tensor| [tensor.layout.role, tensor.layout.index])
             .collect::<Vec<_>>();
         let roster = allocate_publication(&self.provider, values.len())?;
+        #[cfg(feature = "semantic-policy")]
         let execute = self
             .provider
             .device()
@@ -11258,6 +11331,7 @@ impl SemanticTransitionSession {
             .ok_or_else(|| {
                 runtime_error("kernel lookup", "original model seal snapshot unavailable")
             })?;
+        #[cfg(feature = "semantic-policy")]
         let reader = self.steps[&step.token]
             .prepared
             .as_ref()
@@ -11265,9 +11339,14 @@ impl SemanticTransitionSession {
             .reader
             .view();
         seals.prepared = Some(PreparedModelContentSeals {
+            #[cfg(feature = "semantic-policy")]
+            bank,
+            #[cfg(feature = "semantic-policy")]
             storage,
+            #[cfg(feature = "semantic-policy")]
             reader,
             roster,
+            #[cfg(feature = "semantic-policy")]
             execute,
         });
         let owner = self.steps.get_mut(&step.token).expect("checked fixed step");
@@ -11453,16 +11532,23 @@ impl SemanticTransitionSession {
     pub fn bind_prepared_continuation(
         &mut self,
         step: &SemanticPreparedStep,
+        bank: usize,
         continuation: SemanticContinuationInput,
         witness: &SemanticTensorContentWitness,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
         self.check_prepared_content_stream(step, consumer_stream)?;
         self.checked_prepared_content_witness(step, witness)?;
+        if bank > 1 {
+            return Err(publication_input_error(
+                "prepared continuation bank must be zero or one",
+            ));
+        }
         if self.steps[&step.token]
             .prepared
             .as_ref()
             .expect("prepared owner")
+            .branches[bank]
             .continuation
             .is_some()
         {
@@ -11577,6 +11663,7 @@ impl SemanticTransitionSession {
             .prepared
             .as_ref()
             .expect("prepared model update owner")
+            .branches[bank]
             .model_update
             .as_ref()
             .map(PreparedModelUpdate::descriptor)
@@ -11607,6 +11694,7 @@ impl SemanticTransitionSession {
             .prepared
             .as_mut()
             .expect("prepared owner")
+            .branches[bank]
             .continuation = Some(continuation);
         Ok(())
     }
@@ -11622,6 +11710,7 @@ impl SemanticTransitionSession {
     pub fn bind_prepared_update_output(
         &mut self,
         step: &SemanticPreparedStep,
+        bank: usize,
         mut model_memory: SemanticModelMemory,
         mut tensors: Vec<SemanticTensorInput>,
         admissibility: SemanticTensorInput,
@@ -11631,6 +11720,11 @@ impl SemanticTransitionSession {
     ) -> Result<(), SemanticTransitionError> {
         self.check_prepared_content_stream(step, consumer_stream)?;
         self.checked_prepared_content_witness(step, witness)?;
+        if bank > 1 {
+            return Err(publication_input_error(
+                "prepared model update bank must be zero or one",
+            ));
+        }
         if self.prepared_transition_kind(step)? != SemanticTransitionKind::Update {
             return Err(publication_input_error(
                 "model update output belongs only to a prepared update",
@@ -11638,7 +11732,7 @@ impl SemanticTransitionSession {
         }
         let owner = &self.steps[&step.token];
         let prepared = owner.prepared.as_ref().expect("prepared update owner");
-        if prepared
+        if prepared.branches[bank]
             .model_update
             .as_ref()
             .is_none_or(|update| update.output.is_some())
@@ -11783,6 +11877,7 @@ impl SemanticTransitionSession {
             .prepared
             .as_mut()
             .expect("prepared update owner")
+            .branches[bank]
             .model_update
             .as_mut()
             .expect("prepared update binding allocation");
@@ -11959,21 +12054,6 @@ impl SemanticTransitionSession {
             &owner.prepared.as_ref().expect("prepared lease").reader,
             descriptor,
         )?;
-        for content in &owner.content {
-            if let TensorContentSeals::Model(seals) = &content.seals {
-                seals.snapshot_prepared(&self.domain, &mut self.poisoned)?;
-                content.enqueue(
-                    &self.domain,
-                    &mut self.poisoned,
-                    &owner
-                        .prepared
-                        .as_ref()
-                        .expect("prepared witness producer")
-                        .witness,
-                    true,
-                )?;
-            }
-        }
         let selection = if let Some(selected) = owner
             .prepared
             .as_ref()
@@ -12127,6 +12207,75 @@ impl SemanticTransitionSession {
             self.poisoned = true;
         }
         result
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    /// Record the model seals owned by one prepared branch before its producer
+    /// can enqueue model reads into that branch's conditional body.
+    pub fn record_prepared_bank_model_content(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+    ) -> Result<(), SemanticTransitionError> {
+        self.check_prepared_content_stream(step, self.stream.cu_stream() as u64)?;
+        if bank > 1 {
+            return Err(publication_input_error(
+                "prepared model content bank must be zero or one",
+            ));
+        }
+        let owner = &self.steps[&step.token];
+        let prepared = owner
+            .prepared
+            .as_ref()
+            .expect("prepared model content owner");
+        if prepared.model_content_recorded & (1 << bank) != 0 {
+            return Err(publication_input_error(
+                "prepared model content records once per bank branch",
+            ));
+        }
+        let indices = owner
+            .content
+            .iter()
+            .enumerate()
+            .filter_map(|(index, content)| match &content.seals {
+                TensorContentSeals::Model(seals)
+                    if seals
+                        .prepared
+                        .as_ref()
+                        .is_some_and(|source| source.bank == bank) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if indices.is_empty() {
+            return Err(publication_input_error(
+                "prepared branch has no original admitted model content",
+            ));
+        }
+        for index in indices {
+            let TensorContentSeals::Model(seals) = &self.steps[&step.token].content[index].seals
+            else {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            };
+            seals.snapshot_prepared(&self.domain, &mut self.poisoned)?;
+            let witness = SemanticTensorContentWitness {
+                issuer: Arc::clone(&self.publication_issuer),
+                reader_token: step.token,
+                index,
+                _witness: Arc::clone(&self.steps[&step.token].content_witnesses),
+            };
+            self.record_prepared_tensor_content(step, &witness, true)?;
+        }
+        self.steps
+            .get_mut(&step.token)
+            .expect("prepared model content owner")
+            .prepared
+            .as_mut()
+            .expect("prepared model content storage")
+            .model_content_recorded |= 1 << bank;
+        Ok(())
     }
 
     pub fn record_prepared_step_drain_gate(
@@ -12354,14 +12503,20 @@ impl SemanticTransitionSession {
             self.provider
                 .htod_launch_metadata_sync_copy_into(work.recording.events(), &mut destination)
                 .map_err(|error| runtime_error("original model work cold upload", error))?;
-            if let Some(update) = &prepared.model_update {
-                let output = update.output.as_ref().ok_or_else(|| {
-                    publication_input_error("prepared update has no original model output binding")
-                })?;
-                let mut destination = update.bindings.view();
-                self.provider
-                    .htod_launch_metadata_sync_copy_into(&output.values, &mut destination)
-                    .map_err(|error| runtime_error("model update binding cold upload", error))?;
+            for branch in &prepared.branches {
+                if let Some(update) = &branch.model_update {
+                    let output = update.output.as_ref().ok_or_else(|| {
+                        publication_input_error(
+                            "prepared update has no branch-owned model output binding",
+                        )
+                    })?;
+                    let mut destination = update.bindings.view();
+                    self.provider
+                        .htod_launch_metadata_sync_copy_into(&output.values, &mut destination)
+                        .map_err(|error| {
+                            runtime_error("model update binding cold upload", error)
+                        })?;
+                }
             }
         }
         // Failure leaves the actual graph in the caller's owner. No graph
@@ -12499,52 +12654,57 @@ impl SemanticTransitionSession {
                     }
                 }
             }
-            if let Some(continuation) = &prepared.continuation {
-                continuation.text_binding.record(&mut recorder);
-                for tensor in &continuation.sources {
-                    if let Some(source) = &tensor.source {
-                        recorder.read(source);
+            for branch in &prepared.branches {
+                if let Some(continuation) = &branch.continuation {
+                    continuation.text_binding.record(&mut recorder);
+                    for tensor in &continuation.sources {
+                        if let Some(source) = &tensor.source {
+                            recorder.read(source);
+                        }
                     }
                 }
-            }
-            #[cfg(feature = "semantic-policy")]
-            {
-                recorder.write(&prepared.state);
-                recorder.write(
-                    prepared
-                        .support
-                        .as_ref()
-                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                );
-                recorder.write(
-                    prepared
-                        .receipts
-                        .as_ref()
-                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                );
-                if let Some(policy) = &prepared.policy {
-                    for buffer in [
-                        &policy.parameters,
-                        &policy.hidden,
-                        &policy.scores,
-                        &policy.recurrent,
-                        &policy.text_logits,
-                    ] {
-                        recorder.read_write(buffer);
-                    }
-                    policy.text_binding.record(&mut recorder);
-                } else {
-                    recorder.read(
-                        &prepared
-                            .policy_buffers
+                if let Some(update) = &branch.model_update {
+                    update.record(&mut recorder);
+                }
+                #[cfg(feature = "semantic-policy")]
+                {
+                    recorder.write(&branch.state);
+                    recorder.write(
+                        branch
+                            .support
                             .as_ref()
-                            .ok_or(SemanticTransitionError::NotBound)?
-                            .text_logits,
+                            .ok_or(SemanticTransitionError::ObservationMismatch)?,
                     );
-                }
-                for tensor in &prepared.policy_sources {
-                    if let Some(source) = &tensor.source {
-                        recorder.read(source);
+                    recorder.write(
+                        branch
+                            .receipts
+                            .as_ref()
+                            .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                    );
+                    if let Some(policy) = &branch.policy {
+                        for buffer in [
+                            &policy.parameters,
+                            &policy.hidden,
+                            &policy.scores,
+                            &policy.recurrent,
+                            &policy.text_logits,
+                        ] {
+                            recorder.read_write(buffer);
+                        }
+                        policy.text_binding.record(&mut recorder);
+                    } else {
+                        recorder.read(
+                            &branch
+                                .policy_buffers
+                                .as_ref()
+                                .ok_or(SemanticTransitionError::NotBound)?
+                                .text_logits,
+                        );
+                    }
+                    for tensor in &branch.policy_sources {
+                        if let Some(source) = &tensor.source {
+                            recorder.read(source);
+                        }
                     }
                 }
             }
@@ -15632,12 +15792,14 @@ impl SemanticTransitionSession {
         let prepared = owner.prepared.as_mut().expect("prepared owner");
         // These are internal handles, not outstanding consumer witnesses.
         // Actual tensor owners remain in content until the final checks below.
-        prepared.continuation = None;
-        #[cfg(feature = "semantic-policy")]
-        {
-            prepared.policy_witness = None;
-            prepared.policy = None;
-            prepared.policy_sources.clear();
+        for branch in &mut prepared.branches {
+            branch.continuation = None;
+            #[cfg(feature = "semantic-policy")]
+            {
+                branch.policy_witness = None;
+                branch.policy = None;
+                branch.policy_sources.clear();
+            }
         }
         if Arc::strong_count(&owner.content_witnesses) != 1 {
             return Err(publication_input_error(
@@ -16600,6 +16762,7 @@ impl SemanticTransitionSession {
     pub fn bind_prepared_policy(
         &mut self,
         step: &SemanticPreparedStep,
+        bank: usize,
         binding: SemanticCatalogueBinding,
         text_logits: DlpackManagedTensor,
         product_support: DlpackManagedTensor,
@@ -16609,6 +16772,11 @@ impl SemanticTransitionSession {
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
         self.check_prepared_content_stream(step, consumer_stream)?;
+        if bank > 1 {
+            return Err(publication_input_error(
+                "prepared policy bank must be zero or one",
+            ));
+        }
         if self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
             return Err(publication_input_error(
                 "only a proposal step binds a learned policy",
@@ -16646,13 +16814,14 @@ impl SemanticTransitionSession {
             .get_mut(&step.token)
             .expect("checked original step");
         let prepared = owner.prepared.as_mut().expect("prepared policy owner");
-        if prepared.policy.is_some() || !prepared.policy_sources.is_empty() {
+        let branch = &mut prepared.branches[bank];
+        if branch.policy.is_some() || !branch.policy_sources.is_empty() {
             return Err(publication_input_error(
                 "prepared policy already owns its original invocation",
             ));
         }
         let text_binding = Arc::clone(
-            &prepared
+            &branch
                 .continuation
                 .as_ref()
                 .ok_or_else(|| {
@@ -16667,12 +16836,12 @@ impl SemanticTransitionSession {
                 "prepared policy and continuation belong to different original steps",
             ));
         }
-        let buffers = prepared.policy_buffers.take().ok_or_else(|| {
+        let buffers = branch.policy_buffers.take().ok_or_else(|| {
             publication_input_error("prepared policy has no unused cold allocation")
         })?;
-        prepared.policy_sources = sources;
-        prepared.policy_witness = Some(witness.clone());
-        prepared.policy = Some(PolicyStorage {
+        branch.policy_sources = sources;
+        branch.policy_witness = Some(witness.clone());
+        branch.policy = Some(PolicyStorage {
             buffers,
             text_binding,
             replacement: None,
@@ -16715,52 +16884,34 @@ impl SemanticTransitionSession {
         }
         let owner = &self.steps[&step.token];
         let prepared = owner.prepared.as_ref().expect("prepared transition owner");
+        let branch = &prepared.branches[bank];
         if prepared.transition_recorded & (1 << bank) != 0
-            || prepared.continuation.is_none()
-            || (kind == SemanticTransitionKind::Proposal && prepared.policy.is_none())
-            || (kind != SemanticTransitionKind::Proposal && prepared.policy.is_some())
+            || prepared.model_content_recorded & (1 << bank) == 0
+            || branch.continuation.is_none()
+            || (kind == SemanticTransitionKind::Proposal && branch.policy.is_none())
+            || (kind != SemanticTransitionKind::Proposal && branch.policy.is_some())
             || (kind == SemanticTransitionKind::Update
-                && prepared
+                && branch
                     .model_update
                     .as_ref()
                     .is_none_or(|update| update.output.is_none()))
         {
-            return Err(publication_input_error("prepared transition requires its unused original continuation, a policy only for proposals, and a bound model output for updates"));
-        }
-        let model_witnesses = owner
-            .content
-            .iter()
-            .enumerate()
-            .filter(|(_, content)| matches!(content.seals, TensorContentSeals::Model(_)))
-            .map(|(index, _)| SemanticTensorContentWitness {
-                issuer: Arc::clone(&self.publication_issuer),
-                reader_token: step.token,
-                index,
-                _witness: Arc::clone(&owner.content_witnesses),
-            })
-            .collect::<Vec<_>>();
-        if model_witnesses.is_empty() {
-            return Err(publication_input_error(
-                "prepared transition has no original admitted model content",
-            ));
+            return Err(publication_input_error("prepared transition requires recorded branch model content, its unused original continuation, a policy only for proposals, and a bound model output for updates"));
         }
         let policy_witness = if kind == SemanticTransitionKind::Proposal {
-            Some(prepared.policy_witness.clone().ok_or_else(|| {
+            Some(branch.policy_witness.clone().ok_or_else(|| {
                 publication_input_error("prepared transition has no original policy content")
             })?)
         } else {
             None
         };
-        let continuation_witness = prepared
+        let continuation_witness = branch
             .continuation
             .as_ref()
             .expect("checked continuation")
             .text_binding
             ._witness
             .clone();
-        for witness in &model_witnesses {
-            self.record_prepared_tensor_content(step, witness, true)?;
-        }
         if let Some(witness) = &policy_witness {
             self.record_prepared_tensor_content(step, witness, true)?;
         }
@@ -16770,22 +16921,23 @@ impl SemanticTransitionSession {
                 .prepared
                 .as_ref()
                 .expect("retained original step");
-            if let Some(policy) = &prepared.policy {
-                let sources = policy_source_views(&prepared.policy_sources)?;
+            let branch = &prepared.branches[bank];
+            if let Some(policy) = &branch.policy {
+                let sources = policy_source_views(&branch.policy_sources)?;
                 enqueue_policy_snapshots(
                     &self.domain,
                     &mut self.poisoned,
                     &policy.buffers,
-                    prepared.support.as_ref().expect("original support bank"),
+                    branch.support.as_ref().expect("original support bank"),
                     &sources,
                 )?;
             }
-            prepared
+            branch
                 .continuation
                 .as_ref()
                 .expect("checked original continuation")
                 .enqueue(&self.domain, &mut self.poisoned)?;
-            if let Some(update) = &prepared.model_update {
+            if let Some(update) = &branch.model_update {
                 let training_view = prepared.training_view.as_ref().ok_or_else(|| {
                     publication_input_error("prepared update has no native training view")
                 })?;
@@ -16797,7 +16949,7 @@ impl SemanticTransitionSession {
                     training_view,
                 )?;
             }
-            let io = self.prepared_kernel_io(step)?;
+            let io = self.prepared_kernel_io(step, bank)?;
             self.validate_ranges_with(&io)?;
             let descriptor = self.descriptor_with(&io);
             let recorder = self.kernel_recorder_with(&io);
@@ -16912,6 +17064,7 @@ impl SemanticTransitionSession {
     fn take_prepared_policy_tape(
         &mut self,
         step: &SemanticPreparedStep,
+        bank: usize,
         invocation: SemanticRngBinding,
         refusal: Option<SemanticTransitionRefusal>,
     ) -> Result<(), SemanticTransitionError> {
@@ -16933,10 +17086,15 @@ impl SemanticTransitionSession {
             .ok_or_else(|| {
                 publication_input_error("observed prepared policy has no retained original step")
             })?;
-        if prepared.transition_recorded != PREPARED_TRANSITION_BANKS
-            || prepared.policy.is_none()
-            || prepared.support.is_none()
-            || prepared.receipts.is_none()
+        let transition_recorded = prepared.transition_recorded;
+        let branch = prepared
+            .branches
+            .get_mut(bank)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if transition_recorded != PREPARED_TRANSITION_BANKS
+            || branch.policy.is_none()
+            || branch.support.is_none()
+            || branch.receipts.is_none()
         {
             return Err(publication_input_error(
                 "observed prepared policy was not recorded or has already retired",
@@ -16944,7 +17102,7 @@ impl SemanticTransitionSession {
         }
         // A captured nominal proposal may be skipped or forced to drain. Only
         // actual proposal completion creates this original backward obligation.
-        prepared
+        branch
             .policy
             .as_mut()
             .expect("checked original policy")
@@ -16953,9 +17111,10 @@ impl SemanticTransitionSession {
             invocation,
             refusal,
             binding,
-            policy: prepared.policy.take().expect("checked original policy"),
-            support: prepared.support.take().expect("checked original support"),
-            receipts: prepared.receipts.take().expect("checked original receipts"),
+            policy: branch.policy.take().expect("checked original policy"),
+            support: branch.support.take().expect("checked original support"),
+            receipts: branch.receipts.take().expect("checked original receipts"),
+            prepared_bank: Some(bank),
             components: self.device_components.view(),
             codebooks: self.device_codebooks.view(),
         });
@@ -17172,9 +17331,11 @@ impl SemanticTransitionSession {
         &self,
         step: &SemanticPreparedStep,
         invocation: SemanticRngBinding,
-    ) -> Result<(), SemanticTransitionError> {
-        self.checked_prepared_policy_tape(step, invocation)
-            .map(|_| ())
+    ) -> Result<usize, SemanticTransitionError> {
+        let index = self.checked_prepared_policy_tape(step, invocation)?;
+        self.policy_tapes[index]
+            .prepared_bank
+            .ok_or(SemanticTransitionError::ObservationMismatch)
     }
 
     /// Differentiate the original tape of this actually completed native step.
@@ -17264,11 +17425,14 @@ impl SemanticTransitionSession {
         let step_aliases = Arc::clone(&self.steps[&original._witness.reader_token].aliases);
         let tape = &self.policy_tapes[tape_index];
         let policy = &tape.policy;
-        let state = &self.steps[&original._witness.reader_token]
-            .prepared
-            .as_ref()
-            .expect("checked prepared policy owner")
-            .state;
+        let state = tape.prepared_bank.map_or(&self.state, |bank| {
+            &self.steps[&original._witness.reader_token]
+                .prepared
+                .as_ref()
+                .expect("checked prepared policy owner")
+                .branches[bank]
+                .state
+        });
         let training = self.steps[&update_step.token]
             .prepared
             .as_ref()
@@ -17589,10 +17753,14 @@ impl SemanticTransitionSession {
         let step_aliases = Arc::clone(&self.steps[&original._witness.reader_token].aliases);
         let tape = &self.policy_tapes[tape_index];
         let policy = &tape.policy;
-        let state = self.steps[&original._witness.reader_token]
-            .prepared
-            .as_ref()
-            .map_or(&self.state, |prepared| &prepared.state);
+        let state = tape.prepared_bank.map_or(&self.state, |bank| {
+            &self.steps[&original._witness.reader_token]
+                .prepared
+                .as_ref()
+                .expect("retained prepared policy step")
+                .branches[bank]
+                .state
+        });
         let PolicyVjpRecording {
             descriptor,
             recorder,
@@ -17855,6 +18023,7 @@ impl SemanticTransitionSession {
             policy,
             support: std::mem::replace(&mut self.support, replacement.support),
             receipts: std::mem::replace(&mut self.receipts, replacement.receipts),
+            prepared_bank: None,
             components: self.device_components.view(),
             codebooks: self.device_codebooks.view(),
         });
@@ -18378,6 +18547,7 @@ impl SemanticTransitionSession {
     fn prepared_kernel_io(
         &self,
         step: &SemanticPreparedStep,
+        bank: usize,
     ) -> Result<TransitionKernelIo<'_>, SemanticTransitionError> {
         let prepared = self
             .steps
@@ -18386,8 +18556,12 @@ impl SemanticTransitionSession {
             .ok_or_else(|| {
                 publication_input_error("prepared transition has no original storage")
             })?;
-        let policy = prepared.policy.as_ref();
-        let text = &prepared
+        let branch = prepared
+            .branches
+            .get(bank)
+            .ok_or_else(|| publication_input_error("prepared transition bank is invalid"))?;
+        let policy = branch.policy.as_ref();
+        let text = &branch
             .continuation
             .as_ref()
             .ok_or_else(|| {
@@ -18397,7 +18571,7 @@ impl SemanticTransitionSession {
         let logits = match policy {
             Some(policy) => &policy.text_logits,
             None => {
-                &prepared
+                &branch
                     .policy_buffers
                     .as_ref()
                     .ok_or_else(|| {
@@ -18410,21 +18584,21 @@ impl SemanticTransitionSession {
             // Nonproposal execution returns before reading logits or support.
             // Retain the original cold allocation; do not invent policy values.
             logits,
-            support: prepared
+            support: branch
                 .support
                 .as_ref()
                 .ok_or_else(|| publication_input_error("prepared support has retired"))?,
-            receipts: prepared
+            receipts: branch
                 .receipts
                 .as_ref()
                 .ok_or_else(|| publication_input_error("prepared receipts have retired"))?,
-            state: &prepared.state,
+            state: &branch.state,
             text: Some(text),
             lease: Some(&prepared.reader),
             policy,
             model_work: prepared.model_work.as_ref(),
-            model_update: prepared.model_update.as_ref(),
-            training_selection: prepared
+            model_update: branch.model_update.as_ref(),
+            training_selection: branch
                 .continuation
                 .as_ref()
                 .and_then(|continuation| continuation.training_selection.as_ref()),
@@ -18441,10 +18615,11 @@ impl SemanticTransitionSession {
             .get(&step.token)
             .and_then(|owner| owner.prepared.as_ref())
             .ok_or_else(|| publication_input_error("prepared drain has no original storage"))?;
-        let logits = if let Some(policy) = prepared.policy.as_ref() {
+        let branch = &prepared.branches[0];
+        let logits = if let Some(policy) = branch.policy.as_ref() {
             &policy.text_logits
         } else {
-            &prepared
+            &branch
                 .policy_buffers
                 .as_ref()
                 .ok_or_else(|| {
@@ -18454,15 +18629,15 @@ impl SemanticTransitionSession {
         };
         Ok(TransitionKernelIo {
             logits,
-            support: prepared
+            support: branch
                 .support
                 .as_ref()
                 .ok_or_else(|| publication_input_error("prepared support has retired"))?,
-            receipts: prepared
+            receipts: branch
                 .receipts
                 .as_ref()
                 .ok_or_else(|| publication_input_error("prepared receipts have retired"))?,
-            state: &prepared.state,
+            state: &branch.state,
             text: None,
             lease: Some(&prepared.reader),
             policy: None,

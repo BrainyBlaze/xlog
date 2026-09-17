@@ -4304,9 +4304,9 @@ pub(crate) struct PySemanticPreparedStep {
     task_use: Py<PySemanticTransitionTaskUse>,
     scope: Arc<()>,
     inner: SemanticPreparedStep,
-    continuation_producers: Mutex<Vec<Py<PyAny>>>,
+    continuation_producers: Mutex<[Vec<Py<PyAny>>; 2]>,
     #[cfg(feature = "semantic-policy")]
-    policy_inputs: Mutex<Option<PreparedPolicyInputs>>,
+    policy_inputs: Mutex<[Option<PreparedPolicyInputs>; 2]>,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -4932,6 +4932,11 @@ enum ContentStepOwner {
 enum ContentStepRef<'a> {
     Published(&'a PySemanticPublishedParent),
     Prepared(&'a PySemanticPreparedStep),
+}
+
+enum TensorContentBinding {
+    Capture,
+    Model(Option<usize>),
 }
 
 impl ContentStepOwner {
@@ -6504,9 +6509,9 @@ impl PySemanticTransitionController {
     /// with memory_scope, enqueue_step(step, bank), and finish_segment() methods.
     /// memory_scope spans allocation/recording through EndCapture/instantiate;
     /// enqueue_step records both fixed bank branches per slot and returns None.
-    /// Bank zero binds original content, continuation and policy through this
-    /// controller. Bank one replays the same work geometry into those reserved
-    /// output owners without a second binding or allocation.
+    /// Each bank binds its own original model witness, continuation, policy and
+    /// update outputs through this controller. Device admission selects exactly
+    /// one retained branch; no branch aliases the other's primal or tape owners.
     /// Python receives neither the graph nor authority to report its completion.
     /// transitions is a nonempty exact tuple of "proposal" or "recompute" modes;
     /// its length fixes the bound and each mode is retained before any callback.
@@ -6568,8 +6573,8 @@ impl PySemanticTransitionController {
                     task_use: task_use.clone_ref(py),
                     scope: Arc::clone(&scope),
                     inner,
-                    continuation_producers: Mutex::new(Vec::new()),
-                    policy_inputs: Mutex::new(None),
+                    continuation_producers: Mutex::new(std::array::from_fn(|_| Vec::new())),
+                    policy_inputs: Mutex::new(std::array::from_fn(|_| None)),
                 },
             )?);
         }
@@ -6685,6 +6690,10 @@ impl PySemanticTransitionController {
                                     session
                                         .owner()?
                                         .begin_prepared_step_bank_capture(&native, bank)
+                                        .map_err(xlog_err)?;
+                                    session
+                                        .owner()?
+                                        .record_prepared_bank_model_content(&native, bank)
                                         .map_err(xlog_err)?;
                                     let enqueue = recording_callback(check, || {
                                         prepared.getattr("enqueue_step")
@@ -7093,11 +7102,12 @@ impl PySemanticTransitionController {
                     .lock()
                     .map_err(|_| invalid("continuation producer ownership mutex is poisoned"))?,
             );
-            let policy = step
-                .policy_inputs
-                .lock()
-                .map_err(|_| invalid("prepared policy inputs mutex is poisoned"))?
-                .take();
+            let policy = std::mem::take(
+                &mut *step
+                    .policy_inputs
+                    .lock()
+                    .map_err(|_| invalid("prepared policy inputs mutex is poisoned"))?,
+            );
             drop(policy);
             drop(continuation);
         }
@@ -7773,7 +7783,7 @@ impl PySemanticTransitionController {
             ContentStepOwner::from_python(parent)?,
             tensors,
             consumer_stream,
-            false,
+            TensorContentBinding::Capture,
         )
     }
 
@@ -7786,13 +7796,15 @@ impl PySemanticTransitionController {
     /// from a new capture of current model bytes. Initial producer addresses and
     /// valid physical strides may differ; type, shape and logical interval may
     /// not. Later witness.verify requires these same live storage/layout owners.
-    /// Call for every new parent before model reads, and verify after callbacks
-    /// and before late backward. This does not certify Python identity, hooks,
+    /// A prepared parent requires ``bank`` so each recorded branch seals the
+    /// resident model storage that its producer actually reads. Published parents
+    /// reject ``bank``. Call before model reads and verify after callbacks and
+    /// before late backward. This does not certify Python identity, hooks,
     /// configuration or numerical derivation; those remain the model owner's
     /// checks. Successful return is stream-ordered enqueue, not GPU acceptance.
     /// Retain the complete witness through creator-thread cleanup, as for
     /// capture_tensor_content; no first-reader lifetime is used as a baseline.
-    #[pyo3(signature = (task_use, *, parent, tensors, consumer_stream))]
+    #[pyo3(signature = (task_use, *, parent, tensors, consumer_stream, bank=None))]
     fn bind_model_content(
         &self,
         py: Python<'_>,
@@ -7800,6 +7812,7 @@ impl PySemanticTransitionController {
         parent: &Bound<'_, PyAny>,
         tensors: &Bound<'_, PyAny>,
         consumer_stream: &Bound<'_, PyAny>,
+        bank: Option<usize>,
     ) -> PyResult<PySemanticTensorContentWitness> {
         self.bind_tensor_content(
             py,
@@ -7807,7 +7820,7 @@ impl PySemanticTransitionController {
             ContentStepOwner::from_python(parent)?,
             tensors,
             consumer_stream,
-            true,
+            TensorContentBinding::Model(bank),
         )
     }
 
@@ -7824,8 +7837,10 @@ impl PySemanticTransitionController {
     /// N through N+5. Model-content witnesses cannot substitute for this capture.
     /// ``consumer_stream`` is explicit (or legacy stream 1); 0 and 2 are refused.
     /// Native validation checks the acquired source, prefix, services and
-    /// generations before pending ranges enter the sole publication CAS.
-    #[pyo3(signature = (task_use, *, parent, text_rows, text_row_count, selected_text, active_rows, active_row_count, numerical_admissibility, tensors, producer_witness, consumer_stream))]
+    /// generations before pending ranges enter the sole publication CAS. A
+    /// prepared parent requires ``bank`` and retains a distinct continuation for
+    /// each recorded branch; published parents reject it.
+    #[pyo3(signature = (task_use, *, parent, text_rows, text_row_count, selected_text, active_rows, active_row_count, numerical_admissibility, tensors, producer_witness, consumer_stream, bank=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "continuation binding retains each typed producer and its witness"
@@ -7844,11 +7859,17 @@ impl PySemanticTransitionController {
         tensors: &Bound<'_, PyAny>,
         producer_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
+        bank: Option<usize>,
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         self.require_read_issued(task_use)?;
         match ContentStepOwner::from_python(parent)? {
             ContentStepOwner::Published(parent) => {
+                if bank.is_some() {
+                    return Err(invalid(
+                        "published continuation does not accept a prepared bank",
+                    ));
+                }
                 self.require_issued(task_use)?;
                 self.bind_continuation_in_execution(
                     py,
@@ -7864,23 +7885,29 @@ impl PySemanticTransitionController {
                     producer_witness,
                     consumer_stream,
                     None,
+                    None,
                 )
             }
-            ContentStepOwner::Prepared(step) => self.bind_continuation_in_execution(
-                py,
-                task_use,
-                ContentStepRef::Prepared(&step.borrow(py)),
-                text_rows,
-                text_row_count,
-                selected_text,
-                active_rows,
-                active_row_count,
-                numerical_admissibility,
-                tensors,
-                producer_witness,
-                consumer_stream,
-                None,
-            ),
+            ContentStepOwner::Prepared(step) => {
+                let bank =
+                    bank.ok_or_else(|| invalid("prepared continuation requires bank zero or one"))?;
+                self.bind_continuation_in_execution(
+                    py,
+                    task_use,
+                    ContentStepRef::Prepared(&step.borrow(py)),
+                    text_rows,
+                    text_row_count,
+                    selected_text,
+                    active_rows,
+                    active_row_count,
+                    numerical_admissibility,
+                    tensors,
+                    producer_witness,
+                    consumer_stream,
+                    Some(bank),
+                    None,
+                )
+            }
         }
     }
 
@@ -7888,8 +7915,9 @@ impl PySemanticTransitionController {
     /// update. The transient witness must cover allocations followed by typed
     /// model views, Bool8[1] numerical admissibility and the five U64[5,9]
     /// frozen canary result records produced after the selected-view backward,
-    /// optimizer update and candidate cache rebuild.
-    #[pyo3(signature = (task_use, *, step, tensors, model_allocations, model_storages, model_views, numerical_admissibility, canary_results, allocation_witness, consumer_stream))]
+    /// optimizer update and candidate cache rebuild. ``bank`` identifies the
+    /// recorded branch that owns these original output producers.
+    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, canary_results, allocation_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "prepared update binding retains model geometry and numerical admissibility"
@@ -7899,6 +7927,7 @@ impl PySemanticTransitionController {
         py: Python<'_>,
         task_use: &PySemanticTransitionTaskUse,
         step: &PySemanticPreparedStep,
+        bank: usize,
         tensors: &Bound<'_, PyAny>,
         model_allocations: &Bound<'_, PyAny>,
         model_storages: &Bound<'_, PyAny>,
@@ -7910,6 +7939,9 @@ impl PySemanticTransitionController {
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         self.require_read_issued(task_use)?;
+        if bank > 1 {
+            return Err(invalid("prepared model update bank must be zero or one"));
+        }
         let parent = ContentStepRef::Prepared(step);
         let mut budget = 16 * 1024 * 1024;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
@@ -8032,6 +8064,7 @@ impl PySemanticTransitionController {
         owner
             .bind_prepared_update_output(
                 &step.inner,
+                bank,
                 SemanticModelMemory {
                     allocations: allocation_handoff.into_native(),
                     storages,
@@ -8049,7 +8082,7 @@ impl PySemanticTransitionController {
         drop(session);
         step.continuation_producers
             .lock()
-            .map_err(|_| invalid("prepared update producer ownership mutex is poisoned"))?
+            .map_err(|_| invalid("prepared update producer ownership mutex is poisoned"))?[bank]
             .append(&mut producer_owners.0);
         Ok(())
     }
@@ -8059,9 +8092,10 @@ impl PySemanticTransitionController {
     /// parameters and the model-issued component baselines in that exact order.
     /// This records no host publication or RNG identity and returns no invocation;
     /// only actual completed execution can expose the original result and its
-    /// retained late-backward tape.
+    /// retained late-backward tape. ``bank`` identifies the recorded branch whose
+    /// original numerical producers remain owned until native result selection.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, step, binding, model_output, text_logits, product_support, parameters, component_baselines, producer_witness, consumer_stream))]
+    #[pyo3(signature = (task_use, *, step, bank, binding, model_output, text_logits, product_support, parameters, component_baselines, producer_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "parent binding retains complete publication and model ownership"
@@ -8071,6 +8105,7 @@ impl PySemanticTransitionController {
         py: Python<'_>,
         task_use: &PySemanticTransitionTaskUse,
         step: &PySemanticPreparedStep,
+        bank: usize,
         binding: &Bound<'_, PyAny>,
         model_output: Py<PyAny>,
         text_logits: Py<PyAny>,
@@ -8081,6 +8116,9 @@ impl PySemanticTransitionController {
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
+        if bank > 1 {
+            return Err(invalid("prepared policy bank must be zero or one"));
+        }
         let mut budget = 16 * 1024 * 1024;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
         let fields = object_sequence(binding, &mut budget)?;
@@ -8106,7 +8144,7 @@ impl PySemanticTransitionController {
             if step
                 .policy_inputs
                 .lock()
-                .map_err(|_| invalid("prepared policy producer owner is poisoned"))?
+                .map_err(|_| invalid("prepared policy producer owner is poisoned"))?[bank]
                 .is_some()
             {
                 return Err(invalid("prepared policy producers were already bound"));
@@ -8160,6 +8198,7 @@ impl PySemanticTransitionController {
         owner
             .bind_prepared_policy(
                 &step.inner,
+                bank,
                 binding,
                 text,
                 support,
@@ -8176,10 +8215,10 @@ impl PySemanticTransitionController {
             .policy_inputs
             .lock()
             .map_err(|_| invalid("prepared policy producer owner is poisoned"))?;
-        if retained.is_some() {
+        if retained[bank].is_some() {
             return Err(invalid("prepared policy producers were already bound"));
         }
-        *retained = Some(PreparedPolicyInputs {
+        retained[bank] = Some(PreparedPolicyInputs {
             model_output,
             inputs,
             invocation_issued: false,
@@ -8398,7 +8437,7 @@ impl PySemanticTransitionController {
         parent: ContentStepOwner,
         tensors: &Bound<'_, PyAny>,
         consumer_stream: &Bound<'_, PyAny>,
-        model: bool,
+        binding_kind: TensorContentBinding,
     ) -> PyResult<PySemanticTensorContentWitness> {
         self.session.borrow(py).require_creator()?;
         self.require_read_issued(task_use)?;
@@ -8445,10 +8484,18 @@ impl PySemanticTransitionController {
                 }
                 let lease = acquired.lease()?;
                 owner.published_identity(&lease).map_err(xlog_err)?;
-                if model {
-                    owner.bind_model_content(&lease, handoff.into_native(), stream)
-                } else {
-                    owner.capture_tensor_content(&lease, handoff.into_native(), stream)
+                match binding_kind {
+                    TensorContentBinding::Capture => {
+                        owner.capture_tensor_content(&lease, handoff.into_native(), stream)
+                    }
+                    TensorContentBinding::Model(None) => {
+                        owner.bind_model_content(&lease, handoff.into_native(), stream)
+                    }
+                    TensorContentBinding::Model(Some(_)) => {
+                        return Err(invalid(
+                            "published model content does not accept a prepared bank",
+                        ));
+                    }
                 }
             }
             ContentStepOwner::Prepared(step) => {
@@ -8458,14 +8505,21 @@ impl PySemanticTransitionController {
                         "tensor content authority changed during producer handoff",
                     ));
                 }
-                if model {
-                    owner.bind_prepared_model_content(&step.inner, handoff.into_native(), stream)
-                } else {
-                    owner.capture_prepared_tensor_content(
+                match binding_kind {
+                    TensorContentBinding::Model(Some(bank)) => owner.bind_prepared_model_content(
+                        &step.inner,
+                        bank,
+                        handoff.into_native(),
+                        stream,
+                    ),
+                    TensorContentBinding::Model(None) => {
+                        return Err(invalid("prepared model content requires bank zero or one"));
+                    }
+                    TensorContentBinding::Capture => owner.capture_prepared_tensor_content(
                         &step.inner,
                         handoff.into_native(),
                         stream,
-                    )
+                    ),
                 }
             }
         }
@@ -8667,6 +8721,7 @@ impl PySemanticTransitionController {
                 &arguments[6],
                 &producer_witness,
                 &arguments[8],
+                None,
                 Some(import),
             )?;
             if kind == SemanticTransitionKind::Proposal {
@@ -8905,8 +8960,20 @@ impl PySemanticTransitionController {
         tensors: &Bound<'_, PyAny>,
         producer_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
+        prepared_bank: Option<usize>,
         import: Option<&ColdImportGuard<'_>>,
     ) -> PyResult<()> {
+        match parent {
+            ContentStepRef::Published(_) if prepared_bank.is_some() => {
+                return Err(invalid(
+                    "published continuation does not accept a prepared bank",
+                ));
+            }
+            ContentStepRef::Prepared(_) if prepared_bank.is_none_or(|bank| bank > 1) => {
+                return Err(invalid("prepared continuation requires bank zero or one"));
+            }
+            _ => {}
+        }
         let expected = {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
@@ -9016,6 +9083,7 @@ impl PySemanticTransitionController {
             ),
             ContentStepRef::Prepared(step) => owner.bind_prepared_continuation(
                 &step.inner,
+                prepared_bank.expect("validated prepared bank"),
                 input,
                 &producer_witness.inner,
                 consumer_stream,
@@ -9026,16 +9094,19 @@ impl PySemanticTransitionController {
         drop(owner);
         drop(session);
         result?;
-        let retained = match parent {
-            ContentStepRef::Published(parent) => &parent.continuation_producers,
-            ContentStepRef::Prepared(step) => &step.continuation_producers,
-        };
-        retained
-            .lock()
-            .map_err(|_| {
+        match parent {
+            ContentStepRef::Published(parent) => parent
+                .continuation_producers
+                .lock()
+                .map_err(|_| {
+                    PyRuntimeError::new_err("continuation producer ownership mutex is poisoned")
+                })?
+                .append(&mut producer_owners.0),
+            ContentStepRef::Prepared(step) => step.continuation_producers.lock().map_err(|_| {
                 PyRuntimeError::new_err("continuation producer ownership mutex is poisoned")
-            })?
-            .append(&mut producer_owners.0);
+            })?[prepared_bank.expect("validated prepared bank")]
+            .append(&mut producer_owners.0),
+        }
         Ok(())
     }
 
@@ -9127,7 +9198,7 @@ impl PySemanticTransitionController {
         self.require_issued(&issued)?;
         original.require_task(py, &issued)?;
         issued.require_current(&owner)?;
-        owner
+        let bank = owner
             .require_prepared_policy_invocation(&original.inner, rng)
             .map_err(xlog_err)?;
         let state = issued.state()?;
@@ -9142,7 +9213,7 @@ impl PySemanticTransitionController {
             .policy_inputs
             .lock()
             .map_err(|_| invalid("prepared policy producer owner is poisoned"))?;
-        let inputs = retained
+        let inputs = retained[bank]
             .as_mut()
             .ok_or_else(|| invalid("prepared policy has no original numerical producers"))?;
         let (model_output, packed) = inputs.issue_originals(py)?;
@@ -11273,16 +11344,21 @@ assert hasattr(SemanticPublishedParent, 'guard_content')
 assert hasattr(SemanticTransitionController, 'capture_tensor_content')
 import inspect
 assert tuple(inspect.signature(SemanticTransitionController.bind_model_content).parameters) == (
-    'self', 'task_use', 'parent', 'tensors', 'consumer_stream')
+    'self', 'task_use', 'parent', 'tensors', 'consumer_stream', 'bank')
+model_content = inspect.signature(SemanticTransitionController.bind_model_content)
+assert model_content.parameters['bank'].kind is inspect.Parameter.KEYWORD_ONLY
+assert model_content.parameters['bank'].default is None
 continuation = inspect.signature(SemanticTransitionController.bind_continuation)
 assert tuple(continuation.parameters) == (
     'self', 'task_use', 'parent', 'text_rows', 'text_row_count', 'selected_text',
     'active_rows', 'active_row_count', 'numerical_admissibility', 'tensors',
-    'producer_witness', 'consumer_stream')
-for name in tuple(continuation.parameters)[2:]:
+    'producer_witness', 'consumer_stream', 'bank')
+for name in tuple(continuation.parameters)[2:-1]:
     parameter = continuation.parameters[name]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is inspect.Parameter.empty
+assert continuation.parameters['bank'].kind is inspect.Parameter.KEYWORD_ONLY
+assert continuation.parameters['bank'].default is None
 assert hasattr(SemanticTensorContentWitness, 'verify')
 for name in ('digest', 'pointer', 'status', 'identity', 'tensors', 'parent'):
     assert not hasattr(SemanticTensorContentWitness, name), name
@@ -11368,7 +11444,7 @@ else:
         run_python(
             r#"
 try:
-    SemanticTransitionController.bind_prepared_policy(object(), object(), step=object(), binding=(1, bytes(32)), model_output=object(), text_logits=object(), product_support=object(), parameters=object(), component_baselines=object(), producer_witness=object(), consumer_stream=1)
+    SemanticTransitionController.bind_prepared_policy(object(), object(), step=object(), bank=0, binding=(1, bytes(32)), model_output=object(), text_logits=object(), product_support=object(), parameters=object(), component_baselines=object(), producer_witness=object(), consumer_stream=1)
 except TypeError:
     pass
 else:
