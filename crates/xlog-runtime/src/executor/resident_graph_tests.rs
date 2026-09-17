@@ -1970,13 +1970,13 @@ fn dropping_a_real_inflight_graph_releases_handles_workspace_and_events_without_
     );
     assert_eq!(
         fixture.runtime.bytes_outstanding(),
-        runtime_bytes_before_prepare + private_workspace_bytes,
-        "Drop must keep queued workspace frees accounted until reap"
+        runtime_bytes_before_prepare,
+        "Drop must release private workspace after the terminal wait"
     );
     fixture
         .runtime
         .reap_pending()
-        .expect("reap dropped graph workspace");
+        .expect("reap after dropped graph");
     let events_after_reap = fixture.runtime.event_lifecycle_stats();
     assert_eq!(
         events_after_reap.live_events,
@@ -2008,7 +2008,7 @@ fn dropping_a_real_inflight_graph_releases_handles_workspace_and_events_without_
     assert_eq!(
         fixture.runtime.bytes_outstanding(),
         runtime_bytes_before_prepare,
-        "reap must release every private graph-workspace byte"
+        "reap must leave every private graph-workspace byte released"
     );
     let records_after_reap = fixture.sink.snapshot();
     for (ptr, (_, allocation_order)) in &live_workspace_allocations {
@@ -2018,7 +2018,7 @@ fn dropping_a_real_inflight_graph_releases_handles_workspace_and_events_without_
                     && record.ptr == Some(*ptr)
                     && record.order_counter > *allocation_order
             }),
-            "reap must log deallocation of private workspace pointer {ptr:#x}"
+            "Drop or reap must log deallocation of private workspace pointer {ptr:#x}"
         );
     }
     assert_eq!(

@@ -1977,8 +1977,8 @@ static void initial_prefix_identity_is_native_owned() {
 }
 
 static void task_selection_uses_supplied_scoring() {
-    std::array<uint64_t,27> task{};
-    task[19]=3;task[20]=5;task[21]=7;task[22]=2;task[23]=11;task[24]=13;
+    std::array<uint64_t,34> task{};
+    task[25]=3;task[26]=5;task[27]=7;task[28]=2;task[29]=11;task[30]=13;
     State state{};
     auto& evaluation=state.task_evaluation;
     evaluation.facts[0].eligible=1;
@@ -1991,7 +1991,7 @@ static void task_selection_uses_supplied_scoring() {
     evaluation.query_count=6;select_task(&state,task.data());
     require(evaluation.winner==2,"selection ignored the supplied cost tradeoff");
     require(evaluation.return_value==6-13*8,"return ignored improvement/spent coefficients");
-    task[21]=0;
+    task[27]=0;
     for(uint32_t slot=0;slot<3;++slot)task_cost(&state,slot,task.data());
     select_task(&state,task.data());
     require(evaluation.winner==1,"changing the task scoring did not change the selected candidate");
