@@ -424,7 +424,8 @@ struct SemanticTrainingCanaryRefusalRecord {
 };
 struct PolicyBackward {
     uint64_t cotangents,parameters,text,baselines,recurrent,scores,status,parameter_cells,text_cells;
-    uint64_t selection,objective,objective_groups,objective_group_members,origin_candidate,mode;
+    uint64_t selection,objective,objective_groups,objective_group_members,origin_candidate;
+    uint64_t origin_lease,origin_bank,mode;
 };
 struct Descriptor {
     uint64_t logits,support,scratch,receipts,state,components,codebooks,arena[7];
@@ -450,7 +451,7 @@ static_assert(sizeof(SemanticTrainingObjectiveGroupRecord)==32,"training objecti
 static_assert(sizeof(SemanticTrainingCanaryRecord)==80,"training canary ABI");
 static_assert(sizeof(SemanticTrainingCanaryResultRecord)==72,"training canary result ABI");
 static_assert(sizeof(SemanticTrainingCanaryRefusalRecord)==152,"training canary refusal ABI");
-static_assert(sizeof(PolicyBackward)==120,"policy backward ABI");
+static_assert(sizeof(PolicyBackward)==136,"policy backward ABI");
 
 __device__ bool semantic_training_canary_refusal_valid(
         const SemanticTrainingCanaryRefusalRecord& refusal) {
@@ -499,7 +500,7 @@ static_assert(sizeof(AttemptReceipt)==344,"attempt receipt ABI");
 static_assert(sizeof(TokenProvenanceRecord)==184,"token provenance ABI");
 static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
-static_assert(sizeof(Descriptor)==792,"launch ABI");
+static_assert(sizeof(Descriptor)==808,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 
 __device__ uint64_t text_row_count(TextBinding binding) {
@@ -3060,7 +3061,13 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     }
                 }
                 if(actor_groups!=1 || !selected_member)*status=1;
-                apply_selected=b.origin_candidate==selection.origin_candidate;
+                const auto* origin_lease=reinterpret_cast<const PublicationLease*>(b.origin_lease);
+                if(!origin_lease || b.origin_bank>1 ||
+                   !publication_pointer_span(b.origin_lease,sizeof(PublicationLease),alignof(PublicationLease)) ||
+                   origin_lease->abi!=1 || origin_lease->bank>1)
+                    *status=1;
+                apply_selected=b.origin_candidate==selection.origin_candidate &&
+                    origin_lease && origin_lease->bank==b.origin_bank;
                 if(apply_selected && !*status) {
                     const auto* state=reinterpret_cast<const State*>(descriptor.state);
                     if(!state || state->status || state->model_generation!=selection.origin.model_generation ||

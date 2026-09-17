@@ -4619,6 +4619,61 @@ impl PySemanticPreparedStep {
         Ok(PyTuple::new(py, values)?.unbind())
     }
 
+    /// Record the device-selected actor, critic and cost VJP for this prepared
+    /// Proposal inside a later prepared Update branch. The returned parameter,
+    /// full MASK and component-baseline roots remain device-resident; the
+    /// native proposal lease predicates the unselected bank to exact zeros.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (update_step, bank, *, consumer_stream))]
+    fn temporal_selected_vjp(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+        bank: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let bank = usize::try_from(ColdValue::read(bank, &mut 128, 0)?.unsigned()?)
+            .map_err(|_| invalid("prepared policy bank exceeds native address space"))?;
+        let consumer_stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        {
+            let update = update_step.borrow(py);
+            if self.session.as_ptr() != update.session.as_ptr()
+                || !Arc::ptr_eq(&self.scope, &update.scope)
+            {
+                return Err(invalid(
+                    "temporal policy backward requires an Update from the same prepared segment",
+                ));
+            }
+            let task_use = self.task_use.borrow(py);
+            update.require_task(py, &task_use)?;
+        }
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        self.content_binding_with_owner(py, &owner)?;
+        let gradients = owner
+            .record_selected_prepared_policy_vjp(
+                &self.inner,
+                bank,
+                &update_step.borrow(py).inner,
+                consumer_stream,
+            )
+            .map_err(xlog_err)?;
+        let [parameters, text, baselines] = gradients.into_dlpack().map_err(xlog_err)?;
+        let parameters =
+            retain_export_owner(parameters, self.session.clone_ref(py), session.owner_thread)?;
+        let text = retain_export_owner(text, self.session.clone_ref(py), session.owner_thread)?;
+        let baselines =
+            retain_export_owner(baselines, self.session.clone_ref(py), session.owner_thread)?;
+        Ok((
+            crate::dlpack_capsule_from_tensor(py, parameters)?,
+            crate::dlpack_capsule_from_tensor(py, text)?,
+            crate::dlpack_capsule_from_tensor(py, baselines)?,
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+
     /// Export an admitted immutable record; bank-varying records require their
     /// dedicated device-produced input port rather than a guessed cold extent.
     #[pyo3(signature = (role, index, *, consumer_stream))]

@@ -8149,6 +8149,8 @@ struct PolicyBackward {
     objective_groups: u64,
     objective_group_members: u64,
     origin_candidate: u64,
+    origin_lease: u64,
+    origin_bank: u64,
     mode: u64,
 }
 
@@ -8286,6 +8288,58 @@ pub struct SemanticSelectedPolicyGradients {
     support_cells: usize,
 }
 
+/// Device-selected policy roots recorded inside a prepared Update branch.
+/// The retained native bank remains reusable while the mutually exclusive
+/// Update branches are captured; every export is a fresh DLPack view.
+#[cfg(feature = "semantic-policy")]
+pub struct SemanticPreparedPolicyGradients {
+    pub layout: SemanticPolicyLayout,
+    parameters: DeviceMemoryView<f32>,
+    text_logits: DeviceMemoryView<f32>,
+    component_baselines: DeviceMemoryView<f32>,
+    provider: Arc<CudaKernelProvider>,
+    step_aliases: Arc<()>,
+    publication: Arc<PublicationStorage>,
+    continuation: Arc<TextBindingStorage>,
+    owner: Arc<PolicyAdjointBuffers>,
+    support_cells: usize,
+}
+
+#[cfg(feature = "semantic-policy")]
+impl SemanticPreparedPolicyGradients {
+    pub fn into_dlpack(self) -> Result<[DlpackManagedTensor; 3], SemanticTransitionError> {
+        let layouts = policy_producer_layouts(self.support_cells, self.layout.parameter_cells)?;
+        let retained_owner: Arc<dyn Send + Sync> = self.owner;
+        let export = |values: DeviceMemoryView<f32>, layout: SemanticTensorLayout| {
+            let rank = layout.rank as usize;
+            let shape = layout.dimensions[..rank]
+                .iter()
+                .map(|&value| value as i64)
+                .collect();
+            let strides = layout.strides_bytes[..rank]
+                .iter()
+                .map(|&value| (value / layout.element_bytes) as i64)
+                .collect();
+            export_owned_allocation(
+                unsafe { values.cast::<u8>() }.expect("F32 temporal adjoint byte view"),
+                shape,
+                strides,
+                (2, 32),
+                self.provider.device().ordinal() as i32,
+                Arc::clone(&self.step_aliases),
+                Arc::clone(&self.publication),
+                Some(Arc::clone(&self.continuation)),
+                Some(Arc::clone(&retained_owner)),
+            )
+        };
+        Ok([
+            export(self.parameters, layouts[2]),
+            export(self.text_logits, layouts[0]),
+            export(self.component_baselines, layouts[3]),
+        ])
+    }
+}
+
 #[cfg(feature = "semantic-policy")]
 impl SemanticSelectedPolicyGradients {
     /// Export parameter, full MASK and component-baseline adjoints, in that
@@ -8359,6 +8413,7 @@ struct PolicyBuffers {
     text_logits: TrackedCudaSlice<f32>,
     component_baselines: TrackedCudaSlice<f32>,
     adjoints: Option<PolicyAdjointBuffers>,
+    temporal_adjoints: Arc<PolicyAdjointBuffers>,
 }
 
 /// Reserved with the original forward tape, then consumed by its sole backward.
@@ -8545,6 +8600,8 @@ enum PolicyVjpInput<'a> {
     Selected {
         training: &'a SemanticSelectedTrainingView,
         origin_candidate: u64,
+        origin_lease: &'a TrackedCudaSlice<PublicationLease>,
+        origin_bank: usize,
     },
 }
 
@@ -8587,8 +8644,8 @@ const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3256);
 const _: () = assert!(size_of::<DeviceState>() == 6952);
 const _: () = assert!(size_of::<PolicyField>() == 24);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 480);
-const _: () = assert!(size_of::<PolicyBackward>() == 120);
-const _: () = assert!(size_of::<Descriptor>() == 792);
+const _: () = assert!(size_of::<PolicyBackward>() == 136);
+const _: () = assert!(size_of::<Descriptor>() == 808);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -9290,7 +9347,7 @@ fn prepared_segment_allocation_bytes(
 
 #[cfg(feature = "semantic-policy")]
 fn policy_buffer_bytes(layout: &SemanticPolicyLayout) -> Result<usize, SemanticTransitionError> {
-    [
+    let primal_cells = [
         layout.parameter_cells,
         layout.score_cells(),
         layout.recurrent_cells(),
@@ -9300,18 +9357,25 @@ fn policy_buffer_bytes(layout: &SemanticPolicyLayout) -> Result<usize, SemanticT
     .try_fold(0usize, |sum, cells| {
         sum.checked_add(cells)
             .ok_or(SemanticTransitionError::GenerationExhausted)
-    })?
-    // Each differentiable primal bank has a dedicated adjoint bank. Only the
-    // forward hidden vector is shared scratch. Coefficients and status keep
-    // their own types.
-    .checked_mul(2)
-    .and_then(|cells| cells.checked_add(128))
-    .and_then(|cells| cells.checked_add(COMPONENT_COUNT))
-    .and_then(|cells| cells.checked_add(COMPONENT_COUNT))
-    .and_then(|cells| cells.checked_mul(size_of::<f32>()))
-    .and_then(|bytes| bytes.checked_add(COMPONENT_COUNT * size_of::<f64>()))
-    .and_then(|bytes| bytes.checked_add(size_of::<u64>()))
-    .ok_or(SemanticTransitionError::GenerationExhausted)
+    })?;
+    let adjoint_cells = primal_cells
+        .checked_add(COMPONENT_COUNT)
+        .ok_or(SemanticTransitionError::GenerationExhausted)?;
+    let adjoint_cells = adjoint_cells
+        .checked_mul(2)
+        .ok_or(SemanticTransitionError::GenerationExhausted)?;
+    primal_cells
+        // Each differentiable primal bank has a dedicated adjoint bank. Only the
+        // forward hidden vector is shared scratch. A second retained adjoint bank
+        // is reserved for temporal Update capture; coefficients and status keep
+        // their own types in both banks.
+        .checked_add(adjoint_cells)
+        .and_then(|cells| cells.checked_add(128))
+        .and_then(|cells| cells.checked_add(COMPONENT_COUNT))
+        .and_then(|cells| cells.checked_mul(size_of::<f32>()))
+        .and_then(|bytes| bytes.checked_add(2 * COMPONENT_COUNT * size_of::<f64>()))
+        .and_then(|bytes| bytes.checked_add(2 * size_of::<u64>()))
+        .ok_or(SemanticTransitionError::GenerationExhausted)
 }
 
 fn validate_rebinding_ownership(
@@ -16692,26 +16756,8 @@ impl SemanticTransitionSession {
     ) -> Result<PolicyBuffers, SemanticTransitionError> {
         let layout = self.policy_layout()?;
         let text_cells = 32 * TEXT_CARDINALITY;
-        Ok(PolicyBuffers {
-            parameters: reservation
-                .alloc::<f32>(layout.parameter_cells)
-                .map_err(|error| runtime_error("policy parameter allocation", error))?,
-            hidden: reservation
-                .alloc::<f32>(128)
-                .map_err(|error| runtime_error("policy hidden allocation", error))?,
-            scores: reservation
-                .alloc::<f32>(layout.score_cells())
-                .map_err(|error| runtime_error("policy score allocation", error))?,
-            recurrent: reservation
-                .alloc::<f32>(layout.recurrent_cells())
-                .map_err(|error| runtime_error("policy recurrent allocation", error))?,
-            text_logits: reservation
-                .alloc::<f32>(text_cells)
-                .map_err(|error| runtime_error("original text snapshot allocation", error))?,
-            component_baselines: reservation
-                .alloc::<f32>(COMPONENT_COUNT)
-                .map_err(|error| runtime_error("component baseline snapshot allocation", error))?,
-            adjoints: Some(PolicyAdjointBuffers {
+        let mut allocate_adjoints = || {
+            Ok::<_, SemanticTransitionError>(PolicyAdjointBuffers {
                 parameters: reservation
                     .alloc::<f32>(layout.parameter_cells)
                     .map_err(|error| runtime_error("parameter adjoint allocation", error))?,
@@ -16733,7 +16779,31 @@ impl SemanticTransitionSession {
                 status: reservation
                     .alloc::<u64>(1)
                     .map_err(|error| runtime_error("policy backward status allocation", error))?,
-            }),
+            })
+        };
+        let adjoints = allocate_adjoints()?;
+        let temporal_adjoints = Arc::new(allocate_adjoints()?);
+        Ok(PolicyBuffers {
+            parameters: reservation
+                .alloc::<f32>(layout.parameter_cells)
+                .map_err(|error| runtime_error("policy parameter allocation", error))?,
+            hidden: reservation
+                .alloc::<f32>(128)
+                .map_err(|error| runtime_error("policy hidden allocation", error))?,
+            scores: reservation
+                .alloc::<f32>(layout.score_cells())
+                .map_err(|error| runtime_error("policy score allocation", error))?,
+            recurrent: reservation
+                .alloc::<f32>(layout.recurrent_cells())
+                .map_err(|error| runtime_error("policy recurrent allocation", error))?,
+            text_logits: reservation
+                .alloc::<f32>(text_cells)
+                .map_err(|error| runtime_error("original text snapshot allocation", error))?,
+            component_baselines: reservation
+                .alloc::<f32>(COMPONENT_COUNT)
+                .map_err(|error| runtime_error("component baseline snapshot allocation", error))?,
+            adjoints: Some(adjoints),
+            temporal_adjoints,
             layout,
         })
     }
@@ -17448,11 +17518,22 @@ impl SemanticTransitionSession {
                     "selected policy backward requires the Update training-view owner",
                 )
             })?;
+        let origin_bank = tape.prepared_bank.ok_or_else(|| {
+            publication_input_error("selected policy backward requires a prepared policy bank")
+        })?;
+        let origin_lease = &self.steps[&original._witness.reader_token]
+            .prepared
+            .as_ref()
+            .expect("checked prepared policy owner")
+            .reader;
         let PolicyVjpRecording {
             descriptor,
             recorder,
         } = self.prepare_policy_vjp_recording(
             policy,
+            policy.buffers.adjoints.as_ref().ok_or_else(|| {
+                publication_input_error("original policy adjoint banks have already been consumed")
+            })?,
             &tape.support,
             &tape.receipts,
             state,
@@ -17461,6 +17542,8 @@ impl SemanticTransitionSession {
             PolicyVjpInput::Selected {
                 training,
                 origin_candidate,
+                origin_lease,
+                origin_bank,
             },
         )?;
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
@@ -17538,6 +17621,146 @@ impl SemanticTransitionSession {
     }
 
     #[cfg(feature = "semantic-policy")]
+    pub fn record_selected_prepared_policy_vjp(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        update_step: &SemanticPreparedStep,
+        consumer_stream: u64,
+    ) -> Result<SemanticPreparedPolicyGradients, SemanticTransitionError> {
+        dlpack_consumer_stream(consumer_stream)?;
+        self.check_prepared_content_stream(update_step, consumer_stream)?;
+        if bank > 1 {
+            return Err(publication_input_error(
+                "temporal policy backward requires proposal bank zero or one",
+            ));
+        }
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .ok_or_else(|| publication_input_error("no prepared segment is being recorded"))?;
+        if build.completed
+            || build.requested_kind(step, &self.publication_issuer)?
+                != SemanticTransitionKind::Proposal
+            || build.requested_kind(update_step, &self.publication_issuer)?
+                != SemanticTransitionKind::Update
+        {
+            return Err(publication_input_error(
+                "temporal policy backward requires a preceding Proposal and the recording Update",
+            ));
+        }
+        let origin_candidate = build
+            .tokens
+            .iter()
+            .position(|token| *token == step.token)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let update_ordinal = build
+            .tokens
+            .iter()
+            .position(|token| *token == update_step.token)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if origin_candidate >= update_ordinal {
+            return Err(publication_input_error(
+                "temporal policy backward requires a preceding proposal candidate",
+            ));
+        }
+        let origin_candidate = u64::try_from(origin_candidate)
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        let update = self.steps[&update_step.token]
+            .prepared
+            .as_ref()
+            .expect("checked prepared Update owner");
+        if update
+            .model_work
+            .as_ref()
+            .and_then(|work| work.capture_bank)
+            .is_none()
+        {
+            return Err(publication_input_error(
+                "temporal policy backward records inside an active Update bank capture",
+            ));
+        }
+        let training = update.training_view.as_ref().ok_or_else(|| {
+            publication_input_error("prepared Update has no selected training-view owner")
+        })?;
+        let proposal = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("checked prepared Proposal owner");
+        let branch = &proposal.branches[bank];
+        let policy = branch.policy.as_ref().ok_or_else(|| {
+            publication_input_error("prepared Proposal bank has no bound policy tape")
+        })?;
+        if !policy.tape_live {
+            return Err(publication_input_error(
+                "prepared Proposal bank has no live original policy tape",
+            ));
+        }
+        let support = branch.support.as_ref().ok_or_else(|| {
+            publication_input_error("prepared Proposal bank has no policy support")
+        })?;
+        let receipts = branch.receipts.as_ref().ok_or_else(|| {
+            publication_input_error("prepared Proposal bank has no policy receipts")
+        })?;
+        let components = self.device_components.view();
+        let codebooks = self.device_codebooks.view();
+        let owner = Arc::clone(&policy.buffers.temporal_adjoints);
+        let PolicyVjpRecording {
+            descriptor,
+            recorder,
+        } = self.prepare_policy_vjp_recording(
+            policy,
+            &owner,
+            support,
+            receipts,
+            &branch.state,
+            &components,
+            &codebooks,
+            PolicyVjpInput::Selected {
+                training,
+                origin_candidate,
+                origin_lease: &proposal.reader,
+                origin_bank: bank,
+            },
+        )?;
+        let baseline_snapshot = policy.component_baselines.view();
+        let layout = policy.layout.clone();
+        let continuation = Arc::clone(&policy.text_binding);
+        let support_cells = support.len();
+        let parameters = owner.parameters.view();
+        let text_logits = owner.text_logits.view();
+        let component_baselines = owner.component_baselines.view();
+        let step_aliases = Arc::clone(&self.steps[&step.token].aliases);
+        let publication = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        record_policy_vjp(
+            &self.domain,
+            &mut self.poisoned,
+            recorder,
+            self.execute.clone(),
+            descriptor,
+            &owner.coefficients,
+            None,
+            Some(&baseline_snapshot),
+        )?;
+        Ok(SemanticPreparedPolicyGradients {
+            layout,
+            parameters,
+            text_logits,
+            component_baselines,
+            provider: Arc::clone(&self.provider),
+            step_aliases,
+            publication,
+            continuation,
+            owner,
+            support_cells,
+        })
+    }
+
+    #[cfg(feature = "semantic-policy")]
     pub fn finish_prepared_policy_invocation(
         &mut self,
         step: &SemanticPreparedStep,
@@ -17601,6 +17824,7 @@ impl SemanticTransitionSession {
     fn prepare_policy_vjp_recording(
         &self,
         policy: &PolicyStorage,
+        adjoints: &PolicyAdjointBuffers,
         support: &TrackedCudaSlice<u8>,
         receipts: &TrackedCudaSlice<SemanticTransitionReceipt>,
         state: &TrackedCudaSlice<DeviceState>,
@@ -17624,9 +17848,7 @@ impl SemanticTransitionSession {
             scores,
             coefficients,
             status,
-        } = policy.adjoints.as_ref().ok_or_else(|| {
-            publication_input_error("original policy adjoint banks have already been consumed")
-        })?;
+        } = adjoints;
         let io = TransitionKernelIo {
             logits: &policy.text_logits,
             support,
@@ -17649,18 +17871,24 @@ impl SemanticTransitionSession {
             objective_groups,
             objective_group_members,
             origin_candidate,
+            origin_lease,
+            origin_bank,
             mode,
         ) = match input {
-            PolicyVjpInput::External(_) => (0, 0, 0, 0, 0, 0),
+            PolicyVjpInput::External(_) => (0, 0, 0, 0, 0, 0, 0, 0),
             PolicyVjpInput::Selected {
                 training,
                 origin_candidate,
+                origin_lease,
+                origin_bank,
             } => (
                 *training.selection().device_ptr(),
                 *training.objective().device_ptr(),
                 *training.objective_groups().device_ptr(),
                 *training.objective_group_members().device_ptr(),
                 origin_candidate,
+                origin_lease.device_ptr_value(),
+                origin_bank as u64,
                 1,
             ),
         };
@@ -17679,6 +17907,8 @@ impl SemanticTransitionSession {
             objective_groups,
             objective_group_members,
             origin_candidate,
+            origin_lease,
+            origin_bank,
             mode,
         };
         self.validate_ranges_with(&io)?;
@@ -17696,12 +17926,17 @@ impl SemanticTransitionSession {
             PolicyVjpInput::External(score_cotangents) => {
                 recorder.read(score_cotangents);
             }
-            PolicyVjpInput::Selected { training, .. } => {
+            PolicyVjpInput::Selected {
+                training,
+                origin_lease,
+                ..
+            } => {
                 recorder.read(&training.selection());
                 recorder.read(&training.objective());
                 recorder.read(&training.objective_groups());
                 recorder.read(&training.objective_group_members());
                 recorder.read(state);
+                recorder.read(origin_lease);
             }
         }
         recorder.write(&self.scratch);
@@ -17770,6 +18005,9 @@ impl SemanticTransitionSession {
             recorder,
         } = self.prepare_policy_vjp_recording(
             policy,
+            policy.buffers.adjoints.as_ref().ok_or_else(|| {
+                publication_input_error("original policy adjoint banks have already been consumed")
+            })?,
             &tape.support,
             &tape.receipts,
             state,
