@@ -6818,7 +6818,8 @@ impl PySemanticTransitionController {
     /// and drain). No producer callback runs between submission and completion.
     /// Return (genuine final parent, ordered step rows). Each row is
     /// (prepared_step, transition_or_None, skipped_status, refusal_or_None,
-    /// policy_invocation_or_None). Refusal is a typed native evidence dictionary.
+    /// policy_invocation_or_None, selected_bank_or_None). Refusal is a typed native
+    /// evidence dictionary. Every completed row carries the validated publication bank.
     /// A completed drain has no policy invocation or fabricated RNG draw.
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (task_use, *, operation, snapshot, refresh_snapshot))]
@@ -6934,12 +6935,13 @@ impl PySemanticTransitionController {
         }
         let mut rows = Vec::with_capacity(steps.len());
         for (step, completed) in steps.into_iter().zip(outcomes) {
-            let (transition, status, refusal, invocation) = match completed {
+            let (transition, status, refusal, invocation, bank) = match completed {
                 xlog_cuda::SemanticPreparedStepOutcome::Skipped { status, .. } => {
-                    (None, status, None, py.None())
+                    (None, status, None, py.None(), None)
                 }
                 xlog_cuda::SemanticPreparedStepOutcome::Completed {
                     invocation,
+                    bank,
                     transition,
                     outcome,
                     ..
@@ -6967,11 +6969,11 @@ impl PySemanticTransitionController {
                     } else {
                         py.None()
                     };
-                    (Some(label), 0, refusal, invocation)
+                    (Some(label), 0, refusal, invocation, Some(bank))
                 }
             };
             rows.push(
-                (step, transition, status, refusal, invocation)
+                (step, transition, status, refusal, invocation, bank)
                     .into_pyobject(py)?
                     .unbind(),
             );

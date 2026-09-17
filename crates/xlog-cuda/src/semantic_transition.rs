@@ -9237,6 +9237,7 @@ pub enum SemanticPreparedStepOutcome {
     Completed {
         step: SemanticPreparedStep,
         invocation: SemanticRngBinding,
+        bank: u8,
         transition: SemanticTransitionKind,
         outcome: SemanticTransitionOutcome,
     },
@@ -9570,6 +9571,8 @@ impl SemanticTransitionSession {
             }
             let transition =
                 validate_prepared_completion(&lease, &parent, &result, storage.instance)?;
+            let bank = u8::try_from(lease.bank)
+                .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
             let (state_view, receipts, update_refusal_view) = {
                 let prepared = self.steps[&step.token]
                     .prepared
@@ -9577,7 +9580,7 @@ impl SemanticTransitionSession {
                     .expect("original prepared owner");
                 let branch = prepared
                     .branches
-                    .get(lease.bank as usize)
+                    .get(usize::from(bank))
                     .ok_or(SemanticTransitionError::ObservationMismatch)?;
                 (
                     branch.state.view(),
@@ -9639,7 +9642,7 @@ impl SemanticTransitionSession {
             if transition == SemanticTransitionKind::Proposal {
                 self.take_prepared_policy_tape(
                     &step,
-                    lease.bank as usize,
+                    usize::from(bank),
                     invocation,
                     match &outcome {
                         SemanticTransitionOutcome::Refused(refusal) => Some(*refusal),
@@ -9657,6 +9660,7 @@ impl SemanticTransitionSession {
             outcomes.push(SemanticPreparedStepOutcome::Completed {
                 step,
                 invocation,
+                bank,
                 transition,
                 outcome,
             });
