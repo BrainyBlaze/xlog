@@ -9186,7 +9186,7 @@ mod task_state_contract {
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
         assert_eq!(size_of::<DeviceState>(), 6952);
-        assert_eq!(size_of::<Descriptor>(), 736);
+        assert_eq!(size_of::<Descriptor>(), 816);
     }
 
     #[test]
@@ -20620,7 +20620,7 @@ mod tests {
     #[test]
     fn publication_role_roster_preserves_every_required_owner() {
         let mut counts = [1; 55];
-        counts[15] = 2;
+        counts[15] = 3;
         assert!(validate_publication_counts(&counts).is_ok());
         for code in [1usize, 14, 17, 38, 47, 55] {
             let mut omitted = counts;
@@ -21463,7 +21463,7 @@ mod tests {
                 session.graph.transition_arena();
             assert_eq!(
                 (root_capacity, statement_capacity, arena_words),
-                (3, 4, 240)
+                (3, 4, 260)
             );
             assert_eq!(base.slot(), 0);
             let readback_stream = Arc::clone(&session.stream);
@@ -22274,7 +22274,7 @@ mod text_parent_tests {
 
     pub(super) fn publication_test_parent(provider: &CudaKernelProvider) -> SemanticParentBinding {
         let mut counts = [1u64; 55];
-        counts[15] = 2;
+        counts[15] = 3;
         for role in [4, 5, 6, 7, 19, 20, 21, 22, 23, 24, 25, 51, 52, 53, 54] {
             counts[role - 1] = 0;
         }
@@ -23961,7 +23961,7 @@ mod text_parent_tests {
     // Actual hashes and replayable graph content are checked by restore on GPU.
     fn publication_material_sample() -> PublicationMaterial {
         let mut counts = [1u64; 55];
-        counts[15] = 2;
+        counts[15] = 3;
         let layouts: BTreeMap<_, _> = (1..=55)
             .filter(|&role| is_tensor_role(role))
             .map(|role| {
@@ -25228,7 +25228,14 @@ mod text_parent_tests {
                 .collect::<Vec<_>>(),
             std::iter::once((1, 0))
                 .chain((3..=13).map(|role| (role, 0)))
-                .chain([(15, 0), (16, 0), (16, 1), (17, 0), (44, 0)])
+                .chain([
+                    (15, 0),
+                    (16, 0),
+                    (16, 1),
+                    (16, 2),
+                    (17, 0),
+                    (44, 0),
+                ])
                 .collect::<Vec<_>>()
         );
         assert_eq!(plan[0].banks[0].span.len(), 64 * size_of::<SourceSlot>());
@@ -25252,20 +25259,26 @@ mod text_parent_tests {
                 .iter()
                 .map(|input| (input.role, input.index, input.banks[0].span.len()))
                 .collect::<Vec<_>>(),
-            vec![(15, 0, 768), (16, 0, 40), (16, 1, 48), (17, 0, 40)]
+            vec![
+                (15, 0, 768),
+                (16, 0, 40),
+                (16, 1, 48),
+                (16, 2, 56),
+                (17, 0, 40),
+            ]
         );
         assert!(records
             .iter()
             .all(|input| input.layout.scalar_type == 1 && input.layout.element_bytes == 1));
         let mut missing = banks.clone();
-        missing[1].retain(|range| (range.role, range.index) != (16, 1));
+        missing[1].retain(|range| (range.role, range.index) != (16, 2));
         assert!(plan_step_inputs(&missing, &layouts, 64, &sizes).is_err());
         let mut gapped = banks.clone();
         for bank in &mut gapped {
             bank.iter_mut()
                 .find(|range| (range.role, range.index) == (16, 1))
                 .unwrap()
-                .index = 2;
+                .index = 3;
         }
         assert!(plan_step_inputs(&gapped, &layouts, 64, &sizes).is_err());
         let mut shared_raw = banks;
