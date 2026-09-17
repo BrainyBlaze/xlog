@@ -19,7 +19,7 @@
 #define __global__
 #define __shared__
 #define __constant__
-struct HostIndex { unsigned x = 0; };
+struct HostIndex { unsigned x = 0, y = 0; };
 static HostIndex blockIdx, threadIdx, blockDim{1}, gridDim{1};
 static void __syncthreads() {}
 static unsigned __clzll(uint64_t value) { return __builtin_clzll(value); }
@@ -29,11 +29,29 @@ static uint64_t __umul64hi(uint64_t a, uint64_t b) {
 static uint32_t __float_as_uint(float value) {
     uint32_t bits; std::memcpy(&bits, &value, sizeof(bits)); return bits;
 }
+static float __uint_as_float(uint32_t bits) {
+    float value; std::memcpy(&value, &bits, sizeof(value)); return value;
+}
+static double __longlong_as_double(long long bits) {
+    double value; std::memcpy(&value, &bits, sizeof(value)); return value;
+}
+static long long __double_as_longlong(double value) {
+    long long bits; std::memcpy(&bits, &value, sizeof(bits)); return bits;
+}
+static double __dadd_rn(double a, double b) { return a+b; }
+static double __dsub_rn(double a, double b) { return a-b; }
 static double __ddiv_rn(double a, double b) { return a/b; }
 static double __dmul_rn(double a, double b) { return a*b; }
+static double __ull2double_rn(uint64_t value) { return static_cast<double>(value); }
 #ifdef XLOG_SEMANTIC_POLICY
+static double __ll2double_rn(long long value) { return static_cast<double>(value); }
+static float __ll2float_rn(long long value) { return static_cast<float>(value); }
+static float __ull2float_rn(uint64_t value) { return static_cast<float>(value); }
 static float __double2float_rn(double value) { return static_cast<float>(value); }
 static float __fadd_rn(float a, float b) { return a+b; }
+static float __fsub_rn(float a, float b) { return a-b; }
+static float __fmul_rn(float a, float b) { return a*b; }
+static float __fdiv_rn(float a, float b) { return a/b; }
 #endif
 template<typename T> T atomicAdd(T* target, T value) { T old=*target; *target+=value; return old; }
 template<typename T> T atomicOr(T* target, T value) { T old=*target; *target|=value; return old; }
@@ -1403,7 +1421,8 @@ static void recompute_execution_preserves_proposal_state(bool drain_required) {
     }
     PublicationStepResult result{};
     semantic_publication_step_result(reinterpret_cast<uint64_t>(&fixture.control),
-        reinterpret_cast<uint64_t>(&fixture.lease),reinterpret_cast<uint64_t>(&result));
+        reinterpret_cast<uint64_t>(&fixture.lease),reinterpret_cast<uint64_t>(&result),
+        reinterpret_cast<uint64_t>(&parent),0);
     require(result.abi==1 && result.advanced==1 && result.word==fixture.control.word && !result.refusal,
         "recompute completion lost its actual publication outcome");
     semantic_publication_step_release(reinterpret_cast<uint64_t>(&fixture.control),reinterpret_cast<uint64_t>(&fixture.lease));
@@ -1456,7 +1475,7 @@ static void completed_step_result_survives_publication_bank_reuse() {
     require(publication_acquire(fixture.control,original)==0,"completion result fixture reader refused");
     fixture.publish();
     semantic_publication_step_result(reinterpret_cast<uint64_t>(&fixture.control),reinterpret_cast<uint64_t>(&original),
-        reinterpret_cast<uint64_t>(&result));
+        reinterpret_cast<uint64_t>(&result),reinterpret_cast<uint64_t>(&fixture.banks[original.bank].header),0);
     require(result.abi==1 && !result.refusal && result.word==fixture.control.word &&
         std::memcmp(&result.header,&fixture.banks[result.word&1].header,sizeof(PublicationHeader))==0,
         "step result did not preserve the actual post-transition publication header");
@@ -1467,11 +1486,11 @@ static void completed_step_result_survives_publication_bank_reuse() {
         "step result changed after physical publication bank reuse");
     require_content_trap([&] {
         semantic_publication_step_result(reinterpret_cast<uint64_t>(&fixture.control),reinterpret_cast<uint64_t>(&original),
-            reinterpret_cast<uint64_t>(&result));
+            reinterpret_cast<uint64_t>(&result),reinterpret_cast<uint64_t>(&fixture.banks[original.bank].header),0);
     },"step result accepted a released publication reader");
     fixture.control.refusal=5;
     semantic_publication_step_result(reinterpret_cast<uint64_t>(&fixture.control),reinterpret_cast<uint64_t>(&fixture.lease),
-        reinterpret_cast<uint64_t>(&result));
+        reinterpret_cast<uint64_t>(&result),reinterpret_cast<uint64_t>(&fixture.banks[fixture.lease.bank].header),0);
     require(result.abi==1 && result.refusal==5 && result.word==fixture.lease.word,
         "step result lost an actual non-publishing refusal");
 }
@@ -1479,7 +1498,7 @@ static void completed_step_result_survives_publication_bank_reuse() {
 static void next_step_stops_after_actual_nonpublication() {
     StepPublicationFixture fixture;PublicationStepResult result{};PublicationLease next{};uint64_t conditional=1;
     semantic_publication_step_result(reinterpret_cast<uint64_t>(&fixture.control),reinterpret_cast<uint64_t>(&fixture.lease),
-        reinterpret_cast<uint64_t>(&result));
+        reinterpret_cast<uint64_t>(&result),reinterpret_cast<uint64_t>(&fixture.banks[fixture.lease.bank].header),0);
     const auto readers=fixture.control.reader_counts[fixture.lease.bank];
     semantic_publication_step_admit(reinterpret_cast<uint64_t>(&fixture.control),reinterpret_cast<uint64_t>(&next),1,
         reinterpret_cast<uint64_t>(&conditional),reinterpret_cast<uint64_t>(&result));
@@ -1505,7 +1524,7 @@ static void next_step_stops_after_actual_nonpublication() {
     PublicationLease previous{};require(publication_acquire(progressing.control,previous)==0,"advance fixture reader refused");
     progressing.publish();
     semantic_publication_step_result(reinterpret_cast<uint64_t>(&progressing.control),reinterpret_cast<uint64_t>(&previous),
-        reinterpret_cast<uint64_t>(&result));
+        reinterpret_cast<uint64_t>(&result),reinterpret_cast<uint64_t>(&progressing.banks[previous.bank].header),0);
     require(publication_release(progressing.control,previous)==0,"advance fixture reader release refused");
     semantic_publication_step_admit(reinterpret_cast<uint64_t>(&progressing.control),reinterpret_cast<uint64_t>(&next),1,
         reinterpret_cast<uint64_t>(&conditional),reinterpret_cast<uint64_t>(&result));
@@ -1530,7 +1549,7 @@ static void fresh_authority_snapshot_is_published_and_sealed() {
         "publication copied or sealed old authority bytes instead of the fresh pending snapshot");
 }
 
-static void stable_step_inputs_follow_original_publications() {
+static void step_inputs_follow_device_selected_resident_bank() {
     StepPublicationFixture fixture;
     {
         auto original=fixture.banks[0];uint64_t expected[4],digest[4];
@@ -1546,68 +1565,81 @@ static void stable_step_inputs_follow_original_publications() {
     struct Outputs {
         PublicationHeader header;
         SourceSlot source[32];
-        PublicationRange ranges[20];
-        uint64_t copied[20][4];
+        PublicationRange ranges[25];
+        alignas(8) uint8_t copied[25][2*sizeof(RawFeedbackRecord)];
         uint64_t metadata_digests[2][4];
     };
     auto* outputs=static_cast<Outputs*>(mmap(nullptr,2*sizeof(Outputs),PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0));
     require(outputs!=MAP_FAILED,"step fixture shared output allocation failed");
     auto* first_outputs=outputs;
-    std::array<PublicationStepInput,20> bindings{};
-    uint64_t cursor=0;
-    for(uint64_t role : {1,3,4,5,6,7,8,9,10,11,12,13,18,19,20,21,22,23,24,25}) {
-        auto& input=bindings[cursor];const auto& range=fixture.range(0,role);
-        input.role=role;input.capacity_bytes=role==3 ? 32 : fixture.storage[range.storage_slot].bytes;
-        input.destination=role==1 || role==4 || role==5 ? reinterpret_cast<uint64_t>(fixture.data(range)) :
-            reinterpret_cast<uint64_t>(outputs->copied[cursor]);
-        input.backing=input.destination;input.backing_bytes=input.capacity_bytes;
-        if(role==1) {
-            input.layout.role=1;input.layout.element_bytes=8;input.layout.scalar_type=3;input.layout.rank=2;
-            input.layout.logical_axis=0;input.layout.dimensions[0]=64;input.layout.dimensions[1]=8;
-            input.layout.strides_bytes[0]=64;input.layout.strides_bytes[1]=8;
-        } else if(role!=3) input.layout=*publication_find_layout(fixture.control,fixture.directories[0].data(),fixture.directories[0].size(),role,0);
-        ++cursor;
-    }
-    uint64_t binding_count=bindings.size();
+    std::array<std::array<PublicationStepInput,25>,2> bindings{};
+    const auto bind_outputs=[&] {
+        for(uint64_t bank=0;bank<2;++bank) {
+            uint64_t cursor=0;
+            for(uint64_t role=1;role<=44;++role) {
+                if(role==2 || role==14 || (role>25 && role!=44))continue;
+                for(uint64_t index=0;index<fixture.roles[role-1].count;++index) {
+                    auto& input=bindings[bank][cursor];
+                    const auto* range=publication_find_range(fixture.directories[bank].data(),fixture.directories[bank].size(),role,index);
+                    require(range,"step fixture binding range is absent");
+                    const bool model=role>=18 && role<=25;
+                    const bool alias=role==1 || role==4 || role==5 || model;
+                    input={};input.role=role;input.index=index;
+                    input.capacity_bytes=model ? range->length_bytes : fixture.storage[range->storage_slot].bytes;
+                    input.destination=alias ? reinterpret_cast<uint64_t>(fixture.data(*range)) :
+                        reinterpret_cast<uint64_t>(outputs->copied[cursor]);
+                    input.backing=model ? fixture.storage[range->storage_slot].pointer : input.destination;
+                    input.backing_bytes=model ? fixture.storage[range->storage_slot].bytes : input.capacity_bytes;
+                    if(role==1) {
+                        input.layout.role=1;input.layout.element_bytes=8;input.layout.scalar_type=3;input.layout.rank=2;
+                        input.layout.logical_axis=0;input.layout.dimensions[0]=64;input.layout.dimensions[1]=8;
+                        input.layout.strides_bytes[0]=64;input.layout.strides_bytes[1]=8;
+                    } else if(publication_tensor_role(role))
+                        input.layout=*publication_find_layout(fixture.control,fixture.directories[bank].data(),
+                            fixture.directories[bank].size(),role,index);
+                    ++cursor;
+                }
+            }
+            require(cursor==bindings[bank].size(),"step fixture binding roster is incomplete");
+        }
+    };
+    bind_outputs();
+    uint64_t binding_count=bindings[0].size();
     const auto consume=[&] { semantic_publication_step_inputs(reinterpret_cast<uint64_t>(&fixture.control),
-        reinterpret_cast<uint64_t>(&fixture.lease),reinterpret_cast<uint64_t>(bindings.data()),binding_count,
+        reinterpret_cast<uint64_t>(&fixture.lease),reinterpret_cast<uint64_t>(bindings[0].data()),
+        reinterpret_cast<uint64_t>(bindings[1].data()),binding_count,
         reinterpret_cast<uint64_t>(&outputs->header),reinterpret_cast<uint64_t>(outputs->source),reinterpret_cast<uint64_t>(outputs->ranges),
         reinterpret_cast<uint64_t>(outputs->metadata_digests)); };
-    const auto retained_guard=[&] { semantic_publication_step_input_guard(reinterpret_cast<uint64_t>(&outputs->header),
-        reinterpret_cast<uint64_t>(outputs->source),reinterpret_cast<uint64_t>(bindings.data()),bindings.size(),
+    const auto guard=[&] { semantic_publication_step_input_guard(reinterpret_cast<uint64_t>(&fixture.lease),
+        reinterpret_cast<uint64_t>(&outputs->header),reinterpret_cast<uint64_t>(outputs->source),
+        reinterpret_cast<uint64_t>(bindings[0].data()),reinterpret_cast<uint64_t>(bindings[1].data()),bindings[0].size(),
         reinterpret_cast<uint64_t>(outputs->ranges),reinterpret_cast<uint64_t>(outputs->metadata_digests)); };
     const auto verify=[&] {
         const auto& bank=fixture.banks[fixture.lease.bank];
+        const auto& selected=bindings[fixture.lease.bank];
         require(std::memcmp(&outputs->header,&bank.header,sizeof(bank.header))==0 &&
             std::memcmp(outputs->source,bank.source,sizeof(bank.source))==0,"step inputs did not follow the acquired original metadata");
-        for(uint64_t i=0;i<bindings.size();++i) {
-            const auto& original=fixture.range(fixture.lease.bank,bindings[i].role);
+        for(uint64_t i=0;i<selected.size();++i) {
+            const auto& original=*publication_find_range(fixture.directories[fixture.lease.bank].data(),
+                fixture.directories[fixture.lease.bank].size(),selected[i].role,selected[i].index);
             require(std::memcmp(&outputs->ranges[i],&original,sizeof(original))==0,"step inputs replaced the original range seal");
-            if(bindings[i].role==3 || bindings[i].role>=6)
-                require(std::memcmp(reinterpret_cast<void*>(bindings[i].destination),fixture.data(original),original.length_bytes)==0,
+            const bool copied=selected[i].role==3 ||
+                (selected[i].role>=6 && (selected[i].role<18 || selected[i].role>25));
+            if(copied)
+                require(std::memcmp(reinterpret_cast<void*>(selected[i].destination),fixture.data(original),original.length_bytes)==0,
                     "step cache input did not follow the acquired original values");
+            else require(selected[i].destination==reinterpret_cast<uint64_t>(fixture.data(original)),
+                "resident step input did not alias the device-selected publication bank");
         }
     };
-    consume();verify();retained_guard();const Outputs first=*outputs;
-    const auto first_bindings=bindings;
-    const auto first_guard=[&] { semantic_publication_step_input_guard(reinterpret_cast<uint64_t>(&first_outputs->header),
-        reinterpret_cast<uint64_t>(first_outputs->source),reinterpret_cast<uint64_t>(first_bindings.data()),first_bindings.size(),
-        reinterpret_cast<uint64_t>(first_outputs->ranges),reinterpret_cast<uint64_t>(first_outputs->metadata_digests)); };
+    consume();verify();guard();const Outputs first=*outputs;
     outputs=first_outputs+1;
-    for(uint64_t i=0;i<bindings.size();++i)if(bindings[i].role==3 || bindings[i].role>=6) {
-        bindings[i].destination=reinterpret_cast<uint64_t>(outputs->copied[i]);
-        bindings[i].backing=bindings[i].destination;
-    }
-    fixture.publish();consume();verify();retained_guard();const Outputs second=*outputs;
+    fixture.publish();bind_outputs();consume();verify();guard();const Outputs second=*outputs;
     require(std::memcmp(first.copied,second.copied,sizeof(first.copied))!=0,"distinct real publication retained old step cache values");
     require(first.header.prefix_extent==0 && second.header.prefix_extent==1 && first.source[0].kind==1 && second.source[0].kind==0,
         "real publication did not change the original prefix metadata and Source snapshot");
     fixture.publish();
-    first_guard();
-    require(std::memcmp(first_outputs,&first,sizeof(first))==0,"physical reuse of the original bank changed its retained step inputs");
-    require(std::memcmp(outputs,&second,sizeof(second))==0,"bank reuse changed retained step input bytes");
-    retained_guard();
-    consume();verify();const Outputs third=*outputs;
+    consume();verify();guard();const Outputs third=*outputs;
     require(third.header.publication_word==4 && second.header.publication_word==3 && first.header.publication_word==0,
         "step fixture did not traverse three real publication epochs");
     const auto rejects=[&](auto corrupt,const char* message) {
@@ -1615,64 +1647,70 @@ static void stable_step_inputs_follow_original_publications() {
         require_content_trap([&] { corrupt();consume(); },message);
         require(std::memcmp(outputs,&before,sizeof(before))==0,"rejected step input changed output bytes before the integrity trap");
     };
-    rejects([&] { fixture.banks[0].source[0].token^=1; },"step input replaced changed original Source bytes");
-    rejects([&] { ++fixture.banks[0].header.ring_head; },"step input ignored changed original header");
-    rejects([&] { fixture.banks[0].header.descriptor_digest[0]^=1; },"step input ignored original descriptor seal");
-    rejects([&] { fixture.range(0,13).digest[0]^=1; },"step input ignored changed original cache seal");
-    rejects([&] { static_cast<float*>(fixture.data(fixture.range(0,13)))[1]+=1; },"step input resealed changed original cache values");
-    rejects([&] { static_cast<uint64_t*>(fixture.data(fixture.range(0,3)))[0]^=1; },"step input resealed changed original PrefixIdentity");
-    rejects([&] { static_cast<SourceSlot*>(fixture.data(fixture.range(0,1)))[0].token^=1; },
+    const uint64_t active=fixture.lease.bank;
+    auto& selected=bindings[active];
+    rejects([&] { fixture.banks[active].source[0].token^=1; },"step input replaced changed original Source bytes");
+    rejects([&] { ++fixture.banks[active].header.ring_head; },"step input ignored changed original header");
+    rejects([&] { fixture.banks[active].header.descriptor_digest[0]^=1; },"step input ignored original descriptor seal");
+    rejects([&] { fixture.range(active,13).digest[0]^=1; },"step input ignored changed original cache seal");
+    rejects([&] { static_cast<float*>(fixture.data(fixture.range(active,13)))[1]+=1; },"step input resealed changed original cache values");
+    rejects([&] { static_cast<uint64_t*>(fixture.data(fixture.range(active,3)))[0]^=1; },"step input resealed changed original PrefixIdentity");
+    rejects([&] { static_cast<SourceSlot*>(fixture.data(fixture.range(active,1)))[0].token^=1; },
         "step input ignored changed original shared Prefix content");
-    rejects([&] { static_cast<float*>(fixture.data(fixture.range(0,4)))[0]+=1; },
+    rejects([&] { static_cast<float*>(fixture.data(fixture.range(active,4)))[0]+=1; },
         "step input ignored changed original shared attention content");
-    rejects([&] { auto* table=static_cast<TensorLayoutTableHeader*>(fixture.data(fixture.range(0,55)));
+    rejects([&] { static_cast<float*>(fixture.data(fixture.range(active,18)))[0]+=1; },
+        "step input ignored changed resident model content");
+    rejects([&] { auto* table=static_cast<TensorLayoutTableHeader*>(fixture.data(fixture.range(active,55)));
         reinterpret_cast<PublicationTensorLayout*>(table+1)[0].strides_bytes[0]+=4; },"step input ignored original layout seal");
-    rejects([&] { bindings[0].destination+=8; },"step input accepted a different Prefix capacity alias");
-    rejects([&] { bindings[2].destination+=8; },"step input accepted a different attention capacity alias");
-    rejects([&] { --bindings[2].layout.dimensions[2]; },"step input accepted different attention capacity layout");
-    rejects([&] { --bindings[4].capacity_bytes; },"step input accepted a truncated cache owner");
-    rejects([&] { bindings[4].layout.strides_bytes[0]=8; },"step input accepted different cache layout");
-    rejects([&] { std::swap(bindings[4],bindings[5]); },"step input accepted a noncanonical role roster");
+    rejects([&] { selected[0].destination+=8; },"step input accepted a different Prefix capacity alias");
+    rejects([&] { selected[2].destination+=8; },"step input accepted a different attention capacity alias");
+    rejects([&] { --selected[2].layout.dimensions[2]; },"step input accepted different attention capacity layout");
+    rejects([&] { --selected[4].capacity_bytes; },"step input accepted a truncated cache owner");
+    rejects([&] { selected[4].layout.strides_bytes[0]=8; },"step input accepted different cache layout");
+    rejects([&] { std::swap(selected[4],selected[5]); },"step input accepted a noncanonical role roster");
     rejects([&] { --binding_count; },"step input accepted an incomplete input roster");
     rejects([&] { binding_count=UINT64_MAX; },"step input accepted an overflowing input roster");
     rejects([&] { fixture.roles[12].count=2; },"step input accepted a changed original role count");
-    rejects([&] { bindings[4].destination=UINT64_MAX-3; },"step input accepted an overflowing cache output");
-    rejects([&] { fixture.range(0,13).storage_slot=fixture.control.storage_count; },
+    rejects([&] { selected[4].destination=UINT64_MAX-3; },"step input accepted an overflowing cache output");
+    rejects([&] { fixture.range(active,13).storage_slot=fixture.control.storage_count; },
         "step input accepted an original range outside the storage directory");
-    rejects([&] { bindings[4].destination=bindings[5].destination; },"step input accepted overlapping copied destinations");
-    rejects([&] { bindings[4].destination=reinterpret_cast<uint64_t>(outputs->source); },"step input accepted a copied cache overlapping Source output");
-    rejects([&] { bindings[4].destination=reinterpret_cast<uint64_t>(fixture.data(fixture.range(0,6))); },
+    rejects([&] { selected[4].destination=selected[5].destination; },"step input accepted overlapping copied destinations");
+    rejects([&] { selected[4].destination=reinterpret_cast<uint64_t>(outputs->source); },"step input accepted a copied cache overlapping Source output");
+    rejects([&] { selected[4].destination=reinterpret_cast<uint64_t>(fixture.data(fixture.range(active,6))); },
         "step input accepted a copy destination in the original publication");
+    rejects([&] { selected[16].destination=reinterpret_cast<uint64_t>(outputs->copied[16]); },
+        "step input accepted a copied model in place of the resident alias");
     rejects([&] { fixture.lease.active=0; },"step input accepted a released device lease");
     rejects([&] { fixture.lease.bank=2; },"step input traversed an invalid bank");
     consume();verify();
-    require(publication_release(fixture.control,fixture.lease)==0,"step fixture final reader release refused");
-    first_guard();
-    retained_guard();
-    const auto rejects_retained=[&](auto corrupt,const char* message) {
-        require_content_trap([&] { corrupt();retained_guard(); },message);
-        *outputs=third;
+    const auto rejects_guard=[&](auto corrupt,const char* message) {
+        require_content_trap([&] { corrupt();guard(); },message);
     };
-    rejects_retained([&] { ++outputs->header.ring_head; },"late guard accepted changed original RingHead");
-    rejects_retained([&] { ++outputs->header.prefix_extent; },"late guard accepted changed original PrefixExtent");
-    rejects_retained([&] { outputs->source[0].token^=1; },"late guard accepted changed original Source");
-    rejects_retained([&] { outputs->metadata_digests[1][0]^=1; },"late guard replaced original Source baseline");
-    rejects_retained([&] { outputs->copied[1][0]^=1; },"late guard accepted changed original PrefixIdentity");
-    rejects_retained([&] { outputs->copied[11][0]^=1; },"late guard accepted changed original cache copy");
-    rejects_retained([&] { outputs->ranges[11].digest[0]^=1; },"late guard replaced original range seal");
-    require_content_trap([&] { semantic_publication_step_input_guard(reinterpret_cast<uint64_t>(&outputs->header),
-        reinterpret_cast<uint64_t>(outputs->source),reinterpret_cast<uint64_t>(bindings.data()),bindings.size()-1,
+    rejects_guard([&] { ++outputs->header.ring_head; },"step guard accepted changed original RingHead");
+    rejects_guard([&] { ++outputs->header.prefix_extent; },"step guard accepted changed original PrefixExtent");
+    rejects_guard([&] { outputs->source[0].token^=1; },"step guard accepted changed original Source");
+    rejects_guard([&] { outputs->metadata_digests[1][0]^=1; },"step guard replaced original Source baseline");
+    rejects_guard([&] { outputs->copied[1][0]^=1; },"step guard accepted changed original PrefixIdentity");
+    rejects_guard([&] { outputs->copied[11][0]^=1; },"step guard accepted changed original cache copy");
+    rejects_guard([&] { outputs->ranges[11].digest[0]^=1; },"step guard replaced original range seal");
+    require_content_trap([&] { semantic_publication_step_input_guard(reinterpret_cast<uint64_t>(&fixture.lease),
+        reinterpret_cast<uint64_t>(&outputs->header),reinterpret_cast<uint64_t>(outputs->source),
+        reinterpret_cast<uint64_t>(bindings[0].data()),reinterpret_cast<uint64_t>(bindings[1].data()),bindings[0].size()-1,
         reinterpret_cast<uint64_t>(outputs->ranges),reinterpret_cast<uint64_t>(outputs->metadata_digests)); },
-        "late guard accepted an incomplete fixed cache roster");
-    rejects_retained([&] { static_cast<SourceSlot*>(fixture.data(fixture.range(0,1)))[0].token^=1; },
-        "late guard accepted changed retained shared Prefix content");
-    rejects_retained([&] { static_cast<float*>(fixture.data(fixture.range(0,4)))[0]+=1; },
-        "late guard accepted changed retained shared attention content");
-    // Appended capacity rows lie outside the retained original logical interval.
+        "step guard accepted an incomplete fixed cache roster");
+    rejects_guard([&] { static_cast<SourceSlot*>(fixture.data(fixture.range(active,1)))[0].token^=1; },
+        "step guard accepted changed resident Prefix content");
+    rejects_guard([&] { static_cast<float*>(fixture.data(fixture.range(active,4)))[0]+=1; },
+        "step guard accepted changed resident attention content");
+    rejects_guard([&] { static_cast<float*>(fixture.data(fixture.range(active,18)))[0]+=1; },
+        "step guard accepted changed resident model content");
     static_cast<SourceSlot*>(fixture.data(fixture.range(0,1)))[63].token=19;
-    static_cast<float*>(fixture.data(fixture.range(0,4)))[127]=21;
-    retained_guard();
+    static_cast<float*>(fixture.data(fixture.range(active,4)))[127]=21;
+    guard();
     require(std::memcmp(outputs,&third,sizeof(third))==0,"step input verification replaced original retained content");
+    require(publication_release(fixture.control,fixture.lease)==0,"step fixture final reader release refused");
+    require_content_trap(guard,"step guard accepted a released device lease");
     require(munmap(first_outputs,2*sizeof(Outputs))==0,"step fixture output release failed");
 }
 
@@ -2004,7 +2042,7 @@ int main(int argc, char** argv) {
     original_content_seal_accepts_equal_strided_producer();
     scalar_model_content_seals_one_cell_without_reshaping();
     empty_model_storage_keeps_metadata_without_device_cells();
-    stable_step_inputs_follow_original_publications();
+    step_inputs_follow_device_selected_resident_bank();
     captured_model_seals_follow_actual_reader();
     completed_step_result_survives_publication_bank_reuse();
     next_step_stops_after_actual_nonpublication();

@@ -5788,7 +5788,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_deallocation_failure_retains_local_charge_and_records_failure() {
+    fn typed_post_release_error_honors_physical_release_proof() {
         let Some((device, runtime, deallocate_calls)) = try_runtime_with_deallocation_failure()
         else {
             return;
@@ -5804,15 +5804,15 @@ mod tests {
 
         assert_eq!(deallocate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(runtime.bytes_outstanding(), 0);
-        assert_eq!(manager.allocated_bytes(), 1024);
-        assert_eq!(manager.remaining_bytes(), 3072);
-        assert_eq!(manager.deallocation_failure_count(), 1);
-        assert_eq!(manager.deallocation_failure_bytes(), 1024);
-        assert!(manager.reset_tracking().is_err());
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 4096);
+        assert_eq!(manager.deallocation_failure_count(), 0);
+        assert_eq!(manager.deallocation_failure_bytes(), 0);
+        manager.reset_tracking().unwrap();
     }
 
     #[test]
-    fn raw_deallocation_failure_retains_local_charge_and_records_failure() {
+    fn raw_post_release_error_honors_physical_release_proof() {
         let Some((device, runtime, deallocate_calls)) = try_runtime_with_deallocation_failure()
         else {
             return;
@@ -5830,11 +5830,11 @@ mod tests {
 
         assert_eq!(deallocate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(runtime.bytes_outstanding(), 0);
-        assert_eq!(manager.allocated_bytes(), 512);
-        assert_eq!(manager.remaining_bytes(), 3584);
-        assert_eq!(manager.deallocation_failure_count(), 1);
-        assert_eq!(manager.deallocation_failure_bytes(), 512);
-        assert!(manager.reset_tracking().is_err());
+        assert_eq!(manager.allocated_bytes(), 0);
+        assert_eq!(manager.remaining_bytes(), 4096);
+        assert_eq!(manager.deallocation_failure_count(), 0);
+        assert_eq!(manager.deallocation_failure_bytes(), 0);
+        manager.reset_tracking().unwrap();
     }
 
     #[test]

@@ -26193,6 +26193,18 @@ mod text_parent_tests {
             buffer.bytes.clear();
             buffer.capacity = 0;
             buffer.range.length_bytes = 0;
+            let (allocation, offset) = material.model_memory.location(role, 0).unwrap();
+            assert_eq!(offset, 0);
+            material.model_allocations[allocation].clear();
+            material.model_memory.allocation_bytes[allocation] = 0;
+            material
+                .model_memory
+                .storages
+                .iter_mut()
+                .find(|storage| storage.allocation == allocation as u64)
+                .unwrap()
+                .span_bytes = 0;
+            buffer.range.backing_digest = Identity256::from_bytes(Sha256::digest(b"").into());
             let table = material
                 .ranges
                 .iter_mut()
