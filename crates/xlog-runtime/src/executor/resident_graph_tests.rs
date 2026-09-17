@@ -1988,7 +1988,16 @@ fn dropping_a_real_inflight_graph_releases_handles_workspace_and_events_without_
         events_after_reap.created_events - events_before_prepare.created_events,
         events_after_reap.destroyed_events - events_before_prepare.destroyed_events
     );
-    assert!(events_after_reap.drop_waits > events_before_prepare.drop_waits);
+    assert_eq!(
+        events_after_reap.drop_waits, events_before_prepare.drop_waits,
+        "the owner wait must prove completion before event retirement"
+    );
+    let graph_after_reap = fixture.runtime.conditional_graph_stats();
+    assert_eq!(
+        graph_after_reap.terminal_synchronizations,
+        graph_before_prepare.terminal_synchronizations + 1,
+        "dropping the in-flight owner must perform exactly one terminal synchronization"
+    );
     let handles_after_reap = fixture.runtime.resident_graph_handle_lifecycle_stats();
     assert_eq!(
         handles_after_reap.live_graphs,
