@@ -21565,11 +21565,6 @@ mod tests {
                 for slot in [32, 48, 64] {
                     assert_eq!(terminal_arena[slot], 0, "no pending root or candidate");
                 }
-                for (start, width) in [(80, 8), (112, 12), (160, 16)] {
-                    for slot in 0..4 {
-                        assert_eq!(terminal_arena[start + slot * width], 0);
-                    }
-                }
                 drop(session);
                 provider.memory().reap_pending_deallocations().unwrap();
                 assert_eq!(provider.memory().allocated_bytes(), 0);

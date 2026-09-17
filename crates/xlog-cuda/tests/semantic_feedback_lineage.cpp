@@ -514,26 +514,26 @@ static void native_work_preserves_one_model_charge_through_refusal() {
 static void task_preflight_accepts_all_four_truth_states() {
     for(uint64_t first=0;first<4;++first)for(uint64_t second=0;second<4;++second) {
         RefusalExecution execution;
-        std::array<uint64_t,27> task{};
-        task[0]=3;task[1]=91;task[6]=11;task[10]=21;
-        task[14]=first;task[15]=second;task[17]=0;task[18]=1;
-        task[25]=task[26]=15;
+        std::array<uint64_t,34> task{};
+        task[0]=4;task[1]=91;task[6]=11;task[10]=21;
+        task[18]=first;task[19]=second;task[20]=0;
+        task[25]=task[26]=15;task[31]=task[32]=task[33]=15;
         execution.descriptor.task=reinterpret_cast<uint64_t>(task.data());
         // Stop at the existing ordinary support refusal after the actual task
         // preflight and root truth queries, before any categorical draw.
         execution.support[0]=0;
         semantic_transition_execute(execution.descriptor);
-        require(execution.state.status==2 && execution.state.task_evaluation.query_count==2,
+        require(execution.state.status==2 && execution.state.task_evaluation.query_count==3,
             "valid four-valued task truth was rejected before native query execution");
         const auto& facts=execution.state.task_evaluation.facts[0];
         require(facts.correct[0]==uint64_t(first==0) && facts.correct[1]==uint64_t(second==0),
             "task agreement did not compare the actual empty-root truth receipts");
         execution.check_protected_root();
     }
-    for(uint32_t slot=0;slot<2;++slot)for(uint64_t invalid : {uint64_t(4),UINT64_MAX}) {
+    for(uint32_t slot=0;slot<3;++slot)for(uint64_t invalid : {uint64_t(4),UINT64_MAX}) {
         RefusalExecution execution;
-        std::array<uint64_t,27> task{};
-        task[0]=3;task[1]=91;task[14+slot]=invalid;task[25]=task[26]=15;
+        std::array<uint64_t,34> task{};
+        task[0]=4;task[1]=91;task[18+slot]=invalid;task[25]=task[26]=15;
         execution.descriptor.task=reinterpret_cast<uint64_t>(task.data());
         semantic_transition_execute(execution.descriptor);
         require(execution.state.status==7 && execution.state.task_evaluation.query_count==0 &&
