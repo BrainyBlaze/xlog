@@ -686,6 +686,10 @@ mod tests {
         };
         let r = AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool));
 
+        let first = pool.acquire().expect("first allocation stream");
+        let second = pool.acquire().expect("second allocation stream");
+        assert_eq!((first, second), (StreamId(1), StreamId(2)));
+
         install_pending(&r, &[(StreamId(1), 256), (StreamId(2), 512)]);
         r.reap_pending_with(|_| Ok(())).expect("reap");
         assert_eq!(r.pending_free_bytes(), 0);

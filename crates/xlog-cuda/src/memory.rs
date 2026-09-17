@@ -5138,6 +5138,14 @@ mod tests {
             self.inner.allocation_accounting()
         }
 
+        fn access_dependencies(
+            &self,
+            block: BlockId,
+            bytes: usize,
+        ) -> ResourceResult<Option<Arc<DeviceAccessDependencies>>> {
+            self.inner.access_dependencies(block, bytes)
+        }
+
         fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
             self.inner.deallocate(block)
         }
@@ -5158,6 +5166,14 @@ mod tests {
 
         fn allocation_accounting(&self) -> Arc<AllocationAccounting> {
             self.inner.allocation_accounting()
+        }
+
+        fn access_dependencies(
+            &self,
+            block: BlockId,
+            bytes: usize,
+        ) -> ResourceResult<Option<Arc<DeviceAccessDependencies>>> {
+            self.inner.access_dependencies(block, bytes)
         }
 
         fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
