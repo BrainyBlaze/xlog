@@ -3203,7 +3203,7 @@ impl ResidentBuild<'_> {
         for slot in &manifest.slots {
             let allocation_bytes_before = diagnostics.as_ref().map(|_| reservation.used_bytes());
             let allocation_started = diagnostics.as_ref().map(|_| std::time::Instant::now());
-            let mut relation = self
+            let relation = self
                 .executor
                 .provider
                 .prepare_resident_relation_in_reservation(
@@ -3233,20 +3233,6 @@ impl ResidentBuild<'_> {
                             .unwrap_or(u64::MAX)
                             .saturating_add(1),
                     );
-            }
-            let count_started = diagnostics.as_ref().map(|_| std::time::Instant::now());
-            self.executor
-                .provider
-                .initialize_resident_relation_count(&mut relation, slot.initial_count)?;
-            if let Some(diagnostics) = diagnostics.as_deref_mut() {
-                let count_ns = resident_prepare_elapsed_ns(
-                    count_started.expect("diagnostic timer exists when enabled"),
-                );
-                diagnostics.count_initialization_ns =
-                    diagnostics.count_initialization_ns.saturating_add(count_ns);
-                diagnostics.count_initialization_ns_max =
-                    diagnostics.count_initialization_ns_max.max(count_ns);
-                diagnostics.count_memset_calls = diagnostics.count_memset_calls.saturating_add(1);
             }
             relations.push(Some(relation));
         }
@@ -4773,6 +4759,37 @@ impl Executor {
         let physical = build
             .materialize(&manifest, &mut reservation, diagnostics.as_mut())
             .map_err(runtime_error)?;
+        let count_initialization_started = diagnostics.as_ref().map(|_| std::time::Instant::now());
+        let mut count_initialization = execution_domain.new_strict_recorder();
+        for slot_index in 0..manifest.slots.len() {
+            let relation =
+                private_relation(&physical.relations, slot_index).map_err(runtime_error)?;
+            count_initialization.write(relation.num_rows_device());
+        }
+        let count_initialization = unsafe {
+            execution_domain.enqueue(count_initialization, |enqueue| {
+                for (slot_index, slot) in manifest.slots.iter().enumerate() {
+                    let relation = private_relation(&physical.relations, slot_index)?;
+                    self.provider
+                        .record_resident_relation_count_initialize_on_stream(
+                            relation,
+                            slot.initial_count,
+                            enqueue,
+                        )?;
+                }
+                Ok::<(), XlogError>(())
+            })
+        }
+        .map_err(runtime_error)?;
+        count_initialization.commit().map_err(runtime_error)?;
+        if let Some(diagnostics) = diagnostics.as_mut() {
+            diagnostics.count_initialization_ns = resident_prepare_elapsed_ns(
+                count_initialization_started.expect("diagnostic timer exists when enabled"),
+            );
+            diagnostics.count_initialization_ns_max = diagnostics.count_initialization_ns;
+            diagnostics.count_memset_calls =
+                u64::try_from(manifest.slots.len()).unwrap_or(u64::MAX);
+        }
 
         if build.injection.is_some() && !build.injection_recorded {
             return Err(runtime_error(

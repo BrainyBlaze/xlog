@@ -925,10 +925,28 @@ impl CudaKernelProvider {
         Ok(ResidentRelation { buffer })
     }
 
-    /// Initialize a private resident relation's logical set cardinality.
-    ///
-    /// This cold-path write addresses the device scalar directly so it does
-    /// not populate or invalidate the buffer's host row-count cache.
+    /// Record a private resident relation's logical set cardinality on the
+    /// admitted execution stream without populating its host row-count cache.
+    pub fn record_resident_relation_count_initialize_on_stream(
+        &self,
+        relation: &ResidentRelation,
+        initial_count: u32,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
+    ) -> Result<()> {
+        if initial_count > 1 {
+            return Err(XlogError::Kernel(format!(
+                "resident relation initial count {initial_count} is invalid; expected 0 or 1"
+            )));
+        }
+        self.initialize_launch_metadata_u32(
+            initial_count,
+            relation.num_rows_device(),
+            enqueue,
+            "resident relation count initialization",
+        )
+    }
+
+    #[cfg(test)]
     pub fn initialize_resident_relation_count(
         &self,
         relation: &mut ResidentRelation,
