@@ -22,14 +22,15 @@ use xlog_cuda::memory::DeviceAllocationProvenance;
 use xlog_cuda::{
     DlpackManagedTensor, Identity256, SemanticAdmissionLimits, SemanticAdmissionRecords,
     SemanticArgument, SemanticContinuationInput, SemanticGradientDeliveryBinding,
-    SemanticHypergraphCapacities, SemanticObservedSource, SemanticParentBinding, SemanticPolarity,
-    SemanticPredicateRecord, SemanticPreparedStep, SemanticPublishedLease, SemanticRecordRole,
-    SemanticRngBinding, SemanticSourceMapping, SemanticStateRecord, SemanticStateRole,
-    SemanticSupportRecord, SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout,
-    SemanticTextSlot, SemanticTrainingCanary, SemanticTrainingCanaryKind,
-    SemanticTrainingObjective, SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind,
-    SemanticTrainingViewBasis, SemanticTrainingViewPort, SemanticTrainingViewRow,
-    SemanticTransitionKind, SemanticTransitionSession, SemanticTypedRecord,
+    SemanticHypergraphCapacities, SemanticModelForwardWitness, SemanticObservedSource,
+    SemanticParentBinding, SemanticPolarity, SemanticPredicateRecord, SemanticPreparedStep,
+    SemanticPublishedLease, SemanticRecordRole, SemanticRngBinding, SemanticSourceMapping,
+    SemanticStateRecord, SemanticStateRole, SemanticSupportRecord, SemanticTaskGoalWitness,
+    SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout, SemanticTextSlot,
+    SemanticTrainingCanary, SemanticTrainingCanaryKind, SemanticTrainingObjective,
+    SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind, SemanticTrainingViewBasis,
+    SemanticTrainingViewPort, SemanticTrainingViewRow, SemanticTransitionKind,
+    SemanticTransitionSession, SemanticTypedRecord,
 };
 use xlog_cuda::{
     SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
@@ -3697,6 +3698,105 @@ impl TaskAuthority {
         Ok(())
     }
 
+    fn goal_witness(
+        &self,
+        observations: &xlog_cuda::SemanticTaskObservationRoots,
+    ) -> SemanticTaskGoalWitness {
+        fn text(hash: &mut Sha256, value: &str) {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        }
+        let mut authority = Sha256::new();
+        authority.update(b"xlog.task-authority.canonical.v1\0");
+        authority.update((self.canonical.len() as u64).to_le_bytes());
+        authority.update(&self.canonical);
+
+        let mut links = Sha256::new();
+        links.update(b"xlog.task-authority.mandatory-links.v1\0");
+        for node in &self.dependencies {
+            text(&mut links, &node.identity);
+            text(&mut links, &node.kind);
+            for family in [
+                &node.data_parents,
+                &node.control_parents,
+                &node.live_envelopes,
+            ] {
+                links.update((family.len() as u64).to_le_bytes());
+                for value in family {
+                    text(&mut links, value);
+                }
+            }
+            match node.target {
+                Some((row, position)) => {
+                    links.update([1]);
+                    links.update((row as u64).to_le_bytes());
+                    links.update(position.to_le_bytes());
+                }
+                None => links.update([0]),
+            }
+            match &node.native_record {
+                Some((kind, record)) => {
+                    links.update([1]);
+                    text(&mut links, kind);
+                    links.update(record.to_le_bytes());
+                }
+                None => links.update([0]),
+            }
+        }
+
+        let mut constraints = Sha256::new();
+        constraints.update(b"xlog.task-authority.constraints.v1\0");
+        constraints.update((self.canonical.len() as u64).to_le_bytes());
+        constraints.update(&self.canonical);
+        text(&mut constraints, &self.task_ref);
+        for value in &self.scope {
+            text(&mut constraints, value);
+        }
+        for value in &self.feedback_roots {
+            text(&mut constraints, value);
+        }
+        for (family_name, family) in [
+            ("publication", &self.publication),
+            ("inference", &self.inference),
+            ("training", &self.training),
+        ] {
+            text(&mut constraints, family_name);
+            constraints.update((family.len() as u64).to_le_bytes());
+            for grant in family {
+                text(&mut constraints, &grant.reference);
+                text(&mut constraints, &grant.issuer_provenance);
+                constraints.update([u8::from(grant.allowed)]);
+                text(&mut constraints, &grant.task_ref);
+                constraints.update((grant.dependencies.len() as u64).to_le_bytes());
+                for dependency in &grant.dependencies {
+                    text(&mut constraints, dependency);
+                }
+                text(&mut constraints, &grant.expiry.spelling);
+                constraints.update(grant.expiry.micros.to_le_bytes());
+                text(&mut constraints, &grant.revocation_ref);
+                match &grant.learning_purpose {
+                    Some(purpose) => {
+                        constraints.update([1]);
+                        text(&mut constraints, purpose);
+                    }
+                    None => constraints.update([0]),
+                }
+            }
+        }
+        SemanticTaskGoalWitness {
+            semantic_root: observations.root_digest,
+            authority_root: Identity256::from_bytes(authority.finalize().into()),
+            mandatory_links_root: Identity256::from_bytes(links.finalize().into()),
+            constraints_root: Identity256::from_bytes(constraints.finalize().into()),
+            mandatory_link_count: self.dependencies.len() as u64,
+            constraint_count: (self.scope.len()
+                + self.feedback_roots.len()
+                + self.publication.len()
+                + self.inference.len()
+                + self.training.len()) as u64,
+        }
+    }
+
     fn check_snapshot(&self, snapshot: &AuthoritySnapshot) -> PyResult<i64> {
         self.require_source_origins()?;
         if snapshot.live.len() != self.live.len() {
@@ -5533,6 +5633,17 @@ pub(crate) struct PySemanticTensorContentWitness {
     _producers: Vec<Py<PyAny>>,
     parent: ContentStepOwner,
     session: Py<PySemanticTransitionSession>,
+}
+
+#[pyclass(
+    name = "SemanticModelForwardWitness",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticModelForwardWitness {
+    inner: SemanticModelForwardWitness,
+    _logits: Py<PyAny>,
+    _session: Py<PySemanticTransitionSession>,
 }
 
 #[pymethods]
@@ -8021,6 +8132,7 @@ impl PySemanticTransitionController {
             )
             .map_err(xlog_err)?;
         authority.bind_native_reads(&observations, &spec.allowed_support_records)?;
+        let goal_witness = authority.goal_witness(&observations);
         let operation = ColdValue::read(replay_operation, &mut budget, 0)?;
         let (phase, transition) = if let Some(material) = &selected_material {
             let operation = operation.text()?.to_owned();
@@ -8070,6 +8182,9 @@ impl PySemanticTransitionController {
         let (identity, task_epoch) = {
             let mut owner = session.owner()?;
             owner.bind_task_evaluation(spec).map_err(xlog_err)?;
+            owner
+                .bind_task_goal_witness(goal_witness)
+                .map_err(xlog_err)?;
             if let Some(objective) = training_objective {
                 owner
                     .bind_training_view_arena(training_views, objective)
@@ -8302,6 +8417,90 @@ impl PySemanticTransitionController {
     /// Native feedback outputs already carry their producer's original seal.
     /// Capturing those aliases verifies that seal and requires their original
     /// type, shape, interval and roster coordinate; it never reseals changed bytes.
+    /// Issue an opaque native receipt for one exact model-forward logits
+    /// occurrence while the producer's prepared bank capture is active.
+    #[pyo3(signature = (task_use, *, step, bank, role, logits, logits_layout, consumer_stream))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the forward receipt binds task authority, producer bank, role, logits geometry and stream"
+    )]
+    fn record_model_forward(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        step: &PySemanticPreparedStep,
+        bank: usize,
+        role: &str,
+        logits: &Bound<'_, PyAny>,
+        logits_layout: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<PySemanticModelForwardWitness> {
+        self.session.borrow(py).require_creator()?;
+        self.require_read_issued(task_use)?;
+        let role = match role {
+            "baseline" => 0,
+            "candidate" => 1,
+            _ => return Err(invalid("model forward role must be baseline or candidate")),
+        };
+        let mut budget = 16 * 1024 * 1024;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let mut layout = parse_tensor_layout(&ColdValue::read(logits_layout, &mut budget, 0)?)?;
+        let parent = ContentStepRef::Prepared(step);
+        let expected = {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            let state = self.continuation_state(py, task_use, parent, &owner, None)?;
+            step.require_recording_stream(&owner, stream)?;
+            self.continuation_binding(&state, parent, false)?
+        };
+        let check = || -> PyResult<()> {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            let state = self.continuation_state(py, task_use, parent, &owner, None)?;
+            step.require_recording_stream(&owner, stream)?;
+            if self.continuation_binding(&state, parent, false)? != expected {
+                return Err(invalid(
+                    "prepared model-forward authority changed during producer handoff",
+                ));
+            }
+            Ok(())
+        };
+        let device = self.session.borrow(py).device_ordinal;
+        validate_producer_device_guarded(logits, device, &check)?;
+        layout.role = 0;
+        layout.index = role as u64;
+        let tensor = SemanticTensorInput {
+            tensor: crate::dlpack_from_py_for_stream_guarded(
+                logits,
+                i64::try_from(stream)
+                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
+                &check,
+            )?,
+            layout,
+            logical_begin: 0,
+            logical_end: 0,
+            native_allocation: None,
+        };
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        let state = self.continuation_state(py, task_use, parent, &owner, None)?;
+        step.require_recording_stream(&owner, stream)?;
+        if self.continuation_binding(&state, parent, false)? != expected {
+            return Err(invalid(
+                "prepared model-forward authority changed before native receipt recording",
+            ));
+        }
+        let inner = owner
+            .record_prepared_model_forward(&step.inner, bank, role, tensor, stream)
+            .map_err(xlog_err)?;
+        drop(state);
+        Ok(PySemanticModelForwardWitness {
+            inner,
+            _logits: logits.clone().unbind(),
+            _session: self.session.clone_ref(py),
+        })
+    }
+
     #[pyo3(signature = (task_use, *, parent, tensors, consumer_stream))]
     fn capture_tensor_content(
         &self,
@@ -8447,16 +8646,16 @@ impl PySemanticTransitionController {
 
     /// Bind the complete original model backing produced by this recorded
     /// update. The transient witness covers allocations, typed model views,
-    /// Bool8[1] numerical admissibility and the authentic full-vocabulary
-    /// baseline/candidate logits from the captured forward. ``logits_layout`` is
-    /// the native eight-field tensor-layout record; XLOG assigns the two private
-    /// occurrence indices and requires contiguous F16, BF16 or F32
-    /// ``[rows, capacity, vocabulary]`` geometry. XLOG derives both generations
-    /// from the acquired seal and records a private native receipt that joins
-    /// each exact raw-logits occurrence to its baseline or candidate model seal.
+    /// Bool8[1] numerical admissibility. ``baseline_forward`` and
+    /// ``candidate_forward`` are opaque witnesses issued only by
+    /// ``record_model_forward`` at the two actual producer sites. They retain
+    /// contiguous F16, BF16 or F32 ``[rows, capacity, vocabulary]`` logits and
+    /// native receipts that join the exact work occurrence, generation, model
+    /// seal and logits digest; this final handoff cannot assign roles by argument
+    /// position or substitute new tensors.
     /// XLOG computes every canary measurement, resource tally and refusal on device.
     /// ``bank`` identifies the recorded branch that owns these original outputs.
-    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, baseline_logits, candidate_logits, logits_layout, allocation_witness, consumer_stream))]
+    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, baseline_forward, candidate_forward, allocation_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "prepared update binding retains model geometry and numerical admissibility"
@@ -8472,9 +8671,8 @@ impl PySemanticTransitionController {
         model_storages: &Bound<'_, PyAny>,
         model_views: &Bound<'_, PyAny>,
         numerical_admissibility: &Bound<'_, PyAny>,
-        baseline_logits: &Bound<'_, PyAny>,
-        candidate_logits: &Bound<'_, PyAny>,
-        logits_layout: &Bound<'_, PyAny>,
+        baseline_forward: &PySemanticModelForwardWitness,
+        candidate_forward: &PySemanticModelForwardWitness,
         allocation_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
@@ -8488,8 +8686,6 @@ impl PySemanticTransitionController {
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
         let storages = parse_model_storages(model_storages, &mut budget)?;
         let views = parse_model_views(model_views, &mut budget)?;
-        let mut logits_layout =
-            parse_tensor_layout(&ColdValue::read(logits_layout, &mut budget, 0)?)?;
         let expected = {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
@@ -8529,8 +8725,6 @@ impl PySemanticTransitionController {
             allocation_witness._inputs.clone_ref(py),
             model_allocations.clone().unbind(),
             tensors.clone().unbind(),
-            baseline_logits.clone().unbind(),
-            candidate_logits.clone().unbind(),
         ]);
         producer_owners.0.extend(
             allocation_witness
@@ -8571,41 +8765,6 @@ impl PySemanticTransitionController {
             logical_end: 0,
             native_allocation: None,
         };
-        validate_producer_device_guarded(baseline_logits, device, &check)?;
-        validate_producer_device_guarded(candidate_logits, device, &check)?;
-        let baseline_index = allocation_index.checked_add(1).ok_or_else(|| {
-            invalid("model update baseline-logits index exceeds native address space")
-        })?;
-        let candidate_index = baseline_index.checked_add(1).ok_or_else(|| {
-            invalid("model update candidate-logits index exceeds native address space")
-        })?;
-        logits_layout.role = 0;
-        logits_layout.index = baseline_index;
-        let baseline_logits = SemanticTensorInput {
-            tensor: crate::dlpack_from_py_for_stream_guarded(
-                baseline_logits,
-                i64::try_from(stream)
-                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
-                &check,
-            )?,
-            layout: logits_layout,
-            logical_begin: 0,
-            logical_end: 0,
-            native_allocation: None,
-        };
-        logits_layout.index = candidate_index;
-        let candidate_logits = SemanticTensorInput {
-            tensor: crate::dlpack_from_py_for_stream_guarded(
-                candidate_logits,
-                i64::try_from(stream)
-                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
-                &check,
-            )?,
-            layout: logits_layout,
-            logical_begin: 0,
-            logical_end: 0,
-            native_allocation: None,
-        };
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         let state = self.continuation_state(py, task_use, parent, &owner, None)?;
@@ -8626,8 +8785,8 @@ impl PySemanticTransitionController {
                 },
                 tensor_handoff.into_native(),
                 numerical_admissibility,
-                baseline_logits,
-                candidate_logits,
+                &baseline_forward.inner,
+                &candidate_forward.inner,
                 &allocation_witness.inner,
                 stream,
             )

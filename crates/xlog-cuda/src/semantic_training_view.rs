@@ -1209,11 +1209,10 @@ fn validate_objective(
             canary.obligation_positions == [u64::MAX; 3]
         };
         let protected_valid = if canary.kind == SemanticTrainingCanaryKind::RetainedBehavior {
-            !canary.protected_positions.is_empty()
-                && canary
-                    .protected_positions
-                    .windows(2)
-                    .all(|pair| pair[0] < pair[1])
+            canary
+                .protected_positions
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
                 && row.is_some_and(|row| {
                     canary
                         .protected_positions

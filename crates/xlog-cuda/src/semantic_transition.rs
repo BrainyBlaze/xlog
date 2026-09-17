@@ -164,6 +164,21 @@ pub struct SemanticTaskObservationRoots {
     pub contributors: Vec<(u32, Option<u32>, u32)>,
 }
 
+/// Native seal of the independently validated goal authority carried by the
+/// controller. The semantic root is the exact XLOG root inspected for the task;
+/// the remaining roots bind the complete mandatory dependency and constraint
+/// closures. These values are derived by the trusted controller after its
+/// closure checks, never supplied by the model-update consumer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticTaskGoalWitness {
+    pub semantic_root: Identity256,
+    pub authority_root: Identity256,
+    pub mandatory_links_root: Identity256,
+    pub constraints_root: Identity256,
+    pub mandatory_link_count: u64,
+    pub constraint_count: u64,
+}
+
 impl SemanticTaskEvaluationSpec {
     fn validate_records(
         &self,
@@ -269,6 +284,7 @@ pub(crate) struct TaskEvaluationBinding {
     statement_bytes: BTreeMap<u32, Vec<u8>>,
     allowed_supports: Vec<(u32, [u8; 32])>,
     observation: SemanticTaskObservation,
+    goal_witness: Option<SemanticTaskGoalWitness>,
 }
 
 impl TaskEvaluationBinding {
@@ -339,6 +355,7 @@ impl TaskEvaluationBinding {
             statement_bytes,
             allowed_supports: allowed_supports.into_iter().collect(),
             observation,
+            goal_witness: None,
         })
     }
 
@@ -378,6 +395,15 @@ impl TaskEvaluationBinding {
             hash.update(record.to_le_bytes());
             hash.update(support);
         }
+        if let Some(witness) = self.goal_witness {
+            hash.update(b"xlog.semantic.goal-witness.v1\0");
+            hash.update(witness.semantic_root.as_bytes());
+            hash.update(witness.authority_root.as_bytes());
+            hash.update(witness.mandatory_links_root.as_bytes());
+            hash.update(witness.constraints_root.as_bytes());
+            hash.update(witness.mandatory_link_count.to_le_bytes());
+            hash.update(witness.constraint_count.to_le_bytes());
+        }
         Identity256::from_bytes(hash.finalize().into())
     }
 
@@ -399,6 +425,16 @@ impl TaskEvaluationBinding {
         for (record, support) in &self.allowed_supports {
             words.push(u64::from(*record));
             words.extend(identity_words(*support));
+        }
+        if let Some(witness) = self.goal_witness {
+            words.extend(identity_words(*witness.semantic_root.as_bytes()));
+            words.extend(identity_words(*witness.authority_root.as_bytes()));
+            words.extend(identity_words(*witness.mandatory_links_root.as_bytes()));
+            words.extend(identity_words(*witness.constraints_root.as_bytes()));
+            words.push(witness.mandatory_link_count);
+            words.push(witness.constraint_count);
+        } else {
+            words.extend([0; 18]);
         }
         words
     }
@@ -2900,6 +2936,7 @@ struct ModelForwardReceipt {
     abi: u64,
     role: u64,
     generation: u64,
+    work_sequence: u64,
     logits: u64,
     scalar_type: u64,
     row_count: u64,
@@ -2919,8 +2956,9 @@ struct ModelForwardReceiptInputs {
     lease: u64,
     candidate_seals: u64,
     candidate_seal_count: u64,
-    baseline_logits: u64,
-    candidate_logits: u64,
+    role: u64,
+    work_sequence: u64,
+    logits: u64,
     scalar_type: u64,
     row_count: u64,
     capacity: u64,
@@ -2928,9 +2966,8 @@ struct ModelForwardReceiptInputs {
     row_stride_bytes: u64,
     position_stride_bytes: u64,
     vocabulary_stride_bytes: u64,
-    baseline_logits_digest: u64,
-    candidate_logits_digest: u64,
-    receipts: u64,
+    logits_digest: u64,
+    receipt: u64,
 }
 
 #[repr(C)]
@@ -3218,7 +3255,7 @@ const _: () = assert!(size_of::<TextBinding>() == 24);
 const _: () = assert!(size_of::<ModelUpdateBinding>() == 32);
 const _: () = assert!(size_of::<ModelUpdateEvidenceSource>() == 48);
 const _: () = assert!(size_of::<ModelForwardSealInput>() == 32);
-const _: () = assert!(size_of::<ModelForwardReceipt>() == 216);
+const _: () = assert!(size_of::<ModelForwardReceipt>() == 224);
 const _: () = assert!(size_of::<ModelForwardReceiptInputs>() == 128);
 const _: () = assert!(size_of::<PublicationCommand>() == 24);
 const _: () = assert!(size_of::<PublicationLease>() == 88);
@@ -6372,6 +6409,7 @@ struct PreparedModelUpdate {
     canary_results: TrackedCudaSlice<SemanticTrainingCanaryResultRecord>,
     refusal: TrackedCudaSlice<SemanticTrainingCanaryRefusalRecord>,
     output: Option<BoundModelUpdate>,
+    forward_recorded: u8,
     #[cfg_attr(
         not(feature = "semantic-policy"),
         expect(
@@ -6399,11 +6437,10 @@ struct BoundModelUpdate {
     admissibility: PreparedSemanticTensor,
     baseline_logits: PreparedSemanticTensor,
     candidate_logits: PreparedSemanticTensor,
-    baseline_logits_digest: u64,
-    candidate_logits_digest: u64,
     accounted_reserved_bytes: u64,
     copy_bytes: u64,
     _witness: SemanticTensorContentWitness,
+    _forward_witnesses: [SemanticModelForwardWitness; 2],
 }
 
 struct ModelUpdateEvidenceOwner {
@@ -6548,24 +6585,6 @@ impl PreparedModelUpdate {
             .and_then(|bytes| bytes.checked_add(update_bytes))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let logits = output.baseline_logits.layout;
-        let forward_inputs = ModelForwardReceiptInputs {
-            control: storage.control.device_ptr_value(),
-            lease: reader.device_ptr_value(),
-            candidate_seals: self.forward_seals.device_ptr_value(),
-            candidate_seal_count: self.forward_seals.len() as u64,
-            baseline_logits: output.baseline_logits.data,
-            candidate_logits: output.candidate_logits.data,
-            scalar_type: logits.scalar_type,
-            row_count: logits.dimensions[0],
-            capacity: logits.dimensions[1],
-            vocabulary: logits.dimensions[2],
-            row_stride_bytes: logits.strides_bytes[0],
-            position_stride_bytes: logits.strides_bytes[1],
-            vocabulary_stride_bytes: logits.strides_bytes[2],
-            baseline_logits_digest: output.baseline_logits_digest,
-            candidate_logits_digest: output.candidate_logits_digest,
-            receipts: self.forward_receipts.device_ptr_value(),
-        };
         let canary_inputs = ModelUpdateCanaryInputs {
             control: storage.control.device_ptr_value(),
             lease: reader.device_ptr_value(),
@@ -6606,20 +6625,6 @@ impl PreparedModelUpdate {
             reader.device_ptr_value(),
         );
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
-            // SAFETY: immutable seal pointers and exact raw-logits occurrences
-            // were frozen by the original producer witness before capture ended.
-            unsafe {
-                self.forward_receipt.clone().launch_in(
-                    enqueue,
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (1, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (forward_inputs,),
-                )
-            }
-            .map_err(|error| XlogError::Kernel(error.to_string()))?;
             // SAFETY: the producer gate was checked by the same captured
             // content witness as the complete update backing. The native byte
             // is the stable predicate consumed by both copy and publication.
@@ -6894,6 +6899,17 @@ pub struct SemanticTensorContentWitness {
     reader_token: u64,
     index: usize,
     _witness: Arc<()>,
+}
+
+/// Opaque proof that the native receipt node for one exact logits occurrence
+/// was inserted while its model producer's prepared bank capture was active.
+#[derive(Clone)]
+pub struct SemanticModelForwardWitness {
+    issuer: Arc<()>,
+    reader_token: u64,
+    bank: usize,
+    role: usize,
+    content: SemanticTensorContentWitness,
 }
 
 struct TensorContentBuffers {
@@ -10737,8 +10753,15 @@ impl SemanticTransitionSession {
                 let (update_evidence, update_evidence_owners) = if *kind
                     == SemanticTransitionKind::Update
                 {
+                    #[cfg(feature = "semantic-policy")]
                     let mut values = vec![ModelUpdateEvidenceSource::default(); transition_bound];
+                    #[cfg(not(feature = "semantic-policy"))]
+                    let values = vec![ModelUpdateEvidenceSource::default(); transition_bound];
+                    #[cfg(feature = "semantic-policy")]
                     let mut owners = Vec::new();
+                    #[cfg(not(feature = "semantic-policy"))]
+                    let owners = Vec::new();
+                    #[cfg(feature = "semantic-policy")]
                     for source_ordinal in 0..ordinal {
                         if transitions[source_ordinal] != SemanticTransitionKind::Proposal {
                             continue;
@@ -10856,6 +10879,7 @@ impl SemanticTransitionSession {
                         canary_results,
                         refusal,
                         output: None,
+                        forward_recorded: 0,
                         admissibility_copy: model_update_admissibility_copy.clone(),
                         forward_receipt: model_update_forward_receipt.clone(),
                         copy: model_update_copy.clone(),
@@ -12449,6 +12473,163 @@ impl SemanticTransitionSession {
     /// selected-view backward and optimizer update were recorded. The output is
     /// copied into the inactive neural bank by a prepared CUDA node before the
     /// sole publication transition commits its pointer and generation state.
+    /// Record one baseline or candidate forward at the actual producer site.
+    /// The receipt node is inserted into the active prepared bank capture and
+    /// cannot be reconstructed later from handoff argument position.
+    pub fn record_prepared_model_forward(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        role: usize,
+        logits: SemanticTensorInput,
+        consumer_stream: u64,
+    ) -> Result<SemanticModelForwardWitness, SemanticTransitionError> {
+        self.check_prepared_content_stream(step, consumer_stream)?;
+        if bank > 1 || role > 1 {
+            return Err(publication_input_error(
+                "prepared model forward bank and role must be zero or one",
+            ));
+        }
+        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Update {
+            return Err(publication_input_error(
+                "model forward receipts belong only to a prepared update",
+            ));
+        }
+        let content = self.capture_prepared_tensor_content(step, vec![logits], consumer_stream)?;
+        let storage = Arc::clone(self.publication.as_ref().expect("prepared publication"));
+        let owner = self
+            .steps
+            .get_mut(&step.token)
+            .expect("checked update step");
+        let prepared = owner.prepared.as_mut().expect("prepared update owner");
+        if prepared
+            .model_work
+            .as_ref()
+            .is_none_or(|work| work.capture_bank != Some(bank))
+        {
+            return Err(publication_input_error(
+                "model forward receipt requires the active producer bank capture",
+            ));
+        }
+        let training_view = prepared.training_view.as_ref().ok_or_else(|| {
+            publication_input_error("prepared update has no native training view")
+        })?;
+        let work_sequence = prepared
+            .model_work
+            .as_ref()
+            .expect("active model work checked above")
+            .next_slot()
+            .map_err(publication_input_error)?;
+        if work_sequence == 0 {
+            return Err(publication_input_error(
+                "model forward receipt requires recorded producer work before the logits occurrence",
+            ));
+        }
+        let tensor = owner.content[content.index]
+            .tensors
+            .first()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .clone();
+        let layout = tensor.layout;
+        let row_count = training_view.roster_rows().len() as u64;
+        let capacity = training_view.capacity() as u64;
+        if !matches!(
+            (layout.scalar_type, layout.element_bytes),
+            (4, 2) | (5, 2) | (6, 4)
+        ) || layout.role != 0
+            || layout.index != role as u64
+            || layout.rank != 3
+            || layout.logical_axis != u64::MAX
+            || layout.dimensions[0] != row_count
+            || layout.dimensions[1] != capacity
+            || layout.dimensions[2] == 0
+            || layout.dimensions[3] != 0
+            || layout.strides_bytes[2] != layout.element_bytes
+            || layout.strides_bytes[1]
+                != layout.dimensions[2]
+                    .checked_mul(layout.element_bytes)
+                    .unwrap_or(0)
+            || layout.strides_bytes[0]
+                != layout.dimensions[1]
+                    .checked_mul(layout.strides_bytes[1])
+                    .unwrap_or(0)
+            || layout.strides_bytes[3] != 0
+            || tensor.logical_begin != 0
+            || tensor.logical_end != 0
+        {
+            return Err(publication_input_error(
+                "model forward logits must be aligned contiguous F16/BF16/F32 [rows,capacity,vocabulary] with its explicit role",
+            ));
+        }
+        let TensorContentSeals::Captured(digests) = &owner.content[content.index].seals else {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        };
+        let (logits_digest, digest_cells) = captured_tensor_digest_pointer(digests, 0)?;
+        let update = prepared.branches[bank]
+            .model_update
+            .as_mut()
+            .ok_or_else(|| publication_input_error("prepared branch has no model update"))?;
+        if update.forward_recorded != role as u8 {
+            return Err(publication_input_error(
+                "model forwards must be recorded exactly once in baseline then candidate order",
+            ));
+        }
+        update.forward_recorded += 1;
+        let receipt = update.forward_receipts.device_ptr_value()
+            + (role * size_of::<ModelForwardReceipt>()) as u64;
+        let inputs = ModelForwardReceiptInputs {
+            control: storage.control.device_ptr_value(),
+            lease: prepared.reader.device_ptr_value(),
+            candidate_seals: update.forward_seals.device_ptr_value(),
+            candidate_seal_count: update.forward_seals.len() as u64,
+            role: role as u64,
+            work_sequence: work_sequence as u64,
+            logits: tensor.data,
+            scalar_type: layout.scalar_type,
+            row_count,
+            capacity,
+            vocabulary: layout.dimensions[2],
+            row_stride_bytes: layout.strides_bytes[0],
+            position_stride_bytes: layout.strides_bytes[1],
+            vocabulary_stride_bytes: layout.strides_bytes[2],
+            logits_digest,
+            receipt,
+        };
+        let mut recorder = self.domain.new_strict_recorder();
+        storage.record(&mut recorder);
+        recorder.read(&prepared.reader);
+        recorder.read(&update.forward_seals);
+        recorder.read(digest_cells.as_ref());
+        recorder.write(&update.forward_receipts);
+        let result = enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            // SAFETY: all pointers name retained native or producer-owned storage;
+            // the launch is captured immediately after the actual forward.
+            unsafe {
+                update.forward_receipt.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (inputs,),
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        });
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result?;
+        Ok(SemanticModelForwardWitness {
+            issuer: Arc::clone(&self.publication_issuer),
+            reader_token: step.token,
+            bank,
+            role,
+            content,
+        })
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "the native update handoff binds model geometry, numerical validity and canary evidence"
@@ -12460,8 +12641,8 @@ impl SemanticTransitionSession {
         mut model_memory: SemanticModelMemory,
         mut tensors: Vec<SemanticTensorInput>,
         admissibility: SemanticTensorInput,
-        baseline_logits: SemanticTensorInput,
-        candidate_logits: SemanticTensorInput,
+        baseline_forward: &SemanticModelForwardWitness,
+        candidate_forward: &SemanticModelForwardWitness,
         witness: &SemanticTensorContentWitness,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
@@ -12471,6 +12652,17 @@ impl SemanticTransitionSession {
             return Err(publication_input_error(
                 "prepared model update bank must be zero or one",
             ));
+        }
+        for (role, forward) in [(0, baseline_forward), (1, candidate_forward)] {
+            if !Arc::ptr_eq(&forward.issuer, &self.publication_issuer)
+                || forward.reader_token != step.token
+                || forward.bank != bank
+                || forward.role != role
+            {
+                return Err(publication_input_error(
+                    "model update requires exact producer-issued baseline and candidate forward witnesses",
+                ));
+            }
         }
         if self.prepared_transition_kind(step)? != SemanticTransitionKind::Update {
             return Err(publication_input_error(
@@ -12507,8 +12699,6 @@ impl SemanticTransitionSession {
         let tensor_count = tensors.len();
         model_memory.allocations.append(&mut tensors);
         model_memory.allocations.push(admissibility);
-        model_memory.allocations.push(baseline_logits);
-        model_memory.allocations.push(candidate_logits);
         self.verify_prepared_tensor_content(
             step,
             witness,
@@ -12521,11 +12711,20 @@ impl SemanticTransitionSession {
             .clone();
         let (allocations, outputs) = outputs.split_at(allocation_count);
         let (tensors, update_metadata) = outputs.split_at(tensor_count);
-        let [admissibility, baseline_logits, candidate_logits] = update_metadata else {
+        let [admissibility] = update_metadata else {
             return Err(publication_input_error(
-                "model update output requires numerical admissibility and complete baseline/candidate logits",
+                "model update output requires numerical admissibility",
             ));
         };
+        let forward_tensor = |forward: &SemanticModelForwardWitness| {
+            self.steps[&step.token].content[forward.content.index]
+                .tensors
+                .first()
+                .cloned()
+                .ok_or(SemanticTransitionError::ObservationMismatch)
+        };
+        let baseline_logits = forward_tensor(baseline_forward)?;
+        let candidate_logits = forward_tensor(candidate_forward)?;
         let allocation_index = u64::try_from(allocation_count)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
         if admissibility.layout
@@ -12546,12 +12745,6 @@ impl SemanticTransitionSession {
                 "model update numerical admissibility must be Bool8[1]",
             ));
         }
-        let baseline_index = allocation_index
-            .checked_add(1)
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let candidate_index = baseline_index
-            .checked_add(1)
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let training_view = self.steps[&step.token]
             .prepared
             .as_ref()
@@ -12591,8 +12784,8 @@ impl SemanticTransitionSession {
                 && tensor.logical_begin == 0
                 && tensor.logical_end == 0
         };
-        if !layout_valid(baseline_logits, baseline_index)
-            || !layout_valid(candidate_logits, candidate_index)
+        if !layout_valid(&baseline_logits, 0)
+            || !layout_valid(&candidate_logits, 1)
             || baseline_logits.layout.scalar_type != candidate_logits.layout.scalar_type
             || baseline_logits.layout.dimensions != candidate_logits.layout.dimensions
             || baseline_logits.layout.strides_bytes != candidate_logits.layout.strides_bytes
@@ -12653,17 +12846,16 @@ impl SemanticTransitionSession {
             digest_cells.push(tensor_cells);
             digest_cells.push(backing_cells);
         }
-        let baseline_digest_index = allocation_count
-            .checked_add(tensor_count)
-            .and_then(|index| index.checked_add(1))
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let candidate_digest_index = baseline_digest_index
-            .checked_add(1)
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let (baseline_logits_digest, baseline_digest_cells) =
-            captured_tensor_digest_pointer(digests, baseline_digest_index)?;
-        let (candidate_logits_digest, candidate_digest_cells) =
-            captured_tensor_digest_pointer(digests, candidate_digest_index)?;
+        let forward_digest = |forward: &SemanticModelForwardWitness| {
+            let TensorContentSeals::Captured(digests) =
+                &self.steps[&step.token].content[forward.content.index].seals
+            else {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            };
+            captured_tensor_digest_pointer(digests, 0)
+        };
+        let (_, baseline_digest_cells) = forward_digest(baseline_forward)?;
+        let (_, candidate_digest_cells) = forward_digest(candidate_forward)?;
         digest_cells.push(baseline_digest_cells);
         digest_cells.push(candidate_digest_cells);
         for allocation in allocations {
@@ -12736,7 +12928,12 @@ impl SemanticTransitionSession {
             })
             .collect::<Vec<_>>();
         let retained_allocations = allocations.to_vec();
-        let accounted_reserved_bytes = accounted_tensor_allocations(outputs)?;
+        let accounted_reserved_bytes = accounted_tensor_allocations(outputs)?
+            .checked_add(accounted_tensor_allocations(&[
+                baseline_logits.clone(),
+                candidate_logits.clone(),
+            ])?)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let copy_bytes = values.iter().try_fold(0u64, |total, binding| {
             total
                 .checked_add(binding.bytes)
@@ -12760,19 +12957,23 @@ impl SemanticTransitionSession {
         if forward_seal_values.len() != update.forward_seals.len() {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
+        if update.forward_recorded != 2 {
+            return Err(publication_input_error(
+                "model update output requires both producer-issued forward receipts",
+            ));
+        }
         update.output = Some(BoundModelUpdate {
             values,
             forward_seal_values,
             digest_cells,
             allocations: retained_allocations,
             admissibility: admissibility.clone(),
-            baseline_logits: baseline_logits.clone(),
-            candidate_logits: candidate_logits.clone(),
-            baseline_logits_digest,
-            candidate_logits_digest,
+            baseline_logits,
+            candidate_logits,
             accounted_reserved_bytes,
             copy_bytes,
             _witness: witness.clone(),
+            _forward_witnesses: [baseline_forward.clone(), candidate_forward.clone()],
         });
         Ok(())
     }
@@ -17235,6 +17436,83 @@ impl SemanticTransitionSession {
             &mut self.poisoned,
             &mut self.stream_waits,
             "private task adoption wait",
+            CudaStream::synchronize,
+        )?;
+        self.validate_ranges()?;
+        self.task_epoch = next_epoch;
+        Ok(identity)
+    }
+
+    /// Bind the controller's independently validated goal closure to the native
+    /// task bank before any publication, capture, or model work may begin.
+    pub fn bind_task_goal_witness(
+        &mut self,
+        witness: SemanticTaskGoalWitness,
+    ) -> Result<Identity256, SemanticTransitionError> {
+        self.ensure_rebindable()?;
+        if self.publication.is_some() || self.captured.is_some() {
+            return Err(publication_input_error(
+                "goal authority is immutable after publication or capture",
+            ));
+        }
+        if witness.mandatory_link_count == 0
+            || witness.constraint_count == 0
+            || witness
+                .semantic_root
+                .as_bytes()
+                .iter()
+                .all(|byte| *byte == 0)
+            || witness
+                .authority_root
+                .as_bytes()
+                .iter()
+                .all(|byte| *byte == 0)
+            || witness
+                .mandatory_links_root
+                .as_bytes()
+                .iter()
+                .all(|byte| *byte == 0)
+            || witness
+                .constraints_root
+                .as_bytes()
+                .iter()
+                .all(|byte| *byte == 0)
+        {
+            return Err(publication_input_error(
+                "goal authority requires nonempty independently validated roots and closures",
+            ));
+        }
+        let next_epoch = self
+            .task_epoch
+            .checked_add(1)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let (binding, device) = self.task.as_mut().ok_or_else(|| {
+            publication_input_error("goal authority requires a bound native task evaluation")
+        })?;
+        if binding.goal_witness.is_some() {
+            return Err(publication_input_error(
+                "goal authority can be bound only once",
+            ));
+        }
+        binding.goal_witness = Some(witness);
+        let identity = binding.identity();
+        let words = binding.words(self.graph.transition_arena()[1]);
+        self.provider
+            .htod_sync_copy_into_tracked(&words, device)
+            .map_err(|error| {
+                self.poisoned = true;
+                runtime_error("private goal-authority upload", error)
+            })?;
+        let mut recorder = self.domain.new_strict_recorder();
+        recorder.read_write(device);
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |_| {
+            Ok::<(), XlogError>(())
+        })?;
+        wait_on_stream(
+            &self.stream,
+            &mut self.poisoned,
+            &mut self.stream_waits,
+            "private goal-authority adoption wait",
             CudaStream::synchronize,
         )?;
         self.validate_ranges()?;
