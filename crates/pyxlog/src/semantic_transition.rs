@@ -21,15 +21,15 @@ use xlog_core::{RelId, ScalarType, Schema};
 use xlog_cuda::memory::DeviceAllocationProvenance;
 use xlog_cuda::{
     DlpackManagedTensor, Identity256, SemanticAdmissionLimits, SemanticAdmissionRecords,
-    SemanticArgument, SemanticContinuationInput, SemanticHypergraphCapacities,
-    SemanticObservedSource, SemanticParentBinding, SemanticPolarity, SemanticPredicateRecord,
-    SemanticPreparedStep, SemanticPublishedLease, SemanticRecordRole, SemanticRngBinding,
-    SemanticSourceMapping, SemanticStateRecord, SemanticStateRole, SemanticSupportRecord,
-    SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout, SemanticTextSlot,
-    SemanticTrainingCanary, SemanticTrainingCanaryKind, SemanticTrainingObjective,
-    SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind, SemanticTrainingViewBasis,
-    SemanticTrainingViewPort, SemanticTrainingViewRow, SemanticTransitionKind,
-    SemanticTransitionSession, SemanticTypedRecord,
+    SemanticArgument, SemanticContinuationInput, SemanticGradientDeliveryBinding,
+    SemanticHypergraphCapacities, SemanticObservedSource, SemanticParentBinding, SemanticPolarity,
+    SemanticPredicateRecord, SemanticPreparedStep, SemanticPublishedLease, SemanticRecordRole,
+    SemanticRngBinding, SemanticSourceMapping, SemanticStateRecord, SemanticStateRole,
+    SemanticSupportRecord, SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout,
+    SemanticTextSlot, SemanticTrainingCanary, SemanticTrainingCanaryKind,
+    SemanticTrainingObjective, SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind,
+    SemanticTrainingViewBasis, SemanticTrainingViewPort, SemanticTrainingViewRow,
+    SemanticTransitionKind, SemanticTransitionSession, SemanticTypedRecord,
 };
 use xlog_cuda::{
     SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
@@ -4307,6 +4307,135 @@ pub(crate) struct PySemanticPreparedStep {
     continuation_producers: Mutex<[Vec<Py<PyAny>>; 2]>,
     #[cfg(feature = "semantic-policy")]
     policy_inputs: Mutex<[Option<PreparedPolicyInputs>; 2]>,
+    gradient_deliveries: Mutex<[Option<Py<PySemanticGradientDelivery>>; 2]>,
+}
+
+/// Native-owned delivery from one real AccumulateGrad node into the canonical
+/// resident gradient and presence slots. This is a node hook, not a Parameter
+/// hook; the original leaf remains the GraphTask's accumulation owner.
+#[pyclass(module = "pyxlog._native")]
+struct PySemanticGradientDeliveryHook {
+    effective: Py<PyAny>,
+    gradient: Py<PyAny>,
+    presence: Py<PyAny>,
+}
+
+#[pymethods]
+impl PySemanticGradientDeliveryHook {
+    fn __call__(
+        &self,
+        py: Python<'_>,
+        _gradient_inputs: &Bound<'_, PyAny>,
+        _gradient_outputs: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let effective = self.effective.bind(py);
+        let current = effective.getattr("grad")?;
+        if !current.is(self.gradient.bind(py)) {
+            return Err(invalid(
+                "AccumulateGrad replaced the canonical native gradient slot",
+            ));
+        }
+        self.presence.bind(py).call_method1("fill_", (true,))?;
+        Ok(())
+    }
+}
+
+/// Cold registration owner for one prepared bank's complete gradient roster.
+/// Registration attaches canonical role-24 storage to the real leaf, installs
+/// only AccumulateGrad-node hooks, and retains every handle through recording.
+#[pyclass(name = "SemanticGradientDelivery", module = "pyxlog._native")]
+pub(crate) struct PySemanticGradientDelivery {
+    accumulation: Py<PyAny>,
+    gradients: Vec<Py<PyAny>>,
+    presences: Vec<Py<PyAny>>,
+    _binding: SemanticGradientDeliveryBinding,
+    _producers: Vec<Py<PyAny>>,
+    _edges: Vec<Py<PyAny>>,
+    _callbacks: Vec<Py<PySemanticGradientDeliveryHook>>,
+    handles: Mutex<Option<Vec<Py<PyAny>>>>,
+}
+
+#[pymethods]
+impl PySemanticGradientDelivery {
+    /// Record device reset-or-accumulate before the one combined GraphTask.
+    /// A zero accumulation counter clears role 24/25; a nonzero counter keeps
+    /// the existing slots so subsequent node deliveries add in place.
+    fn record_reset(&self, py: Python<'_>) -> PyResult<()> {
+        if self
+            .handles
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("gradient-delivery owner is poisoned"))?
+            .is_none()
+        {
+            return Err(invalid("gradient delivery has already finished recording"));
+        }
+        let zero = self.accumulation.bind(py).call_method1("eq", (0,))?;
+        let keep = zero.call_method0("logical_not")?;
+        for (gradient, presence) in self.gradients.iter().zip(&self.presences) {
+            gradient.bind(py).call_method1("mul_", (&keep,))?;
+            presence.bind(py).call_method1("logical_and_", (&keep,))?;
+        }
+        Ok(())
+    }
+
+    /// Remove cold node hooks after their operations have been captured. The
+    /// captured device graph retains the recorded reset/add/presence work.
+    fn finish_recording(&self, py: Python<'_>) -> PyResult<()> {
+        self.remove_hooks(py, false)
+    }
+}
+
+impl PySemanticGradientDelivery {
+    fn remove_hooks(&self, py: Python<'_>, already_removed_ok: bool) -> PyResult<()> {
+        let handles = self
+            .handles
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("gradient-delivery owner is poisoned"))?
+            .take();
+        let Some(handles) = handles else {
+            return if already_removed_ok {
+                Ok(())
+            } else {
+                Err(invalid("gradient delivery has already finished recording"))
+            };
+        };
+        let mut failure = None;
+        for handle in handles {
+            if let Err(error) = handle.bind(py).call_method0("remove") {
+                if failure.is_none() {
+                    failure = Some(error);
+                }
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+impl PySemanticPreparedStep {
+    fn finish_gradient_delivery_recording(&self, py: Python<'_>) -> PyResult<()> {
+        let deliveries = self
+            .gradient_deliveries
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("gradient-delivery roster is poisoned"))?
+            .iter()
+            .filter_map(|delivery| delivery.as_ref().map(|item| item.clone_ref(py)))
+            .collect::<Vec<_>>();
+        let mut failure = None;
+        for delivery in deliveries {
+            if let Err(error) = delivery.borrow(py).remove_hooks(py, true) {
+                if failure.is_none() {
+                    failure = Some(error);
+                }
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -4619,13 +4748,311 @@ impl PySemanticPreparedStep {
         Ok(PyTuple::new(py, values)?.unbind())
     }
 
-    /// Record the device-selected actor, critic and cost VJP for this prepared
-    /// Proposal inside a later prepared Update branch. The returned parameter,
-    /// full MASK and component-baseline roots remain device-resident; the
-    /// native proposal lease predicates the unselected bank to exact zeros.
+    /// Register one prepared bank's real AccumulateGrad roster before capture.
+    /// ``phase`` and ``accumulation`` are original five-field tensor-input rows.
+    /// ``leaves`` are ``(GradientEdge_or_None, effective_input,
+    /// gradient_input_or_None, presence_input, phase_mask_input)`` in the
+    /// original physical parameter order.
+    #[pyo3(signature = (bank, phase, accumulation, leaves, *, consumer_stream))]
+    fn register_gradient_delivery(
+        &self,
+        py: Python<'_>,
+        bank: &Bound<'_, PyAny>,
+        phase: &Bound<'_, PyAny>,
+        accumulation: &Bound<'_, PyAny>,
+        leaves: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PySemanticGradientDelivery>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let bank = usize::try_from(ColdValue::read(bank, &mut 128, 0)?.unsigned()?)
+            .map_err(|_| invalid("gradient-delivery bank exceeds native address space"))?;
+        if bank > 1 {
+            return Err(invalid("gradient delivery requires bank zero or one"));
+        }
+        {
+            let owners = self
+                .gradient_deliveries
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("gradient-delivery roster is poisoned"))?;
+            if owners[bank].is_some() {
+                return Err(invalid(
+                    "gradient delivery was already registered for this bank",
+                ));
+            }
+        }
+        let consumer_stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        let check = || {
+            self.require_task(py, &self.task_use.borrow(py))?;
+            Ok(())
+        };
+        let rows = object_sequence(leaves, &mut 8192)?;
+        if rows.is_empty() {
+            return Err(invalid(
+                "gradient delivery requires the complete physical leaf roster",
+            ));
+        }
+        struct LeafRows {
+            edge: Option<Py<PyAny>>,
+            effective: usize,
+            gradient: Option<usize>,
+            presence: usize,
+            phase_mask: usize,
+        }
+        let mut tensor_rows = vec![phase.clone(), accumulation.clone()];
+        let mut leaf_rows = Vec::with_capacity(rows.len());
+        for row in rows {
+            let fields = object_sequence(&row, &mut 8192)?;
+            if fields.len() != 5 {
+                return Err(invalid(
+                    "gradient-delivery leaf needs edge, effective, gradient, presence and phase mask",
+                ));
+            }
+            let effective = tensor_rows.len();
+            tensor_rows.push(fields[1].clone());
+            let gradient = if fields[2].is_none() {
+                None
+            } else {
+                let index = tensor_rows.len();
+                tensor_rows.push(fields[2].clone());
+                Some(index)
+            };
+            let presence = tensor_rows.len();
+            tensor_rows.push(fields[3].clone());
+            let phase_mask = tensor_rows.len();
+            tensor_rows.push(fields[4].clone());
+            leaf_rows.push(LeafRows {
+                edge: (!fields[0].is_none()).then(|| fields[0].clone().unbind()),
+                effective,
+                gradient,
+                presence,
+                phase_mask,
+            });
+        }
+        let tensor_rows = PyList::new(py, &tensor_rows)?;
+        let parsed = parse_tensor_inputs_guarded(
+            tensor_rows.as_any(),
+            &mut 32768,
+            session.device_ordinal,
+            consumer_stream,
+            &check,
+        )?;
+        let tensors = &parsed.handoff.0;
+        let is_scalar = |layout: &SemanticTensorLayout, role, element_bytes, scalar_type| {
+            layout.role == role
+                && layout.element_bytes == element_bytes
+                && layout.scalar_type == scalar_type
+                && layout.rank == 0
+                && layout.logical_axis == u64::MAX
+                && layout.dimensions == [0; 4]
+                && layout.strides_bytes == [0; 4]
+        };
+        if !is_scalar(
+            &tensors[0].layout,
+            SemanticStateRole::TrainingSchedule as u64,
+            8,
+            7,
+        ) || !is_scalar(
+            &tensors[1].layout,
+            SemanticStateRole::GradientAccumulation as u64,
+            8,
+            7,
+        ) {
+            return Err(invalid(
+                "gradient delivery phase and accumulation require canonical scalar layouts",
+            ));
+        }
+        let mut effective_coordinates = BTreeSet::new();
+        let mut gradient_coordinates = BTreeSet::new();
+        let mut presence_coordinates = BTreeSet::new();
+        let mut phase_mask_coordinates = BTreeSet::new();
+        for leaf in &leaf_rows {
+            let effective = &tensors[leaf.effective].layout;
+            let presence = &tensors[leaf.presence].layout;
+            let phase_mask = &tensors[leaf.phase_mask].layout;
+            let gradient_valid = leaf.gradient.is_none_or(|index| {
+                let gradient = &tensors[index].layout;
+                gradient.role == SemanticStateRole::Gradients as u64
+                    && gradient.rank == effective.rank
+                    && gradient.dimensions == effective.dimensions
+                    && gradient_coordinates.insert((gradient.role, gradient.index))
+            });
+            if !(18..=20).contains(&effective.role)
+                || !gradient_valid
+                || !is_scalar(
+                    presence,
+                    SemanticStateRole::GradientAccumulation as u64,
+                    1,
+                    8,
+                )
+                || phase_mask.role != SemanticStateRole::TrainingSchedule as u64
+                || phase_mask.element_bytes != 1
+                || phase_mask.scalar_type != 8
+                || phase_mask.rank != 1
+                || phase_mask.logical_axis != u64::MAX
+                || phase_mask.dimensions != [3, 0, 0, 0]
+                || phase_mask.strides_bytes != [1, 0, 0, 0]
+                || !effective_coordinates.insert((effective.role, effective.index))
+                || !presence_coordinates.insert((presence.role, presence.index))
+                || !phase_mask_coordinates.insert((phase_mask.role, phase_mask.index))
+            {
+                return Err(invalid(
+                    "gradient-delivery leaf inputs require unique canonical model, gradient, presence and phase-mask layouts",
+                ));
+            }
+        }
+        let mut owner = session.owner()?;
+        self.content_binding_with_owner(py, &owner)?;
+        let binding = owner
+            .bind_prepared_gradient_delivery(
+                &self.inner,
+                bank,
+                parsed.handoff.into_native(),
+                consumer_stream,
+            )
+            .map_err(xlog_err)?;
+        drop(owner);
+
+        struct HookLeaf {
+            node: Py<PyAny>,
+            effective: Py<PyAny>,
+            gradient: Py<PyAny>,
+            presence: Py<PyAny>,
+            restore_none: bool,
+        }
+        let mut hook_leaves = Vec::new();
+        let mut gradients = Vec::new();
+        let mut presences = Vec::new();
+        let mut edges = Vec::new();
+        for leaf in leaf_rows {
+            let effective = parsed.producers[leaf.effective].bind(py);
+            let gradient = leaf
+                .gradient
+                .map(|index| parsed.producers[index].clone_ref(py));
+            let presence = parsed.producers[leaf.presence].clone_ref(py);
+            if let Some(gradient) = &gradient {
+                gradients.push(gradient.clone_ref(py));
+            }
+            presences.push(presence.clone_ref(py));
+            let Some(edge) = leaf.edge else {
+                if effective.getattr("requires_grad")?.is_truthy()? {
+                    return Err(invalid(
+                        "a trainable physical leaf requires its real AccumulateGrad edge",
+                    ));
+                }
+                continue;
+            };
+            let Some(gradient) = gradient else {
+                return Err(invalid(
+                    "a retained AccumulateGrad edge requires native gradient capacity",
+                ));
+            };
+            let edge_bound = edge.bind(py);
+            let node = edge_bound.getattr("node")?;
+            if edge_bound.getattr("output_nr")?.extract::<u64>()? != 0
+                || node.get_type().name()? != "AccumulateGrad"
+                || !node.getattr("variable")?.is(effective)
+            {
+                return Err(invalid(
+                    "gradient delivery requires the leaf's real AccumulateGrad edge",
+                ));
+            }
+            let current = effective.getattr("grad")?;
+            if !current.is_none() && !current.is(gradient.bind(py)) {
+                return Err(invalid(
+                    "the physical leaf already owns a different gradient allocation",
+                ));
+            }
+            edges.push(edge.clone_ref(py));
+            hook_leaves.push(HookLeaf {
+                node: node.unbind(),
+                effective: effective.clone().unbind(),
+                gradient,
+                presence,
+                restore_none: current.is_none(),
+            });
+        }
+
+        let callbacks = hook_leaves
+            .iter()
+            .map(|leaf| {
+                Py::new(
+                    py,
+                    PySemanticGradientDeliveryHook {
+                        effective: leaf.effective.clone_ref(py),
+                        gradient: leaf.gradient.clone_ref(py),
+                        presence: leaf.presence.clone_ref(py),
+                    },
+                )
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let delivery = Py::new(
+            py,
+            PySemanticGradientDelivery {
+                accumulation: parsed.producers[1].clone_ref(py),
+                gradients,
+                presences,
+                _binding: binding,
+                _producers: parsed.producers,
+                _edges: edges,
+                _callbacks: callbacks.iter().map(|item| item.clone_ref(py)).collect(),
+                handles: Mutex::new(Some(Vec::new())),
+            },
+        )?;
+        let mut owners = self
+            .gradient_deliveries
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("gradient-delivery roster is poisoned"))?;
+        if owners[bank].is_some() {
+            return Err(invalid(
+                "gradient delivery was already registered for this bank",
+            ));
+        }
+        let mut handles = Vec::new();
+        let mut attached = Vec::new();
+        let installed = (|| -> PyResult<()> {
+            for (leaf, callback) in hook_leaves.iter().zip(&callbacks) {
+                let effective = leaf.effective.bind(py);
+                // Native registration, not the numerical producer, attaches
+                // canonical role-24 storage to this real AccumulateGrad node.
+                effective.setattr("grad", leaf.gradient.bind(py))?;
+                attached.push((leaf.effective.clone_ref(py), leaf.restore_none));
+                let handle = leaf
+                    .node
+                    .bind(py)
+                    .call_method1("register_hook", (callback.clone_ref(py),))?;
+                handles.push(handle.unbind());
+            }
+            Ok(())
+        })();
+        if let Err(error) = installed {
+            for handle in handles.drain(..).rev() {
+                let _ = handle.bind(py).call_method0("remove");
+            }
+            for (effective, restore_none) in attached.into_iter().rev() {
+                if restore_none {
+                    let _ = effective.bind(py).setattr("grad", py.None());
+                }
+            }
+            return Err(error);
+        }
+        *delivery
+            .borrow(py)
+            .handles
+            .lock()
+            .expect("unexposed gradient-delivery owner cannot be poisoned") = Some(handles);
+        owners[bank] = Some(delivery.clone_ref(py));
+        Ok(delivery)
+    }
+
+    /// Record this proposal tape's complete Update-policy VJP. Actor, critic
+    /// and cost terms use the frozen selected episode; supervised edit uses
+    /// the exact genuine demonstration origin. When both name this tape their
+    /// selected-score cotangents are summed before one native VJP. Returned
+    /// parameter, full MASK and baseline roots remain device-resident.
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (update_step, bank, *, consumer_stream))]
-    fn temporal_selected_vjp(
+    fn temporal_update_vjp(
         &self,
         py: Python<'_>,
         update_step: Py<PySemanticPreparedStep>,
@@ -4652,7 +5079,7 @@ impl PySemanticPreparedStep {
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
         let gradients = owner
-            .record_selected_prepared_policy_vjp(
+            .record_prepared_update_policy_vjp(
                 &self.inner,
                 bank,
                 &update_step.borrow(py).inner,
@@ -6630,6 +7057,7 @@ impl PySemanticTransitionController {
                     inner,
                     continuation_producers: Mutex::new(std::array::from_fn(|_| Vec::new())),
                     policy_inputs: Mutex::new(std::array::from_fn(|_| None)),
+                    gradient_deliveries: Mutex::new(std::array::from_fn(|_| None)),
                 },
             )?);
         }
@@ -6858,7 +7286,15 @@ impl PySemanticTransitionController {
         })();
         // Cleanup is mandatory even when a callback invalidated the task. It
         // cannot hide that refusal, replace the graph, or suppress an exception.
-        let before_cleanup = check();
+        let mut delivery_cleanup = Ok(());
+        for step in &steps {
+            if let Err(error) = step.borrow(py).finish_gradient_delivery_recording(py) {
+                if delivery_cleanup.is_ok() {
+                    delivery_cleanup = Err(error);
+                }
+            }
+        }
+        let before_cleanup = finish_with_cleanup(py, check(), delivery_cleanup);
         let cleanup = memory_owner.finish(recorded.as_ref().err());
         let cleanup = finish_with_cleanup(py, before_cleanup, cleanup);
         let cleanup = finish_with_cleanup(py, cleanup, check());

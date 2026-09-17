@@ -412,6 +412,11 @@ struct SemanticTrainingObjectiveRecord {
 struct SemanticTrainingObjectiveGroupRecord {
     uint64_t kind,denominator,member_offset,member_count;
 };
+struct SemanticTrainingRosterRow {
+    uint64_t ordinal,basis,window,source_length,block_size,prefix_extent,answer_start,origin_candidate;
+    uint64_t identity[4],source_identity[4],content_identity[4];
+    SemanticTrainingViewOriginRecord origin;
+};
 struct SemanticTrainingCanaryRecord {
     uint64_t kind,row_ordinal,lower_bound_bits,upper_bound_bits,memory_limit,fuel_limit,identity[4];
 };
@@ -424,7 +429,7 @@ struct SemanticTrainingCanaryRefusalRecord {
 };
 struct PolicyBackward {
     uint64_t cotangents,parameters,text,baselines,recurrent,scores,status,parameter_cells,text_cells;
-    uint64_t selection,objective,objective_groups,objective_group_members,origin_candidate;
+    uint64_t selection,objective,objective_groups,objective_group_members,roster_rows,origin_candidate;
     uint64_t origin_lease,origin_bank,mode;
 };
 struct Descriptor {
@@ -448,10 +453,11 @@ static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origi
 static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
 static_assert(sizeof(SemanticTrainingObjectiveRecord)==200,"training objective ABI");
 static_assert(sizeof(SemanticTrainingObjectiveGroupRecord)==32,"training objective group ABI");
+static_assert(sizeof(SemanticTrainingRosterRow)==512,"training roster row ABI");
 static_assert(sizeof(SemanticTrainingCanaryRecord)==80,"training canary ABI");
 static_assert(sizeof(SemanticTrainingCanaryResultRecord)==72,"training canary result ABI");
 static_assert(sizeof(SemanticTrainingCanaryRefusalRecord)==152,"training canary refusal ABI");
-static_assert(sizeof(PolicyBackward)==136,"policy backward ABI");
+static_assert(sizeof(PolicyBackward)==144,"policy backward ABI");
 
 __device__ bool semantic_training_canary_refusal_valid(
         const SemanticTrainingCanaryRefusalRecord& refusal) {
@@ -500,7 +506,7 @@ static_assert(sizeof(AttemptReceipt)==344,"attempt receipt ABI");
 static_assert(sizeof(TokenProvenanceRecord)==184,"token provenance ABI");
 static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
-static_assert(sizeof(Descriptor)==808,"launch ABI");
+static_assert(sizeof(Descriptor)==816,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 
 __device__ uint64_t text_row_count(TextBinding binding) {
@@ -2998,16 +3004,17 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
     auto books=reinterpret_cast<const uint64_t*>(descriptor.codebooks);
     auto viability=reinterpret_cast<uint32_t*>(descriptor.scratch)+2*262144;
     __shared__ uint32_t actions[4][2],choices[18];
-    __shared__ uint32_t legal_count,active_count,selected_active,apply_selected;
-    __shared__ uint64_t actor_denominator;
+    __shared__ uint32_t legal_count,active_count,selected_active,apply_selected,apply_actor,apply_edit;
+    __shared__ uint64_t actor_denominator,edit_denominator;
     __shared__ float maximum,reward_f32,critic_scale;
     __shared__ U192 threshold;
-    __shared__ double scale,reward,actor_scale,cost_scale;
+    __shared__ double scale,reward,actor_scale,edit_scale,cost_scale;
     if(threadIdx.x==0) {
         *status=0;
         apply_selected=1;
-        actor_denominator=0;
-        reward=actor_scale=cost_scale=0.0;
+        apply_actor=apply_edit=0;
+        actor_denominator=edit_denominator=0;
+        reward=actor_scale=edit_scale=cost_scale=0.0;
         reward_f32=critic_scale=0.0f;
         if(b.mode==0) {
             for(uint32_t i=0;i<COMPONENT_COUNT;++i)
@@ -3016,16 +3023,19 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
             if(!b.selection || b.selection%alignof(SemanticTrainingViewSelection) ||
                !b.objective || b.objective%alignof(SemanticTrainingObjectiveRecord) ||
                !b.objective_groups || b.objective_groups%alignof(SemanticTrainingObjectiveGroupRecord) ||
-               !b.objective_group_members || b.objective_group_members%alignof(uint64_t)) {
+               !b.objective_group_members || b.objective_group_members%alignof(uint64_t) ||
+               !b.roster_rows || b.roster_rows%alignof(SemanticTrainingRosterRow)) {
                 *status=1;
             } else {
                 const auto& selection=*reinterpret_cast<const SemanticTrainingViewSelection*>(b.selection);
                 const auto& objective=*reinterpret_cast<const SemanticTrainingObjectiveRecord*>(b.objective);
                 const auto* groups=reinterpret_cast<const SemanticTrainingObjectiveGroupRecord*>(b.objective_groups);
                 const auto* members=reinterpret_cast<const uint64_t*>(b.objective_group_members);
+                const auto* roster=reinterpret_cast<const SemanticTrainingRosterRow*>(b.roster_rows);
                 if(selection.status || selection.basis!=1 || selection.origin.present!=1 ||
                    selection.origin.transition!=1 || selection.origin_candidate==UINT64_MAX ||
-                   selection.ordinal>=selection.row_count || selection.row_count!=objective.row_count ||
+                   selection.ordinal>=selection.row_count ||
+                   selection.row_count!=objective.row_count ||
                    selection.capacity!=objective.capacity || objective.group_count!=8 ||
                    !objective.group_member_count || !objective.cost_cap ||
                    !semantic_policy_identity_present(objective.identity) ||
@@ -3044,8 +3054,9 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                 for(uint32_t i=0;i<7;++i)
                     if(objective_coefficients[fixed_coefficients[i]]!=1.0f)*status=1;
                 if(!isfinite(evaluator_min) || !isfinite(evaluator_max) || evaluator_min>evaluator_max)*status=1;
-                uint64_t actor_groups=0;
+                uint64_t actor_groups=0,edit_groups=0,matching_edit_rows=0;
                 bool selected_member=false;
+                const SemanticTrainingRosterRow* matching_edit_row=nullptr;
                 for(uint64_t i=0;i<objective.group_count && !*status;++i) {
                     const auto group=groups[i];
                     if(!group.denominator || group.denominator!=group.member_count ||
@@ -3056,20 +3067,55 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     if(group.kind==8) {
                         ++actor_groups;
                         actor_denominator=group.denominator;
-                        for(uint64_t member=0;member<group.member_count;++member)
-                            selected_member |= members[group.member_offset+member]==selection.ordinal;
+                        for(uint64_t member=0;member<group.member_count;++member) {
+                            const uint64_t ordinal=members[group.member_offset+member];
+                            if(ordinal>=objective.row_count) {*status=1;break;}
+                            selected_member |= ordinal==selection.ordinal;
+                        }
+                    } else if(group.kind==4) {
+                        ++edit_groups;
+                        edit_denominator=group.denominator;
+                        for(uint64_t member=0;member<group.member_count;++member) {
+                            const uint64_t ordinal=members[group.member_offset+member];
+                            if(ordinal>=objective.row_count) {*status=1;break;}
+                            const auto& row=roster[ordinal];
+                            if(row.ordinal!=ordinal || row.basis!=1 || row.origin.present!=1 ||
+                               row.origin.transition!=1 || row.origin_candidate==UINT64_MAX) {
+                                *status=1;break;
+                            }
+                            if(row.origin_candidate==b.origin_candidate) {
+                                ++matching_edit_rows;
+                                matching_edit_row=&row;
+                            }
+                        }
                     }
                 }
-                if(actor_groups!=1 || !selected_member)*status=1;
+                if(actor_groups!=1 || edit_groups!=1 || !selected_member ||
+                   matching_edit_rows>1)*status=1;
                 const auto* origin_lease=reinterpret_cast<const PublicationLease*>(b.origin_lease);
                 if(!origin_lease || b.origin_bank>1 ||
                    !publication_pointer_span(b.origin_lease,sizeof(PublicationLease),alignof(PublicationLease)) ||
                    origin_lease->abi!=1 || origin_lease->bank>1)
                     *status=1;
-                apply_selected=b.origin_candidate==selection.origin_candidate &&
-                    origin_lease && origin_lease->bank==b.origin_bank;
-                if(apply_selected && !*status) {
-                    const auto* state=reinterpret_cast<const State*>(descriptor.state);
+                const auto* state=reinterpret_cast<const State*>(descriptor.state);
+                const bool owned=origin_lease && origin_lease->bank==b.origin_bank;
+                apply_actor=owned && b.origin_candidate==selection.origin_candidate;
+                apply_edit=owned && matching_edit_rows==1;
+                apply_selected=apply_actor || apply_edit;
+                if((apply_actor || apply_edit) && (!state || state->status))*status=1;
+                if(apply_edit && !*status) {
+                    const auto& origin=matching_edit_row->origin;
+                    if(state->model_generation!=origin.model_generation ||
+                       state->stream_serial!=origin.stream_serial ||
+                       state->family_id!=origin.family_id || state->proposal!=origin.proposal) {
+                        *status=1;
+                    } else {
+                        edit_scale=__ddiv_rn(double(objective_coefficients[3]),
+                            __ull2double_rn(edit_denominator));
+                        if(!isfinite(edit_scale))*status=1;
+                    }
+                }
+                if(apply_actor && !*status) {
                     if(!state || state->status || state->model_generation!=selection.origin.model_generation ||
                        state->stream_serial!=selection.origin.stream_serial ||
                        state->family_id!=selection.origin.family_id ||
@@ -3112,15 +3158,19 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
             coefficients[i]=0.0;
             baseline_gradients[i]=0.0f;
             if(apply_selected) {
-                const float difference=__fsub_rn(baseline,reward_f32);
-                const float raw_square=__fmul_rn(difference,difference);
-                const double advantage=__dsub_rn(reward,double(baseline));
-                coefficients[i]=__dadd_rn(-__dmul_rn(actor_scale,advantage),cost_scale);
-                if(receipts[i].legal_count>1)
-                    baseline_gradients[i]=__fmul_rn(critic_scale,difference);
-                if(!isfinite(baseline) || !isfinite(raw_square) ||
-                   !isfinite(coefficients[i]) || !isfinite(baseline_gradients[i]))
-                    atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
+                if(apply_edit)coefficients[i]=-edit_scale;
+                if(apply_actor) {
+                    const float difference=__fsub_rn(baseline,reward_f32);
+                    const float raw_square=__fmul_rn(difference,difference);
+                    const double advantage=__dsub_rn(reward,double(baseline));
+                    coefficients[i]=__dadd_rn(coefficients[i],
+                        __dadd_rn(-__dmul_rn(actor_scale,advantage),cost_scale));
+                    if(receipts[i].legal_count>1)
+                        baseline_gradients[i]=__fmul_rn(critic_scale,difference);
+                    if(!isfinite(baseline) || !isfinite(raw_square) ||
+                       !isfinite(coefficients[i]) || !isfinite(baseline_gradients[i]))
+                        atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
+                }
             }
         }
     }

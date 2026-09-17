@@ -1249,6 +1249,13 @@ pub struct SemanticTensorInput {
     pub native_allocation: Option<DeviceAllocationProvenance>,
 }
 
+/// Retained original tensor producers for one prepared bank's autograd
+/// delivery boundary. The binding owns the consumed DLPack records until the
+/// Python-side delivery owner is retired; it grants no publication authority.
+pub struct SemanticGradientDeliveryBinding {
+    _tensors: Vec<PreparedSemanticTensor>,
+}
+
 /// A producer-declared storage object within one complete backing allocation.
 /// Storage identity is its ordinal, not an address or a tensor version counter.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5845,6 +5852,35 @@ impl PreparedStepInputs {
         }
         Ok(false)
     }
+
+    fn owns_bank_model_tensor(
+        &self,
+        bank: usize,
+        tensor: &PreparedSemanticTensor,
+    ) -> Result<bool, SemanticTransitionError> {
+        if bank > 1 || !(18..=25).contains(&tensor.layout.role) {
+            return Ok(false);
+        }
+        let Some(input) = self
+            .plans
+            .iter()
+            .find(|input| (input.role, input.index) == (tensor.layout.role, tensor.layout.index))
+        else {
+            return Ok(false);
+        };
+        let view = &self.views[bank][&(input.role, input.index)];
+        let range = self.storage.bank_templates[bank]
+            .iter()
+            .find(|range| (range.role, range.index) == (input.role, input.index))
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        Ok(step_input_alias_matches(
+            input,
+            range,
+            *view.device_ptr(),
+            view.len(),
+            tensor_content_identity(tensor),
+        ) && step_input_allocation_matches(tensor, view))
+    }
 }
 
 fn step_input_allocation_matches(
@@ -8148,6 +8184,7 @@ struct PolicyBackward {
     objective: u64,
     objective_groups: u64,
     objective_group_members: u64,
+    roster_rows: u64,
     origin_candidate: u64,
     origin_lease: u64,
     origin_bank: u64,
@@ -8448,6 +8485,7 @@ struct PolicyStorage {
     text_binding: Arc<TextBindingStorage>,
     replacement: Option<PolicyReplacement>,
     tape_live: bool,
+    temporal_vjp_recorded: u8,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -8597,7 +8635,7 @@ struct PolicyVjpRecording {
 #[derive(Clone, Copy)]
 enum PolicyVjpInput<'a> {
     External(&'a DeviceMemoryView<f64>),
-    Selected {
+    UpdateObjective {
         training: &'a SemanticSelectedTrainingView,
         origin_candidate: u64,
         origin_lease: &'a TrackedCudaSlice<PublicationLease>,
@@ -8644,8 +8682,8 @@ const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3256);
 const _: () = assert!(size_of::<DeviceState>() == 6952);
 const _: () = assert!(size_of::<PolicyField>() == 24);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 480);
-const _: () = assert!(size_of::<PolicyBackward>() == 136);
-const _: () = assert!(size_of::<Descriptor>() == 808);
+const _: () = assert!(size_of::<PolicyBackward>() == 144);
+const _: () = assert!(size_of::<Descriptor>() == 816);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -11447,6 +11485,93 @@ impl SemanticTransitionSession {
             return Err(error);
         }
         Ok(handle)
+    }
+
+    /// Authenticate and retain the original physical tensor rows used by one
+    /// prepared bank's AccumulateGrad delivery owner. Every row must be the
+    /// exact typed alias of that bank's roles 18 through 25.
+    pub fn bind_prepared_gradient_delivery(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        tensors: Vec<SemanticTensorInput>,
+        consumer_stream: u64,
+    ) -> Result<SemanticGradientDeliveryBinding, SemanticTransitionError> {
+        self.check_prepared_cold(step)?;
+        dlpack_consumer_stream(consumer_stream)?;
+        if bank > 1 || tensors.is_empty() {
+            return Err(publication_input_error(
+                "gradient delivery requires one prepared bank and a nonempty physical roster",
+            ));
+        }
+        let imported = prepare_semantic_tensors(&self.provider, tensors)?;
+        let inputs = self.steps[&step.token]
+            .inputs
+            .as_ref()
+            .expect("fixed input owner");
+        for tensor in &imported {
+            if !inputs.owns_bank_model_tensor(bank, tensor)? {
+                return Err(publication_input_error(
+                    "gradient delivery input differs from its prepared bank tensor",
+                ));
+            }
+        }
+        for role in [
+            SemanticStateRole::Gradients as u64,
+            SemanticStateRole::GradientAccumulation as u64,
+        ] {
+            let expected = inputs
+                .plans
+                .iter()
+                .filter(|input| input.role == role)
+                .map(|input| (input.role, input.index))
+                .collect::<BTreeSet<_>>();
+            let actual_rows = imported.iter().filter(|tensor| tensor.layout.role == role);
+            let actual = actual_rows
+                .clone()
+                .map(|tensor| (tensor.layout.role, tensor.layout.index))
+                .collect::<BTreeSet<_>>();
+            if actual != expected || actual_rows.count() != actual.len() {
+                return Err(publication_input_error(
+                    "gradient delivery requires every canonical gradient and presence input exactly once",
+                ));
+            }
+        }
+        let is_phase_mask = |layout: &SemanticTensorLayout| {
+            layout.role == SemanticStateRole::TrainingSchedule as u64
+                && layout.element_bytes == 1
+                && layout.scalar_type == 8
+                && layout.rank == 1
+                && layout.logical_axis == u64::MAX
+                && layout.dimensions == [3, 0, 0, 0]
+                && layout.strides_bytes == [1, 0, 0, 0]
+        };
+        let expected_phase_masks = inputs
+            .plans
+            .iter()
+            .filter(|input| is_phase_mask(&input.layout))
+            .map(|input| (input.role, input.index))
+            .collect::<BTreeSet<_>>();
+        let actual_phase_mask_rows = imported
+            .iter()
+            .filter(|tensor| is_phase_mask(&tensor.layout));
+        let actual_phase_masks = actual_phase_mask_rows
+            .clone()
+            .map(|tensor| (tensor.layout.role, tensor.layout.index))
+            .collect::<BTreeSet<_>>();
+        if actual_phase_masks != expected_phase_masks
+            || actual_phase_mask_rows.count() != actual_phase_masks.len()
+        {
+            return Err(publication_input_error(
+                "gradient delivery requires every canonical phase mask exactly once",
+            ));
+        }
+        self.steps
+            .get_mut(&step.token)
+            .expect("checked gradient-delivery step")
+            .consumer_streams
+            .insert(consumer_stream);
+        Ok(SemanticGradientDeliveryBinding { _tensors: imported })
     }
 
     /// Attach actual original output owners as they are born during recording.
@@ -16920,6 +17045,7 @@ impl SemanticTransitionSession {
             text_binding,
             replacement: None,
             tape_live: false,
+            temporal_vjp_recorded: 0,
         });
         Ok(())
     }
@@ -17258,6 +17384,7 @@ impl SemanticTransitionSession {
             }),
             buffers: self.allocate_policy_buffers()?,
             tape_live: false,
+            temporal_vjp_recorded: 0,
             text_binding,
         };
         // Changing captured pointer arguments invalidates the old executable.
@@ -17539,7 +17666,7 @@ impl SemanticTransitionSession {
             state,
             &tape.components,
             &tape.codebooks,
-            PolicyVjpInput::Selected {
+            PolicyVjpInput::UpdateObjective {
                 training,
                 origin_candidate,
                 origin_lease,
@@ -17621,7 +17748,21 @@ impl SemanticTransitionSession {
     }
 
     #[cfg(feature = "semantic-policy")]
-    pub fn record_selected_prepared_policy_vjp(
+    /// Record one original proposal tape's complete policy contribution to the
+    /// Update objective. Actor/critic/cost and supervised-edit coefficients
+    /// are combined only when their authenticated rows name this exact tape.
+    pub fn record_prepared_update_policy_vjp(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        update_step: &SemanticPreparedStep,
+        consumer_stream: u64,
+    ) -> Result<SemanticPreparedPolicyGradients, SemanticTransitionError> {
+        self.record_prepared_policy_vjp(step, bank, update_step, consumer_stream)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn record_prepared_policy_vjp(
         &mut self,
         step: &SemanticPreparedStep,
         bank: usize,
@@ -17670,14 +17811,18 @@ impl SemanticTransitionSession {
             .prepared
             .as_ref()
             .expect("checked prepared Update owner");
-        if update
+        let update_capture_bank = update
             .model_work
             .as_ref()
             .and_then(|work| work.capture_bank)
-            .is_none()
-        {
+            .ok_or_else(|| {
+                publication_input_error(
+                    "temporal policy backward requires an active Update bank capture",
+                )
+            })?;
+        if update_capture_bank > 1 {
             return Err(publication_input_error(
-                "temporal policy backward records inside an active Update bank capture",
+                "temporal policy backward has an invalid Update capture bank",
             ));
         }
         let training = update.training_view.as_ref().ok_or_else(|| {
@@ -17687,13 +17832,19 @@ impl SemanticTransitionSession {
             .prepared
             .as_ref()
             .expect("checked prepared Proposal owner");
+        if proposal.transition_recorded & (1 << bank) == 0 {
+            return Err(publication_input_error(
+                "temporal policy backward requires the recorded original Proposal branch",
+            ));
+        }
         let branch = &proposal.branches[bank];
         let policy = branch.policy.as_ref().ok_or_else(|| {
             publication_input_error("prepared Proposal bank has no bound policy tape")
         })?;
-        if !policy.tape_live {
+        let update_capture_bit = 1u8 << update_capture_bank;
+        if policy.temporal_vjp_recorded & update_capture_bit != 0 {
             return Err(publication_input_error(
-                "prepared Proposal bank has no live original policy tape",
+                "prepared Proposal bank already recorded this Update capture's policy VJP",
             ));
         }
         let support = branch.support.as_ref().ok_or_else(|| {
@@ -17716,7 +17867,7 @@ impl SemanticTransitionSession {
             &branch.state,
             &components,
             &codebooks,
-            PolicyVjpInput::Selected {
+            PolicyVjpInput::UpdateObjective {
                 training,
                 origin_candidate,
                 origin_lease: &proposal.reader,
@@ -17746,6 +17897,17 @@ impl SemanticTransitionSession {
             None,
             Some(&baseline_snapshot),
         )?;
+        self.steps
+            .get_mut(&step.token)
+            .expect("checked prepared Proposal owner")
+            .prepared
+            .as_mut()
+            .expect("checked prepared Proposal")
+            .branches[bank]
+            .policy
+            .as_mut()
+            .expect("checked prepared policy tape")
+            .temporal_vjp_recorded |= update_capture_bit;
         Ok(SemanticPreparedPolicyGradients {
             layout,
             parameters,
@@ -17870,13 +18032,14 @@ impl SemanticTransitionSession {
             objective,
             objective_groups,
             objective_group_members,
+            roster_rows,
             origin_candidate,
             origin_lease,
             origin_bank,
             mode,
         ) = match input {
-            PolicyVjpInput::External(_) => (0, 0, 0, 0, 0, 0, 0, 0),
-            PolicyVjpInput::Selected {
+            PolicyVjpInput::External(_) => (0, 0, 0, 0, 0, 0, 0, 0, 0),
+            PolicyVjpInput::UpdateObjective {
                 training,
                 origin_candidate,
                 origin_lease,
@@ -17886,6 +18049,7 @@ impl SemanticTransitionSession {
                 *training.objective().device_ptr(),
                 *training.objective_groups().device_ptr(),
                 *training.objective_group_members().device_ptr(),
+                *training.roster_rows().device_ptr(),
                 origin_candidate,
                 origin_lease.device_ptr_value(),
                 origin_bank as u64,
@@ -17906,6 +18070,7 @@ impl SemanticTransitionSession {
             objective,
             objective_groups,
             objective_group_members,
+            roster_rows,
             origin_candidate,
             origin_lease,
             origin_bank,
@@ -17926,7 +18091,7 @@ impl SemanticTransitionSession {
             PolicyVjpInput::External(score_cotangents) => {
                 recorder.read(score_cotangents);
             }
-            PolicyVjpInput::Selected {
+            PolicyVjpInput::UpdateObjective {
                 training,
                 origin_lease,
                 ..
@@ -17935,6 +18100,7 @@ impl SemanticTransitionSession {
                 recorder.read(&training.objective());
                 recorder.read(&training.objective_groups());
                 recorder.read(&training.objective_group_members());
+                recorder.read(&training.roster_rows());
                 recorder.read(state);
                 recorder.read(origin_lease);
             }
