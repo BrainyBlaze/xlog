@@ -1169,6 +1169,10 @@ static void empty_model_storage_keeps_metadata_without_device_cells() {
 }
 
 struct StepPublicationFixture {
+    static constexpr uint64_t kTaskQueryCount=3;
+    static constexpr uint64_t kFeedbackCapacity=kTaskQueryCount;
+    static constexpr uint64_t kActiveRowCapacity=32+kFeedbackCapacity;
+    static constexpr uint64_t kStepInputCount=26;
     RefusalExecution execution;
     std::vector<std::vector<uint64_t>> allocations;
     std::vector<PublicationStorageEntry> storage;
@@ -1180,7 +1184,7 @@ struct StepPublicationFixture {
     PublicationControl control{};
     PublicationLease lease{};
     PendingContinuation pending{};
-    std::array<uint64_t,27> task{};
+    std::array<uint64_t,34> task{};
     uint64_t terminal_token=17;
 
     uint64_t allocate(uint64_t bytes) {
@@ -1197,7 +1201,7 @@ struct StepPublicationFixture {
         uint64_t tensor_count=0;
         for(uint64_t role=1;role<=55;++role)if(publication_tensor_role(role))++tensor_count;
         for(uint64_t role=1;role<=55;++role) {
-            roles[role-1]={role,role==16 ? 2ULL : 1ULL};
+            roles[role-1]={role,role==16 ? kTaskQueryCount : 1ULL};
             for(uint64_t index=0;index<roles[role-1].count;++index) {
                 uint64_t length=8,capacity=8;
                 PublicationTensorLayout layout{};
@@ -1206,12 +1210,13 @@ struct StepPublicationFixture {
                     layout.rank=1;layout.logical_axis=UINT64_MAX;layout.dimensions[0]=2;layout.strides_bytes[0]=4;
                     if(role==4 || role==5 || role==51 || role==52) {
                         layout.rank=4;layout.logical_axis=2;layout.dimensions[0]=layout.dimensions[1]=1;
-                        layout.dimensions[2]=role<51 ? 64 : 34;layout.dimensions[3]=2;
+                        layout.dimensions[2]=role<51 ? 64 : kActiveRowCapacity;layout.dimensions[3]=2;
                         layout.strides_bytes[3]=4;layout.strides_bytes[2]=8;
                         layout.strides_bytes[1]=layout.strides_bytes[0]=layout.dimensions[2]*8;
                         capacity=length=layout.strides_bytes[0];
                     } else if(role==53 || role==54) {
-                        layout.logical_axis=0;layout.dimensions[0]=34;capacity=length=34*4;
+                        layout.logical_axis=0;layout.dimensions[0]=kActiveRowCapacity;
+                        capacity=length=kActiveRowCapacity*4;
                     }
                     if(role>=51 && role<=54)length=0;
                     layouts.push_back(layout);
@@ -1220,13 +1225,13 @@ struct StepPublicationFixture {
                 if(role==2){length=0;capacity=64*sizeof(TokenProvenanceRecord);}
                 if(role==3)capacity=length=32;
                 if(role==14)capacity=length=sizeof(CompletionCoverage);
-                if(role==15)capacity=length=2*sizeof(RawFeedbackRecord);
+                if(role==15)capacity=length=kFeedbackCapacity*sizeof(RawFeedbackRecord);
                 if(role==30){length=sizeof(IntentQueueHeader);capacity=length+(drain_required ? sizeof(IntentEntry) : 0);}
                 if(role==31){length=1;if(drain_required)capacity=32;}
                 if(role==33)capacity=length=sizeof(AttemptReceipt);
                 if(role==48)capacity=length=sizeof(execution.books);
                 if(role==55){length=sizeof(TensorLayoutTableHeader)+tensor_count*sizeof(PublicationTensorLayout);
-                    capacity=length+34*sizeof(ActiveRow);}
+                    capacity=length+kActiveRowCapacity*sizeof(ActiveRow);}
                 PublicationRange item{};item.role=role;item.index=index;item.generation=1;
                 item.length_bytes=length;item.storage_slot=allocate(capacity);
                 directories[0].push_back(item);
@@ -1268,11 +1273,14 @@ struct StepPublicationFixture {
             control.banks[bank]=reinterpret_cast<uint64_t>(&banks[bank]);
             control.directories[bank]=reinterpret_cast<uint64_t>(directories[bank].data());
         }
-        task[0]=3;task[1]=91;task[6]=11;task[10]=21;task[14]=1;task[15]=2;
-        task[19]=14;task[20]=7;task[21]=1;task[22]=45;task[23]=15;task[24]=1;task[25]=task[26]=7;
+        task[0]=4;task[1]=91;task[6]=11;task[10]=task[14]=21;
+        task[18]=1;task[19]=task[20]=2;
+        task[22]=task[23]=task[24]=0;
+        task[25]=14;task[26]=7;task[27]=1;task[28]=45;task[29]=15;task[30]=1;
+        task[31]=task[32]=task[33]=7;
         execution.descriptor.task=reinterpret_cast<uint64_t>(task.data());
         contract.abi=1;contract.range_capacity=directories[0].size();contract.prefix_capacity=64;
-        contract.window_capacity=32;contract.feedback_capacity=2;contract.max_position=96;
+        contract.window_capacity=32;contract.feedback_capacity=kFeedbackCapacity;contract.max_position=96;
         contract.model_generation=3;contract.authority_generation=4;contract.semantic_owner=91;
         if(drain_required){contract.terminal_tokens=reinterpret_cast<uint64_t>(&terminal_token);contract.terminal_token_count=1;}
         contract.role_count=roles.size();contract.role_counts=reinterpret_cast<uint64_t>(roles.data());
@@ -1375,12 +1383,14 @@ static void recompute_execution_preserves_proposal_state(bool drain_required) {
     fixture.pending.ranges=reinterpret_cast<uint64_t>(fixture.pending_ranges.data());
     fixture.pending.range_count=fixture.pending_ranges.size();
     ResidentTextServices text;
-    std::array<ActiveRow,34> active_rows{};active_rows[0]={0,0,0,1};
+    std::array<ActiveRow,StepPublicationFixture::kActiveRowCapacity> active_rows{};
+    active_rows[0]={0,0,0,1};
     uint64_t active_count=1;uint8_t numerical=1;
     const auto* original_feedback=static_cast<const RawFeedbackRecord*>(fixture.data(fixture.range(fixture.lease.bank,15)));
     for(uint64_t slot=0;slot<fixture.contract.feedback_capacity;++slot)if(original_feedback[slot].valid)
         active_rows[active_count++]={1+slot,32+slot,fixture.contract.prefix_capacity+32+slot,3};
-    if(!drain_required){text.count=1;text.rows[0]={1,1};active_rows[active_count++]={3,1,1,2};}
+    if(!drain_required){text.count=1;text.rows[0]={1,1};
+        active_rows[active_count++]={1+fixture.contract.feedback_capacity,1,1,2};}
     ContinuationInputs inputs{text.binding(),reinterpret_cast<uint64_t>(active_rows.data()),
         reinterpret_cast<uint64_t>(&active_count),reinterpret_cast<uint64_t>(&numerical),2,sizeof(uint64_t)};
     semantic_publication_prepare_continuation(reinterpret_cast<uint64_t>(&fixture.control),
@@ -1565,14 +1575,15 @@ static void step_inputs_follow_device_selected_resident_bank() {
     struct Outputs {
         PublicationHeader header;
         SourceSlot source[32];
-        PublicationRange ranges[25];
-        alignas(8) uint8_t copied[25][2*sizeof(RawFeedbackRecord)];
+        PublicationRange ranges[StepPublicationFixture::kStepInputCount];
+        alignas(8) uint8_t copied[StepPublicationFixture::kStepInputCount]
+            [StepPublicationFixture::kFeedbackCapacity*sizeof(RawFeedbackRecord)];
         uint64_t metadata_digests[2][4];
     };
     auto* outputs=static_cast<Outputs*>(mmap(nullptr,2*sizeof(Outputs),PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0));
     require(outputs!=MAP_FAILED,"step fixture shared output allocation failed");
     auto* first_outputs=outputs;
-    std::array<std::array<PublicationStepInput,25>,2> bindings{};
+    std::array<std::array<PublicationStepInput,StepPublicationFixture::kStepInputCount>,2> bindings{};
     const auto bind_outputs=[&] {
         for(uint64_t bank=0;bank<2;++bank) {
             uint64_t cursor=0;
