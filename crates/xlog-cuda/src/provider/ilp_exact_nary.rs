@@ -431,9 +431,7 @@ impl super::CudaKernelProvider {
         // ── D2D columnar concatenation (setup-phase, never host) ──────
         let concat =
             |bufs: &[(&CudaBuffer, u32, u32)], total: usize| -> Result<TrackedCudaSlice<u8>> {
-                let mut out = self
-                    .memory
-                    .alloc::<u8>((total * U64_SIZE).max(U64_SIZE))?;
+                let mut out = self.memory.alloc::<u8>((total * U64_SIZE).max(U64_SIZE))?;
                 let device = self.device.inner();
                 let mut element_offset: usize = 0;
                 for (buf, arity, rows) in bufs {

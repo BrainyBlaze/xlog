@@ -4346,10 +4346,7 @@ pub(crate) mod tests {
         XlogError::Kernel(error.to_string())
     }
 
-    fn download_test_arena(
-        provider: &CudaKernelProvider,
-        graph: &SemanticHypergraph,
-    ) -> Vec<u64> {
+    fn download_test_arena(provider: &CudaKernelProvider, graph: &SemanticHypergraph) -> Vec<u64> {
         let mut arena = vec![0; graph.arena_words as usize];
         provider
             .dtoh_sync_copy_into_tracked(&graph.arena, &mut arena)
@@ -4477,10 +4474,7 @@ pub(crate) mod tests {
             ],
         );
         assert_eq!(repeated.words[0], STATUS_STALE_GENERATION);
-        assert_eq!(
-            download_test_arena(&provider, &graph),
-            retained
-        );
+        assert_eq!(download_test_arena(&provider, &graph), retained);
         let (reused, replacement) = retirement_insert_root(&mut graph, parent, 301, 401);
         assert_eq!(reused.slot, loser.slot);
         assert_eq!(reused.generation, loser.generation + 1);
@@ -4835,10 +4829,7 @@ pub(crate) mod tests {
         let stale = discard(&graph);
         assert_eq!(stale[4].words[0], STATUS_STALE_GENERATION);
         assert_eq!(stale[3].words, before[3].words);
-        assert_eq!(
-            download_test_arena(&provider, &graph),
-            arena
-        );
+        assert_eq!(download_test_arena(&provider, &graph), arena);
         let reused = graph
             .enqueue_resident_insert_support(
                 next.candidate_handle(),
@@ -4858,10 +4849,7 @@ pub(crate) mod tests {
         assert_eq!(sealed[2].words[9], before[2].words[9]);
         assert_eq!(sealed[2].words[10], before[2].words[10] + 1);
         assert_eq!(sealed[4].words[0], STATUS_INVALID_COMMAND);
-        assert_eq!(
-            download_test_arena(&provider, &graph),
-            sealed_arena
-        );
+        assert_eq!(download_test_arena(&provider, &graph), sealed_arena);
     }
 
     #[test]

@@ -25228,14 +25228,7 @@ mod text_parent_tests {
                 .collect::<Vec<_>>(),
             std::iter::once((1, 0))
                 .chain((3..=13).map(|role| (role, 0)))
-                .chain([
-                    (15, 0),
-                    (16, 0),
-                    (16, 1),
-                    (16, 2),
-                    (17, 0),
-                    (44, 0),
-                ])
+                .chain([(15, 0), (16, 0), (16, 1), (16, 2), (17, 0), (44, 0),])
                 .collect::<Vec<_>>()
         );
         assert_eq!(plan[0].banks[0].span.len(), 64 * size_of::<SourceSlot>());

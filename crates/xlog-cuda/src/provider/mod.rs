@@ -1766,10 +1766,7 @@ impl CudaKernelProvider {
         Ok(())
     }
 
-    pub(crate) fn dtoh_sync_copy_into_tracked<
-        T: DeviceRepr,
-        Src: crate::memory::DeviceRead<T>,
-    >(
+    pub(crate) fn dtoh_sync_copy_into_tracked<T: DeviceRepr, Src: crate::memory::DeviceRead<T>>(
         &self,
         src: &Src,
         dst: &mut [T],
