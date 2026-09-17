@@ -13,8 +13,8 @@ use xlog_core::{resolve_bool, MemoryBudget, Result, Schema, XlogError};
 use crate::arrow_device::ArrowDeviceImport;
 use crate::cuda_compat::{AsKernelParam, DeviceParamStorage, IntoKernelParamStorage};
 use crate::device_runtime::resource::{
-    block_use_registry, Access, AllocationAccounting, AllocationRequest, DeviceAccessDependencies,
-    MemoryStorageOwner, MemoryUse, MemoryUseGroup, RetainedStorageUse,
+    block_use_registry, Access, AllocationAccounting, AllocationRequest, BlockUseRegistry,
+    DeviceAccessDependencies, MemoryStorageOwner, MemoryUse, MemoryUseGroup, RetainedStorageUse,
 };
 use crate::device_runtime::{
     AllocTag, BlockId, BlockState, DeviceBlock, ResourceError, RuntimeMemoryReservation, StreamId,
@@ -1966,7 +1966,17 @@ impl MemoryOperationOwner {
         if self.captured.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut dependencies = self.manifest.runtime_dependencies.clone();
+        let mut dependencies = Vec::new();
+        for (dependency, access) in &self.manifest.runtime_dependencies {
+            if let Some((_, existing_access)) = dependencies
+                .iter_mut()
+                .find(|(existing, _)| Arc::ptr_eq(existing, dependency))
+            {
+                *existing_access = crate::launch::combine_access(*existing_access, *access);
+            } else {
+                dependencies.push((Arc::clone(dependency), *access));
+            }
+        }
         for retained in &self.retained {
             let dependency = retained.owner.dependencies()?;
             if let Some((_, access)) = dependencies
@@ -2004,9 +2014,10 @@ impl MemoryOperationOwner {
                 "device memory completion requires prepared dependencies".into(),
             )
         })?;
-        for (dependency, access) in dependencies {
-            dependency.record_completion(Arc::clone(&self.stream), *access)?;
-        }
+        DeviceAccessDependencies::record_operation_completion(
+            dependencies,
+            Arc::clone(&self.stream),
+        )?;
         self.cancel(&[group])
     }
 }
@@ -2231,7 +2242,7 @@ pub(crate) fn admit_memory_access(
         .iter()
         .flat_map(|(context, ranges)| ranges.iter().map(|range| (*context, *range)))
         .collect::<Vec<_>>();
-    let mut manifest = Arc::new(MemoryAccessManifest {
+    let mut manifest = MemoryAccessManifest {
         // Even an empty span retains its actual owner; weak overlap discovery
         // is an alias rendezvous, not proof that the source is owned.
         retained: accesses
@@ -2243,32 +2254,44 @@ pub(crate) fn admit_memory_access(
         runtimes: runtime.iter().cloned().collect(),
         runtime_dependencies: Vec::new(),
         runtime_allocations: Vec::new(),
-    });
-    {
-        let registry = block_use_registry()
-            .lock()
-            .expect("device block-use registry poisoned");
-        let owned = Arc::get_mut(&mut manifest).expect("new memory manifest is unique");
-        if let Some(runtime) = &runtime {
-            for use_ in runtime_uses {
-                let dependencies = runtime
-                    .allocation_dependencies(use_.block, use_.bytes)?
-                    .ok_or_else(|| {
-                        ResourceError::StreamMisuse(
-                            "recorded block backend does not expose allocation dependencies".into(),
-                        )
-                    })?;
-                owned
-                    .runtime_allocations
-                    .push(dependencies.retain_allocation()?);
-                owned.runtime_dependencies.push((dependencies, use_.access));
-            }
-        }
-        for (context, ranges) in &ranges_by_context {
-            registry.retain_storage_uses(*context, ranges, &mut owned.retained)?;
+    };
+    let mut registry = block_use_registry()
+        .lock()
+        .expect("device block-use registry poisoned");
+    if let Some(runtime) = &runtime {
+        for use_ in runtime_uses {
+            let dependencies = runtime
+                .allocation_dependencies(use_.block, use_.bytes)?
+                .ok_or_else(|| {
+                    ResourceError::StreamMisuse(
+                        "recorded block backend does not expose allocation dependencies".into(),
+                    )
+                })?;
+            manifest
+                .runtime_allocations
+                .push(dependencies.retain_allocation()?);
+            manifest
+                .runtime_dependencies
+                .push((dependencies, use_.access));
         }
     }
-    admit_memory_manifest(stream, manifest, execution_id)
+    for (context, ranges) in &ranges_by_context {
+        registry.retain_storage_uses(*context, ranges, &mut manifest.retained)?;
+    }
+    let manifest = Arc::new(manifest);
+    // Owner discovery and range reservation share this registry lock. A fresh
+    // manifest therefore needs no second alias scan during admission.
+    let group = reserve_memory_manifest_locked(&mut registry, &manifest);
+    drop(registry);
+    let retained = manifest
+        .retained
+        .iter()
+        .map(|retained| RetainedStorageUse {
+            owner: Arc::clone(&retained.owner),
+            access: retained.access,
+        })
+        .collect();
+    memory_operation_transaction(stream, manifest, retained, execution_id, group?)
 }
 
 pub(crate) fn admit_memory_manifest(
@@ -2277,49 +2300,66 @@ pub(crate) fn admit_memory_manifest(
     execution_id: u64,
 ) -> crate::device_runtime::ResourceResult<RecorderTransaction<MemoryOperationOwner, MemoryUseGroup>>
 {
-    let completion = Arc::new(OperationCompletion::new(execution_id));
-    let mut owner = Arc::new(MemoryOperationOwner {
+    let mut retained = manifest
+        .retained
+        .iter()
+        .map(|retained| RetainedStorageUse {
+            owner: Arc::clone(&retained.owner),
+            access: retained.access,
+        })
+        .collect::<Vec<_>>();
+    let mut registry = block_use_registry()
+        .lock()
+        .expect("device block-use registry poisoned");
+    // Passive manifests may outlive their original admission. Refresh aliases
+    // once, then reserve their complete ranges under this same registry lock.
+    let mut ranges_by_context = std::collections::BTreeMap::<usize, Vec<MemoryUse>>::new();
+    for (context, range) in &manifest.ranges {
+        ranges_by_context.entry(*context).or_default().push(*range);
+    }
+    for (context, ranges) in ranges_by_context {
+        registry.retain_storage_uses(context, &ranges, &mut retained)?;
+    }
+    let group = reserve_memory_manifest_locked(&mut registry, &manifest);
+    drop(registry);
+    memory_operation_transaction(stream, manifest, retained, execution_id, group?)
+}
+
+fn reserve_memory_manifest_locked(
+    registry: &mut BlockUseRegistry,
+    manifest: &MemoryAccessManifest,
+) -> crate::device_runtime::ResourceResult<MemoryUseGroup> {
+    let source_proofs = manifest
+        .accesses
+        .iter()
+        .map(|access| access.storage.dependencies.reclamation.release_proof())
+        .chain(
+            manifest
+                .runtime_dependencies
+                .iter()
+                .map(|(deps, _)| deps.reclamation.release_proof()),
+        )
+        .collect::<Vec<_>>();
+    registry.reserve_owned_memory_uses(&manifest.ranges, &source_proofs)
+}
+
+fn memory_operation_transaction(
+    stream: Arc<CudaStream>,
+    manifest: Arc<MemoryAccessManifest>,
+    retained: Vec<RetainedStorageUse>,
+    execution_id: u64,
+    group: MemoryUseGroup,
+) -> crate::device_runtime::ResourceResult<RecorderTransaction<MemoryOperationOwner, MemoryUseGroup>>
+{
+    let owner = Arc::new(MemoryOperationOwner {
         stream,
-        retained: manifest
-            .retained
-            .iter()
-            .map(|retained| RetainedStorageUse {
-                owner: Arc::clone(&retained.owner),
-                access: retained.access,
-            })
-            .collect(),
         manifest,
+        retained,
         captured: std::sync::atomic::AtomicBool::new(false),
         dependencies: std::sync::OnceLock::new(),
-        completion,
+        completion: Arc::new(OperationCompletion::new(execution_id)),
     });
-    let transaction = {
-        let mut registry = block_use_registry()
-            .lock()
-            .expect("device block-use registry poisoned");
-        let owned = Arc::get_mut(&mut owner).expect("new memory operation owner is unique");
-        // New external aliases can arrive after capture. Discover their current
-        // dependency owners again under the same atomic admission lock.
-        for (context, range) in &owned.manifest.ranges {
-            registry.retain_storage_uses(*context, &[*range], &mut owned.retained)?;
-        }
-        let source_proofs = owned
-            .manifest
-            .accesses
-            .iter()
-            .map(|access| access.storage.dependencies.reclamation.release_proof())
-            .chain(
-                owned
-                    .manifest
-                    .runtime_dependencies
-                    .iter()
-                    .map(|(deps, _)| deps.reclamation.release_proof()),
-            )
-            .collect::<Vec<_>>();
-        let group = registry.reserve_owned_memory_uses(&owned.manifest.ranges, &source_proofs)?;
-        RecorderTransaction::from_admitted(Arc::clone(&owner), Box::new([group]))
-    };
-    Ok(transaction)
+    Ok(RecorderTransaction::from_admitted(owner, Box::new([group])))
 }
 
 pub(crate) fn with_memory_access<R>(

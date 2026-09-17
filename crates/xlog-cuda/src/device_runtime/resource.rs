@@ -5,7 +5,7 @@
 //! change. Stream-ordered: every alloc/dealloc names a stream; cross-
 //! stream reuse requires explicit event-based synchronization.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -970,6 +970,67 @@ impl DeviceAccessDependencies {
         drop(retired);
         Ok(())
     }
+
+    /// Publish one completion event to every allocation frontier touched by
+    /// an admitted operation.
+    pub(crate) fn record_operation_completion(
+        dependencies: &[(Arc<Self>, Access)],
+        stream: Arc<CudaStream>,
+    ) -> ResourceResult<()> {
+        if dependencies.is_empty() {
+            return Ok(());
+        }
+        let execution_id = crate::cuda_graph::stream_execution_id(&stream)?;
+        let event = stream.context().new_event(None)?;
+        let mut ordered = dependencies.to_vec();
+        ordered.sort_unstable_by_key(|(dependency, _)| Arc::as_ptr(dependency) as usize);
+        let mut combined = Vec::<(Arc<Self>, Access)>::with_capacity(ordered.len());
+        for (dependency, access) in ordered {
+            if let Some((existing, existing_access)) = combined.last_mut() {
+                if Arc::ptr_eq(existing, &dependency) {
+                    *existing_access = if existing_access.writes() || access.writes() {
+                        Access::ReadWrite
+                    } else {
+                        Access::Read
+                    };
+                    continue;
+                }
+            }
+            combined.push((dependency, access));
+        }
+        // Lock every frontier in address order before recording. This keeps
+        // publication atomic without allowing two multi-allocation operations
+        // to acquire the same frontier set in opposite orders.
+        let mut states = Vec::with_capacity(combined.len());
+        for (dependency, access) in &combined {
+            states.push((
+                dependency
+                    .state
+                    .lock()
+                    .expect("device access dependencies poisoned"),
+                *access,
+            ));
+        }
+        if let Err(error) = event.record(&stream) {
+            drop(states);
+            return Err(ResourceError::Driver(format!(
+                "device access completion event record failed: {error}"
+            )));
+        }
+        // One stream event proves completion of the whole admitted operation;
+        // each allocation frontier retains the same event and stream owner.
+        let event = Arc::new(RetainedAccessEvent {
+            event,
+            _stream: stream,
+        });
+        let retired = states
+            .iter_mut()
+            .filter_map(|(state, access)| state.publish(execution_id, Arc::clone(&event), *access))
+            .collect::<Vec<_>>();
+        drop(states);
+        drop(retired);
+        Ok(())
+    }
 }
 
 /// Compact identity of a [`DeviceBlock`] suitable for snapshotting
@@ -1260,12 +1321,19 @@ pub(crate) struct RetainedStorageUse {
 }
 
 struct RegisteredStorage {
-    context: usize,
     range: MemoryUse,
     owner: std::sync::Weak<dyn MemoryStorageOwner>,
     // Set only after cold retirement has finished. A failed Weak upgrade while
     // this is false means retirement is running or uncertain, not empty history.
     released: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Default)]
+struct RegisteredStorageIndex {
+    // The maximum registered span bounds the only start keys that can overlap
+    // a queried range, while the ordered map excludes later allocations.
+    by_start: BTreeMap<u64, Vec<RegisteredStorage>>,
+    max_span: u64,
 }
 
 /// Exact reservation identity. Releasing one operation cannot release a
@@ -1293,7 +1361,7 @@ impl PreparedMemoryUses {
 pub(crate) struct BlockUseRegistry {
     prepared_memory: HashMap<MemoryUseGroup, PreparedMemoryUses>,
     next_memory_group: u64,
-    storage: Vec<RegisteredStorage>,
+    storage: HashMap<usize, RegisteredStorageIndex>,
 }
 
 /// One admission registry for safe XLOG operations, including independently
@@ -1312,10 +1380,11 @@ impl BlockUseRegistry {
         owner: std::sync::Weak<dyn MemoryStorageOwner>,
         released: Arc<std::sync::atomic::AtomicBool>,
     ) {
-        self.storage
-            .retain(|entry| !entry.released.load(std::sync::atomic::Ordering::Acquire));
-        self.storage.push(RegisteredStorage {
-            context,
+        let index = self.storage.entry(context).or_default();
+        index.max_span = index.max_span.max(range.end.saturating_sub(range.start));
+        let entries = index.by_start.entry(range.start).or_default();
+        entries.retain(|entry| !entry.released.load(std::sync::atomic::Ordering::Acquire));
+        entries.push(RegisteredStorage {
             range,
             owner,
             released,
@@ -1326,31 +1395,48 @@ impl BlockUseRegistry {
     /// deliberately leaves earlier snapshots in the caller's vector, so the
     /// caller can release the registry mutex before dropping the last owner.
     pub(crate) fn retain_storage_uses(
-        &self,
+        &mut self,
         context: usize,
         uses: &[MemoryUse],
         retained: &mut Vec<RetainedStorageUse>,
     ) -> ResourceResult<()> {
-        for entry in &self.storage {
-            if entry.context != context || entry.released.load(std::sync::atomic::Ordering::Acquire)
+        let Some(index) = self.storage.get_mut(&context) else {
+            return Ok(());
+        };
+        for use_ in uses {
+            let first_possible_start = use_.start.saturating_sub(index.max_span);
+            for entries in index
+                .by_start
+                .range_mut(first_possible_start..use_.end)
+                .map(|(_, entries)| entries)
             {
-                continue;
+                entries.retain(|entry| !entry.released.load(std::sync::atomic::Ordering::Acquire));
+                for entry in entries {
+                    if !use_.overlaps(entry.range) {
+                        continue;
+                    }
+                    let owner = entry.owner.upgrade().ok_or_else(|| {
+                        ResourceError::StreamMisuse(
+                            "overlapping device storage is retiring without proven release".into(),
+                        )
+                    })?;
+                    if let Some(existing) = retained
+                        .iter_mut()
+                        .find(|existing| Arc::ptr_eq(&existing.owner, &owner))
+                    {
+                        existing.access = if existing.access.writes() || use_.access.writes() {
+                            Access::ReadWrite
+                        } else {
+                            Access::Read
+                        };
+                    } else {
+                        retained.push(RetainedStorageUse {
+                            owner,
+                            access: use_.access,
+                        });
+                    }
+                }
             }
-            let mut overlaps = uses.iter().filter(|use_| use_.overlaps(entry.range));
-            let Some(first) = overlaps.next() else {
-                continue;
-            };
-            let access = if first.access.writes() || overlaps.any(|use_| use_.access.writes()) {
-                Access::ReadWrite
-            } else {
-                Access::Read
-            };
-            let owner = entry.owner.upgrade().ok_or_else(|| {
-                ResourceError::StreamMisuse(
-                    "overlapping device storage is retiring without proven release".into(),
-                )
-            })?;
-            retained.push(RetainedStorageUse { owner, access });
         }
         Ok(())
     }
