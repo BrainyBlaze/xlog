@@ -4683,6 +4683,7 @@ fn upload_publication<T: DeviceRepr>(
         .map_err(|error| runtime_error("publication cold metadata upload", error))
 }
 
+#[cfg(feature = "semantic-policy")]
 fn account_tracked_allocation<T: cudarc::driver::DeviceRepr>(
     allocations: &mut Vec<DeviceAllocationProvenance>,
     slice: &TrackedCudaSlice<T>,
@@ -4700,6 +4701,7 @@ fn account_tracked_allocation<T: cudarc::driver::DeviceRepr>(
     Ok(())
 }
 
+#[cfg(feature = "semantic-policy")]
 fn accounted_tracked_bytes(
     allocations: Vec<DeviceAllocationProvenance>,
 ) -> Result<u64, SemanticTransitionError> {
@@ -4711,6 +4713,7 @@ fn accounted_tracked_bytes(
 }
 
 impl PublicationStorage {
+    #[cfg(feature = "semantic-policy")]
     fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
         let mut allocations = Vec::new();
         account_tracked_allocation(&mut allocations, &self.control)?;
@@ -6437,7 +6440,9 @@ struct BoundModelUpdate {
     admissibility: PreparedSemanticTensor,
     baseline_logits: PreparedSemanticTensor,
     candidate_logits: PreparedSemanticTensor,
+    #[cfg(feature = "semantic-policy")]
     accounted_reserved_bytes: u64,
+    #[cfg(feature = "semantic-policy")]
     copy_bytes: u64,
     _witness: SemanticTensorContentWitness,
     _forward_witnesses: [SemanticModelForwardWitness; 2],
@@ -6452,6 +6457,7 @@ struct ModelUpdateEvidenceOwner {
 }
 
 impl PreparedModelUpdate {
+    #[cfg(feature = "semantic-policy")]
     fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
         let mut allocations = Vec::new();
         account_tracked_allocation(&mut allocations, &self.bindings)?;
@@ -6755,6 +6761,7 @@ impl crate::cuda_compat::IntoKernelParamStorage for ModelUpdateCanaryInputs {
 }
 
 impl PreparedModelWork {
+    #[cfg(feature = "semantic-policy")]
     fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
         let mut allocations = Vec::new();
         account_tracked_allocation(&mut allocations, &self.device)?;
@@ -6762,6 +6769,7 @@ impl PreparedModelWork {
         accounted_tracked_bytes(allocations)
     }
 
+    #[cfg(feature = "semantic-policy")]
     fn record_reads(&self, recorder: &mut LaunchRecorder) {
         recorder.read(&self.device);
         recorder.read(&self.actual);
@@ -7217,6 +7225,7 @@ fn tensor_content_identity(
     )
 }
 
+#[cfg(feature = "semantic-policy")]
 fn cuda_backing_allocation(
     pointer: u64,
     required_bytes: usize,
@@ -7252,6 +7261,7 @@ fn cuda_backing_allocation(
     Ok((base, bytes))
 }
 
+#[cfg(feature = "semantic-policy")]
 fn accounted_tensor_allocations(
     tensors: &[PreparedSemanticTensor],
 ) -> Result<u64, SemanticTransitionError> {
@@ -12928,12 +12938,14 @@ impl SemanticTransitionSession {
             })
             .collect::<Vec<_>>();
         let retained_allocations = allocations.to_vec();
+        #[cfg(feature = "semantic-policy")]
         let accounted_reserved_bytes = accounted_tensor_allocations(outputs)?
             .checked_add(accounted_tensor_allocations(&[
                 baseline_logits.clone(),
                 candidate_logits.clone(),
             ])?)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        #[cfg(feature = "semantic-policy")]
         let copy_bytes = values.iter().try_fold(0u64, |total, binding| {
             total
                 .checked_add(binding.bytes)
@@ -12970,7 +12982,9 @@ impl SemanticTransitionSession {
             admissibility: admissibility.clone(),
             baseline_logits,
             candidate_logits,
+            #[cfg(feature = "semantic-policy")]
             accounted_reserved_bytes,
+            #[cfg(feature = "semantic-policy")]
             copy_bytes,
             _witness: witness.clone(),
             _forward_witnesses: [baseline_forward.clone(), candidate_forward.clone()],

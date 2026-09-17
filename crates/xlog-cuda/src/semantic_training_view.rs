@@ -452,6 +452,7 @@ impl SemanticSelectedTrainingView {
         self.arena.capacity
     }
 
+    #[cfg(feature = "semantic-policy")]
     pub(crate) fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
         let mut allocations: Vec<crate::memory::DeviceAllocationProvenance> = Vec::new();
         macro_rules! account {
@@ -834,6 +835,7 @@ pub(crate) struct SemanticTrainingViewArena {
     groups: TrackedCudaSlice<SemanticTrainingObjectiveGroupRecord>,
     group_members: TrackedCudaSlice<u64>,
     canaries: TrackedCudaSlice<SemanticTrainingCanaryRecord>,
+    #[cfg(feature = "semantic-policy")]
     protected_members: TrackedCudaSlice<u64>,
     row_count: usize,
     capacity: usize,
@@ -925,7 +927,11 @@ impl SemanticTrainingViewArena {
             raw.extend_from_slice(&row.bytes);
             descriptors.push(descriptor);
         }
+        #[cfg(feature = "semantic-policy")]
         let (objective, groups, group_members, canaries, protected_members) =
+            validate_objective(objective, &descriptors, capacity, task_identity)?;
+        #[cfg(not(feature = "semantic-policy"))]
+        let (objective, groups, group_members, canaries, _) =
             validate_objective(objective, &descriptors, capacity, task_identity)?;
         let bytes = descriptors
             .len()
@@ -949,14 +955,15 @@ impl SemanticTrainingViewArena {
                     .len()
                     .checked_mul(size_of::<SemanticTrainingCanaryRecord>())
                     .and_then(|canary_bytes| bytes.checked_add(canary_bytes))
-            })
-            .and_then(|bytes| {
-                protected_members
-                    .len()
-                    .checked_mul(size_of::<u64>())
-                    .and_then(|member_bytes| bytes.checked_add(member_bytes))
-            })
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            });
+        #[cfg(feature = "semantic-policy")]
+        let bytes = bytes.and_then(|bytes| {
+            protected_members
+                .len()
+                .checked_mul(size_of::<u64>())
+                .and_then(|member_bytes| bytes.checked_add(member_bytes))
+        });
+        let bytes = bytes.ok_or(SemanticTransitionError::GenerationExhausted)?;
         let mut reservation = provider
             .memory()
             .reserve_bytes(
@@ -981,6 +988,7 @@ impl SemanticTrainingViewArena {
         let mut device_canaries = reservation
             .alloc::<SemanticTrainingCanaryRecord>(canaries.len())
             .map_err(|error| runtime_error("training canary allocation", error))?;
+        #[cfg(feature = "semantic-policy")]
         let mut device_protected_members = reservation
             .alloc::<u64>(protected_members.len())
             .map_err(|error| runtime_error("protected retention member allocation", error))?;
@@ -1005,6 +1013,7 @@ impl SemanticTrainingViewArena {
         provider
             .htod_sync_copy_into_tracked(&canaries, &mut device_canaries)
             .map_err(|error| runtime_error("training canary upload", error))?;
+        #[cfg(feature = "semantic-policy")]
         provider
             .htod_sync_copy_into_tracked(&protected_members, &mut device_protected_members)
             .map_err(|error| runtime_error("protected retention member upload", error))?;
@@ -1019,6 +1028,7 @@ impl SemanticTrainingViewArena {
             groups: device_groups,
             group_members: device_group_members,
             canaries: device_canaries,
+            #[cfg(feature = "semantic-policy")]
             protected_members: device_protected_members,
             row_count: descriptors.len(),
             capacity,
