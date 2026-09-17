@@ -545,8 +545,9 @@ static void task_preflight_accepts_all_four_truth_states() {
 static void resident_numerical_refusal_precedes_publication() {
     RefusalExecution execution;
     auto& descriptor=execution.descriptor;auto& state=execution.state;
-    std::array<uint64_t,27> task{};task[0]=3;task[1]=91;task[14]=1;task[15]=2;
-    task[19]=14;task[20]=7;task[21]=1;task[22]=45;task[23]=15;task[24]=1;task[25]=task[26]=7;
+    std::array<uint64_t,34> task{};task[0]=4;task[1]=91;task[18]=1;task[19]=task[20]=2;
+    task[25]=14;task[26]=7;task[27]=1;task[28]=45;task[29]=15;task[30]=1;
+    task[31]=task[32]=task[33]=7;
     descriptor.task=reinterpret_cast<uint64_t>(task.data());
     uint8_t numerical=0;
     PendingContinuation pending{};pending.numerical_admissibility=reinterpret_cast<uint64_t>(&numerical);
@@ -629,14 +630,14 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
         std::vector<PublicationRange> ranges,destinations;
         for(uint64_t role=1;role<=55;++role) {
             const bool tensor=publication_tensor_role(role);
-            const uint64_t count=tensor ? uint64_t((role>=8 && role<=13) || role==18) : (role==16 ? 2 : 1);
+            const uint64_t count=tensor ? uint64_t((role>=8 && role<=13) || role==18) : (role==16 ? 3 : 1);
             roles[role-1]={role,count};
             for(uint64_t index=0;index<count;++index) {
                 uint64_t length=tensor ? 4 : 8;
                 if(role==1 || role==2)length=0;
                 if(role==3)length=32;
                 if(role==14)length=sizeof(CompletionCoverage);
-                if(role==15)length=2*sizeof(RawFeedbackRecord);
+                if(role==15)length=3*sizeof(RawFeedbackRecord);
                 if(role==30)length=sizeof(IntentQueueHeader);
                 if(role==31)length=1;
                 if(role==33)length=sizeof(AttemptReceipt);
@@ -681,11 +682,13 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
         std::copy(pending_layouts.begin(),pending_layouts.end(),reinterpret_cast<PublicationTensorLayout*>(table+1));
         pending_ranges.push_back(pending_table);
 
-        std::array<uint64_t,27> task{};task[0]=3;task[1]=91;task[6]=11;task[10]=21;task[14]=1;task[15]=2;
-        task[19]=14;task[20]=7;task[21]=1;task[22]=45;task[23]=15;task[24]=1;task[25]=task[26]=7;
+        std::array<uint64_t,34> task{};task[0]=4;task[1]=91;task[6]=11;task[10]=task[14]=21;
+        task[18]=1;task[19]=task[20]=2;
+        task[25]=14;task[26]=7;task[27]=1;task[28]=45;task[29]=15;task[30]=1;
+        task[31]=task[32]=task[33]=7;
         descriptor.task=reinterpret_cast<uint64_t>(task.data());
         PublicationContract contract{};contract.abi=1;contract.range_capacity=ranges.size();
-        contract.prefix_capacity=64;contract.window_capacity=32;contract.feedback_capacity=2;contract.max_position=128;
+        contract.prefix_capacity=64;contract.window_capacity=32;contract.feedback_capacity=3;contract.max_position=128;
         contract.model_generation=3;contract.authority_generation=4;contract.semantic_owner=91;
         contract.role_counts=reinterpret_cast<uint64_t>(roles.data());contract.role_count=roles.size();
         PublicationBank bank{},inactive{};
@@ -1733,12 +1736,12 @@ static void exact_task_occurrence() {
     uint64_t identity[4], digest[4];
     semantic_graph::decode_identity(statement.identity_words,identity);
     semantic_graph::support_digest(identity,support,digest);
-    std::array<uint64_t,32> task{};
-    task[0]=3; task[1]=91;
+    std::array<uint64_t,39> task{};
+    task[0]=4; task[1]=91;
     std::copy(identity,identity+4,task.begin()+6);
-    task[10]=92; task[14]=1; task[15]=2; task[16]=1;
-    task[17]=7; task[18]=8; task[27]=3;
-    std::copy(digest,digest+4,task.begin()+28);
+    task[10]=task[14]=92; task[18]=1; task[19]=task[20]=2; task[21]=1;
+    task[22]=7; task[23]=task[24]=8; task[31]=task[32]=task[33]=7; task[34]=3;
+    std::copy(digest,digest+4,task.begin()+35);
     require(task_allows(task.data(),statement,support), "exact permitted support occurrence refused");
     require(statement.record==7, "task query lost its original statement occurrence");
     support.record=0;
@@ -1779,8 +1782,9 @@ static void acquired_feedback_history() {
     descriptor.arena[0]=reinterpret_cast<uint64_t>(arena.data());descriptor.arena[1]=91;
     descriptor.arena[2]=roots;descriptor.arena[3]=statements;descriptor.arena[4]=supports;
     descriptor.arena[5]=versions;descriptor.arena[6]=arena.size();
-    std::array<uint64_t,27> task{};
-    task[0]=3;task[1]=91;task[6]=11;task[10]=21;task[17]=3;task[18]=8;
+    std::array<uint64_t,34> task{};
+    task[0]=4;task[1]=91;task[6]=11;task[10]=task[14]=21;
+    task[22]=3;task[23]=task[24]=8;task[31]=task[32]=task[33]=7;
     descriptor.task=reinterpret_cast<uint64_t>(task.data());
     PublicationBank banks[2]{};auto& bank=banks[0];bank.header.abi=1;bank.header.semantic_owner=91;
     bank.header.semantic_slot=sealed.words[3];bank.header.semantic_generation=sealed.words[4];
@@ -1810,21 +1814,22 @@ static void acquired_feedback_history() {
     std::array<float,3*13> features{};
     std::array<uint8_t,3> validity{};
     std::array<uint64_t,3> status{};
-    uint8_t first=0xa5,second=0x3c;
+    uint8_t first=0xa5,second=0x3c,third=0x3c;
     auto next_records=records;std::swap(next_records[0],next_records[2]);
-    PublicationContract contract{};contract.abi=1;contract.range_capacity=3;contract.feedback_capacity=3;
+    PublicationContract contract{};contract.abi=1;contract.range_capacity=4;contract.feedback_capacity=3;
     PublicationStorageEntry storage[]={{reinterpret_cast<uint64_t>(records.data()),sizeof(records),1},
         {reinterpret_cast<uint64_t>(next_records.data()),sizeof(next_records),1},
-        {reinterpret_cast<uint64_t>(&first),1,1},{reinterpret_cast<uint64_t>(&second),1,1}};
-    PublicationRange ranges[2][3]{};
+        {reinterpret_cast<uint64_t>(&first),1,1},{reinterpret_cast<uint64_t>(&second),1,1},
+        {reinterpret_cast<uint64_t>(&third),1,1}};
+    PublicationRange ranges[2][4]{};
     control.contract=reinterpret_cast<uint64_t>(&contract);
-    control.storage=reinterpret_cast<uint64_t>(storage);control.storage_count=4;
+    control.storage=reinterpret_cast<uint64_t>(storage);control.storage_count=5;
     for(uint64_t parent=0;parent<2;++parent) {
-        banks[parent].header.range_count=3;
+        banks[parent].header.range_count=4;
         control.directories[parent]=reinterpret_cast<uint64_t>(ranges[parent]);
         ranges[parent][0].role=15;ranges[parent][0].generation=1;
         ranges[parent][0].storage_slot=parent;ranges[parent][0].length_bytes=sizeof(records);
-        for(uint64_t statement=0;statement<2;++statement) {
+        for(uint64_t statement=0;statement<3;++statement) {
             auto& range=ranges[parent][1+statement];range.role=16;range.index=statement;
             range.generation=1;range.storage_slot=2+statement;range.length_bytes=1;
         }
@@ -1832,7 +1837,7 @@ static void acquired_feedback_history() {
             require(publication_range_digest(control,range,nullptr,range.digest)==0,
                 "original feedback range seal failed");
     }
-    std::array<PublicationRange,6> original_ranges{};
+    std::array<PublicationRange,8> original_ranges{};
     std::memcpy(original_ranges.data(),ranges,sizeof(ranges));
     auto encode=[&]() { semantic_feedback_encode(reinterpret_cast<uint64_t>(&control),&lease,1,3,
         features.data(),validity.data(),status.data()); };
