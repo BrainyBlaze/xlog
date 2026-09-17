@@ -2877,6 +2877,64 @@ struct ModelUpdateBinding {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+struct ModelUpdateEvidenceSource {
+    lease: u64,
+    parent_header: u64,
+    result: u64,
+    origin: u64,
+    states: [u64; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ModelForwardSealInput {
+    role: u64,
+    index: u64,
+    tensor_digest: u64,
+    backing_digest: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ModelForwardReceipt {
+    abi: u64,
+    role: u64,
+    generation: u64,
+    logits: u64,
+    scalar_type: u64,
+    row_count: u64,
+    capacity: u64,
+    vocabulary: u64,
+    strides_bytes: [u64; 3],
+    model_geometry_digest: Identity256,
+    model_numerical_digest: Identity256,
+    logits_digest: Identity256,
+    identity: Identity256,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ModelForwardReceiptInputs {
+    control: u64,
+    lease: u64,
+    candidate_seals: u64,
+    candidate_seal_count: u64,
+    baseline_logits: u64,
+    candidate_logits: u64,
+    scalar_type: u64,
+    row_count: u64,
+    capacity: u64,
+    vocabulary: u64,
+    row_stride_bytes: u64,
+    position_stride_bytes: u64,
+    vocabulary_stride_bytes: u64,
+    baseline_logits_digest: u64,
+    candidate_logits_digest: u64,
+    receipts: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
 struct PublicationCommand {
     control: u64,
     lease: u64,
@@ -3130,6 +3188,9 @@ unsafe impl DeviceRepr for PublicationRoleCount {}
 unsafe impl DeviceRepr for PublicationContract {}
 unsafe impl DeviceRepr for PendingContinuation {}
 unsafe impl DeviceRepr for ModelUpdateBinding {}
+unsafe impl DeviceRepr for ModelUpdateEvidenceSource {}
+unsafe impl DeviceRepr for ModelForwardSealInput {}
+unsafe impl DeviceRepr for ModelForwardReceipt {}
 unsafe impl DeviceRepr for PublicationCommand {}
 unsafe impl DeviceRepr for PublicationLease {}
 unsafe impl DeviceRepr for SemanticTensorLayout {}
@@ -3155,6 +3216,10 @@ const _: () = assert!(size_of::<PublicationContract>() == 272);
 const _: () = assert!(size_of::<SemanticTextRow>() == 16);
 const _: () = assert!(size_of::<TextBinding>() == 24);
 const _: () = assert!(size_of::<ModelUpdateBinding>() == 32);
+const _: () = assert!(size_of::<ModelUpdateEvidenceSource>() == 48);
+const _: () = assert!(size_of::<ModelForwardSealInput>() == 32);
+const _: () = assert!(size_of::<ModelForwardReceipt>() == 216);
+const _: () = assert!(size_of::<ModelForwardReceiptInputs>() == 128);
 const _: () = assert!(size_of::<PublicationCommand>() == 24);
 const _: () = assert!(size_of::<PublicationLease>() == 88);
 const _: () = assert!(size_of::<SemanticTensorLayout>() == 112);
@@ -6292,6 +6357,10 @@ struct PreparedBranchStorage {
 
 struct PreparedModelUpdate {
     bindings: TrackedCudaSlice<ModelUpdateBinding>,
+    evidence: Arc<TrackedCudaSlice<ModelUpdateEvidenceSource>>,
+    evidence_owners: Arc<Vec<ModelUpdateEvidenceOwner>>,
+    forward_seals: TrackedCudaSlice<ModelForwardSealInput>,
+    forward_receipts: TrackedCudaSlice<ModelForwardReceipt>,
     admissibility: TrackedCudaSlice<u8>,
     #[cfg_attr(
         not(feature = "semantic-policy"),
@@ -6311,6 +6380,7 @@ struct PreparedModelUpdate {
         )
     )]
     admissibility_copy: CudaFunction,
+    forward_receipt: CudaFunction,
     #[cfg_attr(
         not(feature = "semantic-policy"),
         expect(
@@ -6323,21 +6393,34 @@ struct PreparedModelUpdate {
 
 struct BoundModelUpdate {
     values: Vec<ModelUpdateBinding>,
+    forward_seal_values: Vec<ModelForwardSealInput>,
+    digest_cells: Vec<Arc<TrackedCudaSlice<u64>>>,
     allocations: Vec<PreparedSemanticTensor>,
     admissibility: PreparedSemanticTensor,
     baseline_logits: PreparedSemanticTensor,
     candidate_logits: PreparedSemanticTensor,
-    baseline_generation: u64,
-    candidate_generation: u64,
+    baseline_logits_digest: u64,
+    candidate_logits_digest: u64,
     accounted_reserved_bytes: u64,
     copy_bytes: u64,
     _witness: SemanticTensorContentWitness,
+}
+
+struct ModelUpdateEvidenceOwner {
+    lease: DeviceMemoryView<PublicationLease>,
+    parent_header: DeviceMemoryView<PublicationHeader>,
+    result: DeviceMemoryView<PreparedStepResult>,
+    origin: DeviceMemoryView<SemanticTrainingViewOriginRecord>,
+    states: [DeviceMemoryView<DeviceState>; 2],
 }
 
 impl PreparedModelUpdate {
     fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
         let mut allocations = Vec::new();
         account_tracked_allocation(&mut allocations, &self.bindings)?;
+        account_tracked_allocation(&mut allocations, self.evidence.as_ref())?;
+        account_tracked_allocation(&mut allocations, &self.forward_seals)?;
+        account_tracked_allocation(&mut allocations, &self.forward_receipts)?;
         account_tracked_allocation(&mut allocations, &self.admissibility)?;
         account_tracked_allocation(&mut allocations, &self.canary_results)?;
         account_tracked_allocation(&mut allocations, &self.refusal)?;
@@ -6355,6 +6438,17 @@ impl PreparedModelUpdate {
 
     fn record(&self, recorder: &mut LaunchRecorder) {
         recorder.read(&self.bindings);
+        recorder.read(self.evidence.as_ref());
+        for evidence in self.evidence_owners.iter() {
+            recorder.read(&evidence.lease);
+            recorder.read(&evidence.parent_header);
+            recorder.read(&evidence.result);
+            recorder.read(&evidence.origin);
+            recorder.read(&evidence.states[0]);
+            recorder.read(&evidence.states[1]);
+        }
+        recorder.read(&self.forward_seals);
+        recorder.read_write(&self.forward_receipts);
         recorder.read_write(&self.admissibility);
         recorder.read_write(&self.refusal);
         if let Some(output) = &self.output {
@@ -6372,10 +6466,17 @@ impl PreparedModelUpdate {
             if let Some(source) = &output.candidate_logits.source {
                 recorder.read(source);
             }
+            for cells in &output.digest_cells {
+                recorder.read(cells.as_ref());
+            }
         }
     }
 
     #[cfg(feature = "semantic-policy")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the update gate joins publication, training, task and original model-work owners"
+    )]
     fn enqueue_copy(
         &self,
         domain: &ResidentExecutionDomain,
@@ -6413,14 +6514,14 @@ impl PreparedModelUpdate {
         let roster_rows = training_view.roster_rows();
         let objective = training_view.objective();
         let canaries = training_view.canaries();
-        let mask_labels = training_view.mask_labels();
+        let protected_members = training_view.protected_members();
         let retention_labels = training_view.retention_labels();
         let kinds = training_view.kinds();
         recorder.read(&selection);
         recorder.read(&roster_rows);
         recorder.read(&objective);
         recorder.read(&canaries);
-        recorder.read(&mask_labels);
+        recorder.read(&protected_members);
         recorder.read(&retention_labels);
         recorder.read(&kinds);
         recorder.write(&self.canary_results);
@@ -6447,6 +6548,24 @@ impl PreparedModelUpdate {
             .and_then(|bytes| bytes.checked_add(update_bytes))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let logits = output.baseline_logits.layout;
+        let forward_inputs = ModelForwardReceiptInputs {
+            control: storage.control.device_ptr_value(),
+            lease: reader.device_ptr_value(),
+            candidate_seals: self.forward_seals.device_ptr_value(),
+            candidate_seal_count: self.forward_seals.len() as u64,
+            baseline_logits: output.baseline_logits.data,
+            candidate_logits: output.candidate_logits.data,
+            scalar_type: logits.scalar_type,
+            row_count: logits.dimensions[0],
+            capacity: logits.dimensions[1],
+            vocabulary: logits.dimensions[2],
+            row_stride_bytes: logits.strides_bytes[0],
+            position_stride_bytes: logits.strides_bytes[1],
+            vocabulary_stride_bytes: logits.strides_bytes[2],
+            baseline_logits_digest: output.baseline_logits_digest,
+            candidate_logits_digest: output.candidate_logits_digest,
+            receipts: self.forward_receipts.device_ptr_value(),
+        };
         let canary_inputs = ModelUpdateCanaryInputs {
             control: storage.control.device_ptr_value(),
             lease: reader.device_ptr_value(),
@@ -6455,9 +6574,14 @@ impl PreparedModelUpdate {
             objective: *objective.device_ptr(),
             canaries: *canaries.device_ptr(),
             canary_count: canaries.len() as u64,
+            protected_members: *protected_members.device_ptr(),
+            protected_member_count: protected_members.len() as u64,
             task: task.device_ptr_value(),
             task_words: task.len() as u64,
-            mask_labels: *mask_labels.device_ptr(),
+            evidence: self.evidence.device_ptr_value(),
+            evidence_count: self.evidence.len() as u64,
+            forward_receipts: self.forward_receipts.device_ptr_value(),
+            candidate_seal_count: self.forward_seals.len() as u64,
             retention_labels: *retention_labels.device_ptr(),
             kinds: *kinds.device_ptr(),
             baseline_logits: output.baseline_logits.data,
@@ -6469,8 +6593,6 @@ impl PreparedModelUpdate {
             row_stride_bytes: logits.strides_bytes[0],
             position_stride_bytes: logits.strides_bytes[1],
             vocabulary_stride_bytes: logits.strides_bytes[2],
-            baseline_generation: output.baseline_generation,
-            candidate_generation: output.candidate_generation,
             model_work: model_work.descriptor(),
             accounted_reserved_bytes,
             copy_bytes: output.copy_bytes,
@@ -6484,6 +6606,20 @@ impl PreparedModelUpdate {
             reader.device_ptr_value(),
         );
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
+            // SAFETY: immutable seal pointers and exact raw-logits occurrences
+            // were frozen by the original producer witness before capture ended.
+            unsafe {
+                self.forward_receipt.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (forward_inputs,),
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))?;
             // SAFETY: the producer gate was checked by the same captured
             // content witness as the complete update backing. The native byte
             // is the stable predicate consumed by both copy and publication.
@@ -6547,9 +6683,14 @@ struct ModelUpdateCanaryInputs {
     objective: u64,
     canaries: u64,
     canary_count: u64,
+    protected_members: u64,
+    protected_member_count: u64,
     task: u64,
     task_words: u64,
-    mask_labels: u64,
+    evidence: u64,
+    evidence_count: u64,
+    forward_receipts: u64,
+    candidate_seal_count: u64,
     retention_labels: u64,
     kinds: u64,
     baseline_logits: u64,
@@ -6561,8 +6702,6 @@ struct ModelUpdateCanaryInputs {
     row_stride_bytes: u64,
     position_stride_bytes: u64,
     vocabulary_stride_bytes: u64,
-    baseline_generation: u64,
-    candidate_generation: u64,
     model_work: ModelWorkInput,
     accounted_reserved_bytes: u64,
     copy_bytes: u64,
@@ -6570,6 +6709,26 @@ struct ModelUpdateCanaryInputs {
     results: u64,
     admissibility_destination: u64,
     refusal_destination: u64,
+}
+
+const _: () = assert!(size_of::<ModelUpdateCanaryInputs>() == 280);
+
+struct ModelForwardReceiptInputsParam(ModelForwardReceiptInputs);
+
+impl crate::cuda_compat::KernelParamStorage for ModelForwardReceiptInputsParam {
+    fn as_kernel_param(&self) -> *mut std::ffi::c_void {
+        (&self.0 as *const ModelForwardReceiptInputs)
+            .cast_mut()
+            .cast()
+    }
+}
+
+impl crate::cuda_compat::IntoKernelParamStorage for ModelForwardReceiptInputs {
+    type Storage = ModelForwardReceiptInputsParam;
+
+    fn into_kernel_param_storage(self) -> Self::Storage {
+        ModelForwardReceiptInputsParam(self)
+    }
 }
 
 struct ModelUpdateCanaryInputsParam(ModelUpdateCanaryInputs);
@@ -7007,6 +7166,27 @@ enum CapturedTensorDigest {
     // Range inputs retain the producer's raw/typed seals. Source and scalar
     // views retain the producer's private complete metadata snapshot.
     Publication(Arc<PreparedStepInputs>),
+}
+
+fn captured_tensor_digest_pointer(
+    digests: &[CapturedTensorDigest],
+    index: usize,
+) -> Result<(u64, Arc<TrackedCudaSlice<u64>>), SemanticTransitionError> {
+    let CapturedTensorDigest::Tensor { cells, offset, .. } = digests
+        .get(index)
+        .ok_or(SemanticTransitionError::ObservationMismatch)?
+    else {
+        return Err(publication_input_error(
+            "model forward receipt requires an original transient tensor seal",
+        ));
+    };
+    if offset.checked_add(4).is_none_or(|end| end > cells.len()) {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
+    Ok((
+        cells.device_ptr_value() + (*offset * size_of::<u64>()) as u64,
+        Arc::clone(cells),
+    ))
 }
 
 fn tensor_content_identity(
@@ -10449,6 +10629,20 @@ impl SemanticTransitionSession {
                 .checked_mul(update_count)
                 .ok_or(SemanticTransitionError::GenerationExhausted)
         })?;
+        let model_forward_seal_count = storage.bank_templates[0]
+            .iter()
+            .filter(|range| matches!(range.role, 18..=25))
+            .count();
+        let model_update_bank_metadata_bytes = model_forward_seal_count
+            .checked_mul(size_of::<ModelForwardSealInput>())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    1 + 5 * size_of::<SemanticTrainingCanaryResultRecord>()
+                        + size_of::<SemanticTrainingCanaryRefusalRecord>()
+                        + 2 * size_of::<ModelForwardReceipt>(),
+                )
+            })
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let update_binding_bytes = update_count
             .checked_mul(2)
             .and_then(|count| count.checked_mul(storage.model_slots.len()))
@@ -10456,13 +10650,14 @@ impl SemanticTransitionSession {
             .and_then(|bytes| {
                 update_count
                     .checked_mul(2)
-                    .and_then(|count| {
-                        count.checked_mul(
-                            1 + 5 * size_of::<SemanticTrainingCanaryResultRecord>()
-                                + size_of::<SemanticTrainingCanaryRefusalRecord>(),
-                        )
-                    })
+                    .and_then(|count| count.checked_mul(model_update_bank_metadata_bytes))
                     .and_then(|metadata| bytes.checked_add(metadata))
+            })
+            .and_then(|bytes| {
+                update_count
+                    .checked_mul(transition_bound)
+                    .and_then(|count| count.checked_mul(size_of::<ModelUpdateEvidenceSource>()))
+                    .and_then(|evidence| bytes.checked_add(evidence))
             })
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let update_binding_bytes = u64::try_from(update_binding_bytes)
@@ -10526,6 +10721,8 @@ impl SemanticTransitionSession {
         let result_kernel = kernel("semantic_publication_step_result")?;
         let model_update_admissibility_copy =
             kernel("semantic_publication_prepare_model_update_admissibility")?;
+        let model_update_forward_receipt =
+            kernel("semantic_publication_record_model_forward_receipts")?;
         let model_update_copy = kernel("semantic_publication_apply_model_update")?;
         self.prepared_segment = Some(build);
         self.next_reader = end;
@@ -10537,6 +10734,57 @@ impl SemanticTransitionSession {
                 let result = reservation
                     .alloc(1)
                     .map_err(|error| runtime_error("prepared result allocation", error))?;
+                let (update_evidence, update_evidence_owners) = if *kind
+                    == SemanticTransitionKind::Update
+                {
+                    let mut values = vec![ModelUpdateEvidenceSource::default(); transition_bound];
+                    let mut owners = Vec::new();
+                    for source_ordinal in 0..ordinal {
+                        if transitions[source_ordinal] != SemanticTransitionKind::Proposal {
+                            continue;
+                        }
+                        let source = &self.steps[&handles[source_ordinal].token];
+                        let prepared = source
+                            .prepared
+                            .as_ref()
+                            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                        let inputs = source
+                            .inputs
+                            .as_ref()
+                            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                        let origin = prepared
+                            .training_origin
+                            .clone()
+                            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                        let owner = ModelUpdateEvidenceOwner {
+                            lease: prepared.reader.view(),
+                            parent_header: inputs.header.view(),
+                            result: prepared.result.view(),
+                            origin,
+                            states: [
+                                prepared.branches[0].state.view(),
+                                prepared.branches[1].state.view(),
+                            ],
+                        };
+                        values[source_ordinal] = ModelUpdateEvidenceSource {
+                            lease: *owner.lease.device_ptr(),
+                            parent_header: *owner.parent_header.device_ptr(),
+                            result: *owner.result.device_ptr(),
+                            origin: *owner.origin.device_ptr(),
+                            states: [*owner.states[0].device_ptr(), *owner.states[1].device_ptr()],
+                        };
+                        owners.push(owner);
+                    }
+                    let evidence = reservation
+                        .alloc::<ModelUpdateEvidenceSource>(transition_bound)
+                        .map_err(|error| {
+                            runtime_error("model update evidence allocation", error)
+                        })?;
+                    upload_publication(&self.provider, &values, &evidence)?;
+                    (Some(Arc::new(evidence)), Some(Arc::new(owners)))
+                } else {
+                    (None, None)
+                };
                 let mut allocate_model_update = || {
                     if *kind != SemanticTransitionKind::Update {
                         return Ok(None);
@@ -10548,6 +10796,25 @@ impl SemanticTransitionSession {
                         &self.provider,
                         &vec![ModelUpdateBinding::default(); storage.model_slots.len()],
                         &bindings,
+                    )?;
+                    let forward_seals = reservation
+                        .alloc::<ModelForwardSealInput>(model_forward_seal_count)
+                        .map_err(|error| runtime_error("model forward seal allocation", error))?;
+                    upload_publication(
+                        &self.provider,
+                        &vec![ModelForwardSealInput::default(); model_forward_seal_count],
+                        &forward_seals,
+                    )?;
+                    let forward_receipts =
+                        reservation
+                            .alloc::<ModelForwardReceipt>(2)
+                            .map_err(|error| {
+                                runtime_error("model forward receipt allocation", error)
+                            })?;
+                    upload_publication(
+                        &self.provider,
+                        &[ModelForwardReceipt::default(); 2],
+                        &forward_receipts,
                     )?;
                     let admissibility = reservation.alloc::<u8>(1).map_err(|error| {
                         runtime_error("model update admissibility allocation", error)
@@ -10573,11 +10840,24 @@ impl SemanticTransitionSession {
                     )?;
                     Ok(Some(PreparedModelUpdate {
                         bindings,
+                        evidence: Arc::clone(
+                            update_evidence
+                                .as_ref()
+                                .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                        ),
+                        evidence_owners: Arc::clone(
+                            update_evidence_owners
+                                .as_ref()
+                                .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                        ),
+                        forward_seals,
+                        forward_receipts,
                         admissibility,
                         canary_results,
                         refusal,
                         output: None,
                         admissibility_copy: model_update_admissibility_copy.clone(),
+                        forward_receipt: model_update_forward_receipt.clone(),
                         copy: model_update_copy.clone(),
                     }))
                 };
@@ -12182,8 +12462,6 @@ impl SemanticTransitionSession {
         admissibility: SemanticTensorInput,
         baseline_logits: SemanticTensorInput,
         candidate_logits: SemanticTensorInput,
-        baseline_generation: u64,
-        candidate_generation: u64,
         witness: &SemanticTensorContentWitness,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
@@ -12318,11 +12596,9 @@ impl SemanticTransitionSession {
             || baseline_logits.layout.scalar_type != candidate_logits.layout.scalar_type
             || baseline_logits.layout.dimensions != candidate_logits.layout.dimensions
             || baseline_logits.layout.strides_bytes != candidate_logits.layout.strides_bytes
-            || baseline_generation == 0
-            || candidate_generation != baseline_generation.checked_add(1).unwrap_or(0)
         {
             return Err(publication_input_error(
-                "model update canary logits must be aligned contiguous F16/BF16/F32 [rows,capacity,vocabulary] from consecutive generations",
+                "model update canary logits must be aligned contiguous F16/BF16/F32 [rows,capacity,vocabulary]",
             ));
         }
         let geometry = prepare_model_memory(
@@ -12346,6 +12622,50 @@ impl SemanticTransitionSession {
                 "model update output differs from the acquired model memory contract",
             ));
         }
+        let TensorContentSeals::Captured(digests) =
+            &self.steps[&step.token].content[witness.index].seals
+        else {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        };
+        let mut forward_seal_values = Vec::new();
+        let mut digest_cells = Vec::new();
+        for range in storage.bank_templates[0]
+            .iter()
+            .filter(|range| matches!(range.role, 18..=25))
+        {
+            let tensor_index = tensors
+                .iter()
+                .position(|tensor| {
+                    (tensor.layout.role, tensor.layout.index) == (range.role, range.index)
+                })
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let (allocation_index, _) = geometry.location(range.role, range.index)?;
+            let (tensor_digest, tensor_cells) =
+                captured_tensor_digest_pointer(digests, allocation_count + tensor_index)?;
+            let (backing_digest, backing_cells) =
+                captured_tensor_digest_pointer(digests, allocation_index)?;
+            forward_seal_values.push(ModelForwardSealInput {
+                role: range.role,
+                index: range.index,
+                tensor_digest,
+                backing_digest,
+            });
+            digest_cells.push(tensor_cells);
+            digest_cells.push(backing_cells);
+        }
+        let baseline_digest_index = allocation_count
+            .checked_add(tensor_count)
+            .and_then(|index| index.checked_add(1))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let candidate_digest_index = baseline_digest_index
+            .checked_add(1)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let (baseline_logits_digest, baseline_digest_cells) =
+            captured_tensor_digest_pointer(digests, baseline_digest_index)?;
+        let (candidate_logits_digest, candidate_digest_cells) =
+            captured_tensor_digest_pointer(digests, candidate_digest_index)?;
+        digest_cells.push(baseline_digest_cells);
+        digest_cells.push(candidate_digest_cells);
         for allocation in allocations {
             let bytes = tensor_layout_bytes(&allocation.layout)?;
             if step_input_overlap(allocation.data, bytes, admissibility.data, 1)? {
@@ -12437,14 +12757,19 @@ impl SemanticTransitionSession {
         if values.len() != update.bindings.len() {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
+        if forward_seal_values.len() != update.forward_seals.len() {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
         update.output = Some(BoundModelUpdate {
             values,
+            forward_seal_values,
+            digest_cells,
             allocations: retained_allocations,
             admissibility: admissibility.clone(),
             baseline_logits: baseline_logits.clone(),
             candidate_logits: candidate_logits.clone(),
-            baseline_generation,
-            candidate_generation,
+            baseline_logits_digest,
+            candidate_logits_digest,
             accounted_reserved_bytes,
             copy_bytes,
             _witness: witness.clone(),
@@ -13074,6 +13399,13 @@ impl SemanticTransitionSession {
                         .map_err(|error| {
                             runtime_error("model update binding cold upload", error)
                         })?;
+                    let mut forward_seals = update.forward_seals.view();
+                    self.provider
+                        .htod_launch_metadata_sync_copy_into(
+                            &output.forward_seal_values,
+                            &mut forward_seals,
+                        )
+                        .map_err(|error| runtime_error("model forward seal cold upload", error))?;
                 }
             }
         }

@@ -18,6 +18,7 @@ type ValidatedTrainingObjective = (
     Vec<SemanticTrainingObjectiveGroupRecord>,
     Vec<u64>,
     Vec<SemanticTrainingCanaryRecord>,
+    Vec<u64>,
 );
 
 const MODULE: &str = "xlog_semantic_training_view";
@@ -91,7 +92,7 @@ pub enum SemanticTrainingCanaryKind {
 }
 
 /// Frozen bounds and resource ceilings for one candidate-update canary.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SemanticTrainingCanary {
     pub kind: SemanticTrainingCanaryKind,
     pub row_ordinal: u64,
@@ -103,6 +104,10 @@ pub struct SemanticTrainingCanary {
     /// symbolic-utility and goal-chain canaries use these coordinates; every
     /// other kind uses `[u64::MAX; 3]`.
     pub obligation_positions: [u64; 3],
+    /// Explicit frozen members whose individual retention is uncompensated.
+    /// Only the retained-behavior canary carries this set. Aggregate retention
+    /// labels remain the metric denominator and do not imply protection.
+    pub protected_positions: Vec<u64>,
 }
 
 /// Complete frozen objective carried by the canonical replay-roster owner.
@@ -132,6 +137,7 @@ pub struct SemanticTrainingObjectiveRecord {
     pub group_count: u64,
     pub group_member_count: u64,
     pub canary_count: u64,
+    pub protected_member_count: u64,
     pub evaluator_min_bits: u64,
     pub evaluator_max_bits: u64,
     pub coefficient_bits: [u64; 9],
@@ -166,6 +172,8 @@ pub struct SemanticTrainingCanaryRecord {
     pub memory_limit: u64,
     pub work_limit: u64,
     pub obligation_positions: [u64; 3],
+    pub protected_member_offset: u64,
+    pub protected_member_count: u64,
     pub row_identity: [u64; 4],
     pub row_content_identity: [u64; 4],
     pub task_identity: [u64; 4],
@@ -466,6 +474,7 @@ impl SemanticSelectedTrainingView {
         account!(self.arena.groups);
         account!(self.arena.group_members);
         account!(self.arena.canaries);
+        account!(self.arena.protected_members);
         account!(self.storage.selection);
         account!(self.storage.roster_rows);
         account!(self.storage.token_ids);
@@ -516,6 +525,11 @@ impl SemanticSelectedTrainingView {
     #[cfg(feature = "semantic-policy")]
     pub(crate) fn canaries(&self) -> DeviceMemoryView<SemanticTrainingCanaryRecord> {
         self.arena.canaries.view()
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn protected_members(&self) -> DeviceMemoryView<u64> {
+        self.arena.protected_members.view()
     }
 
     pub fn token_ids(&self) -> DeviceMemoryView<i64> {
@@ -820,6 +834,7 @@ pub(crate) struct SemanticTrainingViewArena {
     groups: TrackedCudaSlice<SemanticTrainingObjectiveGroupRecord>,
     group_members: TrackedCudaSlice<u64>,
     canaries: TrackedCudaSlice<SemanticTrainingCanaryRecord>,
+    protected_members: TrackedCudaSlice<u64>,
     row_count: usize,
     capacity: usize,
 }
@@ -910,7 +925,7 @@ impl SemanticTrainingViewArena {
             raw.extend_from_slice(&row.bytes);
             descriptors.push(descriptor);
         }
-        let (objective, groups, group_members, canaries) =
+        let (objective, groups, group_members, canaries, protected_members) =
             validate_objective(objective, &descriptors, capacity, task_identity)?;
         let bytes = descriptors
             .len()
@@ -934,6 +949,12 @@ impl SemanticTrainingViewArena {
                     .len()
                     .checked_mul(size_of::<SemanticTrainingCanaryRecord>())
                     .and_then(|canary_bytes| bytes.checked_add(canary_bytes))
+            })
+            .and_then(|bytes| {
+                protected_members
+                    .len()
+                    .checked_mul(size_of::<u64>())
+                    .and_then(|member_bytes| bytes.checked_add(member_bytes))
             })
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let mut reservation = provider
@@ -960,6 +981,9 @@ impl SemanticTrainingViewArena {
         let mut device_canaries = reservation
             .alloc::<SemanticTrainingCanaryRecord>(canaries.len())
             .map_err(|error| runtime_error("training canary allocation", error))?;
+        let mut device_protected_members = reservation
+            .alloc::<u64>(protected_members.len())
+            .map_err(|error| runtime_error("protected retention member allocation", error))?;
         if reservation.remaining_bytes() != 0 {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
@@ -981,6 +1005,9 @@ impl SemanticTrainingViewArena {
         provider
             .htod_sync_copy_into_tracked(&canaries, &mut device_canaries)
             .map_err(|error| runtime_error("training canary upload", error))?;
+        provider
+            .htod_sync_copy_into_tracked(&protected_members, &mut device_protected_members)
+            .map_err(|error| runtime_error("protected retention member upload", error))?;
         Ok(Arc::new(Self {
             provider: Arc::clone(provider),
             domain: domain.clone(),
@@ -992,6 +1019,7 @@ impl SemanticTrainingViewArena {
             groups: device_groups,
             group_members: device_group_members,
             canaries: device_canaries,
+            protected_members: device_protected_members,
             row_count: descriptors.len(),
             capacity,
         }))
@@ -1155,6 +1183,7 @@ fn validate_objective(
     }
     let mut seen_canaries = [false; 5];
     let mut canaries = Vec::with_capacity(objective.canaries.len());
+    let mut protected_members = Vec::new();
     for canary in &objective.canaries {
         let index = canary.kind as usize - 1;
         let row = usize::try_from(canary.row_ordinal)
@@ -1179,6 +1208,21 @@ fn validate_objective(
         } else {
             canary.obligation_positions == [u64::MAX; 3]
         };
+        let protected_valid = if canary.kind == SemanticTrainingCanaryKind::RetainedBehavior {
+            !canary.protected_positions.is_empty()
+                && canary
+                    .protected_positions
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                && row.is_some_and(|row| {
+                    canary
+                        .protected_positions
+                        .iter()
+                        .all(|position| *position < row.window)
+                })
+        } else {
+            canary.protected_positions.is_empty()
+        };
         if index != canaries.len()
             || seen_canaries[index]
             || !canary.lower_bound.is_finite()
@@ -1188,6 +1232,7 @@ fn validate_objective(
             || canary.work_limit == 0
             || row.is_none()
             || !positions_valid
+            || !protected_valid
             || (canary.kind == SemanticTrainingCanaryKind::GoalChain
                 && (canary.lower_bound.to_bits() != 0.0f64.to_bits()
                     || canary.upper_bound.to_bits() != 0.0f64.to_bits()))
@@ -1199,6 +1244,8 @@ fn validate_objective(
         seen_canaries[index] = true;
         let row = row.expect("checked canary row");
         let identity = canary_identity(&objective, canary, row, task_identity);
+        let protected_member_offset = protected_members.len();
+        protected_members.extend_from_slice(&canary.protected_positions);
         canaries.push(SemanticTrainingCanaryRecord {
             evaluator_abi: SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI,
             kind: canary.kind as u64,
@@ -1208,6 +1255,10 @@ fn validate_objective(
             memory_limit: canary.memory_limit,
             work_limit: canary.work_limit,
             obligation_positions: canary.obligation_positions,
+            protected_member_offset: u64::try_from(protected_member_offset)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            protected_member_count: u64::try_from(canary.protected_positions.len())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
             row_identity: row.identity,
             row_content_identity: row.content_identity,
             task_identity: identity_words(task_identity),
@@ -1233,6 +1284,8 @@ fn validate_objective(
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
             canary_count: u64::try_from(canaries.len())
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            protected_member_count: u64::try_from(protected_members.len())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
             evaluator_min_bits: objective.evaluator_min.to_bits(),
             evaluator_max_bits: objective.evaluator_max.to_bits(),
             coefficient_bits: objective
@@ -1245,6 +1298,7 @@ fn validate_objective(
         groups,
         group_members,
         canaries,
+        protected_members,
     ))
 }
 
@@ -1321,6 +1375,14 @@ fn canary_identity(
     hasher.update(canary.memory_limit.to_le_bytes());
     hasher.update(canary.work_limit.to_le_bytes());
     for position in canary.obligation_positions {
+        hasher.update(position.to_le_bytes());
+    }
+    hasher.update(
+        u64::try_from(canary.protected_positions.len())
+            .expect("validated protected retention member count")
+            .to_le_bytes(),
+    );
+    for position in &canary.protected_positions {
         hasher.update(position.to_le_bytes());
     }
     for word in row.identity {

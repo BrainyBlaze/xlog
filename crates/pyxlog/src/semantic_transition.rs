@@ -2262,7 +2262,7 @@ fn read_training_objective(value: &ColdValue) -> PyResult<Option<SemanticTrainin
         .sequence()?
         .iter()
         .map(|value| {
-            let fields = value.fields(7)?;
+            let fields = value.fields(8)?;
             let kind = match fields[0].text()? {
                 "symbolic-utility" => SemanticTrainingCanaryKind::SymbolicUtility,
                 "retained-behavior" => SemanticTrainingCanaryKind::RetainedBehavior,
@@ -2287,6 +2287,15 @@ fn read_training_objective(value: &ColdValue) -> PyResult<Option<SemanticTrainin
                         positions[1].unsigned()?,
                         positions[2].unsigned()?,
                     ]
+                },
+                protected_positions: if fields[7] == ColdValue::None {
+                    Vec::new()
+                } else {
+                    fields[7]
+                        .sequence()?
+                        .iter()
+                        .map(ColdValue::unsigned)
+                        .collect::<PyResult<Vec<_>>>()?
                 },
             })
         })
@@ -7787,8 +7796,10 @@ impl PySemanticTransitionController {
     /// complete mandatory group roster must cover every row. ``truth_tokens`` maps
     /// neither, true, false and both to four distinct vocabulary ids. Each canary
     /// is ``(kind, row_ordinal, lower_f64_bits, upper_f64_bits, memory_limit,
-    /// work_limit, obligation_positions_or_None)``. Native recomputes all
-    /// identities and owns the fixed-shape roster on device.
+    /// work_limit, obligation_positions_or_None, protected_positions_or_None)``.
+    /// Only retained behavior carries the nonempty, strictly increasing protected
+    /// subset; retention labels outside that frozen set remain compensable. Native
+    /// recomputes all identities and owns both rosters on device.
     ///
     /// ``live_authorities`` rows are ``(LiveProvenance.canonical(),
     /// retention_deadline_utc_us)``. ``replay_rows`` rows are
@@ -8440,11 +8451,12 @@ impl PySemanticTransitionController {
     /// baseline/candidate logits from the captured forward. ``logits_layout`` is
     /// the native eight-field tensor-layout record; XLOG assigns the two private
     /// occurrence indices and requires contiguous F16, BF16 or F32
-    /// ``[rows, capacity, vocabulary]`` geometry. The two explicit generations
-    /// must identify the acquired baseline and its immediate candidate. XLOG
-    /// computes every canary measurement, resource tally and refusal on device.
+    /// ``[rows, capacity, vocabulary]`` geometry. XLOG derives both generations
+    /// from the acquired seal and records a private native receipt that joins
+    /// each exact raw-logits occurrence to its baseline or candidate model seal.
+    /// XLOG computes every canary measurement, resource tally and refusal on device.
     /// ``bank`` identifies the recorded branch that owns these original outputs.
-    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, baseline_logits, candidate_logits, baseline_generation, candidate_generation, logits_layout, allocation_witness, consumer_stream))]
+    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, baseline_logits, candidate_logits, logits_layout, allocation_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "prepared update binding retains model geometry and numerical admissibility"
@@ -8462,8 +8474,6 @@ impl PySemanticTransitionController {
         numerical_admissibility: &Bound<'_, PyAny>,
         baseline_logits: &Bound<'_, PyAny>,
         candidate_logits: &Bound<'_, PyAny>,
-        baseline_generation: u64,
-        candidate_generation: u64,
         logits_layout: &Bound<'_, PyAny>,
         allocation_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
@@ -8618,8 +8628,6 @@ impl PySemanticTransitionController {
                 numerical_admissibility,
                 baseline_logits,
                 candidate_logits,
-                baseline_generation,
-                candidate_generation,
                 &allocation_witness.inner,
                 stream,
             )
