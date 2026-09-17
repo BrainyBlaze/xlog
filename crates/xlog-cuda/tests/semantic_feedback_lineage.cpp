@@ -1242,7 +1242,7 @@ struct StepPublicationFixture {
                 PublicationRange item{};item.role=role;item.index=index;item.generation=1;
                 item.length_bytes=length;item.storage_slot=allocate(capacity);
                 directories[0].push_back(item);
-                if(publication_mutable_role(role) && role!=1 && role!=2 && role!=4 && role!=5 && role!=31)
+                if(publication_mutable_role(role) && role!=1 && role!=2 && role!=31)
                     item.storage_slot=allocate(capacity);
                 directories[1].push_back(item);
             }
