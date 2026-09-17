@@ -2887,12 +2887,10 @@ impl SemanticHypergraph {
                 SemanticRootDigest(receipt_identity(&receipt, 16)),
                 receipt_extents(&receipt)?,
             );
-            let arena = self
-                .provider
-                .dtoh_small_metadata_untracked(
-                    &self.arena,
-                    usize::try_from(self.arena_words).map_err(|_| size_overflow())?,
-                )
+            let arena_words = usize::try_from(self.arena_words).map_err(|_| size_overflow())?;
+            let mut arena = vec![0; arena_words];
+            self.provider
+                .dtoh_sync_copy_into_tracked(&self.arena, &mut arena)
                 .map_err(|error| runtime_error("root material arena read", error))?;
             material_from_arena(
                 &arena,
@@ -4348,6 +4346,17 @@ pub(crate) mod tests {
         XlogError::Kernel(error.to_string())
     }
 
+    fn download_test_arena(
+        provider: &CudaKernelProvider,
+        graph: &SemanticHypergraph,
+    ) -> Vec<u64> {
+        let mut arena = vec![0; graph.arena_words as usize];
+        provider
+            .dtoh_sync_copy_into_tracked(&graph.arena, &mut arena)
+            .unwrap();
+        arena
+    }
+
     fn retirement_test_graph() -> Option<SemanticHypergraph> {
         if std::env::var("XLOG_REQUIRE_CUDA").as_deref() != Ok("1") {
             eprintln!("Skipping: set XLOG_REQUIRE_CUDA=1 to run this real-CUDA contract");
@@ -4456,9 +4465,7 @@ pub(crate) mod tests {
             &[(7, 1), (8, parent.slot as u64), (9, parent.generation)],
         );
         assert_eq!(&parent_after.words[13..20], &parent_before.words[13..20]);
-        let retained = provider
-            .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-            .unwrap();
+        let retained = download_test_arena(&provider, &graph);
         let repeated = retirement_command(
             &mut graph,
             OP_RETIRE_ROOT,
@@ -4471,9 +4478,7 @@ pub(crate) mod tests {
         );
         assert_eq!(repeated.words[0], STATUS_STALE_GENERATION);
         assert_eq!(
-            provider
-                .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-                .unwrap(),
+            download_test_arena(&provider, &graph),
             retained
         );
         let (reused, replacement) = retirement_insert_root(&mut graph, parent, 301, 401);
@@ -4560,11 +4565,7 @@ pub(crate) mod tests {
         let empty = graph.empty_root();
         let (target, target_edit) = retirement_insert_root(&mut graph, empty, 100, 200);
         let (other, other_edit) = retirement_insert_root(&mut graph, empty, 300, 400);
-        let read_arena = |graph: &SemanticHypergraph| {
-            provider
-                .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-                .unwrap()
-        };
+        let read_arena = |graph: &SemanticHypergraph| download_test_arena(&provider, graph);
         for (root, base) in [(empty, empty), (target, target)] {
             let before = read_arena(&graph);
             let refused = retirement_command(
@@ -4830,16 +4831,12 @@ pub(crate) mod tests {
         assert_eq!(cleaned[3].words, before[3].words);
         let next = graph.enqueue_resident_fork(base(), slot(1)).unwrap();
         graph.stream.synchronize().unwrap();
-        let arena = provider
-            .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-            .unwrap();
+        let arena = download_test_arena(&provider, &graph);
         let stale = discard(&graph);
         assert_eq!(stale[4].words[0], STATUS_STALE_GENERATION);
         assert_eq!(stale[3].words, before[3].words);
         assert_eq!(
-            provider
-                .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-                .unwrap(),
+            download_test_arena(&provider, &graph),
             arena
         );
         let reused = graph
@@ -4854,9 +4851,7 @@ pub(crate) mod tests {
             .enqueue_resident_seal(reused.candidate_handle(), slot(3))
             .unwrap();
         graph.stream.synchronize().unwrap();
-        let sealed_arena = provider
-            .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-            .unwrap();
+        let sealed_arena = download_test_arena(&provider, &graph);
         let sealed = discard(&graph);
         assert_eq!(sealed[3].words[0], STATUS_OK);
         assert_eq!(sealed[2].words[1], OUTCOME_INSERTED);
@@ -4864,9 +4859,7 @@ pub(crate) mod tests {
         assert_eq!(sealed[2].words[10], before[2].words[10] + 1);
         assert_eq!(sealed[4].words[0], STATUS_INVALID_COMMAND);
         assert_eq!(
-            provider
-                .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-                .unwrap(),
+            download_test_arena(&provider, &graph),
             sealed_arena
         );
     }
@@ -6299,9 +6292,7 @@ pub(crate) mod tests {
                         .unwrap(),
                 )
                 .unwrap();
-            let mut before = provider
-                .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-                .unwrap();
+            let mut before = download_test_arena(&provider, &graph);
             for &(index, value) in changes {
                 before[index] = value;
             }
@@ -6322,9 +6313,7 @@ pub(crate) mod tests {
                 receipt.words[41], 0,
                 "preflight must not acquire a candidate"
             );
-            let after = provider
-                .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-                .unwrap();
+            let after = download_test_arena(&provider, &graph);
             assert_eq!(
                 after, before,
                 "preflight, including refusal, must be read-only"
@@ -6479,14 +6468,12 @@ pub(crate) mod tests {
                     SemanticHypergraphCapacities::try_new(3, 4, 4, 4).unwrap(),
                 )
                 .unwrap();
-            assert_eq!(graph.arena_words * 8, 1920);
+            assert_eq!(graph.arena_words * 8, 2080);
             let candidate = (CONTROL_WORDS + 3 * ROOT_WORDS) as usize;
             let statement_start = candidate + CANDIDATE_WORDS as usize;
             let support_start = statement_start + 4 * STATEMENT_WORDS as usize;
             let version_start = support_start + 4 * SUPPORT_WORDS as usize;
-            let mut arena = provider
-                .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-                .unwrap();
+            let mut arena = download_test_arena(&provider, &graph);
             arena[candidate + 1] = u64::MAX - 2;
             for (start, width) in [
                 (statement_start, STATEMENT_WORDS as usize),
@@ -6696,9 +6683,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         // Establish a reachable cold boundary without iterating 2^64 retirements.
-        let mut arena = provider
-            .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-            .unwrap();
+        let mut arena = download_test_arena(&provider, &graph);
         let candidate_offset = (CONTROL_WORDS + ROOT_WORDS * 2) as usize;
         arena[candidate_offset + 1] = u64::MAX - 1;
         provider
@@ -6707,9 +6692,7 @@ pub(crate) mod tests {
         graph.fork.generation = u64::MAX - 1;
         let last = graph.fork(graph.empty_root()).unwrap();
         graph.discard(last).unwrap();
-        let arena = provider
-            .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-            .unwrap();
+        let arena = download_test_arena(&provider, &graph);
         assert_eq!(arena[candidate_offset + 1], u64::MAX);
         let error = graph.fork(graph.empty_root()).unwrap_err();
         assert!(matches!(
@@ -6719,9 +6702,7 @@ pub(crate) mod tests {
                 slot: 0,
             }
         ));
-        let after = provider
-            .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-            .unwrap();
+        let after = download_test_arena(&provider, &graph);
         assert_eq!(
             after, arena,
             "an unretirable fork must not acquire or modify scratch"
@@ -6751,9 +6732,7 @@ pub(crate) mod tests {
                 SemanticHypergraphCapacities::try_new(2, 1, 1, 1).unwrap(),
             )
             .unwrap();
-        let before = provider
-            .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-            .unwrap();
+        let before = download_test_arena(&provider, &graph);
         let descriptor = DeviceLaunchDescriptor {
             expected_owner: graph.owner,
             root_capacity: 2,
@@ -6804,9 +6783,7 @@ pub(crate) mod tests {
             .dtoh_small_metadata_untracked(&graph.receipt, 1)
             .unwrap();
         assert_eq!(receipt[0].words[0], STATUS_ARENA_MISMATCH);
-        let after = provider
-            .dtoh_small_metadata_untracked(&graph.arena, graph.arena_words as usize)
-            .unwrap();
+        let after = download_test_arena(&provider, &graph);
         assert_eq!(after, before);
     }
 
