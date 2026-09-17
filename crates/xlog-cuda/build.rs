@@ -172,7 +172,11 @@ fn push_wcoj_register_cap(args: &mut Vec<String>, name: &str) {
     }
 }
 
-fn push_reproducible_nvcc_seed(args: &mut Vec<String>, name: &str) {
+fn push_common_nvcc_options(args: &mut Vec<String>, name: &str) {
+    // CUDA 13's CCCL/libcu++ headers require C++17. Apply the dialect to every
+    // kernel instead of coupling it to an optional kernel-specific feature.
+    args.push("--std=c++17".to_string());
+
     // NVCC otherwise assigns process-dependent suffixes to internal PTX symbols.
     // A distinct stable seed per CUDA source keeps both PTX and cubin output
     // independent of build directory and invocation order.
@@ -258,7 +262,6 @@ fn push_semantic_policy_options(args: &mut Vec<String>, name: &str, enabled: boo
         args.extend(
             [
                 "-DXLOG_SEMANTIC_POLICY=1",
-                "--std=c++17",
                 "--fmad=false",
                 "--ftz=false",
                 "--prec-div=true",
@@ -606,7 +609,7 @@ fn main() {
                 .expect("kernel source path must be valid UTF-8")
                 .to_string(),
         ];
-        push_reproducible_nvcc_seed(&mut args, name);
+        push_common_nvcc_options(&mut args, name);
         push_semantic_policy_options(&mut args, name, semantic_policy);
         push_wcoj_register_cap(&mut args, name);
         let status = Command::new(&nvcc)
@@ -674,7 +677,7 @@ fn main() {
                         .expect("kernel source path must be valid UTF-8")
                         .to_string(),
                 ];
-                push_reproducible_nvcc_seed(&mut args, name);
+                push_common_nvcc_options(&mut args, name);
                 push_semantic_policy_options(&mut args, name, semantic_policy);
                 push_wcoj_register_cap(&mut args, name);
                 let status = Command::new(&nvcc)
