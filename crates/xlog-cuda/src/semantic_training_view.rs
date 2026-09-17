@@ -26,6 +26,7 @@ const GATHER_KERNEL: &str = "semantic_training_view_gather";
 const TRAINING_VIEW_HEADER_BYTES: usize = 136;
 const TRAINING_VIEW_ROW_BYTES: usize = 68;
 const PROPOSAL_TRANSITION: u64 = 1;
+pub const SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI: u64 = 3;
 
 /// Origin of one authentic replay training view.
 #[repr(u64)]
@@ -78,12 +79,7 @@ pub struct SemanticTrainingObjectiveGroup {
     pub row_ordinals: Vec<u64>,
 }
 
-/// Mandatory acceptance gate evaluated after a candidate update.
-///
-/// Symbolic utility, retained behavior and goal-chain bounds apply to the
-/// candidate-minus-baseline score. Logit-drift bounds apply to the absolute
-/// score difference. Resource-limit bounds apply to the maximum of exact
-/// memory and fuel utilization ratios; their score inputs are canonical zero.
+/// Mandatory acceptance gate evaluated from original full-vocabulary logits.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticTrainingCanaryKind {
@@ -102,14 +98,16 @@ pub struct SemanticTrainingCanary {
     pub lower_bound: f64,
     pub upper_bound: f64,
     pub memory_limit: u64,
-    pub fuel_limit: u64,
-    pub identity: Identity256,
+    pub work_limit: u64,
+    /// Exact logical positions of the three cold task obligations. Only the
+    /// symbolic-utility and goal-chain canaries use these coordinates; every
+    /// other kind uses `[u64::MAX; 3]`.
+    pub obligation_positions: [u64; 3],
 }
 
 /// Complete frozen objective carried by the canonical replay-roster owner.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SemanticTrainingObjective {
-    pub identity: Identity256,
     pub evaluator_min: f64,
     pub evaluator_max: f64,
     /// Masked-language, autoregressive, semantic, edit, execution, retention,
@@ -117,6 +115,8 @@ pub struct SemanticTrainingObjective {
     pub coefficients: [f32; 9],
     pub cost_unit: Identity256,
     pub cost_cap: u64,
+    /// Vocabulary token representing NEITHER, TRUE, FALSE and BOTH.
+    pub truth_tokens: [u64; 4],
     pub groups: Vec<SemanticTrainingObjectiveGroup>,
     pub canaries: Vec<SemanticTrainingCanary>,
 }
@@ -124,7 +124,9 @@ pub struct SemanticTrainingObjective {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SemanticTrainingObjectiveRecord {
+    pub evaluator_abi: u64,
     pub identity: [u64; 4],
+    pub task_identity: [u64; 4],
     pub row_count: u64,
     pub capacity: u64,
     pub group_count: u64,
@@ -135,6 +137,7 @@ pub struct SemanticTrainingObjectiveRecord {
     pub coefficient_bits: [u64; 9],
     pub cost_unit: [u64; 4],
     pub cost_cap: u64,
+    pub truth_tokens: [u64; 4],
 }
 
 // SAFETY: the fixed CUDA ABI contains only u64 words.
@@ -155,12 +158,17 @@ unsafe impl DeviceRepr for SemanticTrainingObjectiveGroupRecord {}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SemanticTrainingCanaryRecord {
+    pub evaluator_abi: u64,
     pub kind: u64,
     pub row_ordinal: u64,
     pub lower_bound_bits: u64,
     pub upper_bound_bits: u64,
     pub memory_limit: u64,
-    pub fuel_limit: u64,
+    pub work_limit: u64,
+    pub obligation_positions: [u64; 3],
+    pub row_identity: [u64; 4],
+    pub row_content_identity: [u64; 4],
+    pub task_identity: [u64; 4],
     pub identity: [u64; 4],
 }
 
@@ -171,7 +179,7 @@ unsafe impl DeviceRepr for SemanticTrainingCanaryRecord {}
 ///
 /// The result repeats the frozen kind, row and identity so the native update
 /// gate can reject a measurement produced for any other roster entry. The
-/// measurement is carried as raw FP64 bits; memory and fuel are exact integer
+/// measurement is carried as raw FP64 bits; memory and work are exact integer
 /// tallies checked against the frozen ceilings.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -180,7 +188,7 @@ pub(crate) struct SemanticTrainingCanaryResultRecord {
     pub row_ordinal: u64,
     pub measurement_bits: u64,
     pub memory_used: u64,
-    pub fuel_used: u64,
+    pub work_used: u64,
     pub identity: [u64; 4],
 }
 
@@ -194,7 +202,12 @@ pub enum SemanticTrainingCanaryRefusalReason {
     NonFiniteMeasurement = 1,
     OutsideBounds = 2,
     MemoryLimitExceeded = 3,
-    FuelLimitExceeded = 4,
+    WorkLimitExceeded = 4,
+    IncompleteOperands = 5,
+    ProtectedRetentionLost = 6,
+    GoalWitnessInvalid = 7,
+    WorkOverflow = 8,
+    GenerationMismatch = 9,
 }
 
 /// Device-authored evidence for the highest-precedence failed update canary.
@@ -214,8 +227,8 @@ pub struct SemanticTrainingCanaryRefusalRecord {
     pub upper_bound_bits: u64,
     pub memory_used: u64,
     pub memory_limit: u64,
-    pub fuel_used: u64,
-    pub fuel_limit: u64,
+    pub work_used: u64,
+    pub work_limit: u64,
     pub identity: [u64; 4],
     pub selection_identity: [u64; 4],
 }
@@ -226,7 +239,12 @@ impl SemanticTrainingCanaryRefusalRecord {
             1 => Some(SemanticTrainingCanaryRefusalReason::NonFiniteMeasurement),
             2 => Some(SemanticTrainingCanaryRefusalReason::OutsideBounds),
             3 => Some(SemanticTrainingCanaryRefusalReason::MemoryLimitExceeded),
-            4 => Some(SemanticTrainingCanaryRefusalReason::FuelLimitExceeded),
+            4 => Some(SemanticTrainingCanaryRefusalReason::WorkLimitExceeded),
+            5 => Some(SemanticTrainingCanaryRefusalReason::IncompleteOperands),
+            6 => Some(SemanticTrainingCanaryRefusalReason::ProtectedRetentionLost),
+            7 => Some(SemanticTrainingCanaryRefusalReason::GoalWitnessInvalid),
+            8 => Some(SemanticTrainingCanaryRefusalReason::WorkOverflow),
+            9 => Some(SemanticTrainingCanaryRefusalReason::GenerationMismatch),
             _ => None,
         }
     }
@@ -424,6 +442,46 @@ pub enum SemanticTrainingViewPort {
 impl SemanticSelectedTrainingView {
     pub fn capacity(&self) -> usize {
         self.arena.capacity
+    }
+
+    pub(crate) fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
+        let mut allocations: Vec<crate::memory::DeviceAllocationProvenance> = Vec::new();
+        macro_rules! account {
+            ($slice:expr) => {{
+                let provenance = $slice
+                    .view()
+                    .allocation_provenance()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                if !allocations
+                    .iter()
+                    .any(|known| provenance.same_allocation(known))
+                {
+                    allocations.push(provenance);
+                }
+            }};
+        }
+        account!(self.arena.descriptors);
+        account!(self.arena.raw);
+        account!(self.arena.objective);
+        account!(self.arena.groups);
+        account!(self.arena.group_members);
+        account!(self.arena.canaries);
+        account!(self.storage.selection);
+        account!(self.storage.roster_rows);
+        account!(self.storage.token_ids);
+        account!(self.storage.mask_labels);
+        account!(self.storage.mask_weights);
+        account!(self.storage.ar_labels);
+        account!(self.storage.retention_labels);
+        account!(self.storage.source_slots);
+        account!(self.storage.logical_positions);
+        account!(self.storage.kinds);
+        account!(self.storage.parents);
+        allocations.into_iter().try_fold(0u64, |total, allocation| {
+            total
+                .checked_add(allocation.allocation_bytes())
+                .ok_or(SemanticTransitionError::GenerationExhausted)
+        })
     }
 
     pub fn row_count(&self) -> usize {
@@ -817,6 +875,7 @@ impl SemanticTrainingViewArena {
         domain: &ResidentExecutionDomain,
         rows: Vec<SemanticTrainingViewRow>,
         objective: SemanticTrainingObjective,
+        task_identity: Identity256,
     ) -> Result<Arc<Self>, SemanticTransitionError> {
         validate_execution_domain(provider, domain)
             .map_err(|error| runtime_error("training-view domain validation", error))?;
@@ -852,7 +911,7 @@ impl SemanticTrainingViewArena {
             descriptors.push(descriptor);
         }
         let (objective, groups, group_members, canaries) =
-            validate_objective(objective, &descriptors, capacity)?;
+            validate_objective(objective, &descriptors, capacity, task_identity)?;
         let bytes = descriptors
             .len()
             .checked_mul(size_of::<TrainingViewRowDescriptor>())
@@ -981,6 +1040,7 @@ fn validate_objective(
     objective: SemanticTrainingObjective,
     rows: &[TrainingViewRowDescriptor],
     capacity: usize,
+    task_identity: Identity256,
 ) -> Result<ValidatedTrainingObjective, SemanticTransitionError> {
     if objective.groups.len() != 8 || objective.canaries.len() != 5 {
         return Err(input_error(
@@ -996,6 +1056,14 @@ fn validate_objective(
             .any(|value| !value.is_finite() || *value <= 0.0)
         || objective.cost_unit == Identity256::default()
         || objective.cost_cap == 0
+        || task_identity == Identity256::default()
+        || objective
+            .truth_tokens
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != objective.truth_tokens.len()
     {
         return Err(input_error(
             "training objective has invalid evaluator, coefficient or cost bounds",
@@ -1089,42 +1157,72 @@ fn validate_objective(
     let mut canaries = Vec::with_capacity(objective.canaries.len());
     for canary in &objective.canaries {
         let index = canary.kind as usize - 1;
-        if seen_canaries[index]
+        let row = usize::try_from(canary.row_ordinal)
+            .ok()
+            .and_then(|ordinal| rows.get(ordinal));
+        let obligation_kind = matches!(
+            canary.kind,
+            SemanticTrainingCanaryKind::SymbolicUtility | SemanticTrainingCanaryKind::GoalChain
+        );
+        let positions_valid = if obligation_kind {
+            row.is_some_and(|row| {
+                row.basis == SemanticTrainingViewBasis::CorpusSymbolicAnchor as u64
+                    && canary
+                        .obligation_positions
+                        .windows(2)
+                        .all(|pair| pair[0] < pair[1])
+                    && canary
+                        .obligation_positions
+                        .iter()
+                        .all(|position| *position < row.window)
+            })
+        } else {
+            canary.obligation_positions == [u64::MAX; 3]
+        };
+        if index != canaries.len()
+            || seen_canaries[index]
             || !canary.lower_bound.is_finite()
             || !canary.upper_bound.is_finite()
             || canary.lower_bound > canary.upper_bound
             || canary.memory_limit == 0
-            || canary.fuel_limit == 0
-            || canary.identity == Identity256::default()
-            || usize::try_from(canary.row_ordinal)
-                .ok()
-                .is_none_or(|ordinal| ordinal >= rows.len())
+            || canary.work_limit == 0
+            || row.is_none()
+            || !positions_valid
+            || (canary.kind == SemanticTrainingCanaryKind::GoalChain
+                && (canary.lower_bound.to_bits() != 0.0f64.to_bits()
+                    || canary.upper_bound.to_bits() != 0.0f64.to_bits()))
         {
             return Err(input_error(
-                "training canaries require unique kinds, valid rows, bounds and resource ceilings",
+                "training canaries require canonical kind order, valid rows, bounds and resource ceilings",
             ));
         }
         seen_canaries[index] = true;
+        let row = row.expect("checked canary row");
+        let identity = canary_identity(&objective, canary, row, task_identity);
         canaries.push(SemanticTrainingCanaryRecord {
+            evaluator_abi: SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI,
             kind: canary.kind as u64,
             row_ordinal: canary.row_ordinal,
             lower_bound_bits: canary.lower_bound.to_bits(),
             upper_bound_bits: canary.upper_bound.to_bits(),
             memory_limit: canary.memory_limit,
-            fuel_limit: canary.fuel_limit,
-            identity: identity_words(canary.identity),
+            work_limit: canary.work_limit,
+            obligation_positions: canary.obligation_positions,
+            row_identity: row.identity,
+            row_content_identity: row.content_identity,
+            task_identity: identity_words(task_identity),
+            identity: identity_words(identity),
         });
     }
-    if seen_canaries.iter().any(|seen| !seen)
-        || objective_identity(&objective) != objective.identity
-    {
-        return Err(input_error(
-            "training objective is incomplete or differs from its frozen identity",
-        ));
+    if seen_canaries.iter().any(|seen| !seen) {
+        return Err(input_error("training objective is incomplete"));
     }
+    let identity = objective_identity(&objective, rows, task_identity, &canaries);
     Ok((
         SemanticTrainingObjectiveRecord {
-            identity: identity_words(objective.identity),
+            evaluator_abi: SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI,
+            identity: identity_words(identity),
+            task_identity: identity_words(task_identity),
             row_count: u64::try_from(rows.len())
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
             capacity: u64::try_from(capacity)
@@ -1142,6 +1240,7 @@ fn validate_objective(
                 .map(|value| u64::from(value.to_bits())),
             cost_unit: identity_words(objective.cost_unit),
             cost_cap: objective.cost_cap,
+            truth_tokens: objective.truth_tokens,
         },
         groups,
         group_members,
@@ -1149,9 +1248,16 @@ fn validate_objective(
     ))
 }
 
-fn objective_identity(objective: &SemanticTrainingObjective) -> Identity256 {
+fn objective_identity(
+    objective: &SemanticTrainingObjective,
+    rows: &[TrainingViewRowDescriptor],
+    task_identity: Identity256,
+    canaries: &[SemanticTrainingCanaryRecord],
+) -> Identity256 {
     let mut hasher = Sha256::new();
-    hasher.update(b"xlog.semantic.training-objective.v2\0");
+    hasher.update(b"xlog.semantic.training-objective.v3\0");
+    hasher.update(SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI.to_le_bytes());
+    hasher.update(task_identity.as_bytes());
     hasher.update(objective.evaluator_min.to_bits().to_le_bytes());
     hasher.update(objective.evaluator_max.to_bits().to_le_bytes());
     for coefficient in objective.coefficients {
@@ -1159,6 +1265,9 @@ fn objective_identity(objective: &SemanticTrainingObjective) -> Identity256 {
     }
     hasher.update(objective.cost_unit.as_bytes());
     hasher.update(objective.cost_cap.to_le_bytes());
+    for token in objective.truth_tokens {
+        hasher.update(token.to_le_bytes());
+    }
     hasher.update(
         u64::try_from(objective.groups.len())
             .expect("validated training objective group count")
@@ -1174,6 +1283,13 @@ fn objective_identity(objective: &SemanticTrainingObjective) -> Identity256 {
         );
         for ordinal in &group.row_ordinals {
             hasher.update(ordinal.to_le_bytes());
+            let row = &rows[*ordinal as usize];
+            for word in row.identity {
+                hasher.update(word.to_le_bytes());
+            }
+            for word in row.content_identity {
+                hasher.update(word.to_le_bytes());
+            }
         }
     }
     hasher.update(
@@ -1181,14 +1297,41 @@ fn objective_identity(objective: &SemanticTrainingObjective) -> Identity256 {
             .expect("validated training canary count")
             .to_le_bytes(),
     );
-    for canary in &objective.canaries {
-        hasher.update((canary.kind as u64).to_le_bytes());
-        hasher.update(canary.row_ordinal.to_le_bytes());
-        hasher.update(canary.lower_bound.to_bits().to_le_bytes());
-        hasher.update(canary.upper_bound.to_bits().to_le_bytes());
-        hasher.update(canary.memory_limit.to_le_bytes());
-        hasher.update(canary.fuel_limit.to_le_bytes());
-        hasher.update(canary.identity.as_bytes());
+    for canary in canaries {
+        for word in canary.identity {
+            hasher.update(word.to_le_bytes());
+        }
+    }
+    Identity256::from_bytes(hasher.finalize().into())
+}
+
+fn canary_identity(
+    objective: &SemanticTrainingObjective,
+    canary: &SemanticTrainingCanary,
+    row: &TrainingViewRowDescriptor,
+    task_identity: Identity256,
+) -> Identity256 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"xlog.semantic.training-canary.v3\0");
+    hasher.update(SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI.to_le_bytes());
+    hasher.update((canary.kind as u64).to_le_bytes());
+    hasher.update(canary.row_ordinal.to_le_bytes());
+    hasher.update(canary.lower_bound.to_bits().to_le_bytes());
+    hasher.update(canary.upper_bound.to_bits().to_le_bytes());
+    hasher.update(canary.memory_limit.to_le_bytes());
+    hasher.update(canary.work_limit.to_le_bytes());
+    for position in canary.obligation_positions {
+        hasher.update(position.to_le_bytes());
+    }
+    for word in row.identity {
+        hasher.update(word.to_le_bytes());
+    }
+    for word in row.content_identity {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.update(task_identity.as_bytes());
+    for token in objective.truth_tokens {
+        hasher.update(token.to_le_bytes());
     }
     Identity256::from_bytes(hasher.finalize().into())
 }

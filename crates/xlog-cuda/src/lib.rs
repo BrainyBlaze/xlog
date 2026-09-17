@@ -69,7 +69,7 @@ pub use semantic_training_view::{
     SemanticTrainingObjectiveGroupKind, SemanticTrainingObjectiveGroupRecord,
     SemanticTrainingObjectiveRecord, SemanticTrainingRosterRow, SemanticTrainingViewBasis,
     SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
-    SemanticTrainingViewRow, SemanticTrainingViewSelection,
+    SemanticTrainingViewRow, SemanticTrainingViewSelection, SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI,
 };
 pub use semantic_transition::{
     Identity256, SemanticActionCatalogue, SemanticActionDescriptor, SemanticActiveRow,

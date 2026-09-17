@@ -4581,7 +4581,55 @@ fn upload_publication<T: DeviceRepr>(
         .map_err(|error| runtime_error("publication cold metadata upload", error))
 }
 
+fn account_tracked_allocation<T: cudarc::driver::DeviceRepr>(
+    allocations: &mut Vec<DeviceAllocationProvenance>,
+    slice: &TrackedCudaSlice<T>,
+) -> Result<(), SemanticTransitionError> {
+    let provenance = slice
+        .view()
+        .allocation_provenance()
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    if !allocations
+        .iter()
+        .any(|known| provenance.same_allocation(known))
+    {
+        allocations.push(provenance);
+    }
+    Ok(())
+}
+
+fn accounted_tracked_bytes(
+    allocations: Vec<DeviceAllocationProvenance>,
+) -> Result<u64, SemanticTransitionError> {
+    allocations.into_iter().try_fold(0u64, |total, allocation| {
+        total
+            .checked_add(allocation.allocation_bytes())
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    })
+}
+
 impl PublicationStorage {
+    fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
+        let mut allocations = Vec::new();
+        account_tracked_allocation(&mut allocations, &self.control)?;
+        for bank in &self.banks {
+            account_tracked_allocation(&mut allocations, bank)?;
+        }
+        for directory in &self.directories {
+            account_tracked_allocation(&mut allocations, directory)?;
+        }
+        account_tracked_allocation(&mut allocations, &self.storage)?;
+        account_tracked_allocation(&mut allocations, &self.contract)?;
+        account_tracked_allocation(&mut allocations, &self.role_counts)?;
+        account_tracked_allocation(&mut allocations, &self.terminals)?;
+        account_tracked_allocation(&mut allocations, &self.continuation)?;
+        account_tracked_allocation(&mut allocations, &self.continuation_directory)?;
+        for allocation in &self.allocations {
+            account_tracked_allocation(&mut allocations, allocation)?;
+        }
+        accounted_tracked_bytes(allocations)
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "the guard records each authenticated publication coordinate explicitly"
@@ -6277,11 +6325,25 @@ struct BoundModelUpdate {
     values: Vec<ModelUpdateBinding>,
     allocations: Vec<PreparedSemanticTensor>,
     admissibility: PreparedSemanticTensor,
-    canary_outputs: PreparedSemanticTensor,
+    baseline_logits: PreparedSemanticTensor,
+    candidate_logits: PreparedSemanticTensor,
+    baseline_generation: u64,
+    candidate_generation: u64,
+    accounted_reserved_bytes: u64,
+    copy_bytes: u64,
     _witness: SemanticTensorContentWitness,
 }
 
 impl PreparedModelUpdate {
+    fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
+        let mut allocations = Vec::new();
+        account_tracked_allocation(&mut allocations, &self.bindings)?;
+        account_tracked_allocation(&mut allocations, &self.admissibility)?;
+        account_tracked_allocation(&mut allocations, &self.canary_results)?;
+        account_tracked_allocation(&mut allocations, &self.refusal)?;
+        accounted_tracked_bytes(allocations)
+    }
+
     fn descriptor(&self) -> ModelUpdateContinuationInputs {
         ModelUpdateContinuationInputs {
             bindings: self.bindings.device_ptr_value(),
@@ -6304,7 +6366,10 @@ impl PreparedModelUpdate {
             if let Some(source) = &output.admissibility.source {
                 recorder.read(source);
             }
-            if let Some(source) = &output.canary_outputs.source {
+            if let Some(source) = &output.baseline_logits.source {
+                recorder.read(source);
+            }
+            if let Some(source) = &output.candidate_logits.source {
                 recorder.read(source);
             }
         }
@@ -6318,6 +6383,8 @@ impl PreparedModelUpdate {
         storage: &PublicationStorage,
         reader: &TrackedCudaSlice<PublicationLease>,
         training_view: &SemanticSelectedTrainingView,
+        task: &TrackedCudaSlice<u64>,
+        model_work: &PreparedModelWork,
     ) -> Result<(), SemanticTransitionError> {
         let output = self.output.as_ref().ok_or_else(|| {
             publication_input_error("prepared update has no original model output binding")
@@ -6340,18 +6407,78 @@ impl PreparedModelUpdate {
         storage.record(&mut recorder);
         recorder.read(reader);
         self.record(&mut recorder);
+        model_work.record_reads(&mut recorder);
+        recorder.read(task);
         let selection = training_view.selection();
+        let roster_rows = training_view.roster_rows();
+        let objective = training_view.objective();
         let canaries = training_view.canaries();
+        let mask_labels = training_view.mask_labels();
+        let retention_labels = training_view.retention_labels();
+        let kinds = training_view.kinds();
         recorder.read(&selection);
+        recorder.read(&roster_rows);
+        recorder.read(&objective);
         recorder.read(&canaries);
+        recorder.read(&mask_labels);
+        recorder.read(&retention_labels);
+        recorder.read(&kinds);
         recorder.write(&self.canary_results);
         recorder.write(&self.admissibility);
         recorder.write(&self.refusal);
         let admissibility_source = output.admissibility.data;
-        let canary_outputs = output.canary_outputs.data;
         let canary_results = self.canary_results.device_ptr_value();
         let admissibility_destination = self.admissibility.device_ptr_value();
         let refusal_destination = self.refusal.device_ptr_value();
+        let training_view_bytes = training_view.accounted_allocation_bytes()?;
+        let model_work_bytes = model_work.accounted_allocation_bytes()?;
+        let update_bytes = self.accounted_allocation_bytes()?;
+        let task_bytes = task
+            .view()
+            .allocation_provenance()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .allocation_bytes();
+        let accounted_reserved_bytes = output
+            .accounted_reserved_bytes
+            .checked_add(storage.accounted_allocation_bytes()?)
+            .and_then(|bytes| bytes.checked_add(training_view_bytes))
+            .and_then(|bytes| bytes.checked_add(task_bytes))
+            .and_then(|bytes| bytes.checked_add(model_work_bytes))
+            .and_then(|bytes| bytes.checked_add(update_bytes))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let logits = output.baseline_logits.layout;
+        let canary_inputs = ModelUpdateCanaryInputs {
+            control: storage.control.device_ptr_value(),
+            lease: reader.device_ptr_value(),
+            selection: *selection.device_ptr(),
+            roster_rows: *roster_rows.device_ptr(),
+            objective: *objective.device_ptr(),
+            canaries: *canaries.device_ptr(),
+            canary_count: canaries.len() as u64,
+            task: task.device_ptr_value(),
+            task_words: task.len() as u64,
+            mask_labels: *mask_labels.device_ptr(),
+            retention_labels: *retention_labels.device_ptr(),
+            kinds: *kinds.device_ptr(),
+            baseline_logits: output.baseline_logits.data,
+            candidate_logits: output.candidate_logits.data,
+            scalar_type: logits.scalar_type,
+            row_count: logits.dimensions[0],
+            capacity: logits.dimensions[1],
+            vocabulary: logits.dimensions[2],
+            row_stride_bytes: logits.strides_bytes[0],
+            position_stride_bytes: logits.strides_bytes[1],
+            vocabulary_stride_bytes: logits.strides_bytes[2],
+            baseline_generation: output.baseline_generation,
+            candidate_generation: output.candidate_generation,
+            model_work: model_work.descriptor(),
+            accounted_reserved_bytes,
+            copy_bytes: output.copy_bytes,
+            admissibility_source,
+            results: canary_results,
+            admissibility_destination,
+            refusal_destination,
+        };
         let arguments = (
             storage.control.device_ptr_value(),
             reader.device_ptr_value(),
@@ -6368,16 +6495,7 @@ impl PreparedModelUpdate {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (
-                        *selection.device_ptr(),
-                        *canaries.device_ptr(),
-                        canaries.len() as u64,
-                        admissibility_source,
-                        canary_outputs,
-                        canary_results,
-                        admissibility_destination,
-                        refusal_destination,
-                    ),
+                    (canary_inputs,),
                 )
             }
             .map_err(|error| XlogError::Kernel(error.to_string()))?;
@@ -6419,7 +6537,72 @@ struct ModelWorkInput {
     bound: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ModelUpdateCanaryInputs {
+    control: u64,
+    lease: u64,
+    selection: u64,
+    roster_rows: u64,
+    objective: u64,
+    canaries: u64,
+    canary_count: u64,
+    task: u64,
+    task_words: u64,
+    mask_labels: u64,
+    retention_labels: u64,
+    kinds: u64,
+    baseline_logits: u64,
+    candidate_logits: u64,
+    scalar_type: u64,
+    row_count: u64,
+    capacity: u64,
+    vocabulary: u64,
+    row_stride_bytes: u64,
+    position_stride_bytes: u64,
+    vocabulary_stride_bytes: u64,
+    baseline_generation: u64,
+    candidate_generation: u64,
+    model_work: ModelWorkInput,
+    accounted_reserved_bytes: u64,
+    copy_bytes: u64,
+    admissibility_source: u64,
+    results: u64,
+    admissibility_destination: u64,
+    refusal_destination: u64,
+}
+
+struct ModelUpdateCanaryInputsParam(ModelUpdateCanaryInputs);
+
+impl crate::cuda_compat::KernelParamStorage for ModelUpdateCanaryInputsParam {
+    fn as_kernel_param(&self) -> *mut std::ffi::c_void {
+        (&self.0 as *const ModelUpdateCanaryInputs)
+            .cast_mut()
+            .cast()
+    }
+}
+
+impl crate::cuda_compat::IntoKernelParamStorage for ModelUpdateCanaryInputs {
+    type Storage = ModelUpdateCanaryInputsParam;
+
+    fn into_kernel_param_storage(self) -> Self::Storage {
+        ModelUpdateCanaryInputsParam(self)
+    }
+}
+
 impl PreparedModelWork {
+    fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
+        let mut allocations = Vec::new();
+        account_tracked_allocation(&mut allocations, &self.device)?;
+        account_tracked_allocation(&mut allocations, &self.actual)?;
+        accounted_tracked_bytes(allocations)
+    }
+
+    fn record_reads(&self, recorder: &mut LaunchRecorder) {
+        recorder.read(&self.device);
+        recorder.read(&self.actual);
+    }
+
     #[cfg(feature = "semantic-policy")]
     fn begin_capture(&mut self, bank: usize, recorded: u8) -> Result<(), &'static str> {
         if bank > 1 || self.capture_bank.is_some() {
@@ -6836,6 +7019,65 @@ fn tensor_content_identity(
         tensor.data,
         tensor.source.as_ref().map_or(0, DeviceMemoryView::len),
     )
+}
+
+fn cuda_backing_allocation(
+    pointer: u64,
+    required_bytes: usize,
+) -> Result<(u64, u64), SemanticTransitionError> {
+    if pointer == 0 || required_bytes == 0 {
+        return Err(publication_input_error(
+            "accounted update tensor requires a nonempty CUDA allocation",
+        ));
+    }
+    let mut base = 0;
+    let mut bytes = 0usize;
+    // SAFETY: the prepared tensor was already validated as a live CUDA pointer
+    // on this session's current context. This query neither reads nor mutates it.
+    let result = unsafe { sys::cuMemGetAddressRange_v2(&mut base, &mut bytes, pointer) };
+    if result != sys::cudaError_enum::CUDA_SUCCESS {
+        return Err(runtime_error(
+            "update backing-allocation query",
+            format!("cuMemGetAddressRange_v2 failed with {result:?}"),
+        ));
+    }
+    let bytes = u64::try_from(bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+    let required =
+        u64::try_from(required_bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+    if pointer < base
+        || pointer
+            .checked_add(required)
+            .is_none_or(|end| end > base.saturating_add(bytes))
+    {
+        return Err(publication_input_error(
+            "update tensor span exceeds its actual CUDA backing allocation",
+        ));
+    }
+    Ok((base, bytes))
+}
+
+fn accounted_tensor_allocations(
+    tensors: &[PreparedSemanticTensor],
+) -> Result<u64, SemanticTransitionError> {
+    let mut allocations = BTreeMap::new();
+    for tensor in tensors {
+        let bytes = tensor_layout_bytes(&tensor.layout)?;
+        if bytes == 0 {
+            continue;
+        }
+        let (base, allocation_bytes) = cuda_backing_allocation(tensor.data, bytes)?;
+        if allocations
+            .insert(base, allocation_bytes)
+            .is_some_and(|previous| previous != allocation_bytes)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+    }
+    allocations.values().try_fold(0u64, |total, bytes| {
+        total
+            .checked_add(*bytes)
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    })
 }
 
 fn same_tensor_content_owner(
@@ -8941,7 +9183,7 @@ fn decode_canary_refusal(
         || !upper.is_finite()
         || lower > upper
         || record.memory_limit == 0
-        || record.fuel_limit == 0
+        || record.work_limit == 0
         || match reason {
             SemanticTrainingCanaryRefusalReason::NonFiniteMeasurement => measurement.is_finite(),
             SemanticTrainingCanaryRefusalReason::OutsideBounds => {
@@ -8953,13 +9195,18 @@ fn decode_canary_refusal(
                     || measurement > upper
                     || record.memory_used <= record.memory_limit
             }
-            SemanticTrainingCanaryRefusalReason::FuelLimitExceeded => {
+            SemanticTrainingCanaryRefusalReason::WorkLimitExceeded => {
                 !measurement.is_finite()
                     || measurement < lower
                     || measurement > upper
                     || record.memory_used > record.memory_limit
-                    || record.fuel_used <= record.fuel_limit
+                    || record.work_used <= record.work_limit
             }
+            SemanticTrainingCanaryRefusalReason::IncompleteOperands
+            | SemanticTrainingCanaryRefusalReason::ProtectedRetentionLost
+            | SemanticTrainingCanaryRefusalReason::GoalWitnessInvalid
+            | SemanticTrainingCanaryRefusalReason::WorkOverflow
+            | SemanticTrainingCanaryRefusalReason::GenerationMismatch => false,
         }
     {
         return Err(SemanticTransitionError::ObservationMismatch);
@@ -11933,7 +12180,10 @@ impl SemanticTransitionSession {
         mut model_memory: SemanticModelMemory,
         mut tensors: Vec<SemanticTensorInput>,
         admissibility: SemanticTensorInput,
-        canary_outputs: SemanticTensorInput,
+        baseline_logits: SemanticTensorInput,
+        candidate_logits: SemanticTensorInput,
+        baseline_generation: u64,
+        candidate_generation: u64,
         witness: &SemanticTensorContentWitness,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
@@ -11949,9 +12199,11 @@ impl SemanticTransitionSession {
                 "model update output belongs only to a prepared update",
             ));
         }
-        let owner = &self.steps[&step.token];
-        let prepared = owner.prepared.as_ref().expect("prepared update owner");
-        if prepared.branches[bank]
+        if self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("prepared update owner")
+            .branches[bank]
             .model_update
             .as_ref()
             .is_none_or(|update| update.output.is_some())
@@ -11961,7 +12213,7 @@ impl SemanticTransitionSession {
             ));
         }
         if !matches!(
-            owner.content[witness.index].seals,
+            self.steps[&step.token].content[witness.index].seals,
             TensorContentSeals::Captured(_)
         ) {
             return Err(publication_input_error(
@@ -11977,7 +12229,8 @@ impl SemanticTransitionSession {
         let tensor_count = tensors.len();
         model_memory.allocations.append(&mut tensors);
         model_memory.allocations.push(admissibility);
-        model_memory.allocations.push(canary_outputs);
+        model_memory.allocations.push(baseline_logits);
+        model_memory.allocations.push(candidate_logits);
         self.verify_prepared_tensor_content(
             step,
             witness,
@@ -11990,9 +12243,9 @@ impl SemanticTransitionSession {
             .clone();
         let (allocations, outputs) = outputs.split_at(allocation_count);
         let (tensors, update_metadata) = outputs.split_at(tensor_count);
-        let [admissibility, canary_outputs] = update_metadata else {
+        let [admissibility, baseline_logits, candidate_logits] = update_metadata else {
             return Err(publication_input_error(
-                "model update output requires numerical admissibility and five canary output pairs",
+                "model update output requires numerical admissibility and complete baseline/candidate logits",
             ));
         };
         let allocation_index = u64::try_from(allocation_count)
@@ -12015,25 +12268,61 @@ impl SemanticTransitionSession {
                 "model update numerical admissibility must be Bool8[1]",
             ));
         }
-        let canary_index = allocation_index
+        let baseline_index = allocation_index
             .checked_add(1)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        if canary_outputs.layout
-            != (SemanticTensorLayout {
-                role: 0,
-                index: canary_index,
-                element_bytes: 8,
-                scalar_type: 3,
-                rank: 2,
-                logical_axis: u64::MAX,
-                dimensions: [5, 4, 0, 0],
-                strides_bytes: [32, 8, 0, 0],
-            })
-            || canary_outputs.logical_begin != 0
-            || canary_outputs.logical_end != 0
+        let candidate_index = baseline_index
+            .checked_add(1)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let training_view = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("prepared update owner")
+            .training_view
+            .as_ref()
+            .ok_or_else(|| {
+                publication_input_error("prepared update has no native training view")
+            })?;
+        let row_count = training_view.roster_rows().len() as u64;
+        let capacity = training_view.capacity() as u64;
+        let layout_valid = |tensor: &PreparedSemanticTensor, index: u64| {
+            let layout = tensor.layout;
+            matches!(layout.scalar_type, 4..=6)
+                && matches!(
+                    (layout.scalar_type, layout.element_bytes),
+                    (4, 2) | (5, 2) | (6, 4)
+                )
+                && layout.role == 0
+                && layout.index == index
+                && layout.rank == 3
+                && layout.logical_axis == u64::MAX
+                && layout.dimensions[0] == row_count
+                && layout.dimensions[1] == capacity
+                && layout.dimensions[2] > 0
+                && layout.dimensions[3] == 0
+                && layout.strides_bytes[2] == layout.element_bytes
+                && layout.strides_bytes[1]
+                    == layout.dimensions[2]
+                        .checked_mul(layout.element_bytes)
+                        .unwrap_or(0)
+                && layout.strides_bytes[0]
+                    == layout.dimensions[1]
+                        .checked_mul(layout.strides_bytes[1])
+                        .unwrap_or(0)
+                && layout.strides_bytes[3] == 0
+                && tensor.logical_begin == 0
+                && tensor.logical_end == 0
+        };
+        if !layout_valid(baseline_logits, baseline_index)
+            || !layout_valid(candidate_logits, candidate_index)
+            || baseline_logits.layout.scalar_type != candidate_logits.layout.scalar_type
+            || baseline_logits.layout.dimensions != candidate_logits.layout.dimensions
+            || baseline_logits.layout.strides_bytes != candidate_logits.layout.strides_bytes
+            || baseline_generation == 0
+            || candidate_generation != baseline_generation.checked_add(1).unwrap_or(0)
         {
             return Err(publication_input_error(
-                "model update canary outputs must be U64[5,4] baseline bits, candidate bits, memory use and fuel use",
+                "model update canary logits must be aligned contiguous F16/BF16/F32 [rows,capacity,vocabulary] from consecutive generations",
             ));
         }
         let geometry = prepare_model_memory(
@@ -12064,9 +12353,12 @@ impl SemanticTransitionSession {
                     "model update numerical admissibility aliases an output allocation",
                 ));
             }
-            if step_input_overlap(allocation.data, bytes, canary_outputs.data, 5 * 4 * 8)? {
+            let logits_bytes = tensor_layout_bytes(&baseline_logits.layout)?;
+            if step_input_overlap(allocation.data, bytes, baseline_logits.data, logits_bytes)?
+                || step_input_overlap(allocation.data, bytes, candidate_logits.data, logits_bytes)?
+            {
                 return Err(publication_input_error(
-                    "model update canary outputs alias an output allocation",
+                    "model update canary logits alias an output allocation",
                 ));
             }
             for owned in &storage.allocations {
@@ -12082,20 +12374,34 @@ impl SemanticTransitionSession {
                 }
             }
         }
-        if step_input_overlap(admissibility.data, 1, canary_outputs.data, 5 * 4 * 8)? {
+        let logits_bytes = tensor_layout_bytes(&baseline_logits.layout)?;
+        if step_input_overlap(admissibility.data, 1, baseline_logits.data, logits_bytes)?
+            || step_input_overlap(admissibility.data, 1, candidate_logits.data, logits_bytes)?
+            || step_input_overlap(
+                baseline_logits.data,
+                logits_bytes,
+                candidate_logits.data,
+                logits_bytes,
+            )?
+        {
             return Err(publication_input_error(
-                "model update canary outputs alias numerical admissibility",
+                "model update canary logits alias one another or numerical admissibility",
             ));
         }
         for owned in &storage.allocations {
             if step_input_overlap(
-                canary_outputs.data,
-                5 * 4 * 8,
+                baseline_logits.data,
+                logits_bytes,
+                owned.device_ptr_value(),
+                owned.len(),
+            )? || step_input_overlap(
+                candidate_logits.data,
+                logits_bytes,
                 owned.device_ptr_value(),
                 owned.len(),
             )? {
                 return Err(publication_input_error(
-                    "model update canary outputs alias native publication storage",
+                    "model update canary logits alias native publication storage",
                 ));
             }
         }
@@ -12110,6 +12416,12 @@ impl SemanticTransitionSession {
             })
             .collect::<Vec<_>>();
         let retained_allocations = allocations.to_vec();
+        let accounted_reserved_bytes = accounted_tensor_allocations(outputs)?;
+        let copy_bytes = values.iter().try_fold(0u64, |total, binding| {
+            total
+                .checked_add(binding.bytes)
+                .ok_or(SemanticTransitionError::GenerationExhausted)
+        })?;
         let prepared = self
             .steps
             .get_mut(&step.token)
@@ -12129,7 +12441,12 @@ impl SemanticTransitionSession {
             values,
             allocations: retained_allocations,
             admissibility: admissibility.clone(),
-            canary_outputs: canary_outputs.clone(),
+            baseline_logits: baseline_logits.clone(),
+            candidate_logits: candidate_logits.clone(),
+            baseline_generation,
+            candidate_generation,
+            accounted_reserved_bytes,
+            copy_bytes,
             _witness: witness.clone(),
         });
         Ok(())
@@ -16611,11 +16928,18 @@ impl SemanticTransitionSession {
                 "training-view arena requires one cold task binding and cannot be replaced",
             ));
         }
+        let task_identity = self
+            .task
+            .as_ref()
+            .expect("checked cold task binding")
+            .0
+            .identity();
         self.training_views = Some(SemanticTrainingViewArena::allocate(
             &self.provider,
             &self.domain,
             rows,
             objective,
+            task_identity,
         )?);
         Ok(())
     }
@@ -17195,6 +17519,11 @@ impl SemanticTransitionSession {
                     self.publication.as_ref().expect("prepared publication"),
                     &prepared.reader,
                     training_view,
+                    &self.task.as_ref().expect("prepared task binding").1,
+                    prepared
+                        .model_work
+                        .as_ref()
+                        .expect("prepared model work frozen above"),
                 )?;
             }
             let io = self.prepared_kernel_io(step, bank)?;
@@ -19257,8 +19586,11 @@ impl SemanticTransitionSession {
                 if let Some(source) = &output.admissibility.source {
                     ranges.push((output.admissibility.data, source.len() as u64));
                 }
-                if let Some(source) = &output.canary_outputs.source {
-                    ranges.push((output.canary_outputs.data, source.len() as u64));
+                if let Some(source) = &output.baseline_logits.source {
+                    ranges.push((output.baseline_logits.data, source.len() as u64));
+                }
+                if let Some(source) = &output.candidate_logits.source {
+                    ranges.push((output.candidate_logits.data, source.len() as u64));
                 }
             }
         }

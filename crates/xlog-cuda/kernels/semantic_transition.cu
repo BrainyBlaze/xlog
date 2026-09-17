@@ -406,8 +406,10 @@ struct SemanticTrainingViewSelection {
     uint64_t origin_candidate,training_rng[4];
 };
 struct SemanticTrainingObjectiveRecord {
-    uint64_t identity[4],row_count,capacity,group_count,group_member_count,canary_count;
+    uint64_t evaluator_abi,identity[4],task_identity[4];
+    uint64_t row_count,capacity,group_count,group_member_count,canary_count;
     uint64_t evaluator_min_bits,evaluator_max_bits,coefficient_bits[9],cost_unit[4],cost_cap;
+    uint64_t truth_tokens[4];
 };
 struct SemanticTrainingObjectiveGroupRecord {
     uint64_t kind,denominator,member_offset,member_count;
@@ -418,17 +420,25 @@ struct SemanticTrainingRosterRow {
     SemanticTrainingViewOriginRecord origin;
 };
 struct SemanticTrainingCanaryRecord {
-    uint64_t kind,row_ordinal,lower_bound_bits,upper_bound_bits,memory_limit,fuel_limit,identity[4];
-};
-struct SemanticTrainingCanaryOutputRecord {
-    uint64_t baseline_bits,candidate_bits,memory_used,fuel_used;
+    uint64_t evaluator_abi,kind,row_ordinal,lower_bound_bits,upper_bound_bits,memory_limit,work_limit;
+    uint64_t obligation_positions[3],row_identity[4],row_content_identity[4],task_identity[4],identity[4];
 };
 struct SemanticTrainingCanaryResultRecord {
-    uint64_t kind,row_ordinal,measurement_bits,memory_used,fuel_used,identity[4];
+    uint64_t kind,row_ordinal,measurement_bits,memory_used,work_used,identity[4];
 };
 struct SemanticTrainingCanaryRefusalRecord {
     uint64_t abi,reason,kind,row_ordinal,measurement_bits,lower_bound_bits,upper_bound_bits;
-    uint64_t memory_used,memory_limit,fuel_used,fuel_limit,identity[4],selection_identity[4];
+    uint64_t memory_used,memory_limit,work_used,work_limit,identity[4],selection_identity[4];
+};
+struct ModelUpdateCanaryInputs {
+    uint64_t control,lease,selection,roster_rows,objective,canaries,canary_count,task,task_words;
+    uint64_t mask_labels,retention_labels,kinds,baseline_logits,candidate_logits;
+    uint64_t scalar_type,row_count,capacity,vocabulary;
+    uint64_t row_stride_bytes,position_stride_bytes,vocabulary_stride_bytes;
+    uint64_t baseline_generation,candidate_generation;
+    ModelWorkInput model_work;
+    uint64_t accounted_reserved_bytes,copy_bytes,admissibility_source,results;
+    uint64_t admissibility_destination,refusal_destination;
 };
 struct PolicyBackward {
     uint64_t cotangents,parameters,text,baselines,recurrent,scores,status,parameter_cells,text_cells;
@@ -454,22 +464,22 @@ static_assert(sizeof(PolicyField)==24,"policy field ABI");
 static_assert(sizeof(PolicyDescriptor)==480,"policy ABI");
 static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origin ABI");
 static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
-static_assert(sizeof(SemanticTrainingObjectiveRecord)==200,"training objective ABI");
+static_assert(sizeof(SemanticTrainingObjectiveRecord)==272,"training objective ABI");
 static_assert(sizeof(SemanticTrainingObjectiveGroupRecord)==32,"training objective group ABI");
 static_assert(sizeof(SemanticTrainingRosterRow)==512,"training roster row ABI");
-static_assert(sizeof(SemanticTrainingCanaryRecord)==80,"training canary ABI");
-static_assert(sizeof(SemanticTrainingCanaryOutputRecord)==32,"training canary output ABI");
+static_assert(sizeof(SemanticTrainingCanaryRecord)==208,"training canary ABI");
 static_assert(sizeof(SemanticTrainingCanaryResultRecord)==72,"training canary result ABI");
 static_assert(sizeof(SemanticTrainingCanaryRefusalRecord)==152,"training canary refusal ABI");
+static_assert(sizeof(ModelUpdateCanaryInputs)==256,"training canary input ABI");
 static_assert(sizeof(PolicyBackward)==144,"policy backward ABI");
 
 __device__ bool semantic_training_canary_refusal_valid(
         const SemanticTrainingCanaryRefusalRecord& refusal) {
-    if(refusal.abi!=1 || refusal.reason>4)return false;
+    if(refusal.abi!=1 || refusal.reason>9)return false;
     if(!refusal.reason) {
         if(refusal.kind || refusal.row_ordinal || refusal.measurement_bits ||
            refusal.lower_bound_bits || refusal.upper_bound_bits || refusal.memory_used ||
-           refusal.memory_limit || refusal.fuel_used || refusal.fuel_limit)return false;
+           refusal.memory_limit || refusal.work_used || refusal.work_limit)return false;
         for(uint32_t word=0;word<4;++word)
             if(refusal.identity[word] || refusal.selection_identity[word])return false;
         return true;
@@ -479,13 +489,17 @@ __device__ bool semantic_training_canary_refusal_valid(
     const double upper=__longlong_as_double((long long)refusal.upper_bound_bits);
     const double measurement=__longlong_as_double((long long)refusal.measurement_bits);
     if(!isfinite(lower) || !isfinite(upper) || lower>upper ||
-       !refusal.memory_limit || !refusal.fuel_limit)return false;
+       !refusal.memory_limit || !refusal.work_limit)return false;
     if(refusal.reason==1)return !isfinite(measurement);
     if(!isfinite(measurement))return false;
     if(refusal.reason==2)return measurement<lower || measurement>upper;
-    if(measurement<lower || measurement>upper)return false;
-    if(refusal.reason==3)return refusal.memory_used>refusal.memory_limit;
-    return refusal.memory_used<=refusal.memory_limit && refusal.fuel_used>refusal.fuel_limit;
+    if(refusal.reason==3)return measurement>=lower && measurement<=upper &&
+        refusal.memory_used>refusal.memory_limit;
+    if(refusal.reason==4)return measurement>=lower && measurement<=upper &&
+        refusal.memory_used<=refusal.memory_limit && refusal.work_used>refusal.work_limit;
+    if(refusal.reason==6)return refusal.kind==2;
+    if(refusal.reason==7)return refusal.kind==4;
+    return refusal.reason>=5 && refusal.reason<=9;
 }
 static_assert(sizeof(SourceSlot)==64,"source slot ABI");
 static_assert(sizeof(PublicationStorageEntry)==24,"owned storage ABI");
@@ -1511,91 +1525,305 @@ extern "C" __global__ void semantic_publication_prepare_continuation(uint64_t co
        publication_prepare_continuation(*reinterpret_cast<PublicationControl*>(control_ptr),
            *reinterpret_cast<const PublicationLease*>(lease_ptr),inputs))semantic_content_integrity_trap();
 }
+__device__ double semantic_canary_logit(uint64_t pointer,uint64_t scalar_type,uint64_t offset) {
+    const auto* bytes=reinterpret_cast<const uint8_t*>(pointer+offset);
+    if(scalar_type==6)return double(*reinterpret_cast<const float*>(bytes));
+    const uint16_t bits=*reinterpret_cast<const uint16_t*>(bytes);
+    if(scalar_type==5)return double(__uint_as_float(uint32_t(bits)<<16));
+    const uint64_t sign=bits>>15,exponent=(bits>>10)&31,fraction=bits&1023;
+    double value=0.0;
+    if(exponent==31)value=fraction ? NAN : INFINITY;
+    else if(exponent)value=ldexp(double(1024+fraction),int(exponent)-25);
+    else value=ldexp(double(fraction),-24);
+    return sign ? -value : value;
+}
+
+__device__ bool semantic_canary_charge(ExecutionWork& work,uint64_t count,uint64_t units) {
+    if(units && count>UINT64_MAX/units) { work.overflow=1;return false; }
+    return execution_work_add(work,count*units,false);
+}
+
+__device__ bool semantic_canary_argmax(const ModelUpdateCanaryInputs& inputs,uint64_t pointer,
+        uint64_t row,uint64_t position,uint64_t& token) {
+    const uint64_t base=row*inputs.row_stride_bytes+position*inputs.position_stride_bytes;
+    double maximum=-INFINITY;token=0;
+    for(uint64_t vocabulary=0;vocabulary<inputs.vocabulary;++vocabulary) {
+        const double value=semantic_canary_logit(pointer,inputs.scalar_type,
+            base+vocabulary*inputs.vocabulary_stride_bytes);
+        if(!isfinite(value))return false;
+        if(value>maximum) { maximum=value;token=vocabulary; }
+    }
+    return true;
+}
+
+__device__ bool semantic_canary_log_normalizer(const ModelUpdateCanaryInputs& inputs,uint64_t pointer,
+        uint64_t row,uint64_t position,double& maximum,double& logarithm) {
+    const uint64_t base=row*inputs.row_stride_bytes+position*inputs.position_stride_bytes;
+    maximum=-INFINITY;
+    for(uint64_t vocabulary=0;vocabulary<inputs.vocabulary;++vocabulary) {
+        const double value=semantic_canary_logit(pointer,inputs.scalar_type,
+            base+vocabulary*inputs.vocabulary_stride_bytes);
+        if(!isfinite(value))return false;
+        if(value>maximum)maximum=value;
+    }
+    double sum=0.0;
+    for(uint64_t vocabulary=0;vocabulary<inputs.vocabulary;++vocabulary) {
+        const double value=semantic_canary_logit(pointer,inputs.scalar_type,
+            base+vocabulary*inputs.vocabulary_stride_bytes);
+        sum=__dadd_rn(sum,exp(__dsub_rn(value,maximum)));
+    }
+    if(!isfinite(sum) || !(sum>0.0))return false;
+    logarithm=log(sum);
+    return isfinite(logarithm);
+}
+
 extern "C" __global__ void semantic_publication_prepare_model_update_admissibility(
-        uint64_t selection_ptr,uint64_t canaries_ptr,uint64_t canary_count,
-        uint64_t source_ptr,uint64_t outputs_ptr,uint64_t results_ptr,uint64_t destination_ptr,
-        uint64_t refusal_destination_ptr) {
+        ModelUpdateCanaryInputs inputs) {
     if(blockIdx.x || threadIdx.x)return;
-    if(!selection_ptr || selection_ptr%alignof(SemanticTrainingViewSelection) ||
-       selection_ptr>UINT64_MAX-sizeof(SemanticTrainingViewSelection) ||
-       !canaries_ptr || canaries_ptr%alignof(SemanticTrainingCanaryRecord) ||
-       canary_count!=5 || canaries_ptr>UINT64_MAX-canary_count*sizeof(SemanticTrainingCanaryRecord) ||
-       !source_ptr || source_ptr==UINT64_MAX ||
-       !outputs_ptr || outputs_ptr%alignof(SemanticTrainingCanaryOutputRecord) ||
-       outputs_ptr>UINT64_MAX-canary_count*sizeof(SemanticTrainingCanaryOutputRecord) ||
-       !results_ptr || results_ptr%alignof(SemanticTrainingCanaryResultRecord) ||
-       results_ptr>UINT64_MAX-canary_count*sizeof(SemanticTrainingCanaryResultRecord) ||
-       !destination_ptr || destination_ptr==UINT64_MAX ||
-       !refusal_destination_ptr ||
-       refusal_destination_ptr%alignof(SemanticTrainingCanaryRefusalRecord) ||
-       refusal_destination_ptr>UINT64_MAX-sizeof(SemanticTrainingCanaryRefusalRecord)) {
+    if(!inputs.control || inputs.control%alignof(PublicationControl) ||
+       !inputs.lease || inputs.lease%alignof(PublicationLease) ||
+       !inputs.selection || inputs.selection%alignof(SemanticTrainingViewSelection) ||
+       !inputs.roster_rows || inputs.roster_rows%alignof(SemanticTrainingRosterRow) ||
+       !inputs.objective || inputs.objective%alignof(SemanticTrainingObjectiveRecord) ||
+       !inputs.canaries || inputs.canaries%alignof(SemanticTrainingCanaryRecord) || inputs.canary_count!=5 ||
+       !inputs.task || inputs.task%alignof(uint64_t) || inputs.task_words<34 ||
+       !inputs.mask_labels || inputs.mask_labels%alignof(int64_t) ||
+       !inputs.retention_labels || inputs.retention_labels%alignof(int64_t) ||
+       !inputs.kinds || inputs.kinds%alignof(int64_t) ||
+       !inputs.baseline_logits || !inputs.candidate_logits ||
+       !inputs.admissibility_source || !inputs.results ||
+       inputs.results%alignof(SemanticTrainingCanaryResultRecord) ||
+       !inputs.admissibility_destination || !inputs.refusal_destination ||
+       inputs.refusal_destination%alignof(SemanticTrainingCanaryRefusalRecord)) {
         semantic_content_integrity_trap();return;
     }
-    const uint8_t value=*reinterpret_cast<const uint8_t*>(source_ptr);
-    if(value>1) { semantic_content_integrity_trap();return; }
-    const auto& selection=*reinterpret_cast<const SemanticTrainingViewSelection*>(selection_ptr);
-    const auto* canaries=reinterpret_cast<const SemanticTrainingCanaryRecord*>(canaries_ptr);
-    const auto* outputs=reinterpret_cast<const SemanticTrainingCanaryOutputRecord*>(outputs_ptr);
-    auto* results=reinterpret_cast<SemanticTrainingCanaryResultRecord*>(results_ptr);
-    SemanticTrainingCanaryRefusalRecord refusal{};refusal.abi=1;
+    const uint64_t element_bytes=inputs.scalar_type==6 ? 4 : 2;
+    if((inputs.scalar_type!=4 && inputs.scalar_type!=5 && inputs.scalar_type!=6) ||
+       !inputs.row_count || !inputs.capacity || !inputs.vocabulary ||
+       inputs.vocabulary>UINT64_MAX/element_bytes ||
+       inputs.vocabulary_stride_bytes!=element_bytes ||
+       inputs.position_stride_bytes!=inputs.vocabulary*element_bytes ||
+       inputs.position_stride_bytes>UINT64_MAX/inputs.capacity ||
+       inputs.row_stride_bytes!=inputs.capacity*inputs.position_stride_bytes ||
+       inputs.row_stride_bytes>UINT64_MAX/inputs.row_count ||
+       inputs.baseline_logits%element_bytes || inputs.candidate_logits%element_bytes ||
+       inputs.baseline_logits>UINT64_MAX-inputs.row_count*inputs.row_stride_bytes ||
+       inputs.candidate_logits>UINT64_MAX-inputs.row_count*inputs.row_stride_bytes ||
+       inputs.row_count>UINT64_MAX/sizeof(SemanticTrainingRosterRow) ||
+       inputs.capacity>UINT64_MAX/inputs.row_count) {
+        semantic_content_integrity_trap();return;
+    }
+    const auto& control=*reinterpret_cast<const PublicationControl*>(inputs.control);
+    const auto& lease=*reinterpret_cast<const PublicationLease*>(inputs.lease);
+    const auto* base=publication_acquired_bank(control,lease);
+    const auto& selection=*reinterpret_cast<const SemanticTrainingViewSelection*>(inputs.selection);
+    const auto* rows=reinterpret_cast<const SemanticTrainingRosterRow*>(inputs.roster_rows);
+    const auto& objective=*reinterpret_cast<const SemanticTrainingObjectiveRecord*>(inputs.objective);
+    const auto* canaries=reinterpret_cast<const SemanticTrainingCanaryRecord*>(inputs.canaries);
+    const auto* task=reinterpret_cast<const uint64_t*>(inputs.task);
+    const auto* mask_labels=reinterpret_cast<const int64_t*>(inputs.mask_labels);
+    const auto* retention_labels=reinterpret_cast<const int64_t*>(inputs.retention_labels);
+    const auto* kinds=reinterpret_cast<const int64_t*>(inputs.kinds);
+    auto* results=reinterpret_cast<SemanticTrainingCanaryResultRecord*>(inputs.results);
+    const uint8_t numerical=*reinterpret_cast<const uint8_t*>(inputs.admissibility_source);
+    const uint64_t support_count=task[21];
+    if(numerical>1 || objective.evaluator_abi!=3 || objective.canary_count!=5 ||
+       objective.row_count!=inputs.row_count || objective.capacity!=inputs.capacity ||
+       selection.row_count!=inputs.row_count || selection.capacity!=inputs.capacity ||
+       task[0]!=4 || !task[1] || support_count>(UINT64_MAX-34)/5 ||
+       inputs.task_words!=34+support_count*5 ||
+       !publication_identity_equal(objective.task_identity,task+2)) {
+        semantic_content_integrity_trap();return;
+    }
+    const double evaluator_min=__longlong_as_double((long long)objective.evaluator_min_bits);
+    const double evaluator_max=__longlong_as_double((long long)objective.evaluator_max_bits);
+    if(!isfinite(evaluator_min) || !isfinite(evaluator_max) || evaluator_min>evaluator_max) {
+        semantic_content_integrity_trap();return;
+    }
+    for(uint32_t left=0;left<4;++left) {
+        if(objective.truth_tokens[left]>=inputs.vocabulary) { semantic_content_integrity_trap();return; }
+        for(uint32_t right=left+1;right<4;++right)
+            if(objective.truth_tokens[left]==objective.truth_tokens[right]) {
+                semantic_content_integrity_trap();return;
+            }
+    }
+    for(uint32_t obligation=0;obligation<3;++obligation) {
+        bool statement_identity=false;
+        for(uint32_t word=0;word<4;++word)statement_identity |= task[6+4*obligation+word]!=0;
+        if(!statement_identity || task[18+obligation]>3 ||
+           !(task[31+obligation]&(uint64_t(1)<<task[18+obligation]))) {
+            semantic_content_integrity_trap();return;
+        }
+    }
+    ExecutionWork work{};
+    consume_model_work(inputs.model_work,work);
+    semantic_canary_charge(work,inputs.copy_bytes,1);
+    uint64_t global_reason=0;
+    if(!base || selection.status || inputs.model_work.count==0 || inputs.model_work.bound==0 ||
+       work.model_events!=inputs.model_work.count || work.model_bound!=inputs.model_work.bound)
+        global_reason=5;
+    else if(base->header.model_generation!=inputs.baseline_generation ||
+            inputs.candidate_generation!=inputs.baseline_generation+1 ||
+            inputs.candidate_generation<=inputs.baseline_generation)
+        global_reason=9;
     uint64_t seen=0;
-    uint8_t admissible=value && selection.status==0;
-    for(uint64_t item=0;item<canary_count;++item) {
+    SemanticTrainingCanaryRefusalRecord refusal{};refusal.abi=1;
+    uint8_t admissible=numerical && !global_reason;
+    for(uint64_t item=0;item<inputs.canary_count;++item) {
         const auto& canary=canaries[item];
-        if(canary.kind<1 || canary.kind>canary_count ||
-           (seen&(uint64_t(1)<<(canary.kind-1)))) {
+        if(canary.evaluator_abi!=3 || canary.kind!=item+1 ||
+           canary.row_ordinal>=inputs.row_count || (seen&(uint64_t(1)<<(canary.kind-1))) ||
+           !publication_identity_equal(canary.task_identity,objective.task_identity)) {
             semantic_content_integrity_trap();return;
         }
         seen|=uint64_t(1)<<(canary.kind-1);
-        const double lower=__longlong_as_double((long long)canary.lower_bound_bits);
-        const double upper=__longlong_as_double((long long)canary.upper_bound_bits);
-        if(!isfinite(lower) || !isfinite(upper) || lower>upper || !canary.memory_limit ||
-           !canary.fuel_limit) {
+        const auto& row=rows[canary.row_ordinal];
+        if(row.ordinal!=canary.row_ordinal || row.window>inputs.capacity ||
+           !publication_identity_equal(row.identity,canary.row_identity) ||
+           !publication_identity_equal(row.content_identity,canary.row_content_identity)) {
             semantic_content_integrity_trap();return;
         }
-        const auto& output=outputs[canary.kind-1];
-        const double baseline=__longlong_as_double((long long)output.baseline_bits);
-        const double candidate=__longlong_as_double((long long)output.candidate_bits);
+        if(canary.kind!=1 && canary.kind!=4 &&
+           (canary.obligation_positions[0]!=UINT64_MAX ||
+            canary.obligation_positions[1]!=UINT64_MAX ||
+            canary.obligation_positions[2]!=UINT64_MAX)) {
+            semantic_content_integrity_trap();return;
+        }
+        const double lower=__longlong_as_double((long long)canary.lower_bound_bits);
+        const double upper=__longlong_as_double((long long)canary.upper_bound_bits);
+        if(!isfinite(lower) || !isfinite(upper) || lower>upper ||
+           !canary.memory_limit || !canary.work_limit) {
+            semantic_content_integrity_trap();return;
+        }
+        semantic_canary_charge(work,1,1);
+        uint64_t reason=global_reason;
         double measurement=0.0;
-        if(canary.kind==5) {
-            if(output.baseline_bits || output.candidate_bits) {
-                semantic_content_integrity_trap();return;
+        const uint64_t row_offset=canary.row_ordinal*inputs.capacity;
+        if(!reason && (canary.kind==1 || canary.kind==4)) {
+            bool witness=row.basis==3;
+            uint64_t baseline_correct=0,candidate_correct=0,lost=0;
+            for(uint32_t obligation=0;obligation<3;++obligation) {
+                const uint64_t position=canary.obligation_positions[obligation];
+                const uint64_t truth=task[18+obligation];
+                witness &= position<row.window && truth<4 && (task[31+obligation]&(uint64_t(1)<<truth)) &&
+                    mask_labels[row_offset+position]==int64_t(objective.truth_tokens[truth]);
+                if(obligation && position<=canary.obligation_positions[obligation-1])witness=false;
+                uint64_t baseline_token=0,candidate_token=0;
+                if(witness && (!semantic_canary_argmax(inputs,inputs.baseline_logits,canary.row_ordinal,position,baseline_token) ||
+                               !semantic_canary_argmax(inputs,inputs.candidate_logits,canary.row_ordinal,position,candidate_token)))
+                    reason=1;
+                semantic_canary_charge(work,inputs.vocabulary,2);
+                const uint64_t expected=truth<4 ? objective.truth_tokens[truth] : UINT64_MAX;
+                const bool baseline_ok=witness && baseline_token==expected;
+                const bool candidate_ok=witness && candidate_token==expected;
+                baseline_correct+=baseline_ok;candidate_correct+=candidate_ok;
+                lost+=baseline_ok && !candidate_ok;
             }
-            const double memory_ratio=double(output.memory_used)/double(canary.memory_limit);
-            const double fuel_ratio=double(output.fuel_used)/double(canary.fuel_limit);
-            measurement=memory_ratio>fuel_ratio ? memory_ratio : fuel_ratio;
-        } else if(canary.kind==3) measurement=fabs(candidate-baseline);
-        else measurement=candidate-baseline;
+            if(!witness)reason=7;
+            else if(!reason && canary.kind==1)
+                measurement=__ddiv_rn(double(int64_t(candidate_correct)-int64_t(baseline_correct)),3.0);
+            else if(!reason) {
+                measurement=-__ddiv_rn(double(lost),3.0);
+                if(lost)reason=7;
+            }
+        } else if(!reason && canary.kind==2) {
+            uint64_t denominator=0,baseline_correct=0,candidate_correct=0,protected_lost=0;
+            for(uint64_t position=0;position<row.window;++position) {
+                const int64_t label=retention_labels[row_offset+position];
+                if(label<0)continue;
+                if(uint64_t(label)>=inputs.vocabulary) { reason=5;break; }
+                ++denominator;
+                uint64_t baseline_token=0,candidate_token=0;
+                if(!semantic_canary_argmax(inputs,inputs.baseline_logits,canary.row_ordinal,position,baseline_token) ||
+                   !semantic_canary_argmax(inputs,inputs.candidate_logits,canary.row_ordinal,position,candidate_token)) {
+                    reason=1;break;
+                }
+                semantic_canary_charge(work,inputs.vocabulary,2);
+                const bool baseline_ok=baseline_token==uint64_t(label),candidate_ok=candidate_token==uint64_t(label);
+                baseline_correct+=baseline_ok;candidate_correct+=candidate_ok;
+                protected_lost+=baseline_ok && !candidate_ok;
+            }
+            if(!denominator)reason=5;
+            else if(!reason) {
+                measurement=__ddiv_rn(double(int64_t(candidate_correct)-int64_t(baseline_correct)),double(denominator));
+                if(protected_lost)reason=6;
+            }
+        } else if(!reason && canary.kind==3) {
+            uint64_t positions=0;double maximum=0.0;
+            for(uint64_t position=0;position<row.window;++position) {
+                if(!kinds[row_offset+position])continue;
+                ++positions;double baseline_max=0.0,baseline_log=0.0,candidate_max=0.0,candidate_log=0.0;
+                if(!semantic_canary_log_normalizer(inputs,inputs.baseline_logits,canary.row_ordinal,position,baseline_max,baseline_log) ||
+                   !semantic_canary_log_normalizer(inputs,inputs.candidate_logits,canary.row_ordinal,position,candidate_max,candidate_log)) {
+                    reason=1;break;
+                }
+                semantic_canary_charge(work,inputs.vocabulary,6);semantic_canary_charge(work,2,1);
+                const uint64_t baseline_base=canary.row_ordinal*inputs.row_stride_bytes+position*inputs.position_stride_bytes;
+                for(uint64_t vocabulary=0;vocabulary<inputs.vocabulary;++vocabulary) {
+                    const uint64_t offset=baseline_base+vocabulary*inputs.vocabulary_stride_bytes;
+                    const double baseline=__dsub_rn(__dsub_rn(
+                        semantic_canary_logit(inputs.baseline_logits,inputs.scalar_type,offset),baseline_max),baseline_log);
+                    const double candidate=__dsub_rn(__dsub_rn(
+                        semantic_canary_logit(inputs.candidate_logits,inputs.scalar_type,offset),candidate_max),candidate_log);
+                    const double difference=fabs(__dsub_rn(candidate,baseline));
+                    if(!isfinite(difference)) { reason=1;break; }
+                    if(difference>maximum)maximum=difference;
+                }
+                semantic_canary_charge(work,inputs.vocabulary,2);
+                if(reason)break;
+            }
+            if(!positions)reason=5;else measurement=maximum;
+        } else if(!reason && canary.kind==5) {
+            const double memory_ratio=__ddiv_rn(double(inputs.accounted_reserved_bytes),double(canary.memory_limit));
+            const double work_ratio=__ddiv_rn(double(work.raw),double(canary.work_limit));
+            measurement=memory_ratio>work_ratio ? memory_ratio : work_ratio;
+        }
+        if(!reason && !isfinite(measurement))reason=1;
+        if(!reason && (measurement<lower || measurement>upper))reason=2;
+        if(!reason && inputs.accounted_reserved_bytes>canary.memory_limit)reason=3;
         SemanticTrainingCanaryResultRecord result{};
         result.kind=canary.kind;result.row_ordinal=canary.row_ordinal;
         result.measurement_bits=(uint64_t)__double_as_longlong(measurement);
-        result.memory_used=output.memory_used;result.fuel_used=output.fuel_used;
+        result.memory_used=inputs.accounted_reserved_bytes;result.work_used=work.raw;
         for(uint32_t word=0;word<4;++word)result.identity[word]=canary.identity[word];
         results[item]=result;
-        const uint64_t reason=!isfinite(measurement) ? 1 :
-            (measurement<lower || measurement>upper) ? 2 :
-            result.memory_used>canary.memory_limit ? 3 :
-            result.fuel_used>canary.fuel_limit ? 4 : 0;
-        if(value && selection.status==0 && reason &&
-           (!refusal.reason || reason<refusal.reason ||
-            (reason==refusal.reason && result.kind<refusal.kind))) {
+        if(reason && (!refusal.reason || reason<refusal.reason ||
+           (reason==refusal.reason && result.kind<refusal.kind))) {
             refusal.reason=reason;refusal.kind=result.kind;refusal.row_ordinal=result.row_ordinal;
             refusal.measurement_bits=result.measurement_bits;
-            refusal.lower_bound_bits=canary.lower_bound_bits;
-            refusal.upper_bound_bits=canary.upper_bound_bits;
+            refusal.lower_bound_bits=canary.lower_bound_bits;refusal.upper_bound_bits=canary.upper_bound_bits;
             refusal.memory_used=result.memory_used;refusal.memory_limit=canary.memory_limit;
-            refusal.fuel_used=result.fuel_used;refusal.fuel_limit=canary.fuel_limit;
+            refusal.work_used=result.work_used;refusal.work_limit=canary.work_limit;
             for(uint32_t word=0;word<4;++word) {
-                refusal.identity[word]=result.identity[word];
-                refusal.selection_identity[word]=selection.identity[word];
+                refusal.identity[word]=result.identity[word];refusal.selection_identity[word]=selection.identity[word];
             }
         }
         admissible &= !reason;
     }
-    if(seen!=31) { semantic_content_integrity_trap();return; }
-    if(!semantic_training_canary_refusal_valid(refusal)) { semantic_content_integrity_trap();return; }
-    *reinterpret_cast<SemanticTrainingCanaryRefusalRecord*>(refusal_destination_ptr)=refusal;
-    *reinterpret_cast<uint8_t*>(destination_ptr)=admissible;
+    for(uint64_t item=0;item<inputs.canary_count;++item) {
+        const auto& canary=canaries[item];
+        auto& result=results[item];
+        result.work_used=work.raw;
+        const uint64_t reason=work.overflow ? 8 : work.raw>canary.work_limit ? 4 : 0;
+        if(reason && (!refusal.reason || reason<refusal.reason ||
+           (reason==refusal.reason && result.kind<refusal.kind))) {
+            refusal.reason=reason;refusal.kind=result.kind;refusal.row_ordinal=result.row_ordinal;
+            refusal.measurement_bits=result.measurement_bits;
+            refusal.lower_bound_bits=canary.lower_bound_bits;refusal.upper_bound_bits=canary.upper_bound_bits;
+            refusal.memory_used=result.memory_used;refusal.memory_limit=canary.memory_limit;
+            refusal.work_used=result.work_used;refusal.work_limit=canary.work_limit;
+            for(uint32_t word=0;word<4;++word) {
+                refusal.identity[word]=result.identity[word];refusal.selection_identity[word]=selection.identity[word];
+            }
+        }
+        admissible &= !reason;
+    }
+    if(refusal.reason)refusal.work_used=work.raw;
+    if(seen!=31 || !semantic_training_canary_refusal_valid(refusal)) {
+        semantic_content_integrity_trap();return;
+    }
+    *reinterpret_cast<SemanticTrainingCanaryRefusalRecord*>(inputs.refusal_destination)=refusal;
+    *reinterpret_cast<uint8_t*>(inputs.admissibility_destination)=admissible;
 }
 extern "C" __global__ void semantic_publication_apply_model_update(uint64_t control_ptr,
         uint64_t lease_ptr) {

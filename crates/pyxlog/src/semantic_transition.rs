@@ -271,8 +271,23 @@ fn transition_refusal(
                     Some(xlog_cuda::SemanticTrainingCanaryRefusalReason::MemoryLimitExceeded) => {
                         "canary_memory_limit_exceeded"
                     }
-                    Some(xlog_cuda::SemanticTrainingCanaryRefusalReason::FuelLimitExceeded) => {
-                        "canary_fuel_limit_exceeded"
+                    Some(xlog_cuda::SemanticTrainingCanaryRefusalReason::WorkLimitExceeded) => {
+                        "canary_work_limit_exceeded"
+                    }
+                    Some(xlog_cuda::SemanticTrainingCanaryRefusalReason::IncompleteOperands) => {
+                        "canary_incomplete_operands"
+                    }
+                    Some(
+                        xlog_cuda::SemanticTrainingCanaryRefusalReason::ProtectedRetentionLost,
+                    ) => "canary_protected_retention_lost",
+                    Some(xlog_cuda::SemanticTrainingCanaryRefusalReason::GoalWitnessInvalid) => {
+                        "canary_goal_witness_invalid"
+                    }
+                    Some(xlog_cuda::SemanticTrainingCanaryRefusalReason::WorkOverflow) => {
+                        "canary_work_overflow"
+                    }
+                    Some(xlog_cuda::SemanticTrainingCanaryRefusalReason::GenerationMismatch) => {
+                        "canary_generation_mismatch"
                     }
                     None => "invalid_canary_refusal",
                 };
@@ -312,8 +327,8 @@ fn transition_refusal_report(
             report.set_item("upper_bound_bits", evidence.upper_bound_bits)?;
             report.set_item("memory_used", evidence.memory_used)?;
             report.set_item("memory_limit", evidence.memory_limit)?;
-            report.set_item("fuel_used", evidence.fuel_used)?;
-            report.set_item("fuel_limit", evidence.fuel_limit)?;
+            report.set_item("work_used", evidence.work_used)?;
+            report.set_item("work_limit", evidence.work_limit)?;
             report.set_item("canary_identity", evidence.identity)?;
             report.set_item("selection_identity", evidence.selection_identity)?;
         }
@@ -2199,15 +2214,20 @@ fn read_training_objective(value: &ColdValue) -> PyResult<Option<SemanticTrainin
         return Ok(None);
     }
     let fields = value.fields(6)?;
-    let bounds = fields[1].fields(2)?;
-    let coefficient_values = fields[2].fields(9)?;
+    let bounds = fields[0].fields(2)?;
+    let coefficient_values = fields[1].fields(9)?;
     let mut coefficients = [0.0f32; 9];
     for (index, value) in coefficient_values.iter().enumerate() {
         let bits = u32::try_from(value.unsigned()?)
             .map_err(|_| invalid("training objective coefficient is not an f32 bit pattern"))?;
         coefficients[index] = f32::from_bits(bits);
     }
-    let cost = fields[3].fields(2)?;
+    let cost = fields[2].fields(2)?;
+    let truth_values = fields[3].fields(4)?;
+    let mut truth_tokens = [0; 4];
+    for (index, value) in truth_values.iter().enumerate() {
+        truth_tokens[index] = value.unsigned()?;
+    }
     let groups = fields[4]
         .sequence()?
         .iter()
@@ -2257,18 +2277,27 @@ fn read_training_objective(value: &ColdValue) -> PyResult<Option<SemanticTrainin
                 lower_bound: f64::from_bits(fields[2].unsigned()?),
                 upper_bound: f64::from_bits(fields[3].unsigned()?),
                 memory_limit: fields[4].unsigned()?,
-                fuel_limit: fields[5].unsigned()?,
-                identity: replay_digest_identity(fields[6].text()?)?,
+                work_limit: fields[5].unsigned()?,
+                obligation_positions: if fields[6] == ColdValue::None {
+                    [u64::MAX; 3]
+                } else {
+                    let positions = fields[6].fields(3)?;
+                    [
+                        positions[0].unsigned()?,
+                        positions[1].unsigned()?,
+                        positions[2].unsigned()?,
+                    ]
+                },
             })
         })
         .collect::<PyResult<Vec<_>>>()?;
     Ok(Some(SemanticTrainingObjective {
-        identity: replay_digest_identity(fields[0].text()?)?,
         evaluator_min: f64::from_bits(bounds[0].unsigned()?),
         evaluator_max: f64::from_bits(bounds[1].unsigned()?),
         coefficients,
         cost_unit: replay_digest_identity(cost[0].text()?)?,
         cost_cap: cost[1].unsigned()?,
+        truth_tokens,
         groups,
         canaries,
     }))
@@ -7751,14 +7780,15 @@ impl PySemanticTransitionController {
     /// bit masks over (neither, true, false, both), in that bit order.
     ///
     /// ``training_objective`` is None only when replay_rows is empty. Otherwise it
-    /// is ``(identity, evaluator_f64_bits, coefficient_f32_bits, cost, groups,
+    /// is ``(evaluator_f64_bits, coefficient_f32_bits, cost, truth_tokens, groups,
     /// canaries)``. The evaluator pair and nine coefficient words are exact IEEE
     /// bit patterns. Cost is ``(unit_identity, positive_cap)``. Each group is
     /// ``(kind, positive_denominator, strictly_increasing_row_ordinals)`` and the
-    /// complete mandatory group roster must cover every row. Each canary is
-    /// ``(kind, row_ordinal, lower_f64_bits, upper_f64_bits, memory_limit,
-    /// fuel_limit, identity)``. Native recomputes the objective identity and owns
-    /// the fixed-shape roster on device.
+    /// complete mandatory group roster must cover every row. ``truth_tokens`` maps
+    /// neither, true, false and both to four distinct vocabulary ids. Each canary
+    /// is ``(kind, row_ordinal, lower_f64_bits, upper_f64_bits, memory_limit,
+    /// work_limit, obligation_positions_or_None)``. Native recomputes all
+    /// identities and owns the fixed-shape roster on device.
     ///
     /// ``live_authorities`` rows are ``(LiveProvenance.canonical(),
     /// retention_deadline_utc_us)``. ``replay_rows`` rows are
@@ -8405,18 +8435,16 @@ impl PySemanticTransitionController {
     }
 
     /// Bind the complete original model backing produced by this recorded
-    /// update. The transient witness must cover allocations followed by typed
-    /// model views, Bool8[1] numerical admissibility and U64[5,4] canary
-    /// baseline/candidate outputs plus exact memory/fuel use produced after the
-    /// selected-view backward, optimizer update and candidate cache rebuild.
-    /// Rows are ordered by frozen canary kind; columns are baseline FP64 bits,
-    /// candidate FP64 bits, memory use and fuel use. Symbolic utility, retained
-    /// behavior and goal-chain measurements are candidate-minus-baseline;
-    /// logit drift is their absolute difference. Resource-limit score fields
-    /// must be zero and XLOG derives the maximum memory/fuel utilization ratio.
-    /// XLOG stamps and owns the final result records. ``bank`` identifies the
-    /// recorded branch that owns these original output producers.
-    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, canary_outputs, allocation_witness, consumer_stream))]
+    /// update. The transient witness covers allocations, typed model views,
+    /// Bool8[1] numerical admissibility and the authentic full-vocabulary
+    /// baseline/candidate logits from the captured forward. ``logits_layout`` is
+    /// the native eight-field tensor-layout record; XLOG assigns the two private
+    /// occurrence indices and requires contiguous F16, BF16 or F32
+    /// ``[rows, capacity, vocabulary]`` geometry. The two explicit generations
+    /// must identify the acquired baseline and its immediate candidate. XLOG
+    /// computes every canary measurement, resource tally and refusal on device.
+    /// ``bank`` identifies the recorded branch that owns these original outputs.
+    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, baseline_logits, candidate_logits, baseline_generation, candidate_generation, logits_layout, allocation_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "prepared update binding retains model geometry and numerical admissibility"
@@ -8432,7 +8460,11 @@ impl PySemanticTransitionController {
         model_storages: &Bound<'_, PyAny>,
         model_views: &Bound<'_, PyAny>,
         numerical_admissibility: &Bound<'_, PyAny>,
-        canary_outputs: &Bound<'_, PyAny>,
+        baseline_logits: &Bound<'_, PyAny>,
+        candidate_logits: &Bound<'_, PyAny>,
+        baseline_generation: u64,
+        candidate_generation: u64,
+        logits_layout: &Bound<'_, PyAny>,
         allocation_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
@@ -8446,6 +8478,8 @@ impl PySemanticTransitionController {
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
         let storages = parse_model_storages(model_storages, &mut budget)?;
         let views = parse_model_views(model_views, &mut budget)?;
+        let mut logits_layout =
+            parse_tensor_layout(&ColdValue::read(logits_layout, &mut budget, 0)?)?;
         let expected = {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
@@ -8485,7 +8519,8 @@ impl PySemanticTransitionController {
             allocation_witness._inputs.clone_ref(py),
             model_allocations.clone().unbind(),
             tensors.clone().unbind(),
-            canary_outputs.clone().unbind(),
+            baseline_logits.clone().unbind(),
+            candidate_logits.clone().unbind(),
         ]);
         producer_owners.0.extend(
             allocation_witness
@@ -8526,27 +8561,37 @@ impl PySemanticTransitionController {
             logical_end: 0,
             native_allocation: None,
         };
-        validate_producer_device_guarded(canary_outputs, device, &check)?;
-        let canary_index = allocation_index
-            .checked_add(1)
-            .ok_or_else(|| invalid("model update canary index exceeds native address space"))?;
-        let canary_outputs = SemanticTensorInput {
+        validate_producer_device_guarded(baseline_logits, device, &check)?;
+        validate_producer_device_guarded(candidate_logits, device, &check)?;
+        let baseline_index = allocation_index.checked_add(1).ok_or_else(|| {
+            invalid("model update baseline-logits index exceeds native address space")
+        })?;
+        let candidate_index = baseline_index.checked_add(1).ok_or_else(|| {
+            invalid("model update candidate-logits index exceeds native address space")
+        })?;
+        logits_layout.role = 0;
+        logits_layout.index = baseline_index;
+        let baseline_logits = SemanticTensorInput {
             tensor: crate::dlpack_from_py_for_stream_guarded(
-                canary_outputs,
+                baseline_logits,
                 i64::try_from(stream)
                     .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
                 &check,
             )?,
-            layout: SemanticTensorLayout {
-                role: 0,
-                index: canary_index,
-                element_bytes: 8,
-                scalar_type: 3,
-                rank: 2,
-                logical_axis: u64::MAX,
-                dimensions: [5, 4, 0, 0],
-                strides_bytes: [32, 8, 0, 0],
-            },
+            layout: logits_layout,
+            logical_begin: 0,
+            logical_end: 0,
+            native_allocation: None,
+        };
+        logits_layout.index = candidate_index;
+        let candidate_logits = SemanticTensorInput {
+            tensor: crate::dlpack_from_py_for_stream_guarded(
+                candidate_logits,
+                i64::try_from(stream)
+                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
+                &check,
+            )?,
+            layout: logits_layout,
             logical_begin: 0,
             logical_end: 0,
             native_allocation: None,
@@ -8571,7 +8616,10 @@ impl PySemanticTransitionController {
                 },
                 tensor_handoff.into_native(),
                 numerical_admissibility,
-                canary_outputs,
+                baseline_logits,
+                candidate_logits,
+                baseline_generation,
+                candidate_generation,
                 &allocation_witness.inner,
                 stream,
             )
