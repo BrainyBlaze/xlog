@@ -983,10 +983,8 @@ impl RawDeviceAllocation {
                 Ok(())
             },
         )?;
-        // Declare the permit before the Arc so an error or unwind drops the
-        // owner into the cold reaper before releasing this exclusion. The
-        // reaper can then acquire the same exclusion and finish retirement.
-        let lifecycle_exclusion = allocation
+        // Take the permit while the plain owner is still uniquely mutable.
+        let pending_lifecycle_exclusion = allocation
             .payload
             .as_mut()
             .expect("initialized allocation")
@@ -994,6 +992,9 @@ impl RawDeviceAllocation {
             .take()
             .expect("allocation lifecycle exclusion held");
         let allocation = Arc::new(allocation);
+        // Declare the moved permit after the Arc so error or unwind releases
+        // the exclusion before Arc::drop synchronously enters the cold reaper.
+        let lifecycle_exclusion = pending_lifecycle_exclusion;
         let dependencies = allocation.dependencies();
         dependencies.bind_allocation(&allocation);
         {
