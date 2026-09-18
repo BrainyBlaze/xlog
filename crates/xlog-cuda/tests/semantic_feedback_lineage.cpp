@@ -1690,6 +1690,7 @@ static void step_inputs_follow_device_selected_resident_bank() {
         "step guard accepted changed resident attention content");
     rejects_guard([&] { static_cast<float*>(fixture.data(fixture.range(active,18)))[0]+=1; },
         "step guard accepted changed resident model content");
+    consume();verify();
     static_cast<SourceSlot*>(fixture.data(fixture.range(0,1)))[63].token=19;
     static_cast<float*>(fixture.data(fixture.range(active,4)))[127]=21;
     guard();
