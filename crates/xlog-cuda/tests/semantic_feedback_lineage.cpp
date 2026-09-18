@@ -846,7 +846,16 @@ static void active_continuation_preserves_physical_holes(uint64_t role) {
     require(next_values[0]==-11.0f,"active continuation copied an unused physical row");
     require(destination.row.physical_row==33 && destination.header.active_row_count==1
         && next_ranges[0].logical_end==1,"active publication changed its sparse row map or semantic count");
-    require(publication_seal_ranges(control,next,nullptr)==0,"mapped active publication seal refused");
+    TensorLayoutTableView published_table{};
+    const auto seal_active_publication=[&] {
+        require(publication_tensor_table(control,next_ranges,3,&published_table),
+            "active publication table refused");
+        require(publication_range_digest(control,next_ranges[1],nullptr,next_ranges[1].digest)==0,
+            "active publication table seal refused");
+        require(publication_range_digest(control,next_ranges[0],&layout,next_ranges[0].digest,
+            &published_table)==0,"mapped active publication seal refused");
+    };
+    seal_active_publication();
     PublicationLease lease{};lease.abi=1;lease.active=1;lease.word=3;lease.bank=1;lease.epoch=1;
     const auto consume=[&] { semantic_publication_content_guard(reinterpret_cast<uint64_t>(&control),
         next_ranges[0].role,next_ranges[0].index,layout,1,reinterpret_cast<uint64_t>(&lease)); };
@@ -863,7 +872,7 @@ static void active_continuation_preserves_physical_holes(uint64_t role) {
         "computed-empty full-capacity continuation refused");
     require(next_ranges[0].length_bytes==0 && !destination.header.active_row_count,
         "computed-empty publication retained a semantic physical extent");
-    require(publication_seal_ranges(control,next,nullptr)==0,"computed-empty active seal refused");
+    seal_active_publication();
     consume();
 }
 
