@@ -728,9 +728,7 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
         control.banks[0]=reinterpret_cast<uint64_t>(&bank);control.banks[1]=reinterpret_cast<uint64_t>(&inactive);
         control.directories[0]=reinterpret_cast<uint64_t>(ranges.data());control.directories[1]=reinterpret_cast<uint64_t>(destinations.data());
         PublicationLease lease{};descriptor.publication.control=reinterpret_cast<uint64_t>(&control);
-        descriptor.publication.lease=reinterpret_cast<uint64_t>(&lease);descriptor.publication.operation=2;
-        semantic_transition_execute(descriptor);descriptor.publication.operation=0;
-        require(lease.active==1 && !lease.status,"publication refusal did not acquire its actual reader");
+        descriptor.publication.lease=reinterpret_cast<uint64_t>(&lease);
         std::array<float,4*128> z{};std::array<float,128*128> recurrence{};
         std::array<float,18*128> positions{};std::array<float,2*37*128> recurrent{};
         descriptor.text=services.binding();descriptor.policy.z=reinterpret_cast<uint64_t>(z.data());
@@ -744,10 +742,13 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
 #else
         if(nonfinite)continue;
 #endif
-        const auto original_bank=bank;
         require_content_trap([&] {
+            control.reader_gate=1;
             execution.support[0]=2;semantic_transition_execute(descriptor);
-        },"malformed inactive TEXT support returned as an ordinary refusal");
+        },"malformed inactive TEXT support reached publication begin");
+        descriptor.publication.operation=2;semantic_transition_execute(descriptor);descriptor.publication.operation=0;
+        require(lease.active==1 && !lease.status,"publication refusal did not acquire its actual reader");
+        const auto original_bank=bank;
         semantic_transition_execute(descriptor);
         require(execution.state.status==(nonfinite ? 5 : 2) && !control.refusal,
             "ordinary publication refusal did not traverse the validated publication begin path");
