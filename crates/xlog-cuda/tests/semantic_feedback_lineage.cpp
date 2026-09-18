@@ -908,71 +908,7 @@ static void fixed_continuation_buffers_keep_semantic_intervals(uint64_t boundary
         "non-positioned boundary acquired a prefix interval");
 }
 
-static void original_content_seal_accepts_equal_strided_producer() {
-    std::array<float,6> original{1,2,3,4,5,6};
-    PublicationStorageEntry storage{reinterpret_cast<uint64_t>(original.data()),sizeof(original),1};
-    PublicationControl control{};control.abi=1;
-    control.storage=reinterpret_cast<uint64_t>(&storage);control.storage_count=1;
-    PublicationRange sealed{};sealed.role=18;sealed.generation=1;sealed.length_bytes=sizeof(original);
-    PublicationBank bank{};bank.header.abi=1;bank.header.publication_word=2;
-    bank.header.sealed_epoch=1;bank.header.range_count=1;
-    PublicationContract contract{};contract.abi=1;contract.range_capacity=1;
-    PublicationLease lease{};lease.abi=1;lease.active=1;lease.word=2;lease.epoch=1;
-    control.contract=reinterpret_cast<uint64_t>(&contract);control.reader_counts[0]=1;
-    control.banks[0]=reinterpret_cast<uint64_t>(&bank);control.directories[0]=reinterpret_cast<uint64_t>(&sealed);
-    PublicationTensorLayout canonical{};canonical.role=18;canonical.element_bytes=4;
-    canonical.scalar_type=6;canonical.rank=2;canonical.logical_axis=UINT64_MAX;
-    canonical.dimensions[0]=2;canonical.dimensions[1]=3;
-    canonical.strides_bytes[0]=12;canonical.strides_bytes[1]=4;
-    require(publication_range_digest(control,sealed,&canonical,sealed.digest)==0,
-        "canonical original model content could not be sealed");
-    semantic_publication_content_guard(reinterpret_cast<uint64_t>(&control),
-        sealed.role,sealed.index,canonical,1,reinterpret_cast<uint64_t>(&lease));
-    const std::array<uint64_t,4> original_digest{
-        sealed.digest[0],sealed.digest[1],sealed.digest[2],sealed.digest[3]};
-
-    const auto verify=[&](float* data,uint64_t length,uint64_t column_stride) {
-        auto range=sealed;range.length_bytes=length;
-        auto layout=canonical;layout.strides_bytes[0]=4;layout.strides_bytes[1]=column_stride;
-        // The expected pointer is the original publication seal, never a
-        // witness capture of this candidate allocation's current bytes.
-        semantic_tensor_content_witness(reinterpret_cast<uint64_t>(data),length,range,layout,
-            reinterpret_cast<uint64_t>(sealed.digest),1);
-        require(publication_identity_equal(sealed.digest,original_digest.data()),
-            "verification replaced the original model content seal");
-    };
-    std::array<float,6> transposed{1,4,2,5,3,6};
-    verify(transposed.data(),sizeof(transposed),8);
-    std::array<float,12> padded{1,4,-77,-77,2,5,-77,-77,3,6,-77,-77};
-    // Native admission passes the touched view extent, not the backing tail.
-    constexpr uint64_t padded_extent=10*sizeof(float);
-    verify(padded.data(),padded_extent,16);
-    reinterpret_cast<uint8_t*>(padded.data())[2*sizeof(float)]^=1;
-    verify(padded.data(),padded_extent,16);
-
-    require_content_trap([&] {
-        reinterpret_cast<uint8_t*>(padded.data())[5*sizeof(float)]^=1;
-        verify(padded.data(),padded_extent,16);
-    });
-    require_content_trap([&] {
-        reinterpret_cast<uint8_t*>(original.data())[0]^=1;
-        semantic_publication_content_guard(reinterpret_cast<uint64_t>(&control),
-            sealed.role,sealed.index,canonical,1,reinterpret_cast<uint64_t>(&lease));
-    });
-
-    for(uint32_t field=0;field<4;++field) {
-        auto range=sealed;auto layout=canonical;
-        if(field==0)range.role=layout.role=19;
-        if(field==1)range.index=layout.index=1;
-        if(field==2)layout.scalar_type=2; // Equal-width U32 is not F32.
-        if(field==3)range.logical_begin=range.logical_end=1;
-        std::array<uint64_t,4> changed{};
-        require(publication_range_digest(control,range,&layout,changed.data())==0,
-            "changed content descriptor failed its actual digest traversal");
-        require(!publication_identity_equal(changed.data(),sealed.digest),
-            "original model seal omitted role, index, scalar type, or logical interval");
-    }
-}
+static void original_content_seal_accepts_equal_strided_producer();
 
 static void scalar_model_content_seals_one_cell_without_reshaping() {
     const uint64_t widths[]={0,1,4,8,2,2,4,8,1};
@@ -1104,7 +1040,12 @@ struct StepPublicationFixture {
         return *const_cast<PublicationRange*>(publication_find_range(directories[bank].data(),directories[bank].size(),role));
     }
     void* data(const PublicationRange& range) { return reinterpret_cast<void*>(storage[range.storage_slot].pointer+range.offset_bytes); }
-    explicit StepPublicationFixture(bool drain_required=false, std::vector<uint64_t> prefix_tokens={}) {
+    explicit StepPublicationFixture(bool drain_required=false, std::vector<uint64_t> prefix_tokens={},
+            const PublicationTensorLayout* original_layout=nullptr,const void* original_data=nullptr,
+            uint64_t original_bytes=0) {
+        require((original_layout && original_data && original_bytes) ||
+            (!original_layout && !original_data && !original_bytes),
+            "step fixture original model override is incomplete");
         execution.books[8]=execution.books.size()*8;
         uint64_t tensor_count=0;
         for(uint64_t role=1;role<=55;++role)if(publication_tensor_role(role))++tensor_count;
@@ -1125,6 +1066,9 @@ struct StepPublicationFixture {
                     } else if(role==53 || role==54) {
                         layout.logical_axis=0;layout.dimensions[0]=kActiveRowCapacity;
                         capacity=length=kActiveRowCapacity*4;
+                    }
+                    if(role==18 && original_layout) {
+                        layout=*original_layout;capacity=length=original_bytes;
                     }
                     if(role>=51 && role<=54)length=0;
                     layouts.push_back(layout);
@@ -1150,6 +1094,7 @@ struct StepPublicationFixture {
             }
         }
         for(uint64_t bank=0;bank<2;++bank) {
+            if(original_data)std::memcpy(data(range(bank,18)),original_data,original_bytes);
             range(bank,1).length_bytes=prefix_tokens.size()*sizeof(SourceSlot);
             range(bank,1).logical_end=prefix_tokens.size();
             range(bank,4).logical_end=range(bank,5).logical_end=prefix_tokens.size();
@@ -1239,6 +1184,64 @@ struct StepPublicationFixture {
             "step fixture next reader refused");
     }
 };
+
+static void original_content_seal_accepts_equal_strided_producer() {
+    PublicationTensorLayout canonical{};canonical.role=18;canonical.element_bytes=4;
+    canonical.scalar_type=6;canonical.rank=2;canonical.logical_axis=UINT64_MAX;
+    canonical.dimensions[0]=2;canonical.dimensions[1]=3;
+    canonical.strides_bytes[0]=12;canonical.strides_bytes[1]=4;
+    std::array<float,6> original{1,2,3,4,5,6};
+    StepPublicationFixture fixture(false,{},&canonical,original.data(),sizeof(original));
+    auto& sealed=fixture.range(fixture.lease.bank,18);
+    auto* published=static_cast<float*>(fixture.data(sealed));
+    std::array<uint64_t,4> backing{};
+    require(publication_backing_digest(fixture.control,sealed,backing.data())==0 &&
+        publication_identity_equal(backing.data(),sealed.backing_digest),
+        "canonical original model backing could not be sealed");
+    semantic_publication_content_guard(reinterpret_cast<uint64_t>(&fixture.control),
+        sealed.role,sealed.index,canonical,1,reinterpret_cast<uint64_t>(&fixture.lease));
+    const std::array<uint64_t,4> original_digest{
+        sealed.digest[0],sealed.digest[1],sealed.digest[2],sealed.digest[3]};
+
+    const auto verify=[&](float* data,uint64_t length,uint64_t column_stride) {
+        auto range=sealed;range.length_bytes=length;
+        auto layout=canonical;layout.strides_bytes[0]=4;layout.strides_bytes[1]=column_stride;
+        semantic_tensor_content_witness(reinterpret_cast<uint64_t>(data),length,range,layout,
+            reinterpret_cast<uint64_t>(sealed.digest),1);
+        require(publication_identity_equal(sealed.digest,original_digest.data()),
+            "verification replaced the original model content seal");
+    };
+    std::array<float,6> transposed{1,4,2,5,3,6};
+    verify(transposed.data(),sizeof(transposed),8);
+    std::array<float,12> padded{1,4,-77,-77,2,5,-77,-77,3,6,-77,-77};
+    constexpr uint64_t padded_extent=10*sizeof(float);
+    verify(padded.data(),padded_extent,16);
+    reinterpret_cast<uint8_t*>(padded.data())[2*sizeof(float)]^=1;
+    verify(padded.data(),padded_extent,16);
+
+    require_content_trap([&] {
+        reinterpret_cast<uint8_t*>(padded.data())[5*sizeof(float)]^=1;
+        verify(padded.data(),padded_extent,16);
+    });
+    require_content_trap([&] {
+        reinterpret_cast<uint8_t*>(published)[0]^=1;
+        semantic_publication_content_guard(reinterpret_cast<uint64_t>(&fixture.control),
+            sealed.role,sealed.index,canonical,1,reinterpret_cast<uint64_t>(&fixture.lease));
+    });
+
+    for(uint32_t field=0;field<4;++field) {
+        auto range=sealed;auto layout=canonical;
+        if(field==0)range.role=layout.role=19;
+        if(field==1)range.index=layout.index=1;
+        if(field==2)layout.scalar_type=2;
+        if(field==3)range.logical_begin=range.logical_end=1;
+        std::array<uint64_t,4> changed{};
+        require(publication_range_digest(fixture.control,range,&layout,changed.data())==0,
+            "changed content descriptor failed its actual digest traversal");
+        require(!publication_identity_equal(changed.data(),sealed.digest),
+            "original model seal omitted role, index, scalar type, or logical interval");
+    }
+}
 
 static void resident_numerical_refusal_precedes_publication() {
     StepPublicationFixture fixture;
