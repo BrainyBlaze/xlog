@@ -108,7 +108,7 @@ static void device_step_admission_preserves_refused_publications() {
             banks[0].header.sealed_epoch=control.word>>1;expected=5;}
         if(scenario==5){banks[0].header.fuel=1;expected=5;}
         if(scenario==6){banks[0].header.terminal=1;banks[0].header.fuel=0;expected=5;}
-        if(scenario==7){requested_kind=4;expected=1;}
+        if(scenario==7){requested_kind=5;expected=1;}
         if(scenario==8){requested_kind=3;expected=1;}
         if(scenario==9){requested_kind=0;expected=1;}
         if(scenario==10){control.reader_counts[0]=UINT64_MAX;expected=1;}
