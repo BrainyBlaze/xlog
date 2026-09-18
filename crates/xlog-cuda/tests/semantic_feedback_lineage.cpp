@@ -1660,7 +1660,11 @@ static void step_inputs_follow_device_selected_resident_bank() {
     rejects([&] { selected[4].destination=reinterpret_cast<uint64_t>(outputs->source); },"step input accepted a copied cache overlapping Source output");
     rejects([&] { selected[4].destination=reinterpret_cast<uint64_t>(fixture.data(fixture.range(active,6))); },
         "step input accepted a copy destination in the original publication");
-    rejects([&] { selected[16].destination=reinterpret_cast<uint64_t>(outputs->copied[16]); },
+    const auto model_input=std::find_if(selected.begin(),selected.end(),
+        [](const auto& input){return input.role==18 && input.index==0;});
+    require(model_input!=selected.end(),"step fixture lacks its first resident model binding");
+    const uint64_t model_input_index=uint64_t(model_input-selected.begin());
+    rejects([&] { model_input->destination=reinterpret_cast<uint64_t>(outputs->copied[model_input_index]); },
         "step input accepted a copied model in place of the resident alias");
     rejects([&] { fixture.lease.active=0; },"step input accepted a released device lease");
     rejects([&] { fixture.lease.bank=2; },"step input traversed an invalid bank");
