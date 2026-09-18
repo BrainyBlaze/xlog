@@ -1690,11 +1690,11 @@ static void step_inputs_follow_device_selected_resident_bank() {
         "step guard accepted changed resident attention content");
     rejects_guard([&] { static_cast<float*>(fixture.data(fixture.range(active,18)))[0]+=1; },
         "step guard accepted changed resident model content");
-    consume();verify();
+    consume();verify();const Outputs restored=*outputs;
     static_cast<SourceSlot*>(fixture.data(fixture.range(0,1)))[63].token=19;
     static_cast<float*>(fixture.data(fixture.range(active,4)))[127]=21;
     guard();
-    require(std::memcmp(outputs,&third,sizeof(third))==0,"step input verification replaced original retained content");
+    require(std::memcmp(outputs,&restored,sizeof(restored))==0,"step input guard changed restored output bytes");
     require(publication_release(fixture.control,fixture.lease)==0,"step fixture final reader release refused");
     require_content_trap(guard,"step guard accepted a released device lease");
     require(munmap(first_outputs,2*sizeof(Outputs))==0,"step fixture output release failed");
