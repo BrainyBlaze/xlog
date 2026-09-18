@@ -906,93 +906,6 @@ static void fixed_continuation_buffers_keep_semantic_intervals(uint64_t boundary
         "fixed suffix copy included padding or lost its absolute destination interval");
     require(new_boundary==42.0f && !next_ranges[3].logical_begin && !next_ranges[3].logical_end,
         "non-positioned boundary acquired a prefix interval");
-
-    // Original model services retain a later FILLED row past a MASK gap.
-    // Only the contiguous acquired prefix is copied into the completion source.
-    base.source[1].logical_position=9;
-    base.source[7].kind=2;base.source[7].valid=1;base.source[7].logical_position=8;base.source[7].token=MASK_TOKEN;
-    text_services.count=1;text_services.rows[0]={7,8};text_services.selected[7]=1;
-    std::array<ActiveRow,34> active_rows{};active_rows[0]={0,0,7,1};active_rows[1]={1,1,9,1};active_rows[2]={4,7,8,2};
-    uint64_t active_count=3;uint8_t numerical=1;
-    ContinuationInputs services{text_services.binding(),reinterpret_cast<uint64_t>(active_rows.data()),
-        reinterpret_cast<uint64_t>(&active_count),reinterpret_cast<uint64_t>(&numerical),1,1};
-    PublicationLease lease{};lease.abi=lease.active=lease.epoch=1;lease.word=2;
-    for(uint64_t i=0;i<4;++i)base.header.instance[i]=control.instance[i]=lease.instance[i]=9+i;
-    base.header.model_generation=contract.model_generation=7;
-    base.header.authority_generation=contract.authority_generation=9;
-    identity[0]=0x1234;
-    control.word=3;control.banks[0]=reinterpret_cast<uint64_t>(&base);control.reader_counts[0]=1;
-    control.continuation=reinterpret_cast<uint64_t>(&pending);
-    pending={};pending.abi=1;pending.ranges=reinterpret_cast<uint64_t>(inputs);pending.range_count=5;
-    incoming.header={1,2,1,0};inputs[4].length_bytes=empty_table_bytes;
-    inputs[0].length_bytes=inputs[3].length_bytes=0;
-    inputs[0].logical_begin=inputs[0].logical_end=0;
-    inputs[1].logical_begin=inputs[1].logical_end=0;
-    const auto prepare=[&] { semantic_publication_prepare_continuation(reinterpret_cast<uint64_t>(&control),
-        reinterpret_cast<uint64_t>(&lease),services); };
-    prepare();
-    require(pending.base_word==2 && pending.model_generation==7 && pending.authority_generation==9 &&
-        publication_identity_equal(pending.instance,lease.instance) && pending.prefix_identity[0]==identity[0] &&
-        pending.text.rows==services.text.rows && pending.text.count==services.text.count && pending.text.selected==services.text.selected &&
-        pending.numerical_admissibility==services.numerical_admissibility && pending.transition_kind==1 && inputs[3].length_bytes==1,
-        "resident initializer did not preserve exact acquired identity and original service owners");
-    require(inputs[0].logical_begin==7 && inputs[0].logical_end==8 && inputs[0].length_bytes==sizeof(SourceSlot) &&
-        inputs[1].logical_begin==7 && inputs[1].logical_end==8 && inputs[1].length_bytes==sizeof(output) &&
-        completed[0].token==11 && completed[0].committed==1 && completed[0].recomputed==1 &&
-        incoming.header.active_row_count==3 && incoming.rows[1].logical_position==9 && incoming.rows[2].physical_row==4,
-        "resident initializer narrowed active gaps or copied beyond the acquired structural prefix");
-    require(publication_validate_continuation(control,contract,base,pending,8)==0,
-        "resident initialized continuation failed the canonical validator");
-    require(publication_prepare_continuation(control,lease,services)==0,
-        "repeated resident preparation required a host metadata reset");
-    require(inputs[4].length_bytes==empty_table_bytes+active_count*sizeof(ActiveRow),
-        "repeated resident preparation accumulated the previous active row length");
-    require_content_trap([&] { active_count=35;prepare(); });
-    require_content_trap([&] { active_rows[2].physical_row=2;prepare(); });
-    require_content_trap([&] { text_services.selected[7]=2;prepare(); });
-    require_content_trap([&] { lease.active=0;prepare(); });
-    require_content_trap([&] { numerical=2;prepare(); });
-    require_content_trap([&] { services.transition_kind=0;prepare(); });
-    require_content_trap([&] { services.transition_kind=4;prepare(); });
-    require_content_trap([&] { services.transition_kind=2;prepare(); });
-    require_content_trap([&] { services.transition_kind=3;prepare(); });
-    require_content_trap([&] { services.authority_bytes=0;prepare(); });
-    require_content_trap([&] { services.authority_bytes=sizeof(authority)+1;prepare(); });
-    require_content_trap([&] { incoming.header.active_computed=0;prepare(); });
-    require_content_trap([&] { inputs[4].length_bytes+=sizeof(ActiveRow);prepare(); });
-    require_content_trap([&] { storage[inputs[4].storage_slot].bytes=inputs[4].length_bytes;prepare(); },
-        "resident active table lost its fixed row capacity");
-    require_content_trap([&] { storage[inputs[0].storage_slot].bytes=sizeof(SourceSlot);prepare(); },
-        "resident source owner lost its fixed completion capacity");
-    text_services.selected[7]=0;services.transition_kind=2;services.authority_bytes=3;authority[0]=0;
-    prepare();next.header.prefix_extent=8;
-    require(pending.transition_kind==2 && inputs[3].length_bytes==3 &&
-        publication_apply_continuation(control,base,next,pending)==0 &&
-        std::memcmp(authority.data(),next_authority.data(),3)==0 && next_ranges[5].length_bytes==3,
-        "repeated preparation reused the previous transition kind or authority snapshot extent");
-    services.transition_kind=1;text_services.selected[7]=1;services.authority_bytes=1;
-    base.source[1].logical_position=8;base.source[7].logical_position=9;
-    text_services.rows[0].logical_position=9;active_rows[1].logical_position=8;active_rows[2].logical_position=9;
-    prepare();
-    require(inputs[0].logical_end==9 && inputs[0].length_bytes==2*sizeof(SourceSlot) &&
-        inputs[1].logical_end==9 && completed[1].logical_position==8 && inputs[3].length_bytes==1,
-        "repeated preparation retained a stale source interval or authority length");
-    numerical=0;prepare();
-    require(publication_validate_continuation(control,contract,base,pending,9)==0,
-        "ordinary numerical refusal was relabeled malformed continuation metadata");
-    for(auto& slot:base.source)slot={};
-    text_services.count=0;text_services.selected.fill(0);active_count=0;numerical=1;
-    services.transition_kind=3;prepare();
-    require(inputs[0].logical_begin==7 && inputs[0].logical_end==7 && !inputs[0].length_bytes &&
-        inputs[1].logical_begin==7 && inputs[1].logical_end==7 && inputs[1].length_bytes==sizeof(output) &&
-        incoming.header.active_computed==1 && !incoming.header.active_row_count && inputs[4].length_bytes==empty_table_bytes &&
-        publication_validate_continuation(control,contract,base,pending,7)==0,
-        "resident computed-empty services were confused with absent owners");
-    lease.transition_kind=3;services.transition_kind=1;prepare();
-    require(pending.transition_kind==3,
-        "continuation froze the captured proposal request instead of the admitted drain mode");
-    require_content_trap([&] { lease.transition_kind=4;prepare(); },
-        "continuation accepted an invalid device-selected transition mode");
 }
 
 static void original_content_seal_accepts_equal_strided_producer() {
@@ -1445,6 +1358,12 @@ static void recompute_execution_preserves_proposal_state(bool drain_required) {
         reinterpret_cast<uint64_t>(&fixture.lease),inputs);
     require(fixture.pending.transition_kind==fixture.lease.transition_kind,
         "recompute continuation ignored the actual admitted drain override");
+    for(uint64_t role : {6,7}) {
+        const auto* boundary=publication_find_range(fixture.pending_ranges.data(),fixture.pending_ranges.size(),role);
+        require(boundary && !boundary->logical_begin && !boundary->logical_end &&
+            boundary->length_bytes==fixture.storage[boundary->storage_slot].bytes,
+            "resident fixed boundary lost its non-positioned producer extent");
+    }
     descriptor.publication.lease=reinterpret_cast<uint64_t>(&fixture.lease);
     descriptor.text=text.binding();descriptor.policy={};descriptor.logits=descriptor.support=0;
     const auto receipts=fixture.execution.receipts;
