@@ -3199,42 +3199,38 @@ impl ResidentBuild<'_> {
         mut diagnostics: Option<&mut ResidentPrepareDiagnostics>,
     ) -> Result<ResidentPhysicalBuild> {
         let capacity = u64::from(self.capacity);
-        let mut relations = Vec::with_capacity(manifest.slots.len());
-        for slot in &manifest.slots {
-            let allocation_bytes_before = diagnostics.as_ref().map(|_| reservation.used_bytes());
-            let allocation_started = diagnostics.as_ref().map(|_| std::time::Instant::now());
-            let relation = self
-                .executor
-                .provider
-                .prepare_resident_relation_in_reservation(
-                    slot.schema.clone(),
-                    capacity,
-                    reservation,
-                )?;
-            if let Some(diagnostics) = diagnostics.as_deref_mut() {
-                let allocation_ns = resident_prepare_elapsed_ns(
-                    allocation_started.expect("diagnostic timer exists when enabled"),
-                );
-                let allocation_bytes = reservation.used_bytes().saturating_sub(
-                    allocation_bytes_before.expect("diagnostic byte snapshot exists when enabled"),
-                );
-                diagnostics.relation_slot_allocation_ns = diagnostics
-                    .relation_slot_allocation_ns
-                    .saturating_add(allocation_ns);
-                diagnostics.relation_slot_allocation_ns_max = diagnostics
-                    .relation_slot_allocation_ns_max
-                    .max(allocation_ns);
-                diagnostics.relation_slot_allocation_bytes = diagnostics
-                    .relation_slot_allocation_bytes
-                    .saturating_add(allocation_bytes);
-                diagnostics.relation_device_allocation_calls =
-                    diagnostics.relation_device_allocation_calls.saturating_add(
-                        u64::try_from(slot.schema.arity())
-                            .unwrap_or(u64::MAX)
-                            .saturating_add(1),
-                    );
-            }
-            relations.push(Some(relation));
+        let allocation_bytes_before = diagnostics.as_ref().map(|_| reservation.used_bytes());
+        let allocation_started = diagnostics.as_ref().map(|_| std::time::Instant::now());
+        let relations = self
+            .executor
+            .provider
+            .prepare_resident_relations_in_reservation(
+                manifest.slots.iter().map(|slot| &slot.schema),
+                capacity,
+                reservation,
+            )?
+            .into_iter()
+            .map(Some)
+            .collect();
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            let allocation_ns = resident_prepare_elapsed_ns(
+                allocation_started.expect("diagnostic timer exists when enabled"),
+            );
+            let allocation_bytes = reservation.used_bytes().saturating_sub(
+                allocation_bytes_before.expect("diagnostic byte snapshot exists when enabled"),
+            );
+            diagnostics.relation_slot_allocation_ns = diagnostics
+                .relation_slot_allocation_ns
+                .saturating_add(allocation_ns);
+            diagnostics.relation_slot_allocation_ns_max = diagnostics
+                .relation_slot_allocation_ns_max
+                .max(allocation_ns);
+            diagnostics.relation_slot_allocation_bytes = diagnostics
+                .relation_slot_allocation_bytes
+                .saturating_add(allocation_bytes);
+            diagnostics.relation_device_allocation_calls = diagnostics
+                .relation_device_allocation_calls
+                .saturating_add(u64::from(!manifest.slots.is_empty()));
         }
         let filter_scratch = if self.filter_workspaces.is_empty() {
             None

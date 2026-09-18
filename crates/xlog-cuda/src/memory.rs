@@ -659,7 +659,6 @@ impl MemoryPressure {
 struct DeviceStorage {
     backing: ManuallyDrop<Backing>,
     stream: Arc<CudaStream>,
-    raw_ptr: cudarc::driver::sys::CUdeviceptr,
     dependencies: Arc<DeviceAccessDependencies>,
 }
 
@@ -1380,7 +1379,6 @@ impl DeviceStorage {
         let storage = Arc::new(Self {
             backing: ManuallyDrop::new(backing),
             stream,
-            raw_ptr,
             dependencies,
         });
         // Native and runtime storage already register the actual raw owner.
@@ -1560,6 +1558,7 @@ fn alloc_guard_remove(ptr: u64) {
 /// ```
 pub struct TrackedCudaSlice<T: cudarc::driver::DeviceRepr> {
     storage: Arc<DeviceStorage>,
+    ptr: u64,
     len: usize,
     element: std::marker::PhantomData<T>,
 }
@@ -2561,21 +2560,43 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
     }
 
     pub fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
-        &self.storage.raw_ptr
+        &self.ptr
     }
 
     pub fn device_ptr_value(&self) -> cudarc::driver::sys::CUdeviceptr {
-        self.storage.raw_ptr
+        self.ptr
     }
 
     /// A passive view retaining this allocation; obtaining it performs no device access.
     pub fn view(&self) -> DeviceMemoryView<T> {
         DeviceMemoryView {
-            ptr: self.storage.raw_ptr,
+            ptr: self.ptr,
             len: self.len,
             storage: Arc::clone(&self.storage),
             element: std::marker::PhantomData,
         }
+    }
+
+    /// Retain a disjoint typed span of this allocation as an owning slice.
+    ///
+    /// The returned slice shares the physical allocation and budget charge.
+    /// Operation admission still applies to its exact byte range, so sibling
+    /// spans can be recorded independently without duplicating ownership.
+    pub(crate) fn try_owned_subslice<U: cudarc::driver::DeviceRepr>(
+        &self,
+        byte_range: std::ops::Range<usize>,
+    ) -> Option<TrackedCudaSlice<U>> {
+        let bytes = self.view().try_slice(byte_range)?;
+        // SAFETY: callers receive an uninitialized device allocation span, as
+        // they do from alloc::<U>. Alignment and extent are checked by cast;
+        // the span must be initialized before any device read.
+        let typed = unsafe { bytes.cast::<U>()? };
+        Some(TrackedCudaSlice {
+            storage: Arc::clone(&typed.storage),
+            ptr: typed.ptr,
+            len: typed.len,
+            element: std::marker::PhantomData,
+        })
     }
 
     pub fn try_slice(
@@ -2640,10 +2661,13 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
     /// runtime-routed, legacy cudarc slices remain cudarc-routed —
     /// so deallocation continues to match the original allocator.
     pub fn into_bytes(self) -> TrackedCudaSlice<u8> {
-        let len = usize::try_from(self.storage.bytes())
-            .expect("tracked allocation byte size must fit into usize");
+        let len = self
+            .len
+            .checked_mul(std::mem::size_of::<T>())
+            .expect("tracked slice byte size must fit into usize");
         TrackedCudaSlice {
             storage: self.storage,
+            ptr: self.ptr,
             len,
             element: std::marker::PhantomData,
         }
@@ -2670,7 +2694,7 @@ impl<'a, T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &'a TrackedCu
     type Storage = DeviceParamStorage<'a>;
 
     fn into_kernel_param_storage(self) -> Self::Storage {
-        DeviceParamStorage::unsynced(self.storage.raw_ptr)
+        DeviceParamStorage::unsynced(self.ptr)
     }
 }
 
@@ -2678,7 +2702,7 @@ impl<T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &mut TrackedCudaS
     type Storage = DeviceParamStorage<'static>;
 
     fn into_kernel_param_storage(self) -> Self::Storage {
-        DeviceParamStorage::unsynced(self.storage.raw_ptr)
+        DeviceParamStorage::unsynced(self.ptr)
     }
 }
 
@@ -2879,6 +2903,7 @@ impl GpuMemoryManager {
                     Arc::clone(self.device.inner().stream()),
                     raw_ptr,
                 ),
+                ptr: raw_ptr,
                 len,
                 element: std::marker::PhantomData,
             });
@@ -2899,6 +2924,7 @@ impl GpuMemoryManager {
                 Arc::clone(self.device.inner().stream()),
                 raw_ptr,
             ),
+            ptr: raw_ptr,
             len,
             element: std::marker::PhantomData,
         })

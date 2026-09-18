@@ -876,7 +876,19 @@ impl CudaKernelProvider {
         schema: Schema,
         capacity: u64,
     ) -> Result<ResidentRelation> {
-        self.prepare_resident_relation_with_reservation(schema, capacity, None)
+        validate_schema(&schema)?;
+        let capacity_u32 = checked_capacity(capacity, "output")?;
+        let mut columns = Vec::with_capacity(schema.arity());
+        for column in 0..schema.arity() {
+            let bytes = (capacity as usize)
+                .checked_mul(width(schema.column_type(column).expect("schema"))? as usize)
+                .ok_or_else(|| XlogError::Kernel("resident column byte overflow".to_string()))?;
+            columns.push(CudaColumn::Owned(self.memory().alloc::<u8>(bytes)?));
+        }
+        let d_num_rows = self.memory().alloc::<u32>(1)?;
+        let buffer = CudaBuffer::from_columns(columns, capacity, d_num_rows, schema);
+        debug_assert_eq!(capacity_u32 as u64, capacity);
+        Ok(ResidentRelation { buffer })
     }
 
     /// Allocate a resident relation exclusively from an admitted transaction.
@@ -886,43 +898,84 @@ impl CudaKernelProvider {
         capacity: u64,
         reservation: &mut GpuMemoryReservation,
     ) -> Result<ResidentRelation> {
-        self.prepare_resident_relation_with_reservation(schema, capacity, Some(reservation))
+        self.prepare_resident_relations_in_reservation(
+            std::iter::once(&schema),
+            capacity,
+            reservation,
+        )?
+        .pop()
+        .ok_or_else(|| XlogError::Kernel("resident relation allocation was empty".into()))
     }
 
-    fn prepare_resident_relation_with_reservation(
+    /// Allocate every fixed-capacity resident relation from one admitted arena.
+    ///
+    /// Each column and row-count owner retains its exact disjoint range while
+    /// sharing the arena's physical allocation and reservation charge.
+    pub fn prepare_resident_relations_in_reservation<'a>(
         &self,
-        schema: Schema,
+        schemas: impl IntoIterator<Item = &'a Schema>,
         capacity: u64,
-        mut reservation: Option<&mut GpuMemoryReservation>,
-    ) -> Result<ResidentRelation> {
-        if schema.arity() > RESIDENT_RELATIONAL_MAX_ARITY {
-            return Err(XlogError::Kernel(format!(
-                "resident relation arity {} exceeds {RESIDENT_RELATIONAL_MAX_ARITY}",
-                schema.arity()
-            )));
-        }
-        for column in 0..schema.arity() {
-            width(schema.column_type(column).expect("schema arity checked"))?;
+        reservation: &mut GpuMemoryReservation,
+    ) -> Result<Vec<ResidentRelation>> {
+        let schemas: Vec<_> = schemas.into_iter().collect();
+        if schemas.is_empty() {
+            return Ok(Vec::new());
         }
         let capacity_u32 = checked_capacity(capacity, "output")?;
-        let mut columns = Vec::with_capacity(schema.arity());
-        for column in 0..schema.arity() {
-            let bytes = (capacity as usize)
-                .checked_mul(width(schema.column_type(column).expect("schema"))? as usize)
-                .ok_or_else(|| XlogError::Kernel("resident column byte overflow".to_string()))?;
-            let column = match reservation.as_deref_mut() {
-                Some(reservation) => reservation.alloc::<u8>(bytes)?,
-                None => self.memory().alloc::<u8>(bytes)?,
-            };
-            columns.push(CudaColumn::Owned(column));
+        let capacity = usize::try_from(capacity)
+            .map_err(|_| XlogError::Kernel("resident capacity exceeds platform usize".into()))?;
+        let mut arena_bytes = 0usize;
+        for schema in &schemas {
+            validate_schema(schema)?;
+            for column in 0..schema.arity() {
+                let column_bytes = capacity
+                    .checked_mul(width(schema.column_type(column).expect("schema"))? as usize)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("resident column byte overflow".to_string())
+                    })?;
+                arena_bytes = arena_bytes.checked_add(column_bytes).ok_or_else(|| {
+                    XlogError::Kernel("resident relation arena byte overflow".into())
+                })?;
+            }
+            arena_bytes = arena_bytes
+                .checked_add(std::mem::size_of::<u32>())
+                .ok_or_else(|| XlogError::Kernel("resident relation arena byte overflow".into()))?;
         }
-        let d_num_rows = match reservation.as_mut() {
-            Some(reservation) => reservation.alloc::<u32>(1)?,
-            None => self.memory().alloc::<u32>(1)?,
-        };
-        let buffer = CudaBuffer::from_columns(columns, capacity, d_num_rows, schema);
-        debug_assert_eq!(capacity_u32 as u64, capacity);
-        Ok(ResidentRelation { buffer })
+
+        let arena = reservation.alloc::<u8>(arena_bytes)?;
+        let mut cursor = 0usize;
+        let mut relations = Vec::with_capacity(schemas.len());
+        for schema in schemas {
+            let mut columns = Vec::with_capacity(schema.arity());
+            for column in 0..schema.arity() {
+                let column_bytes = capacity
+                    .checked_mul(width(schema.column_type(column).expect("schema"))? as usize)
+                    .expect("resident relation arena sizing already checked");
+                let end = cursor
+                    .checked_add(column_bytes)
+                    .expect("resident relation arena sizing already checked");
+                let column = arena.try_owned_subslice::<u8>(cursor..end).ok_or_else(|| {
+                    XlogError::Kernel("resident column is outside its allocation arena".into())
+                })?;
+                columns.push(CudaColumn::Owned(column));
+                cursor = end;
+            }
+            let count_end = cursor
+                .checked_add(std::mem::size_of::<u32>())
+                .expect("resident relation arena sizing already checked");
+            let d_num_rows = arena
+                .try_owned_subslice::<u32>(cursor..count_end)
+                .ok_or_else(|| {
+                    XlogError::Kernel("resident row count is outside its allocation arena".into())
+                })?;
+            cursor = count_end;
+            let buffer =
+                CudaBuffer::from_columns(columns, capacity as u64, d_num_rows, schema.clone());
+            relations.push(ResidentRelation { buffer });
+        }
+        debug_assert_eq!(cursor, arena_bytes);
+        debug_assert_eq!(capacity_u32 as usize, capacity);
+        Ok(relations)
     }
 
     /// Record a private resident relation's logical set cardinality on the
