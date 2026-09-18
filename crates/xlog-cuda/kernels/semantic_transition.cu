@@ -1507,7 +1507,8 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
     semantic_graph::copy_identity(pending.table_identity,contract.table_identity);
     semantic_graph::copy_identity(pending.prefix_identity,
         reinterpret_cast<const uint64_t*>(publication_range_bytes(control,*prefix)));
-    pending.text=inputs.text;pending.numerical_admissibility=inputs.numerical_admissibility;
+    pending.text=inputs.text;
+    pending.numerical_admissibility=inputs.transition_kind==3 ? 0 : inputs.numerical_admissibility;
     pending.training_selection=inputs.transition_kind==4 ? inputs.training_selection : 0;
     pending.model_update_bindings=inputs.transition_kind==4 ? inputs.model_update_bindings : 0;
     pending.model_update_binding_count=inputs.transition_kind==4 ? inputs.model_update_binding_count : 0;
