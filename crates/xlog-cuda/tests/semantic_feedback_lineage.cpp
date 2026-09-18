@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <execinfo.h>
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -65,6 +66,27 @@ static void cudaGraphSetConditional(cudaGraphConditionalHandle handle, unsigned 
 
 static void require(bool condition, const char* message) {
     if (!condition) { std::cerr << message << '\n'; std::exit(1); }
+}
+
+static void print_fatal_signal_backtrace(int signal) {
+    static constexpr char heading[] = "native feedback fatal signal backtrace:\n";
+    (void)::write(STDERR_FILENO, heading, sizeof(heading) - 1);
+    void* frames[64];
+    int frame_count = ::backtrace(frames, 64);
+    ::backtrace_symbols_fd(frames, frame_count, STDERR_FILENO);
+    std::raise(signal);
+    _exit(128 + signal);
+}
+
+static void install_fatal_signal_backtraces() {
+    struct sigaction action {};
+    action.sa_handler = print_fatal_signal_backtrace;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_NODEFER | SA_RESETHAND;
+    for (int signal : {SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV}) {
+        require(sigaction(signal, &action, nullptr) == 0,
+                "could not install native fatal signal backtrace");
+    }
 }
 
 static void device_step_admission_preserves_refused_publications() {
@@ -2039,6 +2061,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     require(argc==1,"unexpected feedback test arguments");
+    install_fatal_signal_backtraces();
     task_preflight_accepts_all_four_truth_states();
     task_selection_uses_supplied_scoring();
     initial_prefix_identity_is_native_owned();

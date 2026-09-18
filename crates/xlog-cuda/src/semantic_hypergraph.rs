@@ -5216,6 +5216,7 @@ pub(crate) mod tests {
         std::fs::create_dir(&directory).unwrap();
         let deadline = Instant::now() + Duration::from_secs(120);
         let run = |command: &mut Command| {
+            let invocation = format!("{command:?}");
             let mut child = command
                 .current_dir(&directory)
                 .spawn()
@@ -5225,9 +5226,21 @@ pub(crate) mod tests {
                     .try_wait()
                     .expect("native truth regression process status")
                 {
+                    #[cfg(unix)]
+                    let termination = {
+                        use std::os::unix::process::ExitStatusExt;
+                        format!(
+                            "code={:?}, signal={:?}, core_dumped={}",
+                            status.code(),
+                            status.signal(),
+                            status.core_dumped()
+                        )
+                    };
+                    #[cfg(not(unix))]
+                    let termination = format!("code={:?}", status.code());
                     assert!(
                         status.success(),
-                        "native truth regression failed; output retained in {}",
+                        "native truth regression failed: {termination}; command {invocation}; output retained in {}",
                         directory.display()
                     );
                     break;
@@ -5256,6 +5269,9 @@ pub(crate) mod tests {
             compiler.args([
                 "-std=c++20",
                 "-O0",
+                "-g",
+                "-fno-omit-frame-pointer",
+                "-rdynamic",
                 "-Wall",
                 "-Wextra",
                 "-I",
