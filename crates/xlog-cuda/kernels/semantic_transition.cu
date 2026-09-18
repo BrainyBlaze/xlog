@@ -2882,7 +2882,8 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
                 semantic_content_integrity_trap();return;
             }
             const auto* original=publication_range_bytes(control,*range);
-            const bool alias=role==1 || role==4 || role==5 || model;
+            const bool prefix_cache=role==4 || role==5;
+            const bool alias=role==1 || prefix_cache || model;
             if(model) {
                 uint64_t destination=0;
                 if(binding.backing!=storage[range->storage_slot].pointer ||
@@ -2942,7 +2943,7 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
                 if(alias && (binding.destination!=reinterpret_cast<uint64_t>(original) || range->logical_begin ||
                    range->logical_end!=bank->header.prefix_extent ||
                    (role==1 && range->length_bytes!=bank->header.prefix_extent*sizeof(SourceSlot)) ||
-                   (role!=1 && (range->length_bytes!=capacity || original_layout.dimensions[2]!=contract.prefix_capacity)))) {
+                   (prefix_cache && (range->length_bytes!=capacity || original_layout.dimensions[2]!=contract.prefix_capacity)))) {
                     semantic_content_integrity_trap();return;
                 }
             }
