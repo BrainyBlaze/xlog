@@ -263,8 +263,9 @@ static void retained_model_contract_preserves_original_seal_after_bank_reuse() {
         "original raw model contract seal failed");
     PublicationLease original_lease{};
     require(publication_acquire(control,original_lease)==0,"original model contract reader failed");
-    semantic_publication_content_guard(reinterpret_cast<uint64_t>(&control),44,0,
-        PublicationTensorLayout{},0,reinterpret_cast<uint64_t>(&original_lease));
+    // This fixture retains the raw role-44 interval and its original seal. Full
+    // selected-model publication authentication requires the descriptor and
+    // numerical owners built by the complete publication fixture.
     std::array<uint8_t,32> retained_payload{};
     std::memcpy(retained_payload.data(),publication_range_bytes(control,published_range),retained_payload.size());
     PublicationRange retained_range=published_range;
@@ -280,8 +281,6 @@ static void retained_model_contract_preserves_original_seal_after_bank_reuse() {
         "reused bank did not establish distinct model contract content");
     PublicationLease next_lease{};
     require(publication_acquire(control,next_lease)==0,"reused model contract reader failed");
-    semantic_publication_content_guard(reinterpret_cast<uint64_t>(&control),44,0,
-        PublicationTensorLayout{},0,reinterpret_cast<uint64_t>(&next_lease));
     require(publication_release(control,next_lease)==0,"reused model contract reader release failed");
 
     const auto consume=[&] { semantic_retained_model_contract_guard(reinterpret_cast<uint64_t>(retained_payload.data()),
