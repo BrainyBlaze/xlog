@@ -2940,8 +2940,9 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
                    (!alias && (range->length_bytes!=capacity || range->logical_begin || range->logical_end))) {
                     semantic_content_integrity_trap();return;
                 }
+                const uint64_t alias_logical_end=model ? 0 : bank->header.prefix_extent;
                 if(alias && (binding.destination!=reinterpret_cast<uint64_t>(original) || range->logical_begin ||
-                   range->logical_end!=bank->header.prefix_extent ||
+                   range->logical_end!=alias_logical_end ||
                    (role==1 && range->length_bytes!=bank->header.prefix_extent*sizeof(SourceSlot)) ||
                    (prefix_cache && (range->length_bytes!=capacity || original_layout.dimensions[2]!=contract.prefix_capacity)))) {
                     semantic_content_integrity_trap();return;
