@@ -8945,7 +8945,7 @@ struct PolicyStorage {
     text_binding: Arc<TextBindingStorage>,
     replacement: Option<PolicyReplacement>,
     tape_live: bool,
-    temporal_vjp_recorded: u8,
+    temporal_vjp_recorded: BTreeSet<(u64, usize)>,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -18041,7 +18041,7 @@ impl SemanticTransitionSession {
             text_binding,
             replacement: None,
             tape_live: false,
-            temporal_vjp_recorded: 0,
+            temporal_vjp_recorded: BTreeSet::new(),
         });
         Ok(())
     }
@@ -18385,7 +18385,7 @@ impl SemanticTransitionSession {
             }),
             buffers: self.allocate_policy_buffers()?,
             tape_live: false,
-            temporal_vjp_recorded: 0,
+            temporal_vjp_recorded: BTreeSet::new(),
             text_binding,
         };
         // Changing captured pointer arguments invalidates the old executable.
@@ -18842,8 +18842,8 @@ impl SemanticTransitionSession {
         let policy = branch.policy.as_ref().ok_or_else(|| {
             publication_input_error("prepared Proposal bank has no bound policy tape")
         })?;
-        let update_capture_bit = 1u8 << update_capture_bank;
-        if policy.temporal_vjp_recorded & update_capture_bit != 0 {
+        let update_capture = (update_step.token, update_capture_bank);
+        if policy.temporal_vjp_recorded.contains(&update_capture) {
             return Err(publication_input_error(
                 "prepared Proposal bank already recorded this Update capture's policy VJP",
             ));
@@ -18908,7 +18908,8 @@ impl SemanticTransitionSession {
             .policy
             .as_mut()
             .expect("checked prepared policy tape")
-            .temporal_vjp_recorded |= update_capture_bit;
+            .temporal_vjp_recorded
+            .insert(update_capture);
         Ok(SemanticPreparedPolicyGradients {
             layout,
             parameters,
@@ -18931,6 +18932,65 @@ impl SemanticTransitionSession {
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
         let index = self.checked_prepared_policy_tape(step, invocation)?;
+        self.finish_policy_tape(index, consumer_stream)
+    }
+
+    /// Retire a completed published training invocation whose original policy
+    /// tape was already differentiated inside both branches of this exact
+    /// prepared Update capture. This never records or launches another VJP.
+    #[cfg(feature = "semantic-policy")]
+    pub fn finish_recorded_training_policy_invocation(
+        &mut self,
+        step: &SemanticPreparedStep,
+        update_step: &SemanticPreparedStep,
+        invocation: SemanticRngBinding,
+        consumer_stream: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        let index = self.checked_prepared_policy_tape(step, invocation)?;
+        let update_owner = self.checked_prepared_step(update_step, false)?;
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .expect("checked prepared segment");
+        if !build.completed
+            || !update_owner
+                .prepared
+                .as_ref()
+                .is_some_and(|prepared| prepared.observed)
+            || build.requested_kind(update_step, &self.publication_issuer)?
+                != SemanticTransitionKind::Update
+        {
+            return Err(publication_input_error(
+                "recorded training completion requires its actual completed Update step",
+            ));
+        }
+        let proposal_ordinal = build
+            .tokens
+            .iter()
+            .position(|token| *token == step.token)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let update_ordinal = build
+            .tokens
+            .iter()
+            .position(|token| *token == update_step.token)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if proposal_ordinal >= update_ordinal {
+            return Err(publication_input_error(
+                "recorded training completion requires a preceding Proposal step",
+            ));
+        }
+        let tape = &self.policy_tapes[index];
+        if tape.refusal.is_some()
+            || !(0..2).all(|bank| {
+                tape.policy
+                    .temporal_vjp_recorded
+                    .contains(&(update_step.token, bank))
+            })
+        {
+            return Err(publication_input_error(
+                "published training completion requires the exact Update VJP in both captured banks",
+            ));
+        }
         self.finish_policy_tape(index, consumer_stream)
     }
 

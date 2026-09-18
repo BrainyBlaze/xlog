@@ -6025,7 +6025,8 @@ impl PySemanticPolicyInvocation {
     /// consumers (legacy default stream 1 is allowed; 0 and 2 are not). Native
     /// finalization joins that stream without a host wait and retires only this
     /// invocation's retained policy tape. It does not release the parent.
-    /// Published training invocations require ``backward``; refused training
+    /// Published training invocations require ``backward`` or, after an in-graph
+    /// temporal Update VJP, ``finish_recorded_training``; refused training
     /// invocations require ``finish_refusal``. Final use is one-shot, including
     /// uncertain native failures.
     #[pyo3(signature = (*, consumer_stream))]
@@ -6040,12 +6041,79 @@ impl PySemanticPolicyInvocation {
         self.finish_final_use(py, consumer_stream)
     }
 
+    /// Finish a published training invocation after its policy tape was already
+    /// consumed by ``SemanticPreparedStep.temporal_update_vjp`` inside both
+    /// branches of the exact prepared Update. This is a terminal ownership
+    /// handoff only; it does not execute a second backward or policy VJP.
+    ///
+    /// Enqueue every final GraphTask/optimizer consumer on ``consumer_stream``
+    /// before this call. Native validation binds the Proposal, Update and
+    /// invocation to the same completed segment and exact recording identities.
+    #[pyo3(signature = (update_step, *, consumer_stream))]
+    fn finish_recorded_training(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.session.borrow(py).require_creator()?;
+        self.require_public_result(py)?;
+        if !self.training {
+            return Err(invalid(
+                "recorded training completion requires the original training use",
+            ));
+        }
+        self.published_observation()?;
+        let policy_step = match &self._parent {
+            ContentStepOwner::Prepared(step) => step,
+            ContentStepOwner::Published(_) => {
+                return Err(invalid(
+                    "recorded training completion requires an original prepared Proposal",
+                ));
+            }
+        };
+        {
+            let update = update_step.borrow(py);
+            if self.session.as_ptr() != update.session.as_ptr() {
+                return Err(invalid(
+                    "recorded training completion requires an Update from the same Session",
+                ));
+            }
+            let task_use = self._task_use.borrow(py);
+            update.require_task(py, &task_use)?;
+        }
+        let expected = {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            self.final_use_binding(py, &owner)?
+        };
+        let mut budget = 4096;
+        let consumer_stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        self.start_final_use()?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        if self.final_use_binding(py, &owner)? != expected {
+            return Err(invalid(
+                "policy authority changed before recorded training completion",
+            ));
+        }
+        owner
+            .finish_recorded_training_policy_invocation(
+                &policy_step.borrow(py).inner,
+                &update_step.borrow(py).inner,
+                self.rng,
+                consumer_stream,
+            )
+            .map_err(xlog_err)
+    }
+
     /// Finish an actual native refusal from inference or training without a VJP.
     ///
     /// Enqueue final consumers on the explicit ``consumer_stream`` first.
     /// Stream 1 is allowed; 0 and 2 are refused. Published outcomes are not
-    /// admitted here. This shares the one-shot final-use owner with ``backward``
-    /// and ``finish_inference`` and retains the parent for its later release.
+    /// admitted here. This shares the one-shot final-use owner with ``backward``,
+    /// ``finish_recorded_training`` and ``finish_inference`` and retains the
+    /// parent for its later release.
     #[pyo3(signature = (*, consumer_stream))]
     fn finish_refusal(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
