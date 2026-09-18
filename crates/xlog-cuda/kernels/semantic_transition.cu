@@ -4483,6 +4483,23 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                     (update_refusal && update_refusal->reason) ? 15 : 5;
             }
         }
+        input_bank_admitted=!failed && transition_kind==1;
+    }
+    __syncthreads();
+    if(numerical_refused)return;
+    // publication_begin reads selected support while deriving terminal intent
+    // and may retire an inactive semantic root. Prove the entire immutable
+    // proposal support bank binary before either semantic effect can occur.
+    if(threadIdx.x==0)invalid=0;
+    __syncthreads();
+    if(input_bank_admitted)for(uint32_t ordinal=0;ordinal<COMPONENT_COUNT;++ordinal) {
+        const Component component=components[ordinal];
+        for(uint32_t i=threadIdx.x;i<component.cardinality;i+=blockDim.x)
+            if(support[component.offset+i]>1)atomicExch(&invalid,1U);
+    }
+    __syncthreads();
+    if(invalid) { semantic_content_integrity_trap();return; }
+    if(threadIdx.x==0) {
         if(!failed && descriptor.publication.control) {
             auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
             control.refusal=publication_begin(descriptor,state,&acquired_bank,&acquired_word,&structural_end,&publication_held,&publication_staged);
@@ -4501,10 +4518,9 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
            task[18]>3 || task[19]>3 || task[20]>3)) {
             failed=1;state->status=7;
         }
-        input_bank_admitted=!failed;
+        input_bank_admitted=!failed && transition_kind==1;
     }
     __syncthreads();
-    if(numerical_refused)return;
     if(acquired_bank && transition_kind!=1) {
         if(threadIdx.x==0) {
             auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
@@ -4540,7 +4556,6 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         for(uint32_t i=threadIdx.x;i<c.cardinality;i+=blockDim.x) {
             semantic_graph::charge_native(&sampler_work,semantic_graph::NativeWorkEvent::Category,1);
             uint8_t value=support[c.offset+i];
-            if(value>1)atomicOr(&invalid,4U);
             if(value && active_text && !isfinite(logits[offset+i]))atomicOr(&invalid,2U);
         }
         if(threadIdx.x==0 && active_text) {
@@ -4573,7 +4588,6 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
 #endif
     __syncthreads();
     execution_work_merge_parallel(state->execution_work,sampler_work);
-    if(invalid&4U) { semantic_content_integrity_trap();return; }
     if(threadIdx.x==0) {
         if(!failed) {
             if(acquired_bank && transition_kind!=1)
