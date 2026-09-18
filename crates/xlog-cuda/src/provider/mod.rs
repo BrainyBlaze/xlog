@@ -1246,7 +1246,11 @@ impl HostTransferTracker {
 }
 
 impl CudaKernelProvider {
-    fn from_runtime_parts(device: Arc<CudaDevice>, memory: Arc<GpuMemoryManager>) -> Result<Self> {
+    fn from_loaded_runtime_parts(
+        device: Arc<CudaDevice>,
+        memory: Arc<GpuMemoryManager>,
+        ptx_load_profile: Option<PtxLoadProfile>,
+    ) -> Result<Self> {
         let runtime = memory.runtime().ok_or_else(|| {
             XlogError::Kernel(
                 "canonical CUDA provider requires a memory manager with an owned runtime"
@@ -1278,8 +1282,6 @@ impl CudaKernelProvider {
             ));
         }
 
-        let profiling = warmup_profiling_enabled()?;
-        let ptx_load_profile = Self::load_all_kernel_modules(&device, profiling)?;
         Ok(Self::from_loaded_device(device, memory, ptx_load_profile))
     }
 
