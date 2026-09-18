@@ -4502,30 +4502,19 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             failed=1;state->status=7;
         }
         input_bank_admitted=!failed;
-        if(!failed) {
-            if(acquired_bank && transition_kind!=1)
-                publication_snapshot(descriptor,base,&state->semantic_receipts[0],&state->execution_work);
-            else semantic_call(descriptor,semantic_graph::kResidentPreflightTransitionAdmission,&base,nullptr,&state->semantic_receipts[0],nullptr,nullptr,&state->execution_work);
-            failed=state->semantic_receipts[0].words[0]!=0;
-            if(!failed)for(uint32_t i=0;i<4;++i)failed |= state->semantic_receipts[0].words[16+i]!=
-                (acquired_bank ? acquired_bank->header.semantic_digest[i] : books[17+i]);
-            if(failed)state->status=4;
-        }
-        if(!failed && task && transition_kind==1) {
-            state->execution_work.active_candidate=1;
-            if(!task_queries(descriptor,task,0,&base,nullptr,state)) {
-                failed=1;state->status=9;
-            } else if(!state->task_evaluation.facts[0].eligible) {
-                failed=1;state->status=8;
-            }
-            state->execution_work.active_candidate=0;
-        }
     }
     __syncthreads();
     if(numerical_refused)return;
     if(acquired_bank && transition_kind!=1) {
         if(threadIdx.x==0) {
             auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
+            if(!failed) {
+                publication_snapshot(descriptor,base,&state->semantic_receipts[0],&state->execution_work);
+                failed=state->semantic_receipts[0].words[0]!=0;
+                if(!failed)for(uint32_t i=0;i<4;++i)failed |=
+                    state->semantic_receipts[0].words[16+i]!=acquired_bank->header.semantic_digest[i];
+                if(failed)state->status=4;
+            }
             if(!failed) {
                 state->importance_weight=1.0;
                 control.refusal=publication_publish(descriptor,*acquired_bank,acquired_word,structural_end,base,state,receipts,true,transition_kind==3);
@@ -4585,8 +4574,28 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
     __syncthreads();
     execution_work_merge_parallel(state->execution_work,sampler_work);
     if(invalid&4U) { semantic_content_integrity_trap();return; }
-    if(threadIdx.x==0 && invalid && !failed) {
-        failed=1;state->status=(invalid&2) ? 5 : 2;
+    if(threadIdx.x==0) {
+        if(!failed) {
+            if(acquired_bank && transition_kind!=1)
+                publication_snapshot(descriptor,base,&state->semantic_receipts[0],&state->execution_work);
+            else semantic_call(descriptor,semantic_graph::kResidentPreflightTransitionAdmission,&base,nullptr,&state->semantic_receipts[0],nullptr,nullptr,&state->execution_work);
+            failed=state->semantic_receipts[0].words[0]!=0;
+            if(!failed)for(uint32_t i=0;i<4;++i)failed |= state->semantic_receipts[0].words[16+i]!=
+                (acquired_bank ? acquired_bank->header.semantic_digest[i] : books[17+i]);
+            if(failed)state->status=4;
+        }
+        if(!failed && task && transition_kind==1) {
+            state->execution_work.active_candidate=1;
+            if(!task_queries(descriptor,task,0,&base,nullptr,state)) {
+                failed=1;state->status=9;
+            } else if(!state->task_evaluation.facts[0].eligible) {
+                failed=1;state->status=8;
+            }
+            state->execution_work.active_candidate=0;
+        }
+        if(invalid && !failed) {
+            failed=1;state->status=(invalid&2) ? 5 : 2;
+        }
     }
     __syncthreads();
 #ifdef XLOG_SEMANTIC_POLICY
