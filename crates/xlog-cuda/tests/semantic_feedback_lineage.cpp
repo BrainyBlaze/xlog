@@ -624,6 +624,9 @@ static void resident_numerical_refusal_precedes_publication() {
 }
 
 static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
+    static constexpr uint64_t model_schema_begin=104;
+    static constexpr std::array<uint8_t,8> model_schema{44,0,0x80,0xff,0,0,0,0};
+    static constexpr uint64_t model_contract_bytes=model_schema_begin+model_schema.size();
     for(bool nonfinite : {false,true}) {
         RefusalExecution execution;
         auto& descriptor=execution.descriptor;
@@ -662,6 +665,7 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
                 if(role==30)length=sizeof(IntentQueueHeader);
                 if(role==31)length=1;
                 if(role==33)length=sizeof(AttemptReceipt);
+                if(role==44)length=model_contract_bytes;
                 if(role==55)length=sizeof(TensorLayoutTableHeader)+7*sizeof(PublicationTensorLayout);
                 PublicationRange range{};range.role=role;range.index=index;range.generation=1;
                 range.length_bytes=length;range.storage_slot=allocate(length ? length : 8);
@@ -683,6 +687,9 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
             std::copy(layouts.begin(),layouts.end(),reinterpret_cast<PublicationTensorLayout*>(header+1));
         };
         initialize_table(ranges);initialize_table(destinations);
+        const auto* model_range=publication_find_range(ranges.data(),ranges.size(),44);
+        std::copy(model_schema.begin(),model_schema.end(),
+            reinterpret_cast<uint8_t*>(bytes(model_range->storage_slot))+model_schema_begin);
         const auto* intent_range=publication_find_range(ranges.data(),ranges.size(),30);
         auto* queue=reinterpret_cast<IntentQueueHeader*>(bytes(intent_range->storage_slot));
         queue->abi=1;queue->payload_used_bytes=queue->effect_length_bytes=1;queue->payload_capacity_bytes=8;
@@ -711,6 +718,7 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
         PublicationContract contract{};contract.abi=1;contract.range_capacity=ranges.size();
         contract.prefix_capacity=64;contract.window_capacity=32;contract.feedback_capacity=3;contract.max_position=128;
         contract.model_generation=3;contract.authority_generation=4;contract.semantic_owner=91;
+        contract.model_contract_layout={model_schema_begin,model_schema.size(),0,32,40,72};
         contract.role_counts=reinterpret_cast<uint64_t>(roles.data());contract.role_count=roles.size();
         PublicationBank bank{},inactive{};
         bank.header.abi=1;bank.header.publication_word=2;bank.header.sealed_epoch=1;
@@ -727,6 +735,10 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
         control.continuation=reinterpret_cast<uint64_t>(&pending);control.storage=reinterpret_cast<uint64_t>(storage.data());control.storage_count=storage.size();
         control.banks[0]=reinterpret_cast<uint64_t>(&bank);control.banks[1]=reinterpret_cast<uint64_t>(&inactive);
         control.directories[0]=reinterpret_cast<uint64_t>(ranges.data());control.directories[1]=reinterpret_cast<uint64_t>(destinations.data());
+        require(publication_seal_ranges(control,bank,nullptr)==0,
+            "publication refusal fixture could not seal its selected model");
+        require(publication_descriptor_digest(control,bank)==0,
+            "publication refusal fixture could not authenticate its selected model descriptor");
         PublicationLease lease{};descriptor.publication.control=reinterpret_cast<uint64_t>(&control);
         descriptor.publication.lease=reinterpret_cast<uint64_t>(&lease);
         std::array<float,4*128> z{};std::array<float,128*128> recurrence{};
