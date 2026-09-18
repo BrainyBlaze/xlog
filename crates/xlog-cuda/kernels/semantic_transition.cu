@@ -4368,14 +4368,14 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
     __shared__ semantic_graph::ResidentHandle base;
     __shared__ PublicationBank* acquired_bank;
     __shared__ uint64_t acquired_word,structural_end,transition_kind;
-    __shared__ bool publication_held,publication_staged,numerical_refused;
+    __shared__ bool publication_held,publication_staged,numerical_refused,input_bank_admitted;
     __shared__ uint32_t count,invalid,width,failed;
     __shared__ uint32_t choices[18],actions[4][2],lane_live;
     __shared__ semantic_graph::Receipt candidate;
     if(threadIdx.x==0) {
         base={books[14],semantic_graph::kRootKind,books[15],books[16]};
         acquired_bank=nullptr;publication_held=publication_staged=false;acquired_word=structural_end=0;
-        numerical_refused=false;
+        numerical_refused=input_bank_admitted=false;
         transition_kind=1;
         state->blocks=0; state->status=0; state->proposal=state->next_proposal;
         state->importance_weight=0.0;
@@ -4501,6 +4501,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
            task[18]>3 || task[19]>3 || task[20]>3)) {
             failed=1;state->status=7;
         }
+        input_bank_admitted=!failed;
         if(!failed) {
             if(acquired_bank && transition_kind!=1)
                 publication_snapshot(descriptor,base,&state->semantic_receipts[0],&state->execution_work);
@@ -4542,7 +4543,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
     __syncthreads();
     for(uint32_t ordinal=0;ordinal<COMPONENT_COUNT;++ordinal) {
         const Component c=components[ordinal];
-        if(failed)continue;
+        if(!input_bank_admitted)continue;
         const bool active_text=c.kind==COMPONENT_KIND_TEXT &&
             (!descriptor.policy.z || text_selected(descriptor.text,c.field));
         const uint64_t offset=descriptor.policy.z && active_text
