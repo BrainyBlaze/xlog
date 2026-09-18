@@ -563,65 +563,7 @@ static void task_preflight_accepts_all_four_truth_states() {
     }
 }
 
-static void resident_numerical_refusal_precedes_publication() {
-    RefusalExecution execution;
-    auto& descriptor=execution.descriptor;auto& state=execution.state;
-    std::array<uint64_t,34> task{};task[0]=4;task[1]=91;task[18]=1;task[19]=task[20]=2;
-    task[25]=14;task[26]=7;task[27]=1;task[28]=45;task[29]=15;task[30]=1;
-    task[31]=task[32]=task[33]=7;
-    descriptor.task=reinterpret_cast<uint64_t>(task.data());
-    uint8_t numerical=0;
-    PendingContinuation pending{};pending.numerical_admissibility=reinterpret_cast<uint64_t>(&numerical);
-    PublicationContract contract{};contract.abi=1;contract.model_generation=3;contract.authority_generation=4;
-    PublicationBank bank{},inactive{};bank.header.abi=1;bank.header.publication_word=2;bank.header.sealed_epoch=1;
-    bank.header.semantic_owner=91;bank.header.semantic_generation=1;bank.header.model_generation=3;
-    bank.header.authority_generation=4;bank.header.proposal=7;bank.header.stream_serial=11;bank.header.family_id=2;
-    std::copy(execution.initial.words+13,execution.initial.words+16,bank.header.semantic_extents);
-    std::copy(execution.initial.words+16,execution.initial.words+20,bank.header.semantic_digest);
-    PublicationControl control{};control.abi=1;control.word=2;
-    control.banks[0]=reinterpret_cast<uint64_t>(&bank);control.banks[1]=reinterpret_cast<uint64_t>(&inactive);
-    control.contract=reinterpret_cast<uint64_t>(&contract);control.continuation=reinterpret_cast<uint64_t>(&pending);
-    PublicationLease lease{};descriptor.publication.control=reinterpret_cast<uint64_t>(&control);
-    descriptor.publication.lease=reinterpret_cast<uint64_t>(&lease);descriptor.publication.operation=2;
-    semantic_transition_execute(descriptor);descriptor.publication.operation=0;
-    require(!lease.status && lease.active==1 && control.reader_counts[0]==1,"actual refusal reader acquisition failed");
-    pending.abi=1;pending.base_word=lease.word;pending.transition_kind=1;
-    pending.model_generation=3;pending.authority_generation=4;
-    control.reader_gate=1;control.refusal=77;
-    state.next_proposal=uint64_t(UINT32_MAX)+1;
-    semantic_transition_execute(descriptor);
-    require(state.status==5 && !state.blocks && !state.retired_roots_mask && control.refusal==77 && control.reader_gate==1,
-        "resident numerical refusal entered publication or retirement");
-    require(state.model_generation==3 && state.family_id==2 && state.stream_serial==11,
-        "resident numerical refusal did not authenticate and retain its acquired bank coordinates");
-    execution.check_protected_root();
-    require_content_trap([&] { ++lease.epoch;semantic_transition_execute(descriptor); },
-        "numerical refusal accepted a stale acquired lease");
-    require_content_trap([&] { ++bank.header.semantic_generation;semantic_transition_execute(descriptor); },
-        "numerical refusal accepted a stale protected root");
-    require_content_trap([&] { numerical=2;semantic_transition_execute(descriptor); },
-        "non-boolean resident numerical service did not reach the integrity trap");
-    require_content_trap([&] { bank.header.proposal=uint64_t(UINT32_MAX)+1;semantic_transition_execute(descriptor); },
-        "numerical refusal accepted an exhausted acquired proposal coordinate");
-
-    const State accepted_state=state;
-    const auto reject_metadata=[&](auto corrupt) {
-        for(bool published : {false,true}) {
-            state=accepted_state;corrupt(state);
-            descriptor.publication.control=published ? reinterpret_cast<uint64_t>(&control) : 0;
-            semantic_transition_execute(descriptor);
-            require(state.status==1 && !state.blocks && control.refusal==77 && control.reader_gate==1,
-                "invalid cold binding metadata reached proposal execution");
-        }
-    };
-    reject_metadata([](State& value) { ++value.catalogue_generation; });
-    reject_metadata([](State& value) { value.catalogue_digest[0]^=1; });
-    reject_metadata([](State& value) { value.binding_digest[0]^=1; });
-    state=accepted_state;state.next_proposal=uint64_t(UINT32_MAX)+1;
-    descriptor.publication.control=0;
-    semantic_transition_execute(descriptor);
-    require(state.status==1 && !state.blocks,"cold execution accepted an exhausted proposal coordinate");
-}
+static void resident_numerical_refusal_precedes_publication();
 
 static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
     static constexpr uint64_t model_schema_begin=104;
@@ -1383,6 +1325,55 @@ struct StepPublicationFixture {
             "step fixture next reader refused");
     }
 };
+
+static void resident_numerical_refusal_precedes_publication() {
+    StepPublicationFixture fixture;
+    auto& execution=fixture.execution;auto& descriptor=execution.descriptor;auto& state=execution.state;
+    auto& control=fixture.control;auto& lease=fixture.lease;auto& pending=fixture.pending;
+    auto& bank=fixture.banks[lease.bank];
+    bank.header.proposal=7;bank.header.stream_serial=11;bank.header.family_id=2;
+    require(publication_logical_digest(control,bank)==0 && publication_descriptor_digest(control,bank)==0,
+        "resident numerical refusal fixture could not authenticate its selected model coordinates");
+    uint8_t numerical=0;
+    pending.abi=1;pending.base_word=lease.word;pending.transition_kind=1;
+    pending.model_generation=bank.header.model_generation;pending.authority_generation=bank.header.authority_generation;
+    pending.numerical_admissibility=reinterpret_cast<uint64_t>(&numerical);
+    descriptor.publication.lease=reinterpret_cast<uint64_t>(&lease);
+    control.reader_gate=1;control.refusal=77;
+    state.next_proposal=uint64_t(UINT32_MAX)+1;
+    semantic_transition_execute(descriptor);
+    require(state.status==5 && !state.blocks && !state.retired_roots_mask && control.refusal==77 && control.reader_gate==1,
+        "resident numerical refusal entered publication or retirement");
+    require(state.model_generation==3 && state.family_id==2 && state.stream_serial==11,
+        "resident numerical refusal did not authenticate and retain its acquired bank coordinates");
+    execution.check_protected_root();
+    require_content_trap([&] { ++lease.epoch;semantic_transition_execute(descriptor); },
+        "numerical refusal accepted a stale acquired lease");
+    require_content_trap([&] { ++bank.header.semantic_generation;semantic_transition_execute(descriptor); },
+        "numerical refusal accepted a stale protected root");
+    require_content_trap([&] { numerical=2;semantic_transition_execute(descriptor); },
+        "non-boolean resident numerical service did not reach the integrity trap");
+    require_content_trap([&] { bank.header.proposal=uint64_t(UINT32_MAX)+1;semantic_transition_execute(descriptor); },
+        "numerical refusal accepted an exhausted acquired proposal coordinate");
+
+    const State accepted_state=state;
+    const auto reject_metadata=[&](auto corrupt) {
+        for(bool published : {false,true}) {
+            state=accepted_state;corrupt(state);
+            descriptor.publication.control=published ? reinterpret_cast<uint64_t>(&control) : 0;
+            semantic_transition_execute(descriptor);
+            require(state.status==1 && !state.blocks && control.refusal==77 && control.reader_gate==1,
+                "invalid cold binding metadata reached proposal execution");
+        }
+    };
+    reject_metadata([](State& value) { ++value.catalogue_generation; });
+    reject_metadata([](State& value) { value.catalogue_digest[0]^=1; });
+    reject_metadata([](State& value) { value.binding_digest[0]^=1; });
+    state=accepted_state;state.next_proposal=uint64_t(UINT32_MAX)+1;
+    descriptor.publication.control=0;
+    semantic_transition_execute(descriptor);
+    require(state.status==1 && !state.blocks,"cold execution accepted an exhausted proposal coordinate");
+}
 
 static void recompute_execution_preserves_proposal_state(bool drain_required) {
     StepPublicationFixture fixture(drain_required);
