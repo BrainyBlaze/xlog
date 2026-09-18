@@ -19751,6 +19751,9 @@ impl SemanticTransitionSession {
             self.base_snapshot = snapshot;
         }
         self.next_proposal = state.next_proposal;
+        if let Ok(proposal) = u32::try_from(self.next_proposal) {
+            self.rng = Some(SemanticRngBinding { proposal, ..rng });
+        }
         Ok(SemanticTransitionOutcome::Published(
             SemanticTransitionObservation {
                 components,
