@@ -750,8 +750,11 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
         require(lease.active==1 && !lease.status,"publication refusal did not acquire its actual reader");
         const auto original_bank=bank;
         semantic_transition_execute(descriptor);
-        require(execution.state.status==(nonfinite ? 5 : 2) && !control.refusal,
-            "ordinary publication refusal did not traverse the validated publication begin path");
+        if(execution.state.status!=(nonfinite ? 5 : 2) || control.refusal) {
+            std::cerr<<"ordinary publication refusal did not traverse the validated publication begin path: state.status="
+                <<execution.state.status<<", control.refusal="<<control.refusal<<", nonfinite="<<nonfinite<<'\n';
+            std::exit(1);
+        }
         require(control.word==lease.word && control.reader_gate==0 && lease.active==1 &&
             control.reader_counts[lease.bank]==1 && !inactive.header.abi && std::memcmp(&bank,&original_bank,sizeof(bank))==0,
             "ordinary refusal published effects, leaked its gate, or changed the acquired bank");
