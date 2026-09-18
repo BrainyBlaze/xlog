@@ -699,6 +699,70 @@ struct RawAllocationPayload {
     // A per-thread default stream handle cannot provide this retry identity.
     free_stream: Option<ReclamationStream>,
     manager: Option<Arc<GpuMemoryManager>>,
+    lifecycle_exclusion: Option<AllocationLifecyclePermit>,
+}
+
+/// Serialize only physical allocation/release address reuse within one CUDA
+/// context. Operation admission and device-resident execution never enter it.
+struct AllocationLifecycleExclusion {
+    active: std::sync::Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+struct AllocationLifecyclePermit {
+    exclusion: Arc<AllocationLifecycleExclusion>,
+}
+
+impl AllocationLifecycleExclusion {
+    fn enter(self: &Arc<Self>) -> crate::device_runtime::ResourceResult<AllocationLifecyclePermit> {
+        let mut active = self.active.lock().map_err(|_| {
+            ResourceError::Driver("CUDA allocation lifecycle exclusion poisoned".into())
+        })?;
+        while *active {
+            active = self.changed.wait(active).map_err(|_| {
+                ResourceError::Driver("CUDA allocation lifecycle exclusion poisoned".into())
+            })?;
+        }
+        *active = true;
+        Ok(AllocationLifecyclePermit {
+            exclusion: Arc::clone(self),
+        })
+    }
+}
+
+impl Drop for AllocationLifecyclePermit {
+    fn drop(&mut self) {
+        let mut active = self
+            .exclusion
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *active = false;
+        self.exclusion.changed.notify_one();
+    }
+}
+
+fn allocation_lifecycle_exclusion(
+    context: usize,
+) -> crate::device_runtime::ResourceResult<Arc<AllocationLifecycleExclusion>> {
+    static EXCLUSIONS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<usize, std::sync::Weak<AllocationLifecycleExclusion>>,
+        >,
+    > = std::sync::OnceLock::new();
+    let mut exclusions = EXCLUSIONS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .map_err(|_| ResourceError::Driver("CUDA allocation lifecycle registry poisoned".into()))?;
+    if let Some(exclusion) = exclusions.get(&context).and_then(std::sync::Weak::upgrade) {
+        return Ok(exclusion);
+    }
+    let exclusion = Arc::new(AllocationLifecycleExclusion {
+        active: std::sync::Mutex::new(false),
+        changed: std::sync::Condvar::new(),
+    });
+    exclusions.insert(context, Arc::downgrade(&exclusion));
+    Ok(exclusion)
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -827,6 +891,7 @@ impl RawDeviceAllocation {
                     free_event_recorded: false,
                     free_stream: None,
                     manager,
+                    lifecycle_exclusion: None,
                 }),
             },
             bytes,
@@ -857,6 +922,12 @@ impl RawDeviceAllocation {
                     )
                     .result()?;
                 }
+                // Keep the permit in the armed owner so a fallible
+                // post-malloc step transfers it to the cold reaper.
+                payload.lifecycle_exclusion = Some(
+                    allocation_lifecycle_exclusion(payload.stream.context().cu_ctx() as usize)?
+                        .enter()?,
+                );
                 let ptr = if bytes == 0 {
                     0
                 } else {
@@ -912,25 +983,34 @@ impl RawDeviceAllocation {
                 Ok(())
             },
         )?;
-        let allocation = Arc::new(allocation);
+        let mut allocation = Arc::new(allocation);
         let dependencies = allocation.dependencies();
         dependencies.bind_allocation(&allocation);
-        let owner: Arc<dyn MemoryStorageOwner> =
-            Arc::clone(&allocation) as Arc<dyn MemoryStorageOwner>;
-        let payload = allocation.payload.as_ref().expect("initialized allocation");
-        let range = match MemoryUse::new(payload.ptr, payload.bytes, Access::ReadWrite) {
-            Ok(range) => range,
-            Err(error) => return Err(error.retaining(bytes, reclamation)),
-        };
-        block_use_registry()
-            .lock()
-            .expect("device block-use registry poisoned")
-            .register_storage(
-                payload.stream.context().cu_ctx() as usize,
-                range,
-                Arc::downgrade(&owner),
-                dependencies.reclamation.release_proof(),
-            );
+        {
+            let owner: Arc<dyn MemoryStorageOwner> =
+                Arc::clone(&allocation) as Arc<dyn MemoryStorageOwner>;
+            let payload = allocation.payload.as_ref().expect("initialized allocation");
+            let range = match MemoryUse::new(payload.ptr, payload.bytes, Access::ReadWrite) {
+                Ok(range) => range,
+                Err(error) => return Err(error.retaining(bytes, reclamation)),
+            };
+            block_use_registry()
+                .lock()
+                .expect("device block-use registry poisoned")
+                .register_storage(
+                    payload.stream.context().cu_ctx() as usize,
+                    range,
+                    Arc::downgrade(&owner),
+                    dependencies.reclamation.release_proof(),
+                );
+        }
+        Arc::get_mut(&mut allocation)
+            .expect("new allocation has no retained strong aliases")
+            .payload
+            .as_mut()
+            .expect("initialized allocation")
+            .lifecycle_exclusion
+            .take();
         Ok(allocation)
     }
 
@@ -972,6 +1052,14 @@ impl RawDeviceAllocation {
                     stream.destroy()?;
                 }
                 return Ok(());
+            }
+            if payload.lifecycle_exclusion.is_none() {
+                // A failed or unknown release keeps this permit in the
+                // retryable payload until physical release is proven.
+                payload.lifecycle_exclusion = Some(
+                    allocation_lifecycle_exclusion(payload.stream.context().cu_ctx() as usize)?
+                        .enter()?,
+                );
             }
             crate::device_runtime::resource::with_reclamation_admission(
                 block_use_registry(),
