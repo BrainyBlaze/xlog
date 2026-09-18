@@ -872,7 +872,7 @@ impl RawDeviceAllocation {
         // Arm context/events before creating the private stream or attempting
         // malloc. Pre-allocation failures also reach the canonical cold reaper,
         // but never acquire a physical byte charge.
-        let allocation = initialize_allocation(
+        let mut allocation = initialize_allocation(
             Self {
                 reclamation_admission: None,
                 payload: Some(RawAllocationPayload {
@@ -983,7 +983,17 @@ impl RawDeviceAllocation {
                 Ok(())
             },
         )?;
-        let mut allocation = Arc::new(allocation);
+        // Declare the permit before the Arc so an error or unwind drops the
+        // owner into the cold reaper before releasing this exclusion. The
+        // reaper can then acquire the same exclusion and finish retirement.
+        let lifecycle_exclusion = allocation
+            .payload
+            .as_mut()
+            .expect("initialized allocation")
+            .lifecycle_exclusion
+            .take()
+            .expect("allocation lifecycle exclusion held");
+        let allocation = Arc::new(allocation);
         let dependencies = allocation.dependencies();
         dependencies.bind_allocation(&allocation);
         {
@@ -1004,13 +1014,7 @@ impl RawDeviceAllocation {
                     dependencies.reclamation.release_proof(),
                 );
         }
-        Arc::get_mut(&mut allocation)
-            .expect("new allocation has no retained strong aliases")
-            .payload
-            .as_mut()
-            .expect("initialized allocation")
-            .lifecycle_exclusion
-            .take();
+        drop(lifecycle_exclusion);
         Ok(allocation)
     }
 
