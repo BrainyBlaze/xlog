@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
 use xlog_cuda::CudaKernelProvider;
 use xlog_prob::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig};

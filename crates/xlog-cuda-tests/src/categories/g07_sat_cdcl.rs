@@ -4,7 +4,6 @@
 //! covering SAT, UNSAT, propagation, and proof checking paths.
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
-use cudarc::driver::DeviceSlice;
 use std::sync::Arc;
 use std::time::Instant;
 use xlog_cuda::CudaKernelProvider;

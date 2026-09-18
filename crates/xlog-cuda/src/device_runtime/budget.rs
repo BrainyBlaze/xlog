@@ -1,81 +1,57 @@
-//! [`GlobalDeviceBudget`] — per-runtime byte-limit decorator.
+//! Per-runtime budget over the canonical memory resource.
 //!
-//! Wraps a [`DeviceMemoryResource`] and enforces a single byte limit
-//! across all allocations that flow through it. Designed to be the
-//! provider-owned budget layer replacing manager-only accounting,
-//! which could not enforce a coherent limit across allocations that
-//! share one provider runtime.
-//!
-//! # Accounting model
-//!
-//! `GlobalDeviceBudget` keeps `reserved_bytes` strictly equal to
-//! `inner.bytes_outstanding()` at every quiescent moment. This is the
-//! "live + retired-but-not-yet-freed" view from the trait — exactly
-//! the bytes the budget should be guarding.
-//!
-//! To keep that invariant under both synchronous and stream-ordered
-//! async inners, every public method is serialized through a single
-//! `Mutex<BudgetState>` and the inner call is invoked **inside** the
-//! lock. The lock window is bounded by the inner's CUDA call, which
-//! is in any case the dominant cost — the budget decorator does not
-//! add hot-path overhead beyond what the inner already imposes.
-//!
-//! ## Allocate
-//!
-//!   1. Lock state.
-//!   2. If `reserved + bytes > limit`: return
-//!      `ResourceError::OutOfBudget` with exact current, requested,
-//!      remaining, and configured-limit bytes.
-//!   3. Optimistically reserve: `reserved += bytes`.
-//!   4. Call `inner.allocate(bytes, ..)` under the lock. The inner's
-//!      own bookkeeping moves `bytes` from "free" to "live".
-//!   5. If inner returned `Err`, roll back the reservation:
-//!      `reserved -= bytes`. Forward the error.
-//!
-//! ## Deallocate / Reap
-//!
-//! For both methods we sample `inner.bytes_outstanding()` before and
-//! after the inner call (under the lock), and decrement `reserved`
-//! by the observed delta. The pattern handles both backends without
-//! branching:
-//!
-//!   * Synchronous inner (`DirectCudaResource`): `bytes_outstanding`
-//!     drops by the block's bytes on `deallocate`, so the delta is
-//!     `block.bytes`. `reap_pending` is a no-op (delta zero).
-//!   * Stream-ordered async inner (`AsyncCudaResource`): `deallocate`
-//!     moves bytes from "live" to "pending"; `bytes_outstanding`
-//!     stays the same, so the delta is zero — the budget is *not*
-//!     released yet. `reap_pending` drains the pending bytes whose
-//!     queued `cuMemFreeAsync` has completed; `bytes_outstanding`
-//!     drops by the drained total and the budget releases that
-//!     same total.
-//!
-//! Because the inner call and the before/after samples happen under
-//! the same lock, no concurrent budget op can perturb the inner's
-//! `bytes_outstanding` between our reads — the delta strictly
-//! reflects this call's effect on the inner.
-//!
-//! # Composition
-//!
-//! `GlobalDeviceBudget` is a normal `DeviceMemoryResource`, so it
-//! plugs into [`XlogDeviceRuntime::with_resource`] and stacks under
-//! / over [`LoggingResource`]. Recommended ordering for production:
-//! `LoggingResource(GlobalDeviceBudget(AsyncCudaResource))`. The budget remains
-//! the sole admission authority, while the outer logger observes both admitted
-//! allocations and typed `OutOfBudget` rejections exactly once.
-//! Tests can stack either way.
+//! Admission reserves bytes before allocation. Definite refusal and pre-malloc
+//! unwind roll back. Acquired storage carries its exact release ticket through
+//! ordinary and cold reclamation. Cumulative proven-release events restore
+//! capacity even when concurrent allocations or out-of-band reaping occur.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+use super::resource::AllocTag;
 use super::resource::{
-    Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, ResourceBudgetSnapshot,
-    ResourceError, ResourceResult, StreamId,
+    Access, AllocationAccounting, AllocationRequest, BlockId, DeviceBlock, DeviceMemoryResource,
+    ResourceBudgetSnapshot, ResourceError, ResourceResult, StreamId,
 };
 
 /// Internal state guarded by the budget mutex. Kept in its own
 /// struct so the lock guard syntactically scopes all updates.
 struct BudgetState {
-    reserved: usize,
+    admitted_total: u128,
+    baseline_reclaimed: u128,
+}
+
+impl BudgetState {
+    fn reserved(&self, total_reclaimed: u128) -> ResourceResult<usize> {
+        let reclaimed = total_reclaimed
+            .checked_sub(self.baseline_reclaimed)
+            .ok_or_else(|| {
+                ResourceError::Driver("resource reclamation total precedes budget baseline".into())
+            })?;
+        let reserved = self.admitted_total.checked_sub(reclaimed).ok_or_else(|| {
+            ResourceError::Driver("resource releases exceed budget admissions".into())
+        })?;
+        usize::try_from(reserved)
+            .map_err(|_| ResourceError::Driver("global budget accounting overflow".into()))
+    }
+}
+
+struct BudgetReservation<'a> {
+    state: &'a Mutex<BudgetState>,
+    bytes: usize,
+    reclamation: Arc<crate::memory::AllocationReclamation>,
+}
+
+impl Drop for BudgetReservation<'_> {
+    fn drop(&mut self) {
+        if !self.reclamation.was_acquired() {
+            let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
+            state.admitted_total = state
+                .admitted_total
+                .checked_sub(self.bytes as u128)
+                .expect("budget admission includes the refused allocation");
+        }
+    }
 }
 
 /// Per-runtime byte-limit decorator.
@@ -83,20 +59,27 @@ pub struct GlobalDeviceBudget {
     inner: Box<dyn DeviceMemoryResource + Send + Sync>,
     limit: usize,
     state: Mutex<BudgetState>,
+    accounting: Arc<AllocationAccounting>,
 }
 
 impl GlobalDeviceBudget {
     /// Wrap `inner` with a hard `limit` in bytes. The initial
-    /// reserved tally is sampled from `inner.bytes_outstanding()`
+    /// reserved tally and release baseline are sampled atomically from the
+    /// inner resource's canonical accounting ledger,
     /// so callers may compose around an inner that already has live
     /// allocations — though in practice the decorator is installed
     /// before any allocation flows through it.
     pub fn new(inner: Box<dyn DeviceMemoryResource + Send + Sync>, limit: usize) -> Self {
-        let initial = inner.bytes_outstanding();
+        let accounting = inner.allocation_accounting();
+        let (initial, baseline_reclaimed) = accounting.snapshot();
         Self {
             inner,
             limit,
-            state: Mutex::new(BudgetState { reserved: initial }),
+            state: Mutex::new(BudgetState {
+                admitted_total: initial as u128,
+                baseline_reclaimed,
+            }),
+            accounting,
         }
     }
 
@@ -109,32 +92,27 @@ impl GlobalDeviceBudget {
     /// async free). Matches `inner.bytes_outstanding()` at every
     /// quiescent moment.
     pub fn reserved_bytes(&self) -> usize {
-        self.state
-            .lock()
-            .expect("GlobalDeviceBudget poisoned")
-            .reserved
+        let state = self.state.lock().expect("GlobalDeviceBudget poisoned");
+        state
+            .reserved(self.accounting.snapshot().1)
+            .expect("canonical budget release accounting is consistent")
     }
 
     /// Headroom in bytes for the next allocation. Equal to
     /// `limit - reserved_bytes`, saturating at zero.
     pub fn remaining(&self) -> usize {
-        let state = self.state.lock().expect("GlobalDeviceBudget poisoned");
-        self.limit.saturating_sub(state.reserved)
+        self.limit.saturating_sub(self.reserved_bytes())
     }
 
-    fn allocate_with_pressure(
-        &self,
-        bytes: usize,
-        reservation_pressure_bytes: usize,
-        stream: StreamId,
-        tag: AllocTag,
-    ) -> ResourceResult<DeviceBlock> {
+    fn allocate_with_pressure(&self, request: AllocationRequest) -> ResourceResult<DeviceBlock> {
+        let bytes = request.bytes;
+        let reservation_pressure_bytes = request.reservation_pressure_bytes;
         // Admit against both materialized allocations and runtime promises.
         // Only materialized bytes are added to this decorator's own tally.
         {
             let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
             let current = state
-                .reserved
+                .reserved(self.accounting.snapshot().1)?
                 .checked_add(reservation_pressure_bytes)
                 .ok_or_else(|| {
                     ResourceError::Driver(
@@ -143,21 +121,15 @@ impl GlobalDeviceBudget {
                 })?;
             let remaining = self.limit.saturating_sub(current);
             if bytes <= remaining {
-                state.reserved = state.reserved.checked_add(bytes).ok_or_else(|| {
-                    ResourceError::Driver("global budget accounting overflow".to_string())
-                })?;
+                state.admitted_total =
+                    state
+                        .admitted_total
+                        .checked_add(bytes as u128)
+                        .ok_or_else(|| {
+                            ResourceError::Driver("global budget accounting overflow".to_string())
+                        })?;
                 drop(state);
-                return match self.inner.allocate(bytes, stream, tag) {
-                    Ok(block) => Ok(block),
-                    Err(error) => {
-                        let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
-                        state.reserved = state
-                            .reserved
-                            .checked_sub(bytes)
-                            .expect("reserved bytes include the failed allocation");
-                        Err(error)
-                    }
-                };
+                return self.materialize_reserved(request);
             }
             if bytes > self.limit.saturating_sub(reservation_pressure_bytes) {
                 return Err(ResourceError::OutOfBudget {
@@ -175,7 +147,7 @@ impl GlobalDeviceBudget {
 
         let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
         let current = state
-            .reserved
+            .reserved(self.accounting.snapshot().1)?
             .checked_add(reservation_pressure_bytes)
             .ok_or_else(|| {
                 ResourceError::Driver("global budget reservation accounting overflow".to_string())
@@ -189,56 +161,39 @@ impl GlobalDeviceBudget {
                 limit: self.limit,
             });
         }
-        state.reserved = state.reserved.checked_add(bytes).ok_or_else(|| {
-            ResourceError::Driver("global budget accounting overflow".to_string())
-        })?;
+        state.admitted_total =
+            state
+                .admitted_total
+                .checked_add(bytes as u128)
+                .ok_or_else(|| {
+                    ResourceError::Driver("global budget accounting overflow".to_string())
+                })?;
         drop(state);
 
-        match self.inner.allocate(bytes, stream, tag) {
-            Ok(block) => Ok(block),
-            Err(error) => {
-                let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
-                state.reserved = state
-                    .reserved
-                    .checked_sub(bytes)
-                    .expect("reserved bytes include the failed allocation");
-                Err(error)
-            }
-        }
+        self.materialize_reserved(request)
+    }
+
+    fn materialize_reserved(&self, request: AllocationRequest) -> ResourceResult<DeviceBlock> {
+        let _reservation = BudgetReservation {
+            state: &self.state,
+            bytes: request.bytes,
+            reclamation: request.reclamation(),
+        };
+        self.inner.materialize(request)
     }
 }
 
 impl DeviceMemoryResource for GlobalDeviceBudget {
-    fn allocate(
-        &self,
-        bytes: usize,
-        stream: StreamId,
-        tag: AllocTag,
-    ) -> ResourceResult<DeviceBlock> {
-        self.allocate_with_pressure(bytes, 0, stream, tag)
+    fn materialize(&self, request: AllocationRequest) -> ResourceResult<DeviceBlock> {
+        self.allocate_with_pressure(request)
     }
 
-    fn allocate_with_reservation_pressure(
-        &self,
-        bytes: usize,
-        reservation_pressure_bytes: usize,
-        stream: StreamId,
-        tag: AllocTag,
-    ) -> ResourceResult<DeviceBlock> {
-        self.allocate_with_pressure(bytes, reservation_pressure_bytes, stream, tag)
+    fn allocation_accounting(&self) -> Arc<AllocationAccounting> {
+        Arc::clone(&self.accounting)
     }
 
     fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
-        let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
-
-        let before = self.inner.bytes_outstanding();
-        let result = self.inner.deallocate(block);
-        let after = self.inner.bytes_outstanding();
-        let freed = before.saturating_sub(after);
-        if freed > 0 {
-            state.reserved = state.reserved.saturating_sub(freed);
-        }
-        result
+        self.inner.deallocate(block)
     }
 
     fn device_ordinal(&self) -> u32 {
@@ -246,31 +201,18 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
     }
 
     fn bytes_outstanding(&self) -> usize {
-        // Authoritative view is the inner's. We could return our
-        // own `reserved` instead, but matching the inner sidesteps
-        // any transient skew during error rollback.
-        self.inner.bytes_outstanding()
+        self.accounting.snapshot().0
     }
 
     fn budget_snapshot(&self) -> Option<ResourceBudgetSnapshot> {
-        let state = self.state.lock().expect("GlobalDeviceBudget poisoned");
         Some(ResourceBudgetSnapshot {
             limit: self.limit,
-            reserved: state.reserved,
+            reserved: self.reserved_bytes(),
         })
     }
 
     fn reap_pending(&self) -> ResourceResult<()> {
-        let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
-
-        let before = self.inner.bytes_outstanding();
-        let result = self.inner.reap_pending();
-        let after = self.inner.bytes_outstanding();
-        let freed = before.saturating_sub(after);
-        if freed > 0 {
-            state.reserved = state.reserved.saturating_sub(freed);
-        }
-        result
+        self.inner.reap_pending()
     }
 
     fn record_block_use(&self, block: &DeviceBlock, use_stream: StreamId) -> ResourceResult<()> {
@@ -283,6 +225,14 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
 
     fn supports_block_use_tracking(&self) -> bool {
         self.inner.supports_block_use_tracking()
+    }
+
+    fn access_dependencies(
+        &self,
+        block: BlockId,
+        bytes: usize,
+    ) -> ResourceResult<Option<std::sync::Arc<super::resource::DeviceAccessDependencies>>> {
+        self.inner.access_dependencies(block, bytes)
     }
 
     fn prepare_block_use(
@@ -308,7 +258,7 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::async_resource::AsyncCudaResource;
     use super::super::direct::DirectCudaResource;
     use super::super::resource::{BlockState, Generation};
@@ -334,30 +284,27 @@ mod tests {
     /// Test fixture that always fails `allocate` so we can exercise
     /// the rollback path without touching CUDA. `deallocate` and
     /// `reap_pending` are no-ops; `bytes_outstanding` reflects an
-    /// internally tracked tally so the budget's delta-sampling logic
-    /// is also exercised.
+    /// shared physical ledger, independently of admission rollback.
     struct AlwaysFailAllocResource {
         ord: u32,
-        outstanding: std::sync::atomic::AtomicUsize,
+        accounting: Arc<AllocationAccounting>,
     }
 
     impl AlwaysFailAllocResource {
         fn new(ord: u32) -> Self {
             Self {
                 ord,
-                outstanding: std::sync::atomic::AtomicUsize::new(0),
+                accounting: Arc::default(),
             }
         }
     }
 
     impl DeviceMemoryResource for AlwaysFailAllocResource {
-        fn allocate(
-            &self,
-            _bytes: usize,
-            _stream: StreamId,
-            _tag: AllocTag,
-        ) -> ResourceResult<DeviceBlock> {
+        fn materialize(&self, _request: AllocationRequest) -> ResourceResult<DeviceBlock> {
             Err(ResourceError::Driver("inner always fails".into()))
+        }
+        fn allocation_accounting(&self) -> Arc<AllocationAccounting> {
+            Arc::clone(&self.accounting)
         }
         fn deallocate(&self, _block: DeviceBlock) -> ResourceResult<()> {
             Ok(())
@@ -366,8 +313,192 @@ mod tests {
             self.ord
         }
         fn bytes_outstanding(&self) -> usize {
-            self.outstanding.load(std::sync::atomic::Ordering::Relaxed)
+            self.accounting.snapshot().0
         }
+    }
+
+    pub(crate) struct HostAllocation {
+        storage: Option<Box<[u8]>>,
+        reclamation: Arc<crate::memory::AllocationReclamation>,
+    }
+
+    impl Drop for HostAllocation {
+        fn drop(&mut self) {
+            drop(self.storage.take());
+            self.reclamation
+                .complete()
+                .expect("host allocation physically freed");
+        }
+    }
+
+    #[derive(Default)]
+    pub(crate) struct DeferredHostResource {
+        pub(crate) owners: Arc<Mutex<std::collections::HashMap<u64, HostAllocation>>>,
+        pub(crate) accounting: Arc<AllocationAccounting>,
+        pub(crate) release_on_detach: bool,
+    }
+
+    impl DeviceMemoryResource for DeferredHostResource {
+        fn materialize(&self, request: AllocationRequest) -> ResourceResult<DeviceBlock> {
+            let AllocationRequest {
+                bytes,
+                stream,
+                tag,
+                reclamation,
+                ..
+            } = request;
+            reclamation.attach_resource(Arc::clone(&self.accounting), bytes)?;
+            let storage = vec![0_u8; bytes].into_boxed_slice();
+            let ptr = storage.as_ptr() as u64;
+            let owner = HostAllocation {
+                storage: Some(storage),
+                reclamation,
+            };
+            owner.reclamation.acquired()?;
+            self.owners.lock().unwrap().insert(ptr, owner);
+            Ok(DeviceBlock {
+                ptr,
+                device_ordinal: 0,
+                alloc_stream: stream,
+                bytes,
+                align: 1,
+                tag,
+                generation: Generation::next(),
+                state: BlockState::Live,
+            })
+        }
+
+        fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
+            assert!(self.owners.lock().unwrap().contains_key(&block.ptr));
+            if self.release_on_detach {
+                let owner = self.owners.lock().unwrap().remove(&block.ptr);
+                drop(owner);
+            }
+            Ok(())
+        }
+
+        fn device_ordinal(&self) -> u32 {
+            0
+        }
+
+        fn bytes_outstanding(&self) -> usize {
+            self.accounting.snapshot().0
+        }
+        fn allocation_accounting(&self) -> Arc<AllocationAccounting> {
+            Arc::clone(&self.accounting)
+        }
+    }
+
+    #[test]
+    fn host_release_outside_resource_calls_restores_budget_capacity() {
+        let resource = DeferredHostResource::default();
+        let owners = Arc::clone(&resource.owners);
+        let budget = GlobalDeviceBudget::new(Box::new(resource), 64);
+        let block = budget
+            .allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .unwrap();
+        let ptr = block.ptr;
+        budget.deallocate(block).unwrap();
+        assert_eq!(budget.reserved_bytes(), 64);
+
+        let owner = owners.lock().unwrap().remove(&ptr).unwrap();
+        drop(owner);
+
+        assert_eq!(budget.bytes_outstanding(), 0);
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(budget.remaining(), 64);
+        let replacement = budget
+            .allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .expect("physical release restores admission capacity");
+        budget.deallocate(replacement).unwrap();
+    }
+
+    #[test]
+    fn host_budget_construction_preserves_live_bytes_and_prior_reclamation() {
+        let resource = DeferredHostResource::default();
+        let owners = Arc::clone(&resource.owners);
+        let old = resource
+            .allocate(16, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .unwrap();
+        drop(owners.lock().unwrap().remove(&old.ptr));
+        let live = resource
+            .allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .unwrap();
+        let inner = GlobalDeviceBudget::new(Box::new(resource), 96);
+        let outer = GlobalDeviceBudget::new(Box::new(inner), 96);
+        assert_eq!(outer.reserved_bytes(), 64);
+        assert!(outer
+            .allocate_with_reservation_pressure(1, 32, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .is_err());
+        assert_eq!(outer.reserved_bytes(), 64);
+        drop(owners.lock().unwrap().remove(&live.ptr));
+        assert_eq!(outer.reserved_bytes(), 0);
+        let next = outer
+            .allocate(96, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .unwrap();
+        assert_eq!(outer.reserved_bytes(), 96);
+        let owner = owners.lock().unwrap().remove(&next.ptr).unwrap();
+        std::thread::spawn(move || drop(owner)).join().unwrap();
+        assert_eq!(outer.remaining(), 96);
+    }
+
+    #[test]
+    fn host_budget_new_admission_does_not_mask_concurrent_physical_release() {
+        struct PausingResource {
+            inner: DeferredHostResource,
+            entered: Arc<std::sync::Barrier>,
+            proceed: Arc<std::sync::Barrier>,
+        }
+        impl DeviceMemoryResource for PausingResource {
+            fn materialize(&self, request: AllocationRequest) -> ResourceResult<DeviceBlock> {
+                self.entered.wait();
+                self.proceed.wait();
+                self.inner.materialize(request)
+            }
+            fn allocation_accounting(&self) -> Arc<AllocationAccounting> {
+                self.inner.allocation_accounting()
+            }
+            fn bytes_outstanding(&self) -> usize {
+                self.inner.bytes_outstanding()
+            }
+            fn device_ordinal(&self) -> u32 {
+                0
+            }
+            fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
+                self.inner.deallocate(block)
+            }
+        }
+        let inner = DeferredHostResource::default();
+        let old = inner
+            .allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .unwrap();
+        let owners = Arc::clone(&inner.owners);
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let proceed = Arc::new(std::sync::Barrier::new(2));
+        let budget = Arc::new(GlobalDeviceBudget::new(
+            Box::new(PausingResource {
+                inner,
+                entered: Arc::clone(&entered),
+                proceed: Arc::clone(&proceed),
+            }),
+            128,
+        ));
+        let worker = Arc::clone(&budget);
+        let admission = std::thread::spawn(move || {
+            worker
+                .allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED)
+                .unwrap()
+        });
+        entered.wait();
+        assert_eq!(budget.reserved_bytes(), 128);
+        drop(owners.lock().unwrap().remove(&old.ptr));
+        assert_eq!(budget.reserved_bytes(), 64);
+        proceed.wait();
+        let new = admission.join().unwrap();
+        assert_eq!(budget.bytes_outstanding(), 64);
+        assert_eq!(budget.reserved_bytes(), 64);
+        drop(owners.lock().unwrap().remove(&new.ptr));
+        assert_eq!(budget.remaining(), 128);
     }
 
     #[test]
@@ -388,6 +519,100 @@ mod tests {
         budget.deallocate(block).expect("dealloc");
         assert_eq!(budget.reserved_bytes(), 0);
         assert_eq!(budget.bytes_outstanding(), 0);
+    }
+
+    #[test]
+    fn failed_initialization_refunds_only_after_physical_release() {
+        struct AllocatedThenFailed {
+            inner: DeferredHostResource,
+            unwind: bool,
+            release_in_frame: bool,
+        }
+        impl DeviceMemoryResource for AllocatedThenFailed {
+            fn materialize(&self, request: AllocationRequest) -> ResourceResult<DeviceBlock> {
+                let reclamation = request.reclamation();
+                let block = self.inner.materialize(request)?;
+                if self.release_in_frame {
+                    let owner = self.inner.owners.lock().unwrap().remove(&block.ptr);
+                    drop(owner);
+                }
+                if self.unwind {
+                    panic!("initialization interrupted after acquisition");
+                }
+                Err(ResourceError::Driver("ready event failed".into())
+                    .retaining(block.bytes, reclamation))
+            }
+            fn allocation_accounting(&self) -> Arc<AllocationAccounting> {
+                self.inner.allocation_accounting()
+            }
+            fn deallocate(&self, _: DeviceBlock) -> ResourceResult<()> {
+                unreachable!()
+            }
+            fn device_ordinal(&self) -> u32 {
+                0
+            }
+            fn bytes_outstanding(&self) -> usize {
+                self.inner.bytes_outstanding()
+            }
+        }
+        for unwind in [false, true] {
+            for release_in_frame in [false, true] {
+                let inner = DeferredHostResource::default();
+                let owners = Arc::clone(&inner.owners);
+                let budget = GlobalDeviceBudget::new(
+                    Box::new(AllocatedThenFailed {
+                        inner,
+                        unwind,
+                        release_in_frame,
+                    }),
+                    64,
+                );
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    assert!(budget
+                        .allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED)
+                        .is_err());
+                }));
+                assert_eq!(outcome.is_err(), unwind);
+                assert_eq!(
+                    budget.reserved_bytes(),
+                    if release_in_frame { 0 } else { 64 }
+                );
+                let pending = std::mem::take(&mut *owners.lock().unwrap());
+                std::thread::spawn(move || drop(pending)).join().unwrap();
+                assert_eq!(budget.reserved_bytes(), 0);
+                budget.reap_pending().unwrap();
+                assert_eq!(budget.remaining(), 64);
+            }
+        }
+    }
+
+    #[test]
+    fn allocation_unwind_before_acquisition_restores_budget_charge() {
+        struct UnwindingResource(Arc<AllocationAccounting>);
+        impl DeviceMemoryResource for UnwindingResource {
+            fn materialize(&self, _: AllocationRequest) -> ResourceResult<DeviceBlock> {
+                panic!("allocator refused before acquisition")
+            }
+            fn allocation_accounting(&self) -> Arc<AllocationAccounting> {
+                Arc::clone(&self.0)
+            }
+            fn deallocate(&self, _: DeviceBlock) -> ResourceResult<()> {
+                unreachable!()
+            }
+            fn device_ordinal(&self) -> u32 {
+                0
+            }
+            fn bytes_outstanding(&self) -> usize {
+                0
+            }
+        }
+        let budget = GlobalDeviceBudget::new(Box::new(UnwindingResource(Arc::default())), 64);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = budget.allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED);
+        }))
+        .is_err());
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(budget.remaining(), 64);
     }
 
     #[test]
@@ -519,8 +744,8 @@ mod tests {
     #[test]
     fn deallocate_releases_budget_immediately_for_synchronous_inner() {
         // DirectCudaResource is treated as synchronous from the
-        // budget's perspective: bytes_outstanding drops at
-        // deallocate time, so the delta-based release fires there.
+        // budget's perspective: physical release during deallocate updates
+        // the shared ledger before the next admission snapshot.
         let Some(device) = try_device() else {
             return;
         };

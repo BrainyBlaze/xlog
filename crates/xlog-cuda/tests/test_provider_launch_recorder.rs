@@ -44,7 +44,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use cudarc::driver::sys;
-use xlog_core::{MemoryBudget, XlogError};
+use xlog_core::MemoryBudget;
 use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, StreamId};
 use xlog_cuda::CudaProviderBuilder;
 
@@ -403,46 +403,279 @@ fn provider_memset_column_recorded_survives_drop_and_reuse() {
     assert_eq!(last_writer_was_launch, 0);
 }
 
-/// Column-level negative test: TRUE EXTERNAL DLPack memory
-/// (no `source_slice`) is rejected by the strict launch
-/// recorder at preflight, before any CUDA work is queued, with
-/// the "external (DLPack / ArrowDevice) memory" message.
-///
-/// Synthesizes a `CudaColumn::dlpack` over a null
-/// `DlpackManagedTensor`. The tensor is never dereferenced —
-/// the recorder only inspects `is_external()` on the column
-/// — and the null pointer is drop-safe (the
-/// `DlpackManagedTensor::Drop` impl checks for null before
-/// invoking the deleter).
+/// Legacy zero-copy exports publish only after their nonblocking producers finish.
 #[test]
-fn provider_memset_column_recorded_rejects_external_dlpack_column() {
+#[ignore = "requires authorized CUDA execution"]
+fn legacy_exports_wait_for_recorded_nonblocking_producers_without_host_copies() {
+    use cudarc::driver::{CudaSlice, DevicePtr};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::dlpack::{DLDevice, DLManagedTensor, DLTensor, DlpackManagedTensor};
+    use xlog_cuda::{CudaBuffer, CudaColumn};
+
+    struct ForeignProducer {
+        _allocation: CudaSlice<u32>,
+        shape: [i64; 1],
+        releases: Arc<AtomicUsize>,
+    }
+    unsafe extern "C" fn release_foreign(raw: *mut DLManagedTensor) {
+        // SAFETY: the single transferred token owns both boxes; only its
+        // deleter reconstructs them, after all recorded foreign uses finish.
+        let tensor = unsafe { Box::from_raw(raw) };
+        let producer = unsafe { Box::from_raw(tensor.manager_ctx.cast::<ForeignProducer>()) };
+        producer.releases.fetch_add(1, Ordering::SeqCst);
+        drop(producer);
+    }
+    struct ProducerGate {
+        entered: AtomicBool,
+        released: AtomicBool,
+    }
+    struct ReleaseProducer(Arc<ProducerGate>);
+    impl Drop for ReleaseProducer {
+        fn drop(&mut self) {
+            self.0.released.store(true, Ordering::Release);
+        }
+    }
+    unsafe extern "C" fn hold_producer(data: *mut std::ffi::c_void) {
+        // SAFETY: exactly one callback consumes the Arc transferred below.
+        let gate = unsafe { Arc::from_raw(data.cast::<ProducerGate>()) };
+        gate.entered.store(true, Ordering::Release);
+        // A CUDA host callback must not invoke CUDA. This gate only coordinates
+        // CPU threads and cannot finish until the test explicitly releases it.
+        while !gate.released.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     let _recorder_test_guard = recorder_test_lock();
-    use xlog_cuda::{CudaColumn, DlpackManagedTensor};
+    let provider = CudaProviderBuilder::new(0, MemoryBudget::with_limit(64 * 1024 * 1024))
+        .build()
+        .expect("authorized CUDA provider");
+    let runtime = provider.memory().runtime().unwrap();
+    let pool = runtime.stream_pool();
+    let launch_stream = pool.acquire().unwrap();
+    let launch_handle = pool.resolve(launch_stream).unwrap();
+    const EXPORT_BYTES: usize = 4096;
+    let dtype = xlog_cuda::dlpack::DLDataType {
+        code: xlog_cuda::dlpack::K_DLUINT,
+        bits: 8,
+        lanes: 1,
+    };
+    for format in [
+        "slice",
+        "column",
+        "arrow",
+        "foreign_column",
+        "foreign_arrow",
+    ] {
+        let mut rows = provider.memory().alloc::<u32>(1).unwrap();
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[(EXPORT_BYTES / 4) as u32], &mut rows)
+            .unwrap();
+        let producer_releases = Arc::new(AtomicUsize::new(0));
+        let mut column = if format.starts_with("foreign_") {
+            // Allocate directly through the external producer, without an
+            // XLOG runtime alias whose dependencies could mask a broken import.
+            let stream = provider.device().inner().stream();
+            let allocation = stream.alloc_zeros::<u32>(EXPORT_BYTES / 4).unwrap();
+            let (ptr, record) = allocation.device_ptr(stream);
+            drop(record);
+            stream.synchronize().unwrap();
+            let mut producer = Box::new(ForeignProducer {
+                _allocation: allocation,
+                shape: [(EXPORT_BYTES / 4) as i64],
+                releases: Arc::clone(&producer_releases),
+            });
+            let tensor = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: ptr as usize as *mut std::ffi::c_void,
+                    device: DLDevice {
+                        device_type: xlog_cuda::dlpack::K_DLCUDA,
+                        device_id: provider.device().ordinal() as i32,
+                    },
+                    ndim: 1,
+                    dtype: xlog_cuda::dlpack::DLDataType { bits: 32, ..dtype },
+                    shape: producer.shape.as_mut_ptr(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: Box::into_raw(producer).cast(),
+                deleter: Some(release_foreign),
+            });
+            // SAFETY: the unique token owns real producer-ready device storage,
+            // stable shape metadata, and the matching exactly-once deleter.
+            let token = unsafe { DlpackManagedTensor::from_raw(Box::into_raw(tensor)) };
+            // SAFETY: the complete allocation belongs to this retained context;
+            // no external writer is active and the token keeps it alive.
+            let column = unsafe {
+                CudaColumn::dlpack(
+                    ptr,
+                    EXPORT_BYTES,
+                    provider.device().inner().stream().clone(),
+                    token,
+                )
+            };
+            assert!(column.is_external());
+            column
+        } else {
+            CudaColumn::Owned(provider.memory().alloc::<u8>(EXPORT_BYTES).unwrap())
+        };
+        let gate = Arc::new(ProducerGate {
+            entered: AtomicBool::new(false),
+            released: AtomicBool::new(false),
+        });
+        // Release even if admission, export, or a test assertion unwinds.
+        let release = ReleaseProducer(Arc::clone(&gate));
+        let callback_owner = Arc::into_raw(Arc::clone(&gate)).cast_mut().cast();
+        // SAFETY: the stream is owned by the pool; the callback owns its gate
+        // and touches neither CUDA nor any device/host transfer address.
+        assert_eq!(
+            unsafe {
+                sys::cuLaunchHostFunc(
+                    launch_handle.cu_stream(),
+                    Some(hold_producer),
+                    callback_owner,
+                )
+            },
+            sys::cudaError_enum::CUDA_SUCCESS
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gate.entered.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "producer callback never started");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        provider.reset_host_transfer_stats();
+        std::thread::scope(|scope| {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (queued_tx, queued_rx) = mpsc::channel();
+            let (returned_tx, returned_rx) = mpsc::channel();
+            let provider = &provider;
+            let launch_handle = &launch_handle;
+            let producer_releases = &producer_releases;
+            let worker = scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                // Abort cleanup may wait for this stream. Keep submission off
+                // the CPU controller that must release the producer gate.
+                provider
+                    .memset_column_recorded(&mut column, 0xa5, launch_stream)
+                    .unwrap();
+                queued_tx.send(()).unwrap();
+                // Retain the public owner through the readiness query: its Drop
+                // could itself wait for the writer and mask a missing export fence.
+                let exported: Box<dyn std::any::Any> = if format == "slice" {
+                    let CudaColumn::Owned(source) = column else {
+                        unreachable!()
+                    };
+                    Box::new(
+                        xlog_cuda::dlpack::export_slice_managed_tensor(
+                            Arc::new(source),
+                            provider.device().ordinal() as i32,
+                            dtype,
+                            1,
+                            EXPORT_BYTES,
+                        )
+                        .unwrap(),
+                    )
+                } else {
+                    let buffer = CudaBuffer::from_columns_with_host_count(
+                        vec![column],
+                        (EXPORT_BYTES / 4) as u64,
+                        rows,
+                        Schema::new(vec![("value".into(), ScalarType::U32)]),
+                        (EXPORT_BYTES / 4) as u32,
+                    );
+                    if format.ends_with("column") {
+                        Box::new(provider.to_dlpack_table(buffer).column(0).unwrap())
+                    } else {
+                        Box::new(provider.to_arrow_device_record_batch(buffer).unwrap())
+                    }
+                };
+                assert_eq!(producer_releases.load(Ordering::SeqCst), 0);
+                // SAFETY: this live stream has no submission after the writer.
+                // Query adds no synchronization and cannot fix an early export.
+                let ready = unsafe { sys::cuStreamQuery(launch_handle.cu_stream()) };
+                returned_tx.send(ready).unwrap();
+                drop(exported);
+                ready
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            queued_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("producer submission blocked before export was reached");
+            let early = returned_rx.recv_timeout(Duration::from_millis(250));
+            drop(release);
+            let ready = worker.join().unwrap();
+            assert!(
+                matches!(early, Err(mpsc::RecvTimeoutError::Timeout)),
+                "{format} returned while its producer was held pending: {early:?}"
+            );
+            assert_eq!(
+                ready,
+                sys::cudaError_enum::CUDA_SUCCESS,
+                "{format} published before its producer completed"
+            );
+        });
+        assert_eq!(
+            provider.host_transfer_stats().dtoh_bytes,
+            0,
+            "{format} copied host data"
+        );
+        runtime.reap_pending().unwrap();
+        assert_eq!(
+            producer_releases.load(Ordering::SeqCst),
+            usize::from(format.starts_with("foreign_")),
+            "{format} did not release its foreign producer exactly once"
+        );
+    }
+}
+
+/// An independently imported DLPack owner participates in recorded writes and
+/// the subsequent safe readback without requiring a runtime block identity.
+#[test]
+fn provider_memset_column_recorded_accepts_external_dlpack_column() {
+    let _recorder_test_guard = recorder_test_lock();
+    use xlog_cuda::CudaColumn;
 
     provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
 
-    // SAFETY: null-pointer tensor is drop-safe (DlpackManagedTensor's
-    // Drop impl null-checks before invoking the deleter). The recorder
-    // never derefs the tensor.
-    let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
-    let mut col = CudaColumn::dlpack(0, 0, device.inner().stream().clone(), tensor);
+    let slice = Arc::new(memory.alloc::<u8>(1).expect("external allocation"));
+    let ptr = slice.device_ptr_value();
+    let tensor = xlog_cuda::dlpack::export_slice_managed_tensor(
+        slice,
+        device.ordinal() as i32,
+        xlog_cuda::dlpack::DLDataType {
+            code: xlog_cuda::dlpack::K_DLUINT,
+            bits: 8,
+            lanes: 1,
+        },
+        1,
+        1,
+    )
+    .expect("real external owner");
+    device
+        .inner()
+        .stream()
+        .synchronize()
+        .expect("producer ready");
+    // SAFETY: the real token owns this byte on the receiving context, producer
+    // work is complete, and no foreign writer is active.
+    let mut col = unsafe { CudaColumn::dlpack(ptr, 1, device.inner().stream().clone(), tensor) };
     assert!(col.is_external());
 
-    let err = provider.memset_column_recorded(&mut col, 0xAA, launch_stream);
-    match err {
-        Err(XlogError::Kernel(msg)) => {
-            assert!(
-                msg.contains("preflight failed") && msg.contains("external"),
-                "expected preflight-failed external-memory error, got {:?}",
-                msg
-            );
-        }
-        other => panic!(
-            "memset_column_recorded must reject external DLPack at preflight, got {:?}",
-            other
-        ),
-    }
+    provider
+        .memset_column_recorded(&mut col, 0xAA, launch_stream)
+        .expect("recorded write through the external owner");
+    assert_eq!(
+        device.inner().dtoh_sync_copy(&col).expect("safe readback"),
+        [0xAA]
+    );
+    drop(col);
+    runtime.reap_pending().expect("reap");
 }
 
 /// Column-level positive test: an XLOG-OWNED DLPack column —
@@ -456,12 +689,12 @@ fn provider_memset_column_recorded_rejects_external_dlpack_column() {
 /// This locks the slice's intent: zero-copy DLPack export
 /// where xlog retains ownership preserves runtime identity
 /// and remains safe under the strict-recorder discipline.
-/// True external DLPack producers continue to be rejected
+/// Independently imported external owners use the same storage admission path
 /// (covered by the sibling test above).
 #[test]
 fn provider_memset_column_recorded_accepts_xlog_owned_dlpack_column() {
     let _recorder_test_guard = recorder_test_lock();
-    use xlog_cuda::{CudaColumn, DlpackManagedTensor};
+    use xlog_cuda::CudaColumn;
 
     provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
     let launch_stream = pool.acquire().expect("acquire launch_stream");
@@ -469,9 +702,25 @@ fn provider_memset_column_recorded_accepts_xlog_owned_dlpack_column() {
 
     let slice = memory.alloc::<u8>(BYTES).expect("alloc runtime-backed");
     assert!(slice.runtime_block().is_some());
-    let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
-    let mut col =
-        CudaColumn::dlpack_xlog_owned(Arc::new(slice), device.inner().stream().clone(), tensor);
+    let slice = Arc::new(slice);
+    let tensor = xlog_cuda::dlpack::export_slice_managed_tensor(
+        Arc::clone(&slice),
+        device.ordinal() as i32,
+        xlog_cuda::dlpack::DLDataType {
+            code: xlog_cuda::dlpack::K_DLUINT,
+            bits: 8,
+            lanes: 1,
+        },
+        1,
+        slice.len(),
+    )
+    .expect("real export owner");
+    device
+        .inner()
+        .stream()
+        .synchronize()
+        .expect("producer ready");
+    let mut col = CudaColumn::dlpack_xlog_owned(slice, device.inner().stream().clone(), tensor);
     assert!(!col.is_external());
     assert!(col.runtime_block().is_some());
 
@@ -3399,13 +3648,10 @@ fn provider_compare_columns_mask_recorded_survives_drop_and_reuse() {
 /// Filter-class COMPACT path. The compact pipeline is
 /// a multi-kernel chain — `mask_clamp_rows` →
 /// `multiblock_scan_phase1` (and inplace+phase3 when
-/// `num_blocks > 1`) → `capture_compact_count` →
-/// `cu_stream.synchronize()` → host scalar read → per-column
-/// `compact_bytes_by_mask`. Every kernel runs on the same
-/// explicit `launch_stream` via `launch_on_stream`, and the
-/// host scalar read is explicitly ordered against the
-/// launch_stream rather than relying on default-stream
-/// implicit sync (which non-blocking pool streams do NOT get).
+/// `num_blocks > 1`) → `capture_compact_count` → per-column
+/// `compact_bytes_by_mask`. Every kernel runs on the same explicit
+/// `launch_stream`. Commit publishes the whole chain before the host scalar
+/// read acquires its dependency; non-blocking streams need no implicit sync.
 ///
 /// The bug class extends to ALL caller-provided buffers: input
 /// columns AND `d_mask`. Without the recorder, dropping either
@@ -3478,16 +3724,14 @@ fn provider_compact_buffer_by_device_mask_counted_recorded_survives_drop_and_reu
             schema.clone(),
         );
 
-        // Migrated compact: queues the entire chain on
-        // launch_stream, returns AFTER the host scalar read
-        // sync but BEFORE compact_bytes_by_mask completes.
+        // The complete launch_stream chain is committed before the separate
+        // host scalar read. This read also establishes completion of the chain.
         let output_buf = provider
             .compact_buffer_by_device_mask_counted_recorded(&input, &d_mask, launch_stream)
             .expect("compact_buffer_by_device_mask_counted_recorded");
 
-        // Drop input AND d_mask without host sync. The
-        // recorder's commit must have ordered the alloc-stream
-        // frees of both AFTER the launch_stream chain.
+        // No additional host synchronization is needed before dropping these
+        // owners: the published chain preceded the method's metadata read.
         drop(input);
         drop(d_mask);
 
@@ -3595,13 +3839,8 @@ fn provider_compact_recorded_short_mask_ignores_capacity_slack() {
         .htod_sync_copy_into(&bytes, &mut col_bytes)
         .expect("htod col");
 
-    // Logical-domain mask: keep rows 0 and 2. There are no
-    // mask bytes for capacity slack rows [3, ROW_CAP).
+    // Logical-domain masks have no bytes for capacity slack rows [3, ROW_CAP).
     let mut d_mask = memory.alloc::<u8>(LOGICAL).expect("alloc short mask");
-    device
-        .inner()
-        .htod_sync_copy_into(&[1u8, 0, 1], &mut d_mask)
-        .expect("htod mask");
 
     let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
     device
@@ -3615,28 +3854,155 @@ fn provider_compact_recorded_short_mask_ignores_capacity_slack() {
         Schema::new(vec![("v".to_string(), ScalarType::U32)]),
     );
 
-    let output = provider
-        .compact_buffer_by_device_mask_counted_recorded(&input, &d_mask, launch_stream)
-        .expect("compact recorded short mask");
-    launch_handle.synchronize().expect("sync launch");
+    for (mask, expected) in [([1u8, 0, 1], vec![10u32, 30]), ([0u8; LOGICAL], vec![])] {
+        device
+            .inner()
+            .htod_sync_copy_into(&mask, &mut d_mask)
+            .expect("htod mask");
+        let output = provider
+            .compact_buffer_by_device_mask_counted_recorded(&input, &d_mask, launch_stream)
+            .expect("compact recorded short mask");
+        assert_eq!(output.cached_row_count(), Some(expected.len() as u32));
+        assert_eq!(output.num_rows(), ROW_CAP as u64);
+        launch_handle.synchronize().expect("sync launch");
 
-    let mut host_rows = [0u32];
+        let mut host_rows = [0u32];
+        device
+            .inner()
+            .dtoh_sync_copy_into(output.num_rows_device(), &mut host_rows)
+            .expect("dtoh row count");
+        assert_eq!(host_rows[0], expected.len() as u32);
+
+        if !expected.is_empty() {
+            let out_col = output.column(0).expect("output col");
+            let mut readback = vec![0u8; expected.len() * 4];
+            unsafe { dtoh_sync(&mut readback, *out_col.device_ptr()) };
+            let observed: Vec<u32> = readback
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            assert_eq!(observed, expected);
+        }
+    }
+}
+
+#[test]
+fn provider_fused_filter_recorded_reports_zero_and_mixed_counts() {
+    let _recorder_test_guard = recorder_test_lock();
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::{CompareOp, CudaBuffer};
+
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    assert_ne!(launch_stream, StreamId::DEFAULT);
+    let values = [10.0f64, 20.0, 30.0, 40.0, 50.0];
+    let bytes: Vec<u8> = values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let mut column = memory.alloc::<u8>(bytes.len()).expect("alloc column");
     device
         .inner()
-        .dtoh_sync_copy_into(output.num_rows_device(), &mut host_rows)
-        .expect("dtoh row count");
-    assert_eq!(host_rows[0], 2);
+        .htod_sync_copy_into(&bytes, &mut column)
+        .expect("htod column");
+    let mut rows = memory.alloc::<u32>(1).expect("alloc row count");
+    device
+        .inner()
+        .htod_sync_copy_into(&[values.len() as u32], &mut rows)
+        .expect("htod row count");
+    let input = CudaBuffer::from_columns(
+        vec![column.into()],
+        values.len() as u64,
+        rows,
+        Schema::new(vec![("value".to_string(), ScalarType::F64)]),
+    );
 
-    let out_col = output.column(0).expect("output col");
-    let mut readback = vec![0u8; 2 * 4];
-    unsafe { dtoh_sync(&mut readback, *out_col.device_ptr()) };
-    let observed: Vec<u32> = readback
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
-    assert_eq!(observed, vec![10, 30]);
+    for (target, expected_count) in [(0.0f64, 0u32), (30.0f64, 1u32)] {
+        let output = provider
+            .filter_fused_scan_recorded(&input, 0, target, CompareOp::Eq, launch_stream)
+            .expect("fused recorded filter");
+        assert_eq!(output.cached_row_count(), Some(expected_count));
+        assert_eq!(output.num_rows(), values.len() as u64);
+        let mut host_rows = [0u32];
+        device
+            .inner()
+            .dtoh_sync_copy_into(output.num_rows_device(), &mut host_rows)
+            .expect("dtoh row count");
+        assert_eq!(host_rows[0], expected_count);
+        if expected_count != 0 {
+            let mut readback = [0u8; std::mem::size_of::<f64>()];
+            unsafe {
+                dtoh_sync(
+                    &mut readback,
+                    *output.column(0).expect("output column").device_ptr(),
+                )
+            };
+            assert_eq!(f64::from_le_bytes(readback), target);
+        }
+    }
+}
+
+#[test]
+fn provider_host_count_filters_reject_capture_before_enqueue() {
+    let _recorder_test_guard = recorder_test_lock();
+    use xlog_core::{ScalarType, Schema, XlogError};
+    use xlog_cuda::cuda_graph::CapturedCudaGraph;
+    use xlog_cuda::{CompareOp, CudaBuffer};
+
+    provider_fixture!(64 * 1024 * 1024, provider, device, memory, runtime, pool);
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    let launch_handle = pool.resolve(launch_stream).expect("resolve launch_stream");
+    let mut column = memory.alloc::<u8>(4).expect("alloc column");
+    device
+        .inner()
+        .htod_sync_copy_into(&10u32.to_le_bytes(), &mut column)
+        .expect("htod column");
+    let mut rows = memory.alloc::<u32>(1).expect("alloc row count");
+    device
+        .inner()
+        .htod_sync_copy_into(&[1u32], &mut rows)
+        .expect("htod row count");
+    let input = CudaBuffer::from_columns(
+        vec![column.into()],
+        1,
+        rows,
+        Schema::new(vec![("value".to_string(), ScalarType::U32)]),
+    );
+    let mut mask = memory.alloc::<u8>(1).expect("alloc mask");
+    device
+        .inner()
+        .htod_sync_copy_into(&[1u8], &mut mask)
+        .expect("htod mask");
+    launch_handle.synchronize().expect("sync before capture");
+
+    let graph = CapturedCudaGraph::capture_on_stream(&launch_handle, || {
+        let fused = provider
+            .filter_fused_scan_recorded(&input, 0, 10u32, CompareOp::Eq, launch_stream)
+            .err()
+            .expect("host-count fused filter must reject capture");
+        assert!(fused.to_string().contains("requires an uncaptured stream"));
+        let compact = provider
+            .compact_buffer_by_device_mask_counted_recorded(&input, &mask, launch_stream)
+            .err()
+            .expect("host-count compact must reject capture");
+        assert!(compact
+            .to_string()
+            .contains("requires an uncaptured stream"));
+        // SAFETY: this marker writes the one-byte allocation retained by `mask`.
+        // The graph is never launched, and is dropped before the allocation.
+        let result =
+            unsafe { sys::cuMemsetD8Async(*mask.device_ptr(), 0, 1, launch_handle.cu_stream()) };
+        if result != sys::cudaError_enum::CUDA_SUCCESS {
+            return Err(XlogError::Kernel(format!(
+                "capture marker failed: {result:?}"
+            )));
+        }
+        Ok(())
+    })
+    .expect("filter rejection must leave capture usable");
+    assert_eq!(graph.node_count().expect("captured node count"), 1);
 }
 
 /// Negative test: compact migrated path against legacy
@@ -3656,16 +4022,10 @@ fn provider_compact_recorded_short_mask_ignores_capacity_slack() {
 /// deallocate gates the free behind both — chaining the
 /// cross-stream lifetime safety end-to-end.
 ///
-/// Bug class: caller drops `input` after `filter_recorded`
-/// returns, without host sync. Per-column compact_bytes_by_mask
-/// kernels are still in flight on launch_stream — the
-/// function only synchronized launch_stream BEFORE the host
-/// scalar read in the middle of the chain; the per-column
-/// compact kernels enqueue AFTER that sync. Without proper
-/// recording, the alloc-stream `cuMemFreeAsync` would race
-/// the still-pending compact reads of `input.column[i]`, and
-/// a reuse + trample on the default stream would corrupt the
-/// kernels' reads → output column would have wrong contents.
+/// The caller drops `input` after `filter_recorded` returns without an
+/// additional host sync. The complete compaction chain now precedes commit
+/// and metadata readback, so the test checks output survival across owner
+/// release and reuse rather than requiring compact reads to remain in flight.
 ///
 /// Mask predicate: `i % 5 == PREDICATE_KEY`. Input column 0
 /// holds `i % 5`, column 1 holds `i * 100`. Expected output
@@ -3734,9 +4094,8 @@ fn provider_filter_recorded_survives_drop_and_reuse() {
             .filter_recorded::<u32>(&input, 0, PREDICATE_KEY, CompareOp::Eq, launch_stream)
             .expect("filter_recorded");
 
-        // Drop input WITHOUT host sync. Per-column
-        // compact_bytes_by_mask kernels are still pending on
-        // launch_stream.
+        // No additional host synchronization is needed: the complete compact
+        // chain was published before the method's metadata read completed.
         drop(input);
 
         // Reuse + trample. Pool may serve k or v slot.
@@ -3923,9 +4282,8 @@ fn provider_filter_columns_recorded_survives_drop_and_reuse() {
             .filter_columns_recorded::<u32>(&input, 0, 1, CompareOp::Eq, launch_stream)
             .expect("filter_columns_recorded");
 
-        // Drop input WITHOUT host sync. Per-column
-        // compact_bytes_by_mask kernels for ALL THREE columns
-        // are still pending on launch_stream.
+        // The metadata read already followed the complete three-column
+        // compaction chain; no additional host synchronization is needed.
         drop(input);
 
         // Reuse + trample three slots.
@@ -4035,10 +4393,9 @@ fn provider_filter_columns_recorded_survives_drop_and_reuse() {
 ///
 /// The fused path is a single launch that produces
 /// `(d_mask, d_prefix_sum, d_block_sums)` together; the rest
-/// of the chain (`multiblock_scan_phase3`,
-/// `capture_compact_count`, `cu_stream.synchronize()`,
-/// per-column `compact_bytes_by_mask`) matches the non-fused
-/// recorded compact tail.
+/// of the chain (`multiblock_scan_phase3`, `capture_compact_count`,
+/// per-column `compact_bytes_by_mask`, commit, then metadata readback)
+/// matches the non-fused recorded compact tail.
 ///
 /// Predicate: `column[0] == TARGET` (f64 equality, exact bit
 /// match for the integral payload values used here). Input
@@ -4107,9 +4464,8 @@ fn provider_filter_fused_scan_recorded_f64_survives_drop_and_reuse() {
             .filter_fused_scan_recorded::<f64>(&input, 0, TARGET, CompareOp::Eq, launch_stream)
             .expect("filter_fused_scan_recorded::<f64>");
 
-        // Drop input WITHOUT host sync. Per-column
-        // compact_bytes_by_mask kernels are still pending on
-        // launch_stream.
+        // The metadata read already followed the complete compaction chain;
+        // no additional host synchronization is needed before owner release.
         drop(input);
 
         let next_a = memory.alloc::<u8>(ROWS * 8).expect("alloc next_a");
@@ -4186,8 +4542,8 @@ fn provider_filter_fused_scan_recorded_f64_survives_drop_and_reuse() {
         bad_output, 0,
         "filter_fused_scan_recorded::<f64> produced corrupted output in {}/{} iterations \
          (reuse_observed={}). Either the fused phase1 launch's reads of input.column[0] \
-         were not properly recorded, or one of the chain steps (scan/phase3/capture/sync/\
-         compact) raced an alloc-stream reuse + trample.",
+         were not properly recorded, or one of the chain steps (scan/phase3/capture/\
+         compact/readback) raced an alloc-stream reuse + trample.",
         bad_output, ITERATIONS, reuse_observed,
     );
 }

@@ -1,7 +1,7 @@
 //! Relational operations: join, dedup, union, diff, sort, and related helpers.
 
 use std::ffi::c_void;
-use std::sync::atomic::Ordering;
+use std::sync::{atomic::Ordering, Arc};
 
 use crate::{
     cuda_graph::{CapturedCudaGraph, CsmCudaGraphKey, CudaGraphNodeKind},
@@ -16,9 +16,9 @@ use super::{
     DEFAULT_JOIN_MAX_OUTPUT, FILTER_MODULE, ILP_MODULE, JOIN_MODULE, NESTED_LOOP_TOTAL_THRESHOLD,
     PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
 };
-use crate::device_runtime::{Access, BlockId, StreamId};
-use crate::launch::LaunchRecorder;
-use crate::memory::{CudaColumn, TrackedCudaSlice};
+use crate::device_runtime::{StreamId, XlogDeviceRuntime};
+use crate::launch::{LaunchEnqueueError, LaunchRecorder};
+use crate::memory::{CudaColumn, DeviceRead, TrackedCudaSlice};
 use crate::CudaBuffer;
 
 // Per-column scalar-type encoding used by the deterministic full-row
@@ -1509,7 +1509,7 @@ impl super::CudaKernelProvider {
     /// category via `dtoh_scalar_untracked`, which is the auditable,
     /// single-purpose API for metadata reads.
     ///
-    /// The v0.5.5 metadata-read hardening replaced eight
+    /// Metadata-read hardening replaced eight
     /// `dtoh_sync_copy_into_tracked` reads of these scalars with this
     /// helper, so binary-join materialization runs strict-clean.
     /// **This does not make binary-join materialization fully
@@ -1802,12 +1802,13 @@ impl super::CudaKernelProvider {
     /// pattern already used by `diff_gpu_u32` and `dedup_sorted`.
     fn scan_mask_to_prefix_with_count(
         &self,
-        d_mask: &cudarc::driver::CudaSlice<u8>,
+        d_mask: &impl DeviceRead<u8>,
         n: u32,
     ) -> Result<(
         crate::memory::TrackedCudaSlice<u32>,
         crate::memory::TrackedCudaSlice<u32>,
     )> {
+        let d_mask = &d_mask.device_view();
         let device = self.device.inner();
         let block_size = 256u32;
         let num_blocks = n.div_ceil(block_size);
@@ -2745,8 +2746,9 @@ impl super::CudaKernelProvider {
     fn apply_permutation_gpu(
         &self,
         input: &CudaBuffer,
-        permutation: &cudarc::driver::CudaSlice<u32>,
+        permutation: &impl DeviceRead<u32>,
     ) -> Result<CudaBuffer> {
+        let permutation = &permutation.device_view();
         let row_cap = input.num_rows() as u32;
         let d_num_rows = input.num_rows_device();
         let device = self.device.inner();
@@ -2828,9 +2830,10 @@ impl super::CudaKernelProvider {
     fn gather_buffer_by_indices(
         &self,
         input: &CudaBuffer,
-        indices: &cudarc::driver::CudaSlice<u32>,
+        indices: &impl DeviceRead<u32>,
         output_rows: u32,
     ) -> Result<CudaBuffer> {
+        let indices = &indices.device_view();
         if output_rows == 0 {
             return self.create_empty_buffer(input.schema().clone());
         }
@@ -4292,9 +4295,10 @@ impl super::CudaKernelProvider {
     /// pointer chasing during probe.
     fn build_hash_table_v2(
         &self,
-        hashes: &cudarc::driver::CudaSlice<u64>,
+        hashes: &impl DeviceRead<u64>,
         num_rows: u32,
     ) -> Result<JoinHashTableV2> {
+        let hashes = &hashes.device_view();
         let device = self.device.inner();
 
         // Number of buckets: next power-of-two >= max(2*num_rows, 1024)
@@ -6397,9 +6401,8 @@ impl super::CudaKernelProvider {
         ranks: &mut TrackedCudaSlice<u32>,
         num_rows_device: &TrackedCudaSlice<u32>,
         row_cap: u32,
-        cu_stream: &cudarc::driver::CudaStream,
-        launch_stream: StreamId,
-        runtime: &crate::device_runtime::XlogDeviceRuntime,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
+        scan_scratch: &mut super::MultiblockScanScratchU32,
     ) -> Result<()> {
         if row_cap == 0 {
             return Ok(());
@@ -6446,8 +6449,8 @@ impl super::CudaKernelProvider {
 
             // SAFETY: radix_histogram(keys, num_rows_device, row_cap, histograms, shift)
             unsafe {
-                histogram_fn.clone().launch_on_stream(
-                    cu_stream,
+                histogram_fn.clone().launch_in(
+                    enqueue,
                     sort_config,
                     (keys_in, num_rows_device, row_cap, &mut *hist, shift),
                 )
@@ -6456,8 +6459,8 @@ impl super::CudaKernelProvider {
 
             // SAFETY: compute_digit_prefix_sums(histograms, grid_size, prefix_sums)
             unsafe {
-                prefix_fn.clone().launch_on_stream(
-                    cu_stream,
+                prefix_fn.clone().launch_in(
+                    enqueue,
                     prefix_config,
                     (&*hist, grid_size, &mut *prefix),
                 )
@@ -6475,19 +6478,18 @@ impl super::CudaKernelProvider {
                 let start = (digit * grid_size) as usize;
                 let end = start + (grid_size as usize);
                 let mut digit_slice = hist.slice_mut(start..end);
-                self.multiblock_scan_u32_view_inplace_on_stream(
+                self.multiblock_scan_u32_inplace_on_stream(
                     &mut digit_slice,
                     grid_size,
-                    cu_stream,
-                    launch_stream,
-                    runtime,
+                    enqueue,
+                    scan_scratch,
                 )?;
             }
 
             // SAFETY: compute_ranks(keys, num_rows_device, row_cap, ranks, shift)
             unsafe {
-                ranks_fn.clone().launch_on_stream(
-                    cu_stream,
+                ranks_fn.clone().launch_in(
+                    enqueue,
                     sort_config,
                     (keys_in, num_rows_device, row_cap, &mut *ranks, shift),
                 )
@@ -6497,8 +6499,8 @@ impl super::CudaKernelProvider {
             // SAFETY: radix_scatter_stable(keys_in, indices_in, ranks, keys_out,
             // indices_out, prefix_sums, block_offsets, num_rows_device, row_cap, shift)
             unsafe {
-                scatter_fn.clone().launch_on_stream(
-                    cu_stream,
+                scatter_fn.clone().launch_in(
+                    enqueue,
                     sort_config,
                     (
                         keys_in,
@@ -6539,7 +6541,7 @@ impl super::CudaKernelProvider {
         input: &CudaBuffer,
         permutation: &TrackedCudaSlice<u32>,
         dst_cols: &mut [TrackedCudaSlice<u8>],
-        cu_stream: &cudarc::driver::CudaStream,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
     ) -> Result<()> {
         let row_cap = input.num_rows() as u32;
         let d_num_rows = input.num_rows_device();
@@ -6591,8 +6593,8 @@ impl super::CudaKernelProvider {
             // SAFETY: apply_permutation_bytes(input, output, permutation,
             // num_rows_device, row_cap, elem_size)
             unsafe {
-                apply_perm_fn.clone().launch_on_stream(
-                    cu_stream,
+                apply_perm_fn.clone().launch_in(
+                    enqueue,
                     launch_config,
                     (
                         src_col,
@@ -6723,6 +6725,7 @@ impl super::CudaKernelProvider {
             dst_cols.push(self.memory.alloc::<u8>((n as usize) * elem_size)?);
         }
 
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(grid_size)?;
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(input.num_rows_device());
         for col_idx in 0..input.columns.len() {
@@ -6745,6 +6748,9 @@ impl super::CudaKernelProvider {
         for dst_col in &dst_cols {
             rec.write(dst_col);
         }
+        for level in scan_scratch.levels() {
+            rec.read_write(level);
+        }
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("sort_recorded: preflight failed: {}", e)))?;
 
@@ -6753,99 +6759,59 @@ impl super::CudaKernelProvider {
             .get_func(SORT_MODULE, sort_kernels::INIT_INDICES)
             .ok_or_else(|| XlogError::Kernel("init_indices kernel not found".to_string()))?;
         // SAFETY: init_indices(indices, num_rows_device, row_cap)
-        unsafe {
-            init_fn.clone().launch_on_stream(
-                &cu_stream,
-                launch_config,
-                (&mut indices_a, input.num_rows_device(), n),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("init_indices (on_stream) failed: {}", e)))?;
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                init_fn.clone().launch_in(
+                    enqueue,
+                    launch_config,
+                    (&mut indices_a, input.num_rows_device(), n),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("init_indices (on_stream) failed: {}", e)))?;
 
-        // Step 2: LSD radix passes per key column. U32 / Symbol
-        // are 4-byte → one radix pass per column. U64 keys use
-        // the hi/lo gather pair (mirrors legacy `sort()`'s
-        // strategy at line ~1691): one radix pass per half,
-        // lo-first then hi, so the stable LSD ordering is
-        // hi-most-significant.
-        for &col_idx in key_cols.iter().rev() {
-            let col = input
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
-            let ty = input.schema.column_type(col_idx).ok_or_else(|| {
-                XlogError::Kernel(format!("Key column {} type not found in schema", col_idx))
-            })?;
-            match ty {
-                ScalarType::U32 | ScalarType::Symbol => {
-                    let col_view = self.column_as_u32_view(col, n as usize)?;
-                    let gather_fn = device
-                        .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_U32)
-                        .ok_or_else(|| {
-                            XlogError::Kernel("apply_permutation_u32 kernel not found".to_string())
-                        })?;
-                    // SAFETY: apply_permutation_u32(input, output, permutation,
-                    // num_rows_device, row_cap)
-                    unsafe {
-                        gather_fn.clone().launch_on_stream(
-                            &cu_stream,
-                            launch_config,
-                            (
-                                &col_view,
-                                &mut keys_a,
-                                &indices_a,
-                                input.num_rows_device(),
-                                n,
-                            ),
-                        )
-                    }
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "apply_permutation_u32 (on_stream) failed: {}",
-                            e
-                        ))
-                    })?;
-
-                    self.radix_sort_u32_pairs_with_scratch_on_stream(
-                        &mut keys_a,
-                        &mut keys_b,
-                        &mut indices_a,
-                        &mut indices_b,
-                        &mut d_hist,
-                        &mut d_prefix,
-                        &mut d_ranks,
-                        input.num_rows_device(),
-                        n,
-                        &cu_stream,
-                        launch_stream,
-                        runtime,
-                    )?;
-                }
-                ScalarType::U64 => {
-                    let col_view = self.column_as_u64_view(col, n as usize)?;
-                    for &word in &[
-                        sort_kernels::GATHER_KEYS_U64_LO_U32,
-                        sort_kernels::GATHER_KEYS_U64_HI_U32,
-                    ] {
-                        let gather_fn = device.get_func(SORT_MODULE, word).ok_or_else(|| {
-                            XlogError::Kernel(format!("{} kernel not found", word))
-                        })?;
-                        // SAFETY: gather_keys_u64_*_u32(vals, permutation,
-                        // num_rows_device, row_cap, out_keys)
+            // Step 2: LSD radix passes per key column. U32 / Symbol
+            // are 4-byte → one radix pass per column. U64 keys use
+            // the hi/lo gather pair (mirrors legacy `sort()`'s
+            // strategy at line ~1691): one radix pass per half,
+            // lo-first then hi, so the stable LSD ordering is
+            // hi-most-significant.
+            for &col_idx in key_cols.iter().rev() {
+                let col = input.column(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("Key column {} not found", col_idx))
+                })?;
+                let ty = input.schema.column_type(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("Key column {} type not found in schema", col_idx))
+                })?;
+                match ty {
+                    ScalarType::U32 | ScalarType::Symbol => {
+                        let col_view = self.column_as_u32_view(col, n as usize)?;
+                        let gather_fn = device
+                            .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_U32)
+                            .ok_or_else(|| {
+                                XlogError::Kernel(
+                                    "apply_permutation_u32 kernel not found".to_string(),
+                                )
+                            })?;
+                        // SAFETY: apply_permutation_u32(input, output, permutation,
+                        // num_rows_device, row_cap)
                         unsafe {
-                            gather_fn.clone().launch_on_stream(
-                                &cu_stream,
+                            gather_fn.clone().launch_in(
+                                enqueue,
                                 launch_config,
                                 (
                                     &col_view,
+                                    &mut keys_a,
                                     &indices_a,
                                     input.num_rows_device(),
                                     n,
-                                    &mut keys_a,
                                 ),
                             )
                         }
                         .map_err(|e| {
-                            XlogError::Kernel(format!("{} (on_stream) failed: {}", word, e))
+                            XlogError::Kernel(format!(
+                                "apply_permutation_u32 (on_stream) failed: {}",
+                                e
+                            ))
                         })?;
 
                         self.radix_sort_u32_pairs_with_scratch_on_stream(
@@ -6858,46 +6824,93 @@ impl super::CudaKernelProvider {
                             &mut d_ranks,
                             input.num_rows_device(),
                             n,
-                            &cu_stream,
-                            launch_stream,
-                            runtime,
+                            enqueue,
+                            &mut scan_scratch,
                         )?;
                     }
+                    ScalarType::U64 => {
+                        let col_view = self.column_as_u64_view(col, n as usize)?;
+                        for &word in &[
+                            sort_kernels::GATHER_KEYS_U64_LO_U32,
+                            sort_kernels::GATHER_KEYS_U64_HI_U32,
+                        ] {
+                            let gather_fn =
+                                device.get_func(SORT_MODULE, word).ok_or_else(|| {
+                                    XlogError::Kernel(format!("{} kernel not found", word))
+                                })?;
+                            // SAFETY: gather_keys_u64_*_u32(vals, permutation,
+                            // num_rows_device, row_cap, out_keys)
+                            unsafe {
+                                gather_fn.clone().launch_in(
+                                    enqueue,
+                                    launch_config,
+                                    (
+                                        &col_view,
+                                        &indices_a,
+                                        input.num_rows_device(),
+                                        n,
+                                        &mut keys_a,
+                                    ),
+                                )
+                            }
+                            .map_err(|e| {
+                                XlogError::Kernel(format!("{} (on_stream) failed: {}", word, e))
+                            })?;
+
+                            self.radix_sort_u32_pairs_with_scratch_on_stream(
+                                &mut keys_a,
+                                &mut keys_b,
+                                &mut indices_a,
+                                &mut indices_b,
+                                &mut d_hist,
+                                &mut d_prefix,
+                                &mut d_ranks,
+                                input.num_rows_device(),
+                                n,
+                                enqueue,
+                                &mut scan_scratch,
+                            )?;
+                        }
+                    }
+                    other => {
+                        return Err(XlogError::Kernel(format!(
+                            "sort_recorded: column {} unexpected type {:?} after guard",
+                            col_idx, other
+                        )));
+                    }
                 }
-                other => {
+            }
+
+            // Step 3: gather all input columns by the final permutation.
+            self.apply_permutation_gpu_on_stream(input, &indices_a, &mut dst_cols, enqueue)?;
+
+            // Step 4: copy input's logical d_num_rows into the
+            // output's slot via dtod-async on launch_stream.
+            // Sort preserves row count, so this matches what
+            // legacy `apply_permutation_gpu` does via
+            // `clone_device_row_count`.
+            // SAFETY: runtime-backed buffers, 4-byte u32 copy.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                    *output_d_num_rows.device_ptr(),
+                    *input.num_rows_device().device_ptr(),
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
                     return Err(XlogError::Kernel(format!(
-                        "sort_recorded: column {} unexpected type {:?} after guard",
-                        col_idx, other
+                        "sort_recorded: cuMemcpyDtoDAsync (output_d_num_rows) failed: {:?}",
+                        res
                     )));
                 }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
 
-        // Step 3: gather all input columns by the final permutation.
-        self.apply_permutation_gpu_on_stream(input, &indices_a, &mut dst_cols, &cu_stream)?;
-
-        // Step 4: copy input's logical d_num_rows into the
-        // output's slot via dtod-async on launch_stream.
-        // Sort preserves row count, so this matches what
-        // legacy `apply_permutation_gpu` does via
-        // `clone_device_row_count`.
-        // SAFETY: runtime-backed buffers, 4-byte u32 copy.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                *output_d_num_rows.device_ptr(),
-                *input.num_rows_device().device_ptr(),
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "sort_recorded: cuMemcpyDtoDAsync (output_d_num_rows) failed: {:?}",
-                    res
-                )));
-            }
-        }
-
-        rec.commit(runtime)
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("sort_recorded: commit failed: {}", e)))?;
 
         let new_columns: Vec<CudaColumn> = dst_cols.into_iter().map(|s| s.into()).collect();
@@ -7043,28 +7056,33 @@ impl super::CudaKernelProvider {
             })?;
         // SAFETY: mark_unique_full_row_bytewise(col_ptrs, col_sizes,
         // num_cols, num_rows_device, row_cap, unique_mask)
-        unsafe {
-            mark_fn.clone().launch_on_stream(
-                &cu_stream,
-                cfg,
-                (
-                    &d_col_ptrs,
-                    &d_col_sizes,
-                    arity as u32,
-                    sorted.num_rows_device(),
-                    n,
-                    &d_unique_mask,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "mark_unique_full_row_bytewise (on_stream) failed: {}",
-                e
-            ))
-        })?;
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                mark_fn.clone().launch_in(
+                    enqueue,
+                    cfg,
+                    (
+                        &d_col_ptrs,
+                        &d_col_sizes,
+                        arity as u32,
+                        sorted.num_rows_device(),
+                        n,
+                        &d_unique_mask,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "mark_unique_full_row_bytewise (on_stream) failed: {}",
+                    e
+                ))
+            })
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
 
-        rec.commit(runtime).map_err(|e| {
+        rec.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "dedup_full_row_recorded: mark_unique commit failed: {}",
                 e
@@ -7100,27 +7118,21 @@ impl super::CudaKernelProvider {
     //   * Pack-keys constraint of ≤4 columns inherits from
     //     `pack_keys_gpu_on_stream`.
     //   * Algorithm is unchanged: count-then-materialize
-    //     (two probe passes); the GPU-resident
-    //     count-prefix-materialize prototype is not reintroduced here.
+    //     (two probe passes); this helper does not use the
+    //     deterministic count-scan-materialize implementation below.
 
     /// Stream-aware variant of `build_hash_table_v2`. Mirrors
     /// the legacy bucket-count → exclusive-scan → scatter chain
     /// on the caller-supplied `launch_stream` (no internal
-    /// `device.synchronize()`). Each fresh scratch allocation is
-    /// fenced via `prepare_first_use(Access::Write)` immediately
-    /// after alloc so the first cross-stream consumer (memset /
-    /// dtod-copy / kernel) waits for cuMemAllocAsync to complete;
-    /// at exit, every block that escapes (the four returned
-    /// bucket buffers) plus the internal `bucket_cursors` scratch
-    /// is finalized with `finish_block_use(Access::Write)` so
-    /// end-of-scope drops are correctly serialized.
+    /// `device.synchronize()`). One launch recorder owns every input and
+    /// scratch reservation from the first zero-fill through the final scatter.
     fn build_hash_table_v2_on_stream(
         &self,
         hashes: &TrackedCudaSlice<u64>,
         num_rows: u32,
         cu_stream: &cudarc::driver::CudaStream,
         launch_stream: StreamId,
-        runtime: &crate::device_runtime::XlogDeviceRuntime,
+        runtime: &Arc<XlogDeviceRuntime>,
     ) -> Result<crate::provider::JoinHashTableV2> {
         let device = self.device.inner();
 
@@ -7137,213 +7149,157 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("Join hash table size underflow".to_string()))?;
 
         let bucket_counts = self.memory.alloc::<u32>(num_buckets as usize)?;
-        // Fence the alloc-ready event from `bucket_counts`'s
-        // alloc_stream onto `launch_stream` BEFORE the memset
-        // below — the memset would otherwise execute against a
-        // stream that has not waited on cuMemAllocAsync's
-        // completion event, producing garbage / pool-recycled
-        // bytes when the alloc and use streams differ.
-        runtime
-            .prepare_first_use(&bucket_counts, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "build_hash_table_v2_on_stream: prepare bucket_counts failed: {}",
-                    e
-                ))
-            })?;
-        // Async u32 zero-fill on launch_stream.
-        if num_buckets > 0 {
-            // SAFETY: bucket_counts is runtime-backed for
-            // num_buckets * 4 bytes; cu_stream is a valid
-            // stream the runtime owns.
-            unsafe {
-                let res = cudarc::driver::sys::cuMemsetD8Async(
-                    *bucket_counts.device_ptr(),
-                    0,
-                    (num_buckets as usize) * std::mem::size_of::<u32>(),
-                    cu_stream.cu_stream(),
-                );
-                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "cuMemsetD8Async (bucket_counts) failed: {:?}",
-                        res
-                    )));
-                }
-            }
-        }
+        let mut bucket_offsets = self.memory.alloc::<u32>(num_buckets as usize)?;
+        let bucket_cursors = self.memory.alloc::<u32>(num_buckets as usize)?;
+        let bucket_entries = self.memory.alloc::<u32>(num_rows as usize)?;
+        let bucket_entry_hashes = self.memory.alloc::<u64>(num_rows as usize)?;
 
-        let block_size = 256u32;
-        let grid_size = num_rows.div_ceil(block_size);
-        let cfg = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let count_fn = device
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_BUCKET_COUNT_V2)
-            .ok_or_else(|| {
-                XlogError::Kernel("hash_join_bucket_count_v2 kernel not found".to_string())
-            })?;
-        // SAFETY: hash_join_bucket_count_v2(hashes, num_rows, bucket_counts, bucket_mask)
-        unsafe {
-            count_fn.clone().launch_on_stream(
-                cu_stream,
-                cfg,
-                (hashes, num_rows, &bucket_counts, bucket_mask),
-            )
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(num_buckets)?;
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(hashes);
+        rec.write(&bucket_counts);
+        rec.write(&bucket_offsets);
+        rec.write(&bucket_cursors);
+        rec.write(&bucket_entries);
+        rec.write(&bucket_entry_hashes);
+        for level in scan_scratch.levels() {
+            rec.read_write(level);
         }
-        .map_err(|e| {
+        rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
-                "hash_join_bucket_count_v2 (on_stream) failed: {}",
+                "build_hash_table_v2_on_stream: preflight failed: {}",
                 e
             ))
         })?;
-
-        let mut bucket_offsets = self.memory.alloc::<u32>(num_buckets as usize)?;
-        // See `bucket_counts` rationale above: fence
-        // alloc-ready → launch_stream before the dtod-copy.
-        runtime
-            .prepare_first_use(&bucket_offsets, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "build_hash_table_v2_on_stream: prepare bucket_offsets failed: {}",
-                    e
-                ))
-            })?;
-        if num_buckets > 0 {
-            // dtod copy bucket_counts → bucket_offsets on launch_stream.
-            // SAFETY: both buffers are runtime-backed for the
-            // same num_buckets * 4 bytes; cu_stream is valid.
-            unsafe {
-                let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                    *bucket_offsets.device_ptr(),
-                    *bucket_counts.device_ptr(),
-                    (num_buckets as usize) * std::mem::size_of::<u32>(),
-                    cu_stream.cu_stream(),
-                );
-                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "cuMemcpyDtoDAsync (bucket_counts → bucket_offsets) failed: {:?}",
-                        res
-                    )));
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            // Async u32 zero-fill on launch_stream.
+            if num_buckets > 0 {
+                // SAFETY: bucket_counts is runtime-backed for
+                // num_buckets * 4 bytes; cu_stream is a valid
+                // stream the runtime owns.
+                unsafe {
+                    let res = cudarc::driver::sys::cuMemsetD8Async(
+                        *bucket_counts.device_ptr(),
+                        0,
+                        (num_buckets as usize) * std::mem::size_of::<u32>(),
+                        cu_stream.cu_stream(),
+                    );
+                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "cuMemsetD8Async (bucket_counts) failed: {:?}",
+                            res
+                        )));
+                    }
                 }
             }
-            self.multiblock_scan_u32_inplace_on_stream(
-                &mut bucket_offsets,
-                num_buckets,
-                cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-        }
 
-        let bucket_cursors = self.memory.alloc::<u32>(num_buckets as usize)?;
-        // Fence alloc-ready → launch_stream for cursors before
-        // the dtod-copy.
-        runtime
-            .prepare_first_use(&bucket_cursors, launch_stream, Access::Write)
+            let block_size = 256u32;
+            let grid_size = num_rows.div_ceil(block_size);
+            let cfg = LaunchConfig {
+                grid_dim: (grid_size, 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 0,
+            };
+
+            let count_fn = device
+                .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_BUCKET_COUNT_V2)
+                .ok_or_else(|| {
+                    XlogError::Kernel("hash_join_bucket_count_v2 kernel not found".to_string())
+                })?;
+            // SAFETY: hash_join_bucket_count_v2(hashes, num_rows, bucket_counts, bucket_mask)
+            unsafe {
+                count_fn.clone().launch_in(
+                    enqueue,
+                    cfg,
+                    (hashes, num_rows, &bucket_counts, bucket_mask),
+                )
+            }
             .map_err(|e| {
                 XlogError::Kernel(format!(
-                    "build_hash_table_v2_on_stream: prepare bucket_cursors failed: {}",
+                    "hash_join_bucket_count_v2 (on_stream) failed: {}",
                     e
                 ))
             })?;
-        if num_buckets > 0 {
-            // dtod copy bucket_offsets → bucket_cursors on launch_stream.
-            // SAFETY: same shape and size constraints as above.
-            unsafe {
-                let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                    *bucket_cursors.device_ptr(),
-                    *bucket_offsets.device_ptr(),
-                    (num_buckets as usize) * std::mem::size_of::<u32>(),
-                    cu_stream.cu_stream(),
-                );
-                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "cuMemcpyDtoDAsync (bucket_offsets → bucket_cursors) failed: {:?}",
-                        res
-                    )));
+
+            if num_buckets > 0 {
+                // dtod copy bucket_counts → bucket_offsets on launch_stream.
+                // SAFETY: both buffers are runtime-backed for the
+                // same num_buckets * 4 bytes; cu_stream is valid.
+                unsafe {
+                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                        *bucket_offsets.device_ptr(),
+                        *bucket_counts.device_ptr(),
+                        (num_buckets as usize) * std::mem::size_of::<u32>(),
+                        cu_stream.cu_stream(),
+                    );
+                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "cuMemcpyDtoDAsync (bucket_counts → bucket_offsets) failed: {:?}",
+                            res
+                        )));
+                    }
+                }
+                self.multiblock_scan_u32_inplace_on_stream(
+                    &mut bucket_offsets,
+                    num_buckets,
+                    enqueue,
+                    &mut scan_scratch,
+                )?;
+            }
+
+            if num_buckets > 0 {
+                // dtod copy bucket_offsets → bucket_cursors on launch_stream.
+                // SAFETY: same shape and size constraints as above.
+                unsafe {
+                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                        *bucket_cursors.device_ptr(),
+                        *bucket_offsets.device_ptr(),
+                        (num_buckets as usize) * std::mem::size_of::<u32>(),
+                        cu_stream.cu_stream(),
+                    );
+                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "cuMemcpyDtoDAsync (bucket_offsets → bucket_cursors) failed: {:?}",
+                            res
+                        )));
+                    }
                 }
             }
-        }
 
-        let bucket_entries = self.memory.alloc::<u32>(num_rows as usize)?;
-        let bucket_entry_hashes = self.memory.alloc::<u64>(num_rows as usize)?;
-        // Fence alloc-ready → launch_stream for both before the
-        // scatter kernel writes them.
-        runtime
-            .prepare_first_use(&bucket_entries, launch_stream, Access::Write)
+            let scatter_fn = device
+                .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SCATTER_V2)
+                .ok_or_else(|| {
+                    XlogError::Kernel("hash_join_scatter_v2 kernel not found".to_string())
+                })?;
+            // SAFETY: hash_join_scatter_v2(hashes, num_rows, bucket_cursors, bucket_mask, bucket_entries, bucket_entry_hashes)
+            unsafe {
+                scatter_fn.clone().launch_in(
+                    enqueue,
+                    cfg,
+                    (
+                        hashes,
+                        num_rows,
+                        &bucket_cursors,
+                        bucket_mask,
+                        &bucket_entries,
+                        &bucket_entry_hashes,
+                    ),
+                )
+            }
             .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "build_hash_table_v2_on_stream: prepare bucket_entries failed: {}",
-                    e
-                ))
+                XlogError::Kernel(format!("hash_join_scatter_v2 (on_stream) failed: {}", e))
             })?;
-        runtime
-            .prepare_first_use(&bucket_entry_hashes, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "build_hash_table_v2_on_stream: prepare bucket_entry_hashes failed: {}",
-                    e
-                ))
-            })?;
-
-        let scatter_fn = device
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SCATTER_V2)
-            .ok_or_else(|| {
-                XlogError::Kernel("hash_join_scatter_v2 kernel not found".to_string())
-            })?;
-        // SAFETY: hash_join_scatter_v2(hashes, num_rows, bucket_cursors, bucket_mask, bucket_entries, bucket_entry_hashes)
-        unsafe {
-            scatter_fn.clone().launch_on_stream(
-                cu_stream,
-                cfg,
-                (
-                    hashes,
-                    num_rows,
-                    &bucket_cursors,
-                    bucket_mask,
-                    &bucket_entries,
-                    &bucket_entry_hashes,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!("hash_join_scatter_v2 (on_stream) failed: {}", e))
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec = unsafe { rec.enqueue_prepared_with(cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+        rec.commit().map_err(|e| {
+            XlogError::Kernel(format!(
+                "build_hash_table_v2_on_stream: commit failed: {}",
+                e
+            ))
         })?;
-
-        // Record uses on launch_stream:
-        // * bucket_cursors drops at end of helper — must be
-        //   recorded so the runtime defers its free behind
-        //   the scatter kernel.
-        // * bucket_counts / bucket_offsets / bucket_entries /
-        //   bucket_entry_hashes escape via JoinHashTableV2;
-        //   record so downstream drops are gated.
-        for blk in [
-            bucket_counts.runtime_block(),
-            bucket_offsets.runtime_block(),
-            bucket_cursors.runtime_block(),
-            bucket_entries.runtime_block(),
-            bucket_entry_hashes.runtime_block(),
-        ] {
-            if let Some(b) = blk {
-                runtime
-                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "build_hash_table_v2_on_stream: finish_block_use failed: {}",
-                            e
-                        ))
-                    })?;
-            } else {
-                return Err(XlogError::Kernel(
-                    "build_hash_table_v2_on_stream: buffer has no runtime block — \
-                     caller must use a runtime-backed manager"
-                        .to_string(),
-                ));
-            }
-        }
 
         Ok(crate::provider::JoinHashTableV2 {
             bucket_counts,
@@ -7357,10 +7313,8 @@ impl super::CudaKernelProvider {
     /// Stream-aware variant of `gather_buffer_by_indices`.
     /// Allocates output column storage, runs
     /// `apply_permutation_bytes` per input column on
-    /// `launch_stream`, and assembles a `CudaBuffer`. Records
-    /// every fresh allocation directly via the runtime so the
-    /// returned buffer is safe to drop before any pending
-    /// gather kernel completes.
+    /// `launch_stream`, and assembles a `CudaBuffer`. A local recorder owns
+    /// the source reads, index/count reads, and every destination write.
     fn gather_buffer_by_indices_on_stream(
         &self,
         input: &CudaBuffer,
@@ -7368,7 +7322,7 @@ impl super::CudaKernelProvider {
         output_rows: u32,
         cu_stream: &cudarc::driver::CudaStream,
         launch_stream: StreamId,
-        runtime: &crate::device_runtime::XlogDeviceRuntime,
+        runtime: &Arc<XlogDeviceRuntime>,
     ) -> Result<CudaBuffer> {
         if output_rows == 0 {
             return self.create_empty_buffer(input.schema().clone());
@@ -7382,28 +7336,8 @@ impl super::CudaKernelProvider {
         }
 
         let d_output_rows = self.upload_device_row_count(output_rows)?;
-        // `upload_device_row_count` initializes this scalar on
-        // the manager/default stream. Publish that write into
-        // the runtime dependency state, then fence launch_stream
-        // before the gather kernels read it. The scalar is local
-        // scratch, so we also finish a read after the kernels so
-        // its drop/free waits for launch_stream completion.
-        runtime
-            .finish_first_use(&d_output_rows, StreamId::DEFAULT, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "gather_buffer_by_indices_on_stream: record d_output_rows upload failed: {}",
-                    e
-                ))
-            })?;
-        runtime
-            .prepare_first_use(&d_output_rows, launch_stream, Access::Read)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "gather_buffer_by_indices_on_stream: prepare d_output_rows failed: {}",
-                    e
-                ))
-            })?;
+        // The synchronous upload finishes its default-stream copy before returning.
+        // The recorder below prepares the scalar's first tracked read on launch_stream.
         let device = self.device.inner();
         let block_size = 256u32;
         let grid_size = output_rows.div_ceil(block_size);
@@ -7420,6 +7354,7 @@ impl super::CudaKernelProvider {
             })?;
 
         let mut dst_cols: Vec<TrackedCudaSlice<u8>> = Vec::with_capacity(input.columns.len());
+        let mut elem_sizes: Vec<u32> = Vec::with_capacity(input.columns.len());
         for col_idx in 0..input.columns.len() {
             let elem_size = input
                 .schema
@@ -7428,80 +7363,71 @@ impl super::CudaKernelProvider {
                     XlogError::Kernel(format!("Schema type for column {} not found", col_idx))
                 })?
                 .size_bytes() as u32;
-            let dst_bytes = (output_rows as usize) * (elem_size as usize);
-            let dst = self.memory.alloc::<u8>(dst_bytes)?;
-            // Fence alloc-ready → launch_stream for each fresh
-            // dst_col before the gather kernel writes it.
-            runtime
-                .prepare_first_use(&dst, launch_stream, Access::Write)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "gather_buffer_by_indices_on_stream: prepare dst_col {} failed: {}",
-                        col_idx, e
-                    ))
-                })?;
-            dst_cols.push(dst);
-        }
-
-        for (col_idx, dst_col) in dst_cols.iter_mut().enumerate() {
-            let src_col = input
+            input
                 .column(col_idx)
                 .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
-            let elem_size = input
-                .schema
-                .column_type(col_idx)
-                .map(|t| t.size_bytes() as u32)
-                .unwrap_or(4);
-            // SAFETY: apply_permutation_bytes(input, output, permutation, num_rows_device, row_cap, elem_size)
-            unsafe {
-                gather_fn.clone().launch_on_stream(
-                    cu_stream,
-                    launch_config,
-                    (
-                        src_col,
-                        &mut *dst_col,
-                        indices,
-                        &d_output_rows,
-                        output_rows,
-                        elem_size,
-                    ),
-                )
-            }
-            .map_err(|e| {
-                XlogError::Kernel(format!("apply_permutation_bytes (on_stream) failed: {}", e))
-            })?;
+            let dst_bytes = (output_rows as usize) * (elem_size as usize);
+            let dst = self.memory.alloc::<u8>(dst_bytes)?;
+            dst_cols.push(dst);
+            elem_sizes.push(elem_size);
         }
 
-        runtime
-            .finish_first_use(&d_output_rows, launch_stream, Access::Read)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "gather_buffer_by_indices_on_stream: record d_output_rows read failed: {}",
-                    e
-                ))
-            })?;
-
-        // Record uses on launch_stream for buffers we wrote
-        // (the dst_cols escape via the returned CudaBuffer).
-        // input.column[i] reads will be recorded by the
-        // caller's outer LaunchRecorder.
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        for col_idx in 0..input.columns.len() {
+            rec.read_column(
+                input
+                    .column(col_idx)
+                    .expect("input column validated before preflight"),
+            );
+        }
+        rec.read(indices);
+        rec.read(&d_output_rows);
         for dst_col in &dst_cols {
-            if let Some(b) = dst_col.runtime_block() {
-                runtime
-                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "gather_buffer_by_indices_on_stream: finish_block_use \
-                         (dst_col) failed: {}",
-                            e
-                        ))
-                    })?;
-            } else {
-                return Err(XlogError::Kernel(
-                    "gather_buffer_by_indices_on_stream: dst_col has no runtime block".to_string(),
-                ));
-            }
+            rec.write(dst_col);
         }
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "gather_buffer_by_indices_on_stream: preflight failed: {}",
+                e
+            ))
+        })?;
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            for (col_idx, dst_col) in dst_cols.iter_mut().enumerate() {
+                let src_col = input
+                    .column(col_idx)
+                    .expect("input column validated before enqueue boundary");
+                let elem_size = elem_sizes[col_idx];
+                // SAFETY: apply_permutation_bytes(input, output, permutation,
+                // num_rows_device, row_cap, elem_size).
+                unsafe {
+                    gather_fn.clone().launch_in(
+                        enqueue,
+                        launch_config,
+                        (
+                            src_col,
+                            &mut *dst_col,
+                            indices,
+                            &d_output_rows,
+                            output_rows,
+                            elem_size,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("apply_permutation_bytes (on_stream) failed: {}", e))
+                })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec = unsafe { rec.enqueue_prepared_with(cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+        rec.commit().map_err(|e| {
+            XlogError::Kernel(format!(
+                "gather_buffer_by_indices_on_stream: commit failed: {}",
+                e
+            ))
+        })?;
 
         let new_columns: Vec<CudaColumn> = dst_cols.into_iter().map(|s| s.into()).collect();
         Ok(CudaBuffer::from_columns(
@@ -7510,6 +7436,251 @@ impl super::CudaKernelProvider {
             d_output_rows,
             input.schema.clone(),
         ))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "recorded left-outer concatenation needs both relation layouts, both matched buffers, the unmatched tail, row counts, and stream state"
+    )]
+    fn concatenate_left_outer_columns_on_stream(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        inner_left: Option<&CudaBuffer>,
+        inner_right: Option<&CudaBuffer>,
+        unmatched_left: &CudaBuffer,
+        inner_rows: u64,
+        unmatched_rows: u64,
+        cu_stream: &cudarc::driver::CudaStream,
+        launch_stream: StreamId,
+        runtime: &Arc<XlogDeviceRuntime>,
+        context: &'static str,
+    ) -> Result<Vec<CudaColumn>> {
+        let inner_rows = usize::try_from(inner_rows).map_err(|_| {
+            XlogError::Kernel(format!("{context}: matched row count exceeds usize::MAX"))
+        })?;
+        let unmatched_rows = usize::try_from(unmatched_rows).map_err(|_| {
+            XlogError::Kernel(format!("{context}: unmatched row count exceeds usize::MAX"))
+        })?;
+
+        let mut left_outputs = Vec::with_capacity(left.arity());
+        for col_idx in 0..left.arity() {
+            let elem_size = left
+                .schema()
+                .column_type(col_idx)
+                .map(|ty| ty.size_bytes())
+                .unwrap_or(4);
+            let inner_bytes = inner_rows.checked_mul(elem_size).ok_or_else(|| {
+                XlogError::Kernel(format!("{context}: matched left column size overflow"))
+            })?;
+            let unmatched_bytes = unmatched_rows.checked_mul(elem_size).ok_or_else(|| {
+                XlogError::Kernel(format!("{context}: unmatched left column size overflow"))
+            })?;
+            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
+                XlogError::Kernel(format!("{context}: left output column size overflow"))
+            })?;
+            if inner_bytes > 0 {
+                inner_left
+                    .and_then(|buffer| buffer.column(col_idx))
+                    .ok_or_else(|| {
+                        XlogError::Kernel(format!(
+                            "{context}: matched left column {col_idx} not found"
+                        ))
+                    })?;
+            }
+            if unmatched_bytes > 0 {
+                unmatched_left.column(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!(
+                        "{context}: unmatched left column {col_idx} not found"
+                    ))
+                })?;
+            }
+            left_outputs.push((
+                self.memory.alloc::<u8>(total_bytes)?,
+                inner_bytes,
+                unmatched_bytes,
+            ));
+        }
+
+        let mut right_outputs = Vec::with_capacity(right.arity());
+        for col_idx in 0..right.arity() {
+            let elem_size = right
+                .schema()
+                .column_type(col_idx)
+                .map(|ty| ty.size_bytes())
+                .unwrap_or(4);
+            let inner_bytes = inner_rows.checked_mul(elem_size).ok_or_else(|| {
+                XlogError::Kernel(format!("{context}: matched right column size overflow"))
+            })?;
+            let unmatched_bytes = unmatched_rows.checked_mul(elem_size).ok_or_else(|| {
+                XlogError::Kernel(format!("{context}: unmatched right column size overflow"))
+            })?;
+            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
+                XlogError::Kernel(format!("{context}: right output column size overflow"))
+            })?;
+            if inner_bytes > 0 {
+                inner_right
+                    .and_then(|buffer| buffer.column(col_idx))
+                    .ok_or_else(|| {
+                        XlogError::Kernel(format!(
+                            "{context}: matched right column {col_idx} not found"
+                        ))
+                    })?;
+            }
+            right_outputs.push((
+                self.memory.alloc::<u8>(total_bytes)?,
+                inner_bytes,
+                total_bytes,
+            ));
+        }
+
+        let mut recorder = LaunchRecorder::new_strict(launch_stream);
+        for (col_idx, (_, inner_bytes, unmatched_bytes)) in
+            left_outputs.iter().enumerate().take(left.arity())
+        {
+            if *inner_bytes > 0 {
+                recorder.read_column(
+                    inner_left
+                        .and_then(|buffer| buffer.column(col_idx))
+                        .expect("matched left column validated before recorder preflight"),
+                );
+            }
+            if *unmatched_bytes > 0 {
+                recorder.read_column(
+                    unmatched_left
+                        .column(col_idx)
+                        .expect("unmatched left column validated before recorder preflight"),
+                );
+            }
+        }
+        for (col_idx, (_, inner_bytes, _)) in right_outputs.iter().enumerate().take(right.arity()) {
+            if *inner_bytes > 0 {
+                recorder.read_column(
+                    inner_right
+                        .and_then(|buffer| buffer.column(col_idx))
+                        .expect("matched right column validated before recorder preflight"),
+                );
+            }
+        }
+        for (column, _, _) in &left_outputs {
+            recorder.write(column);
+        }
+        for (column, _, _) in &right_outputs {
+            recorder.write(column);
+        }
+        recorder.preflight(runtime).map_err(|error| {
+            XlogError::Kernel(format!("{context}: concat preflight failed: {error}"))
+        })?;
+
+        let has_enqueues = left_outputs
+            .iter()
+            .chain(&right_outputs)
+            .any(|(_, inner_bytes, remaining_bytes)| *inner_bytes > 0 || *remaining_bytes > 0);
+        if !has_enqueues {
+            recorder.abort().map_err(|error| {
+                XlogError::Kernel(format!("{context}: concat abort failed: {error}"))
+            })?;
+        } else {
+            let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                for (col_idx, (out_column, inner_bytes, unmatched_bytes)) in
+                    left_outputs.iter().enumerate()
+                {
+                    let destination = *out_column.device_ptr();
+                    if *inner_bytes > 0 {
+                        let source = inner_left
+                            .and_then(|buffer| buffer.column(col_idx))
+                            .expect("matched left column validated before enqueue boundary");
+                        // SAFETY: source and destination were validated and reserved by recorder.
+                        let result = unsafe {
+                            cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                                destination,
+                                *source.device_ptr(),
+                                *inner_bytes,
+                                enqueue.stream().cu_stream(),
+                            )
+                        };
+                        if result != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                            return Err(XlogError::Kernel(format!(
+                                "{context}: matched left column {col_idx} copy failed: {result:?}"
+                            )));
+                        }
+                    }
+                    if *unmatched_bytes > 0 {
+                        let source = unmatched_left
+                            .column(col_idx)
+                            .expect("unmatched left column validated before enqueue boundary");
+                        // SAFETY: source and destination were validated and reserved by recorder.
+                        let result = unsafe {
+                            cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                                destination + *inner_bytes as u64,
+                                *source.device_ptr(),
+                                *unmatched_bytes,
+                                cu_stream.cu_stream(),
+                            )
+                        };
+                        if result != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                            return Err(XlogError::Kernel(format!(
+                                "{context}: unmatched left column {col_idx} copy failed: {result:?}"
+                            )));
+                        }
+                    }
+                }
+
+                for (col_idx, (out_column, inner_bytes, total_bytes)) in
+                    right_outputs.iter().enumerate()
+                {
+                    let destination = *out_column.device_ptr();
+                    if *total_bytes > 0 {
+                        // SAFETY: destination was allocated to total_bytes and reserved by recorder.
+                        let result = unsafe {
+                            cudarc::driver::sys::cuMemsetD8Async(
+                                destination,
+                                0,
+                                *total_bytes,
+                                cu_stream.cu_stream(),
+                            )
+                        };
+                        if result != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                            return Err(XlogError::Kernel(format!(
+                                "{context}: right column {col_idx} zero-fill failed: {result:?}"
+                            )));
+                        }
+                    }
+                    if *inner_bytes > 0 {
+                        let source = inner_right
+                            .and_then(|buffer| buffer.column(col_idx))
+                            .expect("matched right column validated before enqueue boundary");
+                        // SAFETY: source and destination were validated and reserved by recorder.
+                        let result = unsafe {
+                            cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                                destination,
+                                *source.device_ptr(),
+                                *inner_bytes,
+                                cu_stream.cu_stream(),
+                            )
+                        };
+                        if result != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                            return Err(XlogError::Kernel(format!(
+                                "{context}: matched right column {col_idx} copy failed: {result:?}"
+                            )));
+                        }
+                    }
+                }
+                Ok(())
+            };
+            // SAFETY: preflight retained every accessed allocation for this exact stream.
+            let recorder = unsafe { recorder.enqueue_prepared_with(cu_stream, enqueue) }
+                .map_err(LaunchEnqueueError::into_xlog_error)?;
+            recorder.commit().map_err(|error| {
+                XlogError::Kernel(format!("{context}: concat commit failed: {error}"))
+            })?;
+        }
+
+        Ok(left_outputs
+            .into_iter()
+            .chain(right_outputs)
+            .map(|(column, _, _)| column.into())
+            .collect())
     }
 
     /// Strict-recorder variant of `hash_join_inner_v2`.
@@ -7527,8 +7698,6 @@ impl super::CudaKernelProvider {
         max_output: Option<usize>,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
-        use crate::launch::LaunchRecorder;
-
         let runtime = self.memory.runtime().ok_or_else(|| {
             XlogError::Kernel(
                 "hash_join_inner_v2_recorded requires a runtime-backed GpuMemoryManager"
@@ -7654,54 +7823,60 @@ impl super::CudaKernelProvider {
         // alloc-ready waits, so the memset is correctly fenced
         // behind cuMemAllocAsync's completion.
         // SAFETY: d_count_only is runtime-backed for 4 bytes.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_count_only.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "cuMemsetD8Async (d_count_only) failed: {:?}",
-                    res
-                )));
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_count_only.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemsetD8Async (d_count_only) failed: {:?}",
+                        res
+                    )));
+                }
             }
-        }
 
-        // SAFETY: hash_join_probe_v2 14-arg signature — see
-        // legacy hash_join_inner_v2 for the canonical
-        // documentation. Tuple exceeds 12-element limit, so
-        // we use the raw-pointer launch path.
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                num_left.as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                table.bucket_mask.as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&right_packed.packed_keys).as_kernel_param(),
-                left_packed.key_bytes.as_kernel_param(),
-                (&d_dummy_left).as_kernel_param(),
-                (&d_dummy_right).as_kernel_param(),
-                (&d_count_only).as_kernel_param(),
-                max_output_count_only.as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch_on_stream(&cu_stream, probe_config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_probe_v2 (count, on_stream) failed: {}",
-                        e
-                    ))
-                })?;
-        }
+            // SAFETY: hash_join_probe_v2 14-arg signature — see
+            // legacy hash_join_inner_v2 for the canonical
+            // documentation. Tuple exceeds 12-element limit, so
+            // we use the raw-pointer launch path.
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&left_packed.hashes).as_kernel_param(),
+                    num_left.as_kernel_param(),
+                    (&table.bucket_offsets).as_kernel_param(),
+                    (&table.bucket_counts).as_kernel_param(),
+                    (&table.bucket_entries).as_kernel_param(),
+                    (&table.bucket_entry_hashes).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
+                    (&left_packed.packed_keys).as_kernel_param(),
+                    (&right_packed.packed_keys).as_kernel_param(),
+                    left_packed.key_bytes.as_kernel_param(),
+                    (&d_dummy_left).as_kernel_param(),
+                    (&d_dummy_right).as_kernel_param(),
+                    (&d_count_only).as_kernel_param(),
+                    max_output_count_only.as_kernel_param(),
+                ];
+                probe_func
+                    .clone()
+                    .launch_in(enqueue, probe_config, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_probe_v2 (count, on_stream) failed: {}",
+                            e
+                        ))
+                    })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_count = unsafe { rec_count.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
 
-        rec_count.commit(runtime).map_err(|e| {
+        rec_count.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_inner_v2_recorded: count-pass commit failed: {}",
                 e
@@ -7759,51 +7934,57 @@ impl super::CudaKernelProvider {
         // Zero-init d_output_count via async memset on
         // launch_stream — fenced behind alloc-ready waits.
         // SAFETY: runtime-backed 4-byte buffer.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_output_count.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "cuMemsetD8Async (d_output_count) failed: {:?}",
-                    res
-                )));
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_output_count.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemsetD8Async (d_output_count) failed: {:?}",
+                        res
+                    )));
+                }
             }
-        }
 
-        // SAFETY: same 14-arg probe signature.
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                num_left.as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                table.bucket_mask.as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&right_packed.packed_keys).as_kernel_param(),
-                left_packed.key_bytes.as_kernel_param(),
-                (&d_output_left).as_kernel_param(),
-                (&d_output_right).as_kernel_param(),
-                (&d_output_count).as_kernel_param(),
-                max_output_u32.as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch_on_stream(&cu_stream, probe_config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_probe_v2 (materialize, on_stream) failed: {}",
-                        e
-                    ))
-                })?;
-        }
+            // SAFETY: same 14-arg probe signature.
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&left_packed.hashes).as_kernel_param(),
+                    num_left.as_kernel_param(),
+                    (&table.bucket_offsets).as_kernel_param(),
+                    (&table.bucket_counts).as_kernel_param(),
+                    (&table.bucket_entries).as_kernel_param(),
+                    (&table.bucket_entry_hashes).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
+                    (&left_packed.packed_keys).as_kernel_param(),
+                    (&right_packed.packed_keys).as_kernel_param(),
+                    left_packed.key_bytes.as_kernel_param(),
+                    (&d_output_left).as_kernel_param(),
+                    (&d_output_right).as_kernel_param(),
+                    (&d_output_count).as_kernel_param(),
+                    max_output_u32.as_kernel_param(),
+                ];
+                probe_func
+                    .clone()
+                    .launch_in(enqueue, probe_config, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_probe_v2 (materialize, on_stream) failed: {}",
+                            e
+                        ))
+                    })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
 
-        rec_mat.commit(runtime).map_err(|e| {
+        rec_mat.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_inner_v2_recorded: materialize-pass commit failed: {}",
                 e
@@ -7825,31 +8006,8 @@ impl super::CudaKernelProvider {
         }
         let output_rows = result_count as u32;
 
-        // Step 6: gather both sides on launch_stream. Each
-        // gather records reads of input.column[i] via its own
-        // outer LaunchRecorder — set up below.
-        let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
-        for col_idx in 0..left.columns.len() {
-            let c = left
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Left column {} not found", col_idx)))?;
-            rec_gather.read_column(c);
-        }
-        for col_idx in 0..right.columns.len() {
-            let c = right
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Right column {} not found", col_idx)))?;
-            rec_gather.read_column(c);
-        }
-        rec_gather.read(&d_output_left);
-        rec_gather.read(&d_output_right);
-        rec_gather.preflight(runtime).map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_inner_v2_recorded: gather preflight failed: {}",
-                e
-            ))
-        })?;
-
+        // Gather both sides on launch_stream. Each helper owns one complete
+        // recorder transaction for its input, indices, and destinations.
         let gathered_left = self.gather_buffer_by_indices_on_stream(
             left,
             &d_output_left,
@@ -7866,13 +8024,6 @@ impl super::CudaKernelProvider {
             launch_stream,
             runtime,
         )?;
-
-        rec_gather.commit(runtime).map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_inner_v2_recorded: gather commit failed: {}",
-                e
-            ))
-        })?;
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
@@ -7898,13 +8049,12 @@ impl super::CudaKernelProvider {
     /// but with atomic-induced order non-determinism across
     /// threads/blocks).
     ///
-    /// Sourced from the archived `archive/gpu-resident-binary-join-prototype-*`
-    /// branches — three new kernels migrated:
+    /// Uses three deterministic-ordering kernels:
     /// `hash_join_probe_v2_count_per_row`,
     /// `hash_join_probe_v2_materialize`,
     /// `hash_join_total_from_scan`. LeftOuter / Semi / Anti
-    /// / indexed variants from the prototype are
-    /// intentionally not migrated here.
+    /// The LeftOuter / Semi / Anti / indexed variants use their
+    /// dedicated recorded implementations below.
     ///
     /// Reuses the recorded helpers `pack_keys_gpu_on_stream`,
     /// `build_hash_table_v2_on_stream`,
@@ -7936,8 +8086,6 @@ impl super::CudaKernelProvider {
             self.csm_cuda_graph_fallbacks
                 .fetch_add(1, Ordering::Relaxed);
         }
-
-        use crate::launch::LaunchRecorder;
 
         let runtime = self.memory.runtime().ok_or_else(|| {
             XlogError::Kernel(
@@ -8030,58 +8178,6 @@ impl super::CudaKernelProvider {
         let mut per_probe_offsets = self.memory.alloc::<u32>(probe_cap as usize)?;
         let d_logical_count = self.memory.alloc::<u32>(1)?;
         let d_overflow = self.memory.alloc::<u8>(1)?;
-        // Fence alloc-ready → launch_stream for both before
-        // the memset writes them. The recorder below will
-        // attach further dependencies, but the memset runs
-        // ahead of the recorder's preflight so we need this
-        // direct fence.
-        runtime
-            .prepare_first_use(&d_overflow, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "hash_join_inner_v2_count_scan_materialize_recorded: prepare d_overflow \
-                     failed: {}",
-                    e
-                ))
-            })?;
-        runtime
-            .prepare_first_use(&d_logical_count, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "hash_join_inner_v2_count_scan_materialize_recorded: prepare d_logical_count \
-                     failed: {}",
-                    e
-                ))
-            })?;
-        // Zero-init overflow + logical_count on launch_stream.
-        // SAFETY: 1-byte and 4-byte runtime-backed buffers.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_overflow.device_ptr(),
-                0,
-                1,
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "cuMemsetD8Async (d_overflow init) failed: {:?}",
-                    res
-                )));
-            }
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_logical_count.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "cuMemsetD8Async (d_logical_count init) failed: {:?}",
-                    res
-                )));
-            }
-        }
-
         // Build the count/scan recorder. Reads on inputs that
         // outlive this recorder (left/right packed + table)
         // BEFORE preflight; fresh writes on per_probe_count /
@@ -8098,6 +8194,7 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("hash_join_total_from_scan kernel not found".to_string())
             })?;
 
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(probe_cap)?;
         let mut rec_count = LaunchRecorder::new_strict(launch_stream);
         rec_count.read(&left_packed.hashes);
         rec_count.read(&left_packed.packed_keys);
@@ -8111,99 +8208,137 @@ impl super::CudaKernelProvider {
         rec_count.write(&per_probe_offsets);
         rec_count.write(&d_logical_count);
         rec_count.write(&d_overflow);
+        for level in scan_scratch.levels() {
+            rec_count.read_write(level);
+        }
         rec_count.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!("csm inner: count/scan preflight failed: {}", e))
         })?;
 
         // Step 3: count_per_row.
         // SAFETY: 12-arg signature matches the PTX kernel.
-        unsafe {
-            count_func.clone().launch_on_stream(
-                &cu_stream,
-                probe_config,
-                (
-                    &left_packed.hashes,
-                    left.num_rows_device(),
-                    probe_cap,
-                    &table.bucket_offsets,
-                    &table.bucket_counts,
-                    &table.bucket_entries,
-                    &table.bucket_entry_hashes,
-                    table.bucket_mask,
-                    &left_packed.packed_keys,
-                    &right_packed.packed_keys,
-                    left_packed.key_bytes,
-                    &per_probe_count,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_probe_v2_count_per_row (on_stream) failed: {}",
-                e
-            ))
-        })?;
-
-        // Step 4: dtod-async copy per_probe_count → per_probe_offsets,
-        // then exclusive in-place scan.
-        // SAFETY: same length, both runtime-backed u32 buffers.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                *per_probe_offsets.device_ptr(),
-                *per_probe_count.device_ptr(),
-                (probe_cap as usize) * std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "csm inner: cuMemcpyDtoDAsync (per_probe_count → offsets) failed: {:?}",
-                    res
-                )));
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            // SAFETY: one-byte and one-u32 runtime-backed buffers owned by rec_count.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_overflow.device_ptr(),
+                    0,
+                    1,
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemsetD8Async (d_overflow init) failed: {:?}",
+                        res
+                    )));
+                }
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_logical_count.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemsetD8Async (d_logical_count init) failed: {:?}",
+                        res
+                    )));
+                }
             }
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            &mut per_probe_offsets,
-            probe_cap,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
 
-        // Step 5: total_from_scan — writes d_logical_count + d_overflow.
-        // SAFETY: 7-arg signature. capacity = probe_cap *
-        // num_right is the worst-case bound (cross-product);
-        // in practice the chain caps the actual write count
-        // after the host scalar read below sizes the output
-        // index buffers exactly.
-        let materialize_capacity_bound: u64 = (probe_cap as u64).saturating_mul(num_right as u64);
-        let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
-        unsafe {
-            total_func.clone().launch_on_stream(
-                &cu_stream,
-                LaunchConfig {
-                    grid_dim: (1, 1, 1),
-                    block_dim: (1, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (
-                    &per_probe_offsets,
-                    &per_probe_count,
-                    left.num_rows_device(),
-                    probe_cap,
-                    materialize_capacity_u32,
-                    &d_logical_count,
-                    &d_overflow,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_total_from_scan (on_stream) failed: {}",
-                e
-            ))
-        })?;
+            unsafe {
+                count_func.clone().launch_in(
+                    enqueue,
+                    probe_config,
+                    (
+                        &left_packed.hashes,
+                        left.num_rows_device(),
+                        probe_cap,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
+                        &left_packed.packed_keys,
+                        &right_packed.packed_keys,
+                        left_packed.key_bytes,
+                        &per_probe_count,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_probe_v2_count_per_row (on_stream) failed: {}",
+                    e
+                ))
+            })?;
 
-        rec_count.commit(runtime).map_err(|e| {
+            // Step 4: dtod-async copy per_probe_count → per_probe_offsets,
+            // then exclusive in-place scan.
+            // SAFETY: same length, both runtime-backed u32 buffers.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                    *per_probe_offsets.device_ptr(),
+                    *per_probe_count.device_ptr(),
+                    (probe_cap as usize) * std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "csm inner: cuMemcpyDtoDAsync (per_probe_count → offsets) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut per_probe_offsets,
+                probe_cap,
+                enqueue,
+                &mut scan_scratch,
+            )?;
+
+            // Step 5: total_from_scan — writes d_logical_count + d_overflow.
+            // SAFETY: 7-arg signature. capacity = probe_cap *
+            // num_right is the worst-case bound (cross-product);
+            // in practice the chain caps the actual write count
+            // after the host scalar read below sizes the output
+            // index buffers exactly.
+            let materialize_capacity_bound: u64 =
+                (probe_cap as u64).saturating_mul(num_right as u64);
+            let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
+            unsafe {
+                total_func.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &per_probe_offsets,
+                        &per_probe_count,
+                        left.num_rows_device(),
+                        probe_cap,
+                        materialize_capacity_u32,
+                        &d_logical_count,
+                        &d_overflow,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_total_from_scan (on_stream) failed: {}",
+                    e
+                ))
+            })?;
+
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_count = unsafe { rec_count.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+
+        rec_count.commit().map_err(|e| {
             XlogError::Kernel(format!("csm inner: count/scan commit failed: {}", e))
         })?;
 
@@ -8264,37 +8399,42 @@ impl super::CudaKernelProvider {
             })?;
         // SAFETY: 16-arg signature; tuple form supports up to
         // 12 elements, so we use the raw-param launch path.
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                left.num_rows_device().as_kernel_param(),
-                probe_cap.as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                table.bucket_mask.as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&right_packed.packed_keys).as_kernel_param(),
-                left_packed.key_bytes.as_kernel_param(),
-                (&per_probe_offsets).as_kernel_param(),
-                output_capacity.as_kernel_param(),
-                (&d_output_left).as_kernel_param(),
-                (&d_output_right).as_kernel_param(),
-                (&d_overflow).as_kernel_param(),
-            ];
-            materialize_func
-                .clone()
-                .launch_on_stream(&cu_stream, probe_config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_probe_v2_materialize (on_stream) failed: {}",
-                        e
-                    ))
-                })?;
-        }
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&left_packed.hashes).as_kernel_param(),
+                    left.num_rows_device().as_kernel_param(),
+                    probe_cap.as_kernel_param(),
+                    (&table.bucket_offsets).as_kernel_param(),
+                    (&table.bucket_counts).as_kernel_param(),
+                    (&table.bucket_entries).as_kernel_param(),
+                    (&table.bucket_entry_hashes).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
+                    (&left_packed.packed_keys).as_kernel_param(),
+                    (&right_packed.packed_keys).as_kernel_param(),
+                    left_packed.key_bytes.as_kernel_param(),
+                    (&per_probe_offsets).as_kernel_param(),
+                    output_capacity.as_kernel_param(),
+                    (&d_output_left).as_kernel_param(),
+                    (&d_output_right).as_kernel_param(),
+                    (&d_overflow).as_kernel_param(),
+                ];
+                materialize_func
+                    .clone()
+                    .launch_in(enqueue, probe_config, &mut params)
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_probe_v2_materialize (on_stream) failed: {}",
+                    e
+                ))
+            })
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
 
-        rec_mat.commit(runtime).map_err(|e| {
+        rec_mat.commit().map_err(|e| {
             XlogError::Kernel(format!("csm inner: materialize commit failed: {}", e))
         })?;
 
@@ -8323,25 +8463,8 @@ impl super::CudaKernelProvider {
             )));
         }
 
-        // Step 7: gather both sides on launch_stream.
-        let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
-        for col_idx in 0..left.columns.len() {
-            let c = left
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Left column {} not found", col_idx)))?;
-            rec_gather.read_column(c);
-        }
-        for col_idx in 0..right.columns.len() {
-            let c = right
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Right column {} not found", col_idx)))?;
-            rec_gather.read_column(c);
-        }
-        rec_gather.read(&d_output_left);
-        rec_gather.read(&d_output_right);
-        rec_gather
-            .preflight(runtime)
-            .map_err(|e| XlogError::Kernel(format!("csm inner: gather preflight failed: {}", e)))?;
+        // Gather both sides on launch_stream through independent complete
+        // recorder transactions.
         let gathered_left = self.gather_buffer_by_indices_on_stream(
             left,
             &d_output_left,
@@ -8358,9 +8481,6 @@ impl super::CudaKernelProvider {
             launch_stream,
             runtime,
         )?;
-        rec_gather
-            .commit(runtime)
-            .map_err(|e| XlogError::Kernel(format!("csm inner: gather commit failed: {}", e)))?;
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
@@ -8498,10 +8618,16 @@ impl super::CudaKernelProvider {
                     &cu_stream,
                     launch_stream,
                     runtime,
-                )?;
+                );
+                if result.is_err() {
+                    let failed = cache.remove(&graph_key);
+                    drop(cache);
+                    drop(failed);
+                    return result.map(Some);
+                }
                 self.csm_cuda_graph_cache_hits
                     .fetch_add(1, Ordering::Relaxed);
-                return Ok(Some(result));
+                return result.map(Some);
             }
         }
 
@@ -8530,132 +8656,159 @@ impl super::CudaKernelProvider {
             })?;
 
         let graph = CapturedCudaGraph::capture_on_stream(&cu_stream, || {
-            // SAFETY: graph capture records these writes; replay preflight orders
-            // the runtime-backed buffers before the graph is launched.
-            unsafe {
-                let res = cudarc::driver::sys::cuMemsetD8Async(
-                    *d_overflow.device_ptr(),
-                    0,
-                    1,
-                    cu_stream.cu_stream(),
-                );
-                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "csm inner graph: cuMemsetD8Async (d_overflow) failed: {:?}",
-                        res
-                    )));
+            let mut recorder = LaunchRecorder::new_strict(launch_stream);
+            recorder.read(&left_packed.hashes);
+            recorder.read(&left_packed.packed_keys);
+            recorder.read(&right_packed.packed_keys);
+            recorder.read(&table.bucket_offsets);
+            recorder.read(&table.bucket_counts);
+            recorder.read(&table.bucket_entries);
+            recorder.read(&table.bucket_entry_hashes);
+            recorder.read(left.num_rows_device());
+            recorder.read_write(&per_probe_count);
+            recorder.read_write(&per_probe_offsets);
+            recorder.read_write(&d_logical_count);
+            recorder.read_write(&d_overflow);
+            recorder.write(&d_output_left);
+            recorder.write(&d_output_right);
+            for level in scan_scratch.levels() {
+                recorder.read_write(level);
+            }
+            // BeginCapture has already succeeded. This operation transfers actual
+            // owners to the graph without publishing live completion events.
+            let capture_body = |enqueue: &crate::launch::CudaEnqueue<'_>| {
+                // SAFETY: graph capture records these writes; replay preflight orders
+                // the runtime-backed buffers before the graph is launched.
+                unsafe {
+                    let res = cudarc::driver::sys::cuMemsetD8Async(
+                        *d_overflow.device_ptr(),
+                        0,
+                        1,
+                        cu_stream.cu_stream(),
+                    );
+                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "csm inner graph: cuMemsetD8Async (d_overflow) failed: {:?}",
+                            res
+                        )));
+                    }
+                    let res = cudarc::driver::sys::cuMemsetD8Async(
+                        *d_logical_count.device_ptr(),
+                        0,
+                        std::mem::size_of::<u32>(),
+                        cu_stream.cu_stream(),
+                    );
+                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "csm inner graph: cuMemsetD8Async (d_logical_count) failed: {:?}",
+                            res
+                        )));
+                    }
                 }
-                let res = cudarc::driver::sys::cuMemsetD8Async(
-                    *d_logical_count.device_ptr(),
-                    0,
-                    std::mem::size_of::<u32>(),
-                    cu_stream.cu_stream(),
-                );
-                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "csm inner graph: cuMemsetD8Async (d_logical_count) failed: {:?}",
-                        res
-                    )));
+
+                // SAFETY: 12-arg signature matches the PTX kernel.
+                unsafe {
+                    count_func.clone().launch_in(
+                        enqueue,
+                        probe_config,
+                        (
+                            &left_packed.hashes,
+                            left.num_rows_device(),
+                            probe_cap,
+                            &table.bucket_offsets,
+                            &table.bucket_counts,
+                            &table.bucket_entries,
+                            &table.bucket_entry_hashes,
+                            table.bucket_mask,
+                            &left_packed.packed_keys,
+                            &right_packed.packed_keys,
+                            left_packed.key_bytes,
+                            &per_probe_count,
+                        ),
+                    )
                 }
-            }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("csm inner graph: count_per_row failed: {}", e))
+                })?;
 
-            // SAFETY: 12-arg signature matches the PTX kernel.
-            unsafe {
-                count_func.clone().launch_on_stream(
-                    &cu_stream,
-                    probe_config,
-                    (
-                        &left_packed.hashes,
-                        left.num_rows_device(),
-                        probe_cap,
-                        &table.bucket_offsets,
-                        &table.bucket_counts,
-                        &table.bucket_entries,
-                        &table.bucket_entry_hashes,
-                        table.bucket_mask,
-                        &left_packed.packed_keys,
-                        &right_packed.packed_keys,
-                        left_packed.key_bytes,
-                        &per_probe_count,
-                    ),
-                )
-            }
-            .map_err(|e| {
-                XlogError::Kernel(format!("csm inner graph: count_per_row failed: {}", e))
-            })?;
-
-            // SAFETY: same length, both runtime-backed u32 buffers.
-            unsafe {
-                let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                    *per_probe_offsets.device_ptr(),
-                    *per_probe_count.device_ptr(),
-                    (probe_cap as usize) * std::mem::size_of::<u32>(),
-                    cu_stream.cu_stream(),
-                );
-                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "csm inner graph: cuMemcpyDtoDAsync (count -> offsets) failed: {:?}",
-                        res
-                    )));
+                // SAFETY: same length, both runtime-backed u32 buffers.
+                unsafe {
+                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                        *per_probe_offsets.device_ptr(),
+                        *per_probe_count.device_ptr(),
+                        (probe_cap as usize) * std::mem::size_of::<u32>(),
+                        cu_stream.cu_stream(),
+                    );
+                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "csm inner graph: cuMemcpyDtoDAsync (count -> offsets) failed: {:?}",
+                            res
+                        )));
+                    }
                 }
-            }
-            self.multiblock_scan_u32_inplace_on_stream_with_scratch(
-                &mut per_probe_offsets,
-                probe_cap,
-                &cu_stream,
-                &mut scan_scratch,
-            )?;
+                self.multiblock_scan_u32_inplace_on_stream(
+                    &mut per_probe_offsets,
+                    probe_cap,
+                    enqueue,
+                    &mut scan_scratch,
+                )?;
 
-            // SAFETY: 7-arg signature matches the PTX kernel.
-            unsafe {
-                total_func.clone().launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (1, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        &per_probe_offsets,
-                        &per_probe_count,
-                        left.num_rows_device(),
-                        probe_cap,
-                        materialize_capacity_u32,
-                        &d_logical_count,
-                        &d_overflow,
-                    ),
-                )
-            }
-            .map_err(|e| XlogError::Kernel(format!("csm inner graph: total failed: {}", e)))?;
+                // SAFETY: 7-arg signature matches the PTX kernel.
+                unsafe {
+                    total_func.clone().launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (1, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            &per_probe_offsets,
+                            &per_probe_count,
+                            left.num_rows_device(),
+                            probe_cap,
+                            materialize_capacity_u32,
+                            &d_logical_count,
+                            &d_overflow,
+                        ),
+                    )
+                }
+                .map_err(|e| XlogError::Kernel(format!("csm inner graph: total failed: {}", e)))?;
 
-            // SAFETY: 16-arg signature; tuple form supports up to 12 elements, so use raw params.
-            unsafe {
-                let mut params: Vec<*mut c_void> = vec![
-                    (&left_packed.hashes).as_kernel_param(),
-                    left.num_rows_device().as_kernel_param(),
-                    probe_cap.as_kernel_param(),
-                    (&table.bucket_offsets).as_kernel_param(),
-                    (&table.bucket_counts).as_kernel_param(),
-                    (&table.bucket_entries).as_kernel_param(),
-                    (&table.bucket_entry_hashes).as_kernel_param(),
-                    table.bucket_mask.as_kernel_param(),
-                    (&left_packed.packed_keys).as_kernel_param(),
-                    (&right_packed.packed_keys).as_kernel_param(),
-                    left_packed.key_bytes.as_kernel_param(),
-                    (&per_probe_offsets).as_kernel_param(),
-                    output_capacity.as_kernel_param(),
-                    (&d_output_left).as_kernel_param(),
-                    (&d_output_right).as_kernel_param(),
-                    (&d_overflow).as_kernel_param(),
-                ];
-                materialize_func
-                    .clone()
-                    .launch_on_stream(&cu_stream, probe_config, &mut params)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("csm inner graph: materialize failed: {}", e))
-                    })?;
-            }
-            Ok(())
+                // SAFETY: 16-arg signature; tuple form supports up to 12 elements, so use raw params.
+                unsafe {
+                    let mut params: Vec<*mut c_void> = vec![
+                        (&left_packed.hashes).as_kernel_param(),
+                        left.num_rows_device().as_kernel_param(),
+                        probe_cap.as_kernel_param(),
+                        (&table.bucket_offsets).as_kernel_param(),
+                        (&table.bucket_counts).as_kernel_param(),
+                        (&table.bucket_entries).as_kernel_param(),
+                        (&table.bucket_entry_hashes).as_kernel_param(),
+                        table.bucket_mask.as_kernel_param(),
+                        (&left_packed.packed_keys).as_kernel_param(),
+                        (&right_packed.packed_keys).as_kernel_param(),
+                        left_packed.key_bytes.as_kernel_param(),
+                        (&per_probe_offsets).as_kernel_param(),
+                        output_capacity.as_kernel_param(),
+                        (&d_output_left).as_kernel_param(),
+                        (&d_output_right).as_kernel_param(),
+                        (&d_overflow).as_kernel_param(),
+                    ];
+                    materialize_func
+                        .clone()
+                        .launch_in(enqueue, probe_config, &mut params)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("csm inner graph: materialize failed: {}", e))
+                        })?;
+                }
+                Ok(())
+            };
+            let enqueued = unsafe { recorder.enqueue(runtime, capture_body) }
+                .map_err(LaunchEnqueueError::into_xlog_error)?;
+            enqueued.commit().map_err(|error| {
+                XlogError::Kernel(format!("graph capture memory commit failed: {error}"))
+            })
         })?;
         let nodes = Self::csm_cuda_graph_nodes(&graph)?;
         let mut entry = CsmCudaGraphEntry {
@@ -8711,7 +8864,7 @@ impl super::CudaKernelProvider {
         probe_config: LaunchConfig,
         cu_stream: &cudarc::driver::CudaStream,
         launch_stream: StreamId,
-        runtime: &crate::device_runtime::XlogDeviceRuntime,
+        runtime: &std::sync::Arc<crate::device_runtime::XlogDeviceRuntime>,
     ) -> Result<CudaBuffer> {
         let mut rec_graph = LaunchRecorder::new_strict(launch_stream);
         rec_graph.read(&left_packed.hashes);
@@ -8800,22 +8953,36 @@ impl super::CudaKernelProvider {
         total_params.extra = std::ptr::null_mut();
         materialize_params.kernelParams = materialize_args.as_mut_ptr();
         materialize_params.extra = std::ptr::null_mut();
-        unsafe {
-            entry
-                .graph
-                .set_kernel_node_params(entry.nodes.count, &count_params)?;
-            entry
-                .graph
-                .set_kernel_node_params(entry.nodes.total, &total_params)?;
-            entry
-                .graph
-                .set_kernel_node_params(entry.nodes.materialize, &materialize_params)?;
-        }
-
-        entry.graph.launch(cu_stream)?;
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| {
+            // One candidate admission covers unchanged scratch and every new
+            // input pointer. Partial updates retain both generations for cleanup.
+            unsafe {
+                entry.graph.rebind_kernel_nodes_in(
+                    enqueue,
+                    &[
+                        crate::cuda_graph::KernelNodeUpdate {
+                            node: entry.nodes.count,
+                            params: &count_params,
+                        },
+                        crate::cuda_graph::KernelNodeUpdate {
+                            node: entry.nodes.total,
+                            params: &total_params,
+                        },
+                        crate::cuda_graph::KernelNodeUpdate {
+                            node: entry.nodes.materialize,
+                            params: &materialize_params,
+                        },
+                    ],
+                )?;
+            }
+            entry.graph.launch_in(enqueue)
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_graph = unsafe { rec_graph.enqueue_prepared_with(cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
         self.csm_cuda_graph_launches.fetch_add(1, Ordering::Relaxed);
         rec_graph
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("csm inner graph: commit failed: {}", e)))?;
 
         cu_stream.synchronize().map_err(|e| {
@@ -8837,24 +9004,6 @@ impl super::CudaKernelProvider {
         }
         let output_rows = requested as u32;
 
-        let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
-        for col_idx in 0..left.columns.len() {
-            let c = left
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Left column {} not found", col_idx)))?;
-            rec_gather.read_column(c);
-        }
-        for col_idx in 0..right.columns.len() {
-            let c = right
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Right column {} not found", col_idx)))?;
-            rec_gather.read_column(c);
-        }
-        rec_gather.read(&entry.d_output_left);
-        rec_gather.read(&entry.d_output_right);
-        rec_gather.preflight(runtime).map_err(|e| {
-            XlogError::Kernel(format!("csm inner graph: gather preflight failed: {}", e))
-        })?;
         let gathered_left = self.gather_buffer_by_indices_on_stream(
             left,
             &entry.d_output_left,
@@ -8871,9 +9020,6 @@ impl super::CudaKernelProvider {
             launch_stream,
             runtime,
         )?;
-        rec_gather.commit(runtime).map_err(|e| {
-            XlogError::Kernel(format!("csm inner graph: gather commit failed: {}", e))
-        })?;
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
@@ -8953,12 +9099,9 @@ impl super::CudaKernelProvider {
     /// matching the legacy `hash_join_left_outer_v2_recorded`
     /// row-ordering invariant downstream consumers depend on.
     ///
-    /// This path does not adopt the archived prototype's
-    /// `hash_join_left_outer_count_per_row` /
-    /// `hash_join_left_outer_materialize` design — those
-    /// kernels interleave matched and null-sentinel rows by
-    /// probe-row index, which would change the legacy
-    /// LeftOuter ordering downstream consumers depend on.
+    /// This path preserves matched-first output ordering instead
+    /// of interleaving matched and null-sentinel rows by probe-row
+    /// index, which would change the established LeftOuter ordering.
     ///
     /// # Errors
     ///   * Manager not runtime-backed.
@@ -8976,8 +9119,6 @@ impl super::CudaKernelProvider {
         max_output: Option<usize>,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
-        use crate::launch::LaunchRecorder;
-
         let runtime = self.memory.runtime().ok_or_else(|| {
             XlogError::Kernel(
                 "hash_join_left_outer_v2_count_scan_materialize_recorded requires a \
@@ -9079,56 +9220,11 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
-        // Phase A: count + scan + total (Inner CSM machinery).
+        // Count matches, compute row offsets, and derive the total.
         let per_probe_count = self.memory.alloc::<u32>(probe_cap as usize)?;
         let mut per_probe_offsets = self.memory.alloc::<u32>(probe_cap as usize)?;
         let d_logical_count = self.memory.alloc::<u32>(1)?;
         let d_overflow = self.memory.alloc::<u8>(1)?;
-        // Fence alloc-ready → launch_stream for the scalars
-        // before the memsets below run (memsets enqueue ahead
-        // of any preflight that registers them).
-        runtime
-            .prepare_first_use(&d_overflow, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!("csm left_outer: prepare d_overflow failed: {}", e))
-            })?;
-        runtime
-            .prepare_first_use(&d_logical_count, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "csm left_outer: prepare d_logical_count failed: {}",
-                    e
-                ))
-            })?;
-        // Zero-init overflow + logical_count on launch_stream.
-        // SAFETY: 1-byte and 4-byte runtime-backed buffers.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_overflow.device_ptr(),
-                0,
-                1,
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "csm left_outer: cuMemsetD8Async (d_overflow) failed: {:?}",
-                    res
-                )));
-            }
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_logical_count.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "csm left_outer: cuMemsetD8Async (d_logical_count) failed: {:?}",
-                    res
-                )));
-            }
-        }
-
         let count_func = device
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_COUNT_PER_ROW)
             .ok_or_else(|| {
@@ -9140,6 +9236,7 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("hash_join_total_from_scan kernel not found".to_string())
             })?;
 
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(probe_cap)?;
         let mut rec_count = LaunchRecorder::new_strict(launch_stream);
         rec_count.read(&left_packed.hashes);
         rec_count.read(&left_packed.packed_keys);
@@ -9153,6 +9250,9 @@ impl super::CudaKernelProvider {
         rec_count.write(&per_probe_offsets);
         rec_count.write(&d_logical_count);
         rec_count.write(&d_overflow);
+        for level in scan_scratch.levels() {
+            rec_count.read_write(level);
+        }
         rec_count.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "csm left_outer: count/scan preflight failed: {}",
@@ -9160,91 +9260,126 @@ impl super::CudaKernelProvider {
             ))
         })?;
 
-        // Step A1: count_per_row.
+        // Count matches per probe row.
         // SAFETY: 12-arg signature.
-        unsafe {
-            count_func.clone().launch_on_stream(
-                &cu_stream,
-                probe_config,
-                (
-                    &left_packed.hashes,
-                    left.num_rows_device(),
-                    probe_cap,
-                    &table.bucket_offsets,
-                    &table.bucket_counts,
-                    &table.bucket_entries,
-                    &table.bucket_entry_hashes,
-                    table.bucket_mask,
-                    &left_packed.packed_keys,
-                    &right_packed.packed_keys,
-                    left_packed.key_bytes,
-                    &per_probe_count,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_probe_v2_count_per_row (csm left_outer) failed: {}",
-                e
-            ))
-        })?;
-
-        // Step A2: dtod copy per_probe_count → per_probe_offsets,
-        // then exclusive in-place scan.
-        // SAFETY: same length, both runtime-backed u32.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                *per_probe_offsets.device_ptr(),
-                *per_probe_count.device_ptr(),
-                (probe_cap as usize) * std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "csm left_outer: cuMemcpyDtoDAsync (count → offsets) failed: {:?}",
-                    res
-                )));
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            // SAFETY: one-byte and one-u32 runtime-backed buffers owned by rec_count.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_overflow.device_ptr(),
+                    0,
+                    1,
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "csm left_outer: cuMemsetD8Async (d_overflow) failed: {:?}",
+                        res
+                    )));
+                }
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_logical_count.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "csm left_outer: cuMemsetD8Async (d_logical_count) failed: {:?}",
+                        res
+                    )));
+                }
             }
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            &mut per_probe_offsets,
-            probe_cap,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
 
-        // Step A3: total_from_scan — writes d_logical_count + d_overflow.
-        let materialize_capacity_bound: u64 = (probe_cap as u64).saturating_mul(num_right as u64);
-        let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
-        // SAFETY: 7-arg signature.
-        unsafe {
-            total_func.clone().launch_on_stream(
-                &cu_stream,
-                LaunchConfig {
-                    grid_dim: (1, 1, 1),
-                    block_dim: (1, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (
-                    &per_probe_offsets,
-                    &per_probe_count,
-                    left.num_rows_device(),
-                    probe_cap,
-                    materialize_capacity_u32,
-                    &d_logical_count,
-                    &d_overflow,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_total_from_scan (csm left_outer) failed: {}",
-                e
-            ))
-        })?;
+            unsafe {
+                count_func.clone().launch_in(
+                    enqueue,
+                    probe_config,
+                    (
+                        &left_packed.hashes,
+                        left.num_rows_device(),
+                        probe_cap,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
+                        &left_packed.packed_keys,
+                        &right_packed.packed_keys,
+                        left_packed.key_bytes,
+                        &per_probe_count,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_probe_v2_count_per_row (csm left_outer) failed: {}",
+                    e
+                ))
+            })?;
 
-        rec_count.commit(runtime).map_err(|e| {
+            // Copy per_probe_count to per_probe_offsets,
+            // then exclusive in-place scan.
+            // SAFETY: same length, both runtime-backed u32.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                    *per_probe_offsets.device_ptr(),
+                    *per_probe_count.device_ptr(),
+                    (probe_cap as usize) * std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "csm left_outer: cuMemcpyDtoDAsync (count → offsets) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut per_probe_offsets,
+                probe_cap,
+                enqueue,
+                &mut scan_scratch,
+            )?;
+
+            // Derive the total from the scan, writing d_logical_count and d_overflow.
+            let materialize_capacity_bound: u64 =
+                (probe_cap as u64).saturating_mul(num_right as u64);
+            let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
+            // SAFETY: 7-arg signature.
+            unsafe {
+                total_func.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &per_probe_offsets,
+                        &per_probe_count,
+                        left.num_rows_device(),
+                        probe_cap,
+                        materialize_capacity_u32,
+                        &d_logical_count,
+                        &d_overflow,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_total_from_scan (csm left_outer) failed: {}",
+                    e
+                ))
+            })?;
+
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_count = unsafe { rec_count.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+
+        rec_count.commit().map_err(|e| {
             XlogError::Kernel(format!("csm left_outer: count/scan commit failed: {}", e))
         })?;
 
@@ -9263,7 +9398,7 @@ impl super::CudaKernelProvider {
         }
         let inner_count_u32 = inner_clamped as u32;
 
-        // Phase B: materialize matched index pairs.
+        // Materialize matched index pairs.
         let materialize_func = device
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_MATERIALIZE)
             .ok_or_else(|| {
@@ -9294,41 +9429,50 @@ impl super::CudaKernelProvider {
         })?;
         if inner_count_u32 > 0 {
             // SAFETY: 16-arg signature; raw-param launch.
-            unsafe {
-                let mut params: Vec<*mut c_void> = vec![
-                    (&left_packed.hashes).as_kernel_param(),
-                    left.num_rows_device().as_kernel_param(),
-                    probe_cap.as_kernel_param(),
-                    (&table.bucket_offsets).as_kernel_param(),
-                    (&table.bucket_counts).as_kernel_param(),
-                    (&table.bucket_entries).as_kernel_param(),
-                    (&table.bucket_entry_hashes).as_kernel_param(),
-                    table.bucket_mask.as_kernel_param(),
-                    (&left_packed.packed_keys).as_kernel_param(),
-                    (&right_packed.packed_keys).as_kernel_param(),
-                    left_packed.key_bytes.as_kernel_param(),
-                    (&per_probe_offsets).as_kernel_param(),
-                    inner_count_u32.as_kernel_param(),
-                    (&d_output_left).as_kernel_param(),
-                    (&d_output_right).as_kernel_param(),
-                    (&d_overflow).as_kernel_param(),
-                ];
-                materialize_func
-                    .clone()
-                    .launch_on_stream(&cu_stream, probe_config, &mut params)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "hash_join_probe_v2_materialize (csm left_outer) failed: {}",
-                            e
-                        ))
-                    })?;
-            }
+            let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                unsafe {
+                    let mut params: Vec<*mut c_void> = vec![
+                        (&left_packed.hashes).as_kernel_param(),
+                        left.num_rows_device().as_kernel_param(),
+                        probe_cap.as_kernel_param(),
+                        (&table.bucket_offsets).as_kernel_param(),
+                        (&table.bucket_counts).as_kernel_param(),
+                        (&table.bucket_entries).as_kernel_param(),
+                        (&table.bucket_entry_hashes).as_kernel_param(),
+                        table.bucket_mask.as_kernel_param(),
+                        (&left_packed.packed_keys).as_kernel_param(),
+                        (&right_packed.packed_keys).as_kernel_param(),
+                        left_packed.key_bytes.as_kernel_param(),
+                        (&per_probe_offsets).as_kernel_param(),
+                        inner_count_u32.as_kernel_param(),
+                        (&d_output_left).as_kernel_param(),
+                        (&d_output_right).as_kernel_param(),
+                        (&d_overflow).as_kernel_param(),
+                    ];
+                    materialize_func
+                        .clone()
+                        .launch_in(enqueue, probe_config, &mut params)
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "hash_join_probe_v2_materialize (csm left_outer) failed: {}",
+                        e
+                    ))
+                })
+            };
+            // SAFETY: preflight retained every accessed allocation for this exact stream.
+            let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(LaunchEnqueueError::into_xlog_error)?;
+            rec_mat.commit().map_err(|e| {
+                XlogError::Kernel(format!("csm left_outer: materialize commit failed: {}", e))
+            })?;
+        } else {
+            rec_mat.abort().map_err(|e| {
+                XlogError::Kernel(format!("csm left_outer: materialize abort failed: {}", e))
+            })?;
         }
-        rec_mat.commit(runtime).map_err(|e| {
-            XlogError::Kernel(format!("csm left_outer: materialize commit failed: {}", e))
-        })?;
 
-        // Phase C: unmatched-left mask + recorded compact tail.
+        // Build the unmatched-left mask, then compact the unmatched rows.
         let d_unmatched_mask = self.memory.alloc::<u8>(probe_cap as usize)?;
         let unmatched_mask_func = device
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_CSM_UNMATCHED_MASK)
@@ -9346,25 +9490,30 @@ impl super::CudaKernelProvider {
             ))
         })?;
         // SAFETY: 4-arg signature.
-        unsafe {
-            unmatched_mask_func.clone().launch_on_stream(
-                &cu_stream,
-                probe_config,
-                (
-                    &per_probe_count,
-                    left.num_rows_device(),
-                    probe_cap,
-                    &d_unmatched_mask,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_csm_unmatched_mask (on_stream) failed: {}",
-                e
-            ))
-        })?;
-        rec_um.commit(runtime).map_err(|e| {
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                unmatched_mask_func.clone().launch_in(
+                    enqueue,
+                    probe_config,
+                    (
+                        &per_probe_count,
+                        left.num_rows_device(),
+                        probe_cap,
+                        &d_unmatched_mask,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_csm_unmatched_mask (on_stream) failed: {}",
+                    e
+                ))
+            })
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_um = unsafe { rec_um.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+        rec_um.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "csm left_outer: unmatched mask commit failed: {}",
                 e
@@ -9384,28 +9533,10 @@ impl super::CudaKernelProvider {
             return self.create_empty_buffer(combined_schema);
         }
 
-        // Phase D: gather matched left + right (only if inner_count > 0).
+        // Gather the matched left and right rows when matches exist.
         let inner_left_buf;
         let inner_right_buf;
         if inner_count_u32 > 0 {
-            let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
-            for col_idx in 0..left.columns.len() {
-                let c = left.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("Left column {} not found", col_idx))
-                })?;
-                rec_gather.read_column(c);
-            }
-            for col_idx in 0..right.columns.len() {
-                let c = right.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("Right column {} not found", col_idx))
-                })?;
-                rec_gather.read_column(c);
-            }
-            rec_gather.read(&d_output_left);
-            rec_gather.read(&d_output_right);
-            rec_gather.preflight(runtime).map_err(|e| {
-                XlogError::Kernel(format!("csm left_outer: gather preflight failed: {}", e))
-            })?;
             inner_left_buf = Some(self.gather_buffer_by_indices_on_stream(
                 left,
                 &d_output_left,
@@ -9422,16 +9553,67 @@ impl super::CudaKernelProvider {
                 launch_stream,
                 runtime,
             )?);
-            rec_gather.commit(runtime).map_err(|e| {
-                XlogError::Kernel(format!("csm left_outer: gather commit failed: {}", e))
-            })?;
         } else {
             inner_left_buf = None;
             inner_right_buf = None;
         }
 
-        // Phase E: per-column dtod-async concat.
-        // Same step-D pattern as `hash_join_left_outer_v2_recorded`.
+        // Concatenate each output column on the launch stream.
+        // Use the same deferred concatenation pattern as
+        // `hash_join_left_outer_v2_recorded`.
+        let inner_rows = inner_count_u32 as u64;
+        let mut left_outputs = Vec::with_capacity(left.arity());
+        for col_idx in 0..left.arity() {
+            let elem_size = left
+                .schema()
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            let inner_bytes = (inner_rows as usize)
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("csm left_outer: inner_bytes overflow".into()))?;
+            let unmatched_bytes = (unmatched_rows as usize)
+                .checked_mul(elem_size)
+                .ok_or_else(|| {
+                    XlogError::Kernel("csm left_outer: unmatched_bytes overflow".into())
+                })?;
+            let total_bytes = inner_bytes
+                .checked_add(unmatched_bytes)
+                .ok_or_else(|| XlogError::Kernel("csm left_outer: total_bytes overflow".into()))?;
+            left_outputs.push((
+                self.memory.alloc::<u8>(total_bytes)?,
+                inner_bytes,
+                unmatched_bytes,
+            ));
+        }
+
+        let mut right_outputs = Vec::with_capacity(right.arity());
+        for col_idx in 0..right.arity() {
+            let elem_size = right
+                .schema()
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            let inner_bytes = (inner_rows as usize)
+                .checked_mul(elem_size)
+                .ok_or_else(|| {
+                    XlogError::Kernel("csm left_outer: right inner_bytes overflow".into())
+                })?;
+            let unmatched_bytes = (unmatched_rows as usize)
+                .checked_mul(elem_size)
+                .ok_or_else(|| {
+                    XlogError::Kernel("csm left_outer: right unmatched_bytes overflow".into())
+                })?;
+            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
+                XlogError::Kernel("csm left_outer: right total_bytes overflow".into())
+            })?;
+            right_outputs.push((
+                self.memory.alloc::<u8>(total_bytes)?,
+                inner_bytes,
+                total_bytes,
+            ));
+        }
+
         let mut rec_d = LaunchRecorder::new_strict(launch_stream);
         for col_idx in 0..unmatched_left.columns.len() {
             let c = unmatched_left.column(col_idx).ok_or_else(|| {
@@ -9455,183 +9637,126 @@ impl super::CudaKernelProvider {
                 rec_d.read_column(c);
             }
         }
+        for (out_col, _, _) in &left_outputs {
+            rec_d.write(out_col);
+        }
+        for (out_col, _, _) in &right_outputs {
+            rec_d.write(out_col);
+        }
         rec_d.preflight(runtime).map_err(|e| {
-            XlogError::Kernel(format!("csm left_outer: phase-E preflight failed: {}", e))
+            XlogError::Kernel(format!("csm left_outer: concat preflight failed: {}", e))
         })?;
-
-        let inner_rows = inner_count_u32 as u64;
-        let mut result_columns: Vec<CudaColumn> = Vec::with_capacity(combined_schema.arity());
-
-        // Per-left-column: inner_left | unmatched_left.
-        for col_idx in 0..left.arity() {
-            let elem_size = left
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| XlogError::Kernel("csm left_outer: inner_bytes overflow".into()))?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("csm left_outer: unmatched_bytes overflow".into())
-                })?;
-            let total_bytes = inner_bytes
-                .checked_add(unmatched_bytes)
-                .ok_or_else(|| XlogError::Kernel("csm left_outer: total_bytes overflow".into()))?;
-            let out_col = self.memory.alloc::<u8>(total_bytes)?;
-            let dst_ptr = *out_col.device_ptr();
-            // Fence alloc-ready → launch_stream for out_col.
-            runtime
-                .prepare_first_use(&out_col, launch_stream, Access::Write)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "csm left_outer: prepare left out_col {} failed: {}",
-                        col_idx, e
-                    ))
-                })?;
-            if inner_bytes > 0 {
-                let src_col = inner_left_buf
-                    .as_ref()
-                    .expect("inner_count > 0")
-                    .column(col_idx)
-                    .ok_or_else(|| XlogError::Kernel("inner_left col missing".into()))?;
-                // SAFETY: dtod async on cu_stream.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr,
-                        *src_col.device_ptr(),
-                        inner_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "csm left_outer: dtod inner_left col {} failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if unmatched_bytes > 0 {
-                let src_col = unmatched_left.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("unmatched_left col {} not found", col_idx))
-                })?;
-                // SAFETY: bounded by total_bytes.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr + inner_bytes as u64,
-                        *src_col.device_ptr(),
-                        unmatched_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "csm left_outer: dtod unmatched col {} failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if let Some(b) = out_col.runtime_block() {
-                runtime
-                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "csm left_outer: finish_block_use (left col {}) failed: {}",
-                            col_idx, e
-                        ))
-                    })?;
-            }
-            result_columns.push(out_col.into());
-        }
-
-        // Per-right-column: inner_right | zeros.
-        for col_idx in 0..right.arity() {
-            let elem_size = right
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("csm left_outer: right inner_bytes overflow".into())
-                })?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("csm left_outer: right unmatched_bytes overflow".into())
-                })?;
-            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
-                XlogError::Kernel("csm left_outer: right total_bytes overflow".into())
+        if left_outputs.is_empty() && right_outputs.is_empty() {
+            rec_d.abort().map_err(|e| {
+                XlogError::Kernel(format!("csm left_outer: concat abort failed: {}", e))
             })?;
-            let out_col = self.memory.alloc::<u8>(total_bytes)?;
-            let dst_ptr = *out_col.device_ptr();
-            // Fence alloc-ready → launch_stream for out_col.
-            runtime
-                .prepare_first_use(&out_col, launch_stream, Access::Write)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "csm left_outer: prepare right out_col {} failed: {}",
-                        col_idx, e
-                    ))
-                })?;
-            if total_bytes > 0 {
-                // SAFETY: zero-fill whole column on cu_stream.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemsetD8Async(
-                        dst_ptr,
-                        0,
-                        total_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "csm left_outer: zero-fill right col {} failed: {:?}",
-                            col_idx, res
-                        )));
+        } else {
+            let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                for (col_idx, (out_col, inner_bytes, unmatched_bytes)) in
+                    left_outputs.iter().enumerate()
+                {
+                    let dst_ptr = *out_col.device_ptr();
+                    if *inner_bytes > 0 {
+                        let src_col = inner_left_buf
+                            .as_ref()
+                            .ok_or_else(|| XlogError::Kernel("inner_left buffer missing".into()))?
+                            .column(col_idx)
+                            .ok_or_else(|| XlogError::Kernel("inner_left col missing".into()))?;
+                        // SAFETY: dtod async on cu_stream.
+                        unsafe {
+                            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                                dst_ptr,
+                                *src_col.device_ptr(),
+                                *inner_bytes,
+                                enqueue.stream().cu_stream(),
+                            );
+                            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                                return Err(XlogError::Kernel(format!(
+                                    "csm left_outer: dtod inner_left col {} failed: {:?}",
+                                    col_idx, res
+                                )));
+                            }
+                        }
+                    }
+                    if *unmatched_bytes > 0 {
+                        let src_col = unmatched_left.column(col_idx).ok_or_else(|| {
+                            XlogError::Kernel(format!("unmatched_left col {} not found", col_idx))
+                        })?;
+                        // SAFETY: bounded by total_bytes.
+                        unsafe {
+                            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                                dst_ptr + *inner_bytes as u64,
+                                *src_col.device_ptr(),
+                                *unmatched_bytes,
+                                cu_stream.cu_stream(),
+                            );
+                            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                                return Err(XlogError::Kernel(format!(
+                                    "csm left_outer: dtod unmatched col {} failed: {:?}",
+                                    col_idx, res
+                                )));
+                            }
+                        }
                     }
                 }
-            }
-            if inner_bytes > 0 {
-                let src_col = inner_right_buf
-                    .as_ref()
-                    .expect("inner_count > 0")
-                    .column(col_idx)
-                    .ok_or_else(|| XlogError::Kernel("inner_right col missing".into()))?;
-                // SAFETY: dtod async on cu_stream.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr,
-                        *src_col.device_ptr(),
-                        inner_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "csm left_outer: dtod inner_right col {} failed: {:?}",
-                            col_idx, res
-                        )));
+
+                for (col_idx, (out_col, inner_bytes, total_bytes)) in
+                    right_outputs.iter().enumerate()
+                {
+                    let dst_ptr = *out_col.device_ptr();
+                    // SAFETY: zero-fill whole column on cu_stream.
+                    unsafe {
+                        let res = cudarc::driver::sys::cuMemsetD8Async(
+                            dst_ptr,
+                            0,
+                            *total_bytes,
+                            cu_stream.cu_stream(),
+                        );
+                        if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                            return Err(XlogError::Kernel(format!(
+                                "csm left_outer: zero-fill right col {} failed: {:?}",
+                                col_idx, res
+                            )));
+                        }
+                    }
+                    if *inner_bytes > 0 {
+                        let src_col = inner_right_buf
+                            .as_ref()
+                            .ok_or_else(|| XlogError::Kernel("inner_right buffer missing".into()))?
+                            .column(col_idx)
+                            .ok_or_else(|| XlogError::Kernel("inner_right col missing".into()))?;
+                        // SAFETY: dtod async on cu_stream.
+                        unsafe {
+                            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                                dst_ptr,
+                                *src_col.device_ptr(),
+                                *inner_bytes,
+                                cu_stream.cu_stream(),
+                            );
+                            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                                return Err(XlogError::Kernel(format!(
+                                    "csm left_outer: dtod inner_right col {} failed: {:?}",
+                                    col_idx, res
+                                )));
+                            }
+                        }
                     }
                 }
-            }
-            if let Some(b) = out_col.runtime_block() {
-                runtime
-                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "csm left_outer: finish_block_use (right col {}) failed: {}",
-                            col_idx, e
-                        ))
-                    })?;
-            }
-            result_columns.push(out_col.into());
+                Ok(())
+            };
+            // SAFETY: preflight retained every accessed allocation for this exact stream.
+            let rec_d = unsafe { rec_d.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(LaunchEnqueueError::into_xlog_error)?;
+            rec_d.commit().map_err(|e| {
+                XlogError::Kernel(format!("csm left_outer: concat commit failed: {}", e))
+            })?;
         }
 
-        rec_d.commit(runtime).map_err(|e| {
-            XlogError::Kernel(format!("csm left_outer: phase-E commit failed: {}", e))
-        })?;
+        let result_columns: Vec<CudaColumn> = left_outputs
+            .into_iter()
+            .chain(right_outputs)
+            .map(|(column, _, _)| column.into())
+            .collect();
 
         // Guard the u32 metadata cast: `inner_count_u32` is
         // already u32, but `unmatched_rows` is read from the
@@ -9808,51 +9933,6 @@ impl super::CudaKernelProvider {
         let mut per_probe_offsets = self.memory.alloc::<u32>(probe_cap as usize)?;
         let d_logical_count = self.memory.alloc::<u32>(1)?;
         let d_overflow = self.memory.alloc::<u8>(1)?;
-        // Fence alloc-ready → launch_stream for both before memset.
-        runtime
-            .prepare_first_use(&d_overflow, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "indexed CSM inner: prepare d_overflow failed: {}",
-                    e
-                ))
-            })?;
-        runtime
-            .prepare_first_use(&d_logical_count, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "indexed CSM inner: prepare d_logical_count failed: {}",
-                    e
-                ))
-            })?;
-        // Zero-init both scalars on launch_stream.
-        // SAFETY: 1-byte and 4-byte runtime-backed buffers.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_overflow.device_ptr(),
-                0,
-                1,
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "indexed CSM inner: cuMemsetD8Async (d_overflow) failed: {:?}",
-                    res
-                )));
-            }
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_logical_count.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "indexed CSM inner: cuMemsetD8Async (d_logical_count) failed: {:?}",
-                    res
-                )));
-            }
-        }
 
         // Count/scan recorder. Reads on left_packed + index
         // buffers + left.num_rows_device BEFORE preflight;
@@ -9869,6 +9949,7 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("hash_join_total_from_scan kernel not found".to_string())
             })?;
 
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(probe_cap)?;
         let mut rec_count = LaunchRecorder::new_strict(launch_stream);
         rec_count.read(&left_packed.hashes);
         rec_count.read(&left_packed.packed_keys);
@@ -9882,6 +9963,9 @@ impl super::CudaKernelProvider {
         rec_count.write(&per_probe_offsets);
         rec_count.write(&d_logical_count);
         rec_count.write(&d_overflow);
+        for level in scan_scratch.levels() {
+            rec_count.read_write(level);
+        }
         rec_count.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed CSM inner: count/scan preflight failed: {}",
@@ -9889,91 +9973,126 @@ impl super::CudaKernelProvider {
             ))
         })?;
 
-        // Step 3: count_per_row.
+        // Count matches per probe row.
         // SAFETY: 12-arg signature matches the PTX kernel.
-        unsafe {
-            count_func.clone().launch_on_stream(
-                &cu_stream,
-                probe_config,
-                (
-                    &left_packed.hashes,
-                    left.num_rows_device(),
-                    probe_cap,
-                    &table.bucket_offsets,
-                    &table.bucket_counts,
-                    &table.bucket_entries,
-                    &table.bucket_entry_hashes,
-                    table.bucket_mask,
-                    &left_packed.packed_keys,
-                    &index.packed_keys,
-                    index.key_bytes,
-                    &per_probe_count,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_probe_v2_count_per_row (on_stream, indexed) failed: {}",
-                e
-            ))
-        })?;
-
-        // Step 4: dtod-async copy per_probe_count → per_probe_offsets,
-        // then exclusive in-place scan.
-        // SAFETY: same length, both runtime-backed u32 buffers.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                *per_probe_offsets.device_ptr(),
-                *per_probe_count.device_ptr(),
-                (probe_cap as usize) * std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "indexed CSM inner: cuMemcpyDtoDAsync (count → offsets) failed: {:?}",
-                    res
-                )));
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            // SAFETY: the recorder owns both scalar writes for the complete enqueue interval.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_overflow.device_ptr(),
+                    0,
+                    1,
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "indexed CSM inner: cuMemsetD8Async (d_overflow) failed: {:?}",
+                        res
+                    )));
+                }
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_logical_count.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "indexed CSM inner: cuMemsetD8Async (d_logical_count) failed: {:?}",
+                        res
+                    )));
+                }
             }
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            &mut per_probe_offsets,
-            probe_cap,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
 
-        // Step 5: total_from_scan.
-        let materialize_capacity_bound: u64 = (probe_cap as u64).saturating_mul(right_rows as u64);
-        let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
-        // SAFETY: 7-arg signature.
-        unsafe {
-            total_func.clone().launch_on_stream(
-                &cu_stream,
-                LaunchConfig {
-                    grid_dim: (1, 1, 1),
-                    block_dim: (1, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (
-                    &per_probe_offsets,
-                    &per_probe_count,
-                    left.num_rows_device(),
-                    probe_cap,
-                    materialize_capacity_u32,
-                    &d_logical_count,
-                    &d_overflow,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_total_from_scan (on_stream, indexed) failed: {}",
-                e
-            ))
-        })?;
+            unsafe {
+                count_func.clone().launch_in(
+                    enqueue,
+                    probe_config,
+                    (
+                        &left_packed.hashes,
+                        left.num_rows_device(),
+                        probe_cap,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
+                        &left_packed.packed_keys,
+                        &index.packed_keys,
+                        index.key_bytes,
+                        &per_probe_count,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_probe_v2_count_per_row (on_stream, indexed) failed: {}",
+                    e
+                ))
+            })?;
 
-        rec_count.commit(runtime).map_err(|e| {
+            // Copy per_probe_count to per_probe_offsets,
+            // then exclusive in-place scan.
+            // SAFETY: same length, both runtime-backed u32 buffers.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                    *per_probe_offsets.device_ptr(),
+                    *per_probe_count.device_ptr(),
+                    (probe_cap as usize) * std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "indexed CSM inner: cuMemcpyDtoDAsync (count → offsets) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut per_probe_offsets,
+                probe_cap,
+                enqueue,
+                &mut scan_scratch,
+            )?;
+
+            // Derive the total from the scan.
+            let materialize_capacity_bound: u64 =
+                (probe_cap as u64).saturating_mul(right_rows as u64);
+            let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
+            // SAFETY: 7-arg signature.
+            unsafe {
+                total_func.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &per_probe_offsets,
+                        &per_probe_count,
+                        left.num_rows_device(),
+                        probe_cap,
+                        materialize_capacity_u32,
+                        &d_logical_count,
+                        &d_overflow,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_total_from_scan (on_stream, indexed) failed: {}",
+                    e
+                ))
+            })?;
+
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_count = unsafe { rec_count.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+
+        rec_count.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed CSM inner: count/scan commit failed: {}",
                 e
@@ -10002,9 +10121,15 @@ impl super::CudaKernelProvider {
         }
         let output_capacity = requested as u32;
 
-        // Step 6: materialize.
+        // Materialize the matched index pairs.
         let d_output_left = self.memory.alloc::<u32>(output_capacity as usize)?;
         let d_output_right = self.memory.alloc::<u32>(output_capacity as usize)?;
+
+        let materialize_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_MATERIALIZE)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_probe_v2_materialize kernel not found".to_string())
+            })?;
 
         let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
         rec_mat.read(&left_packed.hashes);
@@ -10027,43 +10152,43 @@ impl super::CudaKernelProvider {
             ))
         })?;
 
-        let materialize_func = device
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_MATERIALIZE)
-            .ok_or_else(|| {
-                XlogError::Kernel("hash_join_probe_v2_materialize kernel not found".to_string())
-            })?;
         // SAFETY: 16-arg signature; raw-param launch path.
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                left.num_rows_device().as_kernel_param(),
-                probe_cap.as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                table.bucket_mask.as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&index.packed_keys).as_kernel_param(),
-                index.key_bytes.as_kernel_param(),
-                (&per_probe_offsets).as_kernel_param(),
-                output_capacity.as_kernel_param(),
-                (&d_output_left).as_kernel_param(),
-                (&d_output_right).as_kernel_param(),
-                (&d_overflow).as_kernel_param(),
-            ];
-            materialize_func
-                .clone()
-                .launch_on_stream(&cu_stream, probe_config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_probe_v2_materialize (on_stream, indexed) failed: {}",
-                        e
-                    ))
-                })?;
-        }
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&left_packed.hashes).as_kernel_param(),
+                    left.num_rows_device().as_kernel_param(),
+                    probe_cap.as_kernel_param(),
+                    (&table.bucket_offsets).as_kernel_param(),
+                    (&table.bucket_counts).as_kernel_param(),
+                    (&table.bucket_entries).as_kernel_param(),
+                    (&table.bucket_entry_hashes).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
+                    (&left_packed.packed_keys).as_kernel_param(),
+                    (&index.packed_keys).as_kernel_param(),
+                    index.key_bytes.as_kernel_param(),
+                    (&per_probe_offsets).as_kernel_param(),
+                    output_capacity.as_kernel_param(),
+                    (&d_output_left).as_kernel_param(),
+                    (&d_output_right).as_kernel_param(),
+                    (&d_overflow).as_kernel_param(),
+                ];
+                materialize_func
+                    .clone()
+                    .launch_in(enqueue, probe_config, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_probe_v2_materialize (on_stream, indexed) failed: {}",
+                            e
+                        ))
+                    })
+            }
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
 
-        rec_mat.commit(runtime).map_err(|e| {
+        rec_mat.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed CSM inner: materialize commit failed: {}",
                 e
@@ -10077,25 +10202,7 @@ impl super::CudaKernelProvider {
             ))
         })?;
 
-        // Step 7: gather both sides on launch_stream.
-        let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
-        for col_idx in 0..left.columns.len() {
-            let c = left
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Left column {} not found", col_idx)))?;
-            rec_gather.read_column(c);
-        }
-        for col_idx in 0..right.columns.len() {
-            let c = right
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Right column {} not found", col_idx)))?;
-            rec_gather.read_column(c);
-        }
-        rec_gather.read(&d_output_left);
-        rec_gather.read(&d_output_right);
-        rec_gather.preflight(runtime).map_err(|e| {
-            XlogError::Kernel(format!("indexed CSM inner: gather preflight failed: {}", e))
-        })?;
+        // Gather both sides through independent complete recorder transactions.
         let gathered_left = self.gather_buffer_by_indices_on_stream(
             left,
             &d_output_left,
@@ -10112,9 +10219,6 @@ impl super::CudaKernelProvider {
             launch_stream,
             runtime,
         )?;
-        rec_gather.commit(runtime).map_err(|e| {
-            XlogError::Kernel(format!("indexed CSM inner: gather commit failed: {}", e))
-        })?;
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
@@ -10125,11 +10229,11 @@ impl super::CudaKernelProvider {
 
     /// Indexed LeftOuter CSM using the indexed deterministic binary-join path.
     ///
-    /// Combines the indexed-Inner CSM Phases A+B (probe-only
+    /// Combines indexed inner count-scan-materialize (probe-only
     /// pack on `launch_stream`; cached
     /// [`crate::provider::JoinIndexV2`] supplies the build
     /// side's `packed_keys` and `&index.table`) with the
-    /// non-indexed LeftOuter CSM Phases C–E (per-probe
+    /// non-indexed LeftOuter unmatched-row handling (per-probe
     /// unmatched-mask via `hash_join_csm_unmatched_mask` →
     /// recorded compact tail → gather matched left + right →
     /// per-column `inner | unmatched` / `inner | zeros`
@@ -10286,55 +10390,11 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
-        // Phase A: count + scan + total.
+        // Count matches, compute row offsets, and derive the total.
         let per_probe_count = self.memory.alloc::<u32>(probe_cap as usize)?;
         let mut per_probe_offsets = self.memory.alloc::<u32>(probe_cap as usize)?;
         let d_logical_count = self.memory.alloc::<u32>(1)?;
         let d_overflow = self.memory.alloc::<u8>(1)?;
-        runtime
-            .prepare_first_use(&d_overflow, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "indexed csm left_outer: prepare d_overflow failed: {}",
-                    e
-                ))
-            })?;
-        runtime
-            .prepare_first_use(&d_logical_count, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "indexed csm left_outer: prepare d_logical_count failed: {}",
-                    e
-                ))
-            })?;
-        // Zero-init scalars on launch_stream.
-        // SAFETY: 1-byte and 4-byte runtime-backed buffers.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_overflow.device_ptr(),
-                0,
-                1,
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "indexed csm left_outer: cuMemsetD8Async (d_overflow) failed: {:?}",
-                    res
-                )));
-            }
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_logical_count.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "indexed csm left_outer: cuMemsetD8Async (d_logical_count) failed: {:?}",
-                    res
-                )));
-            }
-        }
 
         let count_func = device
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_COUNT_PER_ROW)
@@ -10347,6 +10407,7 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("hash_join_total_from_scan kernel not found".to_string())
             })?;
 
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(probe_cap)?;
         let mut rec_count = LaunchRecorder::new_strict(launch_stream);
         rec_count.read(&left_packed.hashes);
         rec_count.read(&left_packed.packed_keys);
@@ -10360,6 +10421,9 @@ impl super::CudaKernelProvider {
         rec_count.write(&per_probe_offsets);
         rec_count.write(&d_logical_count);
         rec_count.write(&d_overflow);
+        for level in scan_scratch.levels() {
+            rec_count.read_write(level);
+        }
         rec_count.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed csm left_outer: count/scan preflight failed: {}",
@@ -10367,90 +10431,125 @@ impl super::CudaKernelProvider {
             ))
         })?;
 
-        // Step A1: count_per_row.
+        // Count matches per probe row.
         // SAFETY: 12-arg signature.
-        unsafe {
-            count_func.clone().launch_on_stream(
-                &cu_stream,
-                probe_config,
-                (
-                    &left_packed.hashes,
-                    left.num_rows_device(),
-                    probe_cap,
-                    &table.bucket_offsets,
-                    &table.bucket_counts,
-                    &table.bucket_entries,
-                    &table.bucket_entry_hashes,
-                    table.bucket_mask,
-                    &left_packed.packed_keys,
-                    &index.packed_keys,
-                    index.key_bytes,
-                    &per_probe_count,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_probe_v2_count_per_row (indexed csm left_outer) failed: {}",
-                e
-            ))
-        })?;
-
-        // Step A2: dtod copy + exclusive scan.
-        // SAFETY: same length, both runtime-backed u32.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                *per_probe_offsets.device_ptr(),
-                *per_probe_count.device_ptr(),
-                (probe_cap as usize) * std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "indexed csm left_outer: cuMemcpyDtoDAsync (count → offsets) failed: {:?}",
-                    res
-                )));
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            // SAFETY: the recorder owns both scalar writes for the complete enqueue interval.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_overflow.device_ptr(),
+                    0,
+                    1,
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "indexed csm left_outer: cuMemsetD8Async (d_overflow) failed: {:?}",
+                        res
+                    )));
+                }
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_logical_count.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "indexed csm left_outer: cuMemsetD8Async (d_logical_count) failed: {:?}",
+                        res
+                    )));
+                }
             }
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            &mut per_probe_offsets,
-            probe_cap,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
 
-        // Step A3: total_from_scan — writes d_logical_count + d_overflow.
-        let materialize_capacity_bound: u64 = (probe_cap as u64).saturating_mul(num_right as u64);
-        let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
-        // SAFETY: 7-arg signature.
-        unsafe {
-            total_func.clone().launch_on_stream(
-                &cu_stream,
-                LaunchConfig {
-                    grid_dim: (1, 1, 1),
-                    block_dim: (1, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (
-                    &per_probe_offsets,
-                    &per_probe_count,
-                    left.num_rows_device(),
-                    probe_cap,
-                    materialize_capacity_u32,
-                    &d_logical_count,
-                    &d_overflow,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_total_from_scan (indexed csm left_outer) failed: {}",
-                e
-            ))
-        })?;
+            unsafe {
+                count_func.clone().launch_in(
+                    enqueue,
+                    probe_config,
+                    (
+                        &left_packed.hashes,
+                        left.num_rows_device(),
+                        probe_cap,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
+                        &left_packed.packed_keys,
+                        &index.packed_keys,
+                        index.key_bytes,
+                        &per_probe_count,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_probe_v2_count_per_row (indexed csm left_outer) failed: {}",
+                    e
+                ))
+            })?;
 
-        rec_count.commit(runtime).map_err(|e| {
+            // Copy match counts and compute exclusive row offsets.
+            // SAFETY: same length, both runtime-backed u32.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                    *per_probe_offsets.device_ptr(),
+                    *per_probe_count.device_ptr(),
+                    (probe_cap as usize) * std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "indexed csm left_outer: cuMemcpyDtoDAsync (count → offsets) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut per_probe_offsets,
+                probe_cap,
+                enqueue,
+                &mut scan_scratch,
+            )?;
+
+            // Derive the total from the scan, writing d_logical_count and d_overflow.
+            let materialize_capacity_bound: u64 =
+                (probe_cap as u64).saturating_mul(num_right as u64);
+            let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
+            // SAFETY: 7-arg signature.
+            unsafe {
+                total_func.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &per_probe_offsets,
+                        &per_probe_count,
+                        left.num_rows_device(),
+                        probe_cap,
+                        materialize_capacity_u32,
+                        &d_logical_count,
+                        &d_overflow,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_total_from_scan (indexed csm left_outer) failed: {}",
+                    e
+                ))
+            })?;
+
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_count = unsafe { rec_count.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+
+        rec_count.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed csm left_outer: count/scan commit failed: {}",
                 e
@@ -10475,7 +10574,7 @@ impl super::CudaKernelProvider {
         }
         let inner_count_u32 = inner_clamped as u32;
 
-        // Phase B: materialize matched index pairs.
+        // Materialize matched index pairs.
         let materialize_func = device
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_MATERIALIZE)
             .ok_or_else(|| {
@@ -10506,44 +10605,56 @@ impl super::CudaKernelProvider {
         })?;
         if inner_count_u32 > 0 {
             // SAFETY: 16-arg signature; raw-param launch.
-            unsafe {
-                let mut params: Vec<*mut c_void> = vec![
-                    (&left_packed.hashes).as_kernel_param(),
-                    left.num_rows_device().as_kernel_param(),
-                    probe_cap.as_kernel_param(),
-                    (&table.bucket_offsets).as_kernel_param(),
-                    (&table.bucket_counts).as_kernel_param(),
-                    (&table.bucket_entries).as_kernel_param(),
-                    (&table.bucket_entry_hashes).as_kernel_param(),
-                    table.bucket_mask.as_kernel_param(),
-                    (&left_packed.packed_keys).as_kernel_param(),
-                    (&index.packed_keys).as_kernel_param(),
-                    index.key_bytes.as_kernel_param(),
-                    (&per_probe_offsets).as_kernel_param(),
-                    inner_count_u32.as_kernel_param(),
-                    (&d_output_left).as_kernel_param(),
-                    (&d_output_right).as_kernel_param(),
-                    (&d_overflow).as_kernel_param(),
-                ];
-                materialize_func
-                    .clone()
-                    .launch_on_stream(&cu_stream, probe_config, &mut params)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "hash_join_probe_v2_materialize (indexed csm left_outer) failed: {}",
-                            e
-                        ))
-                    })?;
-            }
+            let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                unsafe {
+                    let mut params: Vec<*mut c_void> = vec![
+                        (&left_packed.hashes).as_kernel_param(),
+                        left.num_rows_device().as_kernel_param(),
+                        probe_cap.as_kernel_param(),
+                        (&table.bucket_offsets).as_kernel_param(),
+                        (&table.bucket_counts).as_kernel_param(),
+                        (&table.bucket_entries).as_kernel_param(),
+                        (&table.bucket_entry_hashes).as_kernel_param(),
+                        table.bucket_mask.as_kernel_param(),
+                        (&left_packed.packed_keys).as_kernel_param(),
+                        (&index.packed_keys).as_kernel_param(),
+                        index.key_bytes.as_kernel_param(),
+                        (&per_probe_offsets).as_kernel_param(),
+                        inner_count_u32.as_kernel_param(),
+                        (&d_output_left).as_kernel_param(),
+                        (&d_output_right).as_kernel_param(),
+                        (&d_overflow).as_kernel_param(),
+                    ];
+                    materialize_func
+                        .clone()
+                        .launch_in(enqueue, probe_config, &mut params)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!(
+                                "hash_join_probe_v2_materialize (indexed csm left_outer) failed: {}",
+                                e
+                            ))
+                        })
+                }
+            };
+            // SAFETY: preflight retained every accessed allocation for this exact stream.
+            let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+                .map_err(LaunchEnqueueError::into_xlog_error)?;
+            rec_mat.commit().map_err(|e| {
+                XlogError::Kernel(format!(
+                    "indexed csm left_outer: materialize commit failed: {}",
+                    e
+                ))
+            })?;
+        } else {
+            rec_mat.abort().map_err(|e| {
+                XlogError::Kernel(format!(
+                    "indexed csm left_outer: materialize abort failed: {}",
+                    e
+                ))
+            })?;
         }
-        rec_mat.commit(runtime).map_err(|e| {
-            XlogError::Kernel(format!(
-                "indexed csm left_outer: materialize commit failed: {}",
-                e
-            ))
-        })?;
 
-        // Phase C: unmatched-left mask + recorded compact tail.
+        // Build the unmatched-left mask, then compact the unmatched rows.
         let d_unmatched_mask = self.memory.alloc::<u8>(probe_cap as usize)?;
         let unmatched_mask_func = device
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_CSM_UNMATCHED_MASK)
@@ -10561,25 +10672,30 @@ impl super::CudaKernelProvider {
             ))
         })?;
         // SAFETY: 4-arg signature.
-        unsafe {
-            unmatched_mask_func.clone().launch_on_stream(
-                &cu_stream,
-                probe_config,
-                (
-                    &per_probe_count,
-                    left.num_rows_device(),
-                    probe_cap,
-                    &d_unmatched_mask,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_csm_unmatched_mask (indexed csm left_outer) failed: {}",
-                e
-            ))
-        })?;
-        rec_um.commit(runtime).map_err(|e| {
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                unmatched_mask_func.clone().launch_in(
+                    enqueue,
+                    probe_config,
+                    (
+                        &per_probe_count,
+                        left.num_rows_device(),
+                        probe_cap,
+                        &d_unmatched_mask,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_csm_unmatched_mask (indexed csm left_outer) failed: {}",
+                    e
+                ))
+            })
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_um = unsafe { rec_um.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+        rec_um.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed csm left_outer: unmatched mask commit failed: {}",
                 e
@@ -10599,31 +10715,10 @@ impl super::CudaKernelProvider {
             return self.create_empty_buffer(combined_schema);
         }
 
-        // Phase D: gather matched left + right (only if inner_count > 0).
+        // Gather the matched left and right rows when matches exist.
         let inner_left_buf;
         let inner_right_buf;
         if inner_count_u32 > 0 {
-            let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
-            for col_idx in 0..left.columns.len() {
-                let c = left.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("Left column {} not found", col_idx))
-                })?;
-                rec_gather.read_column(c);
-            }
-            for col_idx in 0..right.columns.len() {
-                let c = right.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("Right column {} not found", col_idx))
-                })?;
-                rec_gather.read_column(c);
-            }
-            rec_gather.read(&d_output_left);
-            rec_gather.read(&d_output_right);
-            rec_gather.preflight(runtime).map_err(|e| {
-                XlogError::Kernel(format!(
-                    "indexed csm left_outer: gather preflight failed: {}",
-                    e
-                ))
-            })?;
             inner_left_buf = Some(self.gather_buffer_by_indices_on_stream(
                 left,
                 &d_output_left,
@@ -10640,226 +10735,25 @@ impl super::CudaKernelProvider {
                 launch_stream,
                 runtime,
             )?);
-            rec_gather.commit(runtime).map_err(|e| {
-                XlogError::Kernel(format!(
-                    "indexed csm left_outer: gather commit failed: {}",
-                    e
-                ))
-            })?;
         } else {
             inner_left_buf = None;
             inner_right_buf = None;
         }
 
-        // Phase E: per-column dtod-async concat.
-        let mut rec_d = LaunchRecorder::new_strict(launch_stream);
-        for col_idx in 0..unmatched_left.columns.len() {
-            let c = unmatched_left.column(col_idx).ok_or_else(|| {
-                XlogError::Kernel(format!("unmatched_left col {} not found", col_idx))
-            })?;
-            rec_d.read_column(c);
-        }
-        if let Some(b) = inner_left_buf.as_ref() {
-            for col_idx in 0..b.columns.len() {
-                let c = b.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("inner_left col {} not found", col_idx))
-                })?;
-                rec_d.read_column(c);
-            }
-        }
-        if let Some(b) = inner_right_buf.as_ref() {
-            for col_idx in 0..b.columns.len() {
-                let c = b.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("inner_right col {} not found", col_idx))
-                })?;
-                rec_d.read_column(c);
-            }
-        }
-        rec_d.preflight(runtime).map_err(|e| {
-            XlogError::Kernel(format!(
-                "indexed csm left_outer: phase-E preflight failed: {}",
-                e
-            ))
-        })?;
-
-        let inner_rows = inner_count_u32 as u64;
-        let mut result_columns: Vec<CudaColumn> = Vec::with_capacity(combined_schema.arity());
-
-        // Per-left-column: inner_left | unmatched_left.
-        for col_idx in 0..left.arity() {
-            let elem_size = left
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("indexed csm left_outer: inner_bytes overflow".into())
-                })?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("indexed csm left_outer: unmatched_bytes overflow".into())
-                })?;
-            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
-                XlogError::Kernel("indexed csm left_outer: total_bytes overflow".into())
-            })?;
-            let out_col = self.memory.alloc::<u8>(total_bytes)?;
-            let dst_ptr = *out_col.device_ptr();
-            runtime
-                .prepare_first_use(&out_col, launch_stream, Access::Write)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "indexed csm left_outer: prepare left out_col {} failed: {}",
-                        col_idx, e
-                    ))
-                })?;
-            if inner_bytes > 0 {
-                let src_col = inner_left_buf
-                    .as_ref()
-                    .expect("inner_count > 0")
-                    .column(col_idx)
-                    .ok_or_else(|| XlogError::Kernel("inner_left col missing".into()))?;
-                // SAFETY: dtod async on cu_stream.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr,
-                        *src_col.device_ptr(),
-                        inner_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "indexed csm left_outer: dtod inner_left col {} failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if unmatched_bytes > 0 {
-                let src_col = unmatched_left.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("unmatched_left col {} not found", col_idx))
-                })?;
-                // SAFETY: bounded by total_bytes.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr + inner_bytes as u64,
-                        *src_col.device_ptr(),
-                        unmatched_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "indexed csm left_outer: dtod unmatched col {} failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if let Some(b) = out_col.runtime_block() {
-                runtime
-                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "indexed csm left_outer: finish_block_use (left col {}) failed: {}",
-                            col_idx, e
-                        ))
-                    })?;
-            }
-            result_columns.push(out_col.into());
-        }
-
-        // Per-right-column: inner_right | zeros.
-        for col_idx in 0..right.arity() {
-            let elem_size = right
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("indexed csm left_outer: right inner_bytes overflow".into())
-                })?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "indexed csm left_outer: right unmatched_bytes overflow".into(),
-                    )
-                })?;
-            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
-                XlogError::Kernel("indexed csm left_outer: right total_bytes overflow".into())
-            })?;
-            let out_col = self.memory.alloc::<u8>(total_bytes)?;
-            let dst_ptr = *out_col.device_ptr();
-            runtime
-                .prepare_first_use(&out_col, launch_stream, Access::Write)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "indexed csm left_outer: prepare right out_col {} failed: {}",
-                        col_idx, e
-                    ))
-                })?;
-            if total_bytes > 0 {
-                // SAFETY: zero-fill whole column on cu_stream.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemsetD8Async(
-                        dst_ptr,
-                        0,
-                        total_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "indexed csm left_outer: zero-fill right col {} failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if inner_bytes > 0 {
-                let src_col = inner_right_buf
-                    .as_ref()
-                    .expect("inner_count > 0")
-                    .column(col_idx)
-                    .ok_or_else(|| XlogError::Kernel("inner_right col missing".into()))?;
-                // SAFETY: dtod async on cu_stream.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr,
-                        *src_col.device_ptr(),
-                        inner_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "indexed csm left_outer: dtod inner_right col {} failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if let Some(b) = out_col.runtime_block() {
-                runtime
-                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "indexed csm left_outer: finish_block_use (right col {}) failed: {}",
-                            col_idx, e
-                        ))
-                    })?;
-            }
-            result_columns.push(out_col.into());
-        }
-
-        rec_d.commit(runtime).map_err(|e| {
-            XlogError::Kernel(format!(
-                "indexed csm left_outer: phase-E commit failed: {}",
-                e
-            ))
-        })?;
+        // Concatenate each output column on the launch stream.
+        let result_columns = self.concatenate_left_outer_columns_on_stream(
+            left,
+            right,
+            inner_left_buf.as_ref(),
+            inner_right_buf.as_ref(),
+            &unmatched_left,
+            inner_count_u32 as u64,
+            unmatched_rows,
+            &cu_stream,
+            launch_stream,
+            runtime,
+            "indexed csm left_outer",
+        )?;
 
         // Guard u32 metadata cast.
         if total_rows > u32::MAX as u64 {
@@ -11092,40 +10986,13 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
-        // Step A: SEMI mask (d_has_match) — used for unmatched
+        // Build the match mask used for unmatched detection,
         // detection later. Plus PROBE count + materialize for
         // inner-join row indices.
         let d_has_match = self.memory.alloc::<u8>(num_left as usize)?;
         let d_count_only = self.memory.alloc::<u32>(1)?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
-        // Fence alloc-ready → launch_stream for d_count_only
-        // before the memset writes it (the memset runs ahead
-        // of the recorder's preflight below).
-        runtime
-            .prepare_first_use(&d_count_only, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "left_outer recorded: prepare d_count_only failed: {}",
-                    e
-                ))
-            })?;
-        // SAFETY: runtime-backed 4-byte buffer.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_count_only.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "cuMemsetD8Async (left_outer d_count_only) failed: {:?}",
-                    res
-                )));
-            }
-        }
-
         let semi_func = device
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SEMI)
             .ok_or_else(|| XlogError::Kernel("hash_join_semi kernel not found".to_string()))?;
@@ -11153,58 +11020,81 @@ impl super::CudaKernelProvider {
         })?;
 
         // SAFETY: hash_join_semi 11-arg signature.
-        unsafe {
-            semi_func.clone().launch_on_stream(
-                &cu_stream,
-                cfg,
-                (
-                    &left_packed.hashes,
-                    num_left,
-                    &table.bucket_offsets,
-                    &table.bucket_counts,
-                    &table.bucket_entries,
-                    &table.bucket_entry_hashes,
-                    table.bucket_mask,
-                    &left_packed.packed_keys,
-                    &right_packed.packed_keys,
-                    left_packed.key_bytes,
-                    &d_has_match,
-                ),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("hash_join_semi (on_stream) failed: {}", e)))?;
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            // SAFETY: rec_a owns d_count_only for the complete enqueue interval.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_count_only.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemsetD8Async (left_outer d_count_only) failed: {:?}",
+                        res
+                    )));
+                }
+            }
 
-        let max_output_count_only = 0u32;
-        // SAFETY: hash_join_probe_v2 14-arg signature; raw-param launch.
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                num_left.as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                table.bucket_mask.as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&right_packed.packed_keys).as_kernel_param(),
-                left_packed.key_bytes.as_kernel_param(),
-                (&d_dummy_left).as_kernel_param(),
-                (&d_dummy_right).as_kernel_param(),
-                (&d_count_only).as_kernel_param(),
-                max_output_count_only.as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch_on_stream(&cu_stream, cfg, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_probe_v2 (count, on_stream, left_outer) failed: {}",
-                        e
-                    ))
-                })?;
-        }
+            unsafe {
+                semi_func.clone().launch_in(
+                    enqueue,
+                    cfg,
+                    (
+                        &left_packed.hashes,
+                        num_left,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
+                        &left_packed.packed_keys,
+                        &right_packed.packed_keys,
+                        left_packed.key_bytes,
+                        &d_has_match,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("hash_join_semi (on_stream) failed: {}", e)))?;
 
-        rec_a.commit(runtime).map_err(|e| {
+            let max_output_count_only = 0u32;
+            // SAFETY: hash_join_probe_v2 14-arg signature; raw-param launch.
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&left_packed.hashes).as_kernel_param(),
+                    num_left.as_kernel_param(),
+                    (&table.bucket_offsets).as_kernel_param(),
+                    (&table.bucket_counts).as_kernel_param(),
+                    (&table.bucket_entries).as_kernel_param(),
+                    (&table.bucket_entry_hashes).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
+                    (&left_packed.packed_keys).as_kernel_param(),
+                    (&right_packed.packed_keys).as_kernel_param(),
+                    left_packed.key_bytes.as_kernel_param(),
+                    (&d_dummy_left).as_kernel_param(),
+                    (&d_dummy_right).as_kernel_param(),
+                    (&d_count_only).as_kernel_param(),
+                    max_output_count_only.as_kernel_param(),
+                ];
+                probe_func
+                    .clone()
+                    .launch_in(enqueue, cfg, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_probe_v2 (count, on_stream, left_outer) failed: {}",
+                            e
+                        ))
+                    })?;
+            }
+
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_a = unsafe { rec_a.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+
+        rec_a.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (left_outer): semi/count commit failed: {}",
                 e
@@ -11234,31 +11124,6 @@ impl super::CudaKernelProvider {
         let d_output_left = self.memory.alloc::<u32>(alloc_len)?;
         let d_output_right = self.memory.alloc::<u32>(alloc_len)?;
         let d_output_count = self.memory.alloc::<u32>(1)?;
-        // Fence alloc-ready → launch_stream for d_output_count
-        // before the memset (memset runs ahead of preflight).
-        runtime
-            .prepare_first_use(&d_output_count, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "left_outer recorded: prepare d_output_count failed: {}",
-                    e
-                ))
-            })?;
-        // SAFETY: runtime-backed 4-byte buffer.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_output_count.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "cuMemsetD8Async (left_outer d_output_count) failed: {:?}",
-                    res
-                )));
-            }
-        }
 
         let mut rec_b = LaunchRecorder::new_strict(launch_stream);
         rec_b.read(&left_packed.hashes);
@@ -11279,35 +11144,56 @@ impl super::CudaKernelProvider {
         })?;
 
         // SAFETY: hash_join_probe_v2 14-arg materialize.
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                num_left.as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                table.bucket_mask.as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&right_packed.packed_keys).as_kernel_param(),
-                left_packed.key_bytes.as_kernel_param(),
-                (&d_output_left).as_kernel_param(),
-                (&d_output_right).as_kernel_param(),
-                (&d_output_count).as_kernel_param(),
-                max_output_u32.as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch_on_stream(&cu_stream, cfg, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_probe_v2 (materialize, on_stream, left_outer) failed: {}",
-                        e
-                    ))
-                })?;
-        }
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            // SAFETY: rec_b owns d_output_count for the complete enqueue interval.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_output_count.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemsetD8Async (left_outer d_output_count) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&left_packed.hashes).as_kernel_param(),
+                    num_left.as_kernel_param(),
+                    (&table.bucket_offsets).as_kernel_param(),
+                    (&table.bucket_counts).as_kernel_param(),
+                    (&table.bucket_entries).as_kernel_param(),
+                    (&table.bucket_entry_hashes).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
+                    (&left_packed.packed_keys).as_kernel_param(),
+                    (&right_packed.packed_keys).as_kernel_param(),
+                    left_packed.key_bytes.as_kernel_param(),
+                    (&d_output_left).as_kernel_param(),
+                    (&d_output_right).as_kernel_param(),
+                    (&d_output_count).as_kernel_param(),
+                    max_output_u32.as_kernel_param(),
+                ];
+                probe_func
+                    .clone()
+                    .launch_in(enqueue, cfg, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_probe_v2 (materialize, on_stream, left_outer) failed: {}",
+                            e
+                        ))
+                    })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_b = unsafe { rec_b.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
 
-        rec_b.commit(runtime).map_err(|e| {
+        rec_b.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (left_outer): materialize commit failed: {}",
                 e
@@ -11324,7 +11210,7 @@ impl super::CudaKernelProvider {
             .read_join_output_count_metadata(&d_output_count)?
             .min(max_output_u32);
 
-        // Step B: mask_not(d_has_match) → d_no_match, then
+        // Invert d_has_match into d_no_match, then
         // recorded compact tail filters `left` to unmatched_left.
         let d_no_match = self.memory.alloc::<u8>(num_left as usize)?;
         let mask_not_fn = device
@@ -11341,15 +11227,18 @@ impl super::CudaKernelProvider {
             ))
         })?;
         // SAFETY: mask_not(in_mask, out_mask, num_rows)
-        unsafe {
-            mask_not_fn.clone().launch_on_stream(
-                &cu_stream,
-                cfg,
-                (&d_has_match, &d_no_match, num_left),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("mask_not (on_stream) failed: {}", e)))?;
-        rec_c.commit(runtime).map_err(|e| {
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                mask_not_fn
+                    .clone()
+                    .launch_in(enqueue, cfg, (&d_has_match, &d_no_match, num_left))
+            }
+            .map_err(|e| XlogError::Kernel(format!("mask_not (on_stream) failed: {}", e)))
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_c = unsafe { rec_c.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+        rec_c.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (left_outer): mask_not commit failed: {}",
                 e
@@ -11366,7 +11255,7 @@ impl super::CudaKernelProvider {
             return self.create_empty_buffer(combined_schema);
         }
 
-        // Step C: gather inner-left and inner-right on stream
+        // Gather inner-left and inner-right on stream
         // (only when there are inner matches). Wrap the
         // gather kernels in a recorder so reads of
         // `left.column[i]`, `right.column[i]`, and the index
@@ -11378,27 +11267,6 @@ impl super::CudaKernelProvider {
         let inner_left_buf;
         let inner_right_buf;
         if inner_count > 0 {
-            let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
-            for col_idx in 0..left.columns.len() {
-                let c = left.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("Left column {} not found", col_idx))
-                })?;
-                rec_gather.read_column(c);
-            }
-            for col_idx in 0..right.columns.len() {
-                let c = right.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("Right column {} not found", col_idx))
-                })?;
-                rec_gather.read_column(c);
-            }
-            rec_gather.read(&d_output_left);
-            rec_gather.read(&d_output_right);
-            rec_gather.preflight(runtime).map_err(|e| {
-                XlogError::Kernel(format!(
-                    "hash_join_v2_recorded (left_outer): gather preflight failed: {}",
-                    e
-                ))
-            })?;
             inner_left_buf = Some(self.gather_buffer_by_indices_on_stream(
                 left,
                 &d_output_left,
@@ -11415,18 +11283,12 @@ impl super::CudaKernelProvider {
                 launch_stream,
                 runtime,
             )?);
-            rec_gather.commit(runtime).map_err(|e| {
-                XlogError::Kernel(format!(
-                    "hash_join_v2_recorded (left_outer): gather commit failed: {}",
-                    e
-                ))
-            })?;
         } else {
             inner_left_buf = None;
             inner_right_buf = None;
         }
 
-        // Step D: concatenate per-column on launch_stream.
+        // Concatenate per-column on launch_stream.
         // Left columns: inner_left | unmatched_left.
         // Right columns: inner_right | zeros.
         //
@@ -11442,240 +11304,19 @@ impl super::CudaKernelProvider {
         // subsequent drop of `unmatched_left` /
         // `inner_*_buf` correctly waits for the dtod copies
         // to complete.
-        let mut rec_d = LaunchRecorder::new_strict(launch_stream);
-        for col_idx in 0..unmatched_left.columns.len() {
-            let c = unmatched_left.column(col_idx).ok_or_else(|| {
-                XlogError::Kernel(format!("unmatched_left col {} not found", col_idx))
-            })?;
-            rec_d.read_column(c);
-        }
-        if let Some(b) = inner_left_buf.as_ref() {
-            for col_idx in 0..b.columns.len() {
-                let c = b.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("inner_left col {} not found", col_idx))
-                })?;
-                rec_d.read_column(c);
-            }
-        }
-        if let Some(b) = inner_right_buf.as_ref() {
-            for col_idx in 0..b.columns.len() {
-                let c = b.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("inner_right col {} not found", col_idx))
-                })?;
-                rec_d.read_column(c);
-            }
-        }
-        rec_d.preflight(runtime).map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_v2_recorded (left_outer): step-D preflight failed: {}",
-                e
-            ))
-        })?;
-
-        let mut result_columns: Vec<CudaColumn> = Vec::with_capacity(combined_schema.arity());
-        let inner_rows = inner_count as u64;
-
-        // Per-left-column concat.
-        for col_idx in 0..left.arity() {
-            let elem_size = left
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: inner_bytes overflow".to_string())
-                })?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: unmatched_bytes overflow".to_string())
-                })?;
-            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
-                XlogError::Kernel("Left outer join: total_bytes overflow".to_string())
-            })?;
-
-            let out_col = self.memory.alloc::<u8>(total_bytes)?;
-            let dst_ptr = *out_col.device_ptr();
-            // Fence alloc-ready → launch_stream for out_col
-            // before the dtod-copies write it.
-            runtime
-                .prepare_first_use(&out_col, launch_stream, Access::Write)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "left_outer recorded: prepare left out_col {} failed: {}",
-                        col_idx, e
-                    ))
-                })?;
-
-            if inner_bytes > 0 {
-                let src_col = inner_left_buf
-                    .as_ref()
-                    .expect("inner_count > 0 but inner_left_buf is None")
-                    .column(col_idx)
-                    .ok_or_else(|| {
-                        XlogError::Kernel(format!("inner_left col {} not found", col_idx))
-                    })?;
-                // SAFETY: cuMemcpyDtoDAsync_v2 on cu_stream.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr,
-                        *src_col.device_ptr(),
-                        inner_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "cuMemcpyDtoDAsync (left_outer inner_left col {}) failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if unmatched_bytes > 0 {
-                let src_col = unmatched_left.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("unmatched_left col {} not found", col_idx))
-                })?;
-                // SAFETY: dst_ptr + inner_bytes is in-bounds
-                // (inner_bytes + unmatched_bytes == total_bytes).
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr + inner_bytes as u64,
-                        *src_col.device_ptr(),
-                        unmatched_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "cuMemcpyDtoDAsync (left_outer unmatched_left col {}) failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-
-            // Record use on launch_stream so end-of-scope drop
-            // (when result_columns goes out of scope down the
-            // line via output buffer drop) defers correctly.
-            if let Some(b) = out_col.runtime_block() {
-                runtime
-                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "hash_join_v2_recorded (left_outer): finish_block_use \
-                         (left col {}) failed: {}",
-                            col_idx, e
-                        ))
-                    })?;
-            }
-            result_columns.push(out_col.into());
-        }
-
-        // Per-right-column: inner_right | zeros.
-        for col_idx in 0..right.arity() {
-            let elem_size = right
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: right inner_bytes overflow".to_string())
-                })?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: right unmatched_bytes overflow".to_string())
-                })?;
-            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
-                XlogError::Kernel("Left outer join: right total_bytes overflow".to_string())
-            })?;
-
-            let out_col = self.memory.alloc::<u8>(total_bytes)?;
-            let dst_ptr = *out_col.device_ptr();
-            // Fence alloc-ready → launch_stream for out_col
-            // before the memset / dtod-copy write it.
-            runtime
-                .prepare_first_use(&out_col, launch_stream, Access::Write)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "left_outer recorded: prepare right out_col {} failed: {}",
-                        col_idx, e
-                    ))
-                })?;
-
-            // Zero whole column (unmatched portion will stay
-            // zero; inner portion will be overwritten by the
-            // dtod copy below if inner_bytes > 0).
-            if total_bytes > 0 {
-                // SAFETY: out_col has total_bytes bytes; cu_stream is valid.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemsetD8Async(
-                        dst_ptr,
-                        0,
-                        total_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "cuMemsetD8Async (left_outer right col {}) failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if inner_bytes > 0 {
-                let src_col = inner_right_buf
-                    .as_ref()
-                    .expect("inner_count > 0 but inner_right_buf is None")
-                    .column(col_idx)
-                    .ok_or_else(|| {
-                        XlogError::Kernel(format!("inner_right col {} not found", col_idx))
-                    })?;
-                // SAFETY: cuMemcpyDtoDAsync_v2 on cu_stream.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr,
-                        *src_col.device_ptr(),
-                        inner_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "cuMemcpyDtoDAsync (left_outer inner_right col {}) failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-
-            if let Some(b) = out_col.runtime_block() {
-                runtime
-                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "hash_join_v2_recorded (left_outer): finish_block_use \
-                         (right col {}) failed: {}",
-                            col_idx, e
-                        ))
-                    })?;
-            }
-            result_columns.push(out_col.into());
-        }
-
-        // Commit the step-D recorder NOW that every dtod
-        // copy is queued. The recorded event captures up to
-        // commit time, so a subsequent drop of any source
-        // buffer (unmatched_left / inner_*_buf) correctly
-        // waits.
-        rec_d.commit(runtime).map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_v2_recorded (left_outer): step-D commit failed: {}",
-                e
-            ))
-        })?;
+        let result_columns = self.concatenate_left_outer_columns_on_stream(
+            left,
+            right,
+            inner_left_buf.as_ref(),
+            inner_right_buf.as_ref(),
+            &unmatched_left,
+            inner_count as u64,
+            unmatched_rows,
+            &cu_stream,
+            launch_stream,
+            runtime,
+            "hash_join_v2_recorded left_outer",
+        )?;
 
         // d_num_rows scalar for the output buffer (uploaded
         // synchronously; no launch_stream work touches it).
@@ -11841,28 +11482,33 @@ impl super::CudaKernelProvider {
         //   bucket_offsets, bucket_counts, bucket_entries,
         //   bucket_entry_hashes, bucket_mask, probe_keys,
         //   build_keys, key_bytes, mask). 11 args.
-        unsafe {
-            func.clone().launch_on_stream(
-                &cu_stream,
-                cfg,
-                (
-                    &left_packed.hashes,
-                    num_left,
-                    &table.bucket_offsets,
-                    &table.bucket_counts,
-                    &table.bucket_entries,
-                    &table.bucket_entry_hashes,
-                    table.bucket_mask,
-                    &left_packed.packed_keys,
-                    &right_packed.packed_keys,
-                    left_packed.key_bytes,
-                    &d_mask,
-                ),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("{} (on_stream) failed: {}", kernel_name, e)))?;
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                func.clone().launch_in(
+                    enqueue,
+                    cfg,
+                    (
+                        &left_packed.hashes,
+                        num_left,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
+                        &left_packed.packed_keys,
+                        &right_packed.packed_keys,
+                        left_packed.key_bytes,
+                        &d_mask,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("{} (on_stream) failed: {}", kernel_name, e)))
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
 
-        rec.commit(runtime).map_err(|e| {
+        rec.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (semi/anti): commit failed: {}",
                 e
@@ -12142,28 +11788,6 @@ impl super::CudaKernelProvider {
         let d_count_only = self.memory.alloc::<u32>(1)?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
-        // Fence alloc-ready → launch_stream for d_count_only
-        // before the memset (memset runs ahead of preflight).
-        runtime
-            .prepare_first_use(&d_count_only, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!("indexed inner: prepare d_count_only failed: {}", e))
-            })?;
-        // SAFETY: 4-byte runtime-backed buffer.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_count_only.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "cuMemsetD8Async (indexed inner d_count_only) failed: {:?}",
-                    res
-                )));
-            }
-        }
 
         let max_output_count_only = 0u32;
         let mut rec_count = LaunchRecorder::new_strict(launch_stream);
@@ -12181,34 +11805,55 @@ impl super::CudaKernelProvider {
             XlogError::Kernel(format!("indexed inner: count-pass preflight failed: {}", e))
         })?;
         // SAFETY: 14-arg probe via raw-param launch.
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                num_left.as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                table.bucket_mask.as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&index.packed_keys).as_kernel_param(),
-                index.key_bytes.as_kernel_param(),
-                (&d_dummy_left).as_kernel_param(),
-                (&d_dummy_right).as_kernel_param(),
-                (&d_count_only).as_kernel_param(),
-                max_output_count_only.as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch_on_stream(&cu_stream, probe_config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_probe_v2 (indexed count, on_stream) failed: {}",
-                        e
-                    ))
-                })?;
-        }
-        rec_count.commit(runtime).map_err(|e| {
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            // SAFETY: rec_count owns d_count_only for the complete enqueue interval.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_count_only.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemsetD8Async (indexed inner d_count_only) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&left_packed.hashes).as_kernel_param(),
+                    num_left.as_kernel_param(),
+                    (&table.bucket_offsets).as_kernel_param(),
+                    (&table.bucket_counts).as_kernel_param(),
+                    (&table.bucket_entries).as_kernel_param(),
+                    (&table.bucket_entry_hashes).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
+                    (&left_packed.packed_keys).as_kernel_param(),
+                    (&index.packed_keys).as_kernel_param(),
+                    index.key_bytes.as_kernel_param(),
+                    (&d_dummy_left).as_kernel_param(),
+                    (&d_dummy_right).as_kernel_param(),
+                    (&d_count_only).as_kernel_param(),
+                    max_output_count_only.as_kernel_param(),
+                ];
+                probe_func
+                    .clone()
+                    .launch_in(enqueue, probe_config, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_probe_v2 (indexed count, on_stream) failed: {}",
+                            e
+                        ))
+                    })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_count = unsafe { rec_count.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+        rec_count.commit().map_err(|e| {
             XlogError::Kernel(format!("indexed inner: count-pass commit failed: {}", e))
         })?;
 
@@ -12235,31 +11880,6 @@ impl super::CudaKernelProvider {
         let d_output_left = self.memory.alloc::<u32>(max_output_u32 as usize)?;
         let d_output_right = self.memory.alloc::<u32>(max_output_u32 as usize)?;
         let d_output_count = self.memory.alloc::<u32>(1)?;
-        // Fence alloc-ready → launch_stream for d_output_count
-        // before the memset.
-        runtime
-            .prepare_first_use(&d_output_count, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "indexed inner: prepare d_output_count failed: {}",
-                    e
-                ))
-            })?;
-        // SAFETY: 4-byte runtime-backed buffer.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_output_count.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "cuMemsetD8Async (indexed inner d_output_count) failed: {:?}",
-                    res
-                )));
-            }
-        }
 
         let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
         rec_mat.read(&left_packed.hashes);
@@ -12279,34 +11899,55 @@ impl super::CudaKernelProvider {
             ))
         })?;
         // SAFETY: 14-arg probe via raw-param launch.
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                num_left.as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                table.bucket_mask.as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&index.packed_keys).as_kernel_param(),
-                index.key_bytes.as_kernel_param(),
-                (&d_output_left).as_kernel_param(),
-                (&d_output_right).as_kernel_param(),
-                (&d_output_count).as_kernel_param(),
-                max_output_u32.as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch_on_stream(&cu_stream, probe_config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_probe_v2 (indexed mat, on_stream) failed: {}",
-                        e
-                    ))
-                })?;
-        }
-        rec_mat.commit(runtime).map_err(|e| {
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            // SAFETY: rec_mat owns d_output_count for the complete enqueue interval.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_output_count.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemsetD8Async (indexed inner d_output_count) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&left_packed.hashes).as_kernel_param(),
+                    num_left.as_kernel_param(),
+                    (&table.bucket_offsets).as_kernel_param(),
+                    (&table.bucket_counts).as_kernel_param(),
+                    (&table.bucket_entries).as_kernel_param(),
+                    (&table.bucket_entry_hashes).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
+                    (&left_packed.packed_keys).as_kernel_param(),
+                    (&index.packed_keys).as_kernel_param(),
+                    index.key_bytes.as_kernel_param(),
+                    (&d_output_left).as_kernel_param(),
+                    (&d_output_right).as_kernel_param(),
+                    (&d_output_count).as_kernel_param(),
+                    max_output_u32.as_kernel_param(),
+                ];
+                probe_func
+                    .clone()
+                    .launch_in(enqueue, probe_config, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_probe_v2 (indexed mat, on_stream) failed: {}",
+                            e
+                        ))
+                    })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+        rec_mat.commit().map_err(|e| {
             XlogError::Kernel(format!("indexed inner: materialize commit failed: {}", e))
         })?;
 
@@ -12321,25 +11962,7 @@ impl super::CudaKernelProvider {
         }
         let output_rows = result_count as u32;
 
-        // Gather both sides on launch_stream.
-        let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
-        for col_idx in 0..left.columns.len() {
-            let c = left
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Left column {} not found", col_idx)))?;
-            rec_gather.read_column(c);
-        }
-        for col_idx in 0..right.columns.len() {
-            let c = right
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Right column {} not found", col_idx)))?;
-            rec_gather.read_column(c);
-        }
-        rec_gather.read(&d_output_left);
-        rec_gather.read(&d_output_right);
-        rec_gather.preflight(runtime).map_err(|e| {
-            XlogError::Kernel(format!("indexed inner: gather preflight failed: {}", e))
-        })?;
+        // Gather both sides through independent complete recorder transactions.
         let gathered_left = self.gather_buffer_by_indices_on_stream(
             left,
             &d_output_left,
@@ -12356,9 +11979,6 @@ impl super::CudaKernelProvider {
             launch_stream,
             runtime,
         )?;
-        rec_gather.commit(runtime).map_err(|e| {
-            XlogError::Kernel(format!("indexed inner: gather commit failed: {}", e))
-        })?;
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
@@ -12438,32 +12058,37 @@ impl super::CudaKernelProvider {
             XlogError::Kernel(format!("indexed semi/anti: preflight failed: {}", e))
         })?;
         // SAFETY: 11-arg semi/anti.
-        unsafe {
-            func.clone().launch_on_stream(
-                &cu_stream,
-                cfg,
-                (
-                    &left_packed.hashes,
-                    num_left,
-                    &table.bucket_offsets,
-                    &table.bucket_counts,
-                    &table.bucket_entries,
-                    &table.bucket_entry_hashes,
-                    table.bucket_mask,
-                    &left_packed.packed_keys,
-                    &index.packed_keys,
-                    index.key_bytes,
-                    &d_mask,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "{} (on_stream, indexed) failed: {}",
-                kernel_name, e
-            ))
-        })?;
-        rec.commit(runtime)
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                func.clone().launch_in(
+                    enqueue,
+                    cfg,
+                    (
+                        &left_packed.hashes,
+                        num_left,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
+                        &left_packed.packed_keys,
+                        &index.packed_keys,
+                        index.key_bytes,
+                        &d_mask,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "{} (on_stream, indexed) failed: {}",
+                    kernel_name, e
+                ))
+            })
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("indexed semi/anti: commit failed: {}", e)))?;
 
         self.compact_buffer_by_device_mask_counted_recorded(left, &d_mask, launch_stream)
@@ -12518,37 +12143,11 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
-        // Step A: SEMI mask + PROBE count.
+        // Build the match mask and count matched pairs.
         let d_has_match = self.memory.alloc::<u8>(num_left as usize)?;
         let d_count_only = self.memory.alloc::<u32>(1)?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
-        // Fence alloc-ready → launch_stream for d_count_only
-        // before the memset.
-        runtime
-            .prepare_first_use(&d_count_only, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "indexed left_outer: prepare d_count_only failed: {}",
-                    e
-                ))
-            })?;
-        // SAFETY: 4-byte runtime-backed buffer.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_count_only.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "cuMemsetD8Async (indexed left_outer d_count_only) failed: {:?}",
-                    res
-                )));
-            }
-        }
-
         let semi_func = device
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SEMI)
             .ok_or_else(|| XlogError::Kernel("hash_join_semi kernel not found".to_string()))?;
@@ -12575,62 +12174,83 @@ impl super::CudaKernelProvider {
             ))
         })?;
         // SAFETY: hash_join_semi 11-arg.
-        unsafe {
-            semi_func.clone().launch_on_stream(
-                &cu_stream,
-                cfg,
-                (
-                    &left_packed.hashes,
-                    num_left,
-                    &table.bucket_offsets,
-                    &table.bucket_counts,
-                    &table.bucket_entries,
-                    &table.bucket_entry_hashes,
-                    table.bucket_mask,
-                    &left_packed.packed_keys,
-                    &index.packed_keys,
-                    index.key_bytes,
-                    &d_has_match,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_semi (on_stream, indexed left_outer) failed: {}",
-                e
-            ))
-        })?;
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            // SAFETY: rec_a owns d_count_only for the complete enqueue interval.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_count_only.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemsetD8Async (indexed left_outer d_count_only) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+            unsafe {
+                semi_func.clone().launch_in(
+                    enqueue,
+                    cfg,
+                    (
+                        &left_packed.hashes,
+                        num_left,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
+                        &left_packed.packed_keys,
+                        &index.packed_keys,
+                        index.key_bytes,
+                        &d_has_match,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_semi (on_stream, indexed left_outer) failed: {}",
+                    e
+                ))
+            })?;
 
-        let max_output_count_only = 0u32;
-        // SAFETY: hash_join_probe_v2 14-arg count pass.
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                num_left.as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                table.bucket_mask.as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&index.packed_keys).as_kernel_param(),
-                index.key_bytes.as_kernel_param(),
-                (&d_dummy_left).as_kernel_param(),
-                (&d_dummy_right).as_kernel_param(),
-                (&d_count_only).as_kernel_param(),
-                max_output_count_only.as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch_on_stream(&cu_stream, cfg, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_probe_v2 (count, on_stream, indexed left_outer) failed: {}",
-                        e
-                    ))
-                })?;
-        }
-        rec_a.commit(runtime).map_err(|e| {
+            let max_output_count_only = 0u32;
+            // SAFETY: hash_join_probe_v2 14-arg count pass.
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&left_packed.hashes).as_kernel_param(),
+                    num_left.as_kernel_param(),
+                    (&table.bucket_offsets).as_kernel_param(),
+                    (&table.bucket_counts).as_kernel_param(),
+                    (&table.bucket_entries).as_kernel_param(),
+                    (&table.bucket_entry_hashes).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
+                    (&left_packed.packed_keys).as_kernel_param(),
+                    (&index.packed_keys).as_kernel_param(),
+                    index.key_bytes.as_kernel_param(),
+                    (&d_dummy_left).as_kernel_param(),
+                    (&d_dummy_right).as_kernel_param(),
+                    (&d_count_only).as_kernel_param(),
+                    max_output_count_only.as_kernel_param(),
+                ];
+                probe_func
+                    .clone()
+                    .launch_in(enqueue, cfg, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_probe_v2 (count, on_stream, indexed left_outer) failed: {}",
+                            e
+                        ))
+                    })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_a = unsafe { rec_a.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+        rec_a.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed left_outer: semi/count commit failed: {}",
                 e
@@ -12660,31 +12280,6 @@ impl super::CudaKernelProvider {
         let d_output_left = self.memory.alloc::<u32>(alloc_len)?;
         let d_output_right = self.memory.alloc::<u32>(alloc_len)?;
         let d_output_count = self.memory.alloc::<u32>(1)?;
-        // Fence alloc-ready → launch_stream for d_output_count
-        // before the memset.
-        runtime
-            .prepare_first_use(&d_output_count, launch_stream, Access::Write)
-            .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "indexed left_outer: prepare d_output_count failed: {}",
-                    e
-                ))
-            })?;
-        // SAFETY: 4-byte runtime-backed buffer.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_output_count.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "cuMemsetD8Async (indexed left_outer d_output_count) failed: {:?}",
-                    res
-                )));
-            }
-        }
 
         let mut rec_b = LaunchRecorder::new_strict(launch_stream);
         rec_b.read(&left_packed.hashes);
@@ -12704,34 +12299,55 @@ impl super::CudaKernelProvider {
             ))
         })?;
         // SAFETY: hash_join_probe_v2 14-arg materialize.
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                num_left.as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                table.bucket_mask.as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&index.packed_keys).as_kernel_param(),
-                index.key_bytes.as_kernel_param(),
-                (&d_output_left).as_kernel_param(),
-                (&d_output_right).as_kernel_param(),
-                (&d_output_count).as_kernel_param(),
-                max_output_u32.as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch_on_stream(&cu_stream, cfg, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_probe_v2 (mat, on_stream, indexed left_outer) failed: {}",
-                        e
-                    ))
-                })?;
-        }
-        rec_b.commit(runtime).map_err(|e| {
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            // SAFETY: rec_b owns d_output_count for the complete enqueue interval.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_output_count.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemsetD8Async (indexed left_outer d_output_count) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&left_packed.hashes).as_kernel_param(),
+                    num_left.as_kernel_param(),
+                    (&table.bucket_offsets).as_kernel_param(),
+                    (&table.bucket_counts).as_kernel_param(),
+                    (&table.bucket_entries).as_kernel_param(),
+                    (&table.bucket_entry_hashes).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
+                    (&left_packed.packed_keys).as_kernel_param(),
+                    (&index.packed_keys).as_kernel_param(),
+                    index.key_bytes.as_kernel_param(),
+                    (&d_output_left).as_kernel_param(),
+                    (&d_output_right).as_kernel_param(),
+                    (&d_output_count).as_kernel_param(),
+                    max_output_u32.as_kernel_param(),
+                ];
+                probe_func
+                    .clone()
+                    .launch_in(enqueue, cfg, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_probe_v2 (mat, on_stream, indexed left_outer) failed: {}",
+                            e
+                        ))
+                    })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_b = unsafe { rec_b.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+        rec_b.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed left_outer: materialize commit failed: {}",
                 e
@@ -12745,7 +12361,7 @@ impl super::CudaKernelProvider {
             .read_join_output_count_metadata(&d_output_count)?
             .min(max_output_u32);
 
-        // Step B: mask_not → unmatched filter via recorded compact tail.
+        // Invert the match mask, then compact the unmatched rows.
         let d_no_match = self.memory.alloc::<u8>(num_left as usize)?;
         let mask_not_fn = device
             .get_func(FILTER_MODULE, filter_kernels::MASK_NOT)
@@ -12760,20 +12376,23 @@ impl super::CudaKernelProvider {
             ))
         })?;
         // SAFETY: mask_not(in, out, n).
-        unsafe {
-            mask_not_fn.clone().launch_on_stream(
-                &cu_stream,
-                cfg,
-                (&d_has_match, &d_no_match, num_left),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "mask_not (on_stream, indexed left_outer) failed: {}",
-                e
-            ))
-        })?;
-        rec_c.commit(runtime).map_err(|e| {
+        let enqueue = |enqueue: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                mask_not_fn
+                    .clone()
+                    .launch_in(enqueue, cfg, (&d_has_match, &d_no_match, num_left))
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "mask_not (on_stream, indexed left_outer) failed: {}",
+                    e
+                ))
+            })
+        };
+        // SAFETY: preflight retained every accessed allocation for this exact stream.
+        let rec_c = unsafe { rec_c.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(LaunchEnqueueError::into_xlog_error)?;
+        rec_c.commit().map_err(|e| {
             XlogError::Kernel(format!("indexed left_outer: mask_not commit failed: {}", e))
         })?;
 
@@ -12787,7 +12406,7 @@ impl super::CudaKernelProvider {
             return self.create_empty_buffer(combined_schema);
         }
 
-        // Step C: gather inner sides. Same outer-recorder
+        // Gather the matched rows. The same outer-recorder
         // wrapping as the non-indexed LeftOuter — registers
         // launch_stream reads on left/right columns and the
         // probe-output index buffers so the caller's drop of
@@ -12796,27 +12415,6 @@ impl super::CudaKernelProvider {
         let inner_left_buf;
         let inner_right_buf;
         if inner_count > 0 {
-            let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
-            for col_idx in 0..left.columns.len() {
-                let c = left.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("Left column {} not found", col_idx))
-                })?;
-                rec_gather.read_column(c);
-            }
-            for col_idx in 0..right.columns.len() {
-                let c = right.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("Right column {} not found", col_idx))
-                })?;
-                rec_gather.read_column(c);
-            }
-            rec_gather.read(&d_output_left);
-            rec_gather.read(&d_output_right);
-            rec_gather.preflight(runtime).map_err(|e| {
-                XlogError::Kernel(format!(
-                    "indexed left_outer: gather preflight failed: {}",
-                    e
-                ))
-            })?;
             inner_left_buf = Some(self.gather_buffer_by_indices_on_stream(
                 left,
                 &d_output_left,
@@ -12833,216 +12431,29 @@ impl super::CudaKernelProvider {
                 launch_stream,
                 runtime,
             )?);
-            rec_gather.commit(runtime).map_err(|e| {
-                XlogError::Kernel(format!("indexed left_outer: gather commit failed: {}", e))
-            })?;
         } else {
             inner_left_buf = None;
             inner_right_buf = None;
         }
 
-        // Step D: concatenate per-column on launch_stream.
-        // Same step-D recorder discipline as the non-indexed
+        // Concatenate per-column on launch_stream.
+        // Use the same deferred concatenation recorder discipline as the non-indexed
         // LeftOuter: re-record source columns AFTER the dtod
         // copies are queued, so a drop of `unmatched_left` /
         // `inner_*_buf` waits on the correct event.
-        let mut rec_d = LaunchRecorder::new_strict(launch_stream);
-        for col_idx in 0..unmatched_left.columns.len() {
-            let c = unmatched_left.column(col_idx).ok_or_else(|| {
-                XlogError::Kernel(format!("unmatched_left col {} not found", col_idx))
-            })?;
-            rec_d.read_column(c);
-        }
-        if let Some(b) = inner_left_buf.as_ref() {
-            for col_idx in 0..b.columns.len() {
-                let c = b.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("inner_left col {} not found", col_idx))
-                })?;
-                rec_d.read_column(c);
-            }
-        }
-        if let Some(b) = inner_right_buf.as_ref() {
-            for col_idx in 0..b.columns.len() {
-                let c = b.column(col_idx).ok_or_else(|| {
-                    XlogError::Kernel(format!("inner_right col {} not found", col_idx))
-                })?;
-                rec_d.read_column(c);
-            }
-        }
-        rec_d.preflight(runtime).map_err(|e| {
-            XlogError::Kernel(format!(
-                "indexed left_outer: step-D preflight failed: {}",
-                e
-            ))
-        })?;
-
-        let mut result_columns: Vec<CudaColumn> = Vec::with_capacity(combined_schema.arity());
-        let inner_rows = inner_count as u64;
-
-        for col_idx in 0..left.arity() {
-            let elem_size = left
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| XlogError::Kernel("inner_bytes overflow".to_string()))?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| XlogError::Kernel("unmatched_bytes overflow".to_string()))?;
-            let total_bytes = inner_bytes
-                .checked_add(unmatched_bytes)
-                .ok_or_else(|| XlogError::Kernel("total_bytes overflow".to_string()))?;
-            let out_col = self.memory.alloc::<u8>(total_bytes)?;
-            let dst_ptr = *out_col.device_ptr();
-            // Fence alloc-ready → launch_stream for out_col.
-            runtime
-                .prepare_first_use(&out_col, launch_stream, Access::Write)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "indexed left_outer: prepare left out_col {} failed: {}",
-                        col_idx, e
-                    ))
-                })?;
-            if inner_bytes > 0 {
-                let src_col = inner_left_buf
-                    .as_ref()
-                    .expect("inner_count > 0")
-                    .column(col_idx)
-                    .ok_or_else(|| XlogError::Kernel("inner_left col missing".to_string()))?;
-                // SAFETY: dtod async on cu_stream.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr,
-                        *src_col.device_ptr(),
-                        inner_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "indexed left_outer: dtod copy inner_left col {} failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if unmatched_bytes > 0 {
-                let src_col = unmatched_left
-                    .column(col_idx)
-                    .ok_or_else(|| XlogError::Kernel("unmatched col missing".to_string()))?;
-                // SAFETY: bounded by total_bytes.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr + inner_bytes as u64,
-                        *src_col.device_ptr(),
-                        unmatched_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "indexed left_outer: dtod copy unmatched col {} failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if let Some(b) = out_col.runtime_block() {
-                runtime
-                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "indexed left_outer: finish_block_use (left col {}) failed: {}",
-                            col_idx, e
-                        ))
-                    })?;
-            }
-            result_columns.push(out_col.into());
-        }
-
-        for col_idx in 0..right.arity() {
-            let elem_size = right
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| XlogError::Kernel("right inner_bytes overflow".to_string()))?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| XlogError::Kernel("right unmatched_bytes overflow".to_string()))?;
-            let total_bytes = inner_bytes
-                .checked_add(unmatched_bytes)
-                .ok_or_else(|| XlogError::Kernel("right total_bytes overflow".to_string()))?;
-            let out_col = self.memory.alloc::<u8>(total_bytes)?;
-            let dst_ptr = *out_col.device_ptr();
-            // Fence alloc-ready → launch_stream for out_col.
-            runtime
-                .prepare_first_use(&out_col, launch_stream, Access::Write)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "indexed left_outer: prepare right out_col {} failed: {}",
-                        col_idx, e
-                    ))
-                })?;
-            if total_bytes > 0 {
-                // SAFETY: zero-fill the whole column.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemsetD8Async(
-                        dst_ptr,
-                        0,
-                        total_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "indexed left_outer: zero-fill right col {} failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if inner_bytes > 0 {
-                let src_col = inner_right_buf
-                    .as_ref()
-                    .expect("inner_count > 0")
-                    .column(col_idx)
-                    .ok_or_else(|| XlogError::Kernel("inner_right col missing".to_string()))?;
-                // SAFETY: dtod async on cu_stream.
-                unsafe {
-                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        dst_ptr,
-                        *src_col.device_ptr(),
-                        inner_bytes,
-                        cu_stream.cu_stream(),
-                    );
-                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                        return Err(XlogError::Kernel(format!(
-                            "indexed left_outer: dtod copy inner_right col {} failed: {:?}",
-                            col_idx, res
-                        )));
-                    }
-                }
-            }
-            if let Some(b) = out_col.runtime_block() {
-                runtime
-                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "indexed left_outer: finish_block_use (right col {}) failed: {}",
-                            col_idx, e
-                        ))
-                    })?;
-            }
-            result_columns.push(out_col.into());
-        }
-
-        // Commit step-D recorder; see non-indexed LeftOuter
-        // for the rationale.
-        rec_d.commit(runtime).map_err(|e| {
-            XlogError::Kernel(format!("indexed left_outer: step-D commit failed: {}", e))
-        })?;
+        let result_columns = self.concatenate_left_outer_columns_on_stream(
+            left,
+            right,
+            inner_left_buf.as_ref(),
+            inner_right_buf.as_ref(),
+            &unmatched_left,
+            inner_count as u64,
+            unmatched_rows,
+            &cu_stream,
+            launch_stream,
+            runtime,
+            "indexed left_outer",
+        )?;
 
         let d_num_rows = self.upload_device_row_count(total_rows as u32)?;
         Ok(CudaBuffer::from_columns_with_host_count(

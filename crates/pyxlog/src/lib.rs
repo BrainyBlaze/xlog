@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyBufferError, PyMemoryError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBool, PyDict, PyInt, PyList, PyTuple};
 
 use xlog_core::{MemoryBudget, Schema};
 #[cfg(feature = "arrow-device-import")]
@@ -35,6 +35,7 @@ mod logic;
 mod neural;
 mod program;
 mod relation_metadata;
+mod semantic_transition;
 mod training;
 mod types;
 pub(crate) use diagnostic_serialization::{pack_query_proof_traces, pack_rule_provenance};
@@ -46,8 +47,8 @@ use relation_metadata::RelationMetadataStore;
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
-// Every pyxlog DLPack import is consumed on CudaDevice's legacy default
-// stream. The Python Array API reserves integer 1 for that CUDA stream.
+// Ordinary callers use the legacy default; prepared callers supply their
+// actual stream. The Python Array API reserves integer 1 for the legacy stream.
 const DLPACK_CUDA_LEGACY_DEFAULT_STREAM: i64 = 1;
 
 #[cfg(feature = "arrow-device-import")]
@@ -260,7 +261,160 @@ pub(crate) fn parse_prob_engine_override(s: &str) -> PyResult<ProbEngine> {
     }
 }
 
+/// No native owner lock crosses a Python callback. Recheck even when a producer
+/// raises, so a caught exception cannot hide a revoked original authority.
+pub(crate) fn guarded_python_callback<T>(
+    check: impl Fn() -> PyResult<()>,
+    callback: impl FnOnce() -> PyResult<T>,
+) -> PyResult<T> {
+    check()?;
+    let result = callback();
+    let after = check();
+    match result {
+        Err(error) => Err(error),
+        Ok(value) => after.map(|()| value),
+    }
+}
+
+/// Export storage after the caller selected the consumer's DLPack stream.
+#[cfg(test)]
+pub(crate) fn dlpack_export_for_stream(
+    obj: &Bound<'_, PyAny>,
+    stream: Option<i64>,
+) -> PyResult<Py<PyAny>> {
+    dlpack_export_for_stream_guarded(obj, stream, &|| Ok(()))
+}
+
+fn dlpack_export_for_stream_guarded(
+    obj: &Bound<'_, PyAny>,
+    stream: Option<i64>,
+    check: &dyn Fn() -> PyResult<()>,
+) -> PyResult<Py<PyAny>> {
+    check()?;
+    let kwargs = PyDict::new(obj.py());
+    if let Some(stream) = stream {
+        kwargs.set_item("stream", stream)?;
+    }
+    // PyTorch intentionally rejects exporting autograd semantics via DLPack.
+    // Export only a shared-storage alias; the caller retains the original
+    // primal and applies returned adjoints to its original graph. Using the
+    // alias's standard protocol preserves producer/consumer stream ordering,
+    // which a raw torch.utils.dlpack.to_dlpack capsule cannot negotiate.
+    // Do not import an optional framework for other DLPack producers.
+    let sys = guarded_python_callback(check, || obj.py().import("sys"))?;
+    let modules = guarded_python_callback(check, || sys.getattr("modules"))?;
+    let mut producer = obj.clone();
+    if let Some(torch) =
+        guarded_python_callback(check, || modules.cast::<PyDict>()?.get_item("torch"))?
+    {
+        let tensor_type = guarded_python_callback(check, || torch.getattr("Tensor"))?;
+        let is_tensor = guarded_python_callback(check, || obj.is_instance(&tensor_type))?;
+        let requires_grad = if is_tensor {
+            let value = guarded_python_callback(check, || obj.getattr("requires_grad"))?;
+            guarded_python_callback(check, || value.extract::<bool>())?
+        } else {
+            false
+        };
+        if requires_grad {
+            let detach = guarded_python_callback(check, || tensor_type.getattr("detach"))?;
+            let alias = guarded_python_callback(check, || detach.call1((obj,)))?;
+            for method in ["data_ptr", "storage_offset", "stride"] {
+                let alias_method = guarded_python_callback(check, || alias.getattr(method))?;
+                let alias_value = guarded_python_callback(check, || alias_method.call0())?;
+                let original_method = guarded_python_callback(check, || obj.getattr(method))?;
+                let original_value = guarded_python_callback(check, || original_method.call0())?;
+                let equal = guarded_python_callback(check, || {
+                    alias_value.rich_compare(&original_value, pyo3::basic::CompareOp::Eq)
+                })?;
+                if !guarded_python_callback(check, || equal.is_truthy())? {
+                    return Err(PyBufferError::new_err(
+                        "DLPack transport alias changed the original tensor storage",
+                    ));
+                }
+            }
+            for attribute in ["shape", "dtype", "device"] {
+                let alias_value = guarded_python_callback(check, || alias.getattr(attribute))?;
+                let original_value = guarded_python_callback(check, || obj.getattr(attribute))?;
+                let equal = guarded_python_callback(check, || {
+                    alias_value.rich_compare(&original_value, pyo3::basic::CompareOp::Eq)
+                })?;
+                if !guarded_python_callback(check, || equal.is_truthy())? {
+                    return Err(PyBufferError::new_err(
+                        "DLPack transport alias changed the original tensor layout",
+                    ));
+                }
+            }
+            producer = alias;
+        }
+    }
+    let export = guarded_python_callback(check, || producer.getattr("__dlpack__"))?;
+    Ok(guarded_python_callback(check, || export.call((), Some(&kwargs)))?.unbind())
+}
+
 pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTensor> {
+    dlpack_from_py_for_stream(obj, DLPACK_CUDA_LEGACY_DEFAULT_STREAM)
+}
+
+/// Consume the standard producer protocol on the actual selected consumer stream.
+pub(crate) fn dlpack_from_py_for_stream(
+    obj: &Bound<'_, PyAny>,
+    consumer_stream: i64,
+) -> PyResult<DlpackManagedTensor> {
+    dlpack_from_py_for_stream_guarded(obj, consumer_stream, &|| Ok(()))
+}
+
+/// Read the producer's DLPack device declaration without Python conversions.
+/// Device kinds may be integer enums; the tuple and ordinal remain exact builtins.
+pub(crate) fn dlpack_device_pair(device: &Bound<'_, PyAny>) -> PyResult<(i32, i32)> {
+    let invalid_pair = || {
+        PyValueError::new_err(
+            "DLPack device must be an exact tuple (integer kind, exact integer id)",
+        )
+    };
+    if !device.is_exact_instance_of::<PyTuple>() {
+        return Err(invalid_pair());
+    }
+    let fields = device.cast::<PyTuple>()?;
+    if fields.len() != 2 {
+        return Err(invalid_pair());
+    }
+    let kind = fields.get_item(0)?;
+    let ordinal = fields.get_item(1)?;
+    if kind.is_instance_of::<PyBool>()
+        || !kind.is_instance_of::<PyInt>()
+        || !ordinal.is_exact_instance_of::<PyInt>()
+    {
+        return Err(invalid_pair());
+    }
+    // PyO3's signed integer extraction reads the checked PyLong payload, not
+    // overridden __int__/__index__. Never extract an arbitrary numeric object.
+    let device_type = kind.extract::<i32>()?;
+    let device_id = ordinal.extract::<i32>()?;
+    if device_type != xlog_cuda::dlpack::K_DLCUDA {
+        return Err(PyBufferError::new_err(format!(
+            "Unsupported DLPack producer device type {device_type} (device {device_id}); \
+             XLOG requires CUDA device memory (kDLCUDA=2)"
+        )));
+    }
+    if device_id < 0 {
+        return Err(PyValueError::new_err(
+            "DLPack device id must be nonnegative",
+        ));
+    }
+    Ok((device_type, device_id))
+}
+
+pub(crate) fn dlpack_from_py_for_stream_guarded(
+    obj: &Bound<'_, PyAny>,
+    consumer_stream: i64,
+    check: &dyn Fn() -> PyResult<()>,
+) -> PyResult<DlpackManagedTensor> {
+    if consumer_stream <= 0 || consumer_stream == 2 {
+        return Err(PyValueError::new_err(
+            "DLPack requires an explicit supported consumer stream",
+        ));
+    }
+    check()?;
     let py = obj.py();
 
     // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
@@ -269,27 +423,21 @@ pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTe
     } != 0
     {
         obj.clone()
-    } else if obj.hasattr("__dlpack__")? {
-        let (device_type, device_id): (i32, i32) =
-            obj.call_method0("__dlpack_device__")?.extract()?;
-        if device_type != xlog_cuda::dlpack::K_DLCUDA {
-            return Err(PyBufferError::new_err(format!(
-                "Unsupported DLPack producer device type {device_type} (device {device_id}); \
-                 XLOG requires CUDA device memory (kDLCUDA=2)"
-            )));
-        }
+    } else if guarded_python_callback(check, || obj.hasattr("__dlpack__"))? {
+        let method = guarded_python_callback(check, || obj.getattr("__dlpack_device__"))?;
+        let device = guarded_python_callback(check, || method.call0())?;
+        dlpack_device_pair(&device)?;
         // Passing the consumer stream makes the producer order any pending
         // non-default-stream writes before XLOG reads the tensor. A raw
         // capsule cannot negotiate synchronization and must already be ready
-        // for the legacy default stream when supplied by the caller.
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("stream", DLPACK_CUDA_LEGACY_DEFAULT_STREAM)?;
-        obj.call_method("__dlpack__", (), Some(&kwargs))?
+        // for the selected consumer stream when supplied by the caller.
+        dlpack_export_for_stream_guarded(obj, Some(consumer_stream), check)?.into_bound(py)
     } else {
         return Err(PyValueError::new_err(
             "Expected a DLPack capsule or an object with __dlpack__",
         ));
     };
+    check()?;
 
     // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
     if unsafe {
@@ -328,6 +476,247 @@ pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTe
 
     // SAFETY: ptr is non-null (checked above) and points to a DLManagedTensor matching the DLPack specification layout
     Ok(unsafe { DlpackManagedTensor::from_raw(ptr as *mut xlog_cuda::DLManagedTensor) })
+}
+
+#[cfg(test)]
+mod dlpack_guard_tests {
+    use super::*;
+
+    #[test]
+    fn dlpack_device_callback_refusal_stops_all_later_producer_callbacks() {
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            py.run(
+                cr#"
+from enum import IntEnum
+class DeviceKind(IntEnum):
+    CUDA = 2
+refused = False
+calls = []
+class Producer:
+    def __getattribute__(self, name):
+        if refused:
+            calls.append(('late_lookup', name))
+        return object.__getattribute__(self, name)
+    def __dlpack_device__(self):
+        global refused
+        calls.append('device')
+        refused = True
+        return (DeviceKind.CUDA, 0)
+    def __dlpack__(self, *, stream):
+        calls.append('export')
+        raise AssertionError('export ran after authority refusal')
+producer = Producer()
+"#,
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+            let producer = globals.get_item("producer").unwrap().unwrap();
+            let check = || {
+                if globals.get_item("refused")?.unwrap().extract::<bool>()? {
+                    Err(PyValueError::new_err(
+                        "original producer authority was refused",
+                    ))
+                } else {
+                    Ok(())
+                }
+            };
+            // The ordinary caller has no authority guard: the same production
+            // importer reaches export. This controls the guarded-path check.
+            assert!(super::dlpack_from_py_for_stream(&producer, 19).is_err());
+            py.run(
+                c"assert 'export' in calls\ncalls.clear()\nrefused = False",
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+            let error = match super::dlpack_from_py_for_stream_guarded(&producer, 19, &check) {
+                Ok(_) => panic!("revoked producer handed off a native tensor"),
+                Err(error) => error,
+            };
+            assert!(error
+                .to_string()
+                .contains("original producer authority was refused"));
+            assert_eq!(
+                globals
+                    .get_item("calls")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<Vec<String>>()
+                    .unwrap(),
+                ["device"]
+            );
+        });
+    }
+
+    #[test]
+    fn dlpack_integer_device_kinds_reach_original_export_and_capsule_validation() {
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            py.run(
+                cr#"
+from enum import IntEnum
+class DeviceKind(IntEnum):
+    CUDA = 2
+    def __int__(self):
+        raise AssertionError('device kind conversion invoked')
+    def __index__(self):
+        raise AssertionError('device kind index invoked')
+class IntegerKind(int):
+    def __int__(self):
+        raise AssertionError('integer subclass conversion invoked')
+    def __index__(self):
+        raise AssertionError('integer subclass index invoked')
+calls = []
+class Producer:
+    def __dlpack_device__(self):
+        calls.append('device')
+        return device
+    def __dlpack__(self, *, stream):
+        assert stream == 19
+        calls.append('export')
+        return None
+producer = Producer()
+devices = [(2, 0), (DeviceKind.CUDA, 0), (IntegerKind(2), 0)]
+"#,
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+            let producer = globals.get_item("producer").unwrap().unwrap();
+            let devices = globals.get_item("devices").unwrap().unwrap();
+            for device in devices.cast::<PyList>().unwrap().iter() {
+                globals.set_item("device", device).unwrap();
+                py.run(c"calls.clear()", Some(&globals), None).unwrap();
+                let error = super::dlpack_from_py_for_stream_guarded(&producer, 19, &|| Ok(()))
+                    .err()
+                    .expect("invalid capsule must not be consumed");
+                assert!(error.to_string().contains("Invalid DLPack capsule"));
+                assert_eq!(
+                    globals
+                        .get_item("calls")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<Vec<String>>()
+                        .unwrap(),
+                    ["device", "export"]
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn dlpack_device_pair_rejects_invalid_fields_before_export() {
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            py.run(
+                cr#"
+class Pair(tuple):
+    def __iter__(self):
+        raise AssertionError('tuple subclass iterated')
+    def __getitem__(self, index):
+        raise AssertionError('tuple subclass indexed')
+class IntegerKind(int):
+    def __int__(self):
+        raise AssertionError('kind converted')
+    def __index__(self):
+        raise AssertionError('kind index invoked')
+calls = []
+class Producer:
+    def __dlpack_device__(self):
+        calls.append('device')
+        return device
+    def __dlpack__(self, *, stream):
+        calls.append('export')
+        return None
+producer = Producer()
+devices = [None, [2, 0], Pair((2, 0)), (), (2,), (2, 0, 0),
+           (True, 0), (2, False), (2.0, 0), (2, 0.0), ('2', 0),
+           (1, 0), (-1, 0), (2, -1), (2, 1 << 31), (1 << 31, 0),
+           (IntegerKind(1), 0), (IntegerKind(-1), 0),
+           (IntegerKind(1 << 80), 0), (2, IntegerKind(0))]
+"#,
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+            let producer = globals.get_item("producer").unwrap().unwrap();
+            let devices = globals.get_item("devices").unwrap().unwrap();
+            for device in devices.cast::<PyList>().unwrap().iter() {
+                globals.set_item("device", device).unwrap();
+                py.run(c"calls.clear()", Some(&globals), None).unwrap();
+                assert!(
+                    super::dlpack_from_py_for_stream_guarded(&producer, 19, &|| Ok(())).is_err()
+                );
+                assert_eq!(
+                    globals
+                        .get_item("calls")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<Vec<String>>()
+                        .unwrap(),
+                    ["device"]
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn dlpack_device_metadata_never_invokes_custom_integer_conversion() {
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            py.run(
+                cr#"
+calls = []
+class DeviceIndex:
+    def __int__(self):
+        calls.append('int')
+        return 2
+    def __index__(self):
+        calls.append('index')
+        return 2
+class Producer:
+    def __dlpack_device__(self):
+        calls.append('device')
+        return device
+    def __dlpack__(self, *, stream):
+        calls.append('export')
+        raise AssertionError('export ran after invalid device metadata')
+producer = Producer()
+devices = [(2, DeviceIndex()), (DeviceIndex(), 0)]
+"#,
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+            let producer = globals.get_item("producer").unwrap().unwrap();
+            let devices = globals.get_item("devices").unwrap().unwrap();
+            for device in devices.cast::<PyList>().unwrap().iter() {
+                globals.set_item("device", device).unwrap();
+                py.run(c"calls.clear()", Some(&globals), None).unwrap();
+                let error = super::dlpack_from_py_for_stream_guarded(&producer, 19, &|| Ok(()))
+                    .err()
+                    .expect("custom device conversion must not hand off a native tensor");
+                assert!(error
+                    .to_string()
+                    .contains("exact tuple (integer kind, exact integer id)"));
+                assert_eq!(
+                    globals
+                        .get_item("calls")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<Vec<String>>()
+                        .unwrap(),
+                    ["device"]
+                );
+            }
+        });
+    }
 }
 
 #[pyfunction]
@@ -858,6 +1247,17 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CompiledLogicProgram>()?;
     m.add_class::<CompiledConditionedProgram>()?;
     m.add_class::<LogicRelationSession>()?;
+    m.add_class::<semantic_transition::PySemanticTransitionSession>()?;
+    m.add_class::<semantic_transition::PySemanticTransitionController>()?;
+    m.add_class::<semantic_transition::PySemanticTransitionTaskUse>()?;
+    m.add_class::<semantic_transition::PySemanticPublishedParent>()?;
+    m.add_class::<semantic_transition::PyNativeTensorAllocation>()?;
+    m.add_class::<semantic_transition::PySemanticPreparedStep>()?;
+    m.add_class::<semantic_transition::PySemanticGradientDelivery>()?;
+    m.add_class::<semantic_transition::PySemanticTensorContentWitness>()?;
+    m.add_class::<semantic_transition::PySemanticModelForwardWitness>()?;
+    #[cfg(feature = "semantic-policy")]
+    m.add_class::<semantic_transition::PySemanticPolicyInvocation>()?;
     m.add_class::<relation_metadata::RelationEvidence>()?;
     m.add_class::<LogicQueryResult>()?;
     m.add_class::<LogicEvalResult>()?;

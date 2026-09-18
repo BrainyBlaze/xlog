@@ -1052,6 +1052,125 @@ pub struct LogicProgram {
     epistemic_provenance: Option<EpistemicProvenance>,
 }
 
+/// A self-contained XLOG program whose three selected Boolean queries define a
+/// semantic task's expected truth. Compilation preserves the authored source;
+/// observation executes the canonical GPU evaluator before deriving any result.
+/// Source facts are the complete concrete inputs, and query ordinals retain the
+/// caller's order. No caller-supplied answers enter this adapter.
+pub struct SemanticLogicTaskProgram {
+    source: String,
+    query_ordinals: [usize; 3],
+    program: LogicProgram,
+}
+
+impl std::fmt::Debug for SemanticLogicTaskProgram {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SemanticLogicTaskProgram")
+            .field("source", &self.source)
+            .field("query_ordinals", &self.query_ordinals)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SemanticLogicTaskProgram {
+    /// Compile a complete source program and select three zero-arity query results.
+    /// This performs no GPU execution; the native semantic owner calls `observe`
+    /// during cold binding, including when restoring a retained task.
+    pub fn compile(source: String, query_ordinals: [usize; 3]) -> Result<Self> {
+        let program = LogicProgram::compile(&source)?;
+        if !program.source_program.imports.is_empty() {
+            return Err(XlogError::Compilation(
+                "semantic task source must contain its complete program without imports".into(),
+            ));
+        }
+        for ordinal in query_ordinals {
+            let query = program.source_program.queries.get(ordinal).ok_or_else(|| {
+                XlogError::Compilation(format!("semantic task query ordinal {ordinal} is absent"))
+            })?;
+            if !query_output_vars(query).is_empty() {
+                return Err(XlogError::Compilation(format!(
+                    "semantic task query ordinal {ordinal} must have a zero-arity result",
+                )));
+            }
+        }
+        Ok(Self {
+            source,
+            query_ordinals,
+            program,
+        })
+    }
+}
+
+impl xlog_cuda::SemanticTaskProgram for SemanticLogicTaskProgram {
+    fn observe(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+    ) -> std::result::Result<xlog_cuda::SemanticTaskObservation, xlog_cuda::SemanticTransitionError>
+    {
+        let execution_error = |error: XlogError| xlog_cuda::SemanticTransitionError::InvalidInput {
+            detail: format!("native semantic task program: {error}"),
+        };
+        let result = self
+            .program
+            .evaluate(Arc::clone(&provider), HashMap::new())
+            .map_err(execution_error)?;
+        // Query counts may already be cached on the host. Complete every
+        // executor stream explicitly before treating any result as observed;
+        // the semantic owner's cold binding poisons the session on failure.
+        let context = provider.device().inner().stream().context();
+        context.bind_to_thread().map_err(|error| {
+            execution_error(XlogError::Kernel(format!(
+                "task observer context binding failed: {error}"
+            )))
+        })?;
+        context.synchronize().map_err(|error| {
+            execution_error(XlogError::Kernel(format!(
+                "task observer completion failed: {error}"
+            )))
+        })?;
+        let mut input_bytes = b"xlog.semantic-task.query-selection.v1\0".to_vec();
+        let mut result_bytes = b"xlog.semantic-task.boolean-results.v1\0".to_vec();
+        let mut expected_truth = [xlog_cuda::SemanticTruth::False; 3];
+        for (slot, ordinal) in self.query_ordinals.into_iter().enumerate() {
+            let query = result.queries.get(ordinal).ok_or_else(|| {
+                execution_error(XlogError::Execution(format!(
+                    "semantic task query ordinal {ordinal} was not returned"
+                )))
+            })?;
+            if query.buffer.schema().arity() != 0 {
+                return Err(execution_error(XlogError::Execution(format!(
+                    "semantic task query ordinal {ordinal} returned a nonzero-arity relation",
+                ))));
+            }
+            // This is the canonical completed-result boundary. Device validity
+            // and logical row count are checked before the cold result is used;
+            // no observation or host transfer occurs in the transition hot loop.
+            let rows = provider
+                .validated_logical_row_count(&query.buffer)
+                .map_err(execution_error)?;
+            if rows > 1 {
+                return Err(execution_error(XlogError::Execution(format!(
+                    "semantic task query ordinal {ordinal} returned multiple zero-arity rows",
+                ))));
+            }
+            input_bytes.extend_from_slice(&(ordinal as u64).to_le_bytes());
+            result_bytes.extend_from_slice(&(rows as u64).to_le_bytes());
+            expected_truth[slot] = if rows == 1 {
+                xlog_cuda::SemanticTruth::True
+            } else {
+                xlog_cuda::SemanticTruth::False
+            };
+        }
+        Ok(xlog_cuda::SemanticTaskObservation {
+            program_source: self.source.as_bytes().to_vec(),
+            input_bytes,
+            result_bytes,
+            expected_truth,
+        })
+    }
+}
+
 /// Read-only metadata for one argument of a compiled relation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogicArgumentSchema {
@@ -6006,6 +6125,28 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    #[test]
+    fn semantic_task_program_compiles_distinct_domains_and_preserves_query_order() {
+        for source in [
+            "pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2).",
+            "pred connected(u32,u32). connected(3,4). ?- connected(3,4). ?- connected(4,3).",
+        ] {
+            let observer = SemanticLogicTaskProgram::compile(source.to_owned(), [1, 0, 1]).unwrap();
+            assert_eq!(observer.source, source);
+            assert_eq!(observer.query_ordinals, [1, 0, 1]);
+        }
+    }
+
+    #[test]
+    fn semantic_task_program_rejects_non_boolean_or_missing_queries() {
+        let source = "pred rainfall(u32). rainfall(8). ?- rainfall(X). ?- rainfall(8).";
+        assert!(SemanticLogicTaskProgram::compile(source.to_owned(), [0, 1, 1]).is_err());
+        assert!(SemanticLogicTaskProgram::compile(source.to_owned(), [1, 2, 1]).is_err());
+        assert!(
+            SemanticLogicTaskProgram::compile("invalid program".to_owned(), [0, 1, 0]).is_err()
+        );
+    }
+
     use xlog_core::{symbol, MemoryBudget, ScalarType};
     use xlog_cuda::cuda_graph::CudaGraphNodeKind;
     use xlog_ir::RirNode;
@@ -6112,6 +6253,41 @@ mod tests {
             clean_submodules.success(),
             "recursive submodule checkout is dirty"
         );
+    }
+
+    #[test]
+    #[ignore = "requires authorized CUDA execution"]
+    fn logic_observer_derives_task_truth_from_native_query_execution() -> Result<()> {
+        let provider = ground_term_encoding_test_provider().ok_or_else(|| {
+            XlogError::Execution("authorized CUDA observer test requires a working provider".into())
+        })?;
+        let source = "pred connected(u32,u32). pred reachable(u32,u32). connected(3,4). reachable(X,Y) :- connected(X,Y). ?- reachable(3,4). ?- reachable(4,3).";
+        let forward = SemanticLogicTaskProgram::compile(source.to_owned(), [0, 1, 1])?;
+        let reversed = SemanticLogicTaskProgram::compile(source.to_owned(), [1, 0, 0])?;
+        let observed = xlog_cuda::SemanticTaskProgram::observe(&forward, Arc::clone(&provider))
+            .map_err(|error| XlogError::Execution(error.to_string()))?;
+        let reordered = xlog_cuda::SemanticTaskProgram::observe(&reversed, provider)
+            .map_err(|error| XlogError::Execution(error.to_string()))?;
+        assert_eq!(
+            observed.expected_truth,
+            [
+                xlog_cuda::SemanticTruth::True,
+                xlog_cuda::SemanticTruth::False,
+                xlog_cuda::SemanticTruth::False,
+            ]
+        );
+        assert_eq!(
+            reordered.expected_truth,
+            [
+                xlog_cuda::SemanticTruth::False,
+                xlog_cuda::SemanticTruth::True,
+                xlog_cuda::SemanticTruth::True,
+            ]
+        );
+        assert_eq!(observed.program_source, source.as_bytes());
+        assert_ne!(observed.input_bytes, reordered.input_bytes);
+        assert_ne!(observed.result_bytes, reordered.result_bytes);
+        Ok(())
     }
 
     struct ResidentEnvGuard {
@@ -7178,6 +7354,7 @@ mod tests {
 
         const WARMUP_RUNS: usize = 2;
         const MEASURED_RUNS: usize = 5;
+        let latency_diagnostics_enabled = resident_latency_diagnostics_enabled()?;
         let mut warmup_seconds = Vec::with_capacity(WARMUP_RUNS);
         let mut warmup_device_seconds = Vec::with_capacity(WARMUP_RUNS);
         let mut resident_seconds = Vec::with_capacity(MEASURED_RUNS);
@@ -7185,7 +7362,14 @@ mod tests {
         for run in 0..(WARMUP_RUNS + MEASURED_RUNS) {
             let started = std::time::Instant::now();
             let resident = {
-                let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+                let _env = if latency_diagnostics_enabled {
+                    ResidentEnvGuard::set(&[
+                        ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+                        (RESIDENT_LATENCY_DIAGNOSTICS_ENV, "1"),
+                    ])
+                } else {
+                    ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")])
+                };
                 program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
             };
             assert_eq!(

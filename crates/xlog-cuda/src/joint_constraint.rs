@@ -916,37 +916,36 @@ impl JointConstraintCarrier {
         // live runtime-backed carrier column recorded above, and the
         // capacity metadata matches the allocation shapes. Corrupt
         // invalid arities or entity indices poison their row inside the kernel.
-        unsafe {
-            kernel
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (block, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        *domains.device_ptr(),
-                        *arguments.device_ptr(),
-                        *argument_arities.device_ptr(),
-                        *role_masks.device_ptr(),
-                        self.max_arity as u32,
-                        self.entities as u32,
-                        self.candidates as u32,
-                        self.labels as u32,
-                        self.domain_lanes as u32,
-                        abstain_label,
-                        *outputs.device_ptr(),
-                        *feasible_sets.device_ptr(),
-                    ),
-                )
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "solve launch failed: {e}"
-                    )))
-                })?;
+        let rec = unsafe {
+            rec.enqueue_prepared_with(&cu_stream, |enqueue| {
+                kernel
+                    .launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (block, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            *domains.device_ptr(),
+                            *arguments.device_ptr(),
+                            *argument_arities.device_ptr(),
+                            *role_masks.device_ptr(),
+                            self.max_arity as u32,
+                            self.entities as u32,
+                            self.candidates as u32,
+                            self.labels as u32,
+                            self.domain_lanes as u32,
+                            abstain_label,
+                            *outputs.device_ptr(),
+                            *feasible_sets.device_ptr(),
+                        ),
+                    )
+                    .map_err(|e| xlog_core::XlogError::Kernel(format!("solve launch failed: {e}")))
+            })
         }
-        rec.commit(&self.runtime).map_err(|e| {
+        .map_err(|error| CarrierError::Launch(error.into_xlog_error()))?;
+        rec.commit().map_err(|e| {
             CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
                 "solve launch commit failed: {e}"
             )))
@@ -1024,30 +1023,31 @@ impl JointConstraintCarrier {
         // SAFETY: joint_label_top2(scores, feasible_sets,
         // num_candidates, num_labels, map_results); every pointer is
         // a live runtime-backed carrier column recorded above.
-        unsafe {
-            kernel
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (block, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        *scores.device_ptr(),
-                        *feasible_sets.device_ptr(),
-                        self.candidates as u32,
-                        self.labels as u32,
-                        *map_results.device_ptr(),
-                    ),
-                )
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "top-two launch failed: {e}"
-                    )))
-                })?;
+        let rec = unsafe {
+            rec.enqueue_prepared_with(&cu_stream, |enqueue| {
+                kernel
+                    .launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (block, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            *scores.device_ptr(),
+                            *feasible_sets.device_ptr(),
+                            self.candidates as u32,
+                            self.labels as u32,
+                            *map_results.device_ptr(),
+                        ),
+                    )
+                    .map_err(|e| {
+                        xlog_core::XlogError::Kernel(format!("top-two launch failed: {e}"))
+                    })
+            })
         }
-        rec.commit(&self.runtime).map_err(|e| {
+        .map_err(|error| CarrierError::Launch(error.into_xlog_error()))?;
+        rec.commit().map_err(|e| {
             CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
                 "top-two launch commit failed: {e}"
             )))
@@ -1195,7 +1195,7 @@ impl JointConstraintCarrier {
         // kernel ABI exactly. Every pointer is a live runtime-backed
         // column recorded above, every launch uses the same stream,
         // and the scalar locals live through all enqueues.
-        unsafe {
+        let rec = unsafe {
             use std::ffi::c_void;
             let scores_p = *scores.device_ptr();
             let feasible_p = *feasible_sets.device_ptr();
@@ -1231,179 +1231,177 @@ impl JointConstraintCarrier {
                 &component_count_p as *const _ as *mut c_void,
                 &component_fuel_p as *const _ as *mut c_void,
             ];
-            plan_init_kernel
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (planner_grid, 1, 1),
-                        block_dim: (planner_threads, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut init_params[..],
-                )
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "component plan initialization failed: {e}"
-                    )))
-                })?;
+            rec.enqueue_prepared_with(&cu_stream, |enqueue| -> Result<(), xlog_core::XlogError> {
+                plan_init_kernel
+                    .launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (planner_grid, 1, 1),
+                            block_dim: (planner_threads, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut init_params[..],
+                    )
+                    .map_err(|e| {
+                        xlog_core::XlogError::Kernel(format!(
+                            "component plan initialization failed: {e}"
+                        ))
+                    })?;
 
-            let mut owner_params: [*mut c_void; 6] = [
-                &arguments_p as *const _ as *mut c_void,
-                &arities_p as *const _ as *mut c_void,
-                &num_candidates_v as *const _ as *mut c_void,
-                &max_arity_v as *const _ as *mut c_void,
-                &num_entities_v as *const _ as *mut c_void,
-                &entity_owners_p as *const _ as *mut c_void,
-            ];
-            entity_owners_kernel
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (candidate_grid, 1, 1),
-                        block_dim: (planner_threads, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut owner_params[..],
-                )
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "component entity ownership failed: {e}"
-                    )))
-                })?;
+                let mut owner_params: [*mut c_void; 6] = [
+                    &arguments_p as *const _ as *mut c_void,
+                    &arities_p as *const _ as *mut c_void,
+                    &num_candidates_v as *const _ as *mut c_void,
+                    &max_arity_v as *const _ as *mut c_void,
+                    &num_entities_v as *const _ as *mut c_void,
+                    &entity_owners_p as *const _ as *mut c_void,
+                ];
+                entity_owners_kernel
+                    .launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (candidate_grid, 1, 1),
+                            block_dim: (planner_threads, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut owner_params[..],
+                    )
+                    .map_err(|e| {
+                        xlog_core::XlogError::Kernel(format!(
+                            "component entity ownership failed: {e}"
+                        ))
+                    })?;
 
-            let mut union_params: [*mut c_void; 7] = [
-                &arguments_p as *const _ as *mut c_void,
-                &arities_p as *const _ as *mut c_void,
-                &num_candidates_v as *const _ as *mut c_void,
-                &max_arity_v as *const _ as *mut c_void,
-                &num_entities_v as *const _ as *mut c_void,
-                &entity_owners_p as *const _ as *mut c_void,
-                &parents_p as *const _ as *mut c_void,
-            ];
-            union_kernel
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (candidate_grid, 1, 1),
-                        block_dim: (planner_threads, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut union_params[..],
-                )
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "component union failed: {e}"
-                    )))
-                })?;
+                let mut union_params: [*mut c_void; 7] = [
+                    &arguments_p as *const _ as *mut c_void,
+                    &arities_p as *const _ as *mut c_void,
+                    &num_candidates_v as *const _ as *mut c_void,
+                    &max_arity_v as *const _ as *mut c_void,
+                    &num_entities_v as *const _ as *mut c_void,
+                    &entity_owners_p as *const _ as *mut c_void,
+                    &parents_p as *const _ as *mut c_void,
+                ];
+                union_kernel
+                    .launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (candidate_grid, 1, 1),
+                            block_dim: (planner_threads, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut union_params[..],
+                    )
+                    .map_err(|e| {
+                        xlog_core::XlogError::Kernel(format!("component union failed: {e}"))
+                    })?;
 
-            let mut compress_params: [*mut c_void; 3] = [
-                &parents_p as *const _ as *mut c_void,
-                &num_candidates_v as *const _ as *mut c_void,
-                &component_count_p as *const _ as *mut c_void,
-            ];
-            compress_kernel
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (candidate_grid, 1, 1),
-                        block_dim: (planner_threads, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut compress_params[..],
-                )
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "component compression failed: {e}"
-                    )))
-                })?;
+                let mut compress_params: [*mut c_void; 3] = [
+                    &parents_p as *const _ as *mut c_void,
+                    &num_candidates_v as *const _ as *mut c_void,
+                    &component_count_p as *const _ as *mut c_void,
+                ];
+                compress_kernel
+                    .launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (candidate_grid, 1, 1),
+                            block_dim: (planner_threads, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut compress_params[..],
+                    )
+                    .map_err(|e| {
+                        xlog_core::XlogError::Kernel(format!("component compression failed: {e}"))
+                    })?;
 
-            let mut exact_params: [*mut c_void; 16] = [
-                &scores_p as *const _ as *mut c_void,
-                &feasible_p as *const _ as *mut c_void,
-                &arguments_p as *const _ as *mut c_void,
-                &arities_p as *const _ as *mut c_void,
-                &domains_p as *const _ as *mut c_void,
-                &role_masks_p as *const _ as *mut c_void,
-                &parents_p as *const _ as *mut c_void,
-                &component_count_p as *const _ as *mut c_void,
-                &num_candidates_v as *const _ as *mut c_void,
-                &num_labels_v as *const _ as *mut c_void,
-                &lanes_v as *const _ as *mut c_void,
-                &max_arity_v as *const _ as *mut c_void,
-                &authorized as *const _ as *mut c_void,
-                &map_p as *const _ as *mut c_void,
-                &status_p as *const _ as *mut c_void,
-                &component_fuel_p as *const _ as *mut c_void,
-            ];
-            exact_kernel
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (num_candidates_v, 1, 1),
-                        block_dim: (32, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut exact_params[..],
-                )
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "component solve launch failed: {e}"
-                    )))
-                })?;
-            chain_dp_kernel
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (num_candidates_v, 1, 1),
-                        block_dim: (32, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut exact_params[..],
-                )
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "device-discovered chain DP launch failed: {e}"
-                    )))
-                })?;
-            let mut branch_params: [*mut c_void; 20] = [
-                &scores_p as *const _ as *mut c_void,
-                &feasible_p as *const _ as *mut c_void,
-                &arguments_p as *const _ as *mut c_void,
-                &arities_p as *const _ as *mut c_void,
-                &domains_p as *const _ as *mut c_void,
-                &role_masks_p as *const _ as *mut c_void,
-                &parents_p as *const _ as *mut c_void,
-                &component_count_p as *const _ as *mut c_void,
-                &num_candidates_v as *const _ as *mut c_void,
-                &num_labels_v as *const _ as *mut c_void,
-                &lanes_v as *const _ as *mut c_void,
-                &max_arity_v as *const _ as *mut c_void,
-                &authorized as *const _ as *mut c_void,
-                &map_p as *const _ as *mut c_void,
-                &status_p as *const _ as *mut c_void,
-                &component_fuel_p as *const _ as *mut c_void,
-                &search_assignment_p as *const _ as *mut c_void,
-                &search_best_label_p as *const _ as *mut c_void,
-                &search_best_total_p as *const _ as *mut c_void,
-                &search_alt_total_p as *const _ as *mut c_void,
-            ];
-            branch_and_bound_kernel
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (num_candidates_v, 1, 1),
-                        block_dim: (32, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut branch_params[..],
-                )
-                .map_err(|e| {
-                    CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
-                        "general exact branch-and-bound launch failed: {e}"
-                    )))
-                })?;
+                let mut exact_params: [*mut c_void; 16] = [
+                    &scores_p as *const _ as *mut c_void,
+                    &feasible_p as *const _ as *mut c_void,
+                    &arguments_p as *const _ as *mut c_void,
+                    &arities_p as *const _ as *mut c_void,
+                    &domains_p as *const _ as *mut c_void,
+                    &role_masks_p as *const _ as *mut c_void,
+                    &parents_p as *const _ as *mut c_void,
+                    &component_count_p as *const _ as *mut c_void,
+                    &num_candidates_v as *const _ as *mut c_void,
+                    &num_labels_v as *const _ as *mut c_void,
+                    &lanes_v as *const _ as *mut c_void,
+                    &max_arity_v as *const _ as *mut c_void,
+                    &authorized as *const _ as *mut c_void,
+                    &map_p as *const _ as *mut c_void,
+                    &status_p as *const _ as *mut c_void,
+                    &component_fuel_p as *const _ as *mut c_void,
+                ];
+                exact_kernel
+                    .launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (num_candidates_v, 1, 1),
+                            block_dim: (32, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut exact_params[..],
+                    )
+                    .map_err(|e| {
+                        xlog_core::XlogError::Kernel(format!("component solve launch failed: {e}"))
+                    })?;
+                chain_dp_kernel
+                    .launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (num_candidates_v, 1, 1),
+                            block_dim: (32, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut exact_params[..],
+                    )
+                    .map_err(|e| {
+                        xlog_core::XlogError::Kernel(format!(
+                            "device-discovered chain DP launch failed: {e}"
+                        ))
+                    })?;
+                let mut branch_params: [*mut c_void; 20] = [
+                    &scores_p as *const _ as *mut c_void,
+                    &feasible_p as *const _ as *mut c_void,
+                    &arguments_p as *const _ as *mut c_void,
+                    &arities_p as *const _ as *mut c_void,
+                    &domains_p as *const _ as *mut c_void,
+                    &role_masks_p as *const _ as *mut c_void,
+                    &parents_p as *const _ as *mut c_void,
+                    &component_count_p as *const _ as *mut c_void,
+                    &num_candidates_v as *const _ as *mut c_void,
+                    &num_labels_v as *const _ as *mut c_void,
+                    &lanes_v as *const _ as *mut c_void,
+                    &max_arity_v as *const _ as *mut c_void,
+                    &authorized as *const _ as *mut c_void,
+                    &map_p as *const _ as *mut c_void,
+                    &status_p as *const _ as *mut c_void,
+                    &component_fuel_p as *const _ as *mut c_void,
+                    &search_assignment_p as *const _ as *mut c_void,
+                    &search_best_label_p as *const _ as *mut c_void,
+                    &search_best_total_p as *const _ as *mut c_void,
+                    &search_alt_total_p as *const _ as *mut c_void,
+                ];
+                branch_and_bound_kernel
+                    .launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (num_candidates_v, 1, 1),
+                            block_dim: (32, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut branch_params[..],
+                    )
+                    .map_err(|e| {
+                        xlog_core::XlogError::Kernel(format!(
+                            "general exact branch-and-bound launch failed: {e}"
+                        ))
+                    })?;
+                Ok(())
+            })
         }
-        rec.commit(&self.runtime).map_err(|e| {
+        .map_err(|error| CarrierError::Launch(error.into_xlog_error()))?;
+        rec.commit().map_err(|e| {
             CarrierError::Launch(xlog_core::XlogError::Kernel(format!(
                 "component solve commit failed: {e}"
             )))

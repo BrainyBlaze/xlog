@@ -5,6 +5,104 @@ benchmarks, build scripts, and user-facing documentation. They are merge criteri
 not optional guidance. `CONTRIBUTING.md` describes the contribution workflow;
 `AGENTS.md` adds execution rules for automated contributors.
 
+## Current Human Execution Direction
+
+Implementation must advance the complete governing design through actual production
+code. Following the requested registration of lessons in this file and `AGENTS.md`,
+do not add tests or meta-work, run local component experiments, or loop on isolated
+component improvements. Generic testing and documentation prescriptions below do
+not authorize those activities against this direction. Do not delete existing tests
+or weaken repository checks to conceal this boundary.
+
+Runtime runs are permitted only on explicitly authorized RunPod GPUs through the
+real production path. Reading source, compiling, and fixing actual build failures
+are not runtime evidence or permission for local model execution. If a required
+integration check cannot run within this direction, report its exact unmet condition
+to the lead rather than inventing a substitute or bypassing branch protection.
+
+Every coherent change must receive an atomic commit and be pushed promptly. The lead
+owns integration into remote `main`. Source integration and complete runtime
+qualification are distinct: deliver code for integration without waiting for the
+entire project to become qualified, and never claim qualification from a merge.
+Standing human authorization for commit and push must not be replaced by a peer's
+older or narrower interpretation. Resource, installation, and execution limits remain
+separate. No unreviewed bulk staging, unrelated edits, or AI attribution trailers.
+
+## Lessons Applied to Production Work
+
+- The design's complete observable behavior is the target. An opcode declaration,
+  schema, validator, typed refusal, passing component, or audit does not implement a
+  missing transition, learning step, structural operation, or restored continuation.
+  Choose the next change by the missing connected production behavior, not by how
+  easily a local activity can be completed.
+- Follow each change from its authentic producer through native execution, public
+  bindings, output delivery, refusal, publication, and restoration. Keep one schema
+  and one numerical implementation. Do not invent producer-owned fields, fabricate
+  native objects, detach embeddings, substitute recorded outputs, or add a second
+  loader or model lowering to make an interface appear connected.
+- An invalid branch must not execute forbidden model or state-changing work. Masking
+  its output afterward is not conditional execution. Maintain the original graph,
+  backward path, ownership, and device-side control rather than reading validity on
+  the host or silently changing the numerical model.
+- Preserve real invocation, envelope, allocation, and random-stream generations.
+  Owner-bearing storage must survive asynchronous launches and captured graphs;
+  publish only after validating the exact candidate and generation. Refusal and
+  failure must not expose partial updates or advance protected state.
+- Gradient delivery must reach the original physical model parameters. A receipt,
+  retained buffer, replayable carrier, or parameter-shaped array alone is not an
+  optimizer update. Restoration must preserve the state needed for the next real
+  transition, including parameters, optimizer state, random state, and publication.
+- Bounded work must account for actual execution through final output and publication,
+  not merely a prefix, an estimate, or a renamed counter. Device residency requires
+  measured ZERO TRANSFER in the declared hot loop; source inspection, compiled
+  kernels, and historical narrower GPU runs do not prove the current full path.
+- Delegation does not transfer integration responsibility. Actual code and callers
+  must reach the canonical WSL tree, an atomic commit, the remote branch, and the
+  lead's main integration. An agent's report or an isolated worktree is not delivery.
+  Do not relocate work to Windows-mounted storage, overwrite dirty work, or remove
+  existing copies without explicit authority.
+- Use direct foreground commands and obey the current delegation limits. Coordinate
+  producer changes with their existing owners, keep dependent interfaces authentic,
+  and communicate actionable outcomes instead of status loops. Investigate a real
+  blocker and continue independent production work; do not manufacture new approval
+  gates, substitute tasks, or completion claims.
+- State evidence precisely: local commit, remote push, lead integration, compilation,
+  hardware execution, and complete-design acceptance are separate facts. Preserve
+  failed attempts and valid historical results without promoting them to a stronger
+  or newer claim. A protected branch rejecting a push is not permission to bypass it.
+
+## Goal-Directed Execution
+
+Optimize time to the complete, verified user goal, not the number of tasks, tests,
+documents, messages, or approvals produced.
+
+- Choose work that implements required behavior, closes a production integration,
+  removes a demonstrated bottleneck, or supplies evidence needed for the next real
+  decision. Do not repeatedly polish an isolated component while its required
+  production consumer remains disconnected.
+- Establish the actual producer contract before dependent implementation: data
+  meaning, layout, validity, ownership, lifetime, numerical behavior, and restoration.
+  Carry the smallest coherent production path through its consumers and failure
+  boundaries; independent component tests do not establish that the path works.
+- Necessary source, caller, dependency, history, and documentation research is part of
+  an assigned implementation within existing access rights. Do not invent per-file,
+  per-function, or tool-read-count approval gates. Navigation confidence and context
+  budgets guide efficient exploration; they do not prove absence or define authority.
+- Keep independent authorized work parallel. A data run, hardware gate, or another
+  owner's unfinished interface blocks only work that actually depends on it. Identify
+  the real bottleneck before an expensive run or an infrastructure change.
+- Verify changed behavior and affected boundaries, including required broader checks.
+  Reuse valid evidence for unchanged code; repeat a check when the change, environment,
+  or acceptance requirement justifies it, not to manufacture progress.
+- Coordinate around concrete results, interface changes, decisions, and actionable
+  blockers. Do not reopen settled choices or repeat unchanged status and acknowledgment
+  exchanges in place of implementation.
+- Preserve explicit access, write-set, resource, safety, and publication limits.
+  Urgency and documentation changes do not themselves authorize restricted reads,
+  GPU runs, spending, installation, commit, push, merge, or release. If new authority
+  is genuinely required, request one sufficient connected scope from the responsible
+  decision-maker and continue independent permitted work.
+
 ## Research Before Editing
 
 Every non-trivial change starts with an exact understanding of the current codebase.

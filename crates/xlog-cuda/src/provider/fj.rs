@@ -502,10 +502,14 @@ impl CudaKernelProvider {
                 let mut wp = self.memory().alloc::<u32>(count as usize + 1)?;
                 let lo_col = find_col(&frontier, ColTag::RangeLo(a), ctx)?;
                 let hi_col = find_col(&frontier, ColTag::RangeHi(a), ctx)?;
+                let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(count + 1)?;
                 let mut rec = LaunchRecorder::new_strict(launch_stream);
                 rec.read(lo_col);
                 rec.read(hi_col);
                 rec.write(&wp);
+                for level in scan_scratch.levels() {
+                    rec.read_write(level);
+                }
                 rec.preflight(runtime)
                     .map_err(|e| XlogError::Kernel(format!("{ctx}: wp preflight failed: {e}")))?;
                 let kernel = self
@@ -519,32 +523,37 @@ impl CudaKernelProvider {
                 // SAFETY: fj_expand_work_prefix_u32(parent_lo,
                 // parent_hi, n_frontier, work_prefix); buffers are
                 // device-resident and preflighted.
-                unsafe {
-                    kernel
-                        .clone()
-                        .launch_on_stream(
-                            &cu_stream,
-                            LaunchConfig {
-                                grid_dim: (grid, 1, 1),
-                                block_dim: (BLOCK_SIZE, 1, 1),
-                                shared_mem_bytes: 0,
-                            },
-                            (lo_col, hi_col, count, &mut wp),
-                        )
-                        .map_err(|e| {
-                            XlogError::Kernel(format!(
-                                "fj_expand_work_prefix_u32 launch failed: {e}"
-                            ))
-                        })?;
-                }
-                self.multiblock_scan_u32_inplace_on_stream(
-                    &mut wp,
-                    count + 1,
-                    &cu_stream,
-                    launch_stream,
-                    runtime,
-                )?;
-                rec.commit(runtime)
+                let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                    unsafe {
+                        kernel
+                            .clone()
+                            .launch_in(
+                                stream,
+                                LaunchConfig {
+                                    grid_dim: (grid, 1, 1),
+                                    block_dim: (BLOCK_SIZE, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (lo_col, hi_col, count, &mut wp),
+                            )
+                            .map_err(|e| {
+                                XlogError::Kernel(format!(
+                                    "fj_expand_work_prefix_u32 launch failed: {e}"
+                                ))
+                            })?;
+                    }
+                    self.multiblock_scan_u32_inplace_on_stream(
+                        &mut wp,
+                        count + 1,
+                        stream,
+                        &mut scan_scratch,
+                    )?;
+                    Ok(())
+                };
+                // SAFETY: preflight retained the accessed buffers and bound this stream.
+                let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                    .map_err(|error| error.into_xlog_error())?;
+                rec.commit()
                     .map_err(|e| XlogError::Kernel(format!("{ctx}: wp commit failed: {e}")))?;
                 cu_stream
                     .synchronize()
@@ -651,6 +660,7 @@ impl CudaKernelProvider {
             let const_hi: u32 = n_rows[a];
             let null_ptr: u64 = 0;
             if count_ran {
+                let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(total_work + 1)?;
                 let mut rec = LaunchRecorder::new_strict(launch_stream);
                 rec.read(norm[a].num_rows_device());
                 for i in depth..depth + c {
@@ -676,6 +686,9 @@ impl CudaKernelProvider {
                     }
                 }
                 rec.write(&marks);
+                for level in scan_scratch.levels() {
+                    rec.read_write(level);
+                }
                 rec.preflight(runtime).map_err(|e| {
                     XlogError::Kernel(format!("{ctx}: count preflight failed: {e}"))
                 })?;
@@ -696,59 +709,66 @@ impl CudaKernelProvider {
                 // total_work, group_marks). parent_lo/work_prefix
                 // are null when the cover atom is untouched; the
                 // kernel never dereferences them on that branch.
-                unsafe {
-                    let parent_lo_param = match work_prefix.as_ref() {
-                        Some(_) => find_col(&frontier, ColTag::RangeLo(a), ctx)?.as_kernel_param(),
-                        None => null_ptr.as_kernel_param(),
-                    };
-                    let wp_param = match work_prefix.as_ref() {
-                        Some(wp) => wp.as_kernel_param(),
-                        None => null_ptr.as_kernel_param(),
-                    };
-                    let mut params: Vec<*mut c_void> = vec![
-                        (&d_cover_tbl).as_kernel_param(),
-                        c_u32.as_kernel_param(),
-                        parent_lo_param,
-                        wp_param,
-                        has_parent_range.as_kernel_param(),
-                        const_lo.as_kernel_param(),
-                        const_hi.as_kernel_param(),
-                        count.as_kernel_param(),
-                        total_work.as_kernel_param(),
-                        identity_u32.as_kernel_param(),
-                        match d_fused_desc.as_ref() {
-                            Some(d) => d.as_kernel_param(),
+                let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                    unsafe {
+                        let parent_lo_param = match work_prefix.as_ref() {
+                            Some(_) => {
+                                find_col(&frontier, ColTag::RangeLo(a), ctx)?.as_kernel_param()
+                            }
                             None => null_ptr.as_kernel_param(),
-                        },
-                        n_fused_u32.as_kernel_param(),
-                        (&marks).as_kernel_param(),
-                    ];
-                    kernel
-                        .clone()
-                        .launch_on_stream(
-                            &cu_stream,
-                            LaunchConfig {
-                                grid_dim: (grid, 1, 1),
-                                block_dim: (BLOCK_SIZE, 1, 1),
-                                shared_mem_bytes: 0,
+                        };
+                        let wp_param = match work_prefix.as_ref() {
+                            Some(wp) => wp.as_kernel_param(),
+                            None => null_ptr.as_kernel_param(),
+                        };
+                        let mut params: Vec<*mut c_void> = vec![
+                            (&d_cover_tbl).as_kernel_param(),
+                            c_u32.as_kernel_param(),
+                            parent_lo_param,
+                            wp_param,
+                            has_parent_range.as_kernel_param(),
+                            const_lo.as_kernel_param(),
+                            const_hi.as_kernel_param(),
+                            count.as_kernel_param(),
+                            total_work.as_kernel_param(),
+                            identity_u32.as_kernel_param(),
+                            match d_fused_desc.as_ref() {
+                                Some(d) => d.as_kernel_param(),
+                                None => null_ptr.as_kernel_param(),
                             },
-                            &mut params,
-                        )
-                        .map_err(|e| {
-                            XlogError::Kernel(format!(
-                                "{} launch failed: {e}",
-                                width.count_kernel()
-                            ))
-                        })?;
-                }
-                self.multiblock_scan_u32_inplace_on_stream(
-                    &mut marks,
-                    total_work + 1,
-                    &cu_stream,
-                    launch_stream,
-                    runtime,
-                )?;
-                rec.commit(runtime)
+                            n_fused_u32.as_kernel_param(),
+                            (&marks).as_kernel_param(),
+                        ];
+                        kernel
+                            .clone()
+                            .launch_in(
+                                stream,
+                                LaunchConfig {
+                                    grid_dim: (grid, 1, 1),
+                                    block_dim: (BLOCK_SIZE, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                &mut params,
+                            )
+                            .map_err(|e| {
+                                XlogError::Kernel(format!(
+                                    "{} launch failed: {e}",
+                                    width.count_kernel()
+                                ))
+                            })?;
+                    }
+                    self.multiblock_scan_u32_inplace_on_stream(
+                        &mut marks,
+                        total_work + 1,
+                        stream,
+                        &mut scan_scratch,
+                    )?;
+                    Ok(())
+                };
+                // SAFETY: preflight retained the accessed buffers and bound this stream.
+                let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                    .map_err(|error| error.into_xlog_error())?;
+                rec.commit()
                     .map_err(|e| XlogError::Kernel(format!("{ctx}: count commit failed: {e}")))?;
             }
             let n_children = if count_ran {
@@ -948,137 +968,69 @@ impl CudaKernelProvider {
                 // n_copy_range_cols, child_var_cols, keep_cover_range,
                 // child_cover_lo, child_cover_hi). Nullable pointers
                 // are only dereferenced behind their flags.
-                unsafe {
-                    let parent_lo_param = match work_prefix.as_ref() {
-                        Some(_) => find_col(&frontier, ColTag::RangeLo(a), ctx)?.as_kernel_param(),
-                        None => null_ptr.as_kernel_param(),
-                    };
-                    let parent_hi_param = match work_prefix.as_ref() {
-                        Some(_) => find_col(&frontier, ColTag::RangeHi(a), ctx)?.as_kernel_param(),
-                        None => null_ptr.as_kernel_param(),
-                    };
-                    let wp_param = match work_prefix.as_ref() {
-                        Some(wp) => wp.as_kernel_param(),
-                        None => null_ptr.as_kernel_param(),
-                    };
-                    let cover_lo_param = if keep_cover {
-                        find_col(&child_cols, ColTag::RangeLo(a), ctx)?.as_kernel_param()
-                    } else {
-                        null_ptr.as_kernel_param()
-                    };
-                    let cover_hi_param = if keep_cover {
-                        find_col(&child_cols, ColTag::RangeHi(a), ctx)?.as_kernel_param()
-                    } else {
-                        null_ptr.as_kernel_param()
-                    };
-                    let mut params: Vec<*mut c_void> = vec![
-                        (&d_cover_tbl).as_kernel_param(),
-                        c_u32.as_kernel_param(),
-                        parent_lo_param,
-                        parent_hi_param,
-                        wp_param,
-                        has_parent_range.as_kernel_param(),
-                        const_lo.as_kernel_param(),
-                        const_hi.as_kernel_param(),
-                        count.as_kernel_param(),
-                        total_work.as_kernel_param(),
-                        // No-count path: null offsets select the kernel's
-                        // out == w branch (every position is its own group).
-                        if count_ran {
-                            (&marks).as_kernel_param()
-                        } else {
-                            null_ptr.as_kernel_param()
-                        },
-                        (&d_parent_copy_var_tbl).as_kernel_param(),
-                        (&d_child_copy_var_tbl).as_kernel_param(),
-                        n_copy_var_u32.as_kernel_param(),
-                        (&d_parent_copy_range_tbl).as_kernel_param(),
-                        (&d_child_copy_range_tbl).as_kernel_param(),
-                        n_copy_range_u32.as_kernel_param(),
-                        (&d_child_var_tbl).as_kernel_param(),
-                        keep_cover_u32.as_kernel_param(),
-                        cover_lo_param,
-                        cover_hi_param,
-                    ];
-                    emit_kernel
-                        .clone()
-                        .launch_on_stream(
-                            &cu_stream,
-                            LaunchConfig {
-                                grid_dim: (grid, 1, 1),
-                                block_dim: (BLOCK_SIZE, 1, 1),
-                                shared_mem_bytes: 0,
-                            },
-                            &mut params,
-                        )
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("{} launch failed: {e}", width.emit_kernel()))
-                        })?;
-                }
-
-                // PROBE refinements over the expanded frontier.
-                let probe_kernel = self
-                    .device()
-                    .inner()
-                    .get_func(WCOJ_MODULE, width.probe_kernel())
-                    .ok_or_else(|| {
-                        XlogError::Kernel(format!("{} kernel not found", width.probe_kernel()))
-                    })?;
-                let probe_grid = n_children.div_ceil(BLOCK_SIZE);
-                for (probe_idx, pp) in probe_plans.iter().enumerate() {
-                    let p = pp.input_idx;
-                    let has_range = u32::from(pp.live);
-                    let p_const_lo: u32 = 0;
-                    let p_const_hi: u32 = n_rows[p];
-                    let keep_u32 = u32::from(pp.keep);
-                    let combine: u32 = u32::from(probe_idx > 0);
-                    // SAFETY: fj_probe_refine_u32(probe_cols,
-                    // n_probe_cols, key_cols, in_lo, in_hi, has_range,
-                    // const_lo, const_hi, n_frontier, keep_range,
-                    // out_lo, out_hi, mask, combine_mask). Nullable
-                    // pointers only dereferenced behind their flags.
+                let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
                     unsafe {
-                        let in_lo_param = if pp.live {
-                            find_col(&child_cols, ColTag::RangeLo(p), ctx)?.as_kernel_param()
+                        let parent_lo_param = match work_prefix.as_ref() {
+                            Some(_) => {
+                                find_col(&frontier, ColTag::RangeLo(a), ctx)?.as_kernel_param()
+                            }
+                            None => null_ptr.as_kernel_param(),
+                        };
+                        let parent_hi_param = match work_prefix.as_ref() {
+                            Some(_) => {
+                                find_col(&frontier, ColTag::RangeHi(a), ctx)?.as_kernel_param()
+                            }
+                            None => null_ptr.as_kernel_param(),
+                        };
+                        let wp_param = match work_prefix.as_ref() {
+                            Some(wp) => wp.as_kernel_param(),
+                            None => null_ptr.as_kernel_param(),
+                        };
+                        let cover_lo_param = if keep_cover {
+                            find_col(&child_cols, ColTag::RangeLo(a), ctx)?.as_kernel_param()
                         } else {
                             null_ptr.as_kernel_param()
                         };
-                        let in_hi_param = if pp.live {
-                            find_col(&child_cols, ColTag::RangeHi(p), ctx)?.as_kernel_param()
+                        let cover_hi_param = if keep_cover {
+                            find_col(&child_cols, ColTag::RangeHi(a), ctx)?.as_kernel_param()
                         } else {
                             null_ptr.as_kernel_param()
                         };
-                        let out_lo_param = match pp.out_lo.as_ref() {
-                            Some(lo) => lo.as_kernel_param(),
-                            None => null_ptr.as_kernel_param(),
-                        };
-                        let out_hi_param = match pp.out_hi.as_ref() {
-                            Some(hi) => hi.as_kernel_param(),
-                            None => null_ptr.as_kernel_param(),
-                        };
-                        let mask_ref = mask.as_ref().expect("mask exists when probes exist");
                         let mut params: Vec<*mut c_void> = vec![
-                            (&pp.data_tbl).as_kernel_param(),
-                            pp.n_cols.as_kernel_param(),
-                            (&pp.key_tbl).as_kernel_param(),
-                            in_lo_param,
-                            in_hi_param,
-                            has_range.as_kernel_param(),
-                            p_const_lo.as_kernel_param(),
-                            p_const_hi.as_kernel_param(),
-                            n_children.as_kernel_param(),
-                            keep_u32.as_kernel_param(),
-                            out_lo_param,
-                            out_hi_param,
-                            mask_ref.as_kernel_param(),
-                            combine.as_kernel_param(),
+                            (&d_cover_tbl).as_kernel_param(),
+                            c_u32.as_kernel_param(),
+                            parent_lo_param,
+                            parent_hi_param,
+                            wp_param,
+                            has_parent_range.as_kernel_param(),
+                            const_lo.as_kernel_param(),
+                            const_hi.as_kernel_param(),
+                            count.as_kernel_param(),
+                            total_work.as_kernel_param(),
+                            // No-count path: null offsets select the kernel's
+                            // out == w branch (every position is its own group).
+                            if count_ran {
+                                (&marks).as_kernel_param()
+                            } else {
+                                null_ptr.as_kernel_param()
+                            },
+                            (&d_parent_copy_var_tbl).as_kernel_param(),
+                            (&d_child_copy_var_tbl).as_kernel_param(),
+                            n_copy_var_u32.as_kernel_param(),
+                            (&d_parent_copy_range_tbl).as_kernel_param(),
+                            (&d_child_copy_range_tbl).as_kernel_param(),
+                            n_copy_range_u32.as_kernel_param(),
+                            (&d_child_var_tbl).as_kernel_param(),
+                            keep_cover_u32.as_kernel_param(),
+                            cover_lo_param,
+                            cover_hi_param,
                         ];
-                        probe_kernel
+                        emit_kernel
                             .clone()
-                            .launch_on_stream(
-                                &cu_stream,
+                            .launch_in(
+                                stream,
                                 LaunchConfig {
-                                    grid_dim: (probe_grid, 1, 1),
+                                    grid_dim: (grid, 1, 1),
                                     block_dim: (BLOCK_SIZE, 1, 1),
                                     shared_mem_bytes: 0,
                                 },
@@ -1087,12 +1039,93 @@ impl CudaKernelProvider {
                             .map_err(|e| {
                                 XlogError::Kernel(format!(
                                     "{} launch failed: {e}",
-                                    width.probe_kernel()
+                                    width.emit_kernel()
                                 ))
                             })?;
                     }
-                }
-                rec.commit(runtime)
+
+                    // PROBE refinements over the expanded frontier.
+                    let probe_kernel = self
+                        .device()
+                        .inner()
+                        .get_func(WCOJ_MODULE, width.probe_kernel())
+                        .ok_or_else(|| {
+                            XlogError::Kernel(format!("{} kernel not found", width.probe_kernel()))
+                        })?;
+                    let probe_grid = n_children.div_ceil(BLOCK_SIZE);
+                    for (probe_idx, pp) in probe_plans.iter().enumerate() {
+                        let p = pp.input_idx;
+                        let has_range = u32::from(pp.live);
+                        let p_const_lo: u32 = 0;
+                        let p_const_hi: u32 = n_rows[p];
+                        let keep_u32 = u32::from(pp.keep);
+                        let combine: u32 = u32::from(probe_idx > 0);
+                        // SAFETY: fj_probe_refine_u32(probe_cols,
+                        // n_probe_cols, key_cols, in_lo, in_hi, has_range,
+                        // const_lo, const_hi, n_frontier, keep_range,
+                        // out_lo, out_hi, mask, combine_mask). Nullable
+                        // pointers only dereferenced behind their flags.
+                        unsafe {
+                            let in_lo_param = if pp.live {
+                                find_col(&child_cols, ColTag::RangeLo(p), ctx)?.as_kernel_param()
+                            } else {
+                                null_ptr.as_kernel_param()
+                            };
+                            let in_hi_param = if pp.live {
+                                find_col(&child_cols, ColTag::RangeHi(p), ctx)?.as_kernel_param()
+                            } else {
+                                null_ptr.as_kernel_param()
+                            };
+                            let out_lo_param = match pp.out_lo.as_ref() {
+                                Some(lo) => lo.as_kernel_param(),
+                                None => null_ptr.as_kernel_param(),
+                            };
+                            let out_hi_param = match pp.out_hi.as_ref() {
+                                Some(hi) => hi.as_kernel_param(),
+                                None => null_ptr.as_kernel_param(),
+                            };
+                            let mask_ref = mask.as_ref().expect("mask exists when probes exist");
+                            let mut params: Vec<*mut c_void> = vec![
+                                (&pp.data_tbl).as_kernel_param(),
+                                pp.n_cols.as_kernel_param(),
+                                (&pp.key_tbl).as_kernel_param(),
+                                in_lo_param,
+                                in_hi_param,
+                                has_range.as_kernel_param(),
+                                p_const_lo.as_kernel_param(),
+                                p_const_hi.as_kernel_param(),
+                                n_children.as_kernel_param(),
+                                keep_u32.as_kernel_param(),
+                                out_lo_param,
+                                out_hi_param,
+                                mask_ref.as_kernel_param(),
+                                combine.as_kernel_param(),
+                            ];
+                            probe_kernel
+                                .clone()
+                                .launch_in(
+                                    stream,
+                                    LaunchConfig {
+                                        grid_dim: (probe_grid, 1, 1),
+                                        block_dim: (BLOCK_SIZE, 1, 1),
+                                        shared_mem_bytes: 0,
+                                    },
+                                    &mut params,
+                                )
+                                .map_err(|e| {
+                                    XlogError::Kernel(format!(
+                                        "{} launch failed: {e}",
+                                        width.probe_kernel()
+                                    ))
+                                })?;
+                        }
+                    }
+                    Ok(())
+                };
+                // SAFETY: preflight retained the accessed buffers and bound this stream.
+                let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                    .map_err(|error| error.into_xlog_error())?;
+                rec.commit()
                     .map_err(|e| XlogError::Kernel(format!("{ctx}: emit commit failed: {e}")))?;
             }
 
@@ -1141,12 +1174,25 @@ impl CudaKernelProvider {
                         .collect(),
                 );
                 let d_nr = self.memory().alloc::<u32>(1)?;
-                self.htod_launch_metadata_async_copy_one(
-                    &n_children,
-                    &d_nr,
-                    &cu_stream,
-                    &format!("{ctx}: frontier num_rows"),
-                )?;
+                let mut rec_num_rows = LaunchRecorder::new_strict(launch_stream);
+                rec_num_rows.write(&d_nr);
+                rec_num_rows.preflight(runtime).map_err(|error| {
+                    XlogError::Kernel(format!("{ctx}: num_rows preflight failed: {error}"))
+                })?;
+                let rec_num_rows = unsafe {
+                    rec_num_rows.enqueue_prepared_with(&cu_stream, |enqueue| {
+                        self.initialize_launch_metadata_u32(
+                            n_children,
+                            &d_nr,
+                            enqueue,
+                            &format!("{ctx}: frontier num_rows"),
+                        )
+                    })
+                }
+                .map_err(crate::launch::LaunchEnqueueError::into_xlog_error)?;
+                rec_num_rows.commit().map_err(|error| {
+                    XlogError::Kernel(format!("{ctx}: num_rows commit failed: {error}"))
+                })?;
                 let columns: Vec<CudaColumn> =
                     child_cols.drain(..).map(|(_, s)| s.into()).collect();
                 let staging = CudaBuffer::from_columns_with_host_count(
@@ -1243,23 +1289,31 @@ impl CudaKernelProvider {
                 // SAFETY: fj_count_multiplicity(range_lo_cols,
                 // range_hi_cols, n_ranges, n_frontier, mult);
                 // device-resident, preflighted.
-                unsafe {
-                    kernel
-                        .clone()
-                        .launch_on_stream(
-                            &cu_stream,
-                            LaunchConfig {
-                                grid_dim: (grid, 1, 1),
-                                block_dim: (BLOCK_SIZE, 1, 1),
-                                shared_mem_bytes: 0,
-                            },
-                            (&d_lo_tbl, &d_hi_tbl, n_ranges, count, &mut mult),
-                        )
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("fj_count_multiplicity launch failed: {e}"))
-                        })?;
-                }
-                rec.commit(runtime).map_err(|e| {
+                let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+                    unsafe {
+                        kernel
+                            .clone()
+                            .launch_in(
+                                stream,
+                                LaunchConfig {
+                                    grid_dim: (grid, 1, 1),
+                                    block_dim: (BLOCK_SIZE, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (&d_lo_tbl, &d_hi_tbl, n_ranges, count, &mut mult),
+                            )
+                            .map_err(|e| {
+                                XlogError::Kernel(format!(
+                                    "fj_count_multiplicity launch failed: {e}"
+                                ))
+                            })?;
+                    }
+                    Ok(())
+                };
+                // SAFETY: preflight retained the accessed buffers and bound this stream.
+                let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+                    .map_err(|error| error.into_xlog_error())?;
+                rec.commit().map_err(|e| {
                     XlogError::Kernel(format!("{ctx}: multiplicity commit failed: {e}"))
                 })?;
             }
@@ -1271,12 +1325,25 @@ impl CudaKernelProvider {
                 })?;
             let (_, key_col) = frontier.swap_remove(key_idx);
             let d_nr = self.memory().alloc::<u32>(1)?;
-            self.htod_launch_metadata_async_copy_one(
-                &count,
-                &d_nr,
-                &cu_stream,
-                &format!("{ctx}: staging num_rows"),
-            )?;
+            let mut rec_num_rows = LaunchRecorder::new_strict(launch_stream);
+            rec_num_rows.write(&d_nr);
+            rec_num_rows.preflight(runtime).map_err(|error| {
+                XlogError::Kernel(format!("{ctx}: num_rows preflight failed: {error}"))
+            })?;
+            let rec_num_rows = unsafe {
+                rec_num_rows.enqueue_prepared_with(&cu_stream, |enqueue| {
+                    self.initialize_launch_metadata_u32(
+                        count,
+                        &d_nr,
+                        enqueue,
+                        &format!("{ctx}: staging num_rows"),
+                    )
+                })
+            }
+            .map_err(crate::launch::LaunchEnqueueError::into_xlog_error)?;
+            rec_num_rows.commit().map_err(|error| {
+                XlogError::Kernel(format!("{ctx}: num_rows commit failed: {error}"))
+            })?;
             let staging_schema = Schema::new(vec![
                 (format!("v{group_var}"), width.var_type()),
                 ("count".to_string(), ScalarType::U64),
@@ -1318,12 +1385,25 @@ impl CudaKernelProvider {
                 .collect(),
         );
         let d_nr = self.memory().alloc::<u32>(1)?;
-        self.htod_launch_metadata_async_copy_one(
-            &count,
-            &d_nr,
-            &cu_stream,
-            &format!("{ctx}: result num_rows"),
-        )?;
+        let mut rec_num_rows = LaunchRecorder::new_strict(launch_stream);
+        rec_num_rows.write(&d_nr);
+        rec_num_rows.preflight(runtime).map_err(|error| {
+            XlogError::Kernel(format!("{ctx}: num_rows preflight failed: {error}"))
+        })?;
+        let rec_num_rows = unsafe {
+            rec_num_rows.enqueue_prepared_with(&cu_stream, |enqueue| {
+                self.initialize_launch_metadata_u32(
+                    count,
+                    &d_nr,
+                    enqueue,
+                    &format!("{ctx}: result num_rows"),
+                )
+            })
+        }
+        .map_err(crate::launch::LaunchEnqueueError::into_xlog_error)?;
+        rec_num_rows.commit().map_err(|error| {
+            XlogError::Kernel(format!("{ctx}: num_rows commit failed: {error}"))
+        })?;
         let columns: Vec<CudaColumn> = frontier.into_iter().map(|(_, s)| s.into()).collect();
         // row_cap = frontier CAPACITY (compaction shrinks the logical
         // count without reallocating columns); the logical count rides

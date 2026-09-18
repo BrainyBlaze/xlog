@@ -1,4 +1,3 @@
-use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::CudaProviderBuilder;

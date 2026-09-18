@@ -295,7 +295,7 @@ pub(crate) struct ResidentReceiptPointee {
     pub(crate) ptr: u64,
     pub(crate) range_end: u64,
     pub(crate) manager_id: usize,
-    pub(crate) block: Option<crate::device_runtime::BlockId>,
+    pub(crate) block: Option<(crate::device_runtime::BlockId, usize)>,
 }
 
 fn checked_receipt_pointee(
@@ -322,7 +322,7 @@ fn checked_receipt_pointee(
                     "resident receipt pointee is outside its runtime block".into(),
                 ));
             }
-            Some(block)
+            Some((block, bytes))
         }
         None => None,
     };
@@ -362,7 +362,7 @@ fn validate_receipt_pointee_owners(
         let block = pointee.block.ok_or_else(|| {
             XlogError::Kernel("resident receipt pointee has no runtime block identity".into())
         })?;
-        if block.device_ordinal != device_ordinal {
+        if block.0.device_ordinal != device_ordinal {
             return Err(XlogError::Kernel(
                 "resident receipt pointee belongs to a foreign CUDA device".into(),
             ));
@@ -379,7 +379,7 @@ fn validate_receipt_schedule_block_mapping(
         || pointees
             .iter()
             .zip(expected_blocks)
-            .any(|(pointee, expected)| pointee.block != Some(*expected))
+            .any(|(pointee, expected)| pointee.block.map(|(block, _)| block) != Some(*expected))
     {
         return Err(XlogError::Kernel(
             "resident receipt runtime-block mapping differs from the schedule".into(),
@@ -539,24 +539,12 @@ pub struct ResidentPackedReceipt {
 /// Exact-size page-locked destination for the single final resident receipt.
 #[derive(Debug)]
 pub struct ResidentPinnedReceipt {
-    ptr: std::ptr::NonNull<u8>,
-    len: usize,
+    buffer: crate::device::PinnedHostBuffer,
 }
-
-// SAFETY: the allocation has unique ownership, exposes no host pointer, and
-// CUDA permits page-locked host allocations to be freed from another thread.
-unsafe impl Send for ResidentPinnedReceipt {}
 
 impl ResidentPinnedReceipt {
     pub fn len_bytes(&self) -> usize {
-        self.len
-    }
-}
-
-impl Drop for ResidentPinnedReceipt {
-    fn drop(&mut self) {
-        // SAFETY: `ptr` was returned by `cuMemHostAlloc` and is freed once here.
-        let _ = unsafe { sys::cuMemFreeHost(self.ptr.as_ptr().cast()) };
+        self.buffer.len()
     }
 }
 
@@ -707,13 +695,60 @@ fn checked_capacity(capacity: u64, label: &str) -> Result<u32> {
     })
 }
 
+#[derive(Debug)]
+struct ResidentRelationLayout {
+    columns: Vec<std::ops::Range<u64>>,
+    row_count: std::ops::Range<u64>,
+    bytes: u64,
+}
+
+fn resident_relation_align(cursor: u64, alignment: u64) -> Result<u64> {
+    debug_assert!(alignment.is_power_of_two());
+    cursor
+        .checked_add(alignment - 1)
+        .map(|end| end & !(alignment - 1))
+        .ok_or_else(|| XlogError::Kernel("resident relation layout byte overflow".into()))
+}
+
+fn resident_relation_layout(schema: &Schema, capacity: u64) -> Result<ResidentRelationLayout> {
+    checked_capacity(capacity, "relation")?;
+    validate_schema(schema)?;
+    let mut cursor = 0u64;
+    let mut columns = Vec::with_capacity(schema.arity());
+    for column in 0..schema.arity() {
+        let column_width = u64::from(width(
+            schema
+                .column_type(column)
+                .expect("resident schema arity checked"),
+        )?);
+        cursor = resident_relation_align(cursor, column_width)?;
+        let column_bytes = capacity
+            .checked_mul(column_width)
+            .ok_or_else(|| XlogError::Kernel("resident column byte overflow".into()))?;
+        let end = cursor
+            .checked_add(column_bytes)
+            .ok_or_else(|| XlogError::Kernel("resident relation layout byte overflow".into()))?;
+        columns.push(cursor..end);
+        cursor = end;
+    }
+    cursor = resident_relation_align(cursor, std::mem::align_of::<u32>() as u64)?;
+    let count_end = cursor
+        .checked_add(std::mem::size_of::<u32>() as u64)
+        .ok_or_else(|| XlogError::Kernel("resident relation layout byte overflow".into()))?;
+    let row_count = cursor..count_end;
+    // Preserve the maximum supported column alignment when the manifest sums
+    // relation sizes and the materializer places the next relation.
+    let bytes = resident_relation_align(count_end, std::mem::align_of::<u64>() as u64)?;
+    Ok(ResidentRelationLayout {
+        columns,
+        row_count,
+        bytes,
+    })
+}
+
 /// Exact manager-tracked bytes for one fixed-capacity resident relation.
 pub fn resident_relation_device_bytes(schema: &Schema, capacity: u64) -> Result<u64> {
-    checked_capacity(capacity, "relation")?;
-    capacity
-        .checked_mul(schema.row_size_bytes() as u64)
-        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u32>() as u64))
-        .ok_or_else(|| XlogError::Kernel("resident relation byte overflow".into()))
+    Ok(resident_relation_layout(schema, capacity)?.bytes)
 }
 
 /// Exact manager-tracked bytes for the shared full-row set workspace.
@@ -888,7 +923,19 @@ impl CudaKernelProvider {
         schema: Schema,
         capacity: u64,
     ) -> Result<ResidentRelation> {
-        self.prepare_resident_relation_with_reservation(schema, capacity, None)
+        validate_schema(&schema)?;
+        let capacity_u32 = checked_capacity(capacity, "output")?;
+        let mut columns = Vec::with_capacity(schema.arity());
+        for column in 0..schema.arity() {
+            let bytes = (capacity as usize)
+                .checked_mul(width(schema.column_type(column).expect("schema"))? as usize)
+                .ok_or_else(|| XlogError::Kernel("resident column byte overflow".to_string()))?;
+            columns.push(CudaColumn::Owned(self.memory().alloc::<u8>(bytes)?));
+        }
+        let d_num_rows = self.memory().alloc::<u32>(1)?;
+        let buffer = CudaBuffer::from_columns(columns, capacity, d_num_rows, schema);
+        debug_assert_eq!(capacity_u32 as u64, capacity);
+        Ok(ResidentRelation { buffer })
     }
 
     /// Allocate a resident relation exclusively from an admitted transaction.
@@ -898,49 +945,116 @@ impl CudaKernelProvider {
         capacity: u64,
         reservation: &mut GpuMemoryReservation,
     ) -> Result<ResidentRelation> {
-        self.prepare_resident_relation_with_reservation(schema, capacity, Some(reservation))
+        self.prepare_resident_relations_in_reservation(
+            std::iter::once(&schema),
+            capacity,
+            reservation,
+        )?
+        .pop()
+        .ok_or_else(|| XlogError::Kernel("resident relation allocation was empty".into()))
     }
 
-    fn prepare_resident_relation_with_reservation(
+    /// Allocate every fixed-capacity resident relation from one admitted arena.
+    ///
+    /// Each column and row-count owner retains its exact disjoint range while
+    /// sharing the arena's physical allocation and reservation charge.
+    pub fn prepare_resident_relations_in_reservation<'a>(
         &self,
-        schema: Schema,
+        schemas: impl IntoIterator<Item = &'a Schema>,
         capacity: u64,
-        mut reservation: Option<&mut GpuMemoryReservation>,
-    ) -> Result<ResidentRelation> {
-        if schema.arity() > RESIDENT_RELATIONAL_MAX_ARITY {
+        reservation: &mut GpuMemoryReservation,
+    ) -> Result<Vec<ResidentRelation>> {
+        let schemas: Vec<_> = schemas.into_iter().collect();
+        if schemas.is_empty() {
+            return Ok(Vec::new());
+        }
+        let layouts = schemas
+            .iter()
+            .map(|schema| resident_relation_layout(schema, capacity))
+            .collect::<Result<Vec<_>>>()?;
+        let arena_bytes = layouts.iter().try_fold(0u64, |bytes, layout| {
+            bytes
+                .checked_add(layout.bytes)
+                .ok_or_else(|| XlogError::Kernel("resident relation arena byte overflow".into()))
+        })?;
+        let arena_bytes = usize::try_from(arena_bytes).map_err(|_| {
+            XlogError::Kernel("resident relation arena exceeds platform usize".into())
+        })?;
+
+        let arena = reservation.alloc::<u8>(arena_bytes)?;
+        let mut cursor = 0usize;
+        let mut relations = Vec::with_capacity(schemas.len());
+        for (schema, layout) in schemas.into_iter().zip(layouts) {
+            let mut columns = Vec::with_capacity(schema.arity());
+            for range in layout.columns {
+                let start = cursor
+                    .checked_add(
+                        usize::try_from(range.start)
+                            .expect("resident relation layout fits its arena"),
+                    )
+                    .expect("resident relation arena sizing already checked");
+                let end = cursor
+                    .checked_add(
+                        usize::try_from(range.end)
+                            .expect("resident relation layout fits its arena"),
+                    )
+                    .expect("resident relation arena sizing already checked");
+                let column = arena.try_owned_subslice::<u8>(start..end).ok_or_else(|| {
+                    XlogError::Kernel("resident column is outside its allocation arena".into())
+                })?;
+                columns.push(CudaColumn::Owned(column));
+            }
+            let count_start = cursor
+                .checked_add(
+                    usize::try_from(layout.row_count.start)
+                        .expect("resident relation layout fits its arena"),
+                )
+                .expect("resident relation arena sizing already checked");
+            let count_end = cursor
+                .checked_add(
+                    usize::try_from(layout.row_count.end)
+                        .expect("resident relation layout fits its arena"),
+                )
+                .expect("resident relation arena sizing already checked");
+            let d_num_rows = arena
+                .try_owned_subslice::<u32>(count_start..count_end)
+                .ok_or_else(|| {
+                    XlogError::Kernel("resident row count is outside its allocation arena".into())
+                })?;
+            cursor = cursor
+                .checked_add(
+                    usize::try_from(layout.bytes).expect("resident relation layout fits its arena"),
+                )
+                .expect("resident relation arena sizing already checked");
+            let buffer = CudaBuffer::from_columns(columns, capacity, d_num_rows, schema.clone());
+            relations.push(ResidentRelation { buffer });
+        }
+        debug_assert_eq!(cursor, arena_bytes);
+        Ok(relations)
+    }
+
+    /// Record a private resident relation's logical set cardinality on the
+    /// admitted execution stream without populating its host row-count cache.
+    pub fn record_resident_relation_count_initialize_on_stream(
+        &self,
+        relation: &ResidentRelation,
+        initial_count: u32,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
+    ) -> Result<()> {
+        if initial_count > 1 {
             return Err(XlogError::Kernel(format!(
-                "resident relation arity {} exceeds {RESIDENT_RELATIONAL_MAX_ARITY}",
-                schema.arity()
+                "resident relation initial count {initial_count} is invalid; expected 0 or 1"
             )));
         }
-        for column in 0..schema.arity() {
-            width(schema.column_type(column).expect("schema arity checked"))?;
-        }
-        let capacity_u32 = checked_capacity(capacity, "output")?;
-        let mut columns = Vec::with_capacity(schema.arity());
-        for column in 0..schema.arity() {
-            let bytes = (capacity as usize)
-                .checked_mul(width(schema.column_type(column).expect("schema"))? as usize)
-                .ok_or_else(|| XlogError::Kernel("resident column byte overflow".to_string()))?;
-            let column = match reservation.as_deref_mut() {
-                Some(reservation) => reservation.alloc::<u8>(bytes)?,
-                None => self.memory().alloc::<u8>(bytes)?,
-            };
-            columns.push(CudaColumn::Owned(column));
-        }
-        let d_num_rows = match reservation.as_mut() {
-            Some(reservation) => reservation.alloc::<u32>(1)?,
-            None => self.memory().alloc::<u32>(1)?,
-        };
-        let buffer = CudaBuffer::from_columns(columns, capacity, d_num_rows, schema);
-        debug_assert_eq!(capacity_u32 as u64, capacity);
-        Ok(ResidentRelation { buffer })
+        self.initialize_launch_metadata_u32(
+            initial_count,
+            relation.num_rows_device(),
+            enqueue,
+            "resident relation count initialization",
+        )
     }
 
-    /// Initialize a private resident relation's logical set cardinality.
-    ///
-    /// This cold-path write addresses the device scalar directly so it does
-    /// not populate or invalidate the buffer's host row-count cache.
+    #[cfg(test)]
     pub fn initialize_resident_relation_count(
         &self,
         relation: &mut ResidentRelation,
@@ -1499,20 +1613,16 @@ impl CudaKernelProvider {
         &self,
         receipt: &ResidentPackedReceipt,
     ) -> Result<ResidentPinnedReceipt> {
-        let mut ptr = std::ptr::null_mut();
-        // SAFETY: CUDA initializes `ptr` on success; the owner frees it once.
-        let code = unsafe { sys::cuMemHostAlloc(&mut ptr, receipt.len_bytes(), 0) };
-        if code != sys::cudaError_enum::CUDA_SUCCESS {
-            return Err(XlogError::Kernel(format!(
-                "resident pinned receipt allocation failed: {code:?}"
-            )));
-        }
-        let ptr = std::ptr::NonNull::new(ptr.cast()).ok_or_else(|| {
-            XlogError::Kernel("resident pinned receipt allocation returned null".into())
-        })?;
         Ok(ResidentPinnedReceipt {
-            ptr,
-            len: receipt.len_bytes(),
+            buffer: crate::device::PinnedHostBuffer::new(
+                self.device().inner().stream(),
+                receipt.len_bytes(),
+            )
+            .map_err(|error| {
+                XlogError::Kernel(format!(
+                    "resident pinned receipt allocation failed: {error}"
+                ))
+            })?,
         })
     }
 
@@ -1524,36 +1634,22 @@ impl CudaKernelProvider {
         &self,
         receipt: &ResidentPackedReceipt,
         pinned: &mut ResidentPinnedReceipt,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
     ) -> Result<Vec<u8>> {
-        if pinned.len != receipt.len_bytes() {
+        if pinned.len_bytes() != receipt.len_bytes() {
             return Err(XlogError::Kernel(format!(
                 "resident pinned receipt size {} does not match device receipt size {}",
-                pinned.len,
+                pinned.len_bytes(),
                 receipt.len_bytes()
             )));
         }
-        // SAFETY: both allocations are live for `pinned.len` bytes and the
-        // mutable owner prevents host access until this stream is synchronized.
-        let code = unsafe {
-            sys::cuMemcpyDtoHAsync_v2(
-                pinned.ptr.as_ptr().cast(),
-                receipt.device_bytes().device_ptr_value(),
-                pinned.len,
-                stream.cu_stream(),
-            )
-        };
-        if code != sys::cudaError_enum::CUDA_SUCCESS {
-            return Err(XlogError::Kernel(format!(
-                "resident final receipt copy failed: {code:?}"
-            )));
-        }
-        stream.synchronize().map_err(|error| {
-            XlogError::Kernel(format!("resident final receipt wait failed: {error}"))
-        })?;
-        // SAFETY: the copy and stream wait succeeded for the complete owner.
-        let bytes = unsafe { std::slice::from_raw_parts(pinned.ptr.as_ptr(), pinned.len) }.to_vec();
-        self.record_final_observation_transfer(pinned.len as u64);
+        let bytes = pinned
+            .buffer
+            .copy_from_device(&receipt.device_bytes().view(), stream)
+            .map_err(|error| {
+                XlogError::Kernel(format!("resident final receipt copy failed: {error}"))
+            })?;
+        self.record_final_observation_transfer(bytes.len() as u64);
         Ok(bytes)
     }
 

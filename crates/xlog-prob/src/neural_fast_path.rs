@@ -3,9 +3,8 @@
 //! This module contains GPU-resident tables used to map neural predicate outputs
 //! (probability vectors) to CNF variable ids in the compiled circuit.
 
-use cudarc::driver::{CudaView, DeviceSlice};
 use xlog_core::{Result, XlogError};
-use xlog_cuda::memory::TrackedCudaSlice;
+use xlog_cuda::memory::{DeviceMemoryView, TrackedCudaSlice};
 use xlog_cuda::CudaKernelProvider;
 
 /// Configuration for GPU neural fast-path weight injection.
@@ -129,7 +128,7 @@ impl GpuWeightSlots {
     }
 
     /// Device view over `slot_cnf_var` for a single group.
-    pub fn group_slot_cnf_var(&self, group_idx: usize) -> Result<CudaView<'_, u32>> {
+    pub fn group_slot_cnf_var(&self, group_idx: usize) -> Result<DeviceMemoryView<u32>> {
         let start = *self
             .group_offsets_host
             .get(group_idx)
