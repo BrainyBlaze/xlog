@@ -695,13 +695,60 @@ fn checked_capacity(capacity: u64, label: &str) -> Result<u32> {
     })
 }
 
+#[derive(Debug)]
+struct ResidentRelationLayout {
+    columns: Vec<std::ops::Range<u64>>,
+    row_count: std::ops::Range<u64>,
+    bytes: u64,
+}
+
+fn resident_relation_align(cursor: u64, alignment: u64) -> Result<u64> {
+    debug_assert!(alignment.is_power_of_two());
+    cursor
+        .checked_add(alignment - 1)
+        .map(|end| end & !(alignment - 1))
+        .ok_or_else(|| XlogError::Kernel("resident relation layout byte overflow".into()))
+}
+
+fn resident_relation_layout(schema: &Schema, capacity: u64) -> Result<ResidentRelationLayout> {
+    checked_capacity(capacity, "relation")?;
+    validate_schema(schema)?;
+    let mut cursor = 0u64;
+    let mut columns = Vec::with_capacity(schema.arity());
+    for column in 0..schema.arity() {
+        let column_width = u64::from(width(
+            schema
+                .column_type(column)
+                .expect("resident schema arity checked"),
+        )?);
+        cursor = resident_relation_align(cursor, column_width)?;
+        let column_bytes = capacity
+            .checked_mul(column_width)
+            .ok_or_else(|| XlogError::Kernel("resident column byte overflow".into()))?;
+        let end = cursor
+            .checked_add(column_bytes)
+            .ok_or_else(|| XlogError::Kernel("resident relation layout byte overflow".into()))?;
+        columns.push(cursor..end);
+        cursor = end;
+    }
+    cursor = resident_relation_align(cursor, std::mem::align_of::<u32>() as u64)?;
+    let count_end = cursor
+        .checked_add(std::mem::size_of::<u32>() as u64)
+        .ok_or_else(|| XlogError::Kernel("resident relation layout byte overflow".into()))?;
+    let row_count = cursor..count_end;
+    // Preserve the maximum supported column alignment when the manifest sums
+    // relation sizes and the materializer places the next relation.
+    let bytes = resident_relation_align(count_end, std::mem::align_of::<u64>() as u64)?;
+    Ok(ResidentRelationLayout {
+        columns,
+        row_count,
+        bytes,
+    })
+}
+
 /// Exact manager-tracked bytes for one fixed-capacity resident relation.
 pub fn resident_relation_device_bytes(schema: &Schema, capacity: u64) -> Result<u64> {
-    checked_capacity(capacity, "relation")?;
-    capacity
-        .checked_mul(schema.row_size_bytes() as u64)
-        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u32>() as u64))
-        .ok_or_else(|| XlogError::Kernel("resident relation byte overflow".into()))
+    Ok(resident_relation_layout(schema, capacity)?.bytes)
 }
 
 /// Exact manager-tracked bytes for the shared full-row set workspace.
@@ -921,60 +968,68 @@ impl CudaKernelProvider {
         if schemas.is_empty() {
             return Ok(Vec::new());
         }
-        let capacity_u32 = checked_capacity(capacity, "output")?;
-        let capacity = usize::try_from(capacity)
-            .map_err(|_| XlogError::Kernel("resident capacity exceeds platform usize".into()))?;
-        let mut arena_bytes = 0usize;
-        for schema in &schemas {
-            validate_schema(schema)?;
-            for column in 0..schema.arity() {
-                let column_bytes = capacity
-                    .checked_mul(width(schema.column_type(column).expect("schema"))? as usize)
-                    .ok_or_else(|| {
-                        XlogError::Kernel("resident column byte overflow".to_string())
-                    })?;
-                arena_bytes = arena_bytes.checked_add(column_bytes).ok_or_else(|| {
-                    XlogError::Kernel("resident relation arena byte overflow".into())
-                })?;
-            }
-            arena_bytes = arena_bytes
-                .checked_add(std::mem::size_of::<u32>())
-                .ok_or_else(|| XlogError::Kernel("resident relation arena byte overflow".into()))?;
-        }
+        let layouts = schemas
+            .iter()
+            .map(|schema| resident_relation_layout(schema, capacity))
+            .collect::<Result<Vec<_>>>()?;
+        let arena_bytes = layouts.iter().try_fold(0u64, |bytes, layout| {
+            bytes
+                .checked_add(layout.bytes)
+                .ok_or_else(|| XlogError::Kernel("resident relation arena byte overflow".into()))
+        })?;
+        let arena_bytes = usize::try_from(arena_bytes).map_err(|_| {
+            XlogError::Kernel("resident relation arena exceeds platform usize".into())
+        })?;
 
         let arena = reservation.alloc::<u8>(arena_bytes)?;
         let mut cursor = 0usize;
         let mut relations = Vec::with_capacity(schemas.len());
-        for schema in schemas {
+        for (schema, layout) in schemas.into_iter().zip(layouts) {
             let mut columns = Vec::with_capacity(schema.arity());
-            for column in 0..schema.arity() {
-                let column_bytes = capacity
-                    .checked_mul(width(schema.column_type(column).expect("schema"))? as usize)
+            for range in layout.columns {
+                let start = cursor
+                    .checked_add(
+                        usize::try_from(range.start)
+                            .expect("resident relation layout fits its arena"),
+                    )
                     .expect("resident relation arena sizing already checked");
                 let end = cursor
-                    .checked_add(column_bytes)
+                    .checked_add(
+                        usize::try_from(range.end)
+                            .expect("resident relation layout fits its arena"),
+                    )
                     .expect("resident relation arena sizing already checked");
-                let column = arena.try_owned_subslice::<u8>(cursor..end).ok_or_else(|| {
+                let column = arena.try_owned_subslice::<u8>(start..end).ok_or_else(|| {
                     XlogError::Kernel("resident column is outside its allocation arena".into())
                 })?;
                 columns.push(CudaColumn::Owned(column));
-                cursor = end;
             }
+            let count_start = cursor
+                .checked_add(
+                    usize::try_from(layout.row_count.start)
+                        .expect("resident relation layout fits its arena"),
+                )
+                .expect("resident relation arena sizing already checked");
             let count_end = cursor
-                .checked_add(std::mem::size_of::<u32>())
+                .checked_add(
+                    usize::try_from(layout.row_count.end)
+                        .expect("resident relation layout fits its arena"),
+                )
                 .expect("resident relation arena sizing already checked");
             let d_num_rows = arena
-                .try_owned_subslice::<u32>(cursor..count_end)
+                .try_owned_subslice::<u32>(count_start..count_end)
                 .ok_or_else(|| {
                     XlogError::Kernel("resident row count is outside its allocation arena".into())
                 })?;
-            cursor = count_end;
-            let buffer =
-                CudaBuffer::from_columns(columns, capacity as u64, d_num_rows, schema.clone());
+            cursor = cursor
+                .checked_add(
+                    usize::try_from(layout.bytes).expect("resident relation layout fits its arena"),
+                )
+                .expect("resident relation arena sizing already checked");
+            let buffer = CudaBuffer::from_columns(columns, capacity, d_num_rows, schema.clone());
             relations.push(ResidentRelation { buffer });
         }
         debug_assert_eq!(cursor, arena_bytes);
-        debug_assert_eq!(capacity_u32 as usize, capacity);
         Ok(relations)
     }
 
