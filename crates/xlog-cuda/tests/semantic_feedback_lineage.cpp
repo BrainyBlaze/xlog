@@ -1413,11 +1413,12 @@ static void recompute_execution_preserves_proposal_state(bool drain_required) {
 static void captured_model_seals_follow_actual_reader() {
     StepPublicationFixture fixture;
     const std::array<std::array<uint64_t,2>,3> roster{{{{18,0}},{{19,0}},{{20,0}}}};
-    std::array<PublicationRange,4> retained{};uint64_t contract_bytes=UINT64_MAX;
+    std::array<PublicationRange,4> retained{};
+    std::array<uint8_t,StepPublicationFixture::kModelContractBytes> contract_bytes{};
     const auto capture=[&] {
         semantic_publication_model_seals(reinterpret_cast<uint64_t>(&fixture.control),
             reinterpret_cast<uint64_t>(&fixture.lease),reinterpret_cast<uint64_t>(roster.data()),roster.size(),
-            reinterpret_cast<uint64_t>(retained.data()),reinterpret_cast<uint64_t>(&contract_bytes),sizeof(contract_bytes));
+            reinterpret_cast<uint64_t>(retained.data()),reinterpret_cast<uint64_t>(contract_bytes.data()),contract_bytes.size());
     };
     for(uint64_t invocation=0;invocation<3;++invocation) {
         if(invocation)fixture.publish();
@@ -1426,7 +1427,7 @@ static void captured_model_seals_follow_actual_reader() {
             require(std::memcmp(&retained[i],&fixture.range(fixture.lease.bank,roster[i][0]),sizeof(PublicationRange))==0,
                 "captured model retained a range from a different publication reader");
         require(std::memcmp(&retained.back(),&fixture.range(fixture.lease.bank,44),sizeof(PublicationRange))==0 &&
-            std::memcmp(&contract_bytes,fixture.data(fixture.range(fixture.lease.bank,44)),sizeof(contract_bytes))==0,
+            std::memcmp(contract_bytes.data(),fixture.data(fixture.range(fixture.lease.bank,44)),contract_bytes.size())==0,
             "captured model did not retain the original raw contract and seal");
     }
     require_content_trap([&] {
@@ -1440,7 +1441,7 @@ static void captured_model_seals_follow_actual_reader() {
     require_content_trap([&] {
         semantic_publication_model_seals(reinterpret_cast<uint64_t>(&fixture.control),
             reinterpret_cast<uint64_t>(&fixture.lease),reinterpret_cast<uint64_t>(roster.data()),roster.size(),
-            reinterpret_cast<uint64_t>(retained.data()),reinterpret_cast<uint64_t>(&contract_bytes),sizeof(contract_bytes)-1);
+            reinterpret_cast<uint64_t>(retained.data()),reinterpret_cast<uint64_t>(contract_bytes.data()),contract_bytes.size()-1);
     },"captured model accepted a truncated original contract allocation");
     require(publication_release(fixture.control,fixture.lease)==0,"captured model reader release failed");
     require_content_trap(capture,"captured model reused a released publication reader");
