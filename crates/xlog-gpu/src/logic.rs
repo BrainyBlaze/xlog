@@ -7354,6 +7354,7 @@ mod tests {
 
         const WARMUP_RUNS: usize = 2;
         const MEASURED_RUNS: usize = 5;
+        let latency_diagnostics_enabled = resident_latency_diagnostics_enabled()?;
         let mut warmup_seconds = Vec::with_capacity(WARMUP_RUNS);
         let mut warmup_device_seconds = Vec::with_capacity(WARMUP_RUNS);
         let mut resident_seconds = Vec::with_capacity(MEASURED_RUNS);
@@ -7361,7 +7362,14 @@ mod tests {
         for run in 0..(WARMUP_RUNS + MEASURED_RUNS) {
             let started = std::time::Instant::now();
             let resident = {
-                let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+                let _env = if latency_diagnostics_enabled {
+                    ResidentEnvGuard::set(&[
+                        ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+                        (RESIDENT_LATENCY_DIAGNOSTICS_ENV, "1"),
+                    ])
+                } else {
+                    ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")])
+                };
                 program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
             };
             assert_eq!(
