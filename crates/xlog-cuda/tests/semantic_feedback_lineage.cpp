@@ -851,7 +851,7 @@ static void fixed_continuation_buffers_keep_semantic_intervals(uint64_t boundary
     Table incoming{{1,2,1,2},{suffix,boundary},{{0,0,7,1},{1,1,8,1}}};
     std::array<SourceSlot,64> prefix{};std::array<SourceSlot,32> completed{};
     std::array<uint64_t,4> identity{};std::array<RawFeedbackRecord,2> feedback{};
-    std::array<float,64> cache{};cache.fill(-11.0f);
+    std::array<float,64> cache{},next_cache{};cache.fill(-11.0f);next_cache.fill(-11.0f);
     std::array<float,32> output{};output.fill(-7.0f);output[0]=17.0f;output[1]=23.0f;
     float old_boundary=1.0f,new_boundary=0.0f,output_boundary=42.0f;
     std::array<uint8_t,4> authority{1,0,1,0},next_authority{};
@@ -868,7 +868,8 @@ static void fixed_continuation_buffers_keep_semantic_intervals(uint64_t boundary
         range(39,allocate(authority),sizeof(authority)),range(55,allocate(original),empty_table_bytes)};
     std::array<PublicationRange,7> next_ranges{};
     std::copy(old_ranges,old_ranges+7,next_ranges.begin());
-    next_ranges[3].storage_slot=allocate(new_boundary);next_ranges[5].storage_slot=allocate(next_authority);
+    next_ranges[2].storage_slot=allocate(next_cache);next_ranges[3].storage_slot=allocate(new_boundary);
+    next_ranges[5].storage_slot=allocate(next_authority);
     next_ranges[6].storage_slot=allocate(destination);
     PublicationRange inputs[]={range(1,allocate(completed),2*sizeof(SourceSlot),7,9),
         range(4,allocate(output),sizeof(output),7,9),range(boundary_role,allocate(output_boundary),sizeof(output_boundary)),
@@ -901,7 +902,7 @@ static void fixed_continuation_buffers_keep_semantic_intervals(uint64_t boundary
         "continuation accepted a positioned recurrent boundary");
     original.layouts[1]=incoming.layouts[1]=boundary;
     require(publication_apply_continuation(control,base,next,pending)==0,"fixed continuation copy refused");
-    require(cache[6]==-11.0f && cache[7]==17.0f && cache[8]==23.0f && cache[9]==-11.0f,
+    require(next_cache[6]==-11.0f && next_cache[7]==17.0f && next_cache[8]==23.0f && next_cache[9]==-11.0f,
         "fixed suffix copy included padding or lost its absolute destination interval");
     require(new_boundary==42.0f && !next_ranges[3].logical_begin && !next_ranges[3].logical_end,
         "non-positioned boundary acquired a prefix interval");
