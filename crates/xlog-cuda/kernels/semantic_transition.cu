@@ -2105,31 +2105,6 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
     const auto* old=reinterpret_cast<const PublicationRange*>(control.directories[pending.base_word&1]);
     auto* to=reinterpret_cast<PublicationRange*>(control.directories[(pending.base_word&1)^1]);
     if(publication_validate_model_update(control,base,pending))return 1;
-    if(pending.transition_kind==3) {
-        const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
-        for(uint64_t i=0;i<next.header.range_count;++i) {
-            if((old[i].role!=to[i].role || old[i].index!=to[i].index) ||
-               old[i].storage_slot>=control.storage_count || to[i].storage_slot>=control.storage_count)return 1;
-            if(old[i].role>=18 && old[i].role<=25) {
-                to[i]=old[i];
-                continue;
-            }
-            const uint64_t destination_slot=to[i].storage_slot;
-            const uint64_t destination_generation=to[i].generation;
-            const uint64_t source_slot=old[i].storage_slot;
-            to[i]=old[i];to[i].storage_slot=destination_slot;to[i].generation=destination_generation;
-            if(destination_slot==source_slot)continue;
-            bool copied=false;
-            for(uint64_t j=0;j<i;++j)if(to[j].storage_slot==destination_slot) { copied=true;break; }
-            if(copied)continue;
-            const auto& source=storage[source_slot];
-            const auto& destination=storage[destination_slot];
-            if(source.bytes!=destination.bytes || (source.bytes && source.pointer==destination.pointer))return 1;
-            publication_copy_bytes(reinterpret_cast<uint8_t*>(destination.pointer),
-                reinterpret_cast<const uint8_t*>(source.pointer),source.bytes);
-        }
-        return 0;
-    }
     TensorLayoutTableView pending_table{};
     if(!publication_tensor_table(control,from,pending.range_count,&pending_table))return 1;
     for(uint64_t i=0;i<next.header.range_count;++i) {
