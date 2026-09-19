@@ -7020,11 +7020,13 @@ mod tests {
     }
 
     #[test]
-    fn capture_rejects_stream_from_foreign_provider_context() {
-        let Some(foreign_provider) = provider() else {
-            return;
-        };
+    fn capture_rejects_stream_from_independent_device_context_owner() {
         let Some(provider) = provider() else { return };
+        let foreign_device = crate::CudaDevice::new(0).expect("independent CUDA device owner");
+        assert!(!Arc::ptr_eq(
+            foreign_device.inner().stream().context(),
+            provider.device().inner().stream().context(),
+        ));
         let wave = super::ResidentWaveDescriptor {
             first_op: 0,
             op_count: 0,
@@ -7042,16 +7044,15 @@ mod tests {
         let schedule = provider
             .prepare_resident_schedule(Vec::new(), &[], &[wave], &[region], &[], &[], &[])
             .expect("empty local schedule");
-        let foreign_stream = foreign_provider
-            .device()
+        let foreign_stream = foreign_device
             .inner()
             .stream()
             .fork()
-            .expect("foreign stream");
+            .expect("independent context-owner stream");
 
         let error = match provider.capture_resident_schedule(schedule, 0, foreign_stream) {
             Err(error) => error,
-            Ok(_) => panic!("foreign stream captured a local schedule"),
+            Ok(_) => panic!("independent context-owner stream captured a local schedule"),
         };
         assert!(error.to_string().contains("foreign CUDA context"));
     }
