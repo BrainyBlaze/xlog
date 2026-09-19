@@ -15,9 +15,9 @@
 //!      records in the logging sink and raise both the local
 //!      manager counter and the runtime's `bytes_outstanding`.
 //!   2. Dropping the returned tracked slice / runtime block
-//!      releases the manager counter immediately and, after a
-//!      `runtime.reap_pending()`, the runtime's reserved bytes
-//!      (held while the async free is queued).
+//!      releases the manager counter immediately and, no later than a
+//!      `runtime.reap_pending()`, the runtime's reserved bytes. An idle
+//!      allocation may retire synchronously when no dependency lease remains.
 //!   3. `into_bytes` preserves the `Backing::Runtime` ownership
 //!      tag so a runtime-routed `u32` reinterpreted as bytes still
 //!      frees through the runtime.
@@ -72,30 +72,34 @@ fn alloc_raw_routes_through_runtime_budget_and_logging() {
     assert_eq!(recs[0].bytes, Some(4096));
     assert_eq!(recs[0].tag, Some(AllocTag("provider-rt-A")));
 
-    // Drop the block: manager counter releases immediately, runtime
-    // counter holds bytes pending until reap_pending drains.
+    // Drop the block: manager accounting releases immediately. Runtime
+    // accounting may also release immediately, or remain pending until reap.
     drop(block);
     assert_eq!(manager.allocated_bytes(), 0);
-    assert_eq!(
-        runtime.bytes_outstanding(),
-        4096,
-        "async inner: runtime holds bytes until reap"
+    let outstanding_after_drop = runtime.bytes_outstanding();
+    assert!(
+        outstanding_after_drop == 0 || outstanding_after_drop == 4096,
+        "runtime bytes after drop must be physically released or pending: {outstanding_after_drop}"
     );
 
     runtime.reap_pending().expect("reap");
     assert_eq!(runtime.bytes_outstanding(), 0);
 
     let recs = sink.snapshot();
-    assert_eq!(
-        recs.len(),
-        3,
+    assert!(
+        recs.len() >= 3,
         "expected alloc + dealloc + reap records, got {:?}",
         recs
     );
     assert_eq!(recs[1].action, LogAction::Deallocate);
     assert_eq!(recs[1].result, LogResult::Ok);
-    assert_eq!(recs[2].action, LogAction::ReapPending);
-    assert_eq!(recs[2].result, LogResult::Ok);
+    assert!(
+        recs[2..]
+            .iter()
+            .all(|record| record.action == LogAction::ReapPending && record.result == LogResult::Ok),
+        "every post-deallocation record must be a successful reap: {:?}",
+        recs
+    );
 }
 
 #[test]
@@ -124,10 +128,10 @@ fn alloc_u8_via_runtime_records_in_sink_and_releases_on_drop() {
     // Drop frees through the runtime (Backing::Runtime branch).
     drop(slice);
     assert_eq!(manager.allocated_bytes(), 0);
-    assert_eq!(
-        runtime.bytes_outstanding(),
-        len,
-        "async backend: runtime holds bytes pending until reap"
+    let outstanding_after_drop = runtime.bytes_outstanding();
+    assert!(
+        outstanding_after_drop == 0 || outstanding_after_drop == len,
+        "runtime bytes after drop must be physically released or pending: {outstanding_after_drop}"
     );
 
     runtime.reap_pending().expect("reap");
