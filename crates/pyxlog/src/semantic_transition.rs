@@ -2362,7 +2362,7 @@ impl ReplayRow {
                     group: ReplayAnchorGroup::Symbolic,
                 } => SemanticTrainingViewBasis::CorpusSymbolicAnchor,
             },
-            identity: replay_digest_identity(&material.identity)?,
+            identity: replay_digest_identity(identity[1].text()?)?,
             bytes_identity: replay_digest_identity(
                 material
                     .bytes_sha256
@@ -2830,6 +2830,11 @@ fn validate_replay_training_payload(
     source: &str,
     require_retention: bool,
 ) -> PyResult<()> {
+    if material.bytes_sha256.as_deref() != Some(material.identity.as_str()) {
+        return Err(invalid(
+            "training-view material identity differs from its original byte identity",
+        ));
+    }
     let bytes = material
         .bytes
         .as_deref()
