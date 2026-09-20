@@ -75,6 +75,7 @@ impl DeviceMemoryResource for DirectCudaResource {
         reclamation.attach_resource(Arc::clone(&self.bytes_outstanding), bytes)?;
         let allocation = crate::memory::RawDeviceAllocation::allocate(
             Arc::clone(self.device.inner().stream()),
+            Arc::clone(self.device.inner().allocation_stream()),
             bytes,
             None,
             Arc::clone(&reclamation),

@@ -1031,6 +1031,7 @@ impl CudaFunction {
 pub struct CudaDeviceInner {
     context: Arc<CudarcContext>,
     stream: Arc<CudaStream>,
+    allocation_stream: Arc<CudaStream>,
     modules: RwLock<BTreeMap<String, Arc<LoadedModule>>>,
 }
 
@@ -1068,6 +1069,10 @@ impl CudaDeviceInner {
 
     pub fn stream(&self) -> &Arc<CudaStream> {
         &self.stream
+    }
+
+    pub(crate) fn allocation_stream(&self) -> &Arc<CudaStream> {
+        &self.allocation_stream
     }
 
     pub fn has_func(&self, module_name: &str, func_name: &str) -> bool {
@@ -1131,7 +1136,11 @@ impl CudaDeviceInner {
         &self,
         len: usize,
     ) -> ResourceResult<DeviceMemoryView<T>> {
-        DeviceMemoryView::allocate(Arc::clone(&self.stream), len)
+        DeviceMemoryView::allocate(
+            Arc::clone(&self.stream),
+            Arc::clone(&self.allocation_stream),
+            len,
+        )
     }
 
     pub fn alloc_zeros<T: DeviceRepr + ValidAsZeroBits + 'static>(
@@ -1139,7 +1148,11 @@ impl CudaDeviceInner {
         len: usize,
     ) -> ResourceResult<DeviceMemoryView<T>> {
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)?;
-        let mut allocation = DeviceMemoryView::allocate(Arc::clone(&self.stream), len)?;
+        let mut allocation = DeviceMemoryView::allocate(
+            Arc::clone(&self.stream),
+            Arc::clone(&self.allocation_stream),
+            len,
+        )?;
         self.memset_zeros(&mut allocation)?;
         Ok(allocation)
     }
@@ -1256,7 +1269,11 @@ impl CudaDeviceInner {
         src: &Src,
     ) -> ResourceResult<DeviceMemoryView<T>> {
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)?;
-        let mut dst = DeviceMemoryView::allocate(Arc::clone(&self.stream), src.len())?;
+        let mut dst = DeviceMemoryView::allocate(
+            Arc::clone(&self.stream),
+            Arc::clone(&self.allocation_stream),
+            src.len(),
+        )?;
         self.htod_sync_copy_into(src, &mut dst)?;
         Ok(dst)
     }
@@ -1394,10 +1411,17 @@ impl CudaDevice {
             })?;
 
         let stream = context.default_stream();
+        let allocation_stream = context.new_stream().map_err(|error| {
+            XlogError::Kernel(format!(
+                "Failed to create CUDA allocation stream on device {}: {}",
+                ordinal, error
+            ))
+        })?;
         Ok(Self {
             device: Arc::new(CudaDeviceInner {
                 context,
                 stream,
+                allocation_stream,
                 modules: RwLock::new(BTreeMap::new()),
             }),
         })

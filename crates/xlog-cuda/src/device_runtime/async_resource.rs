@@ -1,6 +1,6 @@
 //! Stream-bound allocation through the shared raw storage owner.
 //!
-//! Producer-ready events are created before malloc and recorded before block
+//! Allocation uses one device-owned lifecycle stream and completes before block
 //! publication. Failed initialization retains actual storage and its byte charge.
 //! Deallocation moves real owners into the existing pending queue. Cold reaping
 //! proves physical free before releasing accounting; pool IDs alone are not
@@ -31,10 +31,9 @@ struct LiveEntry {
     slice: Arc<RawDeviceAllocation>,
     generation: Generation,
     alloc_stream: StreamId,
-    /// The same event history used by storage aliases. Its initial writer is
-    /// the allocation-ready event: cuMemAllocAsync orders allocation only on
-    /// the allocation stream. Exact CUDA stream/context identity, rather than
-    /// this resource's pool-local index, determines which waits can be skipped.
+    /// The same event history used by storage aliases. Allocation is complete
+    /// before publication; subsequent accesses record the authoritative read
+    /// and write frontiers on their exact CUDA streams.
     dependencies: Arc<DeviceAccessDependencies>,
 }
 
@@ -184,6 +183,7 @@ impl DeviceMemoryResource for AsyncCudaResource {
         reclamation.attach_resource(Arc::clone(&self.outstanding_bytes), bytes)?;
         let allocation = crate::memory::RawDeviceAllocation::allocate(
             Arc::clone(&cu_stream),
+            Arc::clone(self.device.inner().allocation_stream()),
             bytes,
             None,
             Arc::clone(&reclamation),

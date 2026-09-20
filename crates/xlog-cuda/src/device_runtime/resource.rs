@@ -881,11 +881,14 @@ impl DeviceAccessDependencies {
         Ok(())
     }
 
-    /// A foreign producer has completed its handoff before the unsafe import
-    /// boundary. XLOG accesses after that handoff populate this same history.
-    pub(crate) fn after_ready(context: Arc<CudaContext>) -> Self {
+    /// The producer has completed its handoff before publication. XLOG accesses
+    /// after that handoff populate this same history.
+    pub(crate) fn after_ready(
+        context: Arc<CudaContext>,
+        reclamation: Arc<crate::memory::AllocationReclamation>,
+    ) -> Self {
         Self {
-            reclamation: Arc::default(),
+            reclamation,
             allocation: std::sync::OnceLock::new(),
             _allocation_context: context,
             state: Mutex::new(AccessDependencies {

@@ -685,18 +685,11 @@ struct RawAllocationPayload {
     acquired: bool,
     bytes: usize,
     stream: Arc<CudaStream>,
+    allocation_stream: Arc<CudaStream>,
     dependencies: Option<Arc<DeviceAccessDependencies>>,
-    ready_event: Option<cudarc::driver::CudaEvent>,
-    initialization_event: cudarc::driver::CudaEvent,
-    initialization_recorded: bool,
     reclamation: Arc<AllocationReclamation>,
     asynchronous: bool,
     free_state: DriverReleaseState,
-    free_event: Option<cudarc::driver::CudaEvent>,
-    free_event_recorded: bool,
-    // An explicit stream preserves the actual free prefix across host threads.
-    // A per-thread default stream handle cannot provide this retry identity.
-    free_stream: Option<ReclamationStream>,
     manager: Option<Arc<GpuMemoryManager>>,
     lifecycle_exclusion: Option<AllocationLifecyclePermit>,
 }
@@ -812,65 +805,22 @@ impl DriverReleaseState {
     }
 }
 
-/// Private stream state owned by the allocation payload, never shared with
-/// ordinary work. The payload retains its context and cannot retire until
-/// `RawDeviceAllocation::release` has destroyed this stream successfully.
-struct ReclamationStream {
-    handle: cudarc::driver::sys::CUstream,
-    destroy_state: DriverReleaseState,
-}
-
-// SAFETY: this is an explicit (not per-thread default) stream. The containing
-// allocation payload retains its context; every driver operation binds it, and
-// release requires exclusive access to the payload. No safe caller can obtain
-// this private handle or race stream destruction with submission.
-unsafe impl Send for ReclamationStream {}
-// SAFETY: shared allocation access cannot mutate or submit to this stream.
-unsafe impl Sync for ReclamationStream {}
-
-impl ReclamationStream {
-    fn create() -> crate::device_runtime::ResourceResult<Self> {
-        // The caller has bound the allocation context and excluded capture.
-        // CudaContext::new_stream would synchronize the entire context when
-        // entering multi-stream mode; fork would import a different prefix.
-        let handle = cudarc::driver::result::stream::create(
-            cudarc::driver::result::stream::StreamKind::NonBlocking,
-        )?;
-        Ok(Self {
-            handle,
-            destroy_state: DriverReleaseState::Owned,
-        })
-    }
-
-    fn destroy(&mut self) -> crate::device_runtime::ResourceResult<()> {
-        self.destroy_state.submit(|| {
-            // SAFETY: the payload bound the retained context. Its own free
-            // prefix is complete, and the handle is private to that payload.
-            // An unknown destroy result never permits a second driver call.
-            unsafe { cudarc::driver::result::stream::destroy(self.handle)? };
-            Ok(())
-        })
-    }
-}
-
 impl RawDeviceAllocation {
     pub(crate) fn allocate(
         stream: Arc<CudaStream>,
+        allocation_stream: Arc<CudaStream>,
         bytes: usize,
         manager: Option<Arc<GpuMemoryManager>>,
         reclamation: Arc<AllocationReclamation>,
     ) -> crate::device_runtime::ResourceResult<Arc<Self>> {
         let _capture_exclusion = crate::cuda_graph::reserve_uncaptured_stream(&stream)?;
-        let execution_id = crate::cuda_graph::stream_execution_id(&stream)?;
-        // Every fallible prerequisite precedes malloc. In particular, creating
-        // the event after malloc would leave an unowned pointer on failure.
-        let ready_event = stream.context().new_event(None)?;
-        let initialization_event = stream.context().new_event(None)?;
         let asynchronous = stream.context().has_async_alloc();
         stream.context().bind_to_thread()?;
-        // Arm context/events before creating the private stream or attempting
-        // malloc. Pre-allocation failures also reach the canonical cold reaper,
-        // but never acquire a physical byte charge.
+        // Preserve the caller-prefix ordering previously carried by a private
+        // ready event without retaining an event per allocation.
+        stream.synchronize()?;
+        // Arm both stream owners before malloc. A post-malloc failure therefore
+        // reaches the canonical cold reaper with the exact device-owned stream.
         let mut allocation = initialize_allocation(
             Self {
                 reclamation_admission: None,
@@ -879,16 +829,11 @@ impl RawDeviceAllocation {
                     acquired: false,
                     bytes,
                     stream,
+                    allocation_stream,
                     dependencies: None,
-                    ready_event: Some(ready_event),
-                    initialization_event,
-                    initialization_recorded: false,
                     reclamation: Arc::clone(&reclamation),
                     asynchronous,
                     free_state: DriverReleaseState::Owned,
-                    free_event: None,
-                    free_event_recorded: false,
-                    free_stream: None,
                     manager,
                     lifecycle_exclusion: None,
                 }),
@@ -900,27 +845,6 @@ impl RawDeviceAllocation {
                     .payload
                     .as_mut()
                     .expect("allocation owner present");
-                let ready = payload
-                    .ready_event
-                    .as_ref()
-                    .expect("producer event present");
-                ready.record(&payload.stream)?;
-                payload.free_stream = Some(ReclamationStream::create()?);
-                let private_stream = payload
-                    .free_stream
-                    .as_ref()
-                    .expect("private stream present");
-                // SAFETY: both handles belong to the bound allocation context.
-                // The wait snapshots the caller-prefix recording. Re-recording
-                // this event for publication below cannot modify this wait.
-                unsafe {
-                    cudarc::driver::sys::cuStreamWaitEvent(
-                        private_stream.handle,
-                        ready.cu_event(),
-                        0,
-                    )
-                    .result()?;
-                }
                 // Keep the permit in the armed owner so a fallible
                 // post-malloc step transfers it to the cold reaper.
                 payload.lifecycle_exclusion = Some(
@@ -930,11 +854,14 @@ impl RawDeviceAllocation {
                 let ptr = if bytes == 0 {
                     0
                 } else {
-                    // SAFETY: capture is excluded and the explicit stream is
-                    // private to this already armed allocation owner.
+                    // SAFETY: capture is excluded and the device-owned stream
+                    // is serialized by the allocation lifecycle permit.
                     unsafe {
                         if asynchronous {
-                            cudarc::driver::result::malloc_async(private_stream.handle, bytes)?
+                            cudarc::driver::result::malloc_async(
+                                payload.allocation_stream.cu_stream(),
+                                bytes,
+                            )?
                         } else {
                             cudarc::driver::result::malloc_sync(bytes)?
                         }
@@ -943,40 +870,33 @@ impl RawDeviceAllocation {
                 payload.ptr = ptr;
                 payload.acquired = true;
                 payload.reclamation.acquired()?;
+                let poison = payload.manager.is_some() && bytes != 0 && poison_alloc_enabled();
                 if payload.manager.is_some() {
                     alloc_guard_insert(payload.ptr, bytes as u64);
-                    if bytes != 0 && poison_alloc_enabled() {
+                    if poison {
                         // SAFETY: initialized only by this armed allocation owner.
                         unsafe {
                             cudarc::driver::sys::cuMemsetD8Async(
                                 payload.ptr,
                                 0xDD,
                                 bytes,
-                                private_stream.handle,
+                                payload.allocation_stream.cu_stream(),
                             )
                             .result()?;
                         }
                     }
                 }
-                // SAFETY: only allocation/initialization work uses this owned
-                // stream. This fence also remains valid on another host thread.
-                unsafe {
-                    cudarc::driver::result::event::record(
-                        payload.initialization_event.cu_event(),
-                        private_stream.handle,
-                    )?;
+                if (asynchronous && bytes != 0) || poison {
+                    // SAFETY: the lifecycle permit excludes any other user of
+                    // this device-owned allocation stream until publication.
+                    unsafe {
+                        cudarc::driver::result::stream::synchronize(
+                            payload.allocation_stream.cu_stream(),
+                        )?;
+                    }
                 }
-                payload.initialization_recorded = true;
-                payload.stream.wait(&payload.initialization_event)?;
-                let event = payload
-                    .ready_event
-                    .as_ref()
-                    .expect("producer event present");
-                event.record(&payload.stream)?;
-                payload.dependencies = Some(Arc::new(DeviceAccessDependencies::after_event(
-                    Arc::clone(&payload.stream),
-                    execution_id,
-                    payload.ready_event.take().expect("producer event present"),
+                payload.dependencies = Some(Arc::new(DeviceAccessDependencies::after_ready(
+                    Arc::clone(payload.stream.context()),
                     Arc::clone(&reclamation),
                 )));
                 Ok(())
@@ -1048,13 +968,9 @@ impl RawDeviceAllocation {
     pub(crate) fn release(&mut self) -> crate::device_runtime::ResourceResult<()> {
         let admission = &mut self.reclamation_admission;
         reclaim_allocation(&mut self.payload, |payload| {
-            // No memory was acquired. Only the private stream/context needs
-            // retirement; the calling frame restores its provisional budget.
+            // No memory was acquired; the device owns the shared allocation
+            // stream and the calling frame restores its provisional budget.
             if !payload.acquired {
-                payload.stream.context().bind_to_thread()?;
-                if let Some(stream) = payload.free_stream.as_mut() {
-                    stream.destroy()?;
-                }
                 return Ok(());
             }
             if payload.lifecycle_exclusion.is_none() {
@@ -1072,9 +988,8 @@ impl RawDeviceAllocation {
                 payload.reclamation.release_proof(),
                 admission,
                 || {
-                    // Only this payload can submit to its private explicit
-                    // stream. Do not reinterpret a caller PTDS handle on the
-                    // cold reaper thread as a capture or completion witness.
+                    // The device-owned stream is serialized by the lifecycle
+                    // permit and is never exposed as an execution dependency.
                     let _capture_exclusion = crate::cuda_graph::reserve_capture_exclusion()?;
                     payload.stream.context().bind_to_thread()?;
                     if payload.free_state != DriverReleaseState::Submitted {
@@ -1083,22 +998,6 @@ impl RawDeviceAllocation {
                                 "previous allocation free outcome is unknown".into(),
                             ));
                         }
-                        if !payload.initialization_recorded {
-                            let stream = payload
-                                .free_stream
-                                .as_ref()
-                                .expect("private stream present");
-                            // SAFETY: replay only the missing fence on the same
-                            // owned explicit prefix; never repeat malloc/poison.
-                            unsafe {
-                                cudarc::driver::result::event::record(
-                                    payload.initialization_event.cu_event(),
-                                    stream.handle,
-                                )?;
-                            }
-                            payload.initialization_recorded = true;
-                        }
-                        payload.initialization_event.synchronize()?;
                         if let Some(dependencies) = &payload.dependencies {
                             dependencies.synchronize()?;
                         }
@@ -1106,28 +1005,24 @@ impl RawDeviceAllocation {
                         let poison = payload.manager.is_some()
                             && payload.bytes != 0
                             && poison_free_enabled();
-                        if payload.asynchronous && payload.bytes != 0 {
-                            payload.free_event = Some(payload.stream.context().new_event(None)?);
-                        }
-                        payload.stream.context().bind_to_thread()?;
                         if poison {
-                            let stream = payload.free_stream.as_ref().expect("free stream present");
                             // SAFETY: all users completed and no free was attempted.
-                            // A failed poison wait may retry only on this same owned
-                            // explicit stream, where any earlier poison is ordered.
+                            // A failed poison wait may retry on the same serialized
+                            // device-owned stream, where earlier poison is ordered.
                             unsafe {
                                 cudarc::driver::sys::cuMemsetD8Async(
                                     payload.ptr,
                                     0xDD,
                                     payload.bytes,
-                                    stream.handle,
+                                    payload.allocation_stream.cu_stream(),
                                 )
                                 .result()?;
                             }
-                            // SAFETY: only this payload's poison/free work uses
-                            // the private stream, in the bound allocation context.
+                            // SAFETY: the lifecycle permit owns the stream prefix.
                             unsafe {
-                                cudarc::driver::result::stream::synchronize(stream.handle)?;
+                                cudarc::driver::result::stream::synchronize(
+                                    payload.allocation_stream.cu_stream(),
+                                )?;
                             }
                         }
                         payload.free_state.submit(|| {
@@ -1144,11 +1039,7 @@ impl RawDeviceAllocation {
                                     if payload.asynchronous {
                                         cudarc::driver::result::free_async(
                                             payload.ptr,
-                                            payload
-                                                .free_stream
-                                                .as_ref()
-                                                .expect("free stream present")
-                                                .handle,
+                                            payload.allocation_stream.cu_stream(),
                                         )?;
                                     } else {
                                         cudarc::driver::result::free_sync(payload.ptr)?;
@@ -1159,33 +1050,15 @@ impl RawDeviceAllocation {
                         })?;
                     }
                     if payload.asynchronous && payload.bytes != 0 {
-                        let event = payload.free_event.as_ref().expect("free event present");
-                        let stream = payload.free_stream.as_ref().expect("free stream present");
-                        // Failed record retries the same explicit stream; failed wait
-                        // retries the same recorded event. Neither resubmits free.
-                        payload.free_state.confirm_async(
-                            &mut payload.free_event_recorded,
-                            || {
-                                // SAFETY: the allocation context is current and
-                                // both handles remain owned by this payload.
-                                unsafe {
-                                    cudarc::driver::result::event::record(
-                                        event.cu_event(),
-                                        stream.handle,
-                                    )?;
-                                }
-                                Ok(())
-                            },
-                            || event.synchronize().map_err(ResourceError::from),
-                        )?;
+                        // A failed synchronization retains Submitted state, so
+                        // retry proves the same free prefix without resubmission.
+                        unsafe {
+                            cudarc::driver::result::stream::synchronize(
+                                payload.allocation_stream.cu_stream(),
+                            )?;
+                        }
                     }
                     payload.reclamation.complete()?;
-                    // Physical byte release and stream-handle retirement are
-                    // separate obligations. An unknown destroy cannot keep
-                    // already freed memory charged or trigger a second free.
-                    if let Some(stream) = payload.free_stream.as_mut() {
-                        stream.destroy()?;
-                    }
                     Ok(())
                 },
             )
@@ -1372,9 +1245,10 @@ impl DeviceStorage {
         let dependencies = match &backing {
             Backing::Native(allocation) => allocation.dependencies(),
             Backing::Runtime(allocation) => Arc::clone(&allocation.dependencies),
-            Backing::Foreign { .. } => Arc::new(DeviceAccessDependencies::after_ready(Arc::clone(
-                stream.context(),
-            ))),
+            Backing::Foreign { .. } => Arc::new(DeviceAccessDependencies::after_ready(
+                Arc::clone(stream.context()),
+                Arc::default(),
+            )),
         };
         let storage = Arc::new(Self {
             backing: ManuallyDrop::new(backing),
@@ -1724,13 +1598,19 @@ impl<T: DeviceRepr + 'static> DeviceMemoryView<T> {
     /// Allocate through the same native owner used by runtime resources.
     pub(crate) fn allocate(
         stream: Arc<CudaStream>,
+        allocation_stream: Arc<CudaStream>,
         len: usize,
     ) -> crate::device_runtime::ResourceResult<Self> {
         let bytes = len
             .checked_mul(std::mem::size_of::<T>())
             .ok_or_else(|| ResourceError::Driver("allocation size overflow".into()))?;
-        let allocation =
-            RawDeviceAllocation::allocate(Arc::clone(&stream), bytes, None, Arc::default())?;
+        let allocation = RawDeviceAllocation::allocate(
+            Arc::clone(&stream),
+            allocation_stream,
+            bytes,
+            None,
+            Arc::default(),
+        )?;
         let ptr = allocation.ptr();
         Ok(Self {
             ptr,
@@ -2859,7 +2739,7 @@ impl GpuMemoryManager {
     }
 
     /// Allocate `len` elements through the attached runtime or the shared raw
-    /// allocator. Producer-ready events precede publication; retained failures
+    /// allocator. Allocation completes before publication; retained failures
     /// keep their actual allocation and local byte claim.
     pub fn alloc<T: cudarc::driver::DeviceRepr>(
         self: &Arc<Self>,
@@ -2913,6 +2793,7 @@ impl GpuMemoryManager {
         self.run_after_local_reservation_hook(bytes);
         let allocation = RawDeviceAllocation::allocate(
             Arc::clone(self.device.inner().stream()),
+            Arc::clone(self.device.inner().allocation_stream()),
             extent,
             Some(Arc::clone(self)),
             reclamation,
@@ -4039,10 +3920,15 @@ mod tests {
         let (abort, wait_for_abort) = mpsc::channel();
         let worker_manager = Arc::clone(&manager);
         let worker = std::thread::spawn(move || {
-            // Real caller-prefix work precedes the target's private allocation
-            // and initialization handoff; keep its bytes for later observation.
+            // Real caller-prefix work precedes the target allocation and
+            // completed publication; keep its bytes for later observation.
             let stream = Arc::clone(worker_manager.device.inner().stream());
-            let prefix = DeviceMemoryView::<u8>::allocate(Arc::clone(&stream), 16).unwrap();
+            let prefix = DeviceMemoryView::<u8>::allocate(
+                Arc::clone(&stream),
+                Arc::clone(worker_manager.device.inner().allocation_stream()),
+                16,
+            )
+            .unwrap();
             with_memory_access(
                 Arc::clone(&stream),
                 vec![prefix.access(Access::Write).unwrap()],
