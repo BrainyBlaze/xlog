@@ -2169,11 +2169,6 @@ impl ReplayMaterial {
                 ))
             }
         };
-        if kind == "training-view" && bytes_sha256.as_ref() != Some(&identity) {
-            return Err(invalid(
-                "training-view identity must be the digest of its original bytes",
-            ));
-        }
         Ok(Self {
             identity,
             kind,
@@ -2367,6 +2362,13 @@ impl ReplayRow {
                     group: ReplayAnchorGroup::Symbolic,
                 } => SemanticTrainingViewBasis::CorpusSymbolicAnchor,
             },
+            identity: replay_digest_identity(&material.identity)?,
+            bytes_identity: replay_digest_identity(
+                material
+                    .bytes_sha256
+                    .as_deref()
+                    .ok_or_else(|| invalid("training view has no original byte identity"))?,
+            )?,
             content_identity: replay_digest_identity(identity[2].text()?)?,
             origin,
             bytes: bytes.to_vec(),

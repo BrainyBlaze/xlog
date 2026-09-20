@@ -53,6 +53,8 @@ pub struct SemanticTrainingViewOrigin {
 /// One already-admitted training view retained for cold device selection.
 pub struct SemanticTrainingViewRow {
     pub basis: SemanticTrainingViewBasis,
+    pub identity: Identity256,
+    pub bytes_identity: Identity256,
     pub content_identity: Identity256,
     pub origin: Option<SemanticTrainingViewOrigin>,
     pub bytes: Vec<u8>,
@@ -918,6 +920,8 @@ impl SemanticTrainingViewArena {
             let descriptor = validate_row(
                 ordinal,
                 row.basis,
+                row.identity,
+                row.bytes_identity,
                 row.content_identity,
                 row.origin,
                 &row.bytes,
@@ -1410,6 +1414,8 @@ fn canary_identity(
 fn validate_row(
     ordinal: usize,
     basis: SemanticTrainingViewBasis,
+    expected_identity: Identity256,
+    bytes_identity: Identity256,
     content_identity: Identity256,
     origin: Option<SemanticTrainingViewOrigin>,
     bytes: &[u8],
@@ -1462,12 +1468,13 @@ fn validate_row(
             "only an episode training view has an authentic execution origin",
         ));
     }
-    if Sha256::digest(bytes).as_slice() != identity
+    if identity != *expected_identity.as_bytes()
+        || Sha256::digest(bytes).as_slice() != bytes_identity.as_bytes()
         || source_identity == [0; 32]
         || content_identity == Identity256::default()
     {
         return Err(input_error(
-            "training-view row identity differs from its bytes, source or replay content",
+            "training-view row differs from its logical identity, material bytes, source or replay content",
         ));
     }
     Ok(TrainingViewRowDescriptor {
