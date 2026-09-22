@@ -11958,6 +11958,7 @@ mod tests {
             assert_eq!(spec.admissible_truth_masks, [15, 7, 3]);
             assert_eq!(spec.scoring.correct_weight, 5);
             assert_eq!(spec.scoring.spent_weight, 0);
+            assert!(spec.actor_eligible);
         });
     }
 
