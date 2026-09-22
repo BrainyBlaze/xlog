@@ -109,7 +109,7 @@ impl SemanticTruth {
         }
     }
 
-    fn from_bits(bits: u64) -> Result<Self, SemanticHypergraphError> {
+    pub(crate) fn from_bits(bits: u64) -> Result<Self, SemanticHypergraphError> {
         match bits {
             0 => Ok(Self::Neither),
             1 => Ok(Self::True),

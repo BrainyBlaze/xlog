@@ -1269,6 +1269,14 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticCompletedActionLane>()?;
     #[cfg(feature = "semantic-policy")]
+    m.add_class::<semantic_transition::PySemanticCompletedTaskFacts>()?;
+    #[cfg(feature = "semantic-policy")]
+    m.add_class::<semantic_transition::PySemanticCompletedLaneOutcome>()?;
+    #[cfg(feature = "semantic-policy")]
+    m.add_class::<semantic_transition::PySemanticCompletedTaskGround>()?;
+    #[cfg(feature = "semantic-policy")]
+    m.add_class::<semantic_transition::PySemanticCompletedEditSolution>()?;
+    #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticCompletedActionProjection>()?;
     m.add_class::<semantic_transition::PySemanticGradientDelivery>()?;
     m.add_class::<semantic_transition::PySemanticTensorContentWitness>()?;

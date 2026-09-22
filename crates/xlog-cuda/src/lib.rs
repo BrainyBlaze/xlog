@@ -96,8 +96,10 @@ pub use semantic_transition::{
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{
     SemanticCompletedActionComponentMaterial, SemanticCompletedActionLaneMaterial,
-    SemanticCompletedActionProjectionMaterial, SemanticCompletedModelCarrierMaterial,
-    SemanticCompletedStepWitnessMaterial, SemanticPolicyGradients, SemanticSelectedPolicyGradients,
+    SemanticCompletedActionProjectionMaterial, SemanticCompletedEditSolutionMaterial,
+    SemanticCompletedLaneOutcomeMaterial, SemanticCompletedModelCarrierMaterial,
+    SemanticCompletedStepWitnessMaterial, SemanticCompletedTaskGroundMaterial,
+    SemanticPolicyGradients, SemanticSelectedPolicyGradients,
 };
 pub use semantic_work::ModelWorkKind;
 

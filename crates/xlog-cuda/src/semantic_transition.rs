@@ -477,6 +477,10 @@ impl TaskEvaluationBinding {
         self.observation.expected_truth
     }
 
+    fn goal_witness(&self) -> Option<SemanticTaskGoalWitness> {
+        self.goal_witness
+    }
+
     pub(crate) fn content(&self) -> (SemanticTaskContentIdentity, [crate::SemanticTruth; 3]) {
         (self.content_identity(), self.expected_truth())
     }
@@ -1123,6 +1127,9 @@ fn canonical_text_null(receipt: &SemanticTransitionReceipt) -> bool {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SemanticTaskFacts {
+    /// Ordered actual Truth4 codes for the three task queries. A task-refused
+    /// lane has no executed truth outcome; its terminal refusal is authoritative.
+    pub truth: [u64; 3],
     /// Equality of each actual Truth4 answer to the protected observer result.
     pub correct: [u64; 3],
     /// Number of correct subgoals, in the inclusive range zero to three.
@@ -3552,6 +3559,46 @@ pub struct SemanticCompletedActionLaneMaterial {
     pub hard_decode_receipts: [SemanticCompletedStepWitnessMaterial; 2],
 }
 
+/// Terminal native result for one learned lane of a completed task ground.
+/// A refusal never invents query results for a request that was not executed.
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticCompletedLaneOutcomeMaterial {
+    Executed([crate::SemanticTruth; 3]),
+    Refused(SemanticTaskRefusal),
+}
+
+/// Typed semantic ground retained by the same completed Proposal owner as the
+/// action projection. Learned attempted requests remain in `lanes`; this value
+/// records their terminal execution results without creating a replay path.
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone)]
+pub struct SemanticCompletedTaskGroundMaterial {
+    pub witness: SemanticCompletedStepWitnessMaterial,
+    pub task_identity: Identity256,
+    pub content: SemanticTaskContentIdentity,
+    pub goal: SemanticTaskGoalWitness,
+    pub base: SemanticPublishedIdentity,
+    pub expected_truth: [crate::SemanticTruth; 3],
+    pub facts: [SemanticTaskFacts; 3],
+    pub base_truth: [crate::SemanticTruth; 3],
+    pub lane_outcomes: [SemanticCompletedLaneOutcomeMaterial; 2],
+}
+
+/// A minimal learned lane that is genuinely decisive for the bound semantic
+/// goal. Presence is the edit-supervision membership decision; selection does
+/// not depend on the policy winner, return, or an admission-only flag.
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone)]
+pub struct SemanticCompletedEditSolutionMaterial {
+    pub witness: SemanticCompletedStepWitnessMaterial,
+    pub lane: u64,
+    pub component_begin: u64,
+    pub component_end: u64,
+    pub structural_delta: SemanticTransitionWork,
+    pub resulting_state_receipt: SemanticCompletedStepWitnessMaterial,
+}
+
 /// Cold typed projection of one completed Proposal action. All byte-backed
 /// children retain the same owner identity and are observations, not authority.
 #[cfg(feature = "semantic-policy")]
@@ -3577,6 +3624,8 @@ pub struct SemanticCompletedActionProjectionMaterial {
     pub slot_zero_admission: SemanticCompletedStepWitnessMaterial,
     pub lanes: [SemanticCompletedActionLaneMaterial; 2],
     pub components: Vec<SemanticCompletedActionComponentMaterial>,
+    pub task_ground: SemanticCompletedTaskGroundMaterial,
+    pub edit_solution: Option<SemanticCompletedEditSolutionMaterial>,
     pub attempt_receipt: SemanticCompletedStepWitnessMaterial,
 }
 
@@ -3929,6 +3978,39 @@ fn completed_receipt_material(
         material_u64(&mut payload, *value);
     }
     completed_action_child_material(owner, kind, ordinal, &payload)
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_task_truths(
+    facts: SemanticTaskFacts,
+) -> Result<[crate::SemanticTruth; 3], SemanticTransitionError> {
+    Ok([
+        crate::SemanticTruth::from_bits(facts.truth[0])
+            .map_err(SemanticTransitionError::Semantic)?,
+        crate::SemanticTruth::from_bits(facts.truth[1])
+            .map_err(SemanticTransitionError::Semantic)?,
+        crate::SemanticTruth::from_bits(facts.truth[2])
+            .map_err(SemanticTransitionError::Semantic)?,
+    ])
+}
+
+#[cfg(feature = "semantic-policy")]
+fn encode_completed_task_facts(bytes: &mut Vec<u8>, facts: SemanticTaskFacts) {
+    for value in facts.truth {
+        material_u64(bytes, value);
+    }
+    for value in facts.correct {
+        material_u64(bytes, value);
+    }
+    for value in [facts.g, facts.p, facts.c, facts.v as u64, facts.eligible] {
+        material_u64(bytes, value);
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+fn bind_completed_material(bytes: &mut Vec<u8>, material: &SemanticCompletedStepWitnessMaterial) {
+    bytes.extend_from_slice(material.identity.as_bytes());
+    bytes.extend_from_slice(&Sha256::digest(&material.bytes));
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -9596,9 +9678,9 @@ content_kernel_parameter!(ContinuationInputs);
 const _: () = assert!(size_of::<PendingContinuation>() == 256);
 const _: () = assert!(size_of::<ContinuationInputs>() == 104);
 const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 296);
-const _: () = assert!(size_of::<SemanticTaskFacts>() == 64);
-const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3256);
-const _: () = assert!(size_of::<DeviceState>() == 7496);
+const _: () = assert!(size_of::<SemanticTaskFacts>() == 88);
+const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3328);
+const _: () = assert!(size_of::<DeviceState>() == 7568);
 const _: () = assert!(size_of::<PolicyField>() == 32);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 672);
 const _: () = assert!(size_of::<PolicyBackward>() == 144);
@@ -9644,7 +9726,7 @@ mod task_state_contract {
 
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
-        assert_eq!(size_of::<DeviceState>(), 7496);
+        assert_eq!(size_of::<DeviceState>(), 7568);
         assert_eq!(size_of::<Descriptor>(), 1008);
     }
 
@@ -9992,6 +10074,15 @@ pub struct SemanticTransitionObservation {
 pub enum SemanticTaskRefusal {
     Scope,
     HardConstraint,
+}
+
+impl SemanticTaskRefusal {
+    pub const fn canonical_kind(self) -> &'static str {
+        match self {
+            Self::Scope => "task-scope",
+            Self::HardConstraint => "hard-constraint",
+        }
+    }
 }
 
 /// One native evaluation of the fixed base/learned roster. The selector runs
@@ -12667,6 +12758,59 @@ impl SemanticTransitionSession {
         let selected_score_vjps = self.publication_read(selected_score_vjp_view)?;
         let catalogue = self.codebooks.binding;
         let batch_root = state.action_batch_root;
+        let (task_identity, task_content, expected_truth, goal, task_result) = {
+            let task = &self
+                .task
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
+                .0;
+            (
+                task.identity(),
+                task.content_identity(),
+                task.expected_truth(),
+                task.goal_witness()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                task.completed_result_material(),
+            )
+        };
+        let executed_slots = [
+            true,
+            state.task_evaluation.lane_refusal[0] != 1,
+            state.task_evaluation.lane_refusal[1] != 1,
+        ];
+        let expected_query_count =
+            executed_slots.iter().filter(|executed| **executed).count() as u64 * 3;
+        let invalid_task_facts =
+            state
+                .task_evaluation
+                .facts
+                .iter()
+                .zip(executed_slots)
+                .any(|(facts, executed)| {
+                    facts.correct.iter().any(|&value| value > 1)
+                        || facts.g > 3
+                        || facts.p > 1
+                        || facts.eligible > 1
+                        || if executed {
+                            facts.truth.iter().any(|&value| value > 3)
+                                || facts
+                                    .truth
+                                    .iter()
+                                    .zip(expected_truth)
+                                    .zip(facts.correct)
+                                    .any(|((&truth, expected), correct)| {
+                                        correct != u64::from(truth == expected as u64)
+                                    })
+                                || facts.g != facts.correct.iter().sum::<u64>()
+                                || facts.p != u64::from(facts.correct == [1; 3])
+                        } else {
+                            facts.truth != [0; 3]
+                                || facts.correct != [0; 3]
+                                || facts.g != 0
+                                || facts.p != 0
+                                || facts.eligible != 0
+                        }
+                });
         if result.refusal != 0
             || result.advanced != 1
             || state.status != 0
@@ -12688,8 +12832,8 @@ impl SemanticTransitionSession {
             || state.catalogue_generation != catalogue.generation
             || state.catalogue_digest != catalogue.digest
             || state.task_evaluation.winner > 2
-            || !(3..=9).contains(&state.task_evaluation.query_count)
-            || !state.task_evaluation.query_count.is_multiple_of(3)
+            || state.task_evaluation.query_count != expected_query_count
+            || invalid_task_facts
             || state.task_evaluation.facts[state.task_evaluation.winner as usize].eligible != 1
             || state
                 .task_evaluation
@@ -12754,12 +12898,6 @@ impl SemanticTransitionSession {
             self.poisoned = true;
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        let task_result = self
-            .task
-            .as_ref()
-            .ok_or(SemanticTransitionError::ObservationMismatch)?
-            .0
-            .completed_result_material();
         let batch_receipt = SemanticCompletedStepWitnessMaterial {
             identity: batch_root,
             bytes: publication_abi_bytes(&[state.action_batch]),
@@ -12964,12 +13102,145 @@ impl SemanticTransitionSession {
                 admitted: state.task_evaluation.lane_refusal[lane] == 0,
                 refusal_reason: match state.task_evaluation.lane_refusal[lane] {
                     0 => None,
-                    1 => Some("task-scope"),
-                    2 => Some("hard-constraint"),
+                    1 => Some(SemanticTaskRefusal::Scope.canonical_kind()),
+                    2 => Some(SemanticTaskRefusal::HardConstraint.canonical_kind()),
                     _ => unreachable!("validated lane refusal code"),
                 },
                 admission: lane_admissions[lane].clone(),
                 hard_decode_receipts: hard_decode_receipts[lane].clone(),
+            }
+        });
+
+        let base_truth = completed_task_truths(state.task_evaluation.facts[0])?;
+        let lane_outcomes =
+            std::array::from_fn(|lane| match state.task_evaluation.lane_refusal[lane] {
+                0 => SemanticCompletedLaneOutcomeMaterial::Executed(
+                    completed_task_truths(state.task_evaluation.facts[lane + 1])
+                        .expect("validated executed task truth"),
+                ),
+                1 => SemanticCompletedLaneOutcomeMaterial::Refused(SemanticTaskRefusal::Scope),
+                2 => SemanticCompletedLaneOutcomeMaterial::Refused(
+                    SemanticTaskRefusal::HardConstraint,
+                ),
+                _ => unreachable!("validated lane refusal code"),
+            });
+        let mut ground_bytes = Vec::new();
+        ground_bytes.extend_from_slice(b"XLOG-COMPLETED-TASK-GROUND\0");
+        material_u64(&mut ground_bytes, 1);
+        ground_bytes.extend_from_slice(task_identity.as_bytes());
+        for identity in [
+            task_content.query,
+            task_content.theory_program,
+            task_content.result,
+        ] {
+            ground_bytes.extend_from_slice(identity.as_bytes());
+        }
+        for identity in [
+            goal.semantic_root,
+            goal.authority_root,
+            goal.mandatory_links_root,
+            goal.constraints_root,
+        ] {
+            ground_bytes.extend_from_slice(identity.as_bytes());
+        }
+        material_u64(&mut ground_bytes, goal.mandatory_link_count);
+        material_u64(&mut ground_bytes, goal.constraint_count);
+        encode_publication_identity(&mut ground_bytes, binding.0);
+        for truth in expected_truth {
+            material_u64(&mut ground_bytes, truth as u64);
+        }
+        for facts in state.task_evaluation.facts {
+            encode_completed_task_facts(&mut ground_bytes, facts);
+        }
+        material_u64(&mut ground_bytes, state.task_evaluation.query_count);
+        for refusal in state.task_evaluation.lane_refusal {
+            material_u64(&mut ground_bytes, refusal);
+        }
+        for work in state.work {
+            for value in [
+                work.edit_commands,
+                work.added_supports,
+                work.defined_truth_changes,
+            ] {
+                material_u64(&mut ground_bytes, value);
+            }
+        }
+        ground_bytes.extend_from_slice(batch_root.as_bytes());
+        let task_ground = SemanticCompletedTaskGroundMaterial {
+            witness: completed_action_child_material(
+                owner_identity,
+                b"task-ground",
+                0,
+                &ground_bytes,
+            ),
+            task_identity,
+            content: task_content,
+            goal,
+            base: binding.0,
+            expected_truth,
+            facts: state.task_evaluation.facts,
+            base_truth,
+            lane_outcomes,
+        };
+
+        let base_solves = state.task_evaluation.facts[0].eligible == 1
+            && state.task_evaluation.facts[0].p == 1
+            && state.task_evaluation.facts[0].correct == [1; 3];
+        let decisive_lane = (0..2).find(|&lane| {
+            let facts = state.task_evaluation.facts[lane + 1];
+            state.task_evaluation.lane_refusal[lane] == 0
+                && state.semantic_receipts[3 + lane * 3][0] == 0
+                && state.work[lane].added_supports > 0
+                && !base_solves
+                && facts.eligible == 1
+                && facts.p == 1
+                && facts.correct == [1; 3]
+        });
+        let edit_solution = decisive_lane.map(|lane| {
+            let component_begin = lane * 68 + 32;
+            let component_end = lane * 68 + 68;
+            let mut solution_bytes = Vec::new();
+            solution_bytes.extend_from_slice(b"XLOG-COMPLETED-EDIT-SOLUTION\0");
+            material_u64(&mut solution_bytes, 1);
+            bind_completed_material(&mut solution_bytes, &task_ground.witness);
+            solution_bytes.extend_from_slice(batch_root.as_bytes());
+            material_u64(&mut solution_bytes, (lane + 1) as u64);
+            material_u64(&mut solution_bytes, component_begin as u64);
+            material_u64(&mut solution_bytes, component_end as u64);
+            for value in [
+                state.work[lane].edit_commands,
+                state.work[lane].added_supports,
+                state.work[lane].defined_truth_changes,
+            ] {
+                material_u64(&mut solution_bytes, value);
+            }
+            bind_completed_material(&mut solution_bytes, &lanes[lane].admission);
+            for receipt in &lanes[lane].hard_decode_receipts {
+                bind_completed_material(&mut solution_bytes, receipt);
+            }
+            for component in &components[lane * 68..(lane + 1) * 68] {
+                for material in [
+                    &component.component_receipt,
+                    &component.final_mask,
+                    &component.pwl_cell,
+                    &component.active_set,
+                    &component.vjp,
+                ] {
+                    bind_completed_material(&mut solution_bytes, material);
+                }
+            }
+            SemanticCompletedEditSolutionMaterial {
+                witness: completed_action_child_material(
+                    owner_identity,
+                    b"edit-solution",
+                    lane as u64,
+                    &solution_bytes,
+                ),
+                lane: (lane + 1) as u64,
+                component_begin: component_begin as u64,
+                component_end: component_end as u64,
+                structural_delta: state.work[lane],
+                resulting_state_receipt: lanes[lane].admission.clone(),
             }
         });
 
@@ -13030,6 +13301,8 @@ impl SemanticTransitionSession {
             slot_zero_admission,
             lanes,
             components,
+            task_ground,
+            edit_solution,
             attempt_receipt,
         };
         if self.prepared_model_binding(step, consumer_streams)? != binding {

@@ -267,7 +267,7 @@ __device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& wo
     if(declared_bound!=input.bound) { semantic_content_integrity_trap();return; }
 }
 struct TaskFacts {
-    uint64_t correct[3],g,p,c;
+    uint64_t truth[3],correct[3],g,p,c;
     int64_t v;
     uint64_t eligible;
 };
@@ -517,12 +517,12 @@ __device__ void retain_policy_cell(const PolicyDescriptor& policy,const Componen
 static_assert(sizeof(U192)==24,"integer ABI");
 static_assert(sizeof(Receipt)==296,"receipt ABI");
 static_assert(sizeof(Work)==24,"semantic work ABI");
-static_assert(sizeof(TaskFacts)==64,"task facts ABI");
-static_assert(sizeof(TaskEvaluation)==3256,"task evaluation ABI");
+static_assert(sizeof(TaskFacts)==88,"task facts ABI");
+static_assert(sizeof(TaskEvaluation)==3328,"task evaluation ABI");
 static_assert(sizeof(PolicyPwlCell)==160,"policy PWL cell ABI");
 static_assert(sizeof(PolicySelectedScoreVjp)==96,"selected-score VJP ABI");
 static_assert(sizeof(ActionBatchReceipt)==504,"action batch receipt ABI");
-static_assert(sizeof(State)==7496,"state ABI");
+static_assert(sizeof(State)==7568,"state ABI");
 static_assert(sizeof(PolicyField)==32,"policy field ABI");
 static_assert(sizeof(PolicyDescriptor)==672,"policy ABI");
 static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origin ABI");
@@ -3445,6 +3445,7 @@ __device__ bool task_queries(const Descriptor& d,const uint64_t* task,uint32_t s
             semantic_graph::kResidentRootTruthAdmission,root,candidate,output,&statement,nullptr,&state->execution_work);
         valid &= output->words[0]==semantic_graph::kOk && output->words[2]<=3;
         hard &= output->words[2]<=3 && (task[31+query] & (uint64_t(1)<<output->words[2]))!=0;
+        facts.truth[query]=output->words[2];
         facts.correct[query]=output->words[0]==semantic_graph::kOk &&
             output->words[2]==task[18+query];
     }
