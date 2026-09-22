@@ -1052,11 +1052,14 @@ pub struct LogicProgram {
     epistemic_provenance: Option<EpistemicProvenance>,
 }
 
-/// A self-contained XLOG program whose three selected Boolean queries define a
-/// semantic task's expected truth. Compilation preserves the authored source;
-/// observation executes the canonical GPU evaluator before deriving any result.
-/// Source facts are the complete concrete inputs, and query ordinals retain the
-/// caller's order. No caller-supplied answers enter this adapter.
+/// A self-contained XLOG program whose three selected zero-arity queries define
+/// a semantic task's positive support. Compilation preserves the authored
+/// source; observation executes the canonical GPU evaluator before deriving any
+/// result. Presence is `True` and absence is `Neither`, never negative support.
+/// Other native observers may produce `False` or `Both`; all four values share
+/// the same task-result contract. Source facts are the complete concrete inputs,
+/// and query ordinals retain the caller's order. No caller-supplied answers enter
+/// this adapter.
 pub struct SemanticLogicTaskProgram {
     source: String,
     query_ordinals: [usize; 3],
@@ -1130,8 +1133,8 @@ impl xlog_cuda::SemanticTaskProgram for SemanticLogicTaskProgram {
             )))
         })?;
         let mut input_bytes = b"xlog.semantic-task.query-selection.v1\0".to_vec();
-        let mut result_bytes = b"xlog.semantic-task.boolean-results.v1\0".to_vec();
-        let mut expected_truth = [xlog_cuda::SemanticTruth::False; 3];
+        let mut result_bytes = b"xlog.semantic-task.four-valued-results.v1\0".to_vec();
+        let mut expected_truth = [xlog_cuda::SemanticTruth::Neither; 3];
         for (slot, ordinal) in self.query_ordinals.into_iter().enumerate() {
             let query = result.queries.get(ordinal).ok_or_else(|| {
                 execution_error(XlogError::Execution(format!(
@@ -1155,12 +1158,12 @@ impl xlog_cuda::SemanticTaskProgram for SemanticLogicTaskProgram {
                 ))));
             }
             input_bytes.extend_from_slice(&(ordinal as u64).to_le_bytes());
-            result_bytes.extend_from_slice(&(rows as u64).to_le_bytes());
             expected_truth[slot] = if rows == 1 {
                 xlog_cuda::SemanticTruth::True
             } else {
-                xlog_cuda::SemanticTruth::False
+                xlog_cuda::SemanticTruth::Neither
             };
+            result_bytes.extend_from_slice(&(expected_truth[slot] as u64).to_le_bytes());
         }
         Ok(xlog_cuda::SemanticTaskObservation {
             program_source: self.source.as_bytes().to_vec(),
@@ -6272,14 +6275,14 @@ mod tests {
             observed.expected_truth,
             [
                 xlog_cuda::SemanticTruth::True,
-                xlog_cuda::SemanticTruth::False,
-                xlog_cuda::SemanticTruth::False,
+                xlog_cuda::SemanticTruth::Neither,
+                xlog_cuda::SemanticTruth::Neither,
             ]
         );
         assert_eq!(
             reordered.expected_truth,
             [
-                xlog_cuda::SemanticTruth::False,
+                xlog_cuda::SemanticTruth::Neither,
                 xlog_cuda::SemanticTruth::True,
                 xlog_cuda::SemanticTruth::True,
             ]

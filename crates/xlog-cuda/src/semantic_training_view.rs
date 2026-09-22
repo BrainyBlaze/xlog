@@ -7,10 +7,12 @@ use crate::launch::LaunchEnqueueError;
 use crate::memory::{DeviceMemoryView, TrackedCudaSlice};
 use crate::provider::resident_schedule::{validate_execution_domain, ResidentExecutionDomain};
 use crate::semantic_transition::{
-    Identity256, SemanticPublishedIdentity, SemanticRngBinding, SemanticTransitionError,
-    SemanticTransitionKind,
+    Identity256, SemanticPublishedIdentity, SemanticRngBinding, SemanticTaskContentIdentity,
+    SemanticTransitionError, SemanticTransitionKind,
 };
-use crate::{CudaFunction, CudaKernelProvider, DeviceRepr, LaunchAsync, LaunchConfig};
+use crate::{
+    CudaFunction, CudaKernelProvider, DeviceRepr, LaunchAsync, LaunchConfig, SemanticTruth,
+};
 
 type TrainingViewPort = (DeviceMemoryView<u8>, Vec<i64>, Vec<i64>, (u8, u8));
 type ValidatedTrainingObjective = (
@@ -56,6 +58,9 @@ pub struct SemanticTrainingViewRow {
     pub identity: Identity256,
     pub bytes_identity: Identity256,
     pub content_identity: Identity256,
+    /// Present only for a symbolic corpus anchor. The three identities must
+    /// equal the native task content executed during this cold binding.
+    pub task_content: Option<SemanticTaskContentIdentity>,
     pub origin: Option<SemanticTrainingViewOrigin>,
     pub bytes: Vec<u8>,
 }
@@ -102,9 +107,10 @@ pub struct SemanticTrainingCanary {
     pub upper_bound: f64,
     pub memory_limit: u64,
     pub work_limit: u64,
-    /// Exact logical positions of the three cold task obligations. Only the
-    /// symbolic-utility and goal-chain canaries use these coordinates; every
-    /// other kind uses `[u64::MAX; 3]`.
+    /// Model-logit positions whose next-token predictions must equal the
+    /// canonical truth token for each native task result, in query order. Only
+    /// the symbolic-utility and goal-chain canaries use these coordinates;
+    /// every other kind uses `[u64::MAX; 3]`.
     pub obligation_positions: [u64; 3],
     /// Explicit frozen members whose individual retention is uncompensated.
     /// Only the retained-behavior canary carries this set. Aggregate retention
@@ -306,6 +312,9 @@ struct TrainingViewRowDescriptor {
     identity: [u64; 4],
     source_identity: [u64; 4],
     content_identity: [u64; 4],
+    task_query_identity: [u64; 4],
+    task_theory_program_identity: [u64; 4],
+    task_result_identity: [u64; 4],
     origin: SemanticTrainingViewOriginRecord,
 }
 
@@ -895,6 +904,8 @@ impl SemanticTrainingViewArena {
         rows: Vec<SemanticTrainingViewRow>,
         objective: SemanticTrainingObjective,
         task_identity: Identity256,
+        task_content: SemanticTaskContentIdentity,
+        expected_truth: [SemanticTruth; 3],
     ) -> Result<Arc<Self>, SemanticTransitionError> {
         validate_execution_domain(provider, domain)
             .map_err(|error| runtime_error("training-view domain validation", error))?;
@@ -923,6 +934,7 @@ impl SemanticTrainingViewArena {
                 row.identity,
                 row.bytes_identity,
                 row.content_identity,
+                row.task_content,
                 row.origin,
                 &row.bytes,
                 raw.len(),
@@ -932,11 +944,25 @@ impl SemanticTrainingViewArena {
             descriptors.push(descriptor);
         }
         #[cfg(feature = "semantic-policy")]
-        let (objective, groups, group_members, canaries, protected_members) =
-            validate_objective(objective, &descriptors, capacity, task_identity)?;
+        let (objective, groups, group_members, canaries, protected_members) = validate_objective(
+            objective,
+            &descriptors,
+            &raw,
+            capacity,
+            task_identity,
+            task_content,
+            expected_truth,
+        )?;
         #[cfg(not(feature = "semantic-policy"))]
-        let (objective, groups, group_members, canaries, _) =
-            validate_objective(objective, &descriptors, capacity, task_identity)?;
+        let (objective, groups, group_members, canaries, _) = validate_objective(
+            objective,
+            &descriptors,
+            &raw,
+            capacity,
+            task_identity,
+            task_content,
+            expected_truth,
+        )?;
         let bytes = descriptors
             .len()
             .checked_mul(size_of::<TrainingViewRowDescriptor>())
@@ -1081,8 +1107,11 @@ fn allocate_port<T: DeviceRepr>(
 fn validate_objective(
     objective: SemanticTrainingObjective,
     rows: &[TrainingViewRowDescriptor],
+    raw: &[u8],
     capacity: usize,
     task_identity: Identity256,
+    task_content: SemanticTaskContentIdentity,
+    expected_truth: [SemanticTruth; 3],
 ) -> Result<ValidatedTrainingObjective, SemanticTransitionError> {
     if objective.groups.len() != 8 || objective.canaries.len() != 5 {
         return Err(input_error(
@@ -1110,6 +1139,23 @@ fn validate_objective(
         return Err(input_error(
             "training objective has invalid evaluator, coefficient or cost bounds",
         ));
+    }
+    let expected_query = identity_words(task_content.query);
+    let expected_theory_program = identity_words(task_content.theory_program);
+    let expected_result = identity_words(task_content.result);
+    for row in rows {
+        let symbolic = row.basis == SemanticTrainingViewBasis::CorpusSymbolicAnchor as u64;
+        let bound = row.task_query_identity == expected_query
+            && row.task_theory_program_identity == expected_theory_program
+            && row.task_result_identity == expected_result;
+        let absent = row.task_query_identity == [0; 4]
+            && row.task_theory_program_identity == [0; 4]
+            && row.task_result_identity == [0; 4];
+        if (symbolic && !bound) || (!symbolic && !absent) {
+            return Err(input_error(
+                "symbolic training view differs from the native query, theory/program or result binding",
+            ));
+        }
     }
     let mut seen_groups = [false; 8];
     let mut referenced_rows = vec![false; rows.len()];
@@ -1218,6 +1264,41 @@ fn validate_objective(
                         .obligation_positions
                         .iter()
                         .all(|position| *position < row.window)
+                    && canary.obligation_positions.iter().zip(expected_truth).all(
+                        |(position, truth)| {
+                            position
+                                .checked_add(1)
+                                .filter(|target| {
+                                    *target >= row.answer_start
+                                        && *target < row.window
+                                        && *target < row.source_length
+                                })
+                                .and_then(|target| {
+                                    usize::try_from(row.raw_offset).ok().and_then(|base| {
+                                        usize::try_from(target).ok().and_then(|target| {
+                                            base.checked_add(TRAINING_VIEW_HEADER_BYTES).and_then(
+                                                |offset| {
+                                                    target
+                                                        .checked_mul(size_of::<i64>())
+                                                        .and_then(|bytes| offset.checked_add(bytes))
+                                                },
+                                            )
+                                        })
+                                    })
+                                })
+                                .and_then(|offset| {
+                                    offset
+                                        .checked_add(size_of::<i64>())
+                                        .and_then(|end| raw.get(offset..end))
+                                })
+                                .map(|bytes| {
+                                    u64::from_le_bytes(
+                                        bytes.try_into().expect("bounded truth token"),
+                                    ) == objective.truth_tokens[truth as usize]
+                                })
+                                .unwrap_or(false)
+                        },
+                    )
             })
         } else {
             canary.obligation_positions == [u64::MAX; 3]
@@ -1417,6 +1498,7 @@ fn validate_row(
     expected_identity: Identity256,
     bytes_identity: Identity256,
     content_identity: Identity256,
+    task_content: Option<SemanticTaskContentIdentity>,
     origin: Option<SemanticTrainingViewOrigin>,
     bytes: &[u8],
     raw_offset: usize,
@@ -1468,6 +1550,11 @@ fn validate_row(
             "only an episode training view has an authentic execution origin",
         ));
     }
+    if matches!(basis, SemanticTrainingViewBasis::CorpusSymbolicAnchor) != task_content.is_some() {
+        return Err(input_error(
+            "only a symbolic corpus training view carries a native task-content binding",
+        ));
+    }
     if identity != *expected_identity.as_bytes()
         || Sha256::digest(bytes).as_slice() != bytes_identity.as_bytes()
         || source_identity == [0; 32]
@@ -1493,6 +1580,15 @@ fn validate_row(
         identity: identity_words(Identity256::from_bytes(identity)),
         source_identity: identity_words(Identity256::from_bytes(source_identity)),
         content_identity: identity_words(content_identity),
+        task_query_identity: task_content
+            .map(|binding| identity_words(binding.query))
+            .unwrap_or_default(),
+        task_theory_program_identity: task_content
+            .map(|binding| identity_words(binding.theory_program))
+            .unwrap_or_default(),
+        task_result_identity: task_content
+            .map(|binding| identity_words(binding.result))
+            .unwrap_or_default(),
         origin: origin.map(origin_record).unwrap_or_default(),
     })
 }

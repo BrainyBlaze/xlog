@@ -86,6 +86,18 @@ pub struct SemanticTaskObservation {
     pub expected_truth: [crate::SemanticTruth; 3],
 }
 
+/// Independently recomputable identities of the exact semantic task content.
+/// These values carry no use authority. They let retained symbolic training
+/// rows bind the ordered query, admitted theory plus executed observer program,
+/// and observed four-valued result to the task that the native owner actually
+/// executed during cold binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticTaskContentIdentity {
+    pub query: Identity256,
+    pub theory_program: Identity256,
+    pub result: Identity256,
+}
+
 /// Explicit nonnegative coefficients for query agreement and measured work.
 /// Selection maximizes the resulting value, retaining the earlier candidate on
 /// ties. The final return separately prices improvement, refusals, and spent work.
@@ -405,6 +417,60 @@ impl TaskEvaluationBinding {
             hash.update(witness.constraint_count.to_le_bytes());
         }
         Identity256::from_bytes(hash.finalize().into())
+    }
+
+    pub(crate) fn content_identity(&self) -> SemanticTaskContentIdentity {
+        let append_bytes = |hash: &mut Sha256, bytes: &[u8]| {
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        };
+
+        let mut query = Sha256::new();
+        query.update(b"xlog.semantic.task-query.v1\0");
+        query.update((self.spec.statement_records.len() as u64).to_le_bytes());
+        for (record, statement) in self.spec.statement_records.into_iter().zip(self.statements) {
+            query.update(record.to_le_bytes());
+            query.update(statement.identity().as_bytes());
+            append_bytes(
+                &mut query,
+                self.statement_bytes
+                    .get(&record)
+                    .expect("bound query statement retains canonical bytes"),
+            );
+        }
+        append_bytes(&mut query, &self.observation.input_bytes);
+        let query = Identity256::from_bytes(query.finalize().into());
+
+        let mut theory_program = Sha256::new();
+        theory_program.update(b"xlog.semantic.task-theory-program.v1\0");
+        theory_program.update(self.admission_identity.as_bytes());
+        theory_program.update(self.schema_generation.as_bytes());
+        theory_program.update((self.allowed_supports.len() as u64).to_le_bytes());
+        for (record, support) in &self.allowed_supports {
+            theory_program.update(record.to_le_bytes());
+            theory_program.update(support);
+        }
+        append_bytes(&mut theory_program, &self.observation.program_source);
+        let theory_program = Identity256::from_bytes(theory_program.finalize().into());
+
+        let mut result = Sha256::new();
+        result.update(b"xlog.semantic.task-four-valued-result.v1\0");
+        result.update(query.as_bytes());
+        result.update(theory_program.as_bytes());
+        append_bytes(&mut result, &self.observation.result_bytes);
+        for truth in self.observation.expected_truth {
+            result.update((truth as u64).to_le_bytes());
+        }
+
+        SemanticTaskContentIdentity {
+            query,
+            theory_program,
+            result: Identity256::from_bytes(result.finalize().into()),
+        }
+    }
+
+    pub(crate) fn expected_truth(&self) -> [crate::SemanticTruth; 3] {
+        self.observation.expected_truth
     }
 
     pub(crate) fn spec(&self) -> &SemanticTaskEvaluationSpec {
@@ -17539,6 +17605,14 @@ impl SemanticTransitionSession {
         self.task.as_ref().map(|(binding, _)| binding.identity())
     }
 
+    /// Exact content identities of the currently bound task, excluding its
+    /// controller authority and scoring policy.
+    pub fn task_content_identity(&self) -> Option<SemanticTaskContentIdentity> {
+        self.task
+            .as_ref()
+            .map(|(binding, _)| binding.content_identity())
+    }
+
     /// Bind every admitted training view once while the task is still cold.
     /// No row is selected here and the arena cannot be replaced after binding.
     pub fn bind_training_view_arena(
@@ -17558,12 +17632,26 @@ impl SemanticTransitionSession {
             .expect("checked cold task binding")
             .0
             .identity();
+        let task_content = self
+            .task
+            .as_ref()
+            .expect("checked cold task binding")
+            .0
+            .content_identity();
+        let expected_truth = self
+            .task
+            .as_ref()
+            .expect("checked cold task binding")
+            .0
+            .expected_truth();
         self.training_views = Some(SemanticTrainingViewArena::allocate(
             &self.provider,
             &self.domain,
             rows,
             objective,
             task_identity,
+            task_content,
+            expected_truth,
         )?);
         Ok(())
     }

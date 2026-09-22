@@ -25,12 +25,12 @@ use xlog_cuda::{
     SemanticHypergraphCapacities, SemanticModelForwardWitness, SemanticObservedSource,
     SemanticParentBinding, SemanticPolarity, SemanticPredicateRecord, SemanticPreparedStep,
     SemanticPublishedLease, SemanticRecordRole, SemanticRngBinding, SemanticSourceMapping,
-    SemanticStateRecord, SemanticStateRole, SemanticSupportRecord, SemanticTaskGoalWitness,
-    SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout, SemanticTextSlot,
-    SemanticTrainingCanary, SemanticTrainingCanaryKind, SemanticTrainingObjective,
-    SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind, SemanticTrainingViewBasis,
-    SemanticTrainingViewPort, SemanticTrainingViewRow, SemanticTransitionKind,
-    SemanticTransitionSession, SemanticTypedRecord,
+    SemanticStateRecord, SemanticStateRole, SemanticSupportRecord, SemanticTaskContentIdentity,
+    SemanticTaskGoalWitness, SemanticTensorContentWitness, SemanticTensorInput,
+    SemanticTensorLayout, SemanticTextSlot, SemanticTrainingCanary, SemanticTrainingCanaryKind,
+    SemanticTrainingObjective, SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind,
+    SemanticTrainingViewBasis, SemanticTrainingViewPort, SemanticTrainingViewRow,
+    SemanticTransitionKind, SemanticTransitionSession, SemanticTypedRecord,
 };
 use xlog_cuda::{
     SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
@@ -2195,8 +2195,13 @@ struct ReplayRow {
 
 #[derive(Clone, Debug)]
 enum ReplayBasis {
-    Episode { execution: serde_json::Value },
-    CorpusAnchor { group: ReplayAnchorGroup },
+    Episode {
+        execution: serde_json::Value,
+    },
+    CorpusAnchor {
+        group: ReplayAnchorGroup,
+        task_content: Option<SemanticTaskContentIdentity>,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2352,16 +2357,22 @@ impl ReplayRow {
             ),
             ReplayBasis::CorpusAnchor { .. } => None,
         };
+        let (basis, task_content) = match &self.basis {
+            ReplayBasis::Episode { .. } => (SemanticTrainingViewBasis::Episode, None),
+            ReplayBasis::CorpusAnchor {
+                group: ReplayAnchorGroup::Language,
+                ..
+            } => (SemanticTrainingViewBasis::CorpusLanguageAnchor, None),
+            ReplayBasis::CorpusAnchor {
+                group: ReplayAnchorGroup::Symbolic,
+                task_content,
+            } => (
+                SemanticTrainingViewBasis::CorpusSymbolicAnchor,
+                *task_content,
+            ),
+        };
         Ok(SemanticTrainingViewRow {
-            basis: match &self.basis {
-                ReplayBasis::Episode { .. } => SemanticTrainingViewBasis::Episode,
-                ReplayBasis::CorpusAnchor {
-                    group: ReplayAnchorGroup::Language,
-                } => SemanticTrainingViewBasis::CorpusLanguageAnchor,
-                ReplayBasis::CorpusAnchor {
-                    group: ReplayAnchorGroup::Symbolic,
-                } => SemanticTrainingViewBasis::CorpusSymbolicAnchor,
-            },
+            basis,
             identity: replay_digest_identity(identity[1].text()?)?,
             bytes_identity: replay_digest_identity(
                 material
@@ -2370,6 +2381,7 @@ impl ReplayRow {
                     .ok_or_else(|| invalid("training view has no original byte identity"))?,
             )?,
             content_identity: replay_digest_identity(identity[2].text()?)?,
+            task_content,
             origin,
             bytes: bytes.to_vec(),
         })
@@ -2524,7 +2536,8 @@ impl ReplayRow {
             return Err(invalid("replay evidence bytes are empty"));
         }
         if basis == "anchor" {
-            let (source, group) = validate_anchor_admission(identity, &record, evidence)?;
+            let (source, group, task_content) =
+                validate_anchor_admission(identity, &record, evidence)?;
             let transported = fields[3].fields(1)?;
             let material = ReplayMaterial::parse(&transported[0], &BTreeSet::new())?;
             if material.kind != "training-view"
@@ -2537,7 +2550,10 @@ impl ReplayRow {
             }
             validate_replay_training_payload(&material, identity, &source, true)?;
             return Ok(Self {
-                basis: ReplayBasis::CorpusAnchor { group },
+                basis: ReplayBasis::CorpusAnchor {
+                    group,
+                    task_content,
+                },
                 identity: fields[1].clone(),
                 record_line,
                 record,
@@ -2736,17 +2752,18 @@ fn validate_anchor_admission(
     identity: &[ColdValue],
     record: &ReplayJsonObject,
     evidence: &[u8],
-) -> PyResult<(String, ReplayAnchorGroup)> {
-    let keys = [
+) -> PyResult<(
+    String,
+    ReplayAnchorGroup,
+    Option<SemanticTaskContentIdentity>,
+)> {
+    let base_keys = [
         "content_sha256",
         "example_id",
         "group",
         "training_view",
         "training_view_identity",
     ];
-    if record.len() != keys.len() || keys.iter().any(|key| !record.contains_key(*key)) {
-        return Err(invalid("corpus anchor record field set differs"));
-    }
     let view = identity[0].fields(9)?;
     let group = match replay_json_value(replay_json_field(record, "group")?)?.as_str() {
         Some("language") => ReplayAnchorGroup::Language,
@@ -2756,6 +2773,41 @@ fn validate_anchor_admission(
                 "corpus anchor requires the exact language or symbolic retention group",
             ));
         }
+    };
+    let has_task_content = matches!(group, ReplayAnchorGroup::Symbolic);
+    let task_content_fields = if has_task_content { 1 } else { 0 };
+    if record.len() != base_keys.len() + task_content_fields
+        || base_keys.iter().any(|key| !record.contains_key(*key))
+        || record.contains_key("semantic_task") != has_task_content
+    {
+        return Err(invalid("corpus anchor record field set differs"));
+    }
+    let task_content = if has_task_content {
+        let binding = replay_json_object(replay_json_field(record, "semantic_task")?)?;
+        let keys = [
+            "query_identity",
+            "result_identity",
+            "theory_program_identity",
+        ];
+        if binding.len() != keys.len() || keys.iter().any(|key| !binding.contains_key(*key)) {
+            return Err(invalid(
+                "symbolic corpus anchor requires exact query, theory/program and result identities",
+            ));
+        }
+        let digest = |name: &str| {
+            let value = replay_json_value(replay_json_field(&binding, name)?)?;
+            let text = value
+                .as_str()
+                .ok_or_else(|| invalid("symbolic task content identity is not a digest"))?;
+            replay_digest_identity(text)
+        };
+        Some(SemanticTaskContentIdentity {
+            query: digest("query_identity")?,
+            theory_program: digest("theory_program_identity")?,
+            result: digest("result_identity")?,
+        })
+    } else {
+        None
     };
     if view[2].text()? != "train" {
         return Err(invalid(
@@ -2767,7 +2819,8 @@ fn validate_anchor_admission(
     validate_replay_json_structure(text, 0)?;
     let parts: Vec<Box<serde_json::value::RawValue>> = serde_json::from_str(text)
         .map_err(|_| invalid("corpus anchor admission evidence requires its canonical record"))?;
-    if parts.len() != 3
+    let expected_evidence_fields = if has_task_content { 6 } else { 3 };
+    if parts.len() != expected_evidence_fields
         || replay_json_value(parts[0].get())? != "dlm-new/corpus-anchor-admission/v1"
         || parts[1].get() != replay_identity_json(&view[0])?
     {
@@ -2812,6 +2865,23 @@ fn validate_anchor_admission(
     {
         return Err(invalid("corpus anchor has no train-only corpus admission"));
     }
+    if let Some(binding) = task_content {
+        for (part, expected) in
+            parts[3..]
+                .iter()
+                .zip([binding.query, binding.theory_program, binding.result])
+        {
+            let actual = replay_json_value(part.get())?;
+            let actual = actual
+                .as_str()
+                .ok_or_else(|| invalid("symbolic admission task binding is not a digest"))?;
+            if replay_digest_identity(actual)? != expected {
+                return Err(invalid(
+                    "symbolic admission differs from its query, theory/program or result binding",
+                ));
+            }
+        }
+    }
     // This checks the transported producer record, not a signature or a grant.
     // TaskAuthority still requires the trusted application's full dependency
     // closure and fresh permission for every use of these retained bytes.
@@ -2821,6 +2891,7 @@ fn validate_anchor_admission(
             .expect("checked original normalized record digest")
             .to_owned(),
         group,
+        task_content,
     ))
 }
 
@@ -7133,6 +7204,32 @@ impl PySemanticTransitionTaskUse {
         session.binding(py)
     }
 
+    /// Return the native-computed identities of the exact ordered query,
+    /// admitted theory plus executed observer program, and observed four-valued
+    /// result. These identities carry no use authority. A symbolic corpus anchor
+    /// stores the same three values in its ``semantic_task`` record and admission
+    /// evidence; cold import rejects any mismatch with the task it executes.
+    /// Returns ``(query_identity, theory_program_identity, result_identity)`` as
+    /// three 32-byte values.
+    fn task_content_identity(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        let binding = owner
+            .task_content_identity()
+            .ok_or_else(|| invalid("native task content binding is absent"))?;
+        Ok(PyTuple::new(
+            py,
+            [
+                PyBytes::new(py, binding.query.as_bytes()),
+                PyBytes::new(py, binding.theory_program.as_bytes()),
+                PyBytes::new(py, binding.result.as_bytes()),
+            ],
+        )?
+        .unbind())
+    }
+
     /// Read the same native Session layout; this does not grant execution.
     fn policy_layout(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         self.session.borrow(py).require_creator()?;
@@ -7983,6 +8080,11 @@ impl PySemanticTransitionController {
     /// neither, true, false and both to four distinct vocabulary ids. Each canary
     /// is ``(kind, row_ordinal, lower_f64_bits, upper_f64_bits, memory_limit,
     /// work_limit, obligation_positions_or_None, protected_positions_or_None)``.
+    /// For symbolic-utility and goal-chain, the three obligation positions are
+    /// model-logit positions in native query order: the token immediately after
+    /// each position in the symbolic training view must equal the objective's
+    /// canonical token for that task result's four-valued truth. They are not
+    /// query ordinals, target-token positions, or physical model rows.
     /// Only retained behavior carries the nonempty, strictly increasing protected
     /// subset; retention labels outside that frozen set remain compensable. Native
     /// recomputes all identities and owns both rosters on device.
@@ -8001,6 +8103,15 @@ impl PySemanticTransitionController {
     /// retains its 136-byte header, answer boundary, supervision and geometry.
     /// An anchor retains its original admission evidence and retention group;
     /// that evidence cannot authorize native execution replay or actor credit.
+    /// A language anchor has exactly the five original record fields and the
+    /// three-field corpus admission evidence. A symbolic anchor additionally has
+    /// ``semantic_task`` with exactly ``query_identity``,
+    /// ``theory_program_identity`` and ``result_identity``. Its existing corpus
+    /// admission evidence appends those three identities in that order. Native
+    /// recomputes them from the ordered admitted statements and query selection,
+    /// the admitted theory and complete executed observer source, and the exact
+    /// observed result bytes plus three four-valued truths. The imported row must
+    /// equal the task executed during this same cold binding.
     /// Materials are the complete ordered ``(MaterialReference.payload(),
     /// bytes_or_None)`` closure. Evidence is the original opaque bytes, not a
     /// caller-decoded receipt. Identity-only rows are not a replay carrier.

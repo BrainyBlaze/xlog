@@ -33,6 +33,9 @@ struct TrainingViewRowDescriptor {
     uint64_t identity[4];
     uint64_t source_identity[4];
     uint64_t content_identity[4];
+    uint64_t task_query_identity[4];
+    uint64_t task_theory_program_identity[4];
+    uint64_t task_result_identity[4];
     SemanticTrainingViewOriginRecord origin;
 };
 
@@ -208,7 +211,7 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
                 if (matches > 1 || (row == cursor && matches != 1)) {
                     selection->status = 3;
                 }
-            } else if (item.basis != 2 || item.origin.present != 0) {
+            } else if ((item.basis != 2 && item.basis != 3) || item.origin.present != 0) {
                 selection->status = 3;
             }
             roster[row].ordinal = item.ordinal;
