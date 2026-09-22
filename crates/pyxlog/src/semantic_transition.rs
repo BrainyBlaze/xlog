@@ -43,6 +43,7 @@ use crate::types::{val_err, xlog_err};
 type PredicateInput = (u32, String, Vec<(String, u8, String)>, Vec<usize>);
 type RecordInput = (u32, Vec<(u8, Py<PyAny>)>, Vec<u32>);
 type SupportInput = (u32, String, u32, u32, u32, u32);
+type TaskContentRead = (Py<PyBytes>, Py<PyBytes>, Py<PyBytes>, (u8, u8, u8));
 
 /// Own one admitted native semantic session and its acquired policy codebooks.
 ///
@@ -7212,34 +7213,33 @@ impl PySemanticTransitionTaskUse {
     /// and admission evidence; cold import rejects any mismatch with the task it
     /// executes.
     ///
-    /// Returns ``((query_identity, theory_program_identity, result_identity),
-    /// (truth0, truth1, truth2))``. Identities are 32-byte values. Truths are the
-    /// native objective indices ``0=Neither``, ``1=True``, ``2=False`` and
-    /// ``3=Both``; each indexes the frozen ``truth_tokens`` array directly.
-    fn task_content_projection(&self, py: Python<'_>) -> PyResult<(Py<PyTuple>, (u8, u8, u8))> {
+    /// Returns ``(query_identity, theory_program_identity, result_identity,
+    /// truths)``. Identities are 32-byte values. ``truths`` contains the native
+    /// objective indices ``0=Neither``, ``1=True``, ``2=False`` and ``3=Both``;
+    /// each indexes the frozen ``truth_tokens`` array directly.
+    fn task_content(&self, py: Python<'_>) -> PyResult<TaskContentRead> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
         let owner = session.owner()?;
         self.require_current(&owner)?;
-        let projection = owner
-            .task_content_projection()
+        let (identity, truth) = owner
+            .task_content()
             .ok_or_else(|| invalid("native task content binding is absent"))?;
-        let identities = PyTuple::new(
-            py,
-            [
-                PyBytes::new(py, projection.identity.query.as_bytes()),
-                PyBytes::new(py, projection.identity.theory_program.as_bytes()),
-                PyBytes::new(py, projection.identity.result.as_bytes()),
-            ],
-        )?
-        .unbind();
-        let [first, second, third] = projection.truth.map(|truth| match truth {
+        let query_identity = PyBytes::new(py, identity.query.as_bytes()).unbind();
+        let theory_program_identity = PyBytes::new(py, identity.theory_program.as_bytes()).unbind();
+        let result_identity = PyBytes::new(py, identity.result.as_bytes()).unbind();
+        let [first, second, third] = truth.map(|truth| match truth {
             SemanticTruth::Neither => 0,
             SemanticTruth::True => 1,
             SemanticTruth::False => 2,
             SemanticTruth::Both => 3,
         });
-        Ok((identities, (first, second, third)))
+        Ok((
+            query_identity,
+            theory_program_identity,
+            result_identity,
+            (first, second, third),
+        ))
     }
 
     /// Read the same native Session layout; this does not grant execution.
