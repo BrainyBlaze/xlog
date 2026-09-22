@@ -28156,7 +28156,7 @@ pub(crate) mod task_binding_tests {
                 spent_weight: 1,
             },
             admissible_truth_masks: [7, 7, 7],
-            actor_eligible: false,
+            actor_eligible: true,
         }
     }
 
