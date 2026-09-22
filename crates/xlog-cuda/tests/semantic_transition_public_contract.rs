@@ -1362,7 +1362,7 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
             spent_weight: 1,
         },
         admissible_truth_masks: [7, 7, 7],
-        actor_eligible: true,
+        actor_eligible: false,
     };
     #[derive(Debug)]
     struct FailingProgram;
