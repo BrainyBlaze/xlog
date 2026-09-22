@@ -40,6 +40,8 @@ use xlog_prob::exact::GpuConfig;
 use crate::guarded_python_callback as recording_callback;
 use crate::types::{val_err, xlog_err};
 
+pub(crate) mod cold_task;
+
 type PredicateInput = (u32, String, Vec<(String, u8, String)>, Vec<usize>);
 type RecordInput = (u32, Vec<(u8, Py<PyAny>)>, Vec<u32>);
 type SupportInput = (u32, String, u32, u32, u32, u32);
@@ -107,21 +109,9 @@ impl PySemanticTransitionSession {
             .lock()
             .map_err(|_| PyRuntimeError::new_err("native semantic session owner mutex is poisoned"))
     }
-}
 
-#[pymethods]
-impl PySemanticTransitionSession {
-    #[new]
-    #[pyo3(signature = (*, predicates, records, supports, capacities, admission_limits, device_ordinal, memory_bytes))]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "session construction receives independent admission and device budgets"
-    )]
-    fn new(
-        py: Python<'_>,
-        predicates: Vec<PredicateInput>,
-        records: Vec<RecordInput>,
-        supports: Vec<SupportInput>,
+    fn from_admission(
+        records: SemanticAdmissionRecords,
         capacities: (u32, u32, u32, u32),
         admission_limits: (u32, u32, u32, usize),
         device_ordinal: usize,
@@ -134,7 +124,6 @@ impl PySemanticTransitionSession {
             capacities.3,
         )
         .map_err(val_err)?;
-        let records = parse_admission(py, predicates, records, supports)?;
         let limits = SemanticAdmissionLimits {
             max_records: admission_limits.0,
             max_terms: admission_limits.1,
@@ -172,6 +161,35 @@ impl PySemanticTransitionSession {
             owner_thread: std::thread::current().id(),
             device_ordinal,
         })
+    }
+}
+
+#[pymethods]
+impl PySemanticTransitionSession {
+    #[new]
+    #[pyo3(signature = (*, predicates, records, supports, capacities, admission_limits, device_ordinal, memory_bytes))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "session construction receives independent admission and device budgets"
+    )]
+    fn new(
+        py: Python<'_>,
+        predicates: Vec<PredicateInput>,
+        records: Vec<RecordInput>,
+        supports: Vec<SupportInput>,
+        capacities: (u32, u32, u32, u32),
+        admission_limits: (u32, u32, u32, usize),
+        device_ordinal: usize,
+        memory_bytes: u64,
+    ) -> PyResult<Self> {
+        let records = parse_admission(py, predicates, records, supports)?;
+        Self::from_admission(
+            records,
+            capacities,
+            admission_limits,
+            device_ordinal,
+            memory_bytes,
+        )
     }
 
     /// Return this retained session's ``(generation, digest_bytes)`` binding.
