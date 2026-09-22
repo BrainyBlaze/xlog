@@ -20828,6 +20828,22 @@ impl SemanticTransitionSession {
             model_update: None,
             training_selection: None,
         };
+        let task = match input {
+            PolicyVjpInput::External(_) => None,
+            PolicyVjpInput::UpdateObjective { .. } => {
+                let (binding, device) = self.task.as_ref().ok_or_else(|| {
+                    publication_input_error(
+                        "Update policy backward requires the bound semantic task ground",
+                    )
+                })?;
+                if binding.goal_witness().is_none() {
+                    return Err(publication_input_error(
+                        "Update policy backward requires the bound semantic goal closure",
+                    ));
+                }
+                Some(device)
+            }
+        };
         let mut descriptor = self.descriptor_with(&io);
         descriptor.components = *components.device_ptr();
         descriptor.codebooks = *codebooks.device_ptr();
@@ -20908,6 +20924,7 @@ impl SemanticTransitionSession {
                 recorder.read(&training.roster_rows());
                 recorder.read(state);
                 recorder.read(origin_lease);
+                recorder.read(task.expect("validated Update task ground"));
             }
         }
         recorder.write(&self.scratch);

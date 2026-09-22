@@ -381,6 +381,15 @@ truths, catalogue, and device-forward component materials. Its half-open edit
 component interval is `32..68` for lane 1 or `100..136` for lane 2; policy winner
 and score do not determine membership.
 
+For an authenticated episode row in the supervised-edit objective,
+`temporal_update_vjp(...)` derives that same minimal decisive lane on device from
+the original completed Proposal state and bound goal closure. Its direct edit
+cotangent covers only the selected lane's 36 edit components. Text components
+and the other lane receive zero direct edit cotangent; the native backward still
+walks the complete original edit recurrence and original categorical choices,
+masks, catalogue, and decode-bound tape. It does not resample, consume a
+historical score array, or invoke the model a second time.
+
 The projection also contains the admitted slot-zero record, learned lane slots 1
 and 2 with their native admission or refusal, exact non-NULL text actions and
 hard-decoded edits, and exactly

@@ -3498,7 +3498,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
     auto books=reinterpret_cast<const uint64_t*>(descriptor.codebooks);
     auto viability=reinterpret_cast<uint32_t*>(descriptor.scratch)+2*262144;
     __shared__ uint32_t actions[4][2],choices[18];
-    __shared__ uint32_t legal_count,active_count,selected_active,apply_selected,apply_actor,apply_edit;
+    __shared__ uint32_t legal_count,active_count,selected_active,apply_selected,apply_actor,apply_edit,edit_lane;
     __shared__ uint64_t actor_denominator,edit_denominator;
     __shared__ float maximum,reward_f32,critic_scale;
     __shared__ U192 threshold;
@@ -3507,6 +3507,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
         *status=0;
         apply_selected=1;
         apply_actor=apply_edit=0;
+        edit_lane=UINT32_MAX;
         actor_denominator=edit_denominator=0;
         reward=actor_scale=edit_scale=cost_scale=0.0;
         reward_f32=critic_scale=0.0f;
@@ -3601,9 +3602,37 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     const auto& origin=matching_edit_row->origin;
                     if(state->model_generation!=origin.model_generation ||
                        state->stream_serial!=origin.stream_serial ||
-                       state->family_id!=origin.family_id || state->proposal!=origin.proposal) {
+                        state->family_id!=origin.family_id || state->proposal!=origin.proposal) {
                         *status=1;
                     } else {
+                        const auto* task=reinterpret_cast<const uint64_t*>(descriptor.task);
+                        if(!task || task[0]!=5) {
+                            *status=1;
+                        } else {
+                            const uint64_t goal=34+task[21]*5;
+                            bool complete_goal=true;
+                            for(uint32_t root=0;root<4;++root) {
+                                bool present=false;
+                                for(uint32_t word=0;word<4;++word)present|=task[goal+root*4+word]!=0;
+                                complete_goal&=present;
+                            }
+                            complete_goal&=task[goal+16]!=0 && task[goal+17]!=0;
+                            const auto& base=state->task_evaluation.facts[0];
+                            const bool base_solves=base.eligible==1 && base.p==1 &&
+                                base.correct[0]==1 && base.correct[1]==1 && base.correct[2]==1;
+                            for(uint32_t lane=0;lane<2 && edit_lane==UINT32_MAX;++lane) {
+                                const auto& facts=state->task_evaluation.facts[lane+1];
+                                const auto& admission=state->semantic_receipts[3+lane*3];
+                                if(complete_goal && !base_solves &&
+                                   state->task_evaluation.lane_refusal[lane]==0 &&
+                                   admission.words[0]==semantic_graph::kOk &&
+                                   state->work[lane].added_supports>0 &&
+                                   facts.eligible==1 && facts.p==1 &&
+                                   facts.correct[0]==1 && facts.correct[1]==1 &&
+                                   facts.correct[2]==1)edit_lane=lane;
+                            }
+                            if(edit_lane==UINT32_MAX)*status=1;
+                        }
                         edit_scale=__ddiv_rn(double(objective_coefficients[3]),
                             __ull2double_rn(edit_denominator));
                         if(!isfinite(edit_scale))*status=1;
@@ -3652,7 +3681,8 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
             coefficients[i]=0.0;
             baseline_gradients[i]=0.0f;
             if(apply_selected) {
-                if(apply_edit)coefficients[i]=-edit_scale;
+                if(apply_edit && i>=edit_lane*68+32 && i<edit_lane*68+68)
+                    coefficients[i]=-edit_scale;
                 if(apply_actor) {
                     const float difference=__fsub_rn(baseline,reward_f32);
                     const float raw_square=__fmul_rn(difference,difference);
