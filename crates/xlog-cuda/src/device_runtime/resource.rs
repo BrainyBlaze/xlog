@@ -750,6 +750,7 @@ struct AccessDependencies<K, E> {
 }
 
 impl<K: PartialEq, E> AccessDependencies<K, E> {
+    #[cfg(test)]
     fn after_write(stream: K, event: E) -> Self {
         Self {
             outstanding_writes: vec![(stream, event)],
@@ -903,26 +904,6 @@ impl DeviceAccessDependencies {
             .lock()
             .expect("device access dependencies poisoned");
         state.outstanding_reads.len() + state.outstanding_writes.len()
-    }
-
-    pub(crate) fn after_event(
-        stream: Arc<CudaStream>,
-        execution_id: u64,
-        event: CudaEvent,
-        reclamation: Arc<crate::memory::AllocationReclamation>,
-    ) -> Self {
-        Self {
-            reclamation,
-            allocation: std::sync::OnceLock::new(),
-            _allocation_context: Arc::clone(stream.context()),
-            state: Mutex::new(AccessDependencies::after_write(
-                execution_id,
-                Arc::new(RetainedAccessEvent {
-                    event,
-                    _stream: stream,
-                }),
-            )),
-        }
     }
 
     pub(crate) fn prepare(&self, stream: &Arc<CudaStream>, access: Access) -> ResourceResult<()> {

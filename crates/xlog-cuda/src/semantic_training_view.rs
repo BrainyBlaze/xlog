@@ -928,17 +928,7 @@ impl SemanticTrainingViewArena {
         let mut descriptors = Vec::with_capacity(rows.len());
         let mut capacity = 0usize;
         for (ordinal, row) in rows.into_iter().enumerate() {
-            let descriptor = validate_row(
-                ordinal,
-                row.basis,
-                row.identity,
-                row.bytes_identity,
-                row.content_identity,
-                row.task_content,
-                row.origin,
-                &row.bytes,
-                raw.len(),
-            )?;
+            let descriptor = validate_row(ordinal, &row, raw.len())?;
             capacity = capacity.max(descriptor.window as usize);
             raw.extend_from_slice(&row.bytes);
             descriptors.push(descriptor);
@@ -1494,15 +1484,10 @@ fn canary_identity(
 
 fn validate_row(
     ordinal: usize,
-    basis: SemanticTrainingViewBasis,
-    expected_identity: Identity256,
-    bytes_identity: Identity256,
-    content_identity: Identity256,
-    task_content: Option<SemanticTaskContentIdentity>,
-    origin: Option<SemanticTrainingViewOrigin>,
-    bytes: &[u8],
+    row: &SemanticTrainingViewRow,
     raw_offset: usize,
 ) -> Result<TrainingViewRowDescriptor, SemanticTransitionError> {
+    let bytes = &row.bytes;
     let mut schema = [0u8; 32];
     let tag = b"dlm-new/training-view/v1";
     schema[..tag.len()].copy_from_slice(tag);
@@ -1545,20 +1530,22 @@ fn validate_row(
     }
     let identity: [u8; 32] = bytes[32..64].try_into().expect("bounded identity");
     let source_identity: [u8; 32] = bytes[64..96].try_into().expect("bounded identity");
-    if matches!(basis, SemanticTrainingViewBasis::Episode) != origin.is_some() {
+    if matches!(row.basis, SemanticTrainingViewBasis::Episode) != row.origin.is_some() {
         return Err(input_error(
             "only an episode training view has an authentic execution origin",
         ));
     }
-    if matches!(basis, SemanticTrainingViewBasis::CorpusSymbolicAnchor) != task_content.is_some() {
+    if matches!(row.basis, SemanticTrainingViewBasis::CorpusSymbolicAnchor)
+        != row.task_content.is_some()
+    {
         return Err(input_error(
             "only a symbolic corpus training view carries a native task-content binding",
         ));
     }
-    if identity != *expected_identity.as_bytes()
-        || Sha256::digest(bytes).as_slice() != bytes_identity.as_bytes()
+    if identity != *row.identity.as_bytes()
+        || Sha256::digest(bytes).as_slice() != row.bytes_identity.as_bytes()
         || source_identity == [0; 32]
-        || content_identity == Identity256::default()
+        || row.content_identity == Identity256::default()
     {
         return Err(input_error(
             "training-view row differs from its logical identity, material bytes, source or replay content",
@@ -1567,7 +1554,7 @@ fn validate_row(
     Ok(TrainingViewRowDescriptor {
         ordinal: u64::try_from(ordinal)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
-        basis: basis as u64,
+        basis: row.basis as u64,
         raw_offset: u64::try_from(raw_offset)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
         raw_bytes: u64::try_from(bytes.len())
@@ -1579,17 +1566,20 @@ fn validate_row(
         answer_start: word(128),
         identity: identity_words(Identity256::from_bytes(identity)),
         source_identity: identity_words(Identity256::from_bytes(source_identity)),
-        content_identity: identity_words(content_identity),
-        task_query_identity: task_content
+        content_identity: identity_words(row.content_identity),
+        task_query_identity: row
+            .task_content
             .map(|binding| identity_words(binding.query))
             .unwrap_or_default(),
-        task_theory_program_identity: task_content
+        task_theory_program_identity: row
+            .task_content
             .map(|binding| identity_words(binding.theory_program))
             .unwrap_or_default(),
-        task_result_identity: task_content
+        task_result_identity: row
+            .task_content
             .map(|binding| identity_words(binding.result))
             .unwrap_or_default(),
-        origin: origin.map(origin_record).unwrap_or_default(),
+        origin: row.origin.map(origin_record).unwrap_or_default(),
     })
 }
 

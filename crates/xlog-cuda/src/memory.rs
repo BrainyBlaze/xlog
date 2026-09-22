@@ -766,6 +766,7 @@ enum DriverReleaseState {
 }
 
 impl DriverReleaseState {
+    #[cfg(test)]
     fn confirm_async(
         &self,
         recorded: &mut bool,
