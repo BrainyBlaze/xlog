@@ -4573,6 +4573,540 @@ impl PySemanticCompletedModelCarrier {
     }
 }
 
+/// One canonical byte-backed material projected from a completed action owner.
+#[cfg(feature = "semantic-policy")]
+#[pyclass(name = "SemanticCompletedMaterial", module = "pyxlog._native", frozen)]
+pub(crate) struct PySemanticCompletedMaterial {
+    inner: xlog_cuda::SemanticCompletedStepWitnessMaterial,
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_action_material(
+    py: Python<'_>,
+    material: &xlog_cuda::SemanticCompletedStepWitnessMaterial,
+) -> PyResult<Py<PySemanticCompletedMaterial>> {
+    Py::new(
+        py,
+        PySemanticCompletedMaterial {
+            inner: material.clone(),
+        },
+    )
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_publication_identity(
+    py: Python<'_>,
+    value: xlog_cuda::SemanticPublishedIdentity,
+) -> PyResult<Py<PyTuple>> {
+    Ok((
+        PyBytes::new(py, value.instance.as_bytes()),
+        value.word,
+        PyBytes::new(py, value.logical_digest.as_bytes()),
+        PyBytes::new(py, value.state_digest.as_bytes()),
+    )
+        .into_pyobject(py)?
+        .unbind())
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_u192(py: Python<'_>, limbs: [u64; 3]) -> PyResult<Py<PyAny>> {
+    let mut bytes = [0u8; 24];
+    for (chunk, limb) in bytes.chunks_exact_mut(8).zip(limbs) {
+        chunk.copy_from_slice(&limb.to_le_bytes());
+    }
+    Ok(py
+        .get_type::<PyInt>()
+        .call_method1("from_bytes", (PyBytes::new(py, &bytes), "little"))?
+        .unbind())
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedMaterial {
+    #[getter]
+    fn identity(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.identity.as_bytes()).unbind()
+    }
+
+    #[getter]
+    fn bytes(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, &self.inner.bytes).unbind()
+    }
+
+    #[getter]
+    fn bytes_sha256(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, &Sha256::digest(&self.inner.bytes)).unbind()
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pyclass(
+    name = "SemanticCompletedActionComponent",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedActionComponent {
+    inner: xlog_cuda::SemanticCompletedActionComponentMaterial,
+    proposal: u64,
+    stream_serial: u64,
+    family_id: u64,
+    action_law_generation: u64,
+    model_generation: u64,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedActionComponent {
+    #[getter]
+    fn ordinal(&self) -> u32 {
+        self.inner.ordinal
+    }
+    #[getter]
+    fn null(&self) -> bool {
+        self.inner.null
+    }
+    #[getter]
+    fn selected_index(&self) -> u32 {
+        self.inner.choice
+    }
+    #[getter]
+    fn legal_count(&self) -> u32 {
+        self.inner.legal_count
+    }
+    #[getter]
+    fn active_count(&self) -> u32 {
+        self.inner.active_count
+    }
+    #[getter]
+    fn pi_numerator(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        completed_u192(py, self.inner.probability_numerator)
+    }
+    #[getter]
+    fn pi_denominator(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        completed_u192(py, self.inner.probability_denominator)
+    }
+    #[getter]
+    fn importance_denominator(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        completed_u192(py, self.inner.importance_denominator)
+    }
+    #[getter]
+    fn cumulative_mass_below(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        completed_u192(py, self.inner.cumulative_mass_below)
+    }
+    #[getter]
+    fn cdf_lower(&self) -> u64 {
+        self.inner.cdf_start
+    }
+    #[getter]
+    fn cdf_upper(&self) -> u64 {
+        self.inner.cdf_end
+    }
+    #[getter]
+    fn behavior_mass(&self) -> u64 {
+        self.inner.mass
+    }
+    #[getter]
+    fn selected_rank(&self) -> u32 {
+        self.inner.selected_rank
+    }
+    #[getter]
+    fn draw(&self) -> u64 {
+        self.inner.draw
+    }
+    #[getter]
+    fn proposal_ordinal(&self) -> u64 {
+        self.proposal
+    }
+    #[getter]
+    fn stream_serial(&self) -> u64 {
+        self.stream_serial
+    }
+    #[getter]
+    fn family_id(&self) -> u64 {
+        self.family_id
+    }
+    #[getter]
+    fn action_law_generation(&self) -> u64 {
+        self.action_law_generation
+    }
+    #[getter]
+    fn model_generation_serial(&self) -> u64 {
+        self.model_generation
+    }
+    #[getter]
+    fn philox_key(&self) -> (u32, u32) {
+        self.inner.key.into()
+    }
+    #[getter]
+    fn philox_counter(&self) -> (u32, u32, u32, u32) {
+        self.inner.counter.into()
+    }
+    #[getter]
+    fn final_mask(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.final_mask)
+    }
+    #[getter]
+    fn pwl_cell(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.pwl_cell)
+    }
+    #[getter]
+    fn active_set(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.active_set)
+    }
+    #[getter]
+    fn vjp(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.vjp)
+    }
+    #[getter]
+    fn receipt(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.component_receipt)
+    }
+    #[getter]
+    fn decode_receipt(&self, py: Python<'_>) -> PyResult<Option<Py<PySemanticCompletedMaterial>>> {
+        self.inner
+            .hard_decode_receipt
+            .as_ref()
+            .map(|material| completed_action_material(py, material))
+            .transpose()
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pyclass(
+    name = "SemanticCompletedTextAction",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedTextAction {
+    source_slot: u32,
+    token_id: u32,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedTextAction {
+    #[getter]
+    fn source_slot(&self) -> u32 {
+        self.source_slot
+    }
+    #[getter]
+    fn token_id(&self) -> u32 {
+        self.token_id
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pyclass(
+    name = "SemanticCompletedDecodedEdit",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedDecodedEdit {
+    choices: [u32; 18],
+    receipt: xlog_cuda::SemanticCompletedStepWitnessMaterial,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedDecodedEdit {
+    #[getter]
+    fn action_class(&self) -> &'static str {
+        match self.choices[0] {
+            0 => "NO_EDIT",
+            1 => "APPLY",
+            _ => unreachable!("native action class is validated by the action law"),
+        }
+    }
+    #[getter]
+    fn opcode(&self) -> Option<u32> {
+        (self.choices[1] != 0).then_some(self.choices[1])
+    }
+    #[getter]
+    fn target_handle(&self) -> Option<u32> {
+        (self.choices[2] != 0).then_some(self.choices[2])
+    }
+    #[getter]
+    fn operands(&self) -> [Option<u32>; 4] {
+        std::array::from_fn(|index| {
+            let value = self.choices[3 + index];
+            (value != 0).then_some(value)
+        })
+    }
+    #[getter]
+    fn bindings(&self) -> [Option<u32>; 4] {
+        std::array::from_fn(|index| {
+            let value = self.choices[7 + index];
+            (value != 0).then_some(value)
+        })
+    }
+    #[getter]
+    fn qualifier_bundle(&self) -> Option<u32> {
+        (self.choices[11] != 0).then_some(self.choices[11])
+    }
+    #[getter]
+    fn guard_descriptor(&self) -> Option<u32> {
+        (self.choices[12] != 0).then_some(self.choices[12])
+    }
+    #[getter]
+    fn edges(&self) -> [Option<u32>; 4] {
+        std::array::from_fn(|index| {
+            let value = self.choices[13 + index];
+            (value != 0).then_some(value)
+        })
+    }
+    #[getter]
+    fn leaf_payload(&self) -> Option<u32> {
+        (self.choices[17] != 0).then_some(self.choices[17])
+    }
+    #[getter]
+    fn decode_receipt(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.receipt)
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pyclass(
+    name = "SemanticCompletedActionLane",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedActionLane {
+    slot: usize,
+    inner: xlog_cuda::SemanticCompletedActionLaneMaterial,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedActionLane {
+    #[getter]
+    fn slot(&self) -> usize {
+        self.slot
+    }
+    #[getter]
+    fn text_actions(&self) -> Vec<(u32, u32)> {
+        self.inner
+            .text_actions
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot, token)| (slot as u32, token))
+            .collect()
+    }
+    #[getter]
+    fn decoded_text_actions(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let actions = self
+            .inner
+            .text_actions
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(source_slot, token_id)| {
+                Py::new(
+                    py,
+                    PySemanticCompletedTextAction {
+                        source_slot: source_slot as u32,
+                        token_id,
+                    },
+                )
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, actions).map(Bound::unbind)
+    }
+    #[getter]
+    fn edit_actions(&self) -> [[u32; 18]; 2] {
+        self.inner.edit_actions
+    }
+    #[getter]
+    fn decoded_edit_actions(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let actions = self
+            .inner
+            .edit_actions
+            .iter()
+            .copied()
+            .zip(self.inner.hard_decode_receipts.iter().cloned())
+            .map(|(choices, receipt)| {
+                Py::new(py, PySemanticCompletedDecodedEdit { choices, receipt })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, actions).map(Bound::unbind)
+    }
+    #[getter]
+    fn admitted(&self) -> bool {
+        self.inner.admitted
+    }
+    #[getter]
+    fn refusal_scope(&self) -> Option<(&'static str, usize)> {
+        (!self.inner.admitted).then_some(("SPECIFIC", self.slot))
+    }
+    #[getter]
+    fn refusal_reason(&self) -> Option<&'static str> {
+        self.inner.refusal_reason
+    }
+    #[getter]
+    fn admission(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.admission)
+    }
+    #[getter]
+    fn hard_decode_receipts(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(
+        Py<PySemanticCompletedMaterial>,
+        Py<PySemanticCompletedMaterial>,
+    )> {
+        Ok((
+            completed_action_material(py, &self.inner.hard_decode_receipts[0])?,
+            completed_action_material(py, &self.inner.hard_decode_receipts[1])?,
+        ))
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pyclass(
+    name = "SemanticCompletedActionProjection",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedActionProjection {
+    inner: xlog_cuda::SemanticCompletedActionProjectionMaterial,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedActionProjection {
+    #[getter]
+    fn owner(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.owner)
+    }
+    #[getter]
+    fn predecessor(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        completed_publication_identity(py, self.inner.predecessor)
+    }
+    #[getter]
+    fn successor(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        completed_publication_identity(py, self.inner.successor)
+    }
+    #[getter]
+    fn acquired_theory_identity(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.predecessor.logical_digest.as_bytes()).unbind()
+    }
+    #[getter]
+    fn result_identity(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.successor.state_digest.as_bytes()).unbind()
+    }
+    #[getter]
+    fn base_logical_digest(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.predecessor.logical_digest.as_bytes()).unbind()
+    }
+    #[getter]
+    fn successor_logical_digest(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.successor.logical_digest.as_bytes()).unbind()
+    }
+    #[getter]
+    fn proposal_ordinal(&self) -> u64 {
+        self.inner.proposal
+    }
+    #[getter]
+    fn stream_serial(&self) -> u64 {
+        self.inner.stream_serial
+    }
+    #[getter]
+    fn family_id(&self) -> u64 {
+        self.inner.family_id
+    }
+    #[getter]
+    fn action_law_generation(&self) -> u64 {
+        self.inner.action_law_generation
+    }
+    #[getter]
+    fn model_generation_serial(&self) -> u64 {
+        self.inner.model_generation
+    }
+    #[getter]
+    fn winner(&self) -> u64 {
+        self.inner.winner
+    }
+    #[getter]
+    fn actor_eligible(&self) -> bool {
+        self.inner.actor_eligible
+    }
+    #[getter]
+    fn total_return_bits(&self) -> u64 {
+        self.inner.total_return_bits
+    }
+    #[getter]
+    fn total_return(&self) -> f64 {
+        self.inner.total_return_bits as i64 as f64
+    }
+    #[getter]
+    fn batch_root(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.batch_root.as_bytes()).unbind()
+    }
+    #[getter]
+    fn action_rng_base(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.action_rng_base)
+    }
+    #[getter]
+    fn action_rng_successor(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.action_rng_successor)
+    }
+    #[getter]
+    fn base_logical_state(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.base_logical_state)
+    }
+    #[getter]
+    fn successor_logical_state(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.successor_logical_state)
+    }
+    #[getter]
+    fn slot_zero_admission(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.slot_zero_admission)
+    }
+    #[getter]
+    fn slot_zero_admitted(&self) -> bool {
+        true
+    }
+    #[getter]
+    fn lanes(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let lanes = self
+            .inner
+            .lanes
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(slot, inner)| Py::new(py, PySemanticCompletedActionLane { slot, inner }))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, lanes).map(Bound::unbind)
+    }
+    #[getter]
+    fn components(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let components = self
+            .inner
+            .components
+            .iter()
+            .cloned()
+            .map(|inner| {
+                Py::new(
+                    py,
+                    PySemanticCompletedActionComponent {
+                        inner,
+                        proposal: self.inner.proposal,
+                        stream_serial: self.inner.stream_serial,
+                        family_id: self.inner.family_id,
+                        action_law_generation: self.inner.action_law_generation,
+                        model_generation: self.inner.model_generation,
+                    },
+                )
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, components).map(Bound::unbind)
+    }
+    #[getter]
+    fn attempt_receipt(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.attempt_receipt)
+    }
+}
+
 /// Session-issued storage for one bounded recorded step, not an acquired parent.
 /// No host publication identity is available before device execution. The
 /// original Runtime retains this handle and its producers through backward.
@@ -5513,6 +6047,29 @@ impl PySemanticPreparedStep {
                 .into_pyobject(py)?
                 .unbind())
         }
+    }
+
+    /// Typed cold projection of the exact completed Proposal action. The
+    /// returned owner, component, admission, RNG, logical-state, VJP and attempt
+    /// materials all come from this retained step; no private device ABI is
+    /// exposed and no current publication is reacquired.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (*, consumer_streams))]
+    fn completed_action_projection(
+        &self,
+        py: Python<'_>,
+        consumer_streams: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PySemanticCompletedActionProjection>> {
+        let streams = self.completed_observation_streams(py, consumer_streams)?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        let projection = owner
+            .prepared_completed_action_projection(&self.inner, &streams)
+            .map_err(xlog_err)?;
+        Py::new(
+            py,
+            PySemanticCompletedActionProjection { inner: projection },
+        )
     }
 
     /// Cold original records, not encoded features or current-bank substitutes.

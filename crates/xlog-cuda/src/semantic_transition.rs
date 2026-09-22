@@ -3399,6 +3399,7 @@ pub struct SemanticFeedbackRecordMaterial {
 /// The identity names the retained native owner and is deliberately independent
 /// of the canonical bytes hash recorded by downstream closure storage.
 #[cfg(feature = "semantic-policy")]
+#[derive(Clone)]
 pub struct SemanticCompletedStepWitnessMaterial {
     pub identity: Identity256,
     pub bytes: Vec<u8>,
@@ -3409,6 +3410,74 @@ pub struct SemanticCompletedModelCarrierMaterial {
     pub numerical_realization: SemanticCompletedStepWitnessMaterial,
     pub logits: SemanticCompletedStepWitnessMaterial,
     pub random_state: SemanticCompletedStepWitnessMaterial,
+}
+
+/// One exact categorical decision and the native closure materials needed to
+/// replay its probability law and selected-score VJP without parsing a private
+/// device ABI.
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone)]
+pub struct SemanticCompletedActionComponentMaterial {
+    pub ordinal: u32,
+    pub null: bool,
+    pub choice: u32,
+    pub legal_count: u32,
+    pub active_count: u32,
+    pub probability_numerator: [u64; 3],
+    pub probability_denominator: [u64; 3],
+    pub importance_denominator: [u64; 3],
+    pub cumulative_mass_below: [u64; 3],
+    pub cdf_start: u64,
+    pub cdf_end: u64,
+    pub mass: u64,
+    pub selected_rank: u32,
+    pub draw: u64,
+    pub key: [u32; 2],
+    pub counter: [u32; 4],
+    pub final_mask: SemanticCompletedStepWitnessMaterial,
+    pub pwl_cell: SemanticCompletedStepWitnessMaterial,
+    pub active_set: SemanticCompletedStepWitnessMaterial,
+    pub vjp: SemanticCompletedStepWitnessMaterial,
+    pub component_receipt: SemanticCompletedStepWitnessMaterial,
+    pub hard_decode_receipt: Option<SemanticCompletedStepWitnessMaterial>,
+}
+
+/// Exact decoded choices and native admission receipts for one learned lane.
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone)]
+pub struct SemanticCompletedActionLaneMaterial {
+    pub text_actions: [u32; 32],
+    pub edit_actions: [[u32; 18]; 2],
+    pub admitted: bool,
+    pub refusal_reason: Option<&'static str>,
+    pub admission: SemanticCompletedStepWitnessMaterial,
+    pub hard_decode_receipts: [SemanticCompletedStepWitnessMaterial; 2],
+}
+
+/// Cold typed projection of one completed Proposal action. All byte-backed
+/// children retain the same owner identity and are observations, not authority.
+#[cfg(feature = "semantic-policy")]
+pub struct SemanticCompletedActionProjectionMaterial {
+    pub owner: SemanticCompletedStepWitnessMaterial,
+    pub predecessor: SemanticPublishedIdentity,
+    pub successor: SemanticPublishedIdentity,
+    pub proposal: u64,
+    pub stream_serial: u64,
+    pub family_id: u64,
+    pub action_law_generation: u64,
+    pub model_generation: u64,
+    pub winner: u64,
+    pub actor_eligible: bool,
+    pub total_return_bits: u64,
+    pub batch_root: Identity256,
+    pub action_rng_base: SemanticCompletedStepWitnessMaterial,
+    pub action_rng_successor: SemanticCompletedStepWitnessMaterial,
+    pub base_logical_state: SemanticCompletedStepWitnessMaterial,
+    pub successor_logical_state: SemanticCompletedStepWitnessMaterial,
+    pub slot_zero_admission: SemanticCompletedStepWitnessMaterial,
+    pub lanes: [SemanticCompletedActionLaneMaterial; 2],
+    pub components: Vec<SemanticCompletedActionComponentMaterial>,
+    pub attempt_receipt: SemanticCompletedStepWitnessMaterial,
 }
 
 impl PublicationMaterialRange {
@@ -3654,6 +3723,126 @@ fn encode_publication_identity(bytes: &mut Vec<u8>, identity: SemanticPublishedI
     material_u64(bytes, identity.word);
     bytes.extend_from_slice(identity.logical_digest.as_bytes());
     bytes.extend_from_slice(identity.state_digest.as_bytes());
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_action_child_material(
+    owner: Identity256,
+    kind: &[u8],
+    ordinal: u64,
+    payload: &[u8],
+) -> SemanticCompletedStepWitnessMaterial {
+    let mut owner_binding = Vec::new();
+    owner_binding.extend_from_slice(b"xlog.completed-action-child.v1\0");
+    owner_binding.extend_from_slice(owner.as_bytes());
+    material_u64(&mut owner_binding, kind.len() as u64);
+    owner_binding.extend_from_slice(kind);
+    material_u64(&mut owner_binding, ordinal);
+    let identity = Identity256::from_bytes(Sha256::digest(&owner_binding).into());
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"XLOG-COMPLETED-ACTION-CHILD\0");
+    material_u64(&mut bytes, 1);
+    bytes.extend_from_slice(owner.as_bytes());
+    material_u64(&mut bytes, kind.len() as u64);
+    bytes.extend_from_slice(kind);
+    material_u64(&mut bytes, ordinal);
+    material_u64(&mut bytes, payload.len() as u64);
+    bytes.extend_from_slice(payload);
+    SemanticCompletedStepWitnessMaterial { identity, bytes }
+}
+
+#[cfg(feature = "semantic-policy")]
+fn encode_completed_component_receipt(bytes: &mut Vec<u8>, receipt: SemanticTransitionReceipt) {
+    material_u64(bytes, receipt.proposal);
+    material_u64(bytes, receipt.catalogue_generation);
+    bytes.extend_from_slice(receipt.catalogue_digest.as_bytes());
+    bytes.extend_from_slice(receipt.admission_binding.as_bytes());
+    for value in [
+        receipt.ordinal,
+        receipt.lane,
+        receipt.slot,
+        receipt.field,
+        receipt.kind,
+        receipt.choice,
+        receipt.legal_count,
+        receipt.active_count,
+        receipt.selected_rank,
+    ] {
+        material_u64(bytes, value as u64);
+    }
+    for value in receipt.key {
+        material_u64(bytes, value as u64);
+    }
+    for value in receipt.counter {
+        material_u64(bytes, value as u64);
+    }
+    for value in receipt.random_words {
+        material_u64(bytes, value as u64);
+    }
+    for value in [
+        receipt.draw,
+        receipt.cdf_start,
+        receipt.cdf_end,
+        receipt.mass,
+    ] {
+        material_u64(bytes, value);
+    }
+    for limbs in [
+        receipt.p,
+        receipt.q,
+        receipt.factor_denominator,
+        receipt.cumulative_mass_below,
+    ] {
+        for value in limbs {
+            material_u64(bytes, value);
+        }
+    }
+    material_u64(bytes, receipt.active_fields as u64);
+    material_u64(bytes, receipt.null_fields as u64);
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_receipt_material(
+    owner: Identity256,
+    kind: &[u8],
+    ordinal: u64,
+    receipt: &[u64; 42],
+) -> SemanticCompletedStepWitnessMaterial {
+    let mut payload = Vec::new();
+    for value in receipt {
+        material_u64(&mut payload, *value);
+    }
+    completed_action_child_material(owner, kind, ordinal, &payload)
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_logical_state_material(
+    owner: Identity256,
+    ordinal: u64,
+    identity: SemanticPublishedIdentity,
+) -> SemanticCompletedStepWitnessMaterial {
+    let mut payload = Vec::new();
+    encode_publication_identity(&mut payload, identity);
+    let mut material = completed_action_child_material(owner, b"logical-state", ordinal, &payload);
+    material.identity = identity.logical_digest;
+    material
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_rng_material(
+    owner: Identity256,
+    ordinal: u64,
+    model_generation: u64,
+    stream_serial: u64,
+    family_id: u64,
+    proposal: u64,
+) -> SemanticCompletedStepWitnessMaterial {
+    let mut payload = Vec::new();
+    for value in [model_generation, stream_serial, family_id, proposal] {
+        material_u64(&mut payload, value);
+    }
+    completed_action_child_material(owner, b"action-rng", ordinal, &payload)
 }
 
 fn decode_publication_identity(
@@ -12233,6 +12422,493 @@ impl SemanticTransitionSession {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         Ok(SemanticCompletedStepWitnessMaterial { identity, bytes })
+    }
+
+    /// Project one completed Proposal into typed action-law values and canonical
+    /// byte-backed child materials. Private device structs never cross this API.
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_completed_action_projection(
+        &mut self,
+        step: &SemanticPreparedStep,
+        consumer_streams: &[u64],
+    ) -> Result<SemanticCompletedActionProjectionMaterial, SemanticTransitionError> {
+        let binding = self.prepared_model_binding(step, consumer_streams)?;
+        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
+            return Err(publication_input_error(
+                "completed action projection requires an original Proposal",
+            ));
+        }
+        let successor = binding
+            .1
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let result_view = self
+            .checked_prepared_step(step, false)?
+            .prepared
+            .as_ref()
+            .expect("checked prepared owner")
+            .result
+            .view();
+        let result = self.publication_read(result_view)?[0];
+        let bank = usize::try_from(result.header.neural_bank)
+            .ok()
+            .filter(|&value| value < 2)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let (
+            state_view,
+            receipt_view,
+            final_mask_view,
+            active_set_view,
+            retained_score_view,
+            text_logit_view,
+            text_rows_source,
+            text_count_source,
+            text_selected_source,
+            layout,
+        ) = {
+            let prepared = self
+                .checked_prepared_step(step, false)?
+                .prepared
+                .as_ref()
+                .expect("checked prepared owner");
+            let branch = &prepared.branches[bank];
+            let policy = branch
+                .policy
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            (
+                branch.state.view(),
+                branch
+                    .receipts
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?
+                    .view(),
+                policy.final_masks.view(),
+                policy.active_sets.view(),
+                policy.retained_scores.view(),
+                policy.text_logits.view(),
+                policy.text_binding.inputs[0]
+                    .source
+                    .clone()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                policy.text_binding.inputs[1]
+                    .source
+                    .clone()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                policy.text_binding.inputs[2]
+                    .source
+                    .clone()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                policy.layout.clone(),
+            )
+        };
+        let state = self.publication_read(state_view)?[0];
+        let receipts = self.publication_read(receipt_view)?;
+        let final_masks = self.publication_read(final_mask_view)?;
+        let active_sets = self.publication_read(active_set_view)?;
+        let retained_scores = self.publication_read(retained_score_view)?;
+        let text_logits = self.publication_read(text_logit_view)?;
+        let text_rows = self.publication_read(unsafe {
+            text_rows_source
+                .cast::<SemanticTextRow>()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
+        })?;
+        let text_count = self.publication_read(unsafe {
+            text_count_source
+                .cast::<u64>()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
+        })?;
+        let text_selected = self.publication_read(text_selected_source)?;
+        let text_count = usize::try_from(
+            *text_count
+                .first()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?,
+        )
+        .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let catalogue = self.codebooks.binding;
+        let batch_root = self
+            .publication
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .contract_value
+            .task_identity;
+        if result.refusal != 0
+            || result.advanced != 1
+            || state.status != 0
+            || state.blocks != COMPONENT_COUNT as u64
+            || receipts.len() != COMPONENT_COUNT
+            || final_masks.len() != self.codebooks.input_cells
+            || active_sets.len() != self.codebooks.input_cells
+            || retained_scores.len() != layout.retained_score_cells()
+            || text_logits.len() != 32 * TEXT_CARDINALITY
+            || text_rows.len() != 32
+            || text_selected.len() != 32
+            || text_count > text_rows.len()
+            || state.proposal.checked_add(1) != Some(state.next_proposal)
+            || state.next_proposal != result.header.proposal
+            || state.stream_serial != result.header.stream_serial
+            || state.family_id as u64 != result.header.family_id
+            || state.model_generation as u64 != result.header.model_generation
+            || state.proposal > u32::MAX as u64
+            || state.stream_serial >= 1 << 56
+            || state.family_id > u8::MAX as u32
+            || state.catalogue_generation > u32::MAX as u64
+            || state.catalogue_generation != catalogue.generation
+            || state.catalogue_digest != catalogue.digest
+            || state.task_evaluation.winner > 2
+            || !(3..=9).contains(&state.task_evaluation.query_count)
+            || !state.task_evaluation.query_count.is_multiple_of(3)
+            || state.task_evaluation.facts[state.task_evaluation.winner as usize].eligible != 1
+            || state
+                .task_evaluation
+                .lane_refusal
+                .iter()
+                .any(|&code| code > 2)
+            || (state.task_evaluation.winner != 0
+                && state.task_evaluation.lane_refusal[state.task_evaluation.winner as usize - 1]
+                    != 0)
+            || state
+                .task_evaluation
+                .facts
+                .iter()
+                .any(|facts| facts.eligible > 1)
+            || final_masks
+                .iter()
+                .chain(&active_sets)
+                .any(|&value| value > 1)
+            || retained_scores.iter().any(|value| !value.is_finite())
+            || text_logits.iter().any(|value| !value.is_finite())
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+
+        let mut owner_binding = Vec::new();
+        owner_binding.extend_from_slice(b"xlog.completed-action-witness-owner.v1\0");
+        encode_publication_identity(&mut owner_binding, binding.0);
+        encode_publication_identity(&mut owner_binding, successor);
+        material_u64(&mut owner_binding, step.token);
+        material_u64(&mut owner_binding, state.proposal);
+        let owner_identity = Identity256::from_bytes(Sha256::digest(&owner_binding).into());
+
+        let slot_zero_admission = completed_receipt_material(
+            owner_identity,
+            b"slot-zero-admission",
+            0,
+            &state.semantic_receipts[0],
+        );
+        let lane_admissions: [SemanticCompletedStepWitnessMaterial; 2] =
+            std::array::from_fn(|lane| {
+                completed_receipt_material(
+                    owner_identity,
+                    b"lane-admission",
+                    lane as u64,
+                    &state.semantic_receipts[3 + lane * 3],
+                )
+            });
+        let hard_decode_receipts: [[SemanticCompletedStepWitnessMaterial; 2]; 2] =
+            std::array::from_fn(|lane| {
+                std::array::from_fn(|slot| {
+                    completed_receipt_material(
+                        owner_identity,
+                        b"hard-decode-receipt",
+                        (lane * 2 + slot) as u64,
+                        &state.semantic_receipts[1 + lane * 3 + slot],
+                    )
+                })
+            });
+
+        let stride = layout.retained_score_stride();
+        let mut field_offset = 0usize;
+        let field_offsets = layout
+            .fields
+            .iter()
+            .map(|field| {
+                let offset = field_offset;
+                field_offset += field.cardinality;
+                offset
+            })
+            .collect::<Vec<_>>();
+        let mut components = Vec::new();
+        components
+            .try_reserve_exact(COMPONENT_COUNT)
+            .map_err(|error| runtime_error("completed action component reservation", error))?;
+        for (ordinal, (&component, &receipt)) in
+            self.codebooks.components.iter().zip(&receipts).enumerate()
+        {
+            let begin = component.offset as usize;
+            let end = begin
+                .checked_add(component.cardinality as usize)
+                .filter(|&end| end <= final_masks.len())
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let final_mask = &final_masks[begin..end];
+            let active_set = &active_sets[begin..end];
+            let block = (COMPONENT_COUNT as u64)
+                .checked_mul(state.proposal)
+                .and_then(|block| block.checked_add(ordinal as u64))
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let packed = (state.stream_serial << 8) | state.family_id as u64;
+            let expected_counter = [
+                block as u32,
+                (block >> 32) as u32,
+                packed as u32,
+                (packed >> 32) as u32,
+            ];
+            if receipt.ordinal as usize != ordinal
+                || receipt.ordinal != component.ordinal
+                || receipt.lane != component.lane
+                || receipt.slot != component.slot
+                || receipt.field != component.field
+                || receipt.kind != component.kind
+                || receipt.proposal != state.proposal
+                || receipt.catalogue_generation != catalogue.generation
+                || receipt.catalogue_digest != catalogue.digest
+                || receipt.admission_binding != state.binding_digest
+                || receipt.choice >= component.cardinality
+                || receipt.legal_count == 0
+                || receipt.active_count == 0
+                || receipt.selected_rank >= receipt.legal_count
+                || final_mask.iter().map(|&value| value as u32).sum::<u32>() != receipt.legal_count
+                || active_set.iter().map(|&value| value as u32).sum::<u32>() != receipt.active_count
+                || final_mask[receipt.choice as usize] != 1
+                || active_set[receipt.choice as usize] != 1
+                || receipt.cdf_start >= receipt.cdf_end
+                || receipt.cdf_end > 1 << 63
+                || receipt.mass != receipt.cdf_end - receipt.cdf_start
+                || receipt.p == [0; 3]
+                || receipt.q == [0; 3]
+                || receipt.factor_denominator == [0; 3]
+                || receipt.key != [state.catalogue_generation as u32, state.model_generation]
+                || receipt.counter != expected_counter
+            {
+                self.poisoned = true;
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+
+            let mut final_mask_bytes = Vec::new();
+            material_u64(&mut final_mask_bytes, component.cardinality as u64);
+            final_mask_bytes.extend_from_slice(final_mask);
+            let final_mask_material = completed_action_child_material(
+                owner_identity,
+                b"final-mask",
+                ordinal as u64,
+                &final_mask_bytes,
+            );
+            let mut active_set_bytes = Vec::new();
+            material_u64(&mut active_set_bytes, component.cardinality as u64);
+            active_set_bytes.extend_from_slice(active_set);
+            let active_set_material = completed_action_child_material(
+                owner_identity,
+                b"active-set",
+                ordinal as u64,
+                &active_set_bytes,
+            );
+            let mut receipt_bytes = Vec::new();
+            encode_completed_component_receipt(&mut receipt_bytes, receipt);
+            let component_receipt = completed_action_child_material(
+                owner_identity,
+                b"component-receipt",
+                ordinal as u64,
+                &receipt_bytes,
+            );
+            let pwl_cell = completed_action_child_material(
+                owner_identity,
+                b"pwl-cell",
+                ordinal as u64,
+                &receipt_bytes,
+            );
+
+            let null = if component.is_text() {
+                canonical_text_null(&receipt)
+            } else {
+                component.field != 0
+                    && receipt.choice == 0
+                    && receipt.legal_count == 1
+                    && receipt.active_count == 1
+            };
+            let mut vjp_bytes = Vec::new();
+            material_u64(&mut vjp_bytes, ordinal as u64);
+            material_u64(&mut vjp_bytes, receipt.choice as u64);
+            if component.is_text() {
+                if null {
+                    material_u64(&mut vjp_bytes, 0);
+                } else {
+                    let source_slot = component.slot as u64;
+                    if text_selected.get(component.slot as usize) != Some(&1) {
+                        self.poisoned = true;
+                        return Err(SemanticTransitionError::ObservationMismatch);
+                    }
+                    let row = text_rows[..text_count]
+                        .iter()
+                        .position(|row| row.source_slot == source_slot)
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                    let score = text_logits[row * TEXT_CARDINALITY + receipt.choice as usize];
+                    material_u64(&mut vjp_bytes, 1);
+                    material_u64(&mut vjp_bytes, row as u64);
+                    material_u64(&mut vjp_bytes, text_rows[row].source_slot);
+                    material_u64(&mut vjp_bytes, text_rows[row].logical_position);
+                    material_u64(&mut vjp_bytes, score.to_bits() as u64);
+                }
+            } else {
+                let lane = usize::try_from(component.lane)
+                    .ok()
+                    .and_then(|lane| lane.checked_sub(1))
+                    .filter(|&lane| lane < 2)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let slot = component.slot as usize;
+                let field = component.field as usize;
+                if slot >= 2 || field >= layout.fields.len() {
+                    self.poisoned = true;
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                let offset = (lane * 2 + slot) * stride + field_offsets[field];
+                let score = retained_scores[offset + receipt.choice as usize];
+                material_u64(&mut vjp_bytes, 2);
+                material_u64(&mut vjp_bytes, lane as u64);
+                material_u64(&mut vjp_bytes, slot as u64);
+                material_u64(&mut vjp_bytes, field as u64);
+                material_u64(&mut vjp_bytes, score.to_bits() as u64);
+            }
+            let vjp =
+                completed_action_child_material(owner_identity, b"vjp", ordinal as u64, &vjp_bytes);
+            let hard_decode_receipt = (!component.is_text()).then(|| {
+                hard_decode_receipts[component.lane as usize - 1][component.slot as usize].clone()
+            });
+            components.push(SemanticCompletedActionComponentMaterial {
+                ordinal: receipt.ordinal,
+                null,
+                choice: receipt.choice,
+                legal_count: receipt.legal_count,
+                active_count: receipt.active_count,
+                probability_numerator: receipt.p,
+                probability_denominator: receipt.q,
+                importance_denominator: receipt.factor_denominator,
+                cumulative_mass_below: receipt.cumulative_mass_below,
+                cdf_start: receipt.cdf_start,
+                cdf_end: receipt.cdf_end,
+                mass: receipt.mass,
+                selected_rank: receipt.selected_rank,
+                draw: receipt.draw,
+                key: receipt.key,
+                counter: receipt.counter,
+                final_mask: final_mask_material,
+                pwl_cell,
+                active_set: active_set_material,
+                vjp,
+                component_receipt,
+                hard_decode_receipt,
+            });
+        }
+
+        let lanes = std::array::from_fn(|lane| {
+            let mut text_actions = [0; 32];
+            let mut edit_actions = [[0; 18]; 2];
+            for slot in 0..32 {
+                text_actions[slot] = receipts[lane * 68 + slot].choice;
+            }
+            for slot in 0..2 {
+                for field in 0..18 {
+                    edit_actions[slot][field] = receipts[lane * 68 + 32 + slot * 18 + field].choice;
+                }
+            }
+            SemanticCompletedActionLaneMaterial {
+                text_actions,
+                edit_actions,
+                admitted: state.task_evaluation.lane_refusal[lane] == 0,
+                refusal_reason: match state.task_evaluation.lane_refusal[lane] {
+                    0 => None,
+                    1 => Some("task-scope"),
+                    2 => Some("hard-constraint"),
+                    _ => unreachable!("validated lane refusal code"),
+                },
+                admission: lane_admissions[lane].clone(),
+                hard_decode_receipts: hard_decode_receipts[lane].clone(),
+            }
+        });
+
+        let mut owner_bytes = Vec::new();
+        owner_bytes.extend_from_slice(b"XLOG-COMPLETED-ACTION-PROJECTION\0");
+        material_u64(&mut owner_bytes, 1);
+        encode_publication_identity(&mut owner_bytes, binding.0);
+        encode_publication_identity(&mut owner_bytes, successor);
+        for value in [
+            state.proposal,
+            state.stream_serial,
+            state.family_id as u64,
+            state.catalogue_generation,
+            state.model_generation as u64,
+            state.task_evaluation.winner,
+            state.task_evaluation.return_value as u64,
+            COMPONENT_COUNT as u64,
+        ] {
+            material_u64(&mut owner_bytes, value);
+        }
+        owner_bytes.extend_from_slice(batch_root.as_bytes());
+        let owner = SemanticCompletedStepWitnessMaterial {
+            identity: owner_identity,
+            bytes: owner_bytes,
+        };
+        let mut attempt_bytes = Vec::new();
+        material_u64(&mut attempt_bytes, result.attempt.abi);
+        attempt_bytes.extend_from_slice(result.attempt.instance.as_bytes());
+        material_u64(&mut attempt_bytes, result.attempt.base_word);
+        material_u64(&mut attempt_bytes, result.attempt.next_word);
+        for digest in [
+            result.attempt.logical_digest,
+            result.attempt.action_receipts_digest,
+            result.attempt.semantic_receipts_digest,
+            result.attempt.coverage_digest,
+            result.attempt.replay_head_digest,
+            result.attempt.intent_head_digest,
+            result.attempt.acknowledgement_head_digest,
+            result.attempt.previous_attempt_digest,
+            result.attempt.receipt_digest,
+        ] {
+            attempt_bytes.extend_from_slice(digest.as_bytes());
+        }
+        let mut attempt_receipt =
+            completed_action_child_material(owner_identity, b"attempt-receipt", 0, &attempt_bytes);
+        attempt_receipt.identity = result.attempt.receipt_digest;
+        let projection = SemanticCompletedActionProjectionMaterial {
+            owner,
+            predecessor: binding.0,
+            successor,
+            proposal: state.proposal,
+            stream_serial: state.stream_serial,
+            family_id: state.family_id as u64,
+            action_law_generation: state.catalogue_generation,
+            model_generation: state.model_generation as u64,
+            winner: state.task_evaluation.winner,
+            actor_eligible: state.task_evaluation.winner != 0,
+            total_return_bits: state.task_evaluation.return_value as u64,
+            batch_root,
+            action_rng_base: completed_rng_material(
+                owner_identity,
+                0,
+                state.model_generation as u64,
+                state.stream_serial,
+                state.family_id as u64,
+                state.proposal,
+            ),
+            action_rng_successor: completed_rng_material(
+                owner_identity,
+                1,
+                state.model_generation as u64,
+                state.stream_serial,
+                state.family_id as u64,
+                state.next_proposal,
+            ),
+            base_logical_state: completed_logical_state_material(owner_identity, 0, binding.0),
+            successor_logical_state: completed_logical_state_material(owner_identity, 1, successor),
+            slot_zero_admission,
+            lanes,
+            components,
+            attempt_receipt,
+        };
+        if self.prepared_model_binding(step, consumer_streams)? != binding {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(projection)
     }
 
     #[cfg(feature = "semantic-policy")]
