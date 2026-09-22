@@ -30,7 +30,7 @@ use xlog_cuda::{
     SemanticTensorLayout, SemanticTextSlot, SemanticTrainingCanary, SemanticTrainingCanaryKind,
     SemanticTrainingObjective, SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind,
     SemanticTrainingViewBasis, SemanticTrainingViewPort, SemanticTrainingViewRow,
-    SemanticTransitionKind, SemanticTransitionSession, SemanticTypedRecord,
+    SemanticTransitionKind, SemanticTransitionSession, SemanticTruth, SemanticTypedRecord,
 };
 use xlog_cuda::{
     SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
@@ -7204,30 +7204,42 @@ impl PySemanticTransitionTaskUse {
         session.binding(py)
     }
 
-    /// Return the native-computed identities of the exact ordered query,
-    /// admitted theory plus executed observer program, and observed four-valued
-    /// result. These identities carry no use authority. A symbolic corpus anchor
-    /// stores the same three values in its ``semantic_task`` record and admission
-    /// evidence; cold import rejects any mismatch with the task it executes.
-    /// Returns ``(query_identity, theory_program_identity, result_identity)`` as
-    /// three 32-byte values.
-    fn task_content_identity(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+    /// Return one immutable native projection of the exact ordered query,
+    /// admitted theory plus executed observer program, observed four-valued
+    /// result, and the three stored truths in query order. This does not
+    /// re-execute the observer and carries no use authority. A symbolic corpus
+    /// anchor stores the same three identities in its ``semantic_task`` record
+    /// and admission evidence; cold import rejects any mismatch with the task it
+    /// executes.
+    ///
+    /// Returns ``((query_identity, theory_program_identity, result_identity),
+    /// (truth0, truth1, truth2))``. Identities are 32-byte values. Truths are the
+    /// native objective indices ``0=Neither``, ``1=True``, ``2=False`` and
+    /// ``3=Both``; each indexes the frozen ``truth_tokens`` array directly.
+    fn task_content_projection(&self, py: Python<'_>) -> PyResult<(Py<PyTuple>, (u8, u8, u8))> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
         let owner = session.owner()?;
         self.require_current(&owner)?;
-        let binding = owner
-            .task_content_identity()
+        let projection = owner
+            .task_content_projection()
             .ok_or_else(|| invalid("native task content binding is absent"))?;
-        Ok(PyTuple::new(
+        let identities = PyTuple::new(
             py,
             [
-                PyBytes::new(py, binding.query.as_bytes()),
-                PyBytes::new(py, binding.theory_program.as_bytes()),
-                PyBytes::new(py, binding.result.as_bytes()),
+                PyBytes::new(py, projection.identity.query.as_bytes()),
+                PyBytes::new(py, projection.identity.theory_program.as_bytes()),
+                PyBytes::new(py, projection.identity.result.as_bytes()),
             ],
         )?
-        .unbind())
+        .unbind();
+        let [first, second, third] = projection.truth.map(|truth| match truth {
+            SemanticTruth::Neither => 0,
+            SemanticTruth::True => 1,
+            SemanticTruth::False => 2,
+            SemanticTruth::Both => 3,
+        });
+        Ok((identities, (first, second, third)))
     }
 
     /// Read the same native Session layout; this does not grant execution.

@@ -98,6 +98,14 @@ pub struct SemanticTaskContentIdentity {
     pub result: Identity256,
 }
 
+/// Cold projection of the exact native task content and its observed truths.
+/// It carries no use authority and never re-executes the task observer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticTaskContentProjection {
+    pub identity: SemanticTaskContentIdentity,
+    pub truth: [crate::SemanticTruth; 3],
+}
+
 /// Explicit nonnegative coefficients for query agreement and measured work.
 /// Selection maximizes the resulting value, retaining the earlier candidate on
 /// ties. The final return separately prices improvement, refusals, and spent work.
@@ -471,6 +479,13 @@ impl TaskEvaluationBinding {
 
     pub(crate) fn expected_truth(&self) -> [crate::SemanticTruth; 3] {
         self.observation.expected_truth
+    }
+
+    pub(crate) fn content_projection(&self) -> SemanticTaskContentProjection {
+        SemanticTaskContentProjection {
+            identity: self.content_identity(),
+            truth: self.expected_truth(),
+        }
     }
 
     pub(crate) fn spec(&self) -> &SemanticTaskEvaluationSpec {
@@ -17605,12 +17620,12 @@ impl SemanticTransitionSession {
         self.task.as_ref().map(|(binding, _)| binding.identity())
     }
 
-    /// Exact content identities of the currently bound task, excluding its
-    /// controller authority and scoring policy.
-    pub fn task_content_identity(&self) -> Option<SemanticTaskContentIdentity> {
+    /// Exact content identities and observed truths of the currently bound
+    /// task, excluding its controller authority and scoring policy.
+    pub fn task_content_projection(&self) -> Option<SemanticTaskContentProjection> {
         self.task
             .as_ref()
-            .map(|(binding, _)| binding.content_identity())
+            .map(|(binding, _)| binding.content_projection())
     }
 
     /// Bind every admitted training view once while the task is still cold.
@@ -17637,21 +17652,15 @@ impl SemanticTransitionSession {
             .as_ref()
             .expect("checked cold task binding")
             .0
-            .content_identity();
-        let expected_truth = self
-            .task
-            .as_ref()
-            .expect("checked cold task binding")
-            .0
-            .expected_truth();
+            .content_projection();
         self.training_views = Some(SemanticTrainingViewArena::allocate(
             &self.provider,
             &self.domain,
             rows,
             objective,
             task_identity,
-            task_content,
-            expected_truth,
+            task_content.identity,
+            task_content.truth,
         )?);
         Ok(())
     }
