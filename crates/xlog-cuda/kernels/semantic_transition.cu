@@ -573,7 +573,7 @@ static_assert(sizeof(PublicationStorageEntry)==24,"owned storage ABI");
 static_assert(sizeof(PublicationRange)==128,"publication range ABI");
 static_assert(sizeof(PublicationHeader)==488,"publication header ABI");
 static_assert(sizeof(PublicationControl)==144,"publication control ABI");
-static_assert(sizeof(PublicationBank)==50288,"publication bank ABI");
+static_assert(sizeof(PublicationBank)==50360,"publication bank ABI");
 static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
 static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
 static_assert(sizeof(PendingContinuation)==256,"pending continuation ABI");

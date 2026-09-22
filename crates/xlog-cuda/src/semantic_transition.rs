@@ -3435,7 +3435,7 @@ const _: () = assert!(size_of::<PublicationStorageEntry>() == 24);
 const _: () = assert!(size_of::<PublicationRange>() == 128);
 const _: () = assert!(size_of::<PublicationHeader>() == 488);
 const _: () = assert!(size_of::<PublicationControl>() == 144);
-const _: () = assert!(size_of::<PublicationBank>() == 50288);
+const _: () = assert!(size_of::<PublicationBank>() == 50360);
 const _: () = assert!(size_of::<PublicationRoleCount>() == 16);
 const _: () = assert!(size_of::<SemanticModelContractLayout>() == 48);
 const _: () = assert!(size_of::<PublicationContract>() == 272);
