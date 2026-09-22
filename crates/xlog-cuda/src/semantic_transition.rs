@@ -3388,6 +3388,15 @@ pub struct SemanticCompletedStepWitnessMaterial {
     pub bytes: Vec<u8>,
 }
 
+/// Canonical device-authored action state retained by one completed Proposal.
+/// Application intent, external receipts and data-owned episode fields are not
+/// synthesized into this native material.
+#[cfg(feature = "semantic-policy")]
+pub struct SemanticCompletedActionWitnessMaterial {
+    pub identity: Identity256,
+    pub bytes: Vec<u8>,
+}
+
 impl PublicationMaterialRange {
     fn into_feedback_record(
         self,
@@ -12076,6 +12085,103 @@ impl SemanticTransitionSession {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         Ok(SemanticCompletedStepWitnessMaterial { identity, bytes })
+    }
+
+    /// Serialize the selected Proposal branch's original device state and all
+    /// 136 exact component receipts after known completion. The step-owned
+    /// buffers, not a current publication or Python reconstruction, are read.
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_completed_action_witnesses(
+        &mut self,
+        step: &SemanticPreparedStep,
+        consumer_streams: &[u64],
+    ) -> Result<SemanticCompletedActionWitnessMaterial, SemanticTransitionError> {
+        let binding = self.prepared_model_binding(step, consumer_streams)?;
+        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
+            return Err(publication_input_error(
+                "completed action witnesses require an original Proposal",
+            ));
+        }
+        let result_view = self
+            .checked_prepared_step(step, false)?
+            .prepared
+            .as_ref()
+            .expect("checked prepared owner")
+            .result
+            .view();
+        let result = self.publication_read(result_view)?[0];
+        let bank = usize::try_from(result.header.neural_bank)
+            .ok()
+            .filter(|&value| value < 2)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let (state_view, receipt_view) = {
+            let prepared = self
+                .checked_prepared_step(step, false)?
+                .prepared
+                .as_ref()
+                .expect("checked prepared owner");
+            let branch = &prepared.branches[bank];
+            (
+                branch.state.view(),
+                branch
+                    .receipts
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?
+                    .view(),
+            )
+        };
+        let state = self.publication_read(state_view)?[0];
+        let receipts = self.publication_read(receipt_view)?;
+        if result.refusal != 0
+            || result.advanced != 1
+            || state.status != 0
+            || state.blocks != COMPONENT_COUNT as u64
+            || receipts.len() != COMPONENT_COUNT
+            || state.proposal.checked_add(1) != Some(state.next_proposal)
+            || state.next_proposal != result.header.proposal
+            || receipts
+                .iter()
+                .any(|receipt| receipt.proposal != state.proposal)
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+
+        let mut owner_binding = Vec::new();
+        owner_binding.extend_from_slice(b"xlog.completed-action-witness-owner.v1\0");
+        encode_publication_identity(&mut owner_binding, binding.0);
+        encode_publication_identity(
+            &mut owner_binding,
+            binding
+                .1
+                .ok_or(SemanticTransitionError::ObservationMismatch)?,
+        );
+        material_u64(&mut owner_binding, step.token);
+        material_u64(&mut owner_binding, state.proposal);
+        let mut owner_hash = Sha256::new();
+        owner_hash.update(&owner_binding);
+        let identity = Identity256::from_bytes(owner_hash.finalize().into());
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"XLOG-COMPLETED-ACTION-WITNESSES\0");
+        material_u64(&mut bytes, 1);
+        encode_publication_identity(&mut bytes, binding.0);
+        encode_publication_identity(
+            &mut bytes,
+            binding
+                .1
+                .ok_or(SemanticTransitionError::ObservationMismatch)?,
+        );
+        material_u64(&mut bytes, bank as u64);
+        material_u64(&mut bytes, size_of::<DeviceState>() as u64);
+        bytes.extend(publication_abi_bytes(&[state]));
+        material_u64(&mut bytes, receipts.len() as u64);
+        bytes.extend(publication_abi_bytes(&receipts));
+        if self.prepared_model_binding(step, consumer_streams)? != binding {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(SemanticCompletedActionWitnessMaterial { identity, bytes })
     }
 
     /// The caller keeps the builder outside its Session lock while recording

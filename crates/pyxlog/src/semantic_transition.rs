@@ -5517,6 +5517,30 @@ impl PySemanticPreparedStep {
             .unbind())
     }
 
+    /// Cold canonical bytes for the completed Proposal's selected native
+    /// DeviceState and all 136 original component receipts. No application
+    /// intent, external receipt, or data-owned episode field is invented.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (*, consumer_streams))]
+    fn completed_action_witnesses(
+        &self,
+        py: Python<'_>,
+        consumer_streams: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        let streams = self.completed_observation_streams(py, consumer_streams)?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        let material = owner
+            .prepared_completed_action_witnesses(&self.inner, &streams)
+            .map_err(xlog_err)?;
+        Ok((
+            PyBytes::new(py, material.identity.as_bytes()),
+            PyBytes::new(py, &material.bytes),
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+
     /// Original imported task lineage, with no invented publication identity.
     fn dependency_lineage(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         let session = self.session.borrow(py);
