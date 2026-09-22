@@ -12247,7 +12247,7 @@ mod tests {
     fn task_program_transport_preserves_explicit_configuration_without_cuda() {
         Python::initialize();
         Python::attach(|py| {
-            let arguments = py.eval(c"((9,4,2),(8,3),'pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2). ?- rainfall(9).',(1,0,2),(5,4,3,2,1,0),(15,7,3))", None, None).unwrap();
+            let arguments = py.eval(c"((9,4,2),(8,3),'pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2). ?- rainfall(9).',(1,0,2),(5,4,3,2,1,0),(15,7,3),True)", None, None).unwrap();
             let arguments = arguments.cast::<PyTuple>().unwrap();
             let fields = arguments.iter().collect::<Vec<_>>();
             let spec = super::read_task_evaluation_spec(
@@ -12257,6 +12257,7 @@ mod tests {
                 &fields[3],
                 &fields[4],
                 &fields[5],
+                &fields[6],
                 &mut (16 * 1024 * 1024),
             )
             .unwrap();
@@ -12265,6 +12266,7 @@ mod tests {
             assert_eq!(spec.admissible_truth_masks, [15, 7, 3]);
             assert_eq!(spec.scoring.correct_weight, 5);
             assert_eq!(spec.scoring.spent_weight, 0);
+            assert!(spec.actor_eligible);
         });
     }
 
@@ -12273,15 +12275,16 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             for expression in [
-                "((0,1),(),(True,False),(0,1),(1,1,1,1,1,1),(7,7))",
-                "((0,1),(),'pred rainfall(u32). rainfall(8). ?- rainfall(X). ?- rainfall(8).',(0,1),(1,1,1,1,1,1),(7,7))",
-                "((0,1),(),'pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2).',(0,9),(1,1,1,1,1,1),(7,7))",
-                "((0,1),(),'pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2).',(0,1),(True,1,1,1,1,1),(7,7))",
+                "((0,1),(),(True,False),(0,1),(1,1,1,1,1,1),(7,7),False)",
+                "((0,1),(),'pred rainfall(u32). rainfall(8). ?- rainfall(X). ?- rainfall(8).',(0,1),(1,1,1,1,1,1),(7,7),False)",
+                "((0,1),(),'pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2).',(0,9),(1,1,1,1,1,1),(7,7),False)",
+                "((0,1),(),'pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2).',(0,1),(True,1,1,1,1,1),(7,7),False)",
             ] {
                 let value = py.eval(&CString::new(expression).unwrap(), None, None).unwrap();
                 let fields = value.cast::<PyTuple>().unwrap().iter().collect::<Vec<_>>();
                 assert!(super::read_task_evaluation_spec(&fields[0], &fields[1], &fields[2],
-                    &fields[3], &fields[4], &fields[5], &mut (16 * 1024 * 1024)).is_err());
+                    &fields[3], &fields[4], &fields[5], &fields[6],
+                    &mut (16 * 1024 * 1024)).is_err());
             }
         });
     }
