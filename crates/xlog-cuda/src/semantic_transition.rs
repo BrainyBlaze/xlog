@@ -3109,7 +3109,7 @@ struct RawFeedbackRecord {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AttemptReceipt {
     abi: u64,
     instance: Identity256,
@@ -6984,6 +6984,7 @@ struct PreparedStepResult {
     refusal: u64,
     header: PublicationHeader,
     advanced: u64,
+    attempt: AttemptReceipt,
 }
 
 #[derive(Clone, Copy)]
@@ -9912,7 +9913,10 @@ pub enum SemanticPreparedStepOutcome {
     },
 }
 
-const _: () = assert!(size_of::<PreparedStepResult>() == size_of::<PublicationHeader>() + 32);
+const _: () = assert!(
+    size_of::<PreparedStepResult>()
+        == size_of::<PublicationHeader>() + 32 + size_of::<AttemptReceipt>()
+);
 
 fn prepared_step_allocation_bytes(
     input_bytes: usize,
@@ -10051,9 +10055,16 @@ fn validate_prepared_completion(
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         if result.word != (epoch << 1) | ((lease.word ^ 1) & 1)
             || result.header.base_word != lease.word
+            || result.attempt.abi != 1
+            || result.attempt.instance != result.header.instance
+            || result.attempt.base_word != lease.word
+            || result.attempt.next_word != result.word
+            || result.attempt.logical_digest != result.header.logical_digest
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
+    } else if result.attempt != AttemptReceipt::default() {
+        return Err(SemanticTransitionError::ObservationMismatch);
     }
     match lease.transition_kind {
         1 => Ok(SemanticTransitionKind::Proposal),
@@ -10605,6 +10616,14 @@ mod prepared_completion_tests {
                 sealed_epoch: 2,
                 proposal: 38,
                 ..parent
+            },
+            attempt: AttemptReceipt {
+                abi: 1,
+                instance: parent.instance,
+                base_word: 2,
+                next_word: 5,
+                logical_digest: parent.logical_digest,
+                ..AttemptReceipt::default()
             },
             ..PreparedStepResult::default()
         };

@@ -348,7 +348,6 @@ struct PendingContinuation {
 };
 struct PublicationCommand { uint64_t control,lease,operation; };
 struct PublicationLease { uint64_t abi,status,instance[4],word,bank,epoch,active,transition_kind; };
-struct PublicationStepResult { uint64_t abi,word,refusal;PublicationHeader header;uint64_t advanced; };
 struct SemanticTrainingViewOriginRecord {
     uint64_t present,transition;
     uint64_t lineage_instance[4];
@@ -381,6 +380,12 @@ struct AttemptReceipt {
     uint64_t abi,instance[4],base_word,next_word,logical_digest[4],action_receipts_digest[4];
     uint64_t semantic_receipts_digest[4],coverage_digest[4],replay_head_digest[4],intent_head_digest[4];
     uint64_t acknowledgement_head_digest[4],previous_attempt_digest[4],receipt_digest[4];
+};
+struct PublicationStepResult {
+    uint64_t abi,word,refusal;
+    PublicationHeader header;
+    uint64_t advanced;
+    AttemptReceipt attempt;
 };
 struct TokenProvenanceRecord {
     uint64_t source_slot,logical_position,token,base_word,proposal,ordinal,action_receipt_digest[4];
@@ -539,7 +544,7 @@ static_assert(sizeof(TextBinding)==24,"compact text binding ABI");
 static_assert(sizeof(ModelUpdateBinding)==32,"model update binding ABI");
 static_assert(sizeof(PublicationCommand)==24,"publication command ABI");
 static_assert(sizeof(PublicationLease)==88,"publication lease ABI");
-static_assert(sizeof(PublicationStepResult)==sizeof(PublicationHeader)+32,"publication step result ABI");
+static_assert(sizeof(PublicationStepResult)==sizeof(PublicationHeader)+32+sizeof(AttemptReceipt),"publication step result ABI");
 static_assert(sizeof(PublicationTensorLayout)==112,"tensor layout ABI");
 static_assert(sizeof(RawFeedbackRecord)==384,"raw feedback ABI");
 static_assert(sizeof(CompletionCoverage)==360,"completion coverage ABI");
@@ -2674,7 +2679,18 @@ extern "C" __global__ void semantic_publication_step_result(uint64_t control_ptr
        ((lease.word>>1)==(UINT64_MAX>>1) || word!=(((lease.word>>1)+1)<<1 | ((lease.word^1)&1)) ||
         bank.header.base_word!=lease.word))) { semantic_content_integrity_trap();return; }
     const uint64_t advanced=uint64_t(word!=lease.word && !control.refusal);
-    *reinterpret_cast<PublicationStepResult*>(result_ptr)={1,word,control.refusal,bank.header,advanced};
+    PublicationStepResult retained={1,word,control.refusal,bank.header,advanced,{}};
+    if(advanced) {
+        const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[word&1]);
+        const auto* range=publication_find_range(ranges,bank.header.range_count,33);
+        const auto* bytes=range ? publication_range_bytes(control,*range) : nullptr;
+        if(!range || range->length_bytes!=sizeof(AttemptReceipt) || !bytes ||
+           reinterpret_cast<uintptr_t>(bytes)%alignof(AttemptReceipt)) {
+            semantic_content_integrity_trap();return;
+        }
+        retained.attempt=*reinterpret_cast<const AttemptReceipt*>(bytes);
+    }
+    *reinterpret_cast<PublicationStepResult*>(result_ptr)=retained;
     if(training_origin_ptr) {
         auto& origin=*reinterpret_cast<SemanticTrainingViewOriginRecord*>(training_origin_ptr);
         origin={};
