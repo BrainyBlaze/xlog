@@ -477,6 +477,7 @@ impl TaskEvaluationBinding {
         self.observation.expected_truth
     }
 
+    #[cfg(feature = "semantic-policy")]
     fn goal_witness(&self) -> Option<SemanticTaskGoalWitness> {
         self.goal_witness
     }
