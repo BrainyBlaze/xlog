@@ -162,6 +162,37 @@ import. A failed final-use call quarantines the original invocation, and uncerta
 completion prevents reader release. Import does not retry final use, repeat
 publication, or substitute a backward call.
 
+### Semantic runtime checkpoints
+
+`SemanticTransitionController.save_checkpoint(task_use, *, parent,
+consumer_streams, snapshot, snapshot_model_state)` returns one sealed `bytes`
+value containing the selected native publication, the task capsule, the session
+allocation contract, and the application's exact model-state bytes. The controller
+joins every listed consumer stream before the cold native export. It then calls
+`snapshot_model_state()` exactly once on the creator thread without holding the
+native owner or task-state lock, and revalidates the task binding and acquired
+publication before sealing the result. The callback must return exact builtin
+`bytes`; failure or concurrent mutation returns no checkpoint.
+
+`SemanticTransitionSession.restore_checkpoint(checkpoint, *, device_ordinal,
+snapshot, restore_model)` validates every section and the retained authority before
+allocating a fresh, never-reused native owner. `snapshot` must be newer than the
+snapshot sealed into the checkpoint. After restoring the selected native bank, the
+session creates one controller and task use, acquires their parent once, and invokes
+the trusted factory exactly once as
+`restore_model(controller, task_use, parent, exact_model_bytes)`. The application
+must return its reconstructed semantic runtime. The frozen
+`SemanticTransitionRestoredCheckpoint` exposes that same `session`, `controller`,
+`task_use`, `parent`, and returned `model` through read-only properties; none is a
+replacement or second acquisition.
+
+The checkpoint carries content, not current permissions. Restore rechecks a fresh
+authority snapshot and the reconstructed native publication after the model factory
+returns. A callback error or final revalidation failure poisons the new native owner
+and returns no reachable carrier. Checkpoint creation and restoration are cold-path
+operations; they are not evidence of device-resident execution, training, or update
+publication.
+
 ### Acquired model numerical identity
 
 The existing acquired parent's `model_context(consumer_stream=...)` returns

@@ -87,6 +87,9 @@ pub(crate) struct PySemanticTransitionSession {
     issuance: Arc<AtomicU64>,
     owner_thread: ThreadId,
     device_ordinal: usize,
+    capacities: (u32, u32, u32, u32),
+    admission_limits: (u32, u32, u32, usize),
+    memory_bytes: u64,
 }
 
 impl PySemanticTransitionSession {
@@ -117,7 +120,7 @@ impl PySemanticTransitionSession {
         device_ordinal: usize,
         memory_bytes: u64,
     ) -> PyResult<Self> {
-        let capacities = SemanticHypergraphCapacities::try_new(
+        let native_capacities = SemanticHypergraphCapacities::try_new(
             capacities.0,
             capacities.1,
             capacities.2,
@@ -145,7 +148,7 @@ impl PySemanticTransitionSession {
             .bind_resident_execution_domain(runtime, stream_id, stream)
             .map_err(xlog_err)?;
         let mut graph = provider
-            .allocate_semantic_hypergraph(&domain, capacities)
+            .allocate_semantic_hypergraph(&domain, native_capacities)
             .map_err(xlog_err)?;
         graph
             .admit_records(graph.empty_root(), records, limits)
@@ -160,6 +163,191 @@ impl PySemanticTransitionSession {
             issuance: Arc::new(AtomicU64::new(0)),
             owner_thread: std::thread::current().id(),
             device_ordinal,
+            capacities,
+            admission_limits,
+            memory_bytes,
+        })
+    }
+}
+
+struct SemanticCheckpointManifest {
+    native: Vec<u8>,
+    model: Vec<u8>,
+    task: Vec<u8>,
+    session: Vec<u8>,
+}
+
+impl SemanticCheckpointManifest {
+    const MAGIC: &'static [u8] = b"XLOG-SEMANTIC-CHECKPOINT\0";
+    const SECTION_COUNT: usize = 4;
+
+    fn encode(self) -> PyResult<Vec<u8>> {
+        let sections = [self.native, self.model, self.task, self.session];
+        let mut bytes = Self::MAGIC.to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        for section in &sections {
+            bytes
+                .len()
+                .checked_add(section.len())
+                .ok_or_else(|| invalid("checkpoint extent exceeds this host"))?;
+            bytes.extend_from_slice(section);
+        }
+        let mut root = Sha256::new();
+        root.update(b"xlog.semantic.checkpoint.root.v1\0");
+        root.update((Self::SECTION_COUNT as u32).to_le_bytes());
+        bytes.extend_from_slice(&(Self::SECTION_COUNT as u32).to_le_bytes());
+        for section in &sections {
+            let length = u64::try_from(section.len())
+                .map_err(|_| invalid("checkpoint section exceeds u64"))?;
+            let digest = Sha256::digest(section);
+            bytes.extend_from_slice(&length.to_le_bytes());
+            bytes.extend_from_slice(&digest);
+            root.update(length.to_le_bytes());
+            root.update(digest);
+        }
+        bytes.extend_from_slice(&root.finalize());
+        Ok(bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> PyResult<Self> {
+        let header = Self::MAGIC.len() + 4;
+        let footer = 4 + Self::SECTION_COUNT * (8 + 32) + 32;
+        if bytes.len() < header + footer
+            || &bytes[..Self::MAGIC.len()] != Self::MAGIC
+            || u32::from_le_bytes(
+                bytes[Self::MAGIC.len()..header]
+                    .try_into()
+                    .expect("checkpoint version extent"),
+            ) != 1
+        {
+            return Err(invalid("checkpoint has another domain or version"));
+        }
+        let footer_begin = bytes.len() - footer;
+        let footer_bytes = &bytes[footer_begin..];
+        if u32::from_le_bytes(footer_bytes[..4].try_into().unwrap()) as usize != Self::SECTION_COUNT
+        {
+            return Err(invalid("checkpoint has another section count"));
+        }
+        let mut cursor = 4;
+        let mut lengths = [0usize; Self::SECTION_COUNT];
+        let mut digests = [[0u8; 32]; Self::SECTION_COUNT];
+        let mut root = Sha256::new();
+        root.update(b"xlog.semantic.checkpoint.root.v1\0");
+        root.update((Self::SECTION_COUNT as u32).to_le_bytes());
+        for index in 0..Self::SECTION_COUNT {
+            let length = u64::from_le_bytes(
+                footer_bytes[cursor..cursor + 8]
+                    .try_into()
+                    .expect("checkpoint length extent"),
+            );
+            cursor += 8;
+            lengths[index] = usize::try_from(length)
+                .map_err(|_| invalid("checkpoint section length exceeds this host"))?;
+            digests[index].copy_from_slice(&footer_bytes[cursor..cursor + 32]);
+            cursor += 32;
+            root.update(length.to_le_bytes());
+            root.update(digests[index]);
+        }
+        let encoded_root: [u8; 32] = footer_bytes[cursor..cursor + 32]
+            .try_into()
+            .expect("checkpoint root extent");
+        let computed_root: [u8; 32] = root.finalize().into();
+        if computed_root != encoded_root {
+            return Err(invalid("checkpoint root seal is invalid"));
+        }
+        let payload_bytes = lengths.iter().try_fold(0usize, |total, &length| {
+            total
+                .checked_add(length)
+                .ok_or_else(|| invalid("checkpoint payload extent exceeds this host"))
+        })?;
+        if payload_bytes != footer_begin - header {
+            return Err(invalid(
+                "checkpoint section lengths do not cover its payload",
+            ));
+        }
+        let mut payload = &bytes[header..footer_begin];
+        let mut sections: [Vec<u8>; Self::SECTION_COUNT] = std::array::from_fn(|_| Vec::new());
+        for index in 0..Self::SECTION_COUNT {
+            let (section, rest) = payload.split_at(lengths[index]);
+            let computed_digest: [u8; 32] = Sha256::digest(section).into();
+            if computed_digest != digests[index] {
+                return Err(invalid("checkpoint section seal is invalid"));
+            }
+            sections[index] = section.to_vec();
+            payload = rest;
+        }
+        let [native, model, task, session] = sections;
+        Ok(Self {
+            native,
+            model,
+            task,
+            session,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SemanticCheckpointSessionConfig {
+    capacities: (u32, u32, u32, u32),
+    admission_limits: (u32, u32, u32, usize),
+    memory_bytes: u64,
+}
+
+impl SemanticCheckpointSessionConfig {
+    fn encode(self) -> PyResult<Vec<u8>> {
+        let mut bytes = b"XLOG-CHECKPOINT-SESSION\0".to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        for value in [
+            self.capacities.0,
+            self.capacities.1,
+            self.capacities.2,
+            self.capacities.3,
+            self.admission_limits.0,
+            self.admission_limits.1,
+            self.admission_limits.2,
+        ] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(
+            &u64::try_from(self.admission_limits.3)
+                .map_err(|_| invalid("checkpoint UTF-8 budget exceeds u64"))?
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&self.memory_bytes.to_le_bytes());
+        Ok(bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> PyResult<Self> {
+        const MAGIC: &[u8] = b"XLOG-CHECKPOINT-SESSION\0";
+        if bytes.len() != MAGIC.len() + 4 + 7 * 4 + 2 * 8
+            || &bytes[..MAGIC.len()] != MAGIC
+            || u32::from_le_bytes(bytes[MAGIC.len()..MAGIC.len() + 4].try_into().unwrap()) != 1
+        {
+            return Err(invalid(
+                "checkpoint session config has another domain or extent",
+            ));
+        }
+        let mut cursor = MAGIC.len() + 4;
+        let mut next_u32 = || {
+            let value = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+            cursor += 4;
+            value
+        };
+        let capacities = (next_u32(), next_u32(), next_u32(), next_u32());
+        let admission_limits = (next_u32(), next_u32(), next_u32());
+        let utf8 = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
+        let memory_bytes = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
+        Ok(Self {
+            capacities,
+            admission_limits: (
+                admission_limits.0,
+                admission_limits.1,
+                admission_limits.2,
+                usize::try_from(utf8)
+                    .map_err(|_| invalid("checkpoint UTF-8 budget exceeds this host"))?,
+            ),
+            memory_bytes,
         })
     }
 }
@@ -239,6 +427,214 @@ impl PySemanticTransitionSession {
         )
             .into_pyobject(py)?
             .unbind())
+    }
+
+    /// Restore one self-contained checkpoint into a fresh never-reused native
+    /// owner. The trusted model factory is called exactly once with the exact
+    /// controller, task use, acquired parent and model bytes retained by the
+    /// returned carrier. The checkpoint itself grants no current authority.
+    #[staticmethod]
+    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model))]
+    fn restore_checkpoint(
+        py: Python<'_>,
+        checkpoint: &Bound<'_, PyAny>,
+        device_ordinal: usize,
+        snapshot: &Bound<'_, PyAny>,
+        restore_model: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
+        if !checkpoint.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid("checkpoint restore requires exact builtin bytes"));
+        }
+        if !restore_model.is_callable() {
+            return Err(invalid(
+                "checkpoint restore requires one trusted model factory",
+            ));
+        }
+        let checkpoint = checkpoint.cast::<PyBytes>()?.as_bytes();
+        let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
+        let config = SemanticCheckpointSessionConfig::decode(&manifest.session)?;
+        let (seed, saved_snapshot, phase) = TaskCheckpointSeed::decode(&manifest.task)?;
+        let mut authority = TaskAuthority::parse(&seed.authority)?;
+        authority.bind_initial_sources(&seed.initial_sources, &seed.source_mapping)?;
+        let spec = task_evaluation_spec(&seed.evaluation)?;
+        let (_, selected_material) =
+            decode_selected_replay(&authority.replay, &seed.replay_selection)?;
+        let training_views = authority
+            .replay
+            .iter()
+            .map(ReplayRow::training_view_row)
+            .collect::<PyResult<Vec<_>>>()?;
+        let training_objective = read_training_objective(&seed.training_objective)?;
+        if training_views.is_empty() != training_objective.is_none() {
+            return Err(invalid(
+                "checkpoint training objective differs from its retained replay rows",
+            ));
+        }
+        let mut budget = 16 * 1024 * 1024;
+        let current_snapshot =
+            AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        current_snapshot.newer_than(&saved_snapshot)?;
+        let validate_authority = |snapshot: &AuthoritySnapshot| match &phase {
+            CheckpointTaskPhase::Imported => authority.check_snapshot(snapshot).map(drop),
+            CheckpointTaskPhase::Segment(operation) => {
+                authority.check_use(operation, snapshot, false)
+            }
+        };
+        validate_authority(&saved_snapshot)?;
+        validate_authority(&current_snapshot)?;
+        let admission = SemanticTransitionSession::state_material_admission(&manifest.native)
+            .map_err(xlog_err)?;
+        let session = Py::new(
+            py,
+            Self::from_admission(
+                admission,
+                config.capacities,
+                config.admission_limits,
+                device_ordinal,
+                config.memory_bytes,
+            )?,
+        )?;
+        let native_binding = (|| -> PyResult<([u8; 32], u64)> {
+            let restored = session.borrow(py);
+            let mut owner = restored.owner()?;
+            let observations = owner
+                .task_observation_roots(
+                    &spec,
+                    selected_material.as_ref().map(|binding| &binding.material),
+                )
+                .map_err(xlog_err)?;
+            authority.bind_native_reads(&observations, &spec.allowed_support_records)?;
+            let goal_witness = authority.goal_witness(&observations);
+            owner.bind_task_evaluation(spec).map_err(xlog_err)?;
+            owner
+                .bind_task_goal_witness(goal_witness)
+                .map_err(xlog_err)?;
+            if let Some(objective) = training_objective {
+                owner
+                    .bind_training_view_arena(training_views, objective)
+                    .map_err(xlog_err)?;
+            }
+            owner
+                .restore_state_material(&manifest.native)
+                .map_err(xlog_err)?;
+            Ok((
+                *owner
+                    .task_evaluation_identity()
+                    .ok_or_else(|| invalid("checkpoint restore lost its native task binding"))?
+                    .as_bytes(),
+                owner.task_evaluation_epoch(),
+            ))
+        })()?;
+        let controller_identity = Arc::new(());
+        let controller = Py::new(
+            py,
+            PySemanticTransitionController {
+                session: session.clone_ref(py),
+                identity: Arc::clone(&controller_identity),
+            },
+        )?;
+        let issuance = {
+            let restored = session.borrow(py);
+            TaskIssuance::issue(Arc::clone(&restored.issuance))?
+        };
+        let task_phase = match &phase {
+            CheckpointTaskPhase::Imported => TaskUsePhase::Imported,
+            CheckpointTaskPhase::Segment(operation) => TaskUsePhase::Segment(operation.clone()),
+        };
+        let restored_snapshot = current_snapshot.canonical.clone();
+        let task_use = Py::new(
+            py,
+            PySemanticTransitionTaskUse {
+                session: session.clone_ref(py),
+                controller: controller_identity,
+                issuance,
+                importing: Arc::clone(&session.borrow(py).importing),
+                task_identity: native_binding.0,
+                task_epoch: native_binding.1,
+                authority,
+                checkpoint: seed,
+                state: Mutex::new(TaskUseState {
+                    phase: task_phase,
+                    snapshot: current_snapshot,
+                }),
+            },
+        )?;
+        let parent = {
+            let issued = task_use.borrow(py);
+            let restored = session.borrow(py);
+            let mut owner = restored.owner()?;
+            issued.require_current(&owner)?;
+            let lease = owner.acquire().map_err(xlog_err)?;
+            Py::new(
+                py,
+                PySemanticPublishedParent {
+                    session: session.clone_ref(py),
+                    task_use: task_use.clone_ref(py),
+                    inner: Mutex::new(lease),
+                    continuation_producers: Mutex::new(Vec::new()),
+                },
+            )?
+        };
+        let model = restore_model
+            .call1((
+                controller.clone_ref(py),
+                task_use.clone_ref(py),
+                parent.clone_ref(py),
+                PyBytes::new(py, &manifest.model),
+            ))
+            .map(|model| model.unbind());
+        let model = match model {
+            Ok(model) => model,
+            Err(error) => {
+                if let Ok(mut owner) = session.borrow(py).owner() {
+                    owner.abort();
+                }
+                if let Ok(mut state) = task_use.borrow(py).state() {
+                    state.phase = TaskUsePhase::Refused;
+                }
+                return Err(error);
+            }
+        };
+        let verified = (|| -> PyResult<()> {
+            let issued = task_use.borrow(py);
+            let acquired = parent.borrow(py);
+            acquired.require_task(py, &issued)?;
+            let restored = session.borrow(py);
+            let mut owner = restored.owner()?;
+            issued.require_current(&owner)?;
+            let state = issued.state()?;
+            if checkpoint_task_phase(&state)? != phase
+                || state.snapshot.canonical != restored_snapshot
+            {
+                return Err(invalid(
+                    "checkpoint task phase changed during model restore",
+                ));
+            }
+            drop(state);
+            owner
+                .verify_restored_state_material(&*acquired.lease()?, &manifest.native)
+                .map_err(xlog_err)?;
+            Ok(())
+        })();
+        if let Err(error) = verified {
+            if let Ok(mut owner) = session.borrow(py).owner() {
+                owner.abort();
+            }
+            if let Ok(mut state) = task_use.borrow(py).state() {
+                state.phase = TaskUsePhase::Refused;
+            }
+            return Err(error);
+        }
+        Py::new(
+            py,
+            PySemanticTransitionRestoredCheckpoint {
+                session,
+                controller,
+                task_use,
+                parent,
+                model,
+            },
+        )
     }
 }
 
@@ -3090,6 +3486,10 @@ fn decode_selected_replay(
     Ok((selection, selected))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native task evaluator has seven independent admitted inputs"
+)]
 fn read_task_evaluation_spec(
     statements: &Bound<'_, PyAny>,
     supports: &Bound<'_, PyAny>,
@@ -3100,7 +3500,52 @@ fn read_task_evaluation_spec(
     actor_eligible: &Bound<'_, PyAny>,
     budget: &mut usize,
 ) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
-    let statements = ColdValue::read(statements, budget, 0)?;
+    let values = read_task_evaluation_values(
+        statements,
+        supports,
+        source,
+        queries,
+        scoring,
+        truth_masks,
+        actor_eligible,
+        budget,
+    )?;
+    task_evaluation_spec(&values)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native task evaluator has seven independent admitted inputs"
+)]
+fn read_task_evaluation_values(
+    statements: &Bound<'_, PyAny>,
+    supports: &Bound<'_, PyAny>,
+    source: &Bound<'_, PyAny>,
+    queries: &Bound<'_, PyAny>,
+    scoring: &Bound<'_, PyAny>,
+    truth_masks: &Bound<'_, PyAny>,
+    actor_eligible: &Bound<'_, PyAny>,
+    budget: &mut usize,
+) -> PyResult<Vec<ColdValue>> {
+    [
+        statements,
+        supports,
+        source,
+        queries,
+        scoring,
+        truth_masks,
+        actor_eligible,
+    ]
+    .into_iter()
+    .map(|value| ColdValue::read(value, budget, 0))
+    .collect()
+}
+
+fn task_evaluation_spec(values: &[ColdValue]) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
+    if values.len() != 7 {
+        return Err(invalid("incorrect task evaluation input count"));
+    }
+    let statements = &values[0];
     let statements = statements.fields(3)?;
     let record_index = |value: &ColdValue| {
         u32::try_from(value.unsigned()?)
@@ -3111,13 +3556,13 @@ fn read_task_evaluation_spec(
         record_index(&statements[1])?,
         record_index(&statements[2])?,
     ];
-    let allowed_support_records = ColdValue::read(supports, budget, 0)?
+    let allowed_support_records = values[1]
         .sequence()?
         .iter()
         .map(record_index)
         .collect::<PyResult<Vec<_>>>()?;
-    let source = ColdValue::read(source, budget, 0)?.text()?.to_owned();
-    let queries = ColdValue::read(queries, budget, 0)?;
+    let source = values[2].text()?.to_owned();
+    let queries = &values[3];
     let queries = queries.fields(3)?;
     let query_ordinal = |value: &ColdValue| {
         usize::try_from(value.unsigned()?)
@@ -3128,7 +3573,7 @@ fn read_task_evaluation_spec(
         query_ordinal(&queries[1])?,
         query_ordinal(&queries[2])?,
     ];
-    let scoring = ColdValue::read(scoring, budget, 0)?;
+    let scoring = &values[4];
     let scoring = scoring.fields(6)?;
     let weight = |value: &ColdValue| {
         u32::try_from(value.unsigned()?)
@@ -3142,13 +3587,13 @@ fn read_task_evaluation_spec(
         refusal_weight: weight(&scoring[4])?,
         spent_weight: weight(&scoring[5])?,
     };
-    let masks = ColdValue::read(truth_masks, budget, 0)?;
+    let masks = &values[5];
     let masks = masks.fields(3)?;
     let mask = |value: &ColdValue| {
         u8::try_from(value.unsigned()?).map_err(|_| invalid("native task truth mask exceeds u8"))
     };
     let admissible_truth_masks = [mask(&masks[0])?, mask(&masks[1])?, mask(&masks[2])?];
-    let actor_eligible = ColdValue::read(actor_eligible, budget, 0)?.boolean()?;
+    let actor_eligible = values[6].boolean()?;
     let program = Arc::new(
         xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)
             .map_err(xlog_err)?,
@@ -4073,6 +4518,204 @@ struct TaskUseState {
     snapshot: AuthoritySnapshot,
 }
 
+#[derive(Clone)]
+struct TaskCheckpointSeed {
+    authority: Vec<ColdValue>,
+    evaluation: Vec<ColdValue>,
+    training_objective: ColdValue,
+    initial_sources: ColdValue,
+    source_mapping: ColdValue,
+    replay_selection: ColdValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CheckpointTaskPhase {
+    Imported,
+    Segment(String),
+}
+
+fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> {
+    match &state.phase {
+        TaskUsePhase::Imported => Ok(CheckpointTaskPhase::Imported),
+        TaskUsePhase::Segment(operation) => Ok(CheckpointTaskPhase::Segment(operation.clone())),
+        _ => Err(invalid(
+            "checkpoint requires an imported or admitted stable task phase",
+        )),
+    }
+}
+
+impl TaskCheckpointSeed {
+    fn encode(
+        &self,
+        snapshot: &AuthoritySnapshot,
+        phase: &CheckpointTaskPhase,
+    ) -> PyResult<Vec<u8>> {
+        let snapshot = ColdValue::from_canonical_bytes(&snapshot.canonical)?;
+        let (phase, operation) = match phase {
+            CheckpointTaskPhase::Imported => ("imported", ColdValue::None),
+            CheckpointTaskPhase::Segment(operation) => {
+                ("segment", ColdValue::Text(operation.clone()))
+            }
+        };
+        Ok(checkpoint_cold_value_bytes(&ColdValue::Sequence(vec![
+            ColdValue::Sequence(self.authority.clone()),
+            ColdValue::Sequence(self.evaluation.clone()),
+            self.training_objective.clone(),
+            self.initial_sources.clone(),
+            self.source_mapping.clone(),
+            self.replay_selection.clone(),
+            snapshot,
+            ColdValue::Text(phase.to_owned()),
+            operation,
+        ])))
+    }
+
+    fn decode(bytes: &[u8]) -> PyResult<(Self, AuthoritySnapshot, CheckpointTaskPhase)> {
+        let value = checkpoint_cold_value(bytes)?;
+        let fields = value.fields(9)?;
+        let phase = match fields[7].text()? {
+            "imported" if fields[8] == ColdValue::None => CheckpointTaskPhase::Imported,
+            "segment" => CheckpointTaskPhase::Segment(fields[8].text()?.to_owned()),
+            _ => return Err(invalid("checkpoint task phase is invalid")),
+        };
+        Ok((
+            Self {
+                authority: fields[0].sequence()?.to_vec(),
+                evaluation: fields[1].sequence()?.to_vec(),
+                training_objective: fields[2].clone(),
+                initial_sources: fields[3].clone(),
+                source_mapping: fields[4].clone(),
+                replay_selection: fields[5].clone(),
+            },
+            AuthoritySnapshot::parse(&fields[6])?,
+            phase,
+        ))
+    }
+}
+
+fn checkpoint_cold_value_bytes(value: &ColdValue) -> Vec<u8> {
+    fn append(value: &ColdValue, bytes: &mut Vec<u8>) {
+        match value {
+            ColdValue::None => bytes.push(0),
+            ColdValue::Bool(value) => bytes.extend_from_slice(&[1, u8::from(*value)]),
+            ColdValue::Integer(value) => {
+                bytes.push(2);
+                bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+                bytes.extend_from_slice(value.as_bytes());
+            }
+            ColdValue::Text(value) => {
+                bytes.push(3);
+                bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+                bytes.extend_from_slice(value.as_bytes());
+            }
+            ColdValue::Sequence(values) => {
+                bytes.push(4);
+                bytes.extend_from_slice(&(values.len() as u64).to_le_bytes());
+                for value in values {
+                    append(value, bytes);
+                }
+            }
+            ColdValue::Bytes(value) => {
+                bytes.push(5);
+                bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+                bytes.extend_from_slice(value);
+            }
+        }
+    }
+    let mut bytes = b"XLOG-CHECKPOINT-TASK\0".to_vec();
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    append(value, &mut bytes);
+    bytes
+}
+
+fn checkpoint_cold_value(bytes: &[u8]) -> PyResult<ColdValue> {
+    fn take<'a>(remaining: &mut &'a [u8], count: usize) -> PyResult<&'a [u8]> {
+        if count > remaining.len() {
+            return Err(invalid("checkpoint task capsule is truncated"));
+        }
+        let (value, rest) = remaining.split_at(count);
+        *remaining = rest;
+        Ok(value)
+    }
+
+    fn length(remaining: &mut &[u8]) -> PyResult<usize> {
+        let encoded: [u8; 8] = take(remaining, 8)?.try_into().unwrap();
+        usize::try_from(u64::from_le_bytes(encoded))
+            .map_err(|_| invalid("checkpoint task capsule length exceeds this host"))
+    }
+
+    fn decode(remaining: &mut &[u8], budget: &mut usize, depth: usize) -> PyResult<ColdValue> {
+        if depth > 32 || *budget == 0 {
+            return Err(invalid(
+                "checkpoint task capsule exceeds its structural bound",
+            ));
+        }
+        *budget -= 1;
+        let tag = *take(remaining, 1)?.first().unwrap();
+        match tag {
+            0 => Ok(ColdValue::None),
+            1 => match *take(remaining, 1)?.first().unwrap() {
+                0 => Ok(ColdValue::Bool(false)),
+                1 => Ok(ColdValue::Bool(true)),
+                _ => Err(invalid(
+                    "checkpoint task capsule contains an invalid boolean",
+                )),
+            },
+            2 | 3 => {
+                let length = length(remaining)?;
+                if length > *budget {
+                    return Err(invalid("checkpoint task capsule exceeds its byte bound"));
+                }
+                *budget -= length;
+                let value = std::str::from_utf8(take(remaining, length)?)
+                    .map_err(|_| invalid("checkpoint task capsule contains invalid UTF-8"))?
+                    .to_owned();
+                if tag == 2 {
+                    Ok(ColdValue::Integer(value))
+                } else {
+                    Ok(ColdValue::Text(value))
+                }
+            }
+            4 => {
+                let count = length(remaining)?;
+                if count > *budget {
+                    return Err(invalid(
+                        "checkpoint task capsule sequence exceeds its bound",
+                    ));
+                }
+                (0..count)
+                    .map(|_| decode(remaining, budget, depth + 1))
+                    .collect::<PyResult<Vec<_>>>()
+                    .map(ColdValue::Sequence)
+            }
+            5 => {
+                let length = length(remaining)?;
+                if length > *budget {
+                    return Err(invalid("checkpoint task payload exceeds its byte bound"));
+                }
+                *budget -= length;
+                Ok(ColdValue::Bytes(Arc::from(take(remaining, length)?)))
+            }
+            _ => Err(invalid("checkpoint task capsule contains an unknown tag")),
+        }
+    }
+
+    let mut remaining = bytes;
+    if take(&mut remaining, 21)? != b"XLOG-CHECKPOINT-TASK\0"
+        || u32::from_le_bytes(take(&mut remaining, 4)?.try_into().unwrap()) != 1
+    {
+        return Err(invalid(
+            "checkpoint task capsule has another domain or version",
+        ));
+    }
+    let mut budget = 16 * 1024 * 1024;
+    let value = decode(&mut remaining, &mut budget, 0)?;
+    if !remaining.is_empty() {
+        return Err(invalid("checkpoint task capsule has trailing bytes"));
+    }
+    Ok(value)
+}
+
 /// Process-local resource authority, independent of restored native epochs.
 /// Every import reserves one new generation before parsing or rebinding state.
 #[derive(Clone)]
@@ -4370,6 +5013,7 @@ pub(crate) struct PySemanticTransitionTaskUse {
     task_identity: [u8; 32],
     task_epoch: u64,
     authority: TaskAuthority,
+    checkpoint: TaskCheckpointSeed,
     state: Mutex<TaskUseState>,
 }
 
@@ -4498,6 +5142,49 @@ pub(crate) struct PySemanticPublishedParent {
     // Policy invocations retain this actual parent through late backward. Keep
     // original autograd producers without a parent-to-witness ownership cycle.
     continuation_producers: Mutex<Vec<Py<PyAny>>>,
+}
+
+/// Complete result of one checkpoint restoration. Its fields are the exact
+/// owners passed to the single trusted model factory and cannot be replaced.
+#[pyclass(
+    name = "SemanticTransitionRestoredCheckpoint",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticTransitionRestoredCheckpoint {
+    session: Py<PySemanticTransitionSession>,
+    controller: Py<PySemanticTransitionController>,
+    task_use: Py<PySemanticTransitionTaskUse>,
+    parent: Py<PySemanticPublishedParent>,
+    model: Py<PyAny>,
+}
+
+#[pymethods]
+impl PySemanticTransitionRestoredCheckpoint {
+    #[getter]
+    fn session(&self, py: Python<'_>) -> Py<PySemanticTransitionSession> {
+        self.session.clone_ref(py)
+    }
+
+    #[getter]
+    fn controller(&self, py: Python<'_>) -> Py<PySemanticTransitionController> {
+        self.controller.clone_ref(py)
+    }
+
+    #[getter]
+    fn task_use(&self, py: Python<'_>) -> Py<PySemanticTransitionTaskUse> {
+        self.task_use.clone_ref(py)
+    }
+
+    #[getter]
+    fn parent(&self, py: Python<'_>) -> Py<PySemanticPublishedParent> {
+        self.parent.clone_ref(py)
+    }
+
+    #[getter]
+    fn model(&self, py: Python<'_>) -> Py<PyAny> {
+        self.model.clone_ref(py)
+    }
 }
 
 /// Native physical allocation origin of one exported tensor view. Instances
@@ -8946,20 +9633,19 @@ impl PySemanticTransitionController {
             .iter()
             .map(ReplayRow::training_view_row)
             .collect::<PyResult<Vec<_>>>()?;
-        let training_objective =
-            read_training_objective(&ColdValue::read(training_objective, &mut budget, 0)?)?;
+        let training_objective_value = ColdValue::read(training_objective, &mut budget, 0)?;
+        let training_objective = read_training_objective(&training_objective_value)?;
         if training_views.is_empty() != training_objective.is_none() {
             return Err(invalid(
                 "training objective must exist exactly when replay rows exist",
             ));
         }
-        authority.bind_initial_sources(
-            &ColdValue::read(initial_sources, &mut budget, 0)?,
-            &ColdValue::read(source_mapping, &mut budget, 0)?,
-        )?;
+        let initial_sources = ColdValue::read(initial_sources, &mut budget, 0)?;
+        let source_mapping = ColdValue::read(source_mapping, &mut budget, 0)?;
+        authority.bind_initial_sources(&initial_sources, &source_mapping)?;
         let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
         authority.check_snapshot(&snapshot)?;
-        let spec = read_task_evaluation_spec(
+        let evaluation = read_task_evaluation_values(
             statement_records,
             allowed_support_records,
             task_program_source,
@@ -8969,10 +9655,10 @@ impl PySemanticTransitionController {
             actor_eligible,
             &mut budget,
         )?;
-        let (selection, selected_material) = decode_selected_replay(
-            &authority.replay,
-            &ColdValue::read(replay_selection, &mut budget, 0)?,
-        )?;
+        let spec = task_evaluation_spec(&evaluation)?;
+        let replay_selection = ColdValue::read(replay_selection, &mut budget, 0)?;
+        let (selection, selected_material) =
+            decode_selected_replay(&authority.replay, &replay_selection)?;
         let observations = session
             .owner()?
             .task_observation_roots(
@@ -9062,6 +9748,14 @@ impl PySemanticTransitionController {
                 task_identity: identity,
                 task_epoch,
                 authority,
+                checkpoint: TaskCheckpointSeed {
+                    authority: values,
+                    evaluation,
+                    training_objective: training_objective_value,
+                    initial_sources,
+                    source_mapping,
+                    replay_selection,
+                },
                 state: Mutex::new(TaskUseState { phase, snapshot }),
             },
         )?;
@@ -9089,6 +9783,142 @@ impl PySemanticTransitionController {
         }
         import.committed = true;
         Ok(task_use)
+    }
+
+    /// Seal the exact selected publication, task capsule and model state into one
+    /// self-contained checkpoint blob. The serializer runs exactly once without
+    /// a native or task-state mutex held. Native ownership and authority are
+    /// revalidated afterwards; a failure returns no candidate checkpoint.
+    #[pyo3(signature = (task_use, *, parent, consumer_streams, snapshot, snapshot_model_state))]
+    fn save_checkpoint(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        consumer_streams: &Bound<'_, PyAny>,
+        snapshot: &Bound<'_, PyAny>,
+        snapshot_model_state: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyBytes>> {
+        self.session.borrow(py).require_creator()?;
+        self.require_issued(task_use)?;
+        parent.require_task(py, task_use)?;
+        if !snapshot_model_state.is_callable() {
+            return Err(invalid(
+                "checkpoint save requires one trusted model-state serializer",
+            ));
+        }
+        let mut budget = 16 * 1024 * 1024;
+        let streams = ColdValue::read(consumer_streams, &mut budget, 0)?;
+        let streams = streams
+            .sequence()?
+            .iter()
+            .map(ColdValue::unsigned)
+            .collect::<PyResult<Vec<_>>>()?;
+        if streams.is_empty()
+            || streams
+                .iter()
+                .any(|&stream| stream == 0 || stream == 2 || stream > i64::MAX as u64)
+        {
+            return Err(invalid(
+                "checkpoint save requires exact supported consumer streams",
+            ));
+        }
+        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        let (identity, task_identity, task_epoch, prior_snapshot, phase, config) = {
+            let session = self.session.borrow(py);
+            if session.importing.load(Ordering::Acquire)
+                || session.recording.load(Ordering::Acquire)
+                || session.retiring.load(Ordering::Acquire)
+            {
+                return Err(invalid(
+                    "checkpoint save cannot overlap recording, import or retirement",
+                ));
+            }
+            let mut owner = session.owner()?;
+            task_use.require_current(&owner)?;
+            let state = task_use.state()?;
+            snapshot.newer_than(&state.snapshot)?;
+            let phase = checkpoint_task_phase(&state)?;
+            match &phase {
+                CheckpointTaskPhase::Imported => {
+                    task_use.authority.check_snapshot(&snapshot)?;
+                }
+                CheckpointTaskPhase::Segment(operation) => {
+                    task_use.authority.check_use(operation, &snapshot, false)?;
+                }
+            }
+            let prior_snapshot = state.snapshot.canonical.clone();
+            drop(state);
+            let lease = parent.lease()?;
+            owner
+                .quiesce_published_reader(&lease, &streams)
+                .map_err(xlog_err)?;
+            let identity = owner.published_identity(&lease).map_err(xlog_err)?;
+            let task_identity = *owner
+                .task_evaluation_identity()
+                .ok_or_else(|| invalid("checkpoint save lost its native task binding"))?
+                .as_bytes();
+            let task_epoch = owner.task_evaluation_epoch();
+            (
+                identity,
+                task_identity,
+                task_epoch,
+                prior_snapshot,
+                phase,
+                SemanticCheckpointSessionConfig {
+                    capacities: session.capacities,
+                    admission_limits: session.admission_limits,
+                    memory_bytes: session.memory_bytes,
+                },
+            )
+        };
+        let model = snapshot_model_state.call0().and_then(|model| {
+            if !model.is_exact_instance_of::<PyBytes>() {
+                return Err(invalid(
+                    "checkpoint model-state serializer must return exact builtin bytes",
+                ));
+            }
+            Ok(model.cast::<PyBytes>()?.as_bytes().to_vec())
+        });
+        let native = {
+            let session = self.session.borrow(py);
+            let mut owner = session.owner()?;
+            task_use.require_current(&owner)?;
+            let state = task_use.state()?;
+            if state.snapshot.canonical != prior_snapshot
+                || checkpoint_task_phase(&state)? != phase
+                || task_use.task_identity != task_identity
+                || task_use.task_epoch != task_epoch
+            {
+                return Err(invalid(
+                    "checkpoint task binding changed during model serialization",
+                ));
+            }
+            drop(state);
+            let lease = parent.lease()?;
+            if owner.published_identity(&lease).map_err(xlog_err)? != identity {
+                return Err(invalid(
+                    "checkpoint publication changed during model serialization",
+                ));
+            }
+            if model.is_err() {
+                None
+            } else {
+                Some(owner.published_state_material(&lease).map_err(xlog_err)?)
+            }
+        };
+        let model = model?;
+        let native = native.expect("successful model serialization exports native state");
+        let task = task_use.checkpoint.encode(&snapshot, &phase)?;
+        let session = config.encode()?;
+        let checkpoint = SemanticCheckpointManifest {
+            native,
+            model,
+            task,
+            session,
+        }
+        .encode()?;
+        Ok(PyBytes::new(py, &checkpoint).unbind())
     }
 
     /// Export one genuinely held transition into the existing replay carrier.

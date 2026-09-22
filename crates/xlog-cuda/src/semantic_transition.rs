@@ -10432,6 +10432,16 @@ fn validate_prepared_completion(
 
 #[cfg(feature = "semantic-policy")]
 impl SemanticTransitionSession {
+    /// Decode and validate one complete native material before allocating a new
+    /// CUDA owner, returning only the original immutable admission needed to
+    /// construct that fresh owner. This is the same state codec consumed by
+    /// `restore_state_material`, not an independently serialized graph.
+    pub fn state_material_admission(
+        bytes: &[u8],
+    ) -> Result<SemanticAdmissionRecords, SemanticTransitionError> {
+        Ok(PublicationMaterial::decode(bytes)?.graph.records.clone())
+    }
+
     /// Submit this Session's complete graph once with the freshly validated
     /// canonical authority snapshot. The metadata upload precedes graph launch.
     pub fn launch_prepared_segment(
@@ -15692,6 +15702,31 @@ impl SemanticTransitionSession {
             self.poisoned = true;
         }
         result
+    }
+
+    /// Re-read the selected publication after its external model owner has been
+    /// reconstructed and prove that it is still the fresh instance recovered
+    /// from these exact original logical and state roots.
+    pub fn verify_restored_state_material(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        bytes: &[u8],
+    ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
+        let expected = PublicationMaterial::decode(bytes)?;
+        let actual = PublicationMaterial::decode(&self.published_state_material(lease)?)?;
+        let expected = expected.bank.header;
+        let header = actual.bank.header;
+        if header.instance == expected.instance
+            || header.recovered_instance != expected.instance
+            || header.publication_word != 0
+            || header.logical_digest != expected.logical_digest
+            || header.state_digest != expected.state_digest
+        {
+            return Err(publication_input_error(
+                "checkpoint restore no longer owns the exact fresh recovered publication",
+            ));
+        }
+        self.published_identity(lease)
     }
 
     fn initialize_publication(
