@@ -10432,16 +10432,6 @@ fn validate_prepared_completion(
 
 #[cfg(feature = "semantic-policy")]
 impl SemanticTransitionSession {
-    /// Decode and validate one complete native material before allocating a new
-    /// CUDA owner, returning only the original immutable admission needed to
-    /// construct that fresh owner. This is the same state codec consumed by
-    /// `restore_state_material`, not an independently serialized graph.
-    pub fn state_material_admission(
-        bytes: &[u8],
-    ) -> Result<SemanticAdmissionRecords, SemanticTransitionError> {
-        Ok(PublicationMaterial::decode(bytes)?.graph.records.clone())
-    }
-
     /// Submit this Session's complete graph once with the freshly validated
     /// canonical authority snapshot. The metadata upload precedes graph launch.
     pub fn launch_prepared_segment(
@@ -11073,6 +11063,16 @@ impl Drop for SemanticTransitionSession {
 }
 
 impl SemanticTransitionSession {
+    /// Decode and validate one complete native material before allocating a new
+    /// CUDA owner, returning only the original immutable admission needed to
+    /// construct that fresh owner. This is the same state codec consumed by
+    /// `restore_state_material`, not an independently serialized graph.
+    pub fn state_material_admission(
+        bytes: &[u8],
+    ) -> Result<SemanticAdmissionRecords, SemanticTransitionError> {
+        Ok(PublicationMaterial::decode(bytes)?.graph.records.clone())
+    }
+
     /// Allocate every native step owner before the first capture begins.
     /// Freeze requested modes and reserve the complete segment before creating
     /// per-step storage. Device admission alone selects terminal drain.
