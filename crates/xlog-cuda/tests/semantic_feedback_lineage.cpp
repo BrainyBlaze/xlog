@@ -535,8 +535,8 @@ static void native_work_preserves_one_model_charge_through_refusal() {
 static void task_preflight_accepts_all_four_truth_states() {
     for(uint64_t first=0;first<4;++first)for(uint64_t second=0;second<4;++second) {
         RefusalExecution execution;
-        std::array<uint64_t,34> task{};
-        task[0]=4;task[1]=91;task[6]=11;task[10]=21;
+        std::array<uint64_t,53> task{};
+        task[0]=5;task[1]=91;task[6]=11;task[10]=21;task[52]=1;
         task[18]=first;task[19]=second;task[20]=0;
         task[25]=task[26]=15;task[31]=task[32]=task[33]=15;
         execution.descriptor.task=reinterpret_cast<uint64_t>(task.data());
@@ -553,8 +553,8 @@ static void task_preflight_accepts_all_four_truth_states() {
     }
     for(uint32_t slot=0;slot<3;++slot)for(uint64_t invalid : {uint64_t(4),UINT64_MAX}) {
         RefusalExecution execution;
-        std::array<uint64_t,34> task{};
-        task[0]=4;task[1]=91;task[18+slot]=invalid;task[25]=task[26]=15;
+        std::array<uint64_t,53> task{};
+        task[0]=5;task[1]=91;task[18+slot]=invalid;task[25]=task[26]=15;task[52]=1;
         execution.descriptor.task=reinterpret_cast<uint64_t>(task.data());
         semantic_transition_execute(execution.descriptor);
         require(execution.state.status==7 && execution.state.task_evaluation.query_count==0 &&
@@ -652,7 +652,7 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
         std::copy(pending_layouts.begin(),pending_layouts.end(),reinterpret_cast<PublicationTensorLayout*>(table+1));
         pending_ranges.push_back(pending_table);
 
-        std::array<uint64_t,34> task{};task[0]=4;task[1]=91;task[6]=11;task[10]=task[14]=21;
+        std::array<uint64_t,53> task{};task[0]=5;task[1]=91;task[6]=11;task[10]=task[14]=21;task[52]=1;
         task[18]=1;task[19]=task[20]=2;
         task[25]=14;task[26]=7;task[27]=1;task[28]=45;task[29]=15;task[30]=1;
         task[31]=task[32]=task[33]=7;
@@ -1028,7 +1028,7 @@ struct StepPublicationFixture {
     PublicationControl control{};
     PublicationLease lease{};
     PendingContinuation pending{};
-    std::array<uint64_t,34> task{};
+    std::array<uint64_t,53> task{};
     uint64_t terminal_token=17;
 
     uint64_t allocate(uint64_t bytes) {
@@ -1129,7 +1129,7 @@ struct StepPublicationFixture {
             control.banks[bank]=reinterpret_cast<uint64_t>(&banks[bank]);
             control.directories[bank]=reinterpret_cast<uint64_t>(directories[bank].data());
         }
-        task[0]=4;task[1]=91;task[6]=11;task[10]=task[14]=21;
+        task[0]=5;task[1]=91;task[6]=11;task[10]=task[14]=21;task[52]=1;
         task[18]=1;task[19]=task[20]=2;
         task[22]=task[23]=task[24]=0;
         task[25]=14;task[26]=7;task[27]=1;task[28]=45;task[29]=15;task[30]=1;
@@ -1709,8 +1709,8 @@ static void exact_task_occurrence() {
     uint64_t identity[4], digest[4];
     semantic_graph::decode_identity(statement.identity_words,identity);
     semantic_graph::support_digest(identity,support,digest);
-    std::array<uint64_t,39> task{};
-    task[0]=4; task[1]=91;
+    std::array<uint64_t,58> task{};
+    task[0]=5; task[1]=91; task[57]=1;
     std::copy(identity,identity+4,task.begin()+6);
     task[10]=task[14]=92; task[18]=1; task[19]=task[20]=2; task[21]=1;
     task[22]=7; task[23]=task[24]=8; task[31]=task[32]=task[33]=7; task[34]=3;
@@ -1755,8 +1755,8 @@ static void acquired_feedback_history() {
     descriptor.arena[0]=reinterpret_cast<uint64_t>(arena.data());descriptor.arena[1]=91;
     descriptor.arena[2]=roots;descriptor.arena[3]=statements;descriptor.arena[4]=supports;
     descriptor.arena[5]=versions;descriptor.arena[6]=arena.size();
-    std::array<uint64_t,34> task{};
-    task[0]=4;task[1]=91;task[6]=11;task[10]=task[14]=21;
+    std::array<uint64_t,53> task{};
+    task[0]=5;task[1]=91;task[6]=11;task[10]=task[14]=21;task[52]=1;
     task[22]=3;task[23]=task[24]=8;task[31]=task[32]=task[33]=7;
     descriptor.task=reinterpret_cast<uint64_t>(task.data());
     PublicationBank banks[2]{};auto& bank=banks[0];bank.header.abi=1;bank.header.semantic_owner=91;

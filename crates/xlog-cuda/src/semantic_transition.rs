@@ -26876,6 +26876,35 @@ mod text_parent_tests {
         bank.state.blocks = COMPONENT_COUNT as u64;
         bank.receipts[0].catalogue_generation = CATALOGUE_GENERATION;
         let codebook = replay_codebook_sample();
+        let component_receipts_digest =
+            publication_action_receipts_digest(&codebook, &bank.receipts).unwrap();
+        let semantic_receipts_digest =
+            publication_semantic_receipts_digest(&bank.state.semantic_receipts);
+        bank.state.action_batch = SemanticActionBatchReceipt {
+            abi: 1,
+            proposal: bank.state.proposal,
+            stream_serial: bank.state.stream_serial,
+            family_id: u64::from(bank.state.family_id),
+            action_law_generation: bank.state.catalogue_generation,
+            model_generation: u64::from(bank.state.model_generation),
+            actor_eligible: bank.state.actor_eligible,
+            component_count: COMPONENT_COUNT as u64,
+            candidate_count: 3,
+            winner: bank.state.task_evaluation.winner,
+            total_return_bits: bank.state.task_evaluation.return_value as u64,
+            base_word: bank.header.base_word,
+            next_word: bank.header.publication_word,
+            rng_base: bank.state.proposal * COMPONENT_COUNT as u64,
+            rng_span: COMPONENT_COUNT as u64,
+            rng_successor: bank.state.next_proposal * COMPONENT_COUNT as u64,
+            catalogue_digest: bank.state.catalogue_digest,
+            component_receipts_digest,
+            semantic_receipts_digest,
+            candidate_roots: [Identity256::default(); 3],
+            base_logical_digest: predecessor.bank.header.logical_digest,
+            execution_work: bank.state.execution_work,
+        };
+        bank.state.action_batch_root = publication_action_batch_root(&bank.state.action_batch);
         let mut completion = CompletionCoverage {
             abi: 1,
             instance: bank.header.instance,
@@ -26898,10 +26927,8 @@ mod text_parent_tests {
         coverage.range.digest = coverage.original_record_digest();
         let item = evidence.ranges.last_mut().unwrap();
         let mut attempt = item.attempt().unwrap();
-        attempt.action_receipts_digest =
-            publication_action_receipts_digest(&codebook, &bank.receipts).unwrap();
-        attempt.semantic_receipts_digest =
-            publication_semantic_receipts_digest(&bank.state.semantic_receipts);
+        attempt.action_receipts_digest = bank.state.action_batch_root;
+        attempt.semantic_receipts_digest = semantic_receipts_digest;
         attempt.coverage_digest = coverage.logical_record_digest().unwrap();
         item.bytes = publication_abi_bytes(&[attempt]);
         seal_replay_sample(&mut evidence);
