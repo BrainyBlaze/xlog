@@ -94,7 +94,10 @@ pub use semantic_transition::{
     SEMANTIC_TRANSITION_GENERATION,
 };
 #[cfg(feature = "semantic-policy")]
-pub use semantic_transition::{SemanticPolicyGradients, SemanticSelectedPolicyGradients};
+pub use semantic_transition::{
+    SemanticCompletedModelCarrierMaterial, SemanticCompletedStepWitnessMaterial,
+    SemanticPolicyGradients, SemanticSelectedPolicyGradients,
+};
 pub use semantic_work::ModelWorkKind;
 
 pub use wcoj_metadata::{

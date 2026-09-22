@@ -18,6 +18,7 @@ use cudarc::driver::{
     DeviceRepr, HostSlice, LaunchConfig, ValidAsZeroBits,
 };
 use cudarc::nvrtc::Ptx;
+use sha2::{Digest, Sha256};
 use xlog_core::{Result, XlogError};
 
 use crate::device_runtime::{Access, ResourceResult};
@@ -570,8 +571,24 @@ mod host_transfer_tests {
 pub(crate) struct LoadedModule {
     cu_module: sys::CUmodule,
     functions: BTreeMap<Arc<str>, sys::CUfunction>,
+    module_name: Arc<str>,
+    artifact_name: Arc<str>,
+    artifact_sha256: Option<[u8; 32]>,
     context: Arc<CudarcContext>,
     completion: Mutex<ExecutionCompletion>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CapturedCudaLaunchBinding {
+    pub(crate) module_name: Arc<str>,
+    pub(crate) artifact_name: Arc<str>,
+    pub(crate) artifact_sha256: Option<[u8; 32]>,
+    pub(crate) function_name: Arc<str>,
+    pub(crate) grid_dim: (u32, u32, u32),
+    pub(crate) block_dim: (u32, u32, u32),
+    pub(crate) shared_mem_bytes: u32,
+    pub(crate) parameter_count: u64,
+    pub(crate) cooperative: bool,
 }
 
 /// Completion events belong to the submitted executable, not its stream wrapper.
@@ -727,16 +744,36 @@ impl CudaFunction {
         self._module.functions[self.function_name.as_ref()]
     }
 
+    fn captured_launch_binding(
+        &self,
+        cfg: LaunchConfig,
+        parameter_count: usize,
+        cooperative: bool,
+    ) -> CapturedCudaLaunchBinding {
+        CapturedCudaLaunchBinding {
+            module_name: Arc::clone(&self._module.module_name),
+            artifact_name: Arc::clone(&self._module.artifact_name),
+            artifact_sha256: self._module.artifact_sha256,
+            function_name: Arc::clone(&self.function_name),
+            grid_dim: cfg.grid_dim,
+            block_dim: cfg.block_dim,
+            shared_mem_bytes: cfg.shared_mem_bytes,
+            parameter_count: parameter_count as u64,
+            cooperative,
+        }
+    }
+
     fn submit(
         &self,
         stream: &CudaStream,
+        binding: CapturedCudaLaunchBinding,
         launch: impl FnOnce() -> std::result::Result<(), DriverError>,
     ) -> std::result::Result<(), DriverError> {
         if stream.context().cu_ctx() != self.context.cu_ctx() {
             return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_CONTEXT));
         }
         crate::cuda_graph::submit_with_capture(stream, |owners| {
-            self.submit_admitted(stream, owners, None, launch)
+            self.submit_admitted(stream, owners, Some(binding), None, launch)
         })
     }
 
@@ -744,16 +781,22 @@ impl CudaFunction {
         &self,
         stream: &CudaStream,
         owners: Option<&crate::cuda_graph::CaptureOwners>,
+        binding: Option<CapturedCudaLaunchBinding>,
         confirmation: Option<Arc<crate::memory::OperationCompletion>>,
         launch: impl FnOnce() -> std::result::Result<(), DriverError>,
     ) -> std::result::Result<(), DriverError> {
         if let Some(owners) = owners {
-            owners
+            let mut owners = owners
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            owners
                 .modules
                 .entry(Arc::as_ptr(&self._module) as usize)
                 .or_insert_with(|| self._module.clone());
+            if let Some(binding) = binding {
+                owners.launches.push(binding);
+            }
+            drop(owners);
             launch()
         } else {
             self._module
@@ -776,28 +819,35 @@ impl CudaFunction {
             return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_CONTEXT));
         }
         self.context.bind_to_thread()?;
+        let binding = self.captured_launch_binding(cfg, params.len(), cooperative);
         enqueue.submit(|owners| {
-            self.submit_admitted(stream, owners, Some(enqueue.completion()), || {
-                if cooperative {
-                    result::launch_cooperative_kernel(
-                        self.cu_function(),
-                        cfg.grid_dim,
-                        cfg.block_dim,
-                        cfg.shared_mem_bytes,
-                        stream.cu_stream(),
-                        params,
-                    )
-                } else {
-                    result::launch_kernel(
-                        self.cu_function(),
-                        cfg.grid_dim,
-                        cfg.block_dim,
-                        cfg.shared_mem_bytes,
-                        stream.cu_stream(),
-                        params,
-                    )
-                }
-            })
+            self.submit_admitted(
+                stream,
+                owners,
+                Some(binding),
+                Some(enqueue.completion()),
+                || {
+                    if cooperative {
+                        result::launch_cooperative_kernel(
+                            self.cu_function(),
+                            cfg.grid_dim,
+                            cfg.block_dim,
+                            cfg.shared_mem_bytes,
+                            stream.cu_stream(),
+                            params,
+                        )
+                    } else {
+                        result::launch_kernel(
+                            self.cu_function(),
+                            cfg.grid_dim,
+                            cfg.block_dim,
+                            cfg.shared_mem_bytes,
+                            stream.cu_stream(),
+                            params,
+                        )
+                    }
+                },
+            )
         })
     }
     pub(crate) unsafe fn launch_raw(
@@ -815,6 +865,7 @@ impl CudaFunction {
         params: &mut [*mut c_void],
     ) -> std::result::Result<(), DriverError> {
         self.context.bind_to_thread()?;
+        let parameter_count = params.len();
         let launch = || {
             result::launch_kernel(
                 self.cu_function(),
@@ -825,7 +876,11 @@ impl CudaFunction {
                 params,
             )
         };
-        self.submit(stream, launch)
+        self.submit(
+            stream,
+            self.captured_launch_binding(cfg, parameter_count, false),
+            launch,
+        )
     }
 
     pub(crate) unsafe fn launch_raw_cooperative(
@@ -843,6 +898,7 @@ impl CudaFunction {
         params: &mut [*mut c_void],
     ) -> std::result::Result<(), DriverError> {
         self.context.bind_to_thread()?;
+        let parameter_count = params.len();
         let launch = || {
             result::launch_cooperative_kernel(
                 self.cu_function(),
@@ -853,7 +909,11 @@ impl CudaFunction {
                 params,
             )
         };
-        self.submit(stream, launch)
+        self.submit(
+            stream,
+            self.captured_launch_binding(cfg, parameter_count, true),
+            launch,
+        )
     }
 
     pub fn occupancy_available_dynamic_smem_per_block(
@@ -1039,6 +1099,8 @@ impl CudaDeviceInner {
     fn insert_module(
         &self,
         module_name: &str,
+        artifact_name: &str,
+        artifact_sha256: Option<[u8; 32]>,
         cu_module: sys::CUmodule,
         kernels: &[&str],
     ) -> std::result::Result<(), DriverError> {
@@ -1047,6 +1109,9 @@ impl CudaDeviceInner {
         let mut module = LoadedModule {
             cu_module,
             functions: BTreeMap::new(),
+            module_name: Arc::from(module_name),
+            artifact_name: Arc::from(artifact_name),
+            artifact_sha256,
             context: self.context.clone(),
             completion: Mutex::default(),
         };
@@ -1100,11 +1165,53 @@ impl CudaDeviceInner {
         module_name: &str,
         kernels: &[&str],
     ) -> std::result::Result<(), DriverError> {
+        let artifact_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file-artifact")
+            .to_string();
+        if let Ok(bytes) = std::fs::read(path) {
+            let is_cubin = path.extension().and_then(|value| value.to_str()) == Some("cubin");
+            return self.load_artifact_bytes(
+                &bytes,
+                is_cubin,
+                module_name,
+                &artifact_name,
+                kernels,
+            );
+        }
         crate::cuda_graph::with_module_loading(|| {
             self.context.bind_to_thread()?;
             let name_c = CString::new(path.to_string_lossy().as_bytes()).unwrap();
             let cu_module = result::module::load(name_c)?;
-            self.insert_module(module_name, cu_module, kernels)
+            self.insert_module(module_name, &artifact_name, None, cu_module, kernels)
+        })
+    }
+
+    pub(crate) fn load_artifact_bytes(
+        &self,
+        bytes: &[u8],
+        is_cubin: bool,
+        module_name: &str,
+        artifact_name: &str,
+        kernels: &[&str],
+    ) -> std::result::Result<(), DriverError> {
+        let artifact_sha256 = Sha256::digest(bytes).into();
+        crate::cuda_graph::with_module_loading(|| {
+            self.context.bind_to_thread()?;
+            let cu_module = if is_cubin {
+                unsafe { result::module::load_data(bytes.as_ptr().cast()) }?
+            } else {
+                let source = CString::new(bytes).unwrap();
+                unsafe { result::module::load_data(source.as_ptr().cast()) }?
+            };
+            self.insert_module(
+                module_name,
+                artifact_name,
+                Some(artifact_sha256),
+                cu_module,
+                kernels,
+            )
         })
     }
 
@@ -1114,15 +1221,40 @@ impl CudaDeviceInner {
         module_name: &str,
         kernels: &[&str],
     ) -> std::result::Result<(), DriverError> {
+        self.load_ptx_named(ptx, module_name, "in-memory-ptx", kernels)
+    }
+
+    pub(crate) fn load_ptx_named(
+        &self,
+        ptx: Ptx,
+        module_name: &str,
+        artifact_name: &str,
+        kernels: &[&str],
+    ) -> std::result::Result<(), DriverError> {
         crate::cuda_graph::with_module_loading(|| {
             self.context.bind_to_thread()?;
-            let cu_module = if let Some(bytes) = ptx.as_bytes() {
-                unsafe { result::module::load_data(bytes.as_ptr() as *const _) }?
+            let (cu_module, artifact_sha256) = if let Some(bytes) = ptx.as_bytes() {
+                let digest = Sha256::digest(bytes).into();
+                (
+                    unsafe { result::module::load_data(bytes.as_ptr() as *const _) }?,
+                    digest,
+                )
             } else {
-                let src = CString::new(ptx.to_src()).unwrap();
-                unsafe { result::module::load_data(src.as_ptr() as *const _) }?
+                let source = ptx.to_src();
+                let digest = Sha256::digest(source.as_bytes()).into();
+                let src = CString::new(source).unwrap();
+                (
+                    unsafe { result::module::load_data(src.as_ptr() as *const _) }?,
+                    digest,
+                )
             };
-            self.insert_module(module_name, cu_module, kernels)
+            self.insert_module(
+                module_name,
+                artifact_name,
+                Some(artifact_sha256),
+                cu_module,
+                kernels,
+            )
         })
     }
 

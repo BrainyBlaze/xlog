@@ -47,7 +47,7 @@ use cudarc::driver::{result::DriverError, sys, CudaContext, CudaStream};
 use libloading::Library;
 use xlog_core::{Result, XlogError};
 
-use crate::device::{ExecutionCompletion, LoadedModule};
+use crate::device::{CapturedCudaLaunchBinding, ExecutionCompletion, LoadedModule};
 use crate::device_runtime::XlogDeviceRuntime;
 
 pub const CSM_CUDA_GRAPH_NODE_LAYOUT_VERSION: u32 = 1;
@@ -195,6 +195,9 @@ impl DeferredRetirement {
 #[derive(Default)]
 pub(crate) struct CapturedOwners {
     pub(crate) modules: BTreeMap<usize, Arc<LoadedModule>>,
+    // Capture-time executable bindings. Conditional presence does not assert
+    // that a node ran; completed-step state separately records reached branches.
+    pub(crate) launches: Vec<CapturedCudaLaunchBinding>,
     pub(crate) memory: Vec<Arc<crate::memory::MemoryAccessManifest>>,
     // Actual producer and stream owners, not an attestation of pointer validity
     // or execution. They must exist before capture can record their uses.
@@ -216,6 +219,7 @@ impl std::fmt::Debug for CapturedOwners {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CapturedOwners")
             .field("modules", &self.modules.len())
+            .field("launches", &self.launches.len())
             .field("memory_manifests", &self.memory.len())
             .field("external_resources", &self.external_resources.len())
             .finish()
@@ -232,12 +236,17 @@ fn retain_child_capture_owners(
     // Release the child lock before locking the parent, including when nested
     // capture already shares one owner set. Freeze the current memory binding,
     // not the child's future mutable graph parameters.
-    let (modules, external_resources) = {
+    let (modules, launches, external_resources) = {
         let child = child.lock().unwrap_or_else(|error| error.into_inner());
-        (child.modules.clone(), child.external_resources.clone())
+        (
+            child.modules.clone(),
+            child.launches.clone(),
+            child.external_resources.clone(),
+        )
     };
     let mut parent = parent.lock().unwrap_or_else(|error| error.into_inner());
     parent.modules.extend(modules);
+    parent.launches.extend(launches);
     parent.external_resources.extend(external_resources);
     parent.memory.push(memory.clone());
 }
@@ -1790,6 +1799,17 @@ pub struct CapturedCudaGraph {
     _resident_lifecycle_lease: Option<Box<dyn Send + Sync>>,
     modules: CaptureOwners,
     execution: Mutex<GraphExecution>,
+}
+
+impl CapturedCudaGraph {
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn captured_launch_bindings(&self) -> Vec<CapturedCudaLaunchBinding> {
+        self.modules
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .launches
+            .clone()
+    }
 }
 
 struct GraphExecution {

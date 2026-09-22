@@ -707,6 +707,16 @@ impl SemanticPolicyLayout {
             .max()
             .unwrap_or(0)
     }
+
+    #[cfg(feature = "semantic-policy")]
+    fn retained_score_stride(&self) -> usize {
+        self.fields.iter().map(|field| field.cardinality).sum()
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn retained_score_cells(&self) -> usize {
+        4 * self.retained_score_stride()
+    }
 }
 
 /// Immutable descriptor meanings derived from the graph's admitted records.
@@ -3383,18 +3393,17 @@ pub struct SemanticFeedbackRecordMaterial {
 /// Canonical native witnesses retained by one actually completed step.
 /// The identity names the retained native owner and is deliberately independent
 /// of the canonical bytes hash recorded by downstream closure storage.
+#[cfg(feature = "semantic-policy")]
 pub struct SemanticCompletedStepWitnessMaterial {
     pub identity: Identity256,
     pub bytes: Vec<u8>,
 }
 
-/// Canonical device-authored action state retained by one completed Proposal.
-/// Application intent, external receipts and data-owned episode fields are not
-/// synthesized into this native material.
 #[cfg(feature = "semantic-policy")]
-pub struct SemanticCompletedActionWitnessMaterial {
-    pub identity: Identity256,
-    pub bytes: Vec<u8>,
+pub struct SemanticCompletedModelCarrierMaterial {
+    pub numerical_realization: SemanticCompletedStepWitnessMaterial,
+    pub logits: SemanticCompletedStepWitnessMaterial,
+    pub random_state: SemanticCompletedStepWitnessMaterial,
 }
 
 impl PublicationMaterialRange {
@@ -8701,6 +8710,7 @@ struct PolicyField {
     biases: u64,
     cardinality: u32,
     null_category: i32,
+    retained_offset: u64,
 }
 
 #[repr(C)]
@@ -8712,6 +8722,8 @@ struct PolicyDescriptor {
     hidden: u64,
     scores: u64,
     recurrent: u64,
+    retained_scores: u64,
+    retained_score_stride: u64,
     fields: [PolicyField; 18],
 }
 
@@ -8993,6 +9005,7 @@ struct PolicyBuffers {
     parameters: TrackedCudaSlice<f32>,
     hidden: TrackedCudaSlice<f32>,
     scores: TrackedCudaSlice<f32>,
+    retained_scores: TrackedCudaSlice<f32>,
     recurrent: TrackedCudaSlice<f32>,
     text_logits: TrackedCudaSlice<f32>,
     component_baselines: TrackedCudaSlice<f32>,
@@ -9227,10 +9240,10 @@ const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 264);
 const _: () = assert!(size_of::<SemanticTaskFacts>() == 64);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3256);
 const _: () = assert!(size_of::<DeviceState>() == 6952);
-const _: () = assert!(size_of::<PolicyField>() == 24);
-const _: () = assert!(size_of::<PolicyDescriptor>() == 480);
+const _: () = assert!(size_of::<PolicyField>() == 32);
+const _: () = assert!(size_of::<PolicyDescriptor>() == 640);
 const _: () = assert!(size_of::<PolicyBackward>() == 144);
-const _: () = assert!(size_of::<Descriptor>() == 816);
+const _: () = assert!(size_of::<Descriptor>() == 976);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -9273,7 +9286,7 @@ mod task_state_contract {
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
         assert_eq!(size_of::<DeviceState>(), 6952);
-        assert_eq!(size_of::<Descriptor>(), 816);
+        assert_eq!(size_of::<Descriptor>(), 976);
     }
 
     #[test]
@@ -9940,6 +9953,7 @@ fn policy_buffer_bytes(layout: &SemanticPolicyLayout) -> Result<usize, SemanticT
     let primal_cells = [
         layout.parameter_cells,
         layout.score_cells(),
+        layout.retained_score_cells(),
         layout.recurrent_cells(),
         32 * TEXT_CARDINALITY,
     ]
@@ -11995,7 +12009,8 @@ impl SemanticTransitionSession {
 
     /// Serialize the completed step's original native RNG and executed-work
     /// witnesses while its retained input/result owners are still reachable.
-    pub fn prepared_completed_step_witnesses(
+    #[cfg(feature = "semantic-policy")]
+    fn prepared_completed_step_witnesses(
         &mut self,
         step: &SemanticPreparedStep,
         consumer_streams: &[u64],
@@ -12091,11 +12106,11 @@ impl SemanticTransitionSession {
     /// 136 exact component receipts after known completion. The step-owned
     /// buffers, not a current publication or Python reconstruction, are read.
     #[cfg(feature = "semantic-policy")]
-    pub fn prepared_completed_action_witnesses(
+    fn prepared_completed_action_witnesses(
         &mut self,
         step: &SemanticPreparedStep,
         consumer_streams: &[u64],
-    ) -> Result<SemanticCompletedActionWitnessMaterial, SemanticTransitionError> {
+    ) -> Result<SemanticCompletedStepWitnessMaterial, SemanticTransitionError> {
         let binding = self.prepared_model_binding(step, consumer_streams)?;
         if self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
             return Err(publication_input_error(
@@ -12181,7 +12196,282 @@ impl SemanticTransitionSession {
             self.poisoned = true;
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        Ok(SemanticCompletedActionWitnessMaterial { identity, bytes })
+        Ok(SemanticCompletedStepWitnessMaterial { identity, bytes })
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn prepared_completed_numerical_material(
+        &mut self,
+        step: &SemanticPreparedStep,
+        consumer_streams: &[u64],
+    ) -> Result<SemanticCompletedStepWitnessMaterial, SemanticTransitionError> {
+        let binding = self.prepared_model_binding(step, consumer_streams)?;
+        let work = self.prepared_completed_step_witnesses(step, consumer_streams)?;
+        let action = self.prepared_completed_action_witnesses(step, consumer_streams)?;
+        let launches = self
+            .captured
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .captured_launch_bindings();
+        if launches.is_empty()
+            || launches
+                .iter()
+                .any(|launch| launch.artifact_sha256.is_none())
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let mut graph = Vec::new();
+        graph.extend_from_slice(b"XLOG-CAPTURED-CUDA-LAUNCH-BINDINGS\0");
+        material_u64(&mut graph, 1);
+        material_u64(&mut graph, launches.len() as u64);
+        for (ordinal, launch) in launches.iter().enumerate() {
+            material_u64(&mut graph, ordinal as u64);
+            material_u64(&mut graph, launch.module_name.len() as u64);
+            graph.extend_from_slice(launch.module_name.as_bytes());
+            material_u64(&mut graph, launch.artifact_name.len() as u64);
+            graph.extend_from_slice(launch.artifact_name.as_bytes());
+            graph.extend_from_slice(
+                launch
+                    .artifact_sha256
+                    .as_ref()
+                    .expect("checked captured artifact identity"),
+            );
+            material_u64(&mut graph, launch.function_name.len() as u64);
+            graph.extend_from_slice(launch.function_name.as_bytes());
+            for dimension in [launch.grid_dim.0, launch.grid_dim.1, launch.grid_dim.2] {
+                material_u64(&mut graph, dimension as u64);
+            }
+            for dimension in [launch.block_dim.0, launch.block_dim.1, launch.block_dim.2] {
+                material_u64(&mut graph, dimension as u64);
+            }
+            material_u64(&mut graph, launch.shared_mem_bytes as u64);
+            material_u64(&mut graph, launch.parameter_count);
+            material_u64(&mut graph, u64::from(launch.cooperative));
+        }
+
+        let successor = binding
+            .1
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let mut owner_binding = Vec::new();
+        owner_binding.extend_from_slice(b"xlog.completed-numerical-realization-owner.v2\0");
+        encode_publication_identity(&mut owner_binding, binding.0);
+        encode_publication_identity(&mut owner_binding, successor);
+        owner_binding.extend_from_slice(work.identity.as_bytes());
+        owner_binding.extend_from_slice(action.identity.as_bytes());
+        let mut graph_hash = Sha256::new();
+        graph_hash.update(&graph);
+        owner_binding.extend_from_slice(&graph_hash.finalize());
+        material_u64(&mut owner_binding, step.token);
+        let mut owner_hash = Sha256::new();
+        owner_hash.update(&owner_binding);
+        let identity = Identity256::from_bytes(owner_hash.finalize().into());
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"XLOG-COMPLETED-NUMERICAL-REALIZATION\0");
+        material_u64(&mut bytes, 2);
+        material_u64(&mut bytes, graph.len() as u64);
+        bytes.extend_from_slice(&graph);
+        material_u64(&mut bytes, work.bytes.len() as u64);
+        bytes.extend_from_slice(&work.bytes);
+        material_u64(&mut bytes, action.bytes.len() as u64);
+        bytes.extend_from_slice(&action.bytes);
+        if self.prepared_model_binding(step, consumer_streams)? != binding {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(SemanticCompletedStepWitnessMaterial { identity, bytes })
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn prepared_completed_logits_material(
+        &mut self,
+        step: &SemanticPreparedStep,
+        consumer_streams: &[u64],
+    ) -> Result<SemanticCompletedStepWitnessMaterial, SemanticTransitionError> {
+        let binding = self.prepared_model_binding(step, consumer_streams)?;
+        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
+            return Err(publication_input_error(
+                "completed logits require an original Proposal",
+            ));
+        }
+        let result_view = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("checked completed step")
+            .result
+            .view();
+        let result = self.publication_read(result_view)?[0];
+        let bank = usize::try_from(result.header.neural_bank)
+            .ok()
+            .filter(|&value| value < 2)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let (scores_view, layout) = {
+            let policy = self.steps[&step.token]
+                .prepared
+                .as_ref()
+                .expect("checked completed step")
+                .branches[bank]
+                .policy
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            (policy.retained_scores.view(), policy.layout.clone())
+        };
+        let scores = self.publication_read(scores_view)?;
+        if result.refusal != 0
+            || result.advanced != 1
+            || scores.len() != layout.retained_score_cells()
+            || scores.iter().any(|value| !value.is_finite())
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+
+        let successor = binding
+            .1
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let mut owner_binding = Vec::new();
+        owner_binding.extend_from_slice(b"xlog.completed-logits-owner.v1\0");
+        encode_publication_identity(&mut owner_binding, binding.0);
+        encode_publication_identity(&mut owner_binding, successor);
+        material_u64(&mut owner_binding, step.token);
+        let mut owner_hash = Sha256::new();
+        owner_hash.update(&owner_binding);
+        let identity = Identity256::from_bytes(owner_hash.finalize().into());
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"XLOG-COMPLETED-EDIT-LOGITS\0");
+        material_u64(&mut bytes, 1);
+        material_u64(&mut bytes, (4 * layout.fields.len()) as u64);
+        let stride = layout.retained_score_stride();
+        let mut next_offset = 0usize;
+        let field_offsets = layout
+            .fields
+            .iter()
+            .map(|field| {
+                let offset = next_offset;
+                next_offset += field.cardinality;
+                offset
+            })
+            .collect::<Vec<_>>();
+        for lane in 0..2usize {
+            for slot in 0..2usize {
+                for (field, field_layout) in layout.fields.iter().enumerate() {
+                    let ordinal = lane * 68 + 32 + slot * 18 + field;
+                    let offset = (lane * 2 + slot) * stride + field_offsets[field];
+                    material_u64(&mut bytes, ordinal as u64);
+                    material_u64(&mut bytes, lane as u64);
+                    material_u64(&mut bytes, slot as u64);
+                    material_u64(&mut bytes, field as u64);
+                    material_u64(&mut bytes, field_layout.cardinality as u64);
+                    for score in &scores[offset..offset + field_layout.cardinality] {
+                        bytes.extend_from_slice(&score.to_bits().to_le_bytes());
+                    }
+                }
+            }
+        }
+        if self.prepared_model_binding(step, consumer_streams)? != binding {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(SemanticCompletedStepWitnessMaterial { identity, bytes })
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn prepared_completed_random_material(
+        &mut self,
+        step: &SemanticPreparedStep,
+        consumer_streams: &[u64],
+    ) -> Result<SemanticCompletedStepWitnessMaterial, SemanticTransitionError> {
+        let binding = self.prepared_model_binding(step, consumer_streams)?;
+        let (header_view, result_view) = {
+            let owner = self.checked_prepared_step(step, false)?;
+            let inputs = owner
+                .inputs
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let prepared = owner.prepared.as_ref().expect("checked prepared owner");
+            (inputs.header.view(), prepared.result.view())
+        };
+        let header = self.publication_read(header_view)?[0];
+        let result = self.publication_read(result_view)?[0];
+        let bank = usize::try_from(result.header.neural_bank)
+            .ok()
+            .filter(|&value| value < 2)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let receipt_view = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("checked completed step")
+            .branches[bank]
+            .receipts
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .view();
+        let receipts = self.publication_read(receipt_view)?;
+        if result.refusal != 0
+            || result.advanced != 1
+            || receipts.len() != COMPONENT_COUNT
+            || receipts
+                .iter()
+                .any(|receipt| receipt.proposal != header.proposal)
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+
+        let mut owner_binding = Vec::new();
+        owner_binding.extend_from_slice(b"xlog.completed-random-state-owner.v1\0");
+        encode_publication_identity(&mut owner_binding, binding.0);
+        material_u64(&mut owner_binding, step.token);
+        let mut owner_hash = Sha256::new();
+        owner_hash.update(&owner_binding);
+        let identity = Identity256::from_bytes(owner_hash.finalize().into());
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"XLOG-COMPLETED-RANDOM-STATE\0");
+        material_u64(&mut bytes, 1);
+        material_u64(&mut bytes, header.model_generation);
+        material_u64(&mut bytes, header.stream_serial);
+        material_u64(&mut bytes, header.family_id);
+        material_u64(&mut bytes, header.proposal);
+        material_u64(&mut bytes, header.training_cursor);
+        for value in header.training_rng {
+            material_u64(&mut bytes, value);
+        }
+        material_u64(&mut bytes, receipts.len() as u64);
+        for receipt in receipts {
+            material_u64(&mut bytes, receipt.ordinal as u64);
+            material_u64(&mut bytes, receipt.draw);
+            for value in receipt.key {
+                material_u64(&mut bytes, value as u64);
+            }
+            for value in receipt.counter {
+                material_u64(&mut bytes, value as u64);
+            }
+            for value in receipt.random_words {
+                material_u64(&mut bytes, value as u64);
+            }
+        }
+        if self.prepared_model_binding(step, consumer_streams)? != binding {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(SemanticCompletedStepWitnessMaterial { identity, bytes })
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_completed_model_carrier(
+        &mut self,
+        step: &SemanticPreparedStep,
+        consumer_streams: &[u64],
+    ) -> Result<SemanticCompletedModelCarrierMaterial, SemanticTransitionError> {
+        Ok(SemanticCompletedModelCarrierMaterial {
+            numerical_realization: self
+                .prepared_completed_numerical_material(step, consumer_streams)?,
+            logits: self.prepared_completed_logits_material(step, consumer_streams)?,
+            random_state: self.prepared_completed_random_material(step, consumer_streams)?,
+        })
     }
 
     /// The caller keeps the builder outside its Session lock while recording
@@ -14069,6 +14359,7 @@ impl SemanticTransitionSession {
                             &policy.parameters,
                             &policy.hidden,
                             &policy.scores,
+                            &policy.retained_scores,
                             &policy.recurrent,
                             &policy.text_logits,
                         ] {
@@ -18206,6 +18497,9 @@ impl SemanticTransitionSession {
             scores: reservation
                 .alloc::<f32>(layout.score_cells())
                 .map_err(|error| runtime_error("policy score allocation", error))?,
+            retained_scores: reservation
+                .alloc::<f32>(layout.retained_score_cells())
+                .map_err(|error| runtime_error("retained policy score allocation", error))?,
             recurrent: reservation
                 .alloc::<f32>(layout.recurrent_cells())
                 .map_err(|error| runtime_error("policy recurrent allocation", error))?,
@@ -20468,6 +20762,27 @@ impl SemanticTransitionSession {
     #[cfg(feature = "semantic-policy")]
     fn retained_policy_descriptor(policy: &PolicyStorage) -> PolicyDescriptor {
         let parameter = |offset: usize| policy.parameters.device_ptr_value() + (offset * 4) as u64;
+        let mut retained_offset = 0usize;
+        let fields = std::array::from_fn(|i| {
+            let field = &policy.layout.fields[i];
+            let result = PolicyField {
+                embeddings: if field.embeddings.is_empty() {
+                    0
+                } else {
+                    parameter(field.embeddings.start)
+                },
+                biases: if field.biases.is_empty() {
+                    0
+                } else {
+                    parameter(field.biases.start)
+                },
+                cardinality: field.cardinality as u32,
+                null_category: field.null_category.map_or(-1, |index| index as i32),
+                retained_offset: retained_offset as u64,
+            };
+            retained_offset += field.cardinality;
+            result
+        });
         PolicyDescriptor {
             z: parameter(policy.layout.z.start),
             recurrence: parameter(policy.layout.recurrence.start),
@@ -20475,23 +20790,9 @@ impl SemanticTransitionSession {
             hidden: policy.hidden.device_ptr_value(),
             scores: policy.scores.device_ptr_value(),
             recurrent: policy.recurrent.device_ptr_value(),
-            fields: std::array::from_fn(|i| {
-                let field = &policy.layout.fields[i];
-                PolicyField {
-                    embeddings: if field.embeddings.is_empty() {
-                        0
-                    } else {
-                        parameter(field.embeddings.start)
-                    },
-                    biases: if field.biases.is_empty() {
-                        0
-                    } else {
-                        parameter(field.biases.start)
-                    },
-                    cardinality: field.cardinality as u32,
-                    null_category: field.null_category.map_or(-1, |index| index as i32),
-                }
-            }),
+            retained_scores: policy.retained_scores.device_ptr_value(),
+            retained_score_stride: policy.layout.retained_score_stride() as u64,
+            fields,
         }
     }
 
@@ -20530,6 +20831,7 @@ impl SemanticTransitionSession {
                     &policy.parameters,
                     &policy.hidden,
                     &policy.scores,
+                    &policy.retained_scores,
                     &policy.recurrent,
                 ] {
                     if !buffer.is_empty() {
@@ -20604,6 +20906,7 @@ impl SemanticTransitionSession {
             recorder.read(&policy.parameters);
             recorder.write(&policy.hidden);
             recorder.write(&policy.scores);
+            recorder.write(&policy.retained_scores);
             recorder.write(&policy.recurrent);
         }
         self.graph.record_transition(&mut recorder);

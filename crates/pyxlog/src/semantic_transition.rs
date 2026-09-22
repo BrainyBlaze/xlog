@@ -4530,6 +4530,49 @@ impl PyNativeTensorAllocation {
     }
 }
 
+/// Immutable native-owned materials from one completed original Proposal.
+#[cfg(feature = "semantic-policy")]
+#[pyclass(
+    name = "SemanticCompletedModelCarrier",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedModelCarrier {
+    inner: xlog_cuda::SemanticCompletedModelCarrierMaterial,
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_model_material(
+    py: Python<'_>,
+    material: &xlog_cuda::SemanticCompletedStepWitnessMaterial,
+) -> PyResult<Py<PyTuple>> {
+    Ok((
+        PyBytes::new(py, material.identity.as_bytes()),
+        PyBytes::new(py, &material.bytes),
+    )
+        .into_pyobject(py)?
+        .unbind())
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedModelCarrier {
+    #[getter]
+    fn numerical_realization(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        completed_model_material(py, &self.inner.numerical_realization)
+    }
+
+    #[getter]
+    fn logits(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        completed_model_material(py, &self.inner.logits)
+    }
+
+    #[getter]
+    fn random_state(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        completed_model_material(py, &self.inner.random_state)
+    }
+}
+
 /// Session-issued storage for one bounded recorded step, not an acquired parent.
 /// No host publication identity is available before device execution. The
 /// original Runtime retains this handle and its producers through backward.
@@ -5409,8 +5452,10 @@ impl PySemanticPreparedStep {
 
     /// Cold authenticated binding of this completed step's original model.
     /// Returns (predecessor_identity, successor_identity_or_None, model_generation,
-    /// model_geometry_digest, model_numerical_digest). Identities have the same
-    /// four fields as PublishedParent.identity(); they are not live readers.
+    /// model_geometry_digest, model_numerical_digest, carrier). The immutable
+    /// carrier exposes numerical_realization, logits and random_state as
+    /// (native_owner_identity, canonical_bytes). Identities have the same four
+    /// fields as PublishedParent.identity(); they are not live readers.
     /// Join every original consumer stream. Read record 44 and complete model
     /// allocations through this step's existing exports, then call again after
     /// serialization to verify the same sealed inputs. Unknown completion and
@@ -5422,28 +5467,52 @@ impl PySemanticPreparedStep {
         consumer_streams: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyTuple>> {
         let streams = self.completed_observation_streams(py, consumer_streams)?;
-        let session = self.session.borrow(py);
-        let mut owner = session.owner()?;
-        let (predecessor, successor, generation, geometry, numerical) = owner
-            .prepared_model_binding(&self.inner, &streams)
-            .map_err(xlog_err)?;
-        let identity = |value: xlog_cuda::SemanticPublishedIdentity| {
-            (
-                PyBytes::new(py, value.instance.as_bytes()),
-                value.word,
-                PyBytes::new(py, value.logical_digest.as_bytes()),
-                PyBytes::new(py, value.state_digest.as_bytes()),
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = streams;
+            Err(invalid(
+                "completed model material requires the semantic-policy feature",
+            ))
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            let session = self.session.borrow(py);
+            let mut owner = session.owner()?;
+            let binding = owner
+                .prepared_model_binding(&self.inner, &streams)
+                .map_err(xlog_err)?;
+            let carrier = owner
+                .prepared_completed_model_carrier(&self.inner, &streams)
+                .map_err(xlog_err)?;
+            if owner
+                .prepared_model_binding(&self.inner, &streams)
+                .map_err(xlog_err)?
+                != binding
+            {
+                return Err(invalid(
+                    "completed model binding changed while serializing its carrier",
+                ));
+            }
+            let (predecessor, successor, generation, geometry, numerical) = binding;
+            let identity = |value: xlog_cuda::SemanticPublishedIdentity| {
+                (
+                    PyBytes::new(py, value.instance.as_bytes()),
+                    value.word,
+                    PyBytes::new(py, value.logical_digest.as_bytes()),
+                    PyBytes::new(py, value.state_digest.as_bytes()),
+                )
+            };
+            Ok((
+                identity(predecessor),
+                successor.map(identity),
+                generation,
+                PyBytes::new(py, geometry.as_bytes()),
+                PyBytes::new(py, numerical.as_bytes()),
+                Py::new(py, PySemanticCompletedModelCarrier { inner: carrier })?,
             )
-        };
-        Ok((
-            identity(predecessor),
-            successor.map(identity),
-            generation,
-            PyBytes::new(py, geometry.as_bytes()),
-            PyBytes::new(py, numerical.as_bytes()),
-        )
-            .into_pyobject(py)?
-            .unbind())
+                .into_pyobject(py)?
+                .unbind())
+        }
     }
 
     /// Cold original records, not encoded features or current-bank substitutes.
@@ -5488,55 +5557,6 @@ impl PySemanticPreparedStep {
             }),
         )?;
         Ok((identity(predecessor), successor.map(identity), records)
-            .into_pyobject(py)?
-            .unbind())
-    }
-
-    /// Cold canonical bytes for the retained completed step's original native
-    /// RNG and executed-work witnesses. The first result is the retained native
-    /// owner's identity, not the canonical bytes hash stored by closure data.
-    /// This joins all original consumers and never consults a current
-    /// publication or reruns the model.
-    #[pyo3(signature = (*, consumer_streams))]
-    fn completed_step_witnesses(
-        &self,
-        py: Python<'_>,
-        consumer_streams: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyTuple>> {
-        let streams = self.completed_observation_streams(py, consumer_streams)?;
-        let session = self.session.borrow(py);
-        let mut owner = session.owner()?;
-        let material = owner
-            .prepared_completed_step_witnesses(&self.inner, &streams)
-            .map_err(xlog_err)?;
-        Ok((
-            PyBytes::new(py, material.identity.as_bytes()),
-            PyBytes::new(py, &material.bytes),
-        )
-            .into_pyobject(py)?
-            .unbind())
-    }
-
-    /// Cold canonical bytes for the completed Proposal's selected native
-    /// DeviceState and all 136 original component receipts. No application
-    /// intent, external receipt, or data-owned episode field is invented.
-    #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (*, consumer_streams))]
-    fn completed_action_witnesses(
-        &self,
-        py: Python<'_>,
-        consumer_streams: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyTuple>> {
-        let streams = self.completed_observation_streams(py, consumer_streams)?;
-        let session = self.session.borrow(py);
-        let mut owner = session.owner()?;
-        let material = owner
-            .prepared_completed_action_witnesses(&self.inner, &streams)
-            .map_err(xlog_err)?;
-        Ok((
-            PyBytes::new(py, material.identity.as_bytes()),
-            PyBytes::new(py, &material.bytes),
-        )
             .into_pyobject(py)?
             .unbind())
     }

@@ -394,9 +394,9 @@ struct IntentEntry {
     uint64_t effect_digest[4],payload_digest[4],payload_offset,payload_len,audit_instance[4],audit_epoch;
     uint64_t previous_chain[4],chain[4];
 };
-struct PolicyField { uint64_t embeddings,biases; uint32_t cardinality; int32_t null_category; };
+struct PolicyField { uint64_t embeddings,biases; uint32_t cardinality; int32_t null_category; uint64_t retained_offset; };
 struct PolicyDescriptor {
-    uint64_t z,recurrence,positions,hidden,scores,recurrent;
+    uint64_t z,recurrence,positions,hidden,scores,recurrent,retained_scores,retained_score_stride;
     PolicyField fields[18];
 };
 struct SemanticTrainingViewSelection {
@@ -478,8 +478,8 @@ static_assert(sizeof(Work)==24,"semantic work ABI");
 static_assert(sizeof(TaskFacts)==64,"task facts ABI");
 static_assert(sizeof(TaskEvaluation)==3256,"task evaluation ABI");
 static_assert(sizeof(State)==6952,"state ABI");
-static_assert(sizeof(PolicyField)==24,"policy field ABI");
-static_assert(sizeof(PolicyDescriptor)==480,"policy ABI");
+static_assert(sizeof(PolicyField)==32,"policy field ABI");
+static_assert(sizeof(PolicyDescriptor)==640,"policy ABI");
 static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origin ABI");
 static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
 static_assert(sizeof(SemanticTrainingObjectiveRecord)==280,"training objective ABI");
@@ -546,7 +546,7 @@ static_assert(sizeof(AttemptReceipt)==344,"attempt receipt ABI");
 static_assert(sizeof(TokenProvenanceRecord)==184,"token provenance ABI");
 static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
-static_assert(sizeof(Descriptor)==816,"launch ABI");
+static_assert(sizeof(Descriptor)==976,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 
 __device__ uint64_t text_row_count(TextBinding binding) {
@@ -4690,6 +4690,10 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 reinterpret_cast<float*>(p.scores),threadIdx.x,blockDim.x);
             __syncthreads();
             row=reinterpret_cast<const float*>(p.scores);
+            float* retained=reinterpret_cast<float*>(p.retained_scores)
+                +(lane*2+component.slot)*p.retained_score_stride+f.retained_offset;
+            for(uint32_t i=threadIdx.x;i<component.cardinality;i+=blockDim.x)retained[i]=row[i];
+            __syncthreads();
         }
 #endif
         const uint8_t* mask=support+component.offset;
