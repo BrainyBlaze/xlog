@@ -119,10 +119,10 @@ struct Receipt {
     uint64_t proposal,catalogue_generation;
     uint8_t catalogue_digest[32];
     uint8_t admission_binding[32];
-    uint32_t ordinal,lane,slot,field,kind,choice,legal_count,active_count;
+    uint32_t ordinal,lane,slot,field,kind,choice,legal_count,active_count,selected_rank,reserved;
     uint32_t key[2],counter[4],random_words[4];
     uint64_t draw,cdf_start,cdf_end,mass;
-    U192 p,q,factor_denominator;
+    U192 p,q,factor_denominator,cumulative_mass_below;
     uint32_t active_fields,null_fields;
 };
 __device__ double receipt_importance_weight(const Receipt* receipts) {
@@ -397,6 +397,7 @@ struct IntentEntry {
 struct PolicyField { uint64_t embeddings,biases; uint32_t cardinality; int32_t null_category; uint64_t retained_offset; };
 struct PolicyDescriptor {
     uint64_t z,recurrence,positions,hidden,scores,recurrent,retained_scores,retained_score_stride;
+    uint64_t final_masks,active_sets;
     PolicyField fields[18];
 };
 struct SemanticTrainingViewSelection {
@@ -473,13 +474,13 @@ struct Descriptor {
     ModelWorkInput model_work;
 };
 static_assert(sizeof(U192)==24,"integer ABI");
-static_assert(sizeof(Receipt)==264,"receipt ABI");
+static_assert(sizeof(Receipt)==296,"receipt ABI");
 static_assert(sizeof(Work)==24,"semantic work ABI");
 static_assert(sizeof(TaskFacts)==64,"task facts ABI");
 static_assert(sizeof(TaskEvaluation)==3256,"task evaluation ABI");
 static_assert(sizeof(State)==6952,"state ABI");
 static_assert(sizeof(PolicyField)==32,"policy field ABI");
-static_assert(sizeof(PolicyDescriptor)==640,"policy ABI");
+static_assert(sizeof(PolicyDescriptor)==656,"policy ABI");
 static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origin ABI");
 static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
 static_assert(sizeof(SemanticTrainingObjectiveRecord)==280,"training objective ABI");
@@ -528,7 +529,7 @@ static_assert(sizeof(PublicationStorageEntry)==24,"owned storage ABI");
 static_assert(sizeof(PublicationRange)==128,"publication range ABI");
 static_assert(sizeof(PublicationHeader)==488,"publication header ABI");
 static_assert(sizeof(PublicationControl)==144,"publication control ABI");
-static_assert(sizeof(PublicationBank)==45392,"publication bank ABI");
+static_assert(sizeof(PublicationBank)==49744,"publication bank ABI");
 static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
 static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
 static_assert(sizeof(PendingContinuation)==256,"pending continuation ABI");
@@ -546,7 +547,7 @@ static_assert(sizeof(AttemptReceipt)==344,"attempt receipt ABI");
 static_assert(sizeof(TokenProvenanceRecord)==184,"token provenance ABI");
 static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
-static_assert(sizeof(Descriptor)==976,"launch ABI");
+static_assert(sizeof(Descriptor)==992,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 
 __device__ uint64_t text_row_count(TextBinding binding) {
@@ -589,7 +590,9 @@ __device__ bool validate_text_binding(const SourceSlot* source,TextBinding bindi
 }
 __device__ bool text_null_receipt(const Receipt& r) {
     return r.kind==COMPONENT_KIND_TEXT && r.choice==TEXT_NULL && r.legal_count==1 && r.active_count==1 &&
-        !r.active_fields && !r.null_fields && !r.cdf_start && r.cdf_end==(uint64_t(1)<<63) && r.mass==r.cdf_end &&
+        !r.selected_rank && !r.cumulative_mass_below.w[0] && !r.cumulative_mass_below.w[1] &&
+        !r.cumulative_mass_below.w[2] && !r.active_fields && !r.null_fields && !r.cdf_start &&
+        r.cdf_end==(uint64_t(1)<<63) && r.mass==r.cdf_end &&
         r.p.w[0]==1 && !r.p.w[1] && !r.p.w[2] && r.q.w[0]==1 && !r.q.w[1] && !r.q.w[2] &&
         r.factor_denominator.w[0]==1 && !r.factor_denominator.w[1] && !r.factor_denominator.w[2];
 }
@@ -4647,6 +4650,10 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         const uint32_t lane=ordinal/68;
         const uint32_t edit=lane*2+component.slot;
         const uint32_t* viable=viability+edit*books[1];
+        uint8_t* final_masks=descriptor.policy.z
+            ? reinterpret_cast<uint8_t*>(descriptor.policy.final_masks)+component.offset : nullptr;
+        uint8_t* active_sets=descriptor.policy.z
+            ? reinterpret_cast<uint8_t*>(descriptor.policy.active_sets)+component.offset : nullptr;
         if(threadIdx.x==0 && ordinal%68==0) {
             state->execution_work.active_candidate=lane+2;
             semantic_call(descriptor,semantic_graph::kResidentForkAdmission,&base,nullptr,&candidate,nullptr,nullptr,&state->execution_work);
@@ -4659,6 +4666,11 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         if(failed)continue;
         const bool inactive_text=descriptor.policy.z && component.kind==COMPONENT_KIND_TEXT && !text_selected(descriptor.text,component.field);
         if(inactive_text) {
+            for(uint32_t i=threadIdx.x;i<component.cardinality;i+=blockDim.x) {
+                final_masks[i]=uint8_t(i==TEXT_NULL);
+                active_sets[i]=uint8_t(i==TEXT_NULL);
+            }
+            __syncthreads();
             if(threadIdx.x==0) {
                 Receipt result=component_receipt(component,*state,&sampler_work);
                 result.choice=TEXT_NULL;result.legal_count=result.active_count=1;
@@ -4701,6 +4713,10 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         __syncthreads();
         for(uint32_t i=threadIdx.x;i<component.cardinality;i+=blockDim.x) {
             bool admitted=mask[i]!=0 && legal_category(component,i,books,viable,choices,actions[edit][0],actions[edit][1],&sampler_work);
+            if(final_masks) {
+                final_masks[i]=uint8_t(admitted);
+                active_sets[i]=0;
+            }
             if(admitted) {
                 if(!isfinite(row[i]))atomicExch(&invalid,1U);
                 uint32_t index=atomicAdd(&count,1U); sorted[index]=i;
@@ -4735,6 +4751,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             if(count==1) {
                 result.choice=sorted[0];result.p.w[0]=result.q.w[0]=result.factor_denominator.w[0]=1;
                 result.active_count=1;result.cdf_end=result.mass=uint64_t(1)<<63;
+                if(active_sets)active_sets[sorted[0]]=1;
             } else {
                 float maximum=row[sorted[0]];
                 U192 g=sub(shifted(1,149),shifted(count,118));
@@ -4747,6 +4764,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                     if(compare(multiply(d,i+1),add(prefix,g))<0){h=i+1;active_sum=prefix;}
                 }
                 result.active_count=h;result.q=shifted(h,149);
+                if(active_sets)for(uint32_t i=0;i<h;++i)active_sets[sorted[i]]=1;
                 U192 cumulative={{0,0,0}};
                 uint64_t lower=0;
                 // Restore original categorical order, independently of compaction.
@@ -4758,10 +4776,12 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                     U192 base=add(active_sum,g), hd=multiply(distance_scaled(maximum,row[i]),h);
                     U192 p=shifted(h,118);
                     if(compare(base,hd)>0)p=add(p,sub(base,hd));
+                    U192 below=cumulative;
                     cumulative=add(cumulative,p);
                     uint64_t upper=boundary(cumulative,h);
                     if(result.draw>=lower && result.draw<upper) {
                         result.choice=i;result.p=p;result.cdf_start=lower;result.cdf_end=upper;
+                        result.selected_rank=index;result.cumulative_mass_below=below;
                         result.mass=upper-lower;result.factor_denominator=multiply(shifted(h,86),result.mass);
                     }
                     lower=upper;

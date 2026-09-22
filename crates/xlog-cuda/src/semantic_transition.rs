@@ -1059,6 +1059,8 @@ pub struct SemanticTransitionReceipt {
     pub choice: u32,
     pub legal_count: u32,
     pub active_count: u32,
+    pub selected_rank: u32,
+    pub reserved: u32,
     pub key: [u32; 2],
     pub counter: [u32; 4],
     pub random_words: [u32; 4],
@@ -1069,6 +1071,7 @@ pub struct SemanticTransitionReceipt {
     pub p: [u64; 3],
     pub q: [u64; 3],
     pub factor_denominator: [u64; 3],
+    pub cumulative_mass_below: [u64; 3],
     pub active_fields: u32,
     pub null_fields: u32,
 }
@@ -1081,6 +1084,8 @@ fn canonical_text_null(receipt: &SemanticTransitionReceipt) -> bool {
         && receipt.choice == TEXT_NULL as u32
         && receipt.legal_count == 1
         && receipt.active_count == 1
+        && receipt.selected_rank == 0
+        && receipt.cumulative_mass_below == [0, 0, 0]
         && receipt.active_fields == 0
         && receipt.null_fields == 0
         && receipt.p == [1, 0, 0]
@@ -3326,7 +3331,7 @@ const _: () = assert!(size_of::<PublicationStorageEntry>() == 24);
 const _: () = assert!(size_of::<PublicationRange>() == 128);
 const _: () = assert!(size_of::<PublicationHeader>() == 488);
 const _: () = assert!(size_of::<PublicationControl>() == 144);
-const _: () = assert!(size_of::<PublicationBank>() == 45392);
+const _: () = assert!(size_of::<PublicationBank>() == 49744);
 const _: () = assert!(size_of::<PublicationRoleCount>() == 16);
 const _: () = assert!(size_of::<SemanticModelContractLayout>() == 48);
 const _: () = assert!(size_of::<PublicationContract>() == 272);
@@ -8724,6 +8729,8 @@ struct PolicyDescriptor {
     recurrent: u64,
     retained_scores: u64,
     retained_score_stride: u64,
+    final_masks: u64,
+    active_sets: u64,
     fields: [PolicyField; 18],
 }
 
@@ -9006,6 +9013,8 @@ struct PolicyBuffers {
     hidden: TrackedCudaSlice<f32>,
     scores: TrackedCudaSlice<f32>,
     retained_scores: TrackedCudaSlice<f32>,
+    final_masks: TrackedCudaSlice<u8>,
+    active_sets: TrackedCudaSlice<u8>,
     recurrent: TrackedCudaSlice<f32>,
     text_logits: TrackedCudaSlice<f32>,
     component_baselines: TrackedCudaSlice<f32>,
@@ -9236,14 +9245,14 @@ content_kernel_parameter!(ContinuationInputs);
 
 const _: () = assert!(size_of::<PendingContinuation>() == 256);
 const _: () = assert!(size_of::<ContinuationInputs>() == 104);
-const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 264);
+const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 296);
 const _: () = assert!(size_of::<SemanticTaskFacts>() == 64);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3256);
 const _: () = assert!(size_of::<DeviceState>() == 6952);
 const _: () = assert!(size_of::<PolicyField>() == 32);
-const _: () = assert!(size_of::<PolicyDescriptor>() == 640);
+const _: () = assert!(size_of::<PolicyDescriptor>() == 656);
 const _: () = assert!(size_of::<PolicyBackward>() == 144);
-const _: () = assert!(size_of::<Descriptor>() == 976);
+const _: () = assert!(size_of::<Descriptor>() == 992);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -9286,7 +9295,7 @@ mod task_state_contract {
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
         assert_eq!(size_of::<DeviceState>(), 6952);
-        assert_eq!(size_of::<Descriptor>(), 976);
+        assert_eq!(size_of::<Descriptor>(), 992);
     }
 
     #[test]
@@ -9949,7 +9958,10 @@ fn prepared_segment_allocation_bytes(
 }
 
 #[cfg(feature = "semantic-policy")]
-fn policy_buffer_bytes(layout: &SemanticPolicyLayout) -> Result<usize, SemanticTransitionError> {
+fn policy_buffer_bytes(
+    layout: &SemanticPolicyLayout,
+    mask_cells: usize,
+) -> Result<usize, SemanticTransitionError> {
     let primal_cells = [
         layout.parameter_cells,
         layout.score_cells(),
@@ -9979,6 +9991,11 @@ fn policy_buffer_bytes(layout: &SemanticPolicyLayout) -> Result<usize, SemanticT
         .and_then(|cells| cells.checked_mul(size_of::<f32>()))
         .and_then(|bytes| bytes.checked_add(2 * COMPONENT_COUNT * size_of::<f64>()))
         .and_then(|bytes| bytes.checked_add(2 * size_of::<u64>()))
+        .and_then(|bytes| {
+            mask_cells
+                .checked_mul(2)
+                .and_then(|masks| bytes.checked_add(masks))
+        })
         .ok_or(SemanticTransitionError::GenerationExhausted)
 }
 
@@ -10732,7 +10749,7 @@ impl SemanticTransitionSession {
         #[cfg(not(feature = "semantic-policy"))]
         let policy_bytes = 0;
         #[cfg(feature = "semantic-policy")]
-        let policy_bytes = policy_buffer_bytes(&self.policy_layout()?)?
+        let policy_bytes = policy_buffer_bytes(&self.policy_layout()?, self.codebooks.input_cells)?
             .checked_add(self.codebooks.input_cells)
             .and_then(|n| n.checked_add(COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>()))
             .and_then(|n| n.checked_add(size_of::<DeviceState>()))
@@ -18448,7 +18465,7 @@ impl SemanticTransitionSession {
         let mut reservation = self
             .provider
             .memory()
-            .reserve_bytes(policy_buffer_bytes(&layout)? as u64)
+            .reserve_bytes(policy_buffer_bytes(&layout, self.codebooks.input_cells)? as u64)
             .map_err(|error| runtime_error("policy reservation", error))?;
         self.allocate_policy_buffers_reserved(&mut reservation)
     }
@@ -18500,6 +18517,12 @@ impl SemanticTransitionSession {
             retained_scores: reservation
                 .alloc::<f32>(layout.retained_score_cells())
                 .map_err(|error| runtime_error("retained policy score allocation", error))?,
+            final_masks: reservation
+                .alloc::<u8>(self.codebooks.input_cells)
+                .map_err(|error| runtime_error("retained final mask allocation", error))?,
+            active_sets: reservation
+                .alloc::<u8>(self.codebooks.input_cells)
+                .map_err(|error| runtime_error("retained active set allocation", error))?,
             recurrent: reservation
                 .alloc::<f32>(layout.recurrent_cells())
                 .map_err(|error| runtime_error("policy recurrent allocation", error))?,
@@ -20792,6 +20815,8 @@ impl SemanticTransitionSession {
             recurrent: policy.recurrent.device_ptr_value(),
             retained_scores: policy.retained_scores.device_ptr_value(),
             retained_score_stride: policy.layout.retained_score_stride() as u64,
+            final_masks: policy.final_masks.device_ptr_value(),
+            active_sets: policy.active_sets.device_ptr_value(),
             fields,
         }
     }
@@ -20836,6 +20861,11 @@ impl SemanticTransitionSession {
                 ] {
                     if !buffer.is_empty() {
                         ranges.push((buffer.device_ptr_value(), (buffer.len() * 4) as u64));
+                    }
+                }
+                for buffer in [&policy.final_masks, &policy.active_sets] {
+                    if !buffer.is_empty() {
+                        ranges.push((buffer.device_ptr_value(), buffer.len() as u64));
                     }
                 }
             }
@@ -20907,6 +20937,8 @@ impl SemanticTransitionSession {
             recorder.write(&policy.hidden);
             recorder.write(&policy.scores);
             recorder.write(&policy.retained_scores);
+            recorder.write(&policy.final_masks);
+            recorder.write(&policy.active_sets);
             recorder.write(&policy.recurrent);
         }
         self.graph.record_transition(&mut recorder);
