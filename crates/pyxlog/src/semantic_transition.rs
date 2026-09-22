@@ -3097,6 +3097,7 @@ fn read_task_evaluation_spec(
     queries: &Bound<'_, PyAny>,
     scoring: &Bound<'_, PyAny>,
     truth_masks: &Bound<'_, PyAny>,
+    actor_eligible: &Bound<'_, PyAny>,
     budget: &mut usize,
 ) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
     let statements = ColdValue::read(statements, budget, 0)?;
@@ -3147,6 +3148,7 @@ fn read_task_evaluation_spec(
         u8::try_from(value.unsigned()?).map_err(|_| invalid("native task truth mask exceeds u8"))
     };
     let admissible_truth_masks = [mask(&masks[0])?, mask(&masks[1])?, mask(&masks[2])?];
+    let actor_eligible = ColdValue::read(actor_eligible, budget, 0)?.boolean()?;
     let program = Arc::new(
         xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)
             .map_err(xlog_err)?,
@@ -3157,6 +3159,7 @@ fn read_task_evaluation_spec(
         program,
         scoring,
         admissible_truth_masks,
+        actor_eligible,
     })
 }
 
@@ -4883,38 +4886,23 @@ impl PySemanticCompletedActionLane {
         self.slot
     }
     #[getter]
-    fn text_actions(&self) -> Vec<(u32, u32)> {
-        self.inner
-            .text_actions
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(slot, token)| (slot as u32, token))
-            .collect()
-    }
-    #[getter]
     fn decoded_text_actions(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         let actions = self
             .inner
             .text_actions
             .iter()
             .copied()
-            .enumerate()
             .map(|(source_slot, token_id)| {
                 Py::new(
                     py,
                     PySemanticCompletedTextAction {
-                        source_slot: source_slot as u32,
+                        source_slot,
                         token_id,
                     },
                 )
             })
             .collect::<PyResult<Vec<_>>>()?;
         PyTuple::new(py, actions).map(Bound::unbind)
-    }
-    #[getter]
-    fn edit_actions(&self) -> [[u32; 18]; 2] {
-        self.inner.edit_actions
     }
     #[getter]
     fn decoded_edit_actions(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
@@ -4987,12 +4975,12 @@ impl PySemanticCompletedActionProjection {
         completed_publication_identity(py, self.inner.successor)
     }
     #[getter]
-    fn acquired_theory_identity(&self, py: Python<'_>) -> Py<PyBytes> {
-        PyBytes::new(py, self.inner.predecessor.logical_digest.as_bytes()).unbind()
+    fn result_identity(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.result.identity.as_bytes()).unbind()
     }
     #[getter]
-    fn result_identity(&self, py: Python<'_>) -> Py<PyBytes> {
-        PyBytes::new(py, self.inner.successor.state_digest.as_bytes()).unbind()
+    fn result_material(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.result)
     }
     #[getter]
     fn base_logical_digest(&self, py: Python<'_>) -> Py<PyBytes> {
@@ -5043,6 +5031,10 @@ impl PySemanticCompletedActionProjection {
         PyBytes::new(py, self.inner.batch_root.as_bytes()).unbind()
     }
     #[getter]
+    fn batch_receipt(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.batch_receipt)
+    }
+    #[getter]
     fn action_rng_base(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
         completed_action_material(py, &self.inner.action_rng_base)
     }
@@ -5074,7 +5066,15 @@ impl PySemanticCompletedActionProjection {
             .iter()
             .cloned()
             .enumerate()
-            .map(|(slot, inner)| Py::new(py, PySemanticCompletedActionLane { slot, inner }))
+            .map(|(lane, inner)| {
+                Py::new(
+                    py,
+                    PySemanticCompletedActionLane {
+                        slot: lane + 1,
+                        inner,
+                    },
+                )
+            })
             .collect::<PyResult<Vec<_>>>()?;
         PyTuple::new(py, lanes).map(Bound::unbind)
     }
@@ -5986,14 +5986,15 @@ impl PySemanticPreparedStep {
 
     /// Cold authenticated binding of this completed step's original model.
     /// Returns (predecessor_identity, successor_identity_or_None, model_generation,
-    /// model_geometry_digest, model_numerical_digest, carrier). The immutable
-    /// carrier exposes numerical_realization, logits and random_state as
+    /// model_geometry_digest, model_numerical_digest, carrier_or_None). The
+    /// immutable successful-Proposal carrier exposes numerical_realization, logits and random_state as
     /// (native_owner_identity, canonical_bytes). Identities have the same four
     /// fields as PublishedParent.identity(); they are not live readers.
     /// Join every original consumer stream. Read record 44 and complete model
     /// allocations through this step's existing exports, then call again after
     /// serialization to verify the same sealed inputs. Unknown completion and
-    /// skipped steps cannot expose a binding; a refusal has no successor.
+    /// skipped steps cannot expose a binding. A refusal has no successor, and
+    /// refusal/Recompute/Update/Drain observations return carrier None.
     #[pyo3(signature = (*, consumer_streams))]
     fn completed_model_binding(
         &self,
@@ -6042,7 +6043,9 @@ impl PySemanticPreparedStep {
                 generation,
                 PyBytes::new(py, geometry.as_bytes()),
                 PyBytes::new(py, numerical.as_bytes()),
-                Py::new(py, PySemanticCompletedModelCarrier { inner: carrier })?,
+                carrier
+                    .map(|inner| Py::new(py, PySemanticCompletedModelCarrier { inner }))
+                    .transpose()?,
             )
                 .into_pyobject(py)?
                 .unbind())
@@ -8647,7 +8650,7 @@ impl PySemanticTransitionController {
     /// device receipts or use grants. A derived target remains None even when
     /// its value equals an admitted query. import_task independently recomputes
     /// this coverage and requires original targets before issuing its TaskUse.
-    #[pyo3(signature = (*, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, replay_rows, replay_selection, max_material_bytes, max_total_material_bytes, max_evidence_bytes))]
+    #[pyo3(signature = (*, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, actor_eligible, replay_rows, replay_selection, max_material_bytes, max_total_material_bytes, max_evidence_bytes))]
     #[expect(
         clippy::too_many_arguments,
         reason = "observation coverage retains every independent task and replay input"
@@ -8661,6 +8664,7 @@ impl PySemanticTransitionController {
         task_query_ordinals: &Bound<'_, PyAny>,
         task_scoring: &Bound<'_, PyAny>,
         admissible_truth_masks: &Bound<'_, PyAny>,
+        actor_eligible: &Bound<'_, PyAny>,
         replay_rows: &Bound<'_, PyAny>,
         replay_selection: &Bound<'_, PyAny>,
         max_material_bytes: &Bound<'_, PyAny>,
@@ -8682,6 +8686,7 @@ impl PySemanticTransitionController {
             task_query_ordinals,
             task_scoring,
             admissible_truth_masks,
+            actor_eligible,
             &mut budget,
         )?;
         let rows = read_replay_rows(
@@ -8860,7 +8865,7 @@ impl PySemanticTransitionController {
     /// Only then does this same TaskUse become Imported. Any failed import
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
-    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, live_authorities, replay_rows, training_objective, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot))]
+    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, actor_eligible, live_authorities, replay_rows, training_objective, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot))]
     #[expect(
         clippy::too_many_arguments,
         reason = "task import binds the complete authority, replay, and callback contract"
@@ -8876,6 +8881,7 @@ impl PySemanticTransitionController {
         task_query_ordinals: &Bound<'_, PyAny>,
         task_scoring: &Bound<'_, PyAny>,
         admissible_truth_masks: &Bound<'_, PyAny>,
+        actor_eligible: &Bound<'_, PyAny>,
         live_authorities: &Bound<'_, PyAny>,
         replay_rows: &Bound<'_, PyAny>,
         training_objective: &Bound<'_, PyAny>,
@@ -8960,6 +8966,7 @@ impl PySemanticTransitionController {
             task_query_ordinals,
             task_scoring,
             admissible_truth_masks,
+            actor_eligible,
             &mut budget,
         )?;
         let (selection, selected_material) = decode_selected_replay(

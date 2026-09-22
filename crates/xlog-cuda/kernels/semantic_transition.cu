@@ -278,6 +278,22 @@ struct TaskEvaluation {
     int64_t return_value;
     TaskFacts facts[3]; // Base, first learned lane, second learned lane.
 };
+struct PolicyPwlCell {
+    uint64_t abi,ordinal,cardinality,legal_count,active_count,selected_rank,maximum_bits,singleton;
+    U192 g,active_sum,selected_probability,probability_denominator;
+};
+struct PolicySelectedScoreVjp {
+    uint64_t abi,ordinal,choice,active_count,selected_active,singleton;
+    U192 probability_numerator,probability_denominator;
+};
+struct ActionBatchReceipt {
+    uint64_t abi,proposal,stream_serial,family_id,action_law_generation,model_generation;
+    uint64_t actor_eligible,component_count,candidate_count,winner,total_return_bits;
+    uint64_t base_word,next_word,rng_base,rng_span,rng_successor;
+    uint64_t catalogue_digest[4],component_receipts_digest[4],semantic_receipts_digest[4];
+    uint64_t candidate_roots[3][4],base_logical_digest[4];
+    ExecutionWork execution_work;
+};
 struct State {
     uint32_t model_generation,family_id;
     uint64_t stream_serial,proposal,next_proposal,blocks,status,catalogue_generation;
@@ -289,7 +305,10 @@ struct State {
     uint64_t retired_roots_mask;
     semantic_graph::Receipt cleanup_receipts[3];
     TaskEvaluation task_evaluation;
+    uint64_t actor_eligible;
     ExecutionWork execution_work;
+    ActionBatchReceipt action_batch;
+    uint64_t action_batch_root[4];
 };
 struct SourceSlot {
     uint64_t token,logical_position,kind,provenance,valid,committed,recomputed,provenance_record;
@@ -402,7 +421,7 @@ struct IntentEntry {
 struct PolicyField { uint64_t embeddings,biases; uint32_t cardinality; int32_t null_category; uint64_t retained_offset; };
 struct PolicyDescriptor {
     uint64_t z,recurrence,positions,hidden,scores,recurrent,retained_scores,retained_score_stride;
-    uint64_t final_masks,active_sets;
+    uint64_t final_masks,active_sets,pwl_cells,selected_score_vjps;
     PolicyField fields[18];
 };
 struct SemanticTrainingViewSelection {
@@ -478,14 +497,34 @@ struct Descriptor {
     TextBinding text;
     ModelWorkInput model_work;
 };
+
+__device__ void retain_policy_cell(const PolicyDescriptor& policy,const Component& component,
+        const Receipt& receipt,float maximum,U192 g,U192 active_sum,bool singleton) {
+    if(!policy.z)return;
+    auto& cell=reinterpret_cast<PolicyPwlCell*>(policy.pwl_cells)[component.ordinal];
+    cell=PolicyPwlCell{};cell.abi=1;cell.ordinal=component.ordinal;
+    cell.cardinality=component.cardinality;cell.legal_count=receipt.legal_count;
+    cell.active_count=receipt.active_count;cell.selected_rank=receipt.selected_rank;
+    cell.maximum_bits=uint64_t(__float_as_uint(maximum));cell.singleton=uint64_t(singleton);
+    cell.g=g;cell.active_sum=active_sum;cell.selected_probability=receipt.p;
+    cell.probability_denominator=receipt.q;
+    auto& vjp=reinterpret_cast<PolicySelectedScoreVjp*>(policy.selected_score_vjps)[component.ordinal];
+    vjp=PolicySelectedScoreVjp{};vjp.abi=1;vjp.ordinal=component.ordinal;
+    vjp.choice=receipt.choice;vjp.active_count=receipt.active_count;vjp.selected_active=1;
+    vjp.singleton=uint64_t(singleton);vjp.probability_numerator=receipt.p;
+    vjp.probability_denominator=receipt.q;
+}
 static_assert(sizeof(U192)==24,"integer ABI");
 static_assert(sizeof(Receipt)==296,"receipt ABI");
 static_assert(sizeof(Work)==24,"semantic work ABI");
 static_assert(sizeof(TaskFacts)==64,"task facts ABI");
 static_assert(sizeof(TaskEvaluation)==3256,"task evaluation ABI");
-static_assert(sizeof(State)==6952,"state ABI");
+static_assert(sizeof(PolicyPwlCell)==160,"policy PWL cell ABI");
+static_assert(sizeof(PolicySelectedScoreVjp)==96,"selected-score VJP ABI");
+static_assert(sizeof(ActionBatchReceipt)==504,"action batch receipt ABI");
+static_assert(sizeof(State)==7496,"state ABI");
 static_assert(sizeof(PolicyField)==32,"policy field ABI");
-static_assert(sizeof(PolicyDescriptor)==656,"policy ABI");
+static_assert(sizeof(PolicyDescriptor)==672,"policy ABI");
 static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origin ABI");
 static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
 static_assert(sizeof(SemanticTrainingObjectiveRecord)==280,"training objective ABI");
@@ -534,7 +573,7 @@ static_assert(sizeof(PublicationStorageEntry)==24,"owned storage ABI");
 static_assert(sizeof(PublicationRange)==128,"publication range ABI");
 static_assert(sizeof(PublicationHeader)==488,"publication header ABI");
 static_assert(sizeof(PublicationControl)==144,"publication control ABI");
-static_assert(sizeof(PublicationBank)==49744,"publication bank ABI");
+static_assert(sizeof(PublicationBank)==50288,"publication bank ABI");
 static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
 static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
 static_assert(sizeof(PendingContinuation)==256,"pending continuation ABI");
@@ -552,7 +591,7 @@ static_assert(sizeof(AttemptReceipt)==344,"attempt receipt ABI");
 static_assert(sizeof(TokenProvenanceRecord)==184,"token provenance ABI");
 static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
-static_assert(sizeof(Descriptor)==992,"launch ABI");
+static_assert(sizeof(Descriptor)==1008,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 
 __device__ uint64_t text_row_count(TextBinding binding) {
@@ -1751,7 +1790,7 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
        !inputs.roster_rows || inputs.roster_rows%alignof(SemanticTrainingRosterRow) ||
        !inputs.objective || inputs.objective%alignof(SemanticTrainingObjectiveRecord) ||
        !inputs.canaries || inputs.canaries%alignof(SemanticTrainingCanaryRecord) || inputs.canary_count!=5 ||
-       !inputs.task || inputs.task%alignof(uint64_t) || inputs.task_words<34 ||
+       !inputs.task || inputs.task%alignof(uint64_t) || inputs.task_words<53 ||
        (inputs.protected_member_count && (!inputs.protected_members ||
         inputs.protected_members%alignof(uint64_t))) ||
        !inputs.forward_receipts || inputs.forward_receipts%alignof(ModelForwardReceipt) ||
@@ -1799,8 +1838,8 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
        objective.row_count!=inputs.row_count || objective.capacity!=inputs.capacity ||
        objective.protected_member_count!=inputs.protected_member_count ||
        selection.row_count!=inputs.row_count || selection.capacity!=inputs.capacity ||
-        task[0]!=4 || !task[1] || support_count>(UINT64_MAX-52)/5 ||
-        inputs.task_words!=34+support_count*5+18 ||
+       task[0]!=5 || !task[1] || support_count>(UINT64_MAX-53)/5 ||
+       inputs.task_words!=34+support_count*5+19 || task[52+support_count*5]>1 ||
        !publication_identity_equal(objective.task_identity,task+2)) {
         semantic_content_integrity_trap();return;
     }
@@ -2313,6 +2352,37 @@ struct PublicationSemanticReceiptBytes {
     }
 };
 
+__device__ uint64_t publication_seal_action_batch(const PublicationControl& control,
+        const PublicationBank& base,const PublicationBank& bank,State& state) {
+    ActionBatchReceipt receipt{};receipt.abi=1;receipt.proposal=state.proposal;
+    receipt.stream_serial=state.stream_serial;receipt.family_id=state.family_id;
+    receipt.action_law_generation=state.catalogue_generation;
+    receipt.model_generation=state.model_generation;receipt.actor_eligible=state.actor_eligible;
+    receipt.component_count=COMPONENT_COUNT;receipt.candidate_count=3;
+    receipt.winner=state.task_evaluation.winner;
+    receipt.total_return_bits=uint64_t(state.task_evaluation.return_value);
+    receipt.base_word=base.header.publication_word;receipt.next_word=bank.header.publication_word;
+    receipt.rng_base=state.proposal*COMPONENT_COUNT;receipt.rng_span=COMPONENT_COUNT;
+    receipt.rng_successor=state.next_proposal*COMPONENT_COUNT;
+    auto* catalogue_digest_bytes=reinterpret_cast<uint8_t*>(receipt.catalogue_digest);
+    for(uint32_t byte=0;byte<32;++byte)
+        catalogue_digest_bytes[byte]=state.catalogue_digest[byte];
+    if(publication_action_digest(control,bank,bank.receipts,COMPONENT_COUNT,
+            receipt.component_receipts_digest))return 1;
+    semantic_graph::sha256(PublicationSemanticReceiptBytes{state.semantic_receipts},
+        sizeof(state.semantic_receipts),receipt.semantic_receipts_digest);
+    const uint32_t candidate_receipts[3]={0,3,6};
+    for(uint32_t candidate=0;candidate<3;++candidate)
+        semantic_graph::copy_identity(receipt.candidate_roots[candidate],
+            state.semantic_receipts[candidate_receipts[candidate]].words+16);
+    semantic_graph::copy_identity(receipt.base_logical_digest,base.header.logical_digest);
+    receipt.execution_work=state.execution_work;
+    state.action_batch=receipt;
+    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(&receipt),sizeof(receipt),
+        state.action_batch_root);
+    return 0;
+}
+
 __device__ bool publication_model_contract_layout(const ModelContractLayout& layout,uint64_t bytes) {
     const uint64_t begin[]={layout.schema_begin,layout.schema_digest_offset,layout.generation_offset,
         layout.numerical_digest_offset,layout.identity_offset};
@@ -2407,7 +2477,10 @@ __device__ uint64_t publication_logical_digest(const PublicationControl& control
     uint64_t digest[4];
     semantic_graph::sha256(reinterpret_cast<const uint8_t*>(bank.source),sizeof(bank.source),digest);
     publication_fold(bank.header.logical_digest,0,1,digest);
-    if(publication_action_digest(control,bank,bank.receipts,136,digest))return 1;
+    if(bank.state.action_batch_root[0] || bank.state.action_batch_root[1] ||
+       bank.state.action_batch_root[2] || bank.state.action_batch_root[3])
+        semantic_graph::copy_identity(digest,bank.state.action_batch_root);
+    else if(publication_action_digest(control,bank,bank.receipts,136,digest))return 1;
     publication_fold(bank.header.logical_digest,0,2,digest);
     const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[bank.header.publication_word&1]);
     for(uint64_t i=0;i<bank.header.range_count;++i) {
@@ -3323,7 +3396,7 @@ __device__ void decode_action(const uint64_t* books,const uint32_t* choices,
 __device__ bool task_allows(const uint64_t* task,
         semantic_graph::DecodedStatement& statement,
         const semantic_graph::DecodedSupport& support) {
-    if(!task || task[0]!=4)return false;
+    if(!task || task[0]!=5)return false;
     uint64_t identity[4];semantic_graph::decode_identity(statement.identity_words,identity);
     uint32_t query_index=3;
     for(uint32_t query=0;query<3 && query_index==3;++query) {
@@ -3826,7 +3899,17 @@ __device__ uint64_t publication_write_attempt(const PublicationControl& control,
     semantic_graph::copy_identity(attempt->instance,bank.header.instance);
     attempt->base_word=base.header.publication_word;attempt->next_word=bank.header.publication_word;
     semantic_graph::copy_identity(attempt->logical_digest,bank.header.logical_digest);
-    if(publication_action_digest(control,bank,bank.receipts,drain ? 0 : 136,attempt->action_receipts_digest))return 1;
+    if(drain) {
+        if(publication_action_digest(control,bank,bank.receipts,0,
+                attempt->action_receipts_digest))return 1;
+    } else {
+        uint64_t root[4];
+        semantic_graph::sha256(reinterpret_cast<const uint8_t*>(&bank.state.action_batch),
+            sizeof(bank.state.action_batch),root);
+        if(bank.state.action_batch.abi!=1 || bank.state.action_batch.component_count!=COMPONENT_COUNT ||
+           !publication_identity_equal(root,bank.state.action_batch_root))return 1;
+        semantic_graph::copy_identity(attempt->action_receipts_digest,root);
+    }
     semantic_graph::sha256(PublicationSemanticReceiptBytes{bank.state.semantic_receipts},sizeof(bank.state.semantic_receipts),attempt->semantic_receipts_digest);
     const uint64_t role[5]={14,27,30,32,33};
     uint64_t* output[5]={attempt->coverage_digest,attempt->replay_head_digest,attempt->intent_head_digest,
@@ -3851,7 +3934,7 @@ __device__ uint64_t publication_initialize(const Descriptor& descriptor,Publicat
        !contract.model_generation || bank.header.model_generation>UINT32_MAX ||
        (restored ? bank.header.model_generation<contract.model_generation : bank.header.model_generation!=contract.model_generation) ||
        bank.header.authority_generation!=contract.authority_generation ||
-        !publication_identity_equal(contract.task_identity,task+2) || task[0]!=4 || task[1]!=descriptor.arena[1] ||
+        !publication_identity_equal(contract.task_identity,task+2) || task[0]!=5 || task[1]!=descriptor.arena[1] ||
        !publication_identity_equal(control.instance,bank.header.instance) || bank.header.range_count!=inactive.header.range_count ||
        (contract.terminal_token_count && !contract.terminal_tokens))return 1;
     uint64_t end=0;
@@ -4172,6 +4255,11 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
     // Feedback queries and root retirement belong to this attempt even when
     // they follow candidate selection. Snapshot their actual accumulated work.
     next.state.execution_work=state->execution_work;
+    if(!no_draw) {
+        if(publication_seal_action_batch(control,base,next,*state))return 1;
+        next.state.action_batch=state->action_batch;
+        semantic_graph::copy_identity(next.state.action_batch_root,state->action_batch_root);
+    }
     if(publication_range_digest(control,*source,nullptr,reinterpret_cast<uint64_t*>(publication_range_bytes(control,*prefix))) ||
        publication_write_coverage(control,contract,next,drain ? nullptr : &pending) || publication_seal_ranges(control,next,&base) ||
        publication_logical_digest(control,next))return 1;
@@ -4269,7 +4357,7 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
     PublicationFeedbackInputs inputs{};
     if(publication_feedback_inputs(descriptor.publication.control,lease,slots,&inputs) || !descriptor.task)return 1;
     const auto* task=reinterpret_cast<const uint64_t*>(descriptor.task);
-    if(task[0]!=4 || task[1]!=descriptor.arena[1] ||
+    if(task[0]!=5 || task[1]!=descriptor.arena[1] ||
        task[22]>=UINT32_MAX || task[23]>=UINT32_MAX || task[24]>=UINT32_MAX)return 1;
     const auto& bank=*inputs.bank;
     semantic_graph::Layout layout{};
@@ -4402,6 +4490,9 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         state->importance_weight=0.0;
         state->retired_roots_mask=0;
         state->task_evaluation=TaskEvaluation{};
+        state->actor_eligible=0;
+        state->action_batch=ActionBatchReceipt{};
+        for(uint32_t i=0;i<4;++i)state->action_batch_root[i]=0;
         // Drain never executes the model body. Other modes consume the common
         // original forward, including numerical refusals.
         state->execution_work=ExecutionWork{};
@@ -4480,7 +4571,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                    !publication_identity_equal(pending.instance,lease.instance) || contract.abi!=1 ||
                    !publication_identity_equal(pending.topology_identity,contract.topology_identity) ||
                    !publication_identity_equal(pending.table_identity,contract.table_identity) ||
-                    !task || task[0]!=4 || task[1]!=descriptor.arena[1] ||
+                    !task || task[0]!=5 || task[1]!=descriptor.arena[1] ||
                    !publication_identity_equal(contract.task_identity,task+2)) {
                     semantic_content_integrity_trap();return;
                 }
@@ -4535,10 +4626,11 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 transition_kind=reinterpret_cast<const PendingContinuation*>(control.continuation)->transition_kind;
             }
         }
-        if(!failed && task && (task[0]!=4 || task[1]!=descriptor.arena[1] ||
-           task[18]>3 || task[19]>3 || task[20]>3)) {
+        if(!failed && task && (task[0]!=5 || task[1]!=descriptor.arena[1] ||
+           task[18]>3 || task[19]>3 || task[20]>3 || task[52+task[21]*5]>1)) {
             failed=1;state->status=7;
         }
+        if(!failed && task)state->actor_eligible=task[52+task[21]*5];
         input_bank_admitted=!failed && transition_kind==1;
     }
     __syncthreads();
@@ -4692,6 +4784,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 result.choice=TEXT_NULL;result.legal_count=result.active_count=1;
                 result.p.w[0]=result.q.w[0]=result.factor_denominator.w[0]=1;
                 result.cdf_end=result.mass=uint64_t(1)<<63;
+                retain_policy_cell(descriptor.policy,component,result,0.0f,U192{},U192{},true);
                 receipts[ordinal]=result;++state->blocks;
                 semantic_graph::charge_native(&sampler_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(Receipt));
             }
@@ -4701,6 +4794,8 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         const uint64_t offset=descriptor.policy.z && component.kind==COMPONENT_KIND_TEXT
             ? text_row_index(descriptor.text,component.field)*TEXT_CARDINALITY : component.offset;
         const float* row=descriptor.policy.z && component.kind==COMPONENT_KIND_EDIT ? nullptr : logits+offset;
+        if(threadIdx.x==0){count=0;invalid=0;}
+        __syncthreads();
 #ifdef XLOG_SEMANTIC_POLICY
         if (descriptor.policy.z && component.kind==COMPONENT_KIND_EDIT) {
             const auto p=descriptor.policy;
@@ -4720,13 +4815,14 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             row=reinterpret_cast<const float*>(p.scores);
             float* retained=reinterpret_cast<float*>(p.retained_scores)
                 +(lane*2+component.slot)*p.retained_score_stride+f.retained_offset;
-            for(uint32_t i=threadIdx.x;i<component.cardinality;i+=blockDim.x)retained[i]=row[i];
+            for(uint32_t i=threadIdx.x;i<component.cardinality;i+=blockDim.x) {
+                retained[i]=row[i];
+                if(!isfinite(row[i]))atomicExch(&invalid,1U);
+            }
             __syncthreads();
         }
 #endif
         const uint8_t* mask=support+component.offset;
-        if(threadIdx.x==0){count=0;invalid=0;}
-        __syncthreads();
         for(uint32_t i=threadIdx.x;i<component.cardinality;i+=blockDim.x) {
             bool admitted=mask[i]!=0 && legal_category(component,i,books,viable,choices,actions[edit][0],actions[edit][1],&sampler_work);
             if(final_masks) {
@@ -4763,15 +4859,16 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         }
         if(threadIdx.x==0) {
             Receipt result=component_receipt(component,*state,&sampler_work);result.legal_count=count;
+            float maximum=row[sorted[0]];
+            U192 g={{0,0,0}},active_sum={{0,0,0}};
             ++state->blocks;
             if(count==1) {
                 result.choice=sorted[0];result.p.w[0]=result.q.w[0]=result.factor_denominator.w[0]=1;
                 result.active_count=1;result.cdf_end=result.mass=uint64_t(1)<<63;
                 if(active_sets)active_sets[sorted[0]]=1;
             } else {
-                float maximum=row[sorted[0]];
-                U192 g=sub(shifted(1,149),shifted(count,118));
-                U192 prefix={{0,0,0}},active_sum={{0,0,0}};
+                g=sub(shifted(1,149),shifted(count,118));
+                U192 prefix={{0,0,0}};
                 uint32_t h=0;
                 for(uint32_t i=0;i<count;++i) {
                     semantic_graph::charge_native(&sampler_work,semantic_graph::NativeWorkEvent::CdfStep,1);
@@ -4810,6 +4907,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 choices[component.field]=result.choice;
                 if(choices[0]==ACTION_APPLY){result.active_fields=INSERT_SUPPORT_ACTIVE_MASK;result.null_fields=INSERT_SUPPORT_NULL_MASK;}
             }
+            retain_policy_cell(descriptor.policy,component,result,maximum,g,active_sum,count==1);
             receipts[ordinal]=result;
             semantic_graph::charge_native(&sampler_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(Receipt));
             if(!failed && component.kind==COMPONENT_KIND_EDIT && component.field==17) {

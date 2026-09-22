@@ -100,20 +100,22 @@ python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python \
 ### Semantic task binding
 
 The semantic controller's `task_observation_roots` and `import_task` methods
-require four explicit keyword arguments in addition to their admission and
+require five explicit keyword arguments in addition to their admission and
 authority inputs:
 
 | Argument | Meaning |
 | --- | --- |
 | `task_program_source` | Complete authored XLOG source, including concrete input facts; imports and external relation inputs are not accepted by this adapter. |
-| `task_query_ordinals` | Two zero-based query ordinals, in admitted statement order; both queries must return zero-arity results. |
+| `task_query_ordinals` | Three zero-based query ordinals, in admitted statement order; all queries must return zero-arity results. |
 | `task_scoring` | Six nonnegative `u32` coefficients in order: correct, all-correct, work, improvement, refusal, spent. |
-| `admissible_truth_masks` | Two nonzero four-bit masks, one per query; bit `n` permits truth value `n`. |
+| `admissible_truth_masks` | Three nonzero four-bit masks, one per query; bit `n` permits truth value `n`. |
+| `actor_eligible` | Required Boolean application decision, frozen into the task before any action draw; it is never inferred from the winner or result. |
 
 Import runs the authored program through XLOG's native GPU evaluator and derives
 expected Boolean answers from its completed results. There is no expected-answer
 argument or built-in task. Source, selected queries, observed results, scoring,
-and masks become part of the task identity checked during restoration. See the
+masks, and actor eligibility become part of the task identity checked during
+restoration. See the
 [Rust task contract](/reference/rust#semantic-task-programs) for scoring and
 numerical-policy build requirements. These inputs replace the former implicit
 task; there is no legacy fallback.
@@ -276,10 +278,13 @@ Before retiring a completed segment, call its original step's
 `completed_model_binding(consumer_streams=[...])` to authenticate that step's
 retained model inputs. The result is
 `(predecessor_identity, successor_identity_or_None, model_generation,
-model_geometry_digest, model_numerical_digest)`. Each identity has the four
+model_geometry_digest, model_numerical_digest, carrier_or_None)`. Each identity has the four
 fields returned by `PublishedParent.identity()`. The generation and both
 32-byte digests belong to the acquired predecessor, not the final segment bank.
-A completed numerical refusal has no successor. A skipped step, an uncompleted
+A successful Proposal carrier exposes `numerical_realization`, `logits`, and
+`random_state` as native-owner identity plus canonical bytes. Recompute, Update,
+Drain, and refused steps return `None` for the carrier; a completed numerical
+refusal also has no successor. A skipped step, an uncompleted
 segment, or uncertain execution cannot return a binding.
 
 Use the same step's `record(44, 0, consumer_stream=...)`, `tensor(...)` and
@@ -297,6 +302,36 @@ outside capture and the measured resident loop, before `retire_segment`. It does
 not finish policy use or retire the step. Its returned identities are not live
 readers, complete predecessor/successor replay materials, or authorization for a
 new model invocation.
+
+### Completed-step action projection
+
+For a successfully published Proposal, call
+`completed_action_projection(consumer_streams=[...])` before retiring the
+segment. This typed cold projection returns the authenticated predecessor and
+successor, logical-state materials, proposal/stream/family/action-law/model
+coordinates, native winner and pre-draw actor eligibility, exact signed-return
+bits, the device-sealed batch receipt and root, the retained task-result material,
+and distinct action RNG base and successor materials. The projection does not
+manufacture an acquired-theory identity; that value remains an application-owned
+assembler input.
+
+The projection contains the admitted slot-zero record, learned lane slots 1 and 2
+with their native admission or refusal, exact non-NULL text actions and
+hard-decoded edits, and exactly
+136 ordered component objects. Each component retains its selected category,
+legal and active counts, exact 192-bit probability and cumulative-mass values,
+CDF interval, draw, rank, Philox address, and byte-backed final-mask, PWL-cell,
+active-set, selected-score VJP, component-receipt, and applicable hard-decode
+receipt materials. PWL-cell and VJP bytes are original device-forward records,
+not host reconstructions. The successor publication's native `AttemptReceipt`
+remains a separate evidence material.
+
+The method joins declared consumers and reads retained device storage outside
+the resident loop. Its opaque owner is the original retained completed-step
+carrier; typed children do not reinterpret that private ABI. It never runs a
+second forward or reacquires a current publication. Native rechecks the
+same completed binding after serialization; a changed owner, non-Proposal step,
+refusal, unknown completion, or malformed retained law closes the call.
 
 ### Completed-step raw feedback
 

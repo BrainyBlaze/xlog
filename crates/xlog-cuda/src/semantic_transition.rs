@@ -158,6 +158,9 @@ pub struct SemanticTaskEvaluationSpec {
     pub scoring: SemanticTaskScoring,
     /// Bit n permits Truth4 value n for the corresponding candidate query.
     pub admissible_truth_masks: [u8; 3],
+    /// Application-owned ex-ante decision that this episode may contribute an
+    /// actor term. It is frozen with the task before any action draw.
+    pub actor_eligible: bool,
 }
 
 /// Owner-validated cold read coverage for a task's queried semantic heads.
@@ -373,7 +376,7 @@ impl TaskEvaluationBinding {
 
     pub(crate) fn identity(&self) -> Identity256 {
         let mut hash = Sha256::new();
-        hash.update(b"xlog.semantic.task-evaluation.v5\0");
+        hash.update(b"xlog.semantic.task-evaluation.v6\0");
         hash.update(self.admission_identity.as_bytes());
         hash.update(self.schema_generation.as_bytes());
         // Keep source occurrence and explicit selection order separate from
@@ -396,6 +399,7 @@ impl TaskEvaluationBinding {
             hash.update((truth as u64).to_le_bytes());
         }
         hash.update(self.spec.admissible_truth_masks);
+        hash.update([u8::from(self.spec.actor_eligible)]);
         for weight in self.spec.scoring.words() {
             hash.update(weight.to_le_bytes());
         }
@@ -477,12 +481,30 @@ impl TaskEvaluationBinding {
         (self.content_identity(), self.expected_truth())
     }
 
+    #[cfg(feature = "semantic-policy")]
+    fn completed_result_material(&self) -> SemanticCompletedStepWitnessMaterial {
+        let identities = self.content_identity();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"xlog.semantic.task-four-valued-result.v1\0");
+        bytes.extend_from_slice(identities.query.as_bytes());
+        bytes.extend_from_slice(identities.theory_program.as_bytes());
+        material_u64(&mut bytes, self.observation.result_bytes.len() as u64);
+        bytes.extend_from_slice(&self.observation.result_bytes);
+        for truth in self.observation.expected_truth {
+            material_u64(&mut bytes, truth as u64);
+        }
+        SemanticCompletedStepWitnessMaterial {
+            identity: identities.result,
+            bytes,
+        }
+    }
+
     pub(crate) fn spec(&self) -> &SemanticTaskEvaluationSpec {
         &self.spec
     }
 
     pub(crate) fn words(&self, owner: u64) -> Vec<u64> {
-        let mut words = vec![4, owner];
+        let mut words = vec![5, owner];
         words.extend(identity_words(*self.identity().as_bytes()));
         for statement in self.statements {
             words.extend(identity_words(*statement.identity().as_bytes()));
@@ -506,6 +528,7 @@ impl TaskEvaluationBinding {
         } else {
             words.extend([0; 18]);
         }
+        words.push(u64::from(self.spec.actor_eligible));
         words
     }
 }
@@ -1125,6 +1148,70 @@ struct DeviceTaskEvaluation {
     facts: [SemanticTaskFacts; 3],
 }
 
+/// Exact piecewise-linear cell selected by the device policy forward pass.
+/// The separate retained masks carry the categorical support and active set.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SemanticPolicyPwlCell {
+    abi: u64,
+    ordinal: u64,
+    cardinality: u64,
+    legal_count: u64,
+    active_count: u64,
+    selected_rank: u64,
+    maximum_bits: u64,
+    singleton: u64,
+    g: [u64; 3],
+    active_sum: [u64; 3],
+    selected_probability: [u64; 3],
+    probability_denominator: [u64; 3],
+}
+
+/// Producer-owned selected-score differential operator retained by the forward
+/// pass. Together with the exact active set it determines the categorical VJP.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SemanticPolicySelectedScoreVjp {
+    abi: u64,
+    ordinal: u64,
+    choice: u64,
+    active_count: u64,
+    selected_active: u64,
+    singleton: u64,
+    probability_numerator: [u64; 3],
+    probability_denominator: [u64; 3],
+}
+
+/// Device-sealed receipt for the complete action batch. The root is SHA-256 of
+/// these exact bytes and therefore cannot be substituted by a task identity or
+/// a digest of component receipts alone.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SemanticActionBatchReceipt {
+    abi: u64,
+    proposal: u64,
+    stream_serial: u64,
+    family_id: u64,
+    action_law_generation: u64,
+    model_generation: u64,
+    actor_eligible: u64,
+    component_count: u64,
+    candidate_count: u64,
+    winner: u64,
+    total_return_bits: u64,
+    base_word: u64,
+    next_word: u64,
+    rng_base: u64,
+    rng_span: u64,
+    rng_successor: u64,
+    catalogue_digest: Identity256,
+    component_receipts_digest: Identity256,
+    semantic_receipts_digest: Identity256,
+    candidate_roots: [Identity256; 3],
+    base_logical_digest: Identity256,
+    execution_work: ExecutionWork,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct DeviceState {
@@ -1144,7 +1231,10 @@ struct DeviceState {
     retired_roots_mask: u64,
     cleanup_receipts: [[u64; 42]; 3],
     task_evaluation: DeviceTaskEvaluation,
+    actor_eligible: u64,
     execution_work: ExecutionWork,
+    action_batch: SemanticActionBatchReceipt,
+    action_batch_root: Identity256,
 }
 
 impl Default for DeviceState {
@@ -1157,6 +1247,13 @@ impl Default for DeviceState {
 
 // SAFETY: C layout, integer and FP64 fields; all bit patterns are valid.
 unsafe impl DeviceRepr for DeviceState {}
+unsafe impl DeviceRepr for SemanticPolicyPwlCell {}
+unsafe impl DeviceRepr for SemanticPolicySelectedScoreVjp {}
+unsafe impl DeviceRepr for SemanticActionBatchReceipt {}
+
+const _: () = assert!(size_of::<SemanticPolicyPwlCell>() == 160);
+const _: () = assert!(size_of::<SemanticPolicySelectedScoreVjp>() == 96);
+const _: () = assert!(size_of::<SemanticActionBatchReceipt>() == 504);
 
 /// Original active-ring source slot. Kind and provenance are independent: a
 /// filled model-input row is not an assertion that the token was observed.
@@ -3331,7 +3428,7 @@ const _: () = assert!(size_of::<PublicationStorageEntry>() == 24);
 const _: () = assert!(size_of::<PublicationRange>() == 128);
 const _: () = assert!(size_of::<PublicationHeader>() == 488);
 const _: () = assert!(size_of::<PublicationControl>() == 144);
-const _: () = assert!(size_of::<PublicationBank>() == 49744);
+const _: () = assert!(size_of::<PublicationBank>() == 50288);
 const _: () = assert!(size_of::<PublicationRoleCount>() == 16);
 const _: () = assert!(size_of::<SemanticModelContractLayout>() == 48);
 const _: () = assert!(size_of::<PublicationContract>() == 272);
@@ -3446,7 +3543,8 @@ pub struct SemanticCompletedActionComponentMaterial {
 #[cfg(feature = "semantic-policy")]
 #[derive(Clone)]
 pub struct SemanticCompletedActionLaneMaterial {
-    pub text_actions: [u32; 32],
+    /// Exact non-NULL learned text actions as (original source slot, token).
+    pub text_actions: Vec<(u32, u32)>,
     pub edit_actions: [[u32; 18]; 2],
     pub admitted: bool,
     pub refusal_reason: Option<&'static str>,
@@ -3470,6 +3568,8 @@ pub struct SemanticCompletedActionProjectionMaterial {
     pub actor_eligible: bool,
     pub total_return_bits: u64,
     pub batch_root: Identity256,
+    pub batch_receipt: SemanticCompletedStepWitnessMaterial,
+    pub result: SemanticCompletedStepWitnessMaterial,
     pub action_rng_base: SemanticCompletedStepWitnessMaterial,
     pub action_rng_successor: SemanticCompletedStepWitnessMaterial,
     pub base_logical_state: SemanticCompletedStepWitnessMaterial,
@@ -3656,8 +3756,19 @@ fn publication_action_receipts_digest(
 ) -> Result<Identity256, SemanticTransitionError> {
     // publication_logical_codebook_digest and PublicationActionReceiptBytes:
     // owner/slot/generation and the runtime admission binding are audit data.
-    let bytes = &codebook.bytes;
-    if codebook.range.role != 48 || bytes.len() < 25 * 8 || !bytes.len().is_multiple_of(8) {
+    if codebook.range.role != 48 {
+        return Err(publication_input_error(
+            "replay action codebook has another native extent",
+        ));
+    }
+    publication_action_receipts_digest_bytes(&codebook.bytes, receipts)
+}
+
+fn publication_action_receipts_digest_bytes(
+    bytes: &[u8],
+    receipts: &[SemanticTransitionReceipt],
+) -> Result<Identity256, SemanticTransitionError> {
+    if bytes.len() < 25 * 8 || !bytes.len().is_multiple_of(8) {
         return Err(publication_input_error(
             "replay action codebook has another native extent",
         ));
@@ -3712,6 +3823,10 @@ fn publication_semantic_receipts_digest(receipts: &[[u64; 42]; 7]) -> Identity25
         }
     }
     Identity256::from_bytes(hash.finalize().into())
+}
+
+fn publication_action_batch_root(batch: &SemanticActionBatchReceipt) -> Identity256 {
+    Identity256::from_bytes(Sha256::digest(publication_abi_bytes(&[*batch])).into())
 }
 
 const REPLAY_EVIDENCE_ROLES: [u64; 6] = [27, 28, 30, 31, 32, 33];
@@ -4166,15 +4281,56 @@ impl PublicationReplayEvidence {
             std::ptr::read_unaligned(coverage.bytes.as_ptr().cast::<CompletionCoverage>())
         };
         let coverage_digest = coverage.logical_record_digest()?;
+        let component_receipts_digest =
+            publication_action_receipts_digest(codebook, &bank.receipts[..draws])?;
+        let semantic_receipts_digest =
+            publication_semantic_receipts_digest(&bank.state.semantic_receipts);
+        let action_batch_valid = if kind == SemanticTransitionKind::Proposal {
+            let batch = &bank.state.action_batch;
+            let root = publication_action_batch_root(batch);
+            batch.abi == 1
+                && batch.proposal == bank.state.proposal
+                && batch.stream_serial == bank.state.stream_serial
+                && batch.family_id == u64::from(bank.state.family_id)
+                && batch.action_law_generation == bank.state.catalogue_generation
+                && batch.model_generation == u64::from(bank.state.model_generation)
+                && batch.actor_eligible == bank.state.actor_eligible
+                && batch.actor_eligible <= 1
+                && batch.component_count == COMPONENT_COUNT as u64
+                && batch.candidate_count == 3
+                && batch.winner == bank.state.task_evaluation.winner
+                && batch.total_return_bits == bank.state.task_evaluation.return_value as u64
+                && batch.base_word == base.publication_word
+                && batch.next_word == header.publication_word
+                && batch.rng_base == bank.state.proposal * COMPONENT_COUNT as u64
+                && batch.rng_span == COMPONENT_COUNT as u64
+                && batch.rng_successor == bank.state.next_proposal * COMPONENT_COUNT as u64
+                && batch.catalogue_digest == bank.state.catalogue_digest
+                && batch.component_receipts_digest == component_receipts_digest
+                && batch.semantic_receipts_digest == semantic_receipts_digest
+                && batch.base_logical_digest == base.logical_digest
+                && batch.execution_work == bank.state.execution_work
+                && [0usize, 3, 6]
+                    .into_iter()
+                    .enumerate()
+                    .all(|(candidate, receipt)| {
+                        identity_words(*batch.candidate_roots[candidate].as_bytes())
+                            == bank.state.semantic_receipts[receipt][16..20]
+                    })
+                && root == bank.state.action_batch_root
+                && root == attempt.action_receipts_digest
+        } else {
+            bank.state.action_batch == SemanticActionBatchReceipt::default()
+                && bank.state.action_batch_root == Identity256::default()
+                && attempt.action_receipts_digest == component_receipts_digest
+        };
         if completion.abi != 1
             || completion.instance != header.instance
             || completion.base_word != base.publication_word
             || completion.receipt_digest != coverage_digest
             || attempt.coverage_digest != coverage_digest
-            || attempt.action_receipts_digest
-                != publication_action_receipts_digest(codebook, &bank.receipts[..draws])?
-            || attempt.semantic_receipts_digest
-                != publication_semantic_receipts_digest(&bank.state.semantic_receipts)
+            || !action_batch_valid
+            || attempt.semantic_receipts_digest != semantic_receipts_digest
         {
             return Err(publication_input_error(
                 "whole native attempt differs from actual action, semantic or completion receipts",
@@ -8921,6 +9077,8 @@ struct PolicyDescriptor {
     retained_score_stride: u64,
     final_masks: u64,
     active_sets: u64,
+    pwl_cells: u64,
+    selected_score_vjps: u64,
     fields: [PolicyField; 18],
 }
 
@@ -9205,6 +9363,8 @@ struct PolicyBuffers {
     retained_scores: TrackedCudaSlice<f32>,
     final_masks: TrackedCudaSlice<u8>,
     active_sets: TrackedCudaSlice<u8>,
+    pwl_cells: TrackedCudaSlice<SemanticPolicyPwlCell>,
+    selected_score_vjps: TrackedCudaSlice<SemanticPolicySelectedScoreVjp>,
     recurrent: TrackedCudaSlice<f32>,
     text_logits: TrackedCudaSlice<f32>,
     component_baselines: TrackedCudaSlice<f32>,
@@ -9438,11 +9598,11 @@ const _: () = assert!(size_of::<ContinuationInputs>() == 104);
 const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 296);
 const _: () = assert!(size_of::<SemanticTaskFacts>() == 64);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3256);
-const _: () = assert!(size_of::<DeviceState>() == 6952);
+const _: () = assert!(size_of::<DeviceState>() == 7496);
 const _: () = assert!(size_of::<PolicyField>() == 32);
-const _: () = assert!(size_of::<PolicyDescriptor>() == 656);
+const _: () = assert!(size_of::<PolicyDescriptor>() == 672);
 const _: () = assert!(size_of::<PolicyBackward>() == 144);
-const _: () = assert!(size_of::<Descriptor>() == 992);
+const _: () = assert!(size_of::<Descriptor>() == 1008);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -9484,8 +9644,8 @@ mod task_state_contract {
 
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
-        assert_eq!(size_of::<DeviceState>(), 6952);
-        assert_eq!(size_of::<Descriptor>(), 992);
+        assert_eq!(size_of::<DeviceState>(), 7496);
+        assert_eq!(size_of::<Descriptor>(), 1008);
     }
 
     #[test]
@@ -10155,10 +10315,9 @@ fn policy_buffer_bytes(
     layout: &SemanticPolicyLayout,
     mask_cells: usize,
 ) -> Result<usize, SemanticTransitionError> {
-    let primal_cells = [
+    let differentiable_cells = [
         layout.parameter_cells,
         layout.score_cells(),
-        layout.retained_score_cells(),
         layout.recurrent_cells(),
         32 * TEXT_CARDINALITY,
     ]
@@ -10167,7 +10326,10 @@ fn policy_buffer_bytes(
         sum.checked_add(cells)
             .ok_or(SemanticTransitionError::GenerationExhausted)
     })?;
-    let adjoint_cells = primal_cells
+    let primal_cells = differentiable_cells
+        .checked_add(layout.retained_score_cells())
+        .ok_or(SemanticTransitionError::GenerationExhausted)?;
+    let adjoint_cells = differentiable_cells
         .checked_add(COMPONENT_COUNT)
         .ok_or(SemanticTransitionError::GenerationExhausted)?;
     let adjoint_cells = adjoint_cells
@@ -10184,6 +10346,10 @@ fn policy_buffer_bytes(
         .and_then(|cells| cells.checked_mul(size_of::<f32>()))
         .and_then(|bytes| bytes.checked_add(2 * COMPONENT_COUNT * size_of::<f64>()))
         .and_then(|bytes| bytes.checked_add(2 * size_of::<u64>()))
+        .and_then(|bytes| bytes.checked_add(COMPONENT_COUNT * size_of::<SemanticPolicyPwlCell>()))
+        .and_then(|bytes| {
+            bytes.checked_add(COMPONENT_COUNT * size_of::<SemanticPolicySelectedScoreVjp>())
+        })
         .and_then(|bytes| {
             mask_cells
                 .checked_mul(2)
@@ -12089,7 +12255,6 @@ impl SemanticTransitionSession {
         let reader = self.publication_read(reader)?[0];
         let result = self.publication_read(result)?[0];
         if validate_prepared_completion(&reader, &parent, &result, inputs.storage.instance).is_err()
-            || result.refusal != 0
             || (result.advanced == 0 && result.header != parent)
         {
             self.poisoned = true;
@@ -12458,12 +12623,8 @@ impl SemanticTransitionSession {
             receipt_view,
             final_mask_view,
             active_set_view,
-            retained_score_view,
-            text_logit_view,
-            text_rows_source,
-            text_count_source,
-            text_selected_source,
-            layout,
+            pwl_cell_view,
+            selected_score_vjp_view,
         ) = {
             let prepared = self
                 .checked_prepared_step(step, false)?
@@ -12484,53 +12645,18 @@ impl SemanticTransitionSession {
                     .view(),
                 policy.final_masks.view(),
                 policy.active_sets.view(),
-                policy.retained_scores.view(),
-                policy.text_logits.view(),
-                policy.text_binding.inputs[0]
-                    .source
-                    .clone()
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                policy.text_binding.inputs[1]
-                    .source
-                    .clone()
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                policy.text_binding.inputs[2]
-                    .source
-                    .clone()
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                policy.layout.clone(),
+                policy.pwl_cells.view(),
+                policy.selected_score_vjps.view(),
             )
         };
         let state = self.publication_read(state_view)?[0];
         let receipts = self.publication_read(receipt_view)?;
         let final_masks = self.publication_read(final_mask_view)?;
         let active_sets = self.publication_read(active_set_view)?;
-        let retained_scores = self.publication_read(retained_score_view)?;
-        let text_logits = self.publication_read(text_logit_view)?;
-        let text_rows = self.publication_read(unsafe {
-            text_rows_source
-                .cast::<SemanticTextRow>()
-                .ok_or(SemanticTransitionError::ObservationMismatch)?
-        })?;
-        let text_count = self.publication_read(unsafe {
-            text_count_source
-                .cast::<u64>()
-                .ok_or(SemanticTransitionError::ObservationMismatch)?
-        })?;
-        let text_selected = self.publication_read(text_selected_source)?;
-        let text_count = usize::try_from(
-            *text_count
-                .first()
-                .ok_or(SemanticTransitionError::ObservationMismatch)?,
-        )
-        .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let pwl_cells = self.publication_read(pwl_cell_view)?;
+        let selected_score_vjps = self.publication_read(selected_score_vjp_view)?;
         let catalogue = self.codebooks.binding;
-        let batch_root = self
-            .publication
-            .as_ref()
-            .ok_or(SemanticTransitionError::ObservationMismatch)?
-            .contract_value
-            .task_identity;
+        let batch_root = state.action_batch_root;
         if result.refusal != 0
             || result.advanced != 1
             || state.status != 0
@@ -12538,11 +12664,8 @@ impl SemanticTransitionSession {
             || receipts.len() != COMPONENT_COUNT
             || final_masks.len() != self.codebooks.input_cells
             || active_sets.len() != self.codebooks.input_cells
-            || retained_scores.len() != layout.retained_score_cells()
-            || text_logits.len() != 32 * TEXT_CARDINALITY
-            || text_rows.len() != 32
-            || text_selected.len() != 32
-            || text_count > text_rows.len()
+            || pwl_cells.len() != COMPONENT_COUNT
+            || selected_score_vjps.len() != COMPONENT_COUNT
             || state.proposal.checked_add(1) != Some(state.next_proposal)
             || state.next_proposal != result.header.proposal
             || state.stream_serial != result.header.stream_serial
@@ -12575,20 +12698,62 @@ impl SemanticTransitionSession {
                 .iter()
                 .chain(&active_sets)
                 .any(|&value| value > 1)
-            || retained_scores.iter().any(|value| !value.is_finite())
-            || text_logits.iter().any(|value| !value.is_finite())
+            || state.actor_eligible > 1
+            || state.action_batch.abi != 1
+            || publication_action_batch_root(&state.action_batch) != batch_root
+            || result.attempt.action_receipts_digest != batch_root
+            || state.action_batch.proposal != state.proposal
+            || state.action_batch.stream_serial != state.stream_serial
+            || state.action_batch.family_id != u64::from(state.family_id)
+            || state.action_batch.action_law_generation != state.catalogue_generation
+            || state.action_batch.model_generation != u64::from(state.model_generation)
+            || state.action_batch.actor_eligible != state.actor_eligible
+            || state.action_batch.component_count != COMPONENT_COUNT as u64
+            || state.action_batch.candidate_count != 3
+            || state.action_batch.winner != state.task_evaluation.winner
+            || state.action_batch.total_return_bits != state.task_evaluation.return_value as u64
+            || state.action_batch.base_word != binding.0.word
+            || state.action_batch.next_word != successor.word
+            || state.action_batch.rng_base != state.proposal * COMPONENT_COUNT as u64
+            || state.action_batch.rng_span != COMPONENT_COUNT as u64
+            || state.action_batch.rng_successor != state.next_proposal * COMPONENT_COUNT as u64
+            || state.action_batch.catalogue_digest != state.catalogue_digest
+            || state.action_batch.semantic_receipts_digest
+                != publication_semantic_receipts_digest(&state.semantic_receipts)
+            || state.action_batch.base_logical_digest != binding.0.logical_digest
+            || state.action_batch.execution_work != state.execution_work
+            || [0usize, 3, 6]
+                .into_iter()
+                .enumerate()
+                .any(|(candidate, receipt)| {
+                    identity_words(*state.action_batch.candidate_roots[candidate].as_bytes())
+                        != state.semantic_receipts[receipt][16..20]
+                })
         {
             self.poisoned = true;
             return Err(SemanticTransitionError::ObservationMismatch);
         }
 
-        let mut owner_binding = Vec::new();
-        owner_binding.extend_from_slice(b"xlog.completed-action-witness-owner.v1\0");
-        encode_publication_identity(&mut owner_binding, binding.0);
-        encode_publication_identity(&mut owner_binding, successor);
-        material_u64(&mut owner_binding, step.token);
-        material_u64(&mut owner_binding, state.proposal);
-        let owner_identity = Identity256::from_bytes(Sha256::digest(&owner_binding).into());
+        let owner = self.prepared_completed_action_witnesses(step, consumer_streams)?;
+        let owner_identity = owner.identity;
+        let component_receipts_digest = publication_action_receipts_digest_bytes(
+            &publication_abi_bytes(&self.codebooks.words),
+            &receipts,
+        )?;
+        if state.action_batch.component_receipts_digest != component_receipts_digest {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let task_result = self
+            .task
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .0
+            .completed_result_material();
+        let batch_receipt = SemanticCompletedStepWitnessMaterial {
+            identity: batch_root,
+            bytes: publication_abi_bytes(&[state.action_batch]),
+        };
 
         let slot_zero_admission = completed_receipt_material(
             owner_identity,
@@ -12617,17 +12782,6 @@ impl SemanticTransitionSession {
                 })
             });
 
-        let stride = layout.retained_score_stride();
-        let mut field_offset = 0usize;
-        let field_offsets = layout
-            .fields
-            .iter()
-            .map(|field| {
-                let offset = field_offset;
-                field_offset += field.cardinality;
-                offset
-            })
-            .collect::<Vec<_>>();
         let mut components = Vec::new();
         components
             .try_reserve_exact(COMPONENT_COUNT)
@@ -12642,6 +12796,8 @@ impl SemanticTransitionSession {
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
             let final_mask = &final_masks[begin..end];
             let active_set = &active_sets[begin..end];
+            let pwl_cell = pwl_cells[ordinal];
+            let selected_score_vjp = selected_score_vjps[ordinal];
             let block = (COMPONENT_COUNT as u64)
                 .checked_mul(state.proposal)
                 .and_then(|block| block.checked_add(ordinal as u64))
@@ -12679,6 +12835,25 @@ impl SemanticTransitionSession {
                 || receipt.factor_denominator == [0; 3]
                 || receipt.key != [state.catalogue_generation as u32, state.model_generation]
                 || receipt.counter != expected_counter
+                || pwl_cell.abi != 1
+                || pwl_cell.ordinal != ordinal as u64
+                || pwl_cell.cardinality != u64::from(component.cardinality)
+                || pwl_cell.legal_count != u64::from(receipt.legal_count)
+                || pwl_cell.active_count != u64::from(receipt.active_count)
+                || pwl_cell.selected_rank != u64::from(receipt.selected_rank)
+                || pwl_cell.singleton != u64::from(receipt.legal_count == 1)
+                || pwl_cell.maximum_bits >> 32 != 0
+                || !f32::from_bits(pwl_cell.maximum_bits as u32).is_finite()
+                || pwl_cell.selected_probability != receipt.p
+                || pwl_cell.probability_denominator != receipt.q
+                || selected_score_vjp.abi != 1
+                || selected_score_vjp.ordinal != ordinal as u64
+                || selected_score_vjp.choice != u64::from(receipt.choice)
+                || selected_score_vjp.active_count != u64::from(receipt.active_count)
+                || selected_score_vjp.selected_active != 1
+                || selected_score_vjp.singleton != u64::from(receipt.legal_count == 1)
+                || selected_score_vjp.probability_numerator != receipt.p
+                || selected_score_vjp.probability_denominator != receipt.q
             {
                 self.poisoned = true;
                 return Err(SemanticTransitionError::ObservationMismatch);
@@ -12714,62 +12889,23 @@ impl SemanticTransitionSession {
                 owner_identity,
                 b"pwl-cell",
                 ordinal as u64,
-                &receipt_bytes,
+                &publication_abi_bytes(&[pwl_cell]),
             );
 
             let null = if component.is_text() {
-                canonical_text_null(&receipt)
+                receipt.choice == TEXT_NULL as u32
             } else {
                 component.field != 0
                     && receipt.choice == 0
                     && receipt.legal_count == 1
                     && receipt.active_count == 1
             };
-            let mut vjp_bytes = Vec::new();
-            material_u64(&mut vjp_bytes, ordinal as u64);
-            material_u64(&mut vjp_bytes, receipt.choice as u64);
-            if component.is_text() {
-                if null {
-                    material_u64(&mut vjp_bytes, 0);
-                } else {
-                    let source_slot = component.slot as u64;
-                    if text_selected.get(component.slot as usize) != Some(&1) {
-                        self.poisoned = true;
-                        return Err(SemanticTransitionError::ObservationMismatch);
-                    }
-                    let row = text_rows[..text_count]
-                        .iter()
-                        .position(|row| row.source_slot == source_slot)
-                        .ok_or(SemanticTransitionError::ObservationMismatch)?;
-                    let score = text_logits[row * TEXT_CARDINALITY + receipt.choice as usize];
-                    material_u64(&mut vjp_bytes, 1);
-                    material_u64(&mut vjp_bytes, row as u64);
-                    material_u64(&mut vjp_bytes, text_rows[row].source_slot);
-                    material_u64(&mut vjp_bytes, text_rows[row].logical_position);
-                    material_u64(&mut vjp_bytes, score.to_bits() as u64);
-                }
-            } else {
-                let lane = usize::try_from(component.lane)
-                    .ok()
-                    .and_then(|lane| lane.checked_sub(1))
-                    .filter(|&lane| lane < 2)
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
-                let slot = component.slot as usize;
-                let field = component.field as usize;
-                if slot >= 2 || field >= layout.fields.len() {
-                    self.poisoned = true;
-                    return Err(SemanticTransitionError::ObservationMismatch);
-                }
-                let offset = (lane * 2 + slot) * stride + field_offsets[field];
-                let score = retained_scores[offset + receipt.choice as usize];
-                material_u64(&mut vjp_bytes, 2);
-                material_u64(&mut vjp_bytes, lane as u64);
-                material_u64(&mut vjp_bytes, slot as u64);
-                material_u64(&mut vjp_bytes, field as u64);
-                material_u64(&mut vjp_bytes, score.to_bits() as u64);
-            }
-            let vjp =
-                completed_action_child_material(owner_identity, b"vjp", ordinal as u64, &vjp_bytes);
+            let vjp = completed_action_child_material(
+                owner_identity,
+                b"vjp",
+                ordinal as u64,
+                &publication_abi_bytes(&[selected_score_vjp]),
+            );
             let hard_decode_receipt = (!component.is_text()).then(|| {
                 hard_decode_receipts[component.lane as usize - 1][component.slot as usize].clone()
             });
@@ -12800,11 +12936,13 @@ impl SemanticTransitionSession {
         }
 
         let lanes = std::array::from_fn(|lane| {
-            let mut text_actions = [0; 32];
+            let text_actions = (0..32)
+                .filter_map(|slot| {
+                    let receipt = receipts[lane * 68 + slot];
+                    (receipt.choice != TEXT_NULL as u32).then_some((slot as u32, receipt.choice))
+                })
+                .collect();
             let mut edit_actions = [[0; 18]; 2];
-            for slot in 0..32 {
-                text_actions[slot] = receipts[lane * 68 + slot].choice;
-            }
             for slot in 0..2 {
                 for field in 0..18 {
                     edit_actions[slot][field] = receipts[lane * 68 + 32 + slot * 18 + field].choice;
@@ -12825,28 +12963,6 @@ impl SemanticTransitionSession {
             }
         });
 
-        let mut owner_bytes = Vec::new();
-        owner_bytes.extend_from_slice(b"XLOG-COMPLETED-ACTION-PROJECTION\0");
-        material_u64(&mut owner_bytes, 1);
-        encode_publication_identity(&mut owner_bytes, binding.0);
-        encode_publication_identity(&mut owner_bytes, successor);
-        for value in [
-            state.proposal,
-            state.stream_serial,
-            state.family_id as u64,
-            state.catalogue_generation,
-            state.model_generation as u64,
-            state.task_evaluation.winner,
-            state.task_evaluation.return_value as u64,
-            COMPONENT_COUNT as u64,
-        ] {
-            material_u64(&mut owner_bytes, value);
-        }
-        owner_bytes.extend_from_slice(batch_root.as_bytes());
-        let owner = SemanticCompletedStepWitnessMaterial {
-            identity: owner_identity,
-            bytes: owner_bytes,
-        };
         let mut attempt_bytes = Vec::new();
         material_u64(&mut attempt_bytes, result.attempt.abi);
         attempt_bytes.extend_from_slice(result.attempt.instance.as_bytes());
@@ -12878,9 +12994,11 @@ impl SemanticTransitionSession {
             action_law_generation: state.catalogue_generation,
             model_generation: state.model_generation as u64,
             winner: state.task_evaluation.winner,
-            actor_eligible: state.task_evaluation.winner != 0,
+            actor_eligible: state.actor_eligible == 1,
             total_return_bits: state.task_evaluation.return_value as u64,
             batch_root,
+            batch_receipt,
+            result: task_result,
             action_rng_base: completed_rng_material(
                 owner_identity,
                 0,
@@ -13177,13 +13295,19 @@ impl SemanticTransitionSession {
         &mut self,
         step: &SemanticPreparedStep,
         consumer_streams: &[u64],
-    ) -> Result<SemanticCompletedModelCarrierMaterial, SemanticTransitionError> {
-        Ok(SemanticCompletedModelCarrierMaterial {
+    ) -> Result<Option<SemanticCompletedModelCarrierMaterial>, SemanticTransitionError> {
+        let binding = self.prepared_model_binding(step, consumer_streams)?;
+        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal
+            || binding.1.is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(SemanticCompletedModelCarrierMaterial {
             numerical_realization: self
                 .prepared_completed_numerical_material(step, consumer_streams)?,
             logits: self.prepared_completed_logits_material(step, consumer_streams)?,
             random_state: self.prepared_completed_random_material(step, consumer_streams)?,
-        })
+        }))
     }
 
     /// The caller keeps the builder outside its Session lock while recording
@@ -19172,6 +19296,12 @@ impl SemanticTransitionSession {
     ) -> Result<PolicyBuffers, SemanticTransitionError> {
         let layout = self.policy_layout()?;
         let text_cells = 32 * TEXT_CARDINALITY;
+        let pwl_cells = reservation
+            .alloc::<SemanticPolicyPwlCell>(COMPONENT_COUNT)
+            .map_err(|error| runtime_error("retained PWL cell allocation", error))?;
+        let selected_score_vjps = reservation
+            .alloc::<SemanticPolicySelectedScoreVjp>(COMPONENT_COUNT)
+            .map_err(|error| runtime_error("retained selected-score VJP allocation", error))?;
         let mut allocate_adjoints = || {
             Ok::<_, SemanticTransitionError>(PolicyAdjointBuffers {
                 parameters: reservation
@@ -19218,6 +19348,8 @@ impl SemanticTransitionSession {
             active_sets: reservation
                 .alloc::<u8>(self.codebooks.input_cells)
                 .map_err(|error| runtime_error("retained active set allocation", error))?,
+            pwl_cells,
+            selected_score_vjps,
             recurrent: reservation
                 .alloc::<f32>(layout.recurrent_cells())
                 .map_err(|error| runtime_error("policy recurrent allocation", error))?,
@@ -21512,6 +21644,8 @@ impl SemanticTransitionSession {
             retained_score_stride: policy.layout.retained_score_stride() as u64,
             final_masks: policy.final_masks.device_ptr_value(),
             active_sets: policy.active_sets.device_ptr_value(),
+            pwl_cells: policy.pwl_cells.device_ptr_value(),
+            selected_score_vjps: policy.selected_score_vjps.device_ptr_value(),
             fields,
         }
     }
@@ -21563,6 +21697,15 @@ impl SemanticTransitionSession {
                         ranges.push((buffer.device_ptr_value(), buffer.len() as u64));
                     }
                 }
+                ranges.push((
+                    policy.pwl_cells.device_ptr_value(),
+                    (policy.pwl_cells.len() * size_of::<SemanticPolicyPwlCell>()) as u64,
+                ));
+                ranges.push((
+                    policy.selected_score_vjps.device_ptr_value(),
+                    (policy.selected_score_vjps.len() * size_of::<SemanticPolicySelectedScoreVjp>())
+                        as u64,
+                ));
             }
         }
         if let Some(text) = io.text {
@@ -21634,6 +21777,8 @@ impl SemanticTransitionSession {
             recorder.write(&policy.retained_scores);
             recorder.write(&policy.final_masks);
             recorder.write(&policy.active_sets);
+            recorder.write(&policy.pwl_cells);
+            recorder.write(&policy.selected_score_vjps);
             recorder.write(&policy.recurrent);
         }
         self.graph.record_transition(&mut recorder);
