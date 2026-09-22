@@ -5492,6 +5492,29 @@ impl PySemanticPreparedStep {
             .unbind())
     }
 
+    /// Cold canonical bytes for the retained completed step's original native
+    /// RNG and executed-work witnesses. This joins all original consumers and
+    /// never consults a current publication or reruns the model.
+    #[pyo3(signature = (*, consumer_streams))]
+    fn completed_step_witnesses(
+        &self,
+        py: Python<'_>,
+        consumer_streams: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        let streams = self.completed_observation_streams(py, consumer_streams)?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        let material = owner
+            .prepared_completed_step_witnesses(&self.inner, &streams)
+            .map_err(xlog_err)?;
+        Ok((
+            PyBytes::new(py, material.identity.as_bytes()),
+            PyBytes::new(py, &material.bytes),
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+
     /// Original imported task lineage, with no invented publication identity.
     fn dependency_lineage(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         let session = self.session.borrow(py);

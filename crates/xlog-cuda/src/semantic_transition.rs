@@ -3380,6 +3380,14 @@ pub struct SemanticFeedbackRecordMaterial {
     pub bytes: Vec<u8>,
 }
 
+/// Canonical native witnesses retained by one actually completed step.
+/// The identity hashes the exact bytes below; no current publication, replay,
+/// or replacement model execution participates in their construction.
+pub struct SemanticCompletedStepWitnessMaterial {
+    pub identity: Identity256,
+    pub bytes: Vec<u8>,
+}
+
 impl PublicationMaterialRange {
     fn into_feedback_record(
         self,
@@ -11974,6 +11982,92 @@ impl SemanticTransitionSession {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         Ok((binding.0, binding.1, records))
+    }
+
+    /// Serialize the completed step's original native RNG and executed-work
+    /// witnesses while its retained input/result owners are still reachable.
+    pub fn prepared_completed_step_witnesses(
+        &mut self,
+        step: &SemanticPreparedStep,
+        consumer_streams: &[u64],
+    ) -> Result<SemanticCompletedStepWitnessMaterial, SemanticTransitionError> {
+        let binding = self.prepared_model_binding(step, consumer_streams)?;
+        let transition = match self.prepared_transition_kind(step)? {
+            SemanticTransitionKind::Proposal => 1,
+            SemanticTransitionKind::Recompute => 2,
+            SemanticTransitionKind::Update => 3,
+            SemanticTransitionKind::Drain => 4,
+        };
+        let (header_view, result_view, actual_view, events) = {
+            let owner = self.checked_prepared_step(step, false)?;
+            let inputs = owner
+                .inputs
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let prepared = owner.prepared.as_ref().expect("checked prepared owner");
+            let work = prepared
+                .model_work
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            (
+                inputs.header.view(),
+                prepared.result.view(),
+                work.actual.view(),
+                work.recording.events().to_vec(),
+            )
+        };
+        let header = self.publication_read(header_view)?[0];
+        let result = self.publication_read(result_view)?[0];
+        let actual = self.publication_read(actual_view)?;
+        if actual.len() < events.len().saturating_mul(3) {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"XLOG-COMPLETED-STEP-WITNESSES\0");
+        material_u64(&mut bytes, 1);
+        material_u64(&mut bytes, transition);
+        encode_publication_identity(&mut bytes, binding.0);
+        material_u64(&mut bytes, u64::from(binding.1.is_some()));
+        if let Some(successor) = binding.1 {
+            encode_publication_identity(&mut bytes, successor);
+        }
+        material_u64(&mut bytes, header.model_generation);
+        material_u64(&mut bytes, header.stream_serial);
+        material_u64(&mut bytes, header.family_id);
+        material_u64(&mut bytes, header.proposal);
+        material_u64(&mut bytes, header.training_cursor);
+        for value in header.training_rng {
+            material_u64(&mut bytes, value);
+        }
+        material_u64(&mut bytes, result.refusal);
+        material_u64(&mut bytes, result.advanced);
+        bytes.extend_from_slice(binding.3.as_bytes());
+        bytes.extend_from_slice(binding.4.as_bytes());
+        material_u64(&mut bytes, events.len() as u64);
+        for (index, event) in events.iter().enumerate() {
+            material_u64(&mut bytes, event.kind);
+            material_u64(&mut bytes, event.witness);
+            material_u64(&mut bytes, event.tensor);
+            material_u64(&mut bytes, event.rank);
+            for dimension in event.dimensions {
+                material_u64(&mut bytes, dimension);
+            }
+            for value in &actual[index * 3..index * 3 + 3] {
+                material_u64(&mut bytes, *value);
+            }
+        }
+        if self.prepared_model_binding(step, consumer_streams)? != binding {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let mut hash = Sha256::new();
+        hash.update(&bytes);
+        Ok(SemanticCompletedStepWitnessMaterial {
+            identity: Identity256::from_bytes(hash.finalize().into()),
+            bytes,
+        })
     }
 
     /// The caller keeps the builder outside its Session lock while recording
