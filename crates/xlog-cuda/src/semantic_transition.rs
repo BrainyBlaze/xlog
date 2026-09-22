@@ -3381,8 +3381,8 @@ pub struct SemanticFeedbackRecordMaterial {
 }
 
 /// Canonical native witnesses retained by one actually completed step.
-/// The identity hashes the exact bytes below; no current publication, replay,
-/// or replacement model execution participates in their construction.
+/// The identity names the retained native owner and is deliberately independent
+/// of the canonical bytes hash recorded by downstream closure storage.
 pub struct SemanticCompletedStepWitnessMaterial {
     pub identity: Identity256,
     pub bytes: Vec<u8>,
@@ -12024,6 +12024,19 @@ impl SemanticTransitionSession {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
 
+        let mut owner_binding = Vec::new();
+        owner_binding.extend_from_slice(b"xlog.completed-step-witness-owner.v1\0");
+        encode_publication_identity(&mut owner_binding, binding.0);
+        material_u64(&mut owner_binding, u64::from(binding.1.is_some()));
+        if let Some(successor) = binding.1 {
+            encode_publication_identity(&mut owner_binding, successor);
+        }
+        material_u64(&mut owner_binding, step.token);
+        material_u64(&mut owner_binding, transition);
+        let mut owner_hash = Sha256::new();
+        owner_hash.update(&owner_binding);
+        let identity = Identity256::from_bytes(owner_hash.finalize().into());
+
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"XLOG-COMPLETED-STEP-WITNESSES\0");
         material_u64(&mut bytes, 1);
@@ -12062,12 +12075,7 @@ impl SemanticTransitionSession {
             self.poisoned = true;
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        let mut hash = Sha256::new();
-        hash.update(&bytes);
-        Ok(SemanticCompletedStepWitnessMaterial {
-            identity: Identity256::from_bytes(hash.finalize().into()),
-            bytes,
-        })
+        Ok(SemanticCompletedStepWitnessMaterial { identity, bytes })
     }
 
     /// The caller keeps the builder outside its Session lock while recording

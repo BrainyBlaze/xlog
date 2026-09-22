@@ -5493,8 +5493,10 @@ impl PySemanticPreparedStep {
     }
 
     /// Cold canonical bytes for the retained completed step's original native
-    /// RNG and executed-work witnesses. This joins all original consumers and
-    /// never consults a current publication or reruns the model.
+    /// RNG and executed-work witnesses. The first result is the retained native
+    /// owner's identity, not the canonical bytes hash stored by closure data.
+    /// This joins all original consumers and never consults a current
+    /// publication or reruns the model.
     #[pyo3(signature = (*, consumer_streams))]
     fn completed_step_witnesses(
         &self,
