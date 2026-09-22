@@ -5311,6 +5311,27 @@ fn completed_u192(py: Python<'_>, limbs: [u64; 3]) -> PyResult<Py<PyAny>> {
 }
 
 #[cfg(feature = "semantic-policy")]
+fn completed_truth_kind(code: u64) -> &'static str {
+    match code {
+        0 => "NEITHER",
+        1 => "TRUE",
+        2 => "FALSE",
+        3 => "BOTH",
+        _ => unreachable!("native completed task truth was validated"),
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_truth_codes(truth: [xlog_cuda::SemanticTruth; 3]) -> [u64; 3] {
+    truth.map(|value| value as u64)
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_truth_kinds(truth: [xlog_cuda::SemanticTruth; 3]) -> [&'static str; 3] {
+    completed_truth_codes(truth).map(completed_truth_kind)
+}
+
+#[cfg(feature = "semantic-policy")]
 #[pymethods]
 impl PySemanticCompletedMaterial {
     #[getter]
@@ -5637,6 +5658,272 @@ impl PySemanticCompletedActionLane {
 }
 
 #[cfg(feature = "semantic-policy")]
+#[pyclass(name = "SemanticCompletedTaskFacts", module = "pyxlog._native", frozen)]
+pub(crate) struct PySemanticCompletedTaskFacts {
+    slot: usize,
+    inner: xlog_cuda::SemanticTaskFacts,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedTaskFacts {
+    #[getter]
+    fn slot(&self) -> usize {
+        self.slot
+    }
+    #[getter]
+    fn truth_codes(&self) -> [u64; 3] {
+        self.inner.truth
+    }
+    #[getter]
+    fn truth_kinds(&self) -> [&'static str; 3] {
+        self.inner.truth.map(completed_truth_kind)
+    }
+    #[getter]
+    fn correct(&self) -> [u64; 3] {
+        self.inner.correct
+    }
+    #[getter]
+    fn correct_count(&self) -> u64 {
+        self.inner.g
+    }
+    #[getter]
+    fn solves_expected_truths(&self) -> bool {
+        self.inner.p == 1
+    }
+    #[getter]
+    fn measured_work(&self) -> u64 {
+        self.inner.c
+    }
+    #[getter]
+    fn value(&self) -> i64 {
+        self.inner.v
+    }
+    #[getter]
+    fn eligible(&self) -> bool {
+        self.inner.eligible == 1
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pyclass(
+    name = "SemanticCompletedLaneOutcome",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedLaneOutcome {
+    slot: usize,
+    inner: xlog_cuda::SemanticCompletedLaneOutcomeMaterial,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedLaneOutcome {
+    #[getter]
+    fn slot(&self) -> usize {
+        self.slot
+    }
+    #[getter]
+    fn kind(&self) -> &'static str {
+        match self.inner {
+            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Executed(_) => "EXECUTED",
+            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(_) => "REFUSED",
+        }
+    }
+    #[getter]
+    fn truth_codes(&self) -> Option<[u64; 3]> {
+        match self.inner {
+            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Executed(truth) => {
+                Some(completed_truth_codes(truth))
+            }
+            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(_) => None,
+        }
+    }
+    #[getter]
+    fn truth_kinds(&self) -> Option<[&'static str; 3]> {
+        match self.inner {
+            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Executed(truth) => {
+                Some(completed_truth_kinds(truth))
+            }
+            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(_) => None,
+        }
+    }
+    #[getter]
+    fn refusal_kind(&self) -> Option<&'static str> {
+        match self.inner {
+            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Executed(_) => None,
+            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(refusal) => {
+                Some(refusal.canonical_kind())
+            }
+        }
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pyclass(
+    name = "SemanticCompletedTaskGround",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedTaskGround {
+    inner: xlog_cuda::SemanticCompletedTaskGroundMaterial,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedTaskGround {
+    #[getter]
+    fn identity(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.witness.identity.as_bytes()).unbind()
+    }
+    #[getter]
+    fn witness(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.witness)
+    }
+    #[getter]
+    fn task_identity(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.task_identity.as_bytes()).unbind()
+    }
+    #[getter]
+    fn query_identity(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.content.query.as_bytes()).unbind()
+    }
+    #[getter]
+    fn theory_program_identity(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.content.theory_program.as_bytes()).unbind()
+    }
+    #[getter]
+    fn expected_result_identity(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.content.result.as_bytes()).unbind()
+    }
+    #[getter]
+    fn base(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        completed_publication_identity(py, self.inner.base)
+    }
+    #[getter]
+    fn expected_truth_codes(&self) -> [u64; 3] {
+        completed_truth_codes(self.inner.expected_truth)
+    }
+    #[getter]
+    fn expected_truth_kinds(&self) -> [&'static str; 3] {
+        completed_truth_kinds(self.inner.expected_truth)
+    }
+    #[getter]
+    fn base_truth_codes(&self) -> [u64; 3] {
+        completed_truth_codes(self.inner.base_truth)
+    }
+    #[getter]
+    fn base_truth_kinds(&self) -> [&'static str; 3] {
+        completed_truth_kinds(self.inner.base_truth)
+    }
+    #[getter]
+    fn semantic_goal_root(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.goal.semantic_root.as_bytes()).unbind()
+    }
+    #[getter]
+    fn authority_root(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.goal.authority_root.as_bytes()).unbind()
+    }
+    #[getter]
+    fn mandatory_links_root(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.goal.mandatory_links_root.as_bytes()).unbind()
+    }
+    #[getter]
+    fn constraints_root(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.goal.constraints_root.as_bytes()).unbind()
+    }
+    #[getter]
+    fn mandatory_link_count(&self) -> u64 {
+        self.inner.goal.mandatory_link_count
+    }
+    #[getter]
+    fn constraint_count(&self) -> u64 {
+        self.inner.goal.constraint_count
+    }
+    #[getter]
+    fn facts(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let facts = self
+            .inner
+            .facts
+            .into_iter()
+            .enumerate()
+            .map(|(slot, inner)| Py::new(py, PySemanticCompletedTaskFacts { slot, inner }))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, facts).map(Bound::unbind)
+    }
+    #[getter]
+    fn lane_outcomes(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let outcomes = self
+            .inner
+            .lane_outcomes
+            .into_iter()
+            .enumerate()
+            .map(|(lane, inner)| {
+                Py::new(
+                    py,
+                    PySemanticCompletedLaneOutcome {
+                        slot: lane + 1,
+                        inner,
+                    },
+                )
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, outcomes).map(Bound::unbind)
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pyclass(
+    name = "SemanticCompletedEditSolution",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedEditSolution {
+    inner: xlog_cuda::SemanticCompletedEditSolutionMaterial,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedEditSolution {
+    #[getter]
+    fn identity(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.witness.identity.as_bytes()).unbind()
+    }
+    #[getter]
+    fn witness(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.witness)
+    }
+    #[getter]
+    fn selected_lane(&self) -> u64 {
+        self.inner.lane
+    }
+    #[getter]
+    fn component_begin(&self) -> u64 {
+        self.inner.component_begin
+    }
+    #[getter]
+    fn component_end(&self) -> u64 {
+        self.inner.component_end
+    }
+    #[getter]
+    fn edit_commands(&self) -> u64 {
+        self.inner.structural_delta.edit_commands
+    }
+    #[getter]
+    fn added_supports(&self) -> u64 {
+        self.inner.structural_delta.added_supports
+    }
+    #[getter]
+    fn defined_truth_changes(&self) -> u64 {
+        self.inner.structural_delta.defined_truth_changes
+    }
+    #[getter]
+    fn resulting_state_receipt(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.resulting_state_receipt)
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
 #[pyclass(
     name = "SemanticCompletedActionProjection",
     module = "pyxlog._native",
@@ -5787,6 +6074,27 @@ impl PySemanticCompletedActionProjection {
             })
             .collect::<PyResult<Vec<_>>>()?;
         PyTuple::new(py, components).map(Bound::unbind)
+    }
+    #[getter]
+    fn task_ground(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedTaskGround>> {
+        Py::new(
+            py,
+            PySemanticCompletedTaskGround {
+                inner: self.inner.task_ground.clone(),
+            },
+        )
+    }
+    #[getter]
+    fn edit_solution(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Option<Py<PySemanticCompletedEditSolution>>> {
+        self.inner
+            .edit_solution
+            .as_ref()
+            .cloned()
+            .map(|inner| Py::new(py, PySemanticCompletedEditSolution { inner }))
+            .transpose()
     }
     #[getter]
     fn attempt_receipt(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
@@ -11958,6 +12266,7 @@ mod tests {
             assert_eq!(spec.admissible_truth_masks, [15, 7, 3]);
             assert_eq!(spec.scoring.correct_weight, 5);
             assert_eq!(spec.scoring.spent_weight, 0);
+            assert!(spec.actor_eligible);
         });
     }
 
