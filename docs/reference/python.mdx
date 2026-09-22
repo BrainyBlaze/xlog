@@ -276,16 +276,32 @@ GPU evidence remain unfinished. The model receiver does not establish those gate
 
 Before retiring a completed segment, call its original step's
 `completed_model_binding(consumer_streams=[...])` to authenticate that step's
-retained model inputs. The result is
+retained model inputs. With the semantic-policy feature enabled, the result is
 `(predecessor_identity, successor_identity_or_None, model_generation,
-model_geometry_digest, model_numerical_digest, carrier_or_None)`. Each identity has the four
-fields returned by `PublishedParent.identity()`. The generation and both
-32-byte digests belong to the acquired predecessor, not the final segment bank.
-A successful Proposal carrier exposes `numerical_realization`, `logits`, and
-`random_state` as native-owner identity plus canonical bytes. Recompute, Update,
-Drain, and refused steps return `None` for the carrier; a completed numerical
-refusal also has no successor. A skipped step, an uncompleted
-segment, or uncertain execution cannot return a binding.
+model_geometry_digest, model_numerical_digest, carrier_or_None)`. Each identity
+has the four fields returned by `PublishedParent.identity()`. The generation and
+both 32-byte digests belong to the acquired predecessor, not the final segment
+bank.
+
+For a successfully published Proposal, `carrier_or_None` is a frozen
+`SemanticCompletedModelCarrier`. Its `numerical_realization`, `logits`, and
+`random_state` properties are three separate immutable
+`(native_owner_identity, canonical_bytes)` pairs. The first pair binds the
+completed step and action realization to the CUDA execution and typed launch
+identities that produced it. The second carries the retained conditional edit
+FP32 distributions and their placement from that execution; it never recomputes
+logits or runs a second forward. The third carries the invocation and training
+RNG header followed by the ordered native draw-receipt records.
+
+The carrier is a cold observation owned by the original completed step. It
+retains that step's native owners only until retirement; it neither reacquires a
+publication nor grants execution or publication authority. Native code validates
+the same completed binding before and after serializing the carrier. Recompute,
+Update, Drain, and refused steps return `None` for the carrier; a completed
+numerical refusal also has no successor. A skipped step, an uncompleted segment,
+or uncertain execution cannot return a binding. When the semantic-policy feature
+is disabled, the method raises its typed feature-required error instead of
+returning a six-field tuple with a fabricated `None` carrier.
 
 Use the same step's `record(44, 0, consumer_stream=...)`, `tensor(...)` and
 `tensor_allocation(...)` exports to serialize the original model contract and
@@ -357,7 +373,8 @@ not SHA-256 of `raw_bytes` alone. A canonical carrier stores the byte hash
 separately. Do not replace the model identity from record 44 with a new hash of
 these records. The six tensors returned by `feedback()` are separate encoded
 features and projected service values, not this raw feedback material. This
-export does not supply canonical logits, complete RNG state, or complete
+raw-feedback export does not supply the canonical logits or complete RNG state
+carried by `completed_model_binding`, does not supply complete
 predecessor/successor replay material, and grants no new execution authority.
 
 ## Package Details
