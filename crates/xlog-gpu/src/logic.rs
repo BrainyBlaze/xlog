@@ -1,7 +1,7 @@
 //! GPU-accelerated evaluation of compiled Datalog programs.
 
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -3231,12 +3231,19 @@ impl LogicProgram {
 
         let arity_qualified_predicates = self.arity_qualified_fact_predicates();
         let fact_rows = self.fact_rows_by_relation(arity_qualified_predicates);
-        // A single asserted tuple needs no set union against a known-empty base.
-        // Keep the merge for imported inputs and multi-row fact relations, where
-        // it preserves the existing set semantics.
-        let singleton_fact_names = fact_rows
+        // Encoded inline facts can be deduplicated before upload unless their
+        // unary float equality differs from the GPU union's signed-zero rule.
+        // Caller inputs still need a device union with the inline facts.
+        let directly_loaded_fact_names = fact_rows
             .iter()
-            .filter(|(name, rows)| rows.len() == 1 && !inputs.contains_key(*name))
+            .filter(|(name, rows)| {
+                !inputs.contains_key(*name)
+                    && (rows.len() == 1
+                        || self
+                            .schemas
+                            .get(*name)
+                            .is_some_and(Self::host_fact_row_equality_matches_union))
+            })
             .map(|(name, _)| name.clone())
             .collect::<BTreeSet<_>>();
 
@@ -3247,7 +3254,7 @@ impl LogicProgram {
                 && !fact_rows.contains_key(name);
             if is_derived_placeholder
                 || inputs.contains_key(name)
-                || singleton_fact_names.contains(name)
+                || directly_loaded_fact_names.contains(name)
             {
                 continue;
             }
@@ -3278,7 +3285,7 @@ impl LogicProgram {
             provider,
             executor.store_mut(),
             fact_rows,
-            &singleton_fact_names,
+            &directly_loaded_fact_names,
         )?;
         Ok(executor)
     }
@@ -3805,12 +3812,22 @@ impl LogicProgram {
         self.load_grouped_facts_into_store(provider, store, rows_by_pred, &BTreeSet::new())
     }
 
+    fn host_fact_row_equality_matches_union(schema: &Schema) -> bool {
+        // The GPU's unary float dedup equates signed zeros. Multi-column set
+        // dedup uses full-row encoded-byte equality instead.
+        schema.arity() != 1
+            || !matches!(
+                schema.column_type(0),
+                Some(ScalarType::F32 | ScalarType::F64)
+            )
+    }
+
     fn load_grouped_facts_into_store(
         &self,
         provider: &CudaKernelProvider,
         store: &mut RelationStore,
         rows_by_pred: HashMap<String, Vec<&[Term]>>,
-        singleton_fact_names: &BTreeSet<String>,
+        directly_loaded_fact_names: &BTreeSet<String>,
     ) -> Result<()> {
         let mut names = Vec::with_capacity(rows_by_pred.len());
         let mut host_relations = Vec::with_capacity(rows_by_pred.len());
@@ -3830,18 +3847,34 @@ impl LogicProgram {
                 )));
             }
 
-            let fact_rows = if schema.arity() == 0 { 1 } else { rows.len() };
+            let mut seen_rows = Self::host_fact_row_equality_matches_union(schema)
+                .then(|| HashSet::with_capacity(rows.len()));
+            let mut fact_rows = 0;
             let mut columns: Vec<Vec<u8>> = vec![Vec::new(); schema.arity()];
+            let mut column_starts = Vec::with_capacity(schema.arity());
             for row in rows {
+                column_starts.clear();
+                let mut row_key = Vec::with_capacity(schema.row_size_bytes());
                 for (col_idx, term) in row.iter().enumerate() {
                     let typ = schema.column_type(col_idx).ok_or_else(|| {
                         XlogError::Execution(format!("Missing type for column {}", col_idx))
                     })?;
+                    column_starts.push(columns[col_idx].len());
                     append_ground_term_bytes(&mut columns[col_idx], term, typ).map_err(|error| {
                         XlogError::Execution(format!(
                             "Failed to encode fact for predicate {pred} at column {col_idx}: {error}"
                         ))
                     })?;
+                    if seen_rows.is_some() {
+                        row_key.extend_from_slice(&columns[col_idx][column_starts[col_idx]..]);
+                    }
+                }
+                if seen_rows.as_mut().is_some_and(|seen| !seen.insert(row_key)) {
+                    for (column, start) in columns.iter_mut().zip(&column_starts) {
+                        column.truncate(*start);
+                    }
+                } else {
+                    fact_rows += 1;
                 }
             }
             // Every asserted nullary fact denotes the same unit tuple.
@@ -3853,7 +3886,7 @@ impl LogicProgram {
             .into_iter()
             .zip(provider.create_buffers_from_host_columns(&host_relations)?)
         {
-            if singleton_fact_names.contains(&pred) {
+            if directly_loaded_fact_names.contains(&pred) {
                 store.put(pred.as_str(), fact_buf);
                 continue;
             }
@@ -9540,7 +9573,7 @@ mod tests {
         assert_eq!(fact_load_transfers.htod_calls, 1);
         assert_eq!(
             fact_load_transfers.htod_bytes,
-            3 * std::mem::size_of::<u32>() as u64
+            2 * std::mem::size_of::<u32>() as u64
         );
         assert_eq!(fact_load_transfers.dtoh_calls, 0);
         assert_eq!(fact_load_transfers.dtoh_bytes, 0);
