@@ -92,6 +92,8 @@ struct TrainingViewLaunch {
     uint64_t mask_weights;
     uint64_t ar_labels;
     uint64_t retention_labels;
+    uint64_t branch_labels;
+    uint64_t branch_ids;
     uint64_t source_slots;
     uint64_t logical_positions;
     uint64_t kinds;
@@ -260,6 +262,8 @@ extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch laun
     auto* output_mask_weights = reinterpret_cast<float*>(launch.mask_weights);
     auto* output_ar_labels = reinterpret_cast<int64_t*>(launch.ar_labels);
     auto* output_retention_labels = reinterpret_cast<int64_t*>(launch.retention_labels);
+    auto* output_branch_labels = reinterpret_cast<int64_t*>(launch.branch_labels);
+    auto* output_branch_ids = reinterpret_cast<int64_t*>(launch.branch_ids);
     auto* output_source_slots = reinterpret_cast<int64_t*>(launch.source_slots);
     auto* output_logical_positions = reinterpret_cast<int64_t*>(launch.logical_positions);
     auto* output_kinds = reinterpret_cast<int64_t*>(launch.kinds);
@@ -275,6 +279,8 @@ extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch laun
         output_mask_weights[output_offset + index] = 0.0f;
         output_ar_labels[output_offset + index] = -100;
         output_retention_labels[output_offset + index] = -100;
+        output_branch_labels[output_offset + index] = -100;
+        output_branch_ids[output_offset + index] = -1;
         output_source_slots[output_offset + index] = static_cast<int64_t>(index);
         output_logical_positions[output_offset + index] = -1;
         output_kinds[output_offset + index] = 0;
@@ -289,12 +295,14 @@ extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch laun
     const auto* raw = reinterpret_cast<const uint8_t*>(launch.raw) + descriptor.raw_offset;
     const uint64_t window = descriptor.window;
     const uint64_t padding = (window & 1ULL) * 4ULL;
-    const auto* token_ids = reinterpret_cast<const int64_t*>(raw + 136);
-    const auto* mask_labels = reinterpret_cast<const int64_t*>(raw + 136 + window * 8);
-    const auto* mask_weights = reinterpret_cast<const float*>(raw + 136 + window * 16);
-    const auto* ar_labels = reinterpret_cast<const int64_t*>(raw + 136 + window * 20 + padding);
+    const auto* token_ids = reinterpret_cast<const int64_t*>(raw + 264);
+    const auto* mask_labels = reinterpret_cast<const int64_t*>(raw + 264 + window * 8);
+    const auto* mask_weights = reinterpret_cast<const float*>(raw + 264 + window * 16);
+    const auto* ar_labels = reinterpret_cast<const int64_t*>(raw + 264 + window * 20 + padding);
     const auto* retention_labels = ar_labels + window;
-    const auto* source_slots = retention_labels + window;
+    const auto* branch_labels = retention_labels + window;
+    const auto* branch_ids = branch_labels + window;
+    const auto* source_slots = branch_ids + window;
     const auto* logical_positions = source_slots + window;
     const auto* kinds = logical_positions + window;
     const auto* parents = kinds + window;
@@ -305,6 +313,8 @@ extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch laun
             output_mask_weights[output_offset + index] = mask_weights[index];
             output_ar_labels[output_offset + index] = ar_labels[index];
             output_retention_labels[output_offset + index] = retention_labels[index];
+            output_branch_labels[output_offset + index] = branch_labels[index];
+            output_branch_ids[output_offset + index] = branch_ids[index];
             output_source_slots[output_offset + index] = source_slots[index];
             output_logical_positions[output_offset + index] = logical_positions[index];
             output_kinds[output_offset + index] = kinds[index];

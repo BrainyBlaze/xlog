@@ -26,8 +26,8 @@ type ValidatedTrainingObjective = (
 const MODULE: &str = "xlog_semantic_training_view";
 const SELECT_KERNEL: &str = "semantic_training_view_select";
 const GATHER_KERNEL: &str = "semantic_training_view_gather";
-const TRAINING_VIEW_HEADER_BYTES: usize = 136;
-const TRAINING_VIEW_ROW_BYTES: usize = 68;
+const TRAINING_VIEW_HEADER_BYTES: usize = 264;
+const TRAINING_VIEW_ROW_BYTES: usize = 84;
 const PROPOSAL_TRANSITION: u64 = 1;
 pub const SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI: u64 = 3;
 
@@ -391,6 +391,8 @@ struct TrainingViewLaunch {
     mask_weights: u64,
     ar_labels: u64,
     retention_labels: u64,
+    branch_labels: u64,
+    branch_ids: u64,
     source_slots: u64,
     logical_positions: u64,
     kinds: u64,
@@ -424,6 +426,8 @@ struct SelectedTrainingViewStorage {
     mask_weights: TrackedCudaSlice<f32>,
     ar_labels: TrackedCudaSlice<i64>,
     retention_labels: TrackedCudaSlice<i64>,
+    branch_labels: TrackedCudaSlice<i64>,
+    branch_ids: TrackedCudaSlice<i64>,
     source_slots: TrackedCudaSlice<i64>,
     logical_positions: TrackedCudaSlice<i64>,
     kinds: TrackedCudaSlice<i64>,
@@ -452,6 +456,8 @@ pub enum SemanticTrainingViewPort {
     MaskWeights,
     AutoregressiveLabels,
     RetentionLabels,
+    BranchLabels,
+    BranchIds,
     SourceSlots,
     LogicalPositions,
     Kinds,
@@ -494,6 +500,8 @@ impl SemanticSelectedTrainingView {
         account!(self.storage.mask_weights);
         account!(self.storage.ar_labels);
         account!(self.storage.retention_labels);
+        account!(self.storage.branch_labels);
+        account!(self.storage.branch_ids);
         account!(self.storage.source_slots);
         account!(self.storage.logical_positions);
         account!(self.storage.kinds);
@@ -562,6 +570,14 @@ impl SemanticSelectedTrainingView {
 
     pub fn retention_labels(&self) -> DeviceMemoryView<i64> {
         self.storage.retention_labels.view()
+    }
+
+    pub fn branch_labels(&self) -> DeviceMemoryView<i64> {
+        self.storage.branch_labels.view()
+    }
+
+    pub fn branch_ids(&self) -> DeviceMemoryView<i64> {
+        self.storage.branch_ids.view()
     }
 
     pub fn source_slots(&self) -> DeviceMemoryView<i64> {
@@ -680,6 +696,20 @@ impl SemanticSelectedTrainingView {
                 vec![],
                 (0, 64),
             ),
+            SemanticTrainingViewPort::BranchLabels => (
+                unsafe { self.storage.branch_labels.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                vec![],
+                vec![],
+                (0, 64),
+            ),
+            SemanticTrainingViewPort::BranchIds => (
+                unsafe { self.storage.branch_ids.view().cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                vec![],
+                vec![],
+                (0, 64),
+            ),
             SemanticTrainingViewPort::SourceSlots => (
                 unsafe { self.storage.source_slots.view().cast::<u8>() }
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
@@ -715,6 +745,8 @@ impl SemanticSelectedTrainingView {
             | SemanticTrainingViewPort::MaskWeights
             | SemanticTrainingViewPort::AutoregressiveLabels
             | SemanticTrainingViewPort::RetentionLabels
+            | SemanticTrainingViewPort::BranchLabels
+            | SemanticTrainingViewPort::BranchIds
             | SemanticTrainingViewPort::SourceSlots
             | SemanticTrainingViewPort::LogicalPositions
             | SemanticTrainingViewPort::Kinds
@@ -775,6 +807,8 @@ impl SemanticSelectedTrainingView {
             mask_weights: self.storage.mask_weights.device_ptr_value(),
             ar_labels: self.storage.ar_labels.device_ptr_value(),
             retention_labels: self.storage.retention_labels.device_ptr_value(),
+            branch_labels: self.storage.branch_labels.device_ptr_value(),
+            branch_ids: self.storage.branch_ids.device_ptr_value(),
             source_slots: self.storage.source_slots.device_ptr_value(),
             logical_positions: self.storage.logical_positions.device_ptr_value(),
             kinds: self.storage.kinds.device_ptr_value(),
@@ -797,6 +831,8 @@ impl SemanticSelectedTrainingView {
         recorder.write(&self.storage.mask_weights);
         recorder.write(&self.storage.ar_labels);
         recorder.write(&self.storage.retention_labels);
+        recorder.write(&self.storage.branch_labels);
+        recorder.write(&self.storage.branch_ids);
         recorder.write(&self.storage.source_slots);
         recorder.write(&self.storage.logical_positions);
         recorder.write(&self.storage.kinds);
@@ -886,6 +922,8 @@ impl SemanticTrainingViewArena {
             mask_weights: allocate_port(reservation, self.row_count, self.capacity)?,
             ar_labels: allocate_port(reservation, self.row_count, self.capacity)?,
             retention_labels: allocate_port(reservation, self.row_count, self.capacity)?,
+            branch_labels: allocate_port(reservation, self.row_count, self.capacity)?,
+            branch_ids: allocate_port(reservation, self.row_count, self.capacity)?,
             source_slots: allocate_port(reservation, self.row_count, self.capacity)?,
             logical_positions: allocate_port(reservation, self.row_count, self.capacity)?,
             kinds: allocate_port(reservation, self.row_count, self.capacity)?,
@@ -1489,7 +1527,7 @@ fn validate_row(
 ) -> Result<TrainingViewRowDescriptor, SemanticTransitionError> {
     let bytes = &row.bytes;
     let mut schema = [0u8; 32];
-    let tag = b"dlm-new/training-view/v1";
+    let tag = b"dlm-new/training-view/v2";
     schema[..tag.len()].copy_from_slice(tag);
     if bytes.len() < TRAINING_VIEW_HEADER_BYTES || bytes[..32] != schema {
         return Err(input_error("training-view row has another schema"));
@@ -1509,6 +1547,7 @@ fn validate_row(
     if window == 0
         || word(104) == 0
         || word(112) == 0
+        || word(104) > word(96)
         || word(120) > word(104)
         || word(128) == 0
         || word(128) > word(104)
@@ -1518,6 +1557,42 @@ fn validate_row(
         return Err(input_error(
             "training-view row has invalid extent or geometry",
         ));
+    }
+    let shared_context_end = word(136);
+    if shared_context_end == 0 {
+        if (1..16).any(|index| word(136 + index * 8) != 0) {
+            return Err(input_error(
+                "training-view row has incomplete branch geometry",
+            ));
+        }
+    } else {
+        let mut next_begin = word(104)
+            .checked_mul(2)
+            .ok_or_else(|| input_error("training-view branch extent exceeds address space"))?;
+        if shared_context_end > word(128) || next_begin > word(96) {
+            return Err(input_error("training-view row has invalid branch geometry"));
+        }
+        for branch in 0..3 {
+            let offset = 144 + branch * 40;
+            let tail_begin = word(offset);
+            let tail_end = word(offset + 8);
+            let answer_begin = word(offset + 16);
+            let answer_end = word(offset + 24);
+            let answer_start = word(offset + 32);
+            if tail_begin != next_begin
+                || tail_end <= tail_begin
+                || answer_begin != tail_end
+                || answer_end <= answer_begin
+                || answer_end > word(96)
+                || shared_context_end.checked_add(tail_end - tail_begin) != Some(answer_start)
+                || answer_start
+                    .checked_add(answer_end - answer_begin)
+                    .is_none_or(|end| end > word(96))
+            {
+                return Err(input_error("training-view row has invalid branch geometry"));
+            }
+            next_begin = answer_end;
+        }
     }
     let padding = TRAINING_VIEW_HEADER_BYTES + window * 20;
     if bytes[padding..padding + (window % 2) * 4]
