@@ -84,6 +84,14 @@ struct ResidentLatencyDiagnostic {
     certificate_cache_access_ns: u64,
     input_setup_ns: u64,
     prepare_capture_allocation_ns: u64,
+    executor_registration_ns: u64,
+    fact_grouping_ns: u64,
+    empty_relation_seed_ns: u64,
+    fact_encoding_ns: u64,
+    fact_batch_upload_ns: u64,
+    fact_union_ns: u64,
+    multi_row_fact_relations: usize,
+    fact_union_calls: usize,
     launch_submission_ns: u64,
     sync_wall_ns: u64,
     device_event_ns: u64,
@@ -218,7 +226,7 @@ impl ResidentLatencyDiagnostic {
         let executor_manager_bytes_released =
             self.manager_bytes[6].saturating_sub(self.manager_bytes[7]);
         format!(
-            "resident latency phases: sample={} total_ns={} certificate_input_ns={} certificate_cache_was_warm={} certificate_initialized_here={} certificate_initialization_ns={} certificate_cache_access_ns={} input_setup_ns={} certificate_input_unattributed_ns={} prepare_capture_allocation_ns={} launch_submission_ns={} sync_wall_ns={} device_event_ns_nonadditive={} receipt_d2h_ns={} receipt_decode_schema_staging_ns={} owner_teardown_residual_ns={} commit_ns={} result_stats_construction_ns={} executor_store_teardown_ns={} unattributed_host_ns={} staged_outputs={} relation_registrations={} remaining_store_relations_before_drop={} allocation_snapshot_order=runtime_ready|after_setup|after_prepare|after_launch|after_sync|after_observe|after_commit|after_executor_drop runtime_bytes={:?} manager_bytes={:?} owner_runtime_bytes_released={} owner_manager_bytes_released={} executor_runtime_bytes_released={} executor_manager_bytes_released={} deallocation_calls=unavailable",
+            "resident latency phases: sample={} total_ns={} certificate_input_ns={} certificate_cache_was_warm={} certificate_initialized_here={} certificate_initialization_ns={} certificate_cache_access_ns={} input_setup_ns={} certificate_input_unattributed_ns={} prepare_capture_allocation_ns={} executor_registration_ns_nested={} fact_grouping_ns_nested={} empty_relation_seed_ns_nested={} fact_encoding_ns_nested={} fact_batch_upload_ns_nested={} fact_union_ns_nested={} multi_row_fact_relations={} fact_union_calls={} launch_submission_ns={} sync_wall_ns={} device_event_ns_nonadditive={} receipt_d2h_ns={} receipt_decode_schema_staging_ns={} owner_teardown_residual_ns={} commit_ns={} result_stats_construction_ns={} executor_store_teardown_ns={} unattributed_host_ns={} staged_outputs={} relation_registrations={} remaining_store_relations_before_drop={} allocation_snapshot_order=runtime_ready|after_setup|after_prepare|after_launch|after_sync|after_observe|after_commit|after_executor_drop runtime_bytes={:?} manager_bytes={:?} owner_runtime_bytes_released={} owner_manager_bytes_released={} executor_runtime_bytes_released={} executor_manager_bytes_released={} deallocation_calls=unavailable",
             self.sample,
             total_ns,
             self.certificate_input_ns,
@@ -232,6 +240,14 @@ impl ResidentLatencyDiagnostic {
                 .saturating_sub(self.certificate_cache_access_ns)
                 .saturating_sub(self.input_setup_ns),
             self.prepare_capture_allocation_ns,
+            self.executor_registration_ns,
+            self.fact_grouping_ns,
+            self.empty_relation_seed_ns,
+            self.fact_encoding_ns,
+            self.fact_batch_upload_ns,
+            self.fact_union_ns,
+            self.multi_row_fact_relations,
+            self.fact_union_calls,
             self.launch_submission_ns,
             self.sync_wall_ns,
             self.device_event_ns,
@@ -2758,6 +2774,7 @@ impl LogicProgram {
                 resident_inputs,
                 profiling,
                 ordinary_plan,
+                latency_diagnostic.as_mut(),
             )?;
             let prepared = match executor
                 .prepare_certified_resident_graph(certified_plan.as_ref(), prepare_options)
@@ -3201,6 +3218,7 @@ impl LogicProgram {
         inputs: HashMap<String, CudaBuffer>,
         profiling: bool,
         plan: &ExecutionPlan,
+        diagnostic: Option<&mut ResidentLatencyDiagnostic>,
     ) -> Result<Executor> {
         let derived_relations = plan
             .rules_by_scc
@@ -3213,6 +3231,7 @@ impl LogicProgram {
             inputs,
             profiling,
             Some(&derived_relations),
+            diagnostic,
         )
     }
 
@@ -3222,13 +3241,19 @@ impl LogicProgram {
         inputs: HashMap<String, CudaBuffer>,
         profiling: bool,
         derived_relations: Option<&BTreeSet<String>>,
+        mut diagnostic: Option<&mut ResidentLatencyDiagnostic>,
     ) -> Result<Executor> {
+        let registration_started = diagnostic.as_ref().map(|_| std::time::Instant::now());
         let mut executor = Executor::new(provider.clone());
         executor.set_profiling(profiling);
         for (name, rel_id) in &self.rel_ids {
             executor.register_relation(*rel_id, name);
         }
+        if let Some(diagnostic) = diagnostic.as_deref_mut() {
+            diagnostic.executor_registration_ns = resident_latency_elapsed_ns(registration_started);
+        }
 
+        let grouping_started = diagnostic.as_ref().map(|_| std::time::Instant::now());
         let arity_qualified_predicates = self.arity_qualified_fact_predicates();
         let fact_rows = self.fact_rows_by_relation(arity_qualified_predicates);
         // A single asserted tuple needs no set union against a known-empty base.
@@ -3239,7 +3264,11 @@ impl LogicProgram {
             .filter(|(name, rows)| rows.len() == 1 && !inputs.contains_key(*name))
             .map(|(name, _)| name.clone())
             .collect::<BTreeSet<_>>();
+        if let Some(diagnostic) = diagnostic.as_deref_mut() {
+            diagnostic.fact_grouping_ns = resident_latency_elapsed_ns(grouping_started);
+        }
 
+        let empty_started = diagnostic.as_ref().map(|_| std::time::Instant::now());
         let mut empty_names = Vec::new();
         let mut empty_schemas = Vec::new();
         for (name, schema) in &self.schemas {
@@ -3260,6 +3289,9 @@ impl LogicProgram {
         {
             executor.store_mut().put(name, buffer);
         }
+        if let Some(diagnostic) = diagnostic.as_deref_mut() {
+            diagnostic.empty_relation_seed_ns = resident_latency_elapsed_ns(empty_started);
+        }
 
         for (name, buffer) in inputs {
             let schema = self.schemas.get(&name).ok_or_else(|| {
@@ -3279,6 +3311,7 @@ impl LogicProgram {
             executor.store_mut(),
             fact_rows,
             &singleton_fact_names,
+            diagnostic,
         )?;
         Ok(executor)
     }
@@ -3553,7 +3586,9 @@ impl LogicProgram {
         inputs: HashMap<String, CudaBuffer>,
         profiling: bool,
     ) -> Result<Executor> {
-        self.prepare_executor_excluding_derived_placeholders(provider, inputs, profiling, None)
+        self.prepare_executor_excluding_derived_placeholders(
+            provider, inputs, profiling, None, None,
+        )
     }
 
     /// Execute an epistemic program and return its accepted GPU execution evidence.
@@ -3802,7 +3837,7 @@ impl LogicProgram {
     ) -> Result<()> {
         let arity_qualified_predicates = self.arity_qualified_fact_predicates();
         let rows_by_pred = self.fact_rows_by_relation(arity_qualified_predicates);
-        self.load_grouped_facts_into_store(provider, store, rows_by_pred, &BTreeSet::new())
+        self.load_grouped_facts_into_store(provider, store, rows_by_pred, &BTreeSet::new(), None)
     }
 
     fn load_grouped_facts_into_store(
@@ -3811,7 +3846,13 @@ impl LogicProgram {
         store: &mut RelationStore,
         rows_by_pred: HashMap<String, Vec<&[Term]>>,
         singleton_fact_names: &BTreeSet<String>,
+        mut diagnostic: Option<&mut ResidentLatencyDiagnostic>,
     ) -> Result<()> {
+        let encoding_started = diagnostic.as_ref().map(|_| std::time::Instant::now());
+        if let Some(diagnostic) = diagnostic.as_deref_mut() {
+            diagnostic.multi_row_fact_relations =
+                rows_by_pred.values().filter(|rows| rows.len() > 1).count();
+        }
         let mut names = Vec::with_capacity(rows_by_pred.len());
         let mut host_relations = Vec::with_capacity(rows_by_pred.len());
         for (pred, rows) in rows_by_pred {
@@ -3848,11 +3889,16 @@ impl LogicProgram {
             names.push(pred);
             host_relations.push((schema.clone(), columns, fact_rows));
         }
+        if let Some(diagnostic) = diagnostic.as_deref_mut() {
+            diagnostic.fact_encoding_ns = resident_latency_elapsed_ns(encoding_started);
+        }
 
-        for (pred, fact_buf) in names
-            .into_iter()
-            .zip(provider.create_buffers_from_host_columns(&host_relations)?)
-        {
+        let upload_started = diagnostic.as_ref().map(|_| std::time::Instant::now());
+        let fact_buffers = provider.create_buffers_from_host_columns(&host_relations)?;
+        if let Some(diagnostic) = diagnostic.as_deref_mut() {
+            diagnostic.fact_batch_upload_ns = resident_latency_elapsed_ns(upload_started);
+        }
+        for (pred, fact_buf) in names.into_iter().zip(fact_buffers) {
             if singleton_fact_names.contains(&pred) {
                 store.put(pred.as_str(), fact_buf);
                 continue;
@@ -3864,7 +3910,14 @@ impl LogicProgram {
                 ))
             })?;
 
+            let union_started = diagnostic.as_ref().map(|_| std::time::Instant::now());
             let merged = provider.union(existing, &fact_buf)?;
+            if let Some(diagnostic) = diagnostic.as_deref_mut() {
+                diagnostic.fact_union_ns = diagnostic
+                    .fact_union_ns
+                    .saturating_add(resident_latency_elapsed_ns(union_started));
+                diagnostic.fact_union_calls = diagnostic.fact_union_calls.saturating_add(1);
+            }
             store.put(pred.as_str(), merged);
         }
 
@@ -7192,8 +7245,13 @@ mod tests {
             return Ok(());
         };
         let resident_provider = Arc::clone(&provider);
-        let executor =
-            program.prepare_resident_executor(&resident_provider, HashMap::new(), false, plan)?;
+        let executor = program.prepare_resident_executor(
+            &resident_provider,
+            HashMap::new(),
+            false,
+            plan,
+            None,
+        )?;
         let runtime = resident_provider
             .memory()
             .runtime()
@@ -8644,7 +8702,7 @@ mod tests {
         };
 
         let compiler_seeded =
-            program.prepare_resident_executor(&provider, HashMap::new(), false, plan)?;
+            program.prepare_resident_executor(&provider, HashMap::new(), false, plan, None)?;
         assert!(compiler_seeded.store().get("source").is_some());
         assert!(compiler_seeded.store().get("answer").is_none());
         assert_eq!(
@@ -8666,6 +8724,7 @@ mod tests {
             HashMap::from([("answer".to_string(), explicit_empty)]),
             false,
             plan,
+            None,
         )?;
         assert_eq!(
             explicitly_seeded
