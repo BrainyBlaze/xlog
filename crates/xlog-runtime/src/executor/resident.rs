@@ -279,6 +279,7 @@ struct ResidentRunOwners {
     _schedule_program: ResidentScheduleDeviceProgram,
     recorder: LaunchRecorder,
     relations: Vec<Option<ResidentRelation>>,
+    source_binding_names: Vec<String>,
     output_indices: Vec<(String, usize)>,
     _filter_scratch: Option<ResidentFilterScratch>,
     _set_workspace: ResidentSetWorkspace,
@@ -2544,6 +2545,7 @@ impl PreparedResidentGraph {
             self.owners.source_epoch,
             &self.source_set_snapshots,
         )?;
+        let next_recorder = resident_replay_recorder(&self.owners, source_guard)?;
         for (_, index) in &self.owners.output_indices {
             private_relation(&self.owners.relations, *index)
                 .map_err(runtime_error)?
@@ -2574,10 +2576,7 @@ impl PreparedResidentGraph {
             |execution| reserve_uncaptured_stream(&execution.owners.stream).map_err(runtime_error),
             |execution| {
                 let execution_domain = execution.owners.execution_domain.clone();
-                let recorder = std::mem::replace(
-                    &mut execution.owners.recorder,
-                    execution_domain.new_strict_recorder(),
-                );
+                let recorder = std::mem::replace(&mut execution.owners.recorder, next_recorder);
                 // SAFETY: graph preparation registered every runtime allocation touched
                 // by this graph on `recorder`. The closure queues the timing events and
                 // graph launch synchronously and uses only the domain-supplied stream.
@@ -2632,6 +2631,41 @@ impl PreparedResidentGraph {
             _executor: PhantomData,
         })
     }
+}
+
+fn resident_replay_recorder(
+    owners: &ResidentRunOwners,
+    executor: &Executor,
+) -> std::result::Result<LaunchRecorder, ResidentGraphExecutionError> {
+    let mut recorder = owners.execution_domain.new_strict_recorder();
+    for relation in &owners.relations {
+        let relation = relation
+            .as_ref()
+            .ok_or_else(|| runtime_error("resident graph relation was not restored"))?;
+        ResidentScheduleSlotBinding::permanent(relation.buffer(), 0).record_uses(&mut recorder);
+    }
+    for name in &owners.source_binding_names {
+        let source = executor
+            .store
+            .get(name)
+            .ok_or_else(|| runtime_error(format!("resident source {name} was not restored")))?;
+        for column in source.columns() {
+            recorder.read_column(column);
+        }
+        recorder.read(source.num_rows_device());
+    }
+    ResidentScheduleExternalBindings::new(
+        owners._filter_scratch.as_ref(),
+        &owners._set_workspace,
+        &owners._join_workspace,
+        &owners._control,
+        &owners._device_trace,
+        &owners._schema_winners,
+        &owners.receipt,
+    )
+    .record_uses(&mut recorder);
+    owners._schedule_program.record_uses(&mut recorder);
+    Ok(recorder)
 }
 
 impl<'executor> ResidentGraphInFlight<'executor> {
@@ -5335,6 +5369,7 @@ impl Executor {
             _schedule_program: schedule_program,
             recorder,
             relations: physical.relations,
+            source_binding_names: compact_schedule.source_slots.keys().cloned().collect(),
             output_indices,
             _filter_scratch: physical.filter_scratch,
             _set_workspace: physical.set_workspace,
