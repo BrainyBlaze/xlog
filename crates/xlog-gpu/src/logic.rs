@@ -1047,6 +1047,7 @@ pub struct LogicProgram {
     plan: LogicExecutionPlan,
     schemas: HashMap<String, Schema>,
     rel_ids: HashMap<String, RelId>,
+    fact_arity_qualifications: OnceLock<BTreeSet<String>>,
     /// `Some` iff the source program contained epistemic literals (regardless of
     /// whether the executable plan ended up epistemic or ordinary).
     epistemic_provenance: Option<EpistemicProvenance>,
@@ -1289,6 +1290,7 @@ impl LogicProgram {
                 plan: LogicExecutionPlan::Ordinary(Box::new(plan)),
                 schemas,
                 rel_ids: compiler.rel_ids().clone(),
+                fact_arity_qualifications: OnceLock::new(),
                 epistemic_provenance: None,
             }
         };
@@ -1375,6 +1377,7 @@ impl LogicProgram {
                 plan: LogicExecutionPlan::EpistemicG91Compatibility(Box::new(plan)),
                 schemas,
                 rel_ids,
+                fact_arity_qualifications: OnceLock::new(),
                 epistemic_provenance: Some(EpistemicProvenance {
                     reduction: "g91_tuple_compatibility",
                     literals: provenance_literals,
@@ -1439,6 +1442,7 @@ impl LogicProgram {
                 plan,
                 schemas,
                 rel_ids,
+                fact_arity_qualifications: OnceLock::new(),
                 epistemic_provenance: Some(EpistemicProvenance {
                     reduction: "stratified",
                     literals: provenance_literals,
@@ -1467,6 +1471,7 @@ impl LogicProgram {
                     plan: LogicExecutionPlan::EpistemicWfsGpu(Box::new(wfs_plan)),
                     schemas,
                     rel_ids,
+                    fact_arity_qualifications: OnceLock::new(),
                     epistemic_provenance: Some(EpistemicProvenance {
                         reduction: "wfs_gpu_recursive",
                         literals: provenance_literals,
@@ -1484,6 +1489,7 @@ impl LogicProgram {
                 plan: LogicExecutionPlan::Ordinary(Box::new(plan)),
                 schemas: compiler.schemas().clone(),
                 rel_ids: compiler.rel_ids().clone(),
+                fact_arity_qualifications: OnceLock::new(),
                 epistemic_provenance: Some(EpistemicProvenance {
                     reduction: "ordinary_recursive_modal_reduction",
                     literals: provenance_literals,
@@ -1524,6 +1530,7 @@ impl LogicProgram {
             plan,
             schemas,
             rel_ids,
+            fact_arity_qualifications: OnceLock::new(),
             epistemic_provenance: Some(EpistemicProvenance {
                 reduction: "epistemic_executable",
                 literals: provenance_literals,
@@ -3125,7 +3132,7 @@ impl LogicProgram {
         }
 
         let arity_qualified_predicates = self.arity_qualified_fact_predicates();
-        let fact_rows = self.fact_rows_by_relation(&arity_qualified_predicates);
+        let fact_rows = self.fact_rows_by_relation(arity_qualified_predicates);
         // A single asserted tuple needs no set union against a known-empty base.
         // Keep the merge for imported inputs and multi-row fact relations, where
         // it preserves the existing set semantics.
@@ -3657,15 +3664,17 @@ impl LogicProgram {
         })
     }
 
-    fn arity_qualified_fact_predicates(&self) -> BTreeSet<String> {
-        if self.epistemic_provenance.is_some() {
-            epistemic_extensional_multi_arity_predicates(&self.program)
-        } else {
-            predicate_arities(&self.program)
-                .into_iter()
-                .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
-                .collect()
-        }
+    fn arity_qualified_fact_predicates(&self) -> &BTreeSet<String> {
+        self.fact_arity_qualifications.get_or_init(|| {
+            if self.epistemic_provenance.is_some() {
+                epistemic_extensional_multi_arity_predicates(&self.program)
+            } else {
+                predicate_arities(&self.program)
+                    .into_iter()
+                    .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
+                    .collect()
+            }
+        })
     }
 
     fn fact_rows_by_relation<'program>(
@@ -3694,7 +3703,7 @@ impl LogicProgram {
         store: &mut RelationStore,
     ) -> Result<()> {
         let arity_qualified_predicates = self.arity_qualified_fact_predicates();
-        let rows_by_pred = self.fact_rows_by_relation(&arity_qualified_predicates);
+        let rows_by_pred = self.fact_rows_by_relation(arity_qualified_predicates);
         self.load_grouped_facts_into_store(provider, store, rows_by_pred, &BTreeSet::new())
     }
 
