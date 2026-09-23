@@ -3231,9 +3231,8 @@ impl LogicProgram {
 
         let arity_qualified_predicates = self.arity_qualified_fact_predicates();
         let fact_rows = self.fact_rows_by_relation(arity_qualified_predicates);
-        // Encoded inline facts can be deduplicated before upload unless their
-        // unary float equality differs from the GPU union's signed-zero rule.
-        // Caller inputs still need a device union with the inline facts.
+        // Multi-row fact-only sources must be sorted and certified before
+        // resident capture. Caller inputs still need a device union.
         let directly_loaded_fact_names = fact_rows
             .iter()
             .filter(|(name, rows)| {
@@ -3242,7 +3241,7 @@ impl LogicProgram {
                         || self
                             .schemas
                             .get(*name)
-                            .is_some_and(Self::host_fact_row_equality_matches_union))
+                            .is_some_and(Self::host_fact_rows_can_be_canonicalized))
             })
             .map(|(name, _)| name.clone())
             .collect::<BTreeSet<_>>();
@@ -3822,6 +3821,15 @@ impl LogicProgram {
             )
     }
 
+    fn host_fact_rows_can_be_canonicalized(schema: &Schema) -> bool {
+        (0..schema.arity()).all(|index| {
+            matches!(
+                schema.column_type(index),
+                Some(ScalarType::U32 | ScalarType::Symbol)
+            )
+        })
+    }
+
     fn load_grouped_facts_into_store(
         &self,
         provider: &CudaKernelProvider,
@@ -3875,6 +3883,38 @@ impl LogicProgram {
                     }
                 } else {
                     fact_rows += 1;
+                }
+            }
+            if directly_loaded_fact_names.contains(&pred) && fact_rows > 1 {
+                let mut order = (0..fact_rows).collect::<Vec<_>>();
+                order.sort_unstable_by(|&left, &right| {
+                    columns
+                        .iter()
+                        .map(|column| {
+                            let left_start = left * std::mem::size_of::<u32>();
+                            let right_start = right * std::mem::size_of::<u32>();
+                            let left_value = u32::from_le_bytes(
+                                column[left_start..left_start + 4]
+                                    .try_into()
+                                    .expect("u32 fact column"),
+                            );
+                            let right_value = u32::from_le_bytes(
+                                column[right_start..right_start + 4]
+                                    .try_into()
+                                    .expect("u32 fact column"),
+                            );
+                            left_value.cmp(&right_value)
+                        })
+                        .find(|ordering| *ordering != CmpOrdering::Equal)
+                        .unwrap_or(CmpOrdering::Equal)
+                });
+                for column in &mut columns {
+                    let mut sorted = Vec::with_capacity(column.len());
+                    for &row in &order {
+                        let start = row * std::mem::size_of::<u32>();
+                        sorted.extend_from_slice(&column[start..start + 4]);
+                    }
+                    *column = sorted;
                 }
             }
             // Every asserted nullary fact denotes the same unit tuple.

@@ -8,6 +8,44 @@ use xlog_core::{Result, ScalarType, Schema, XlogError};
 use super::{d4_kernels, pack_kernels, D4_MODULE, PACK_MODULE};
 use crate::{CudaBuffer, CudaColumn};
 
+fn host_columns_form_canonical_u32_set(schema: &Schema, columns: &[Vec<u8>], rows: usize) -> bool {
+    if rows <= 1 {
+        return true;
+    }
+    if schema.arity() == 0
+        || !(0..schema.arity()).all(|index| {
+            matches!(
+                schema.column_type(index),
+                Some(ScalarType::U32 | ScalarType::Symbol)
+            )
+        })
+    {
+        return false;
+    }
+
+    (1..rows).all(|row| {
+        columns
+            .iter()
+            .map(|column| {
+                let prior = (row - 1) * std::mem::size_of::<u32>();
+                let current = row * std::mem::size_of::<u32>();
+                let prior_value = u32::from_le_bytes(
+                    column[prior..prior + 4]
+                        .try_into()
+                        .expect("validated u32 column"),
+                );
+                let current_value = u32::from_le_bytes(
+                    column[current..current + 4]
+                        .try_into()
+                        .expect("validated u32 column"),
+                );
+                prior_value.cmp(&current_value)
+            })
+            .find(|ordering| *ordering != std::cmp::Ordering::Equal)
+            == Some(std::cmp::Ordering::Less)
+    })
+}
+
 impl super::CudaKernelProvider {
     // ============== Buffer Helper Methods ==============
 
@@ -128,7 +166,8 @@ impl super::CudaKernelProvider {
     /// Upload a group of host-columnar relations with one payload transfer and
     /// one row-count transfer. Each returned buffer owns disjoint views of the
     /// shared device allocations, so dropping one relation cannot invalidate
-    /// another.
+    /// another. Strictly sorted, unique U32/Symbol rows receive a canonical
+    /// full-row set proof after their host columns are checked.
     pub fn create_buffers_from_host_columns(
         &self,
         relations: &[(Schema, Vec<Vec<u8>>, usize)],
@@ -144,6 +183,7 @@ impl super::CudaKernelProvider {
         let mut payload_bytes = 0usize;
         let mut spans = Vec::with_capacity(relations.len());
         let mut count_bytes = Vec::with_capacity(count_capacity);
+        let mut canonical_sets = Vec::with_capacity(relations.len());
         for (schema, columns, rows) in relations {
             if columns.len() != schema.arity() {
                 return Err(XlogError::Kernel(format!(
@@ -192,6 +232,7 @@ impl super::CudaKernelProvider {
                 column_spans.push(start..end);
                 payload_bytes = end;
             }
+            canonical_sets.push(host_columns_form_canonical_u32_set(schema, columns, *rows));
             spans.push(column_spans);
         }
 
@@ -236,7 +277,7 @@ impl super::CudaKernelProvider {
                 schema.clone(),
                 *rows as u32,
             );
-            if *rows <= 1 {
+            if canonical_sets[index] {
                 buffer.certify_canonical_full_row_set();
             }
             buffers.push(buffer);
