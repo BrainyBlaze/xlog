@@ -2229,6 +2229,7 @@ pub struct PreparedResidentGraph {
     preflight_report: ResidentGraphPreflightReport,
     has_device_status_writer: bool,
     source_set_snapshots: Vec<ResidentSourceSetSnapshot>,
+    source_buffers_to_restore: Vec<(String, CudaBuffer)>,
     prepare_diagnostic: Option<ResidentPrepareDiagnostics>,
 }
 
@@ -2517,6 +2518,9 @@ impl PreparedResidentGraph {
             })?;
             *slot = Some(ResidentRelation::from_buffer(buffer));
         }
+        for (name, buffer) in self.source_buffers_to_restore.drain(..) {
+            executor.store.put_owned(name, buffer);
+        }
         Ok(())
     }
 
@@ -2530,6 +2534,11 @@ impl PreparedResidentGraph {
         self,
         source_guard: &'executor Executor,
     ) -> std::result::Result<ResidentGraphInFlight<'executor>, ResidentGraphExecutionError> {
+        if !self.source_buffers_to_restore.is_empty() {
+            return Err(runtime_error(
+                "resident source buffers were not restored before graph launch",
+            ));
+        }
         validate_resident_source_set_snapshots(
             source_guard,
             self.owners.source_epoch,
@@ -2870,6 +2879,7 @@ impl<'executor> ResidentGraphSynchronized<'executor> {
             preflight_report: self.replay_metadata.preflight_report,
             has_device_status_writer: self.replay_metadata.has_device_status_writer,
             source_set_snapshots: self.replay_metadata.source_set_snapshots,
+            source_buffers_to_restore: Vec::new(),
             prepare_diagnostic: self.replay_metadata.prepare_diagnostic,
         });
         Ok(ObservedResidentGraphReceipt {
@@ -3003,6 +3013,23 @@ impl ObservedResidentGraphReceipt {
         for output in self.outputs.drain(..) {
             if let Some(&rel) = executor.name_to_rel.get(&output.name) {
                 executor.join_index_cache.invalidate_rel(rel);
+            }
+            if let Some(prepared) = self.prepared_for_reuse.as_mut() {
+                if prepared
+                    .source_set_snapshots
+                    .iter()
+                    .any(|source| source.name == output.name)
+                {
+                    let source = executor.store.remove(&output.name).ok_or_else(|| {
+                        runtime_error(format!(
+                            "resident source {} disappeared before output publication",
+                            output.name
+                        ))
+                    })?;
+                    prepared
+                        .source_buffers_to_restore
+                        .push((output.name.clone(), source));
+                }
             }
             executor.store.put_owned(output.name, output.buffer);
         }
@@ -5346,6 +5373,7 @@ impl Executor {
             preflight_report,
             has_device_status_writer,
             source_set_snapshots,
+            source_buffers_to_restore: Vec::new(),
             prepare_diagnostic,
         })
     }

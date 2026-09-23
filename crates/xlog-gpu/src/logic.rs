@@ -2710,19 +2710,11 @@ impl LogicProgram {
             .map(|(name, buffer)| (name.clone(), buffer.schema().clone(), buffer.num_rows()))
             .collect::<Vec<_>>();
         input_shape.sort_by(|left, right| left.0.cmp(&right.0));
-        // Authored facts can be merged into a source during executor setup.
-        // A derived head can also replace a source at commit. Neither remains
-        // a direct, stable copy target for a later raw input buffer.
-        let derived_names = ordinary_plan
-            .rules_by_scc
-            .iter()
-            .flatten()
-            .map(|rule| rule.head.as_str())
-            .collect::<BTreeSet<_>>();
-        let reusable_source_shape = self.program.facts().into_iter().next().is_none()
-            && input_shape
-                .iter()
-                .all(|(name, _, _)| !derived_names.contains(name.as_str()));
+        // Fixed authored facts need no replacement when there are no external
+        // inputs. With external inputs, fact merging can change captured source
+        // geometry, so reuse is limited to programs without authored facts.
+        let reusable_source_shape =
+            input_shape.is_empty() || self.program.facts().into_iter().next().is_none();
 
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.input_setup_ns = resident_latency_elapsed_ns(input_setup_started);
