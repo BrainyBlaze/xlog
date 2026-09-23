@@ -174,18 +174,31 @@ impl super::CudaKernelProvider {
                         rows
                     )));
                 }
-                let end = payload_bytes.checked_add(column.len()).ok_or_else(|| {
+                // A later u64/f64 view may borrow this byte slice directly.
+                // Keep every column start aligned even after a shorter column.
+                let alignment = width.max(std::mem::align_of::<u64>());
+                let remainder = payload_bytes % alignment;
+                let padding = if remainder == 0 {
+                    0
+                } else {
+                    alignment - remainder
+                };
+                let start = payload_bytes.checked_add(padding).ok_or_else(|| {
                     XlogError::Kernel("Host relation payload size overflow".into())
                 })?;
-                column_spans.push(payload_bytes..end);
+                let end = start.checked_add(column.len()).ok_or_else(|| {
+                    XlogError::Kernel("Host relation payload size overflow".into())
+                })?;
+                column_spans.push(start..end);
                 payload_bytes = end;
             }
             spans.push(column_spans);
         }
 
         let mut payload = Vec::with_capacity(payload_bytes);
-        for (_, columns, _) in relations {
-            for column in columns {
+        for ((_, columns, _), column_spans) in relations.iter().zip(&spans) {
+            for (column, span) in columns.iter().zip(column_spans) {
+                payload.resize(span.start, 0);
                 payload.extend_from_slice(column);
             }
         }
