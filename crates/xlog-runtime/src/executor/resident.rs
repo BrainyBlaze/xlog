@@ -938,6 +938,8 @@ fn resident_lower_compact_regions<'a>(
         let region_flags = logical_region.flags;
         let first_wave = u32::try_from(waves.len())
             .map_err(|_| XlogError::Execution("resident wave count exceeds u32".into()))?;
+        let first_op = u32::try_from(ops.len())
+            .map_err(|_| XlogError::Execution("resident compact op count exceeds u32".into()))?;
         let generation_offset = u32::try_from(generation_bases.len()).map_err(|_| {
             XlogError::Execution("resident generation baseline offset exceeds u32".into())
         })?;
@@ -962,16 +964,7 @@ fn resident_lower_compact_regions<'a>(
                     }
                 }
                 let op_index = ops.len();
-                let first_op = u32::try_from(op_index).map_err(|_| {
-                    XlogError::Execution("resident compact op count exceeds u32".into())
-                })?;
                 ops.push(descriptor);
-                waves.push(ResidentWaveDescriptor {
-                    first_op,
-                    op_count: 1,
-                    flags: 0,
-                    reserved: 0,
-                });
                 last_relation_descriptor = Some((op_index, output));
                 Ok(())
             };
@@ -1175,32 +1168,14 @@ fn resident_lower_compact_regions<'a>(
                             *generation = Some(reference.generation);
                         }
                     }
-                    let first_op = u32::try_from(ops.len()).map_err(|_| {
-                        XlogError::Execution("resident compact op count exceeds u32".into())
-                    })?;
                     ops.push(ResidentOpDescriptor::trace_delta(
                         scan_delta,
                         filter_delta,
                         semantic_guard.map(|reference| (reference.slot, reference.generation)),
                     ));
-                    waves.push(ResidentWaveDescriptor {
-                        first_op,
-                        op_count: 1,
-                        flags: 0,
-                        reserved: 0,
-                    });
                 }
                 ResidentRecordedOp::TestStatus(status) => {
-                    let first_op = u32::try_from(ops.len()).map_err(|_| {
-                        XlogError::Execution("resident compact op count exceeds u32".into())
-                    })?;
                     ops.push(ResidentOpDescriptor::test_status(status)?);
-                    waves.push(ResidentWaveDescriptor {
-                        first_op,
-                        op_count: 1,
-                        flags: 0,
-                        reserved: 0,
-                    });
                 }
                 ResidentRecordedOp::SchemaWinnerMark {
                     contribution,
@@ -1255,6 +1230,18 @@ fn resident_lower_compact_regions<'a>(
                     ));
                 }
             }
+        }
+
+        let last_op = u32::try_from(ops.len())
+            .map_err(|_| XlogError::Execution("resident compact op count exceeds u32".into()))?;
+        if last_op != first_op {
+            // The device executes operations serially within a wave; extra waves add grid barriers.
+            waves.push(ResidentWaveDescriptor {
+                first_op,
+                op_count: last_op - first_op,
+                flags: 0,
+                reserved: 0,
+            });
         }
 
         for (slot, generation) in first_generations.into_iter().enumerate() {
@@ -7541,7 +7528,9 @@ mod tests {
         assert_eq!(plan.ops[2].kind, super::ResidentScheduleOpKind::Scan);
         assert_eq!(plan.ops[2].out, 2);
         assert_eq!(plan.ops[2].in0_generation, 0);
-        assert_eq!(plan.waves.len(), plan.ops.len());
+        assert_eq!(plan.waves.len(), 1);
+        assert_eq!(plan.waves[0].first_op, 0);
+        assert_eq!(plan.waves[0].op_count, 4);
         assert_eq!(plan.regions.len(), 1);
         assert_eq!(plan.generation_bases, vec![0, 4, 0]);
     }
