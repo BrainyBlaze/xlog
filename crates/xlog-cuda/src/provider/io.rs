@@ -215,9 +215,7 @@ impl super::CudaKernelProvider {
         self.htod_launch_metadata_sync_copy_into(&count_bytes, &mut counts)?;
 
         let mut buffers = Vec::with_capacity(relations.len());
-        for (index, ((schema, _, rows), column_spans)) in
-            relations.iter().zip(spans.into_iter()).enumerate()
-        {
+        for (index, ((schema, _, rows), column_spans)) in relations.iter().zip(spans).enumerate() {
             let mut columns = Vec::<CudaColumn>::with_capacity(column_spans.len());
             for span in column_spans {
                 let column = payload_owner
