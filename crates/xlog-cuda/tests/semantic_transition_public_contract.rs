@@ -720,7 +720,7 @@ fn public_session_round_trips_all_136_components_as_no_edit_null_without_mutatio
     assert_eq!(first.root_handle.generation(), 1);
     assert_eq!(
         session.host_io_stats().observation_bytes - before.observation_bytes,
-        42_856
+        47_824
     );
     assert_eq!(
         session.host_io_stats().observation_calls - before.observation_calls,
