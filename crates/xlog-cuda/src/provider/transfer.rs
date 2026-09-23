@@ -35,6 +35,9 @@ impl super::CudaKernelProvider {
         if num_rows > 0 {
             self.gate_column_download::<T>("download_column", num_rows)?;
             self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
+            super::record_resident_transfer(self.provider_identity, |stats| {
+                stats.provider_dtoh_calls += 1;
+            });
         }
         self.download_column_inner_with_rows::<T>(buffer, col_idx, num_rows)
     }

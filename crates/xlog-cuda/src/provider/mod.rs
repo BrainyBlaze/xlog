@@ -1176,6 +1176,70 @@ struct HostTransferTracker {
     launch_metadata_htod_calls: AtomicU64,
 }
 
+/// Transfers issued by one caller on the thread executing a resident graph.
+/// CUDA work is asynchronous, but these host transfer entry points are called
+/// synchronously by the submitting thread.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResidentHostTransferStats {
+    pub tracked_htod_calls: u64,
+    pub tracked_htod_bytes: u64,
+    pub tracked_dtoh_calls: u64,
+    pub tracked_dtoh_bytes: u64,
+    pub provider_dtoh_calls: u64,
+    pub untracked_metadata_dtoh_calls: u64,
+    pub deterministic_dtoh_violations: u64,
+    pub final_dtoh_calls: u64,
+    pub final_dtoh_bytes: u64,
+    pub final_pinned_receipts: u64,
+}
+
+type ResidentTransferCell = std::rc::Rc<std::cell::Cell<ResidentHostTransferStats>>;
+
+thread_local! {
+    static RESIDENT_TRANSFER_SCOPES: std::cell::RefCell<Vec<(u64, ResidentTransferCell)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A same-thread, provider-specific observation scope for one resident call.
+/// Dropping it removes attribution even when execution returns an error.
+pub struct ResidentHostTransferScope {
+    provider_identity: u64,
+    counters: ResidentTransferCell,
+}
+
+impl ResidentHostTransferScope {
+    pub fn snapshot(&self) -> ResidentHostTransferStats {
+        self.counters.get()
+    }
+}
+
+impl Drop for ResidentHostTransferScope {
+    fn drop(&mut self) {
+        RESIDENT_TRANSFER_SCOPES.with_borrow_mut(|scopes| {
+            if let Some(index) = scopes.iter().rposition(|(identity, counters)| {
+                *identity == self.provider_identity && std::rc::Rc::ptr_eq(counters, &self.counters)
+            }) {
+                scopes.remove(index);
+            }
+        });
+    }
+}
+
+fn record_resident_transfer(
+    provider_identity: u64,
+    update: impl Fn(&mut ResidentHostTransferStats),
+) {
+    RESIDENT_TRANSFER_SCOPES.with_borrow(|scopes| {
+        for (identity, counters) in scopes.iter() {
+            if *identity == provider_identity {
+                let mut stats = counters.get();
+                update(&mut stats);
+                counters.set(stats);
+            }
+        }
+    });
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct HostTransferStats {
     pub dtoh_bytes: u64,
@@ -1615,6 +1679,19 @@ impl CudaKernelProvider {
         self.transfer_tracker.snapshot()
     }
 
+    /// Attribute host operations to this call rather than taking a delta of
+    /// provider-wide counters shared with concurrent evaluations.
+    pub fn begin_resident_host_transfer_scope(&self) -> ResidentHostTransferScope {
+        let counters = std::rc::Rc::new(std::cell::Cell::new(ResidentHostTransferStats::default()));
+        RESIDENT_TRANSFER_SCOPES.with_borrow_mut(|scopes| {
+            scopes.push((self.provider_identity, counters.clone()));
+        });
+        ResidentHostTransferScope {
+            provider_identity: self.provider_identity,
+            counters,
+        }
+    }
+
     /// Reset the separately accounted final resident-receipt transfer.
     pub fn reset_final_observation_transfer_stats(&self) {
         self.final_observation_transfer_tracker.reset();
@@ -1644,6 +1721,11 @@ impl CudaKernelProvider {
         self.final_observation_transfer_tracker.record_dtoh(bytes);
         self.final_observation_pinned_receipts
             .fetch_add(1, Ordering::Relaxed);
+        record_resident_transfer(self.provider_identity, |stats| {
+            stats.final_dtoh_calls += 1;
+            stats.final_dtoh_bytes += bytes;
+            stats.final_pinned_receipts += 1;
+        });
     }
 
     /// Validate and publish logical row counts decoded from one resident receipt.
@@ -1760,6 +1842,9 @@ impl CudaKernelProvider {
         if self.strict_deterministic_d2h.load(Ordering::Relaxed) {
             self.deterministic_d2h_violations
                 .fetch_add(1, Ordering::Relaxed);
+            record_resident_transfer(self.provider_identity, |stats| {
+                stats.deterministic_dtoh_violations += 1;
+            });
             return Err(XlogError::Execution(format!(
                 "deterministic D2H gate: {} attempted to copy {} bytes from device to host",
                 op, bytes
@@ -1778,6 +1863,10 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("dtoh size overflow".to_string()))?;
         self.check_deterministic_d2h("dtoh_sync_copy_into_tracked", bytes as u64)?;
         self.transfer_tracker.record_dtoh(bytes as u64);
+        record_resident_transfer(self.provider_identity, |stats| {
+            stats.tracked_dtoh_calls += 1;
+            stats.tracked_dtoh_bytes += bytes as u64;
+        });
         self.device
             .inner()
             .dtoh_sync_copy_into(src, dst)
@@ -1847,6 +1936,9 @@ impl CudaKernelProvider {
         let mut buf: Vec<T> = vec![T::default(); count];
         self.untracked_metadata_dtoh_count
             .fetch_add(1, Ordering::Relaxed);
+        record_resident_transfer(self.provider_identity, |stats| {
+            stats.untracked_metadata_dtoh_calls += 1;
+        });
         self.device
             .inner()
             .dtoh_sync_copy_into(&slice, &mut buf)
@@ -1884,6 +1976,9 @@ impl CudaKernelProvider {
         let mut buf = [T::default()];
         self.untracked_metadata_dtoh_count
             .fetch_add(1, Ordering::Relaxed);
+        record_resident_transfer(self.provider_identity, |stats| {
+            stats.untracked_metadata_dtoh_calls += 1;
+        });
         self.device
             .inner()
             .dtoh_sync_copy_into(&slice, &mut buf)
@@ -1901,6 +1996,10 @@ impl CudaKernelProvider {
             .checked_mul(src.len())
             .ok_or_else(|| XlogError::Kernel("htod size overflow".to_string()))?;
         self.transfer_tracker.record_htod(bytes as u64);
+        record_resident_transfer(self.provider_identity, |stats| {
+            stats.tracked_htod_calls += 1;
+            stats.tracked_htod_bytes += bytes as u64;
+        });
         self.device
             .inner()
             .htod_sync_copy_into(src, dst)
@@ -1917,6 +2016,10 @@ impl CudaKernelProvider {
             .checked_mul(src.len())
             .ok_or_else(|| XlogError::Kernel("htod size overflow".to_string()))?;
         self.transfer_tracker.record_htod(bytes as u64);
+        record_resident_transfer(self.provider_identity, |stats| {
+            stats.tracked_htod_calls += 1;
+            stats.tracked_htod_bytes += bytes as u64;
+        });
         self.device
             .inner()
             .htod_sync_copy(src)

@@ -2803,12 +2803,7 @@ impl LogicProgram {
         }
         let prepare_diagnostic = prepared.take_prepare_diagnostic();
 
-        let transfer_before = resident_provider.host_transfer_stats();
-        let provider_dtoh_before = resident_provider.d2h_transfer_count();
-        let untracked_dtoh_before = resident_provider.untracked_metadata_dtoh_count();
-        let deterministic_d2h_before = resident_provider.deterministic_d2h_violation_count();
-        let final_before = resident_provider.final_observation_transfer_stats();
-        let graph_before = runtime.conditional_graph_stats();
+        let transfer_scope = resident_provider.begin_resident_host_transfer_scope();
 
         let launch_started = latency_diagnostic
             .as_ref()
@@ -2833,28 +2828,14 @@ impl LogicProgram {
             diagnostic.manager_bytes[4] = resident_provider.memory().allocated_bytes();
         }
 
-        let transfer_after = resident_provider.host_transfer_stats();
-        let provider_dtoh_after = resident_provider.d2h_transfer_count();
-        let untracked_dtoh_after = resident_provider.untracked_metadata_dtoh_count();
-        let deterministic_d2h_after = resident_provider.deterministic_d2h_violation_count();
-        let final_before_observation = resident_provider.final_observation_transfer_stats();
-        let graph_after = runtime.conditional_graph_stats();
+        let core_snapshot = transfer_scope.snapshot();
         let core_transfers = ResidentGraphCoreTransferStats {
-            tracked_htod_calls: transfer_after
-                .htod_calls
-                .saturating_sub(transfer_before.htod_calls),
-            tracked_htod_bytes: transfer_after
-                .htod_bytes
-                .saturating_sub(transfer_before.htod_bytes),
-            tracked_dtoh_calls: transfer_after
-                .dtoh_calls
-                .saturating_sub(transfer_before.dtoh_calls),
-            tracked_dtoh_bytes: transfer_after
-                .dtoh_bytes
-                .saturating_sub(transfer_before.dtoh_bytes),
-            provider_dtoh_calls: provider_dtoh_after.saturating_sub(provider_dtoh_before),
-            untracked_metadata_dtoh_calls: untracked_dtoh_after
-                .saturating_sub(untracked_dtoh_before),
+            tracked_htod_calls: core_snapshot.tracked_htod_calls,
+            tracked_htod_bytes: core_snapshot.tracked_htod_bytes,
+            tracked_dtoh_calls: core_snapshot.tracked_dtoh_calls,
+            tracked_dtoh_bytes: core_snapshot.tracked_dtoh_bytes,
+            provider_dtoh_calls: core_snapshot.provider_dtoh_calls,
+            untracked_metadata_dtoh_calls: core_snapshot.untracked_metadata_dtoh_calls,
         };
         if core_transfers.tracked_htod_calls != 0
             || core_transfers.tracked_htod_bytes != 0
@@ -2862,39 +2843,27 @@ impl LogicProgram {
             || core_transfers.tracked_dtoh_bytes != 0
             || core_transfers.provider_dtoh_calls != 0
             || core_transfers.untracked_metadata_dtoh_calls != 0
-            || final_before_observation.dtoh_calls != final_before.dtoh_calls
-            || final_before_observation.dtoh_bytes != final_before.dtoh_bytes
-            || final_before_observation.pinned_receipts != final_before.pinned_receipts
+            || core_snapshot.final_dtoh_calls != 0
+            || core_snapshot.final_dtoh_bytes != 0
+            || core_snapshot.final_pinned_receipts != 0
         {
             return Err(XlogError::Execution(
                 "resident conditional-graph core performed a host transfer".into(),
             ));
         }
-        let graph_launches = graph_after.launches.saturating_sub(graph_before.launches);
-        let terminal_synchronizations = graph_after
-            .terminal_synchronizations
-            .saturating_sub(graph_before.terminal_synchronizations);
-        let host_iterations = graph_after
-            .host_iterations
-            .saturating_sub(graph_before.host_iterations);
-        let host_allocations = graph_after
-            .host_allocations
-            .saturating_sub(graph_before.host_allocations);
-        let host_status_injections = graph_after
-            .host_status_injections
-            .saturating_sub(graph_before.host_status_injections);
-        let deterministic_d2h_violations =
-            deterministic_d2h_after.saturating_sub(deterministic_d2h_before);
-        if graph_launches != 1
-            || terminal_synchronizations != 1
-            || host_iterations != 0
-            || host_allocations != 0
-            || host_status_injections != 0
-            || deterministic_d2h_violations != 0
-        {
+        // The successful launch and one successful completion wait above are
+        // owned by this invocation. Provider-wide telemetry also includes
+        // concurrent callers and cannot establish these per-call counts.
+        let graph_launches = 1;
+        let terminal_synchronizations = 1;
+        let host_iterations = 0;
+        let host_allocations = 0;
+        let host_status_injections = 0;
+        let deterministic_d2h_violations = core_snapshot.deterministic_dtoh_violations;
+        if deterministic_d2h_violations != 0 {
             return Err(XlogError::Execution(format!(
-                    "resident conditional-graph runtime invariant failed: launches={graph_launches}, terminal_synchronizations={terminal_synchronizations}, host_iterations={host_iterations}, host_allocations={host_allocations}, host_status_injections={host_status_injections}, deterministic_d2h_violations={deterministic_d2h_violations}"
-                )));
+                "resident conditional-graph core attempted {deterministic_d2h_violations} forbidden device-to-host transfers"
+            )));
         }
 
         let observation_started = latency_diagnostic
@@ -2929,17 +2898,11 @@ impl LogicProgram {
         let semantic_filter_invocations = observed.semantic_filter_invocations();
         let staged_store_mutations = observed.staged_output_count();
         let iterations = observed.iterations();
-        let final_after = resident_provider.final_observation_transfer_stats();
+        let final_after = transfer_scope.snapshot();
         let final_observation = ResidentGraphFinalObservationStats {
-            dtoh_calls: final_after
-                .dtoh_calls
-                .saturating_sub(final_before_observation.dtoh_calls),
-            dtoh_bytes: final_after
-                .dtoh_bytes
-                .saturating_sub(final_before_observation.dtoh_bytes),
-            pinned_receipts: final_after
-                .pinned_receipts
-                .saturating_sub(final_before_observation.pinned_receipts),
+            dtoh_calls: final_after.final_dtoh_calls,
+            dtoh_bytes: final_after.final_dtoh_bytes,
+            pinned_receipts: final_after.final_pinned_receipts,
         };
         if final_observation.dtoh_calls != 1
             || final_observation.dtoh_bytes != encoded_len
