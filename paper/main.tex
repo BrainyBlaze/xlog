@@ -1,6 +1,54 @@
 \documentclass[10pt,twocolumn]{article}
 
-\usepackage{arxiv}
+% Keep the page layout in the submission source so no custom style file is needed.
+\usepackage[letterpaper,margin=0.75in,headheight=14pt,columnsep=0.25in]{geometry}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{setspace}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+
+\setlength{\parindent}{12pt}
+\setlength{\parskip}{2pt plus 1pt minus 1pt}
+\linespread{1.0}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\itshape A Preprint}
+\fancyhead[R]{\small\thepage\,/\,\pageref{LastPage}}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\makeatletter
+\renewcommand{\maketitle}{%
+  \begingroup
+    \centering
+    {\LARGE\bfseries \@title\par}%
+    \vspace{1.2em}%
+    {\large \@author\par}%
+    \vspace{0.6em}%
+    {\small \@date\par}%
+    \vspace{1.5em}%
+  \endgroup
+  \thispagestyle{fancy}%
+}
+
+\@addtoreset{section}{part}
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {-3.5ex \@plus -1ex \@minus -.2ex}%
+  {2.3ex \@plus.2ex}%
+  {\normalfont\Large\bfseries}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-3.25ex\@plus -1ex \@minus -.2ex}%
+  {1.5ex \@plus .2ex}%
+  {\normalfont\large\bfseries}}
+\renewcommand\subsubsection{\@startsection{subsubsection}{3}{\z@}%
+  {-3.25ex\@plus -1ex \@minus -.2ex}%
+  {1.5ex \@plus .2ex}%
+  {\normalfont\normalsize\bfseries}}
+\makeatother
 \usepackage[htt]{hyphenat}
 % Break long \texttt identifiers at their underscores, and never with a
 % hyphen: both\_low\_or\_stopped must not read as both\_-low\_or\_stopped.

@@ -12,7 +12,7 @@ FIGPDFS := $(MMDS:.mmd=.pdf)
 
 all: $(PDF)
 
-$(PDF): $(TEX) refs.bib $(wildcard sections/*.tex) $(FIGPDFS) arxiv.sty
+$(PDF): $(TEX) refs.bib $(wildcard sections/*.tex) $(FIGPDFS)
 	latexmk -pdf $(TEX)
 
 figures: $(FIGPDFS)
