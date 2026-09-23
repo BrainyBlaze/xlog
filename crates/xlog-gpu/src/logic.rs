@@ -3127,15 +3127,22 @@ impl LogicProgram {
         let arity_qualified_predicates = self.arity_qualified_fact_predicates();
         let fact_rows = self.fact_rows_by_relation(&arity_qualified_predicates);
 
+        let mut empty_names = Vec::new();
+        let mut empty_schemas = Vec::new();
         for (name, schema) in &self.schemas {
             let is_derived_placeholder = derived_relations.is_some_and(|set| set.contains(name))
                 && !fact_rows.contains_key(name);
-            if is_derived_placeholder {
+            if is_derived_placeholder || inputs.contains_key(name) {
                 continue;
             }
-            executor
-                .store_mut()
-                .put(name, provider.create_empty_buffer(schema.clone())?);
+            empty_names.push(name);
+            empty_schemas.push(schema.clone());
+        }
+        for (name, buffer) in empty_names
+            .into_iter()
+            .zip(provider.create_empty_buffers(&empty_schemas)?)
+        {
+            executor.store_mut().put(name, buffer);
         }
 
         for (name, buffer) in inputs {

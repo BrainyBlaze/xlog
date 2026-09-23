@@ -2538,12 +2538,55 @@ impl CudaKernelProvider {
     /// # Errors
     /// Returns `XlogError::Kernel` if allocation fails
     pub fn create_empty_buffer(&self, schema: Schema) -> Result<CudaBuffer> {
-        let mut columns = Vec::with_capacity(schema.arity());
-        for _ in 0..schema.arity() {
-            // Allocate zero-length column
-            columns.push(self.memory.alloc::<u8>(0)?.into());
+        let mut buffers = self.create_empty_buffers(&[schema])?;
+        Ok(buffers.pop().expect("one schema produces one empty buffer"))
+    }
+
+    /// Construct empty relations with disjoint device row counts in one allocation.
+    pub fn create_empty_buffers(&self, schemas: &[Schema]) -> Result<Vec<CudaBuffer>> {
+        if schemas.is_empty() {
+            return Ok(Vec::new());
         }
-        self.buffer_from_columns(columns, 0, schema)
+
+        let count_bytes = schemas
+            .len()
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| XlogError::Kernel("empty relation count size overflow".into()))?;
+        let mut counts = self.memory.alloc::<u8>(count_bytes)?;
+        self.htod_launch_metadata_sync_copy_into(&vec![0_u8; count_bytes], &mut counts)?;
+        // Empty columns have no readable or writable payload, so one owner can
+        // back every zero-length view. Row counts use disjoint writable spans.
+        let empty_column = schemas
+            .iter()
+            .any(|schema| schema.arity() != 0)
+            .then(|| self.memory.alloc::<u8>(0))
+            .transpose()?;
+        let mut buffers = Vec::with_capacity(schemas.len());
+        for (index, schema) in schemas.iter().enumerate() {
+            let mut columns = Vec::with_capacity(schema.arity());
+            for _ in 0..schema.arity() {
+                let column = empty_column
+                    .as_ref()
+                    .expect("non-nullary schema has an empty column owner")
+                    .try_owned_subslice::<u8>(0..0)
+                    .ok_or_else(|| XlogError::Kernel("empty column view is invalid".into()))?;
+                columns.push(column.into());
+            }
+            let start = index
+                .checked_mul(std::mem::size_of::<u32>())
+                .ok_or_else(|| XlogError::Kernel("empty relation count offset overflow".into()))?;
+            let end = start
+                .checked_add(std::mem::size_of::<u32>())
+                .ok_or_else(|| XlogError::Kernel("empty relation count offset overflow".into()))?;
+            let count = counts
+                .try_owned_subslice::<u32>(start..end)
+                .ok_or_else(|| XlogError::Kernel("empty relation count view is invalid".into()))?;
+            let mut buffer =
+                CudaBuffer::from_columns_with_host_count(columns, 0, count, schema.clone(), 0);
+            buffer.certify_canonical_full_row_set();
+            buffers.push(buffer);
+        }
+        Ok(buffers)
     }
 
     /// Create a zero-arity (nullary) relation buffer carrying `rows` unit tuples.
