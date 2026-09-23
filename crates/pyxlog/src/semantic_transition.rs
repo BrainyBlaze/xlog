@@ -6521,8 +6521,9 @@ impl PySemanticPreparedStep {
     /// The first U64 tensor is the selection/status record. It is followed by the
     /// complete roster metadata, frozen objective, reduction groups, group member
     /// ordinals and canaries. Remaining rank-two ports are token IDs, mask labels,
-    /// mask weights, autoregressive labels, retention labels, source slots, logical
-    /// positions, kinds, and parents for every replay row.
+    /// mask weights, autoregressive labels, retention labels, branch labels,
+    /// branch IDs, source slots, logical positions, kinds, and parents for every
+    /// replay row.
     #[pyo3(signature = (*, consumer_stream))]
     fn training_view(
         &self,
@@ -6541,6 +6542,8 @@ impl PySemanticPreparedStep {
             SemanticTrainingViewPort::MaskWeights,
             SemanticTrainingViewPort::AutoregressiveLabels,
             SemanticTrainingViewPort::RetentionLabels,
+            SemanticTrainingViewPort::BranchLabels,
+            SemanticTrainingViewPort::BranchIds,
             SemanticTrainingViewPort::SourceSlots,
             SemanticTrainingViewPort::LogicalPositions,
             SemanticTrainingViewPort::Kinds,
