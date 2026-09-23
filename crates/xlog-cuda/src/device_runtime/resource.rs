@@ -1387,6 +1387,16 @@ impl BlockUseRegistry {
         let Some(index) = self.storage.get_mut(&context) else {
             return Ok(());
         };
+        // A resident graph may admit thousands of spans for each captured
+        // region. Preserve the first matching owner and its access merge
+        // semantics without rescanning the growing retained list per span.
+        // Arc::ptr_eq compares the allocation data pointer, not trait metadata.
+        let mut retained_by_owner = HashMap::with_capacity(retained.len());
+        for (position, existing) in retained.iter().enumerate() {
+            retained_by_owner
+                .entry(Arc::as_ptr(&existing.owner) as *const ())
+                .or_insert(position);
+        }
         for use_ in uses {
             let first_possible_start = use_.start.saturating_sub(index.max_span);
             for entries in index
@@ -1404,16 +1414,16 @@ impl BlockUseRegistry {
                             "overlapping device storage is retiring without proven release".into(),
                         )
                     })?;
-                    if let Some(existing) = retained
-                        .iter_mut()
-                        .find(|existing| Arc::ptr_eq(&existing.owner, &owner))
-                    {
+                    let owner_key = Arc::as_ptr(&owner) as *const ();
+                    if let Some(&position) = retained_by_owner.get(&owner_key) {
+                        let existing = &mut retained[position];
                         existing.access = if existing.access.writes() || use_.access.writes() {
                             Access::ReadWrite
                         } else {
                             Access::Read
                         };
                     } else {
+                        retained_by_owner.insert(owner_key, retained.len());
                         retained.push(RetainedStorageUse {
                             owner,
                             access: use_.access,
