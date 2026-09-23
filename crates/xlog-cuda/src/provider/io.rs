@@ -6,7 +6,7 @@ use crate::{LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use super::{d4_kernels, pack_kernels, D4_MODULE, PACK_MODULE};
-use crate::CudaBuffer;
+use crate::{CudaBuffer, CudaColumn};
 
 impl super::CudaKernelProvider {
     // ============== Buffer Helper Methods ==============
@@ -123,6 +123,114 @@ impl super::CudaKernelProvider {
         }
 
         self.buffer_from_columns(columns, num_rows as u64, schema)
+    }
+
+    /// Upload a group of host-columnar relations with one payload transfer and
+    /// one row-count transfer. Each returned buffer owns disjoint views of the
+    /// shared device allocations, so dropping one relation cannot invalidate
+    /// another.
+    pub fn create_buffers_from_host_columns(
+        &self,
+        relations: &[(Schema, Vec<Vec<u8>>, usize)],
+    ) -> Result<Vec<CudaBuffer>> {
+        if relations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let count_capacity = relations
+            .len()
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| XlogError::Kernel("Host relation count size overflow".into()))?;
+        let mut payload_bytes = 0usize;
+        let mut spans = Vec::with_capacity(relations.len());
+        let mut count_bytes = Vec::with_capacity(count_capacity);
+        for (schema, columns, rows) in relations {
+            if columns.len() != schema.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Column count {} doesn't match schema arity {}",
+                    columns.len(),
+                    schema.arity()
+                )));
+            }
+            let rows_u32 = u32::try_from(*rows)
+                .map_err(|_| XlogError::Kernel(format!("Row count {} exceeds u32::MAX", rows)))?;
+            count_bytes.extend_from_slice(&rows_u32.to_le_bytes());
+
+            let mut column_spans = Vec::with_capacity(columns.len());
+            for (index, column) in columns.iter().enumerate() {
+                let width = schema
+                    .column_type(index)
+                    .map(|typ| typ.size_bytes())
+                    .unwrap_or(4);
+                let expected = rows
+                    .checked_mul(width)
+                    .ok_or_else(|| XlogError::Kernel("Host column byte length overflow".into()))?;
+                if column.len() != expected {
+                    return Err(XlogError::Kernel(format!(
+                        "Column {} has {} bytes but expected {} for {} rows",
+                        index,
+                        column.len(),
+                        expected,
+                        rows
+                    )));
+                }
+                let end = payload_bytes.checked_add(column.len()).ok_or_else(|| {
+                    XlogError::Kernel("Host relation payload size overflow".into())
+                })?;
+                column_spans.push(payload_bytes..end);
+                payload_bytes = end;
+            }
+            spans.push(column_spans);
+        }
+
+        let mut payload = Vec::with_capacity(payload_bytes);
+        for (_, columns, _) in relations {
+            for column in columns {
+                payload.extend_from_slice(column);
+            }
+        }
+        let payload_owner = if relations.iter().any(|(_, columns, _)| !columns.is_empty()) {
+            let mut allocation = self.memory.alloc::<u8>(payload.len())?;
+            if !payload.is_empty() {
+                self.htod_sync_copy_into_tracked(&payload, &mut allocation)?;
+            }
+            Some(allocation)
+        } else {
+            None
+        };
+        let mut counts = self.memory.alloc::<u8>(count_bytes.len())?;
+        self.htod_launch_metadata_sync_copy_into(&count_bytes, &mut counts)?;
+
+        let mut buffers = Vec::with_capacity(relations.len());
+        for (index, ((schema, _, rows), column_spans)) in
+            relations.iter().zip(spans.into_iter()).enumerate()
+        {
+            let mut columns = Vec::<CudaColumn>::with_capacity(column_spans.len());
+            for span in column_spans {
+                let column = payload_owner
+                    .as_ref()
+                    .expect("non-nullary relation has a payload owner")
+                    .try_owned_subslice::<u8>(span)
+                    .ok_or_else(|| XlogError::Kernel("Host column view is invalid".into()))?;
+                columns.push(column.into());
+            }
+            let start = index * std::mem::size_of::<u32>();
+            let count = counts
+                .try_owned_subslice::<u32>(start..start + std::mem::size_of::<u32>())
+                .ok_or_else(|| XlogError::Kernel("Host row count view is invalid".into()))?;
+            let mut buffer = CudaBuffer::from_columns_with_host_count(
+                columns,
+                *rows as u64,
+                count,
+                schema.clone(),
+                *rows as u32,
+            );
+            if *rows <= 1 {
+                buffer.certify_canonical_full_row_set();
+            }
+            buffers.push(buffer);
+        }
+        Ok(buffers)
     }
 
     /// Export CudaBuffer to Arrow C Data Interface (device-resident).

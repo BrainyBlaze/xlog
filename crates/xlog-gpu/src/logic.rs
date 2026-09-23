@@ -3688,6 +3688,8 @@ impl LogicProgram {
         store: &mut RelationStore,
         rows_by_pred: HashMap<String, Vec<&[Term]>>,
     ) -> Result<()> {
+        let mut names = Vec::with_capacity(rows_by_pred.len());
+        let mut host_relations = Vec::with_capacity(rows_by_pred.len());
         for (pred, rows) in rows_by_pred {
             let schema = self.schemas.get(pred.as_str()).ok_or_else(|| {
                 XlogError::Execution(format!(
@@ -3704,6 +3706,7 @@ impl LogicProgram {
                 )));
             }
 
+            let fact_rows = if schema.arity() == 0 { 1 } else { rows.len() };
             let mut columns: Vec<Vec<u8>> = vec![Vec::new(); schema.arity()];
             for row in rows {
                 for (col_idx, term) in row.iter().enumerate() {
@@ -3717,19 +3720,15 @@ impl LogicProgram {
                     })?;
                 }
             }
+            // Every asserted nullary fact denotes the same unit tuple.
+            names.push(pred);
+            host_relations.push((schema.clone(), columns, fact_rows));
+        }
 
-            let fact_buf = if schema.arity() == 0 {
-                // Nullary predicate: every `pred().` assertion denotes the same unit
-                // tuple `()`, so presence is a single row. `create_buffer_from_slices`
-                // with no column slices yields a 0-row (absent) relation, which would
-                // make an asserted nullary fact read as false everywhere downstream
-                // (ordinary joins and epistemic modal membership alike).
-                provider.create_zero_arity_buffer(schema.clone(), 1)?
-            } else {
-                let slices: Vec<&[u8]> = columns.iter().map(|c| c.as_slice()).collect();
-                provider.create_buffer_from_slices(&slices, schema.clone())?
-            };
-
+        for (pred, fact_buf) in names
+            .into_iter()
+            .zip(provider.create_buffers_from_host_columns(&host_relations)?)
+        {
             let existing = store.get(&pred).ok_or_else(|| {
                 XlogError::Execution(format!(
                     "Missing base relation {} while loading facts",
