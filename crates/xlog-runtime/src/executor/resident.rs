@@ -2224,11 +2224,10 @@ fn resident_checked_add(total: &mut u64, bytes: u64, label: &str) -> Result<()> 
 }
 
 /// A fully allocated, instantiated resident transaction that has not launched.
-pub struct PreparedResidentGraph<'executor> {
+pub struct PreparedResidentGraph {
     owners: ResidentRunOwners,
     preflight_report: ResidentGraphPreflightReport,
     has_device_status_writer: bool,
-    source_guard: &'executor Executor,
     source_set_snapshots: Vec<ResidentSourceSetSnapshot>,
     prepare_diagnostic: Option<ResidentPrepareDiagnostics>,
 }
@@ -2285,7 +2284,15 @@ pub struct ResidentGraphPreflightReport {
 /// A resident transaction whose one graph launch is in flight.
 pub struct ResidentGraphInFlight<'executor> {
     execution: PendingResidentOwners<ResidentLaunchOwners>,
+    replay_metadata: ResidentGraphReplayMetadata,
     _executor: PhantomData<&'executor Executor>,
+}
+
+struct ResidentGraphReplayMetadata {
+    preflight_report: ResidentGraphPreflightReport,
+    has_device_status_writer: bool,
+    source_set_snapshots: Vec<ResidentSourceSetSnapshot>,
+    prepare_diagnostic: Option<ResidentPrepareDiagnostics>,
 }
 
 struct ResidentLaunchOwners {
@@ -2301,6 +2308,7 @@ struct ResidentLaunchOwners {
 pub struct ResidentGraphSynchronized<'executor> {
     device_elapsed_ns: u64,
     owners: ResidentRunOwners,
+    replay_metadata: ResidentGraphReplayMetadata,
     _executor: PhantomData<&'executor Executor>,
 }
 
@@ -2325,6 +2333,7 @@ pub struct ObservedResidentGraphReceipt {
     transaction_identity: Arc<()>,
     provider: Arc<CudaKernelProvider>,
     phase_timings: Option<ResidentFinalObservationPhaseTimings>,
+    prepared_for_reuse: Option<PreparedResidentGraph>,
 }
 
 /// Opt-in wall-clock breakdown of final resident receipt observation.
@@ -2444,7 +2453,7 @@ fn validate_resident_source_set_snapshots(
     Ok(())
 }
 
-impl<'executor> PreparedResidentGraph<'executor> {
+impl PreparedResidentGraph {
     /// Return immutable prelaunch topology and memory diagnostics.
     pub fn preflight_report(&self) -> &ResidentGraphPreflightReport {
         &self.preflight_report
@@ -2456,20 +2465,87 @@ impl<'executor> PreparedResidentGraph<'executor> {
         self.prepare_diagnostic.take()
     }
 
+    /// Rebind source versions after an in-place device copy without changing
+    /// any address or captured source geometry.
+    pub fn refresh_source_set_snapshots(
+        &mut self,
+        executor: &Executor,
+    ) -> std::result::Result<(), ResidentGraphExecutionError> {
+        for snapshot in &mut self.source_set_snapshots {
+            let Some((buffer, version)) = executor.store.get_with_version(&snapshot.name) else {
+                return Err(resident_decline_error(
+                    ResidentGraphDeclineReason::SourceSetUncertified {
+                        relation: snapshot.name.clone(),
+                    },
+                ));
+            };
+            let current =
+                resident_source_set_snapshot(&executor.provider, &snapshot.name, version, buffer)
+                    .map_err(resident_decline_error)?;
+            let mut expected = snapshot.clone();
+            expected.version = version;
+            if current != expected {
+                return Err(resident_decline_error(
+                    ResidentGraphDeclineReason::SourceSetUncertified {
+                        relation: snapshot.name.clone(),
+                    },
+                ));
+            }
+            snapshot.version = version;
+        }
+        self.owners.source_epoch = executor.store.mutation_epoch();
+        Ok(())
+    }
+
+    /// Return staged output owners to their captured slots after the caller
+    /// has finished inspecting them. The caller must discard this graph on error.
+    pub fn restore_outputs(
+        &mut self,
+        executor: &mut Executor,
+    ) -> std::result::Result<(), ResidentGraphExecutionError> {
+        for (name, index) in &self.owners.output_indices {
+            let slot = self
+                .owners
+                .relations
+                .get_mut(*index)
+                .ok_or_else(|| runtime_error("resident output slot index is invalid"))?;
+            if slot.is_some() {
+                return Err(runtime_error("resident output slot was not staged"));
+            }
+            let buffer = executor.store.remove(name).ok_or_else(|| {
+                runtime_error(format!("resident output {name} was not published"))
+            })?;
+            *slot = Some(ResidentRelation::from_buffer(buffer));
+        }
+        Ok(())
+    }
+
     #[cfg(all(feature = "resident-graph-tests", test))]
     pub(crate) fn invalidate_expected_source_epoch(&mut self) {
         self.owners.source_epoch = self.owners.source_epoch.wrapping_add(1);
     }
 
     /// Launch the already-instantiated graph exactly once.
-    pub fn launch(
+    pub fn launch<'executor>(
         self,
+        source_guard: &'executor Executor,
     ) -> std::result::Result<ResidentGraphInFlight<'executor>, ResidentGraphExecutionError> {
         validate_resident_source_set_snapshots(
-            self.source_guard,
+            source_guard,
             self.owners.source_epoch,
             &self.source_set_snapshots,
         )?;
+        for (_, index) in &self.owners.output_indices {
+            private_relation(&self.owners.relations, *index)
+                .map_err(runtime_error)?
+                .invalidate_observed_row_count();
+        }
+        let replay_metadata = ResidentGraphReplayMetadata {
+            preflight_report: self.preflight_report,
+            has_device_status_writer: self.has_device_status_writer,
+            source_set_snapshots: self.source_set_snapshots,
+            prepare_diagnostic: self.prepare_diagnostic,
+        };
         // Arm before the first API that may enqueue. The recorder protects
         // tracked allocations; this owner also protects the graph, host bank,
         // provider, exact stream/context and timing/completion handles.
@@ -2523,10 +2599,9 @@ impl<'executor> PreparedResidentGraph<'executor> {
                             ))
                                 })?,
                         );
-                        execution
-                            .owners
-                            .runtime
-                            .record_conditional_graph_launch(self.has_device_status_writer);
+                        execution.owners.runtime.record_conditional_graph_launch(
+                            replay_metadata.has_device_status_writer,
+                        );
                         Ok::<(), ResidentGraphExecutionError>(())
                     })
                 }
@@ -2544,6 +2619,7 @@ impl<'executor> PreparedResidentGraph<'executor> {
         )?;
         Ok(ResidentGraphInFlight {
             execution,
+            replay_metadata,
             _executor: PhantomData,
         })
     }
@@ -2587,6 +2663,7 @@ impl<'executor> ResidentGraphInFlight<'executor> {
         Ok(ResidentGraphSynchronized {
             device_elapsed_ns,
             owners: self.execution.into_inner().owners,
+            replay_metadata: self.replay_metadata,
             _executor: PhantomData,
         })
     }
@@ -2784,6 +2861,17 @@ impl<'executor> ResidentGraphSynchronized<'executor> {
         let decode_schema_staging_ns = decode_started
             .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
             .unwrap_or(0);
+        let source_epoch = owners.source_epoch;
+        let relation_registration = owners.relation_registration.clone();
+        let transaction_identity = Arc::clone(&owners.transaction_identity);
+        let provider = Arc::clone(&owners.provider);
+        let prepared_for_reuse = terminal.is_ok().then_some(PreparedResidentGraph {
+            owners,
+            preflight_report: self.replay_metadata.preflight_report,
+            has_device_status_writer: self.replay_metadata.has_device_status_writer,
+            source_set_snapshots: self.replay_metadata.source_set_snapshots,
+            prepare_diagnostic: self.replay_metadata.prepare_diagnostic,
+        });
         Ok(ObservedResidentGraphReceipt {
             encoded_len,
             device_elapsed_ns: self.device_elapsed_ns,
@@ -2794,14 +2882,15 @@ impl<'executor> ResidentGraphSynchronized<'executor> {
             iterations,
             terminal,
             outputs,
-            source_epoch: owners.source_epoch,
-            relation_registration: owners.relation_registration.clone(),
-            transaction_identity: Arc::clone(&owners.transaction_identity),
-            provider: Arc::clone(&owners.provider),
+            source_epoch,
+            relation_registration,
+            transaction_identity,
+            provider,
             phase_timings: phase_diagnostics.then_some(ResidentFinalObservationPhaseTimings {
                 receipt_d2h_ns,
                 decode_schema_staging_ns,
             }),
+            prepared_for_reuse,
         })
     }
 }
@@ -2861,9 +2950,26 @@ impl ObservedResidentGraphReceipt {
 
     /// Atomically publish staged outputs after optimistic validation.
     pub fn commit(
-        mut self,
+        self,
         executor: &mut Executor,
     ) -> std::result::Result<(), ResidentGraphExecutionError> {
+        self.commit_inner(executor).map(|_| ())
+    }
+
+    /// Publish outputs while retaining the graph for the next invocation.
+    pub fn commit_for_reuse(
+        self,
+        executor: &mut Executor,
+    ) -> std::result::Result<PreparedResidentGraph, ResidentGraphExecutionError> {
+        self.commit_inner(executor)?.ok_or_else(|| {
+            runtime_error("successful resident receipt did not retain its graph owner")
+        })
+    }
+
+    fn commit_inner(
+        mut self,
+        executor: &mut Executor,
+    ) -> std::result::Result<Option<PreparedResidentGraph>, ResidentGraphExecutionError> {
         self.terminal?;
         if !Arc::ptr_eq(&self.transaction_identity, &executor.transaction_identity)
             || !Arc::ptr_eq(&self.provider, &executor.provider)
@@ -2900,7 +3006,7 @@ impl ObservedResidentGraphReceipt {
             }
             executor.store.put_owned(output.name, output.buffer);
         }
-        Ok(())
+        Ok(self.prepared_for_reuse.take())
     }
 }
 
@@ -4185,12 +4291,12 @@ fn resident_generated_query_heads(
 
 impl Executor {
     /// Prepare one immutable, fixed-capacity conditional graph transaction.
-    pub fn prepare_resident_graph<'executor>(
-        &'executor self,
+    pub fn prepare_resident_graph(
+        &self,
         plan: &ExecutionPlan,
         certificate: &ResidentGraphRouteCertificate,
         options: ResidentGraphPrepareOptions,
-    ) -> std::result::Result<PreparedResidentGraph<'executor>, ResidentGraphExecutionError> {
+    ) -> std::result::Result<PreparedResidentGraph, ResidentGraphExecutionError> {
         if !certificate.matches_plan(plan).map_err(runtime_error)? {
             return Err(resident_decline_error(
                 ResidentGraphDeclineReason::WorkspaceUnbounded {
@@ -4212,11 +4318,11 @@ impl Executor {
     }
 
     /// Prepare a transaction from a certificate sealed to its exact immutable plan.
-    pub fn prepare_certified_resident_graph<'executor>(
-        &'executor self,
+    pub fn prepare_certified_resident_graph(
+        &self,
         certified: &ResidentGraphCertifiedPlan,
         options: ResidentGraphPrepareOptions,
-    ) -> std::result::Result<PreparedResidentGraph<'executor>, ResidentGraphExecutionError> {
+    ) -> std::result::Result<PreparedResidentGraph, ResidentGraphExecutionError> {
         let certificate = certified.certificate();
         if !certificate.is_supported() {
             return Err(resident_decline_error(
@@ -4230,12 +4336,12 @@ impl Executor {
         self.prepare_resident_graph_after_certification(certified.plan(), certificate, options)
     }
 
-    fn prepare_resident_graph_after_certification<'executor>(
-        &'executor self,
+    fn prepare_resident_graph_after_certification(
+        &self,
         plan: &ExecutionPlan,
         certificate: &ResidentGraphRouteCertificate,
         options: ResidentGraphPrepareOptions,
-    ) -> std::result::Result<PreparedResidentGraph<'executor>, ResidentGraphExecutionError> {
+    ) -> std::result::Result<PreparedResidentGraph, ResidentGraphExecutionError> {
         let mut diagnostics =
             resident_prepare_diagnostics_for_sample(options.latency_diagnostic_sample);
         let total_started = diagnostics.as_ref().map(|_| std::time::Instant::now());
@@ -5239,7 +5345,6 @@ impl Executor {
             owners,
             preflight_report,
             has_device_status_writer,
-            source_guard: self,
             source_set_snapshots,
             prepare_diagnostic,
         })

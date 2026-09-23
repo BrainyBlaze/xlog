@@ -91,8 +91,18 @@ pub struct ResidentRelation {
 }
 
 impl ResidentRelation {
+    /// Recover a stable graph allocation after temporary result publication.
+    pub fn from_buffer(buffer: CudaBuffer) -> Self {
+        Self { buffer }
+    }
+
     pub fn buffer(&self) -> &CudaBuffer {
         &self.buffer
+    }
+
+    /// The next graph launch will replace this relation's logical count.
+    pub fn invalidate_observed_row_count(&self) {
+        self.buffer.invalidate_cached_row_count();
     }
 
     /// Consume the stable owner after terminal receipt validation.

@@ -4,7 +4,7 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use xlog_core::{resolve_bool, symbol, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaColumn, CudaKernelProvider};
@@ -24,7 +24,7 @@ use xlog_logic::{
     format_constraint_body, Atom, BodyLiteral, Compiler, Constraint, EpistemicLiteral, EpistemicOp,
     Program, Query, Rule, Term,
 };
-use xlog_runtime::executor::JoinIndexCacheStats;
+use xlog_runtime::executor::{JoinIndexCacheStats, PreparedResidentGraph};
 use xlog_runtime::resident_graph::{
     ResidentGraphCertifiedPlan, ResidentGraphCoreTransferStats, ResidentGraphDeclineReason,
     ResidentGraphDeferredProfile, ResidentGraphExecutionError, ResidentGraphExecutionStats,
@@ -478,10 +478,18 @@ pub struct LogicSessionRuntime {
     profiling: bool,
 }
 
-#[derive(Debug)]
+struct ResidentEvaluationOwner {
+    provider: Arc<CudaKernelProvider>,
+    input_shape: Vec<(String, Schema, u64)>,
+    profiling: bool,
+    executor: Executor,
+    prepared: PreparedResidentGraph,
+}
+
 struct LogicProgramIdentity {
     resident_certification:
         OnceLock<std::result::Result<Arc<ResidentGraphCertifiedPlan>, Arc<str>>>,
+    resident_evaluation_owner: Mutex<Option<ResidentEvaluationOwner>>,
     #[cfg(test)]
     resident_certification_initializations: AtomicU64,
 }
@@ -490,9 +498,39 @@ impl LogicProgramIdentity {
     fn new() -> Self {
         Self {
             resident_certification: OnceLock::new(),
+            resident_evaluation_owner: Mutex::new(None),
             #[cfg(test)]
             resident_certification_initializations: AtomicU64::new(0),
         }
+    }
+
+    fn take_resident_evaluation_owner(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        input_shape: &[(String, Schema, u64)],
+        profiling: bool,
+    ) -> Result<Option<ResidentEvaluationOwner>> {
+        let mut cached = self.resident_evaluation_owner.lock().map_err(|_| {
+            XlogError::Execution("resident evaluation owner lock is poisoned".into())
+        })?;
+        let matches = cached.as_ref().is_some_and(|owner| {
+            Arc::ptr_eq(&owner.provider, provider)
+                && owner.input_shape == input_shape
+                && owner.profiling == profiling
+        });
+        let owner = cached.take();
+        drop(cached);
+        Ok(owner.filter(|_| matches))
+    }
+
+    fn retain_resident_evaluation_owner(&self, owner: ResidentEvaluationOwner) -> Result<()> {
+        let mut cached = self.resident_evaluation_owner.lock().map_err(|_| {
+            XlogError::Execution("resident evaluation owner lock is poisoned".into())
+        })?;
+        let previous = cached.replace(owner);
+        drop(cached);
+        drop(previous);
+        Ok(())
     }
 
     fn get_or_init_resident_certification(
@@ -2666,7 +2704,25 @@ impl LogicProgram {
                 let canonical = canonical_replacements.remove(&name).unwrap_or(buffer);
                 (name, canonical)
             })
-            .collect();
+            .collect::<HashMap<_, _>>();
+        let mut input_shape = resident_inputs
+            .iter()
+            .map(|(name, buffer)| (name.clone(), buffer.schema().clone(), buffer.num_rows()))
+            .collect::<Vec<_>>();
+        input_shape.sort_by(|left, right| left.0.cmp(&right.0));
+        // Authored facts can be merged into a source during executor setup.
+        // A derived head can also replace a source at commit. Neither remains
+        // a direct, stable copy target for a later raw input buffer.
+        let derived_names = ordinary_plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .map(|rule| rule.head.as_str())
+            .collect::<BTreeSet<_>>();
+        let reusable_source_shape = self.program.facts().into_iter().next().is_none()
+            && input_shape
+                .iter()
+                .all(|(name, _, _)| !derived_names.contains(name.as_str()));
 
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.input_setup_ns = resident_latency_elapsed_ns(input_setup_started);
@@ -2678,12 +2734,6 @@ impl LogicProgram {
         let prepare_started = latency_diagnostic
             .as_ref()
             .map(|_| std::time::Instant::now());
-        let mut executor = self.prepare_resident_executor(
-            &resident_provider,
-            resident_inputs,
-            profiling,
-            ordinary_plan,
-        )?;
         let prepare_options = latency_diagnostic
             .as_ref()
             .map(|diagnostic| {
@@ -2691,15 +2741,42 @@ impl LogicProgram {
                     .with_latency_diagnostic_sample(diagnostic.sample)
             })
             .unwrap_or_default();
-        let mut prepared = match executor
-            .prepare_certified_resident_graph(certified_plan.as_ref(), prepare_options)
-        {
-            Ok(prepared) => prepared,
-            Err(ResidentGraphExecutionError::Declined(reason)) => {
-                runtime
-                    .reap_pending()
-                    .map_err(|error| XlogError::Kernel(error.to_string()))?;
-                return match mode {
+        let cached = if reusable_source_shape {
+            self.reusable_state_identity
+                .take_resident_evaluation_owner(&resident_provider, &input_shape, profiling)?
+        } else {
+            None
+        };
+        let (mut executor, mut prepared) = if let Some(mut owner) = cached {
+            for (name, input) in resident_inputs {
+                let target = owner.executor.store_mut().get_mut(&name).ok_or_else(|| {
+                    XlogError::Execution(format!(
+                        "resident source {name} disappeared before in-place replacement"
+                    ))
+                })?;
+                resident_provider.overwrite_resident_source(target, &input)?;
+            }
+            owner
+                .prepared
+                .refresh_source_set_snapshots(&owner.executor)
+                .map_err(Self::resident_execution_error)?;
+            (owner.executor, owner.prepared)
+        } else {
+            let mut executor = self.prepare_resident_executor(
+                &resident_provider,
+                resident_inputs,
+                profiling,
+                ordinary_plan,
+            )?;
+            let prepared = match executor
+                .prepare_certified_resident_graph(certified_plan.as_ref(), prepare_options)
+            {
+                Ok(prepared) => prepared,
+                Err(ResidentGraphExecutionError::Declined(reason)) => {
+                    runtime
+                        .reap_pending()
+                        .map_err(|error| XlogError::Kernel(error.to_string()))?;
+                    return match mode {
                         ResidentSelectionMode::Auto => {
                             executor.execute_plan(ordinary_plan)?;
                             let mut result = self.finish_ordinary_evaluation(
@@ -2722,8 +2799,10 @@ impl LogicProgram {
                             "disabled resident selection does not call the resident evaluator"
                         ),
                     };
-            }
-            Err(error) => return Err(Self::resident_execution_error(error)),
+                }
+                Err(error) => return Err(Self::resident_execution_error(error)),
+            };
+            (executor, prepared)
         };
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.prepare_capture_allocation_ns = resident_latency_elapsed_ns(prepare_started);
@@ -2742,7 +2821,9 @@ impl LogicProgram {
         let launch_started = latency_diagnostic
             .as_ref()
             .map(|_| std::time::Instant::now());
-        let in_flight = prepared.launch().map_err(Self::resident_execution_error)?;
+        let in_flight = prepared
+            .launch(&executor)
+            .map_err(Self::resident_execution_error)?;
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.launch_submission_ns = resident_latency_elapsed_ns(launch_started);
             diagnostic.runtime_bytes[3] = runtime.bytes_outstanding();
@@ -2885,9 +2966,18 @@ impl LogicProgram {
         let commit_started = latency_diagnostic
             .as_ref()
             .map(|_| std::time::Instant::now());
-        observed
-            .commit(&mut executor)
-            .map_err(Self::resident_execution_error)?;
+        let prepared = if reusable_source_shape {
+            Some(
+                observed
+                    .commit_for_reuse(&mut executor)
+                    .map_err(Self::resident_execution_error)?,
+            )
+        } else {
+            observed
+                .commit(&mut executor)
+                .map_err(Self::resident_execution_error)?;
+            None
+        };
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.commit_ns = resident_latency_elapsed_ns(commit_started);
             diagnostic.runtime_bytes[6] = runtime.bytes_outstanding();
@@ -2930,16 +3020,40 @@ impl LogicProgram {
             diagnostic.result_stats_construction_ns =
                 resident_latency_elapsed_ns(telemetry_started);
         }
-        let result = self.finish_ordinary_evaluation(
-            &resident_provider,
-            executor,
-            profiling,
-            Some(ResidentCompletedProfile {
-                telemetry,
-                iterations,
-            }),
-            latency_diagnostic.as_mut(),
-        )?;
+        let completed_profile = Some(ResidentCompletedProfile {
+            telemetry,
+            iterations,
+        });
+        let result = if let Some(mut prepared) = prepared {
+            let result = self.collect_ordinary_evaluation(
+                &resident_provider,
+                &mut executor,
+                profiling,
+                completed_profile,
+                true,
+                latency_diagnostic.as_mut(),
+            )?;
+            prepared
+                .restore_outputs(&mut executor)
+                .map_err(Self::resident_execution_error)?;
+            self.reusable_state_identity
+                .retain_resident_evaluation_owner(ResidentEvaluationOwner {
+                    provider: Arc::clone(&resident_provider),
+                    input_shape,
+                    profiling,
+                    executor,
+                    prepared,
+                })?;
+            result
+        } else {
+            self.finish_ordinary_evaluation(
+                &resident_provider,
+                executor,
+                profiling,
+                completed_profile,
+                latency_diagnostic.as_mut(),
+            )?
+        };
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.runtime_bytes[7] = runtime.bytes_outstanding();
             diagnostic.manager_bytes[7] = resident_provider.memory().allocated_bytes();
@@ -3014,6 +3128,34 @@ impl LogicProgram {
         resident_profile: Option<ResidentCompletedProfile>,
         mut latency_diagnostic: Option<&mut ResidentLatencyDiagnostic>,
     ) -> Result<LogicEvalResult> {
+        let result = self.collect_ordinary_evaluation(
+            provider,
+            &mut executor,
+            profiling,
+            resident_profile,
+            false,
+            latency_diagnostic.as_deref_mut(),
+        )?;
+        let executor_drop_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        drop(executor);
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.executor_store_teardown_ns =
+                resident_latency_elapsed_ns(executor_drop_started);
+        }
+        Ok(result)
+    }
+
+    fn collect_ordinary_evaluation(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        executor: &mut Executor,
+        profiling: bool,
+        resident_profile: Option<ResidentCompletedProfile>,
+        retain_query_owners: bool,
+        mut latency_diagnostic: Option<&mut ResidentLatencyDiagnostic>,
+    ) -> Result<LogicEvalResult> {
         let result_started = latency_diagnostic
             .as_ref()
             .map(|_| std::time::Instant::now());
@@ -3022,14 +3164,24 @@ impl LogicProgram {
         let mut queries = Vec::with_capacity(self.program.queries.len());
         for (index, query) in self.program.queries.iter().enumerate() {
             let internal_relation_name = format!("__xlog_query_{index}");
-            let buffer = executor
-                .store_mut()
-                .remove(&internal_relation_name)
-                .ok_or_else(|| {
-                    XlogError::Execution(format!(
-                        "Missing query result relation {internal_relation_name} (compiler bug?)"
-                    ))
-                })?;
+            let missing_query = || {
+                XlogError::Execution(format!(
+                    "Missing query result relation {internal_relation_name} (compiler bug?)"
+                ))
+            };
+            let buffer = if retain_query_owners {
+                provider.clone_buffer(
+                    executor
+                        .store()
+                        .get(&internal_relation_name)
+                        .ok_or_else(missing_query)?,
+                )?
+            } else {
+                executor
+                    .store_mut()
+                    .remove(&internal_relation_name)
+                    .ok_or_else(missing_query)?
+            };
             queries.push(self.logic_query_result(
                 provider.as_ref(),
                 index,
@@ -3085,14 +3237,6 @@ impl LogicProgram {
                 .result_stats_construction_ns
                 .saturating_add(resident_latency_elapsed_ns(result_started));
             diagnostic.remaining_store_relations_before_drop = executor.store().len();
-        }
-        let executor_drop_started = latency_diagnostic
-            .as_ref()
-            .map(|_| std::time::Instant::now());
-        drop(executor);
-        if let Some(diagnostic) = latency_diagnostic.as_mut() {
-            diagnostic.executor_store_teardown_ns =
-                resident_latency_elapsed_ns(executor_drop_started);
         }
         Ok(result)
     }

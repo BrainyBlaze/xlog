@@ -2383,6 +2383,54 @@ impl CudaKernelProvider {
         Ok(d_num_rows)
     }
 
+    /// Replace a captured source in place while preserving its device addresses.
+    /// Both buffers must have the same physical shape and a full-row set proof.
+    pub fn overwrite_resident_source(
+        &self,
+        target: &mut CudaBuffer,
+        source: &CudaBuffer,
+    ) -> Result<()> {
+        if target.schema() != source.schema()
+            || target.num_rows() != source.num_rows()
+            || target.columns().len() != source.columns().len()
+            || target
+                .columns()
+                .iter()
+                .zip(source.columns())
+                .any(|(target, source)| target.num_bytes() != source.num_bytes())
+            || !target.canonical_full_row_set_certified()
+            || !source.canonical_full_row_set_certified()
+        {
+            return Err(XlogError::Execution(
+                "resident source replacement changes captured shape or set semantics".into(),
+            ));
+        }
+        for (source_column, target_column) in source.columns().iter().zip(target.columns_mut()) {
+            if source_column.num_bytes() == 0 {
+                continue;
+            }
+            self.device
+                .inner()
+                .dtod_copy(source_column, target_column)
+                .map_err(|error| {
+                    XlogError::Kernel(format!("resident source copy failed: {error}"))
+                })?;
+        }
+        self.device
+            .inner()
+            .dtod_copy(source.num_rows_device(), target.num_rows_device_mut())
+            .map_err(|error| {
+                XlogError::Kernel(format!("resident source count copy failed: {error}"))
+            })?;
+        if let Some(source_rows) = source.cached_row_count() {
+            target.set_cached_row_count_after_device_copy(source_rows);
+        } else {
+            target.invalidate_cached_row_count();
+        }
+        target.certify_canonical_full_row_set();
+        Ok(())
+    }
+
     fn upload_device_row_count(&self, row_count: u32) -> Result<TrackedCudaSlice<u32>> {
         let mut d_num_rows = self.memory.alloc::<u32>(1)?;
         self.htod_launch_metadata_sync_copy_into(&[row_count], &mut d_num_rows)

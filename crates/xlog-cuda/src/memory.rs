@@ -3717,6 +3717,14 @@ impl CudaBuffer {
         );
     }
 
+    pub(crate) fn set_cached_row_count_after_device_copy(&self, count: u32) {
+        self.cached_row_count.store(count, Ordering::Relaxed);
+    }
+
+    pub(crate) fn invalidate_cached_row_count(&self) {
+        self.cached_row_count.store(u32::MAX, Ordering::Relaxed);
+    }
+
     /// Whether rows are sorted in schema-column order and full-row unique.
     pub fn canonical_full_row_set_certified(&self) -> bool {
         self.canonical_full_row_set_certified
