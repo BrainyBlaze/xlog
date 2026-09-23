@@ -1321,12 +1321,22 @@ fn reset_slot_flags(flags: u32) -> u32 {
 }
 
 #[cfg(test)]
-fn reset_slot_state_for_region(flags: u32, generation: u32, count: u32) -> (u32, u32, u32) {
-    let fixed = flags & (RESIDENT_SCHEDULE_SLOT_SOURCE | RESIDENT_SCHEDULE_SLOT_PERMANENT) != 0;
+fn reset_slot_state_for_region(
+    flags: u32,
+    generation: u32,
+    count: u32,
+    initializes: bool,
+) -> (u32, u32, u32) {
+    let source = flags & RESIDENT_SCHEDULE_SLOT_SOURCE != 0;
+    let permanent = flags & RESIDENT_SCHEDULE_SLOT_PERMANENT != 0;
     (
         reset_slot_flags(flags),
         generation,
-        if fixed { count } else { 0 },
+        if source || (permanent && !initializes) {
+            count
+        } else {
+            0
+        },
     )
 }
 
@@ -5688,8 +5698,9 @@ mod tests {
     }
 
     #[test]
-    fn slot_reset_preserves_source_and_permanent_counts_and_clears_scratch() {
-        let source = super::reset_slot_state_for_region(super::RESIDENT_SCHEDULE_SLOT_SOURCE, 9, 4);
+    fn slot_reset_preserves_sources_and_clears_permanent_outputs_at_initialization() {
+        let source =
+            super::reset_slot_state_for_region(super::RESIDENT_SCHEDULE_SLOT_SOURCE, 9, 4, true);
         assert_eq!(
             source,
             (
@@ -5698,8 +5709,12 @@ mod tests {
                 4,
             )
         );
-        let permanent =
-            super::reset_slot_state_for_region(super::RESIDENT_SCHEDULE_SLOT_PERMANENT, 7, 3);
+        let permanent = super::reset_slot_state_for_region(
+            super::RESIDENT_SCHEDULE_SLOT_PERMANENT,
+            7,
+            3,
+            false,
+        );
         assert_eq!(
             permanent,
             (
@@ -5708,7 +5723,18 @@ mod tests {
                 3,
             )
         );
-        assert_eq!(super::reset_slot_state_for_region(0, 11, 8), (0, 11, 0));
+        assert_eq!(
+            super::reset_slot_state_for_region(super::RESIDENT_SCHEDULE_SLOT_PERMANENT, 7, 3, true),
+            (
+                super::RESIDENT_SCHEDULE_SLOT_PERMANENT | super::RESIDENT_SCHEDULE_SLOT_DEFINED,
+                7,
+                0,
+            )
+        );
+        assert_eq!(
+            super::reset_slot_state_for_region(0, 11, 8, true),
+            (0, 11, 0)
+        );
     }
 
     #[test]
@@ -5727,8 +5753,8 @@ mod tests {
             reset
                 .matches("*device_ptr<uint32_t>(slot.relation.num_rows) = 0")
                 .count(),
-            1,
-            "only the scratch branch may reset a count word"
+            2,
+            "scratch resets every region; permanent outputs reset only at initialization"
         );
 
         let rust = include_str!("resident_schedule.rs");

@@ -1368,8 +1368,13 @@ extern "C" __global__ void resident_schedule_execute(
                     break;
                 }
                 slot.generation = generation_metadata[region.generation_offset + index];
-                if ((slot.flags & (kSourceSlot | kPermanentSlot)) != 0) {
+                if ((slot.flags & kSourceSlot) != 0) {
                     slot.flags |= kDefinedSlot;
+                } else if ((slot.flags & kPermanentSlot) != 0) {
+                    slot.flags |= kDefinedSlot;
+                    if (initializes) {
+                        *device_ptr<uint32_t>(slot.relation.num_rows) = 0;
+                    }
                 } else {
                     slot.flags &= ~kDefinedSlot;
                     *device_ptr<uint32_t>(slot.relation.num_rows) = 0;
