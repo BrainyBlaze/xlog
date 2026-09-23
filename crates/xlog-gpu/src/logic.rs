@@ -3126,13 +3126,24 @@ impl LogicProgram {
 
         let arity_qualified_predicates = self.arity_qualified_fact_predicates();
         let fact_rows = self.fact_rows_by_relation(&arity_qualified_predicates);
+        // A single asserted tuple needs no set union against a known-empty base.
+        // Keep the merge for imported inputs and multi-row fact relations, where
+        // it preserves the existing set semantics.
+        let singleton_fact_names = fact_rows
+            .iter()
+            .filter(|(name, rows)| rows.len() == 1 && !inputs.contains_key(*name))
+            .map(|(name, _)| name.clone())
+            .collect::<BTreeSet<_>>();
 
         let mut empty_names = Vec::new();
         let mut empty_schemas = Vec::new();
         for (name, schema) in &self.schemas {
             let is_derived_placeholder = derived_relations.is_some_and(|set| set.contains(name))
                 && !fact_rows.contains_key(name);
-            if is_derived_placeholder || inputs.contains_key(name) {
+            if is_derived_placeholder
+                || inputs.contains_key(name)
+                || singleton_fact_names.contains(name)
+            {
                 continue;
             }
             empty_names.push(name);
@@ -3158,7 +3169,12 @@ impl LogicProgram {
             executor.store_mut().put(&name, buffer);
         }
 
-        self.load_grouped_facts_into_store(provider, executor.store_mut(), fact_rows)?;
+        self.load_grouped_facts_into_store(
+            provider,
+            executor.store_mut(),
+            fact_rows,
+            &singleton_fact_names,
+        )?;
         Ok(executor)
     }
 
@@ -3679,7 +3695,7 @@ impl LogicProgram {
     ) -> Result<()> {
         let arity_qualified_predicates = self.arity_qualified_fact_predicates();
         let rows_by_pred = self.fact_rows_by_relation(&arity_qualified_predicates);
-        self.load_grouped_facts_into_store(provider, store, rows_by_pred)
+        self.load_grouped_facts_into_store(provider, store, rows_by_pred, &BTreeSet::new())
     }
 
     fn load_grouped_facts_into_store(
@@ -3687,6 +3703,7 @@ impl LogicProgram {
         provider: &CudaKernelProvider,
         store: &mut RelationStore,
         rows_by_pred: HashMap<String, Vec<&[Term]>>,
+        singleton_fact_names: &BTreeSet<String>,
     ) -> Result<()> {
         let mut names = Vec::with_capacity(rows_by_pred.len());
         let mut host_relations = Vec::with_capacity(rows_by_pred.len());
@@ -3729,6 +3746,10 @@ impl LogicProgram {
             .into_iter()
             .zip(provider.create_buffers_from_host_columns(&host_relations)?)
         {
+            if singleton_fact_names.contains(&pred) {
+                store.put(pred.as_str(), fact_buf);
+                continue;
+            }
             let existing = store.get(&pred).ok_or_else(|| {
                 XlogError::Execution(format!(
                     "Missing base relation {} while loading facts",
