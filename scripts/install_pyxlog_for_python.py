@@ -157,7 +157,10 @@ def main(argv: list[str] | None = None) -> int:
     run([args.python, "-c", "import sys; print(sys.executable)"], dry_run=args.dry_run)
 
     if not args.skip_stage:
-        run(["bash", "scripts/stage_pyxlog_kernels.sh"], dry_run=args.dry_run)
+        stage_cmd = ["bash", "scripts/stage_pyxlog_kernels.sh"]
+        if args.features and "semantic-policy" in args.features.replace(",", " ").split():
+            stage_cmd.extend(["--features", "semantic-policy"])
+        run(stage_cmd, dry_run=args.dry_run)
 
     prune_existing_pyxlog_wheels(wheel_dir, dry_run=args.dry_run)
 

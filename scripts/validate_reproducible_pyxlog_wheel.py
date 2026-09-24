@@ -92,6 +92,7 @@ def build_wheel(
     *,
     compatibility: str = "linux",
     python_executable: str | None = None,
+    features: str | None = None,
 ) -> Path:
     target_dir = target_dir.resolve()
     output_dir = output_dir.resolve()
@@ -113,6 +114,8 @@ def build_wheel(
     ]
     if python_executable is not None:
         command.extend(["-i", python_executable])
+    if features is not None:
+        command.extend(["--features", features])
     print(f"+ {shlex.join(command)}", flush=True)
     subprocess.run(command, cwd=repo_root, env=env, check=True)
 
@@ -339,6 +342,10 @@ def parse_args() -> argparse.Namespace:
         dest="python_executable",
         help="explicit Python interpreter passed to maturin",
     )
+    parser.add_argument(
+        "--features",
+        help="additional Cargo features passed to both maturin wheel builds",
+    )
     return parser.parse_args()
 
 
@@ -369,6 +376,7 @@ def main() -> int:
             source_date_epoch,
             compatibility=args.compatibility,
             python_executable=args.python_executable,
+            features=args.features,
         )
         second_wheel = build_wheel(
             repo_root,
@@ -377,6 +385,7 @@ def main() -> int:
             source_date_epoch,
             compatibility=args.compatibility,
             python_executable=args.python_executable,
+            features=args.features,
         )
         validate_reproducible_wheels(first_wheel, second_wheel, source_date_epoch)
 
