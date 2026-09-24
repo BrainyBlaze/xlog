@@ -1226,11 +1226,12 @@ fn external_column_shows_inverse_ownership_signature() {
         return;
     };
 
-    // SAFETY: null-pointer tensor is drop-safe (DlpackManagedTensor's
-    // Drop impl null-checks before invoking the deleter); nothing
-    // dereferences the tensor here.
+    // SAFETY: the zero-length column never accesses the null device range, and
+    // the null-pointer tensor is drop-safe because its Drop implementation
+    // checks the pointer before invoking the deleter.
     let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
-    let column = xlog_cuda::CudaColumn::dlpack(0, 0, device.inner().stream().clone(), tensor);
+    let column =
+        unsafe { xlog_cuda::CudaColumn::dlpack(0, 0, device.inner().stream().clone(), tensor) };
 
     assert!(column.is_external(), "raw DLPack column must be external");
     assert!(

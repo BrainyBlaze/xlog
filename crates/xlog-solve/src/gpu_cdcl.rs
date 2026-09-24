@@ -7,7 +7,7 @@ use xlog_core::resolve_bool;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{sat_kernels, SAT_MODULE};
-use xlog_cuda::{AsKernelParam, CudaKernelProvider, DeviceSlice, LaunchAsync};
+use xlog_cuda::{AsKernelParam, CudaKernelProvider, LaunchAsync};
 
 use crate::gpu_cnf::GpuCnf;
 
@@ -21,12 +21,32 @@ const SAT_STATUS_BUDGET_EXHAUSTED: i32 = 2;
 
 struct GpuCdclRun {
     assignment: TrackedCudaSlice<i8>,
-    // Scratch buffers used only by sat_cdcl_solve, but must stay alive until the solver kernel completes.
+    // Every buffer passed to the asynchronous sat_cdcl_solve launch must remain
+    // owned until the first status read or explicit synchronization completes.
+    _level: TrackedCudaSlice<u32>,
+    _reason: TrackedCudaSlice<i32>,
+    _var_activity: TrackedCudaSlice<u32>,
+    _var_phase: TrackedCudaSlice<i8>,
     _decision_heap: TrackedCudaSlice<u32>,
     _decision_heap_pos: TrackedCudaSlice<u32>,
+    _trail: TrackedCudaSlice<i32>,
+    _trail_lim: TrackedCudaSlice<u32>,
+    _seen: TrackedCudaSlice<u8>,
+    _learnt_tmp: TrackedCudaSlice<i32>,
+    _proof_vars_tmp: TrackedCudaSlice<u32>,
+    _proof_reason_tmp: TrackedCudaSlice<u32>,
+    _watch0_pos: TrackedCudaSlice<u32>,
+    _watch1_pos: TrackedCudaSlice<u32>,
+    _watch_head: TrackedCudaSlice<i32>,
+    _watch_next: TrackedCudaSlice<i32>,
+    _watch_prev: TrackedCudaSlice<i32>,
 
     learned_offsets: TrackedCudaSlice<u32>,
     learned_lits: TrackedCudaSlice<i32>,
+    _learned_deleted: TrackedCudaSlice<u8>,
+    _learned_lbd: TrackedCudaSlice<u32>,
+    _learned_activity: TrackedCudaSlice<u32>,
+    _learned_locked: TrackedCudaSlice<u8>,
     proof_offsets: TrackedCudaSlice<u32>,
     proof_data: TrackedCudaSlice<u32>,
 
@@ -629,10 +649,29 @@ impl GpuCdclSolver {
 
         Ok(GpuCdclRun {
             assignment: assign,
+            _level: level,
+            _reason: reason,
+            _var_activity: var_activity,
+            _var_phase: var_phase,
             _decision_heap: decision_heap,
             _decision_heap_pos: decision_heap_pos,
+            _trail: trail,
+            _trail_lim: trail_lim,
+            _seen: seen,
+            _learnt_tmp: learnt_tmp,
+            _proof_vars_tmp: proof_vars_tmp,
+            _proof_reason_tmp: proof_reason_tmp,
+            _watch0_pos: watch0_pos,
+            _watch1_pos: watch1_pos,
+            _watch_head: watch_head,
+            _watch_next: watch_next,
+            _watch_prev: watch_prev,
             learned_offsets,
             learned_lits,
+            _learned_deleted: learned_deleted,
+            _learned_lbd: learned_lbd,
+            _learned_activity: learned_activity,
+            _learned_locked: learned_locked,
             proof_offsets,
             proof_data,
             out_status,

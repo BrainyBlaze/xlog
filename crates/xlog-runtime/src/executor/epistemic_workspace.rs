@@ -3268,10 +3268,6 @@ impl EpistemicGpuRuntimeWcojCertification {
     }
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "variants borrow the exact typed GPU column owners required by each arity; boxing would add allocation and indirection to every launch"
-)]
 enum TupleSourceLaunch<'a> {
     ArityZero {
         literal_index: u32,
@@ -3479,10 +3475,10 @@ impl Executor {
         }
     }
 
-    fn time_epistemic_gpu_kernel_launch(
+    fn time_epistemic_gpu_kernel_launch<E: std::fmt::Display>(
         &self,
         operation: &str,
-        launch: impl FnOnce() -> std::result::Result<(), DriverError>,
+        launch: impl FnOnce() -> std::result::Result<(), E>,
     ) -> Result<EpistemicGpuKernelTimingTrace> {
         let stream = self.provider.device().inner().stream().clone();
         let start = stream
@@ -4848,7 +4844,7 @@ impl Executor {
                             func_arity_n.clone().launch(config, &mut params)?;
                         }
                     };
-                    Ok(())
+                    Ok::<(), DriverError>(())
                 },
             )?;
             kernel_timings.push(kernel_timing);
@@ -6043,7 +6039,7 @@ impl Executor {
                     LaunchConfig::for_num_elems(output_row_capacity_u32.max(1)),
                     &mut row_map_params,
                 )?;
-                Ok(())
+                Ok::<(), xlog_cuda::device_runtime::ResourceError>(())
             },
         )?;
         kernel_timings.push(row_map_timing);
@@ -6062,7 +6058,7 @@ impl Executor {
                     LaunchConfig::for_num_elems(candidate_count_u32.max(1)),
                     &mut close_rejections_params,
                 )?;
-                Ok(())
+                Ok::<(), DriverError>(())
             },
         )?;
         kernel_timings.push(close_rejections_timing);
@@ -6098,7 +6094,7 @@ impl Executor {
                         LaunchConfig::for_num_elems((*column_byte_len).max(1)),
                         &mut params,
                     )?;
-                    Ok(())
+                    Ok::<(), DriverError>(())
                 },
             )?;
             kernel_timings.push(column_timing);

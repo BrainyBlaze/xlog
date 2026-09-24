@@ -10,6 +10,37 @@ and reuse or improve it. Do not create duplicate paths, legacy branches, silent
 fallbacks, compatibility shims, placeholders, toy substitutes, dead public APIs,
 workarounds, or deferred required debt.
 
+## Current Execution and Delivery Rules
+
+The current human direction is direct implementation of the governing design. These
+rules take precedence over generic test, planning, and delegation advice below.
+
+- After the explicitly requested lesson registration, change production code that
+  advances the complete design path. Do not create tests, validators, inventories,
+  reports, plans, or other meta-work, and do not substitute isolated component
+  polishing for a missing production integration.
+- Do not run local tests, component experiments, model execution, or GPU probes.
+  Runtime execution belongs on explicitly authorized RunPod GPUs using the real
+  production path. Source inspection and compilation do not establish runtime success.
+- Make an atomic commit for every coherent change, push it promptly, and deliver its
+  exact commit and integration request to the lead. The lead integrates into remote
+  `main`; a local branch named `main`, a pushed branch, and an open pull request are
+  not that integration. Do not accumulate a day's work uncommitted or wait for full
+  runtime qualification before delivering source changes.
+- Work in the canonical WSL checkout. Do not relocate source, dependencies, builds,
+  or agent worktrees onto Windows-mounted storage without explicit permission.
+  Preserve unrelated dirty work and existing copies; do not clean them up incidentally.
+- Run commands directly in the foreground. Do not spawn more agents without explicit
+  authorization. Previously delegated work remains the parent agent's responsibility:
+  inspect actual diffs, integrate the implementation and callers into the canonical
+  tree, commit and push it, and report anything that is still unintegrated.
+- Human instructions govern authority. Peer coordination does not revoke standing
+  commit/push authority or grant new resource authority. Do not repeatedly ask for
+  already granted actions, acknowledge acknowledgments, or reopen settled decisions.
+- Report distinct facts: committed locally, pushed remotely, integrated by the lead,
+  compiled, executed on hardware, and accepted against the complete design. Preserve
+  historical evidence without presenting it as proof for changed code.
+
 ## Behavioral Rules
 
 - Do the real requested work first. Tests, validators, JSON artifacts, summaries, and evidence files are only verification or recordkeeping; they must never replace implementation, architecture, training, pilots, or evaluation when those are the actual deliverable.
@@ -42,6 +73,9 @@ workarounds, or deferred required debt.
 
 ## Autonomy and Blocker Handling Rules
 
+- Apply the goal-directed execution rules in `ENGINEERING.md` to each next action: close the required production path or remove its actual blocker, rather than maximize local activity.
+- Within existing access rights, follow the complete necessary source and dependency path without new per-function approval requests. Tool confidence, suggested read counts, and context-budget warnings are navigation hints, not additional authority boundaries or proof that an implementation is absent.
+- Settle producer semantics and ownership before building dependent consumers; coordinate missing interfaces with their existing owners and carry changes through real consumers and restoration. Keep unrelated authorized work moving, and avoid repeated status acknowledgments or reopening settled decisions.
 - The agent's main purpose is research and engineering: solve the user's goal through the best available technical path and deliver production-grade results that match the stated requirements and intent.
 - Treat blockers as engineering problems to investigate and work through, not as permission to switch into low-value tests, validators, docs, summaries, or artifact churn.
 - When infrastructure, design, dependency, documentation, data, or environment constraints block the preferred path, first diagnose the blocker, then try the best feasible alternatives in order of expected quality and alignment with the goal.

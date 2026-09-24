@@ -1,167 +1,89 @@
-//! [`AsyncCudaResource`] — stream-ordered allocation backed by
-//! cudarc's `CudaStream::alloc` (which forwards to `cuMemAllocAsync`
-//! when the context supports it).
+//! Stream-bound allocation through the shared raw storage owner.
 //!
-//! Each [`DeviceMemoryResource::allocate`] call resolves the
-//! caller-supplied [`StreamId`] to a live `cudarc::driver::CudaStream`
-//! via the [`StreamPool`], allocates against that stream, and stores
-//! the resulting `CudaSlice<u8>` in the resource's live map. Drop on
-//! deallocate invokes `cuMemFreeAsync` (when supported) on the same
-//! stream the allocation was bound to.
-//!
-//! This backend is the production candidate. It is **not** the
-//! sanitizer/cert backend — pool/async behavior can hide byte-level
-//! out-of-bounds patterns from Compute Sanitizer; the cert role
-//! belongs to [`DirectCudaResource`] (subject to manual Compute Sanitizer
-//! confirmation on a supported host).
-//!
-//! # Stream-ordering contract enforced here
-//!   * `allocate(.., stream, ..)` is ordered on the resolved
-//!     `CudaStream`. The returned `DeviceBlock` carries the same
-//!     `alloc_stream`.
-//!   * `deallocate(block)` releases the underlying memory ordered on
-//!     the block's `alloc_stream`. Callers must have synchronized any
-//!     work on a different stream before deallocation.
-//!   * Reuse of the underlying byte address by a future `allocate` is
-//!     ordered after the previous deallocate by the CUDA driver's
-//!     stream-ordered memory allocator semantics. The stream-ordered
-//!     allocation lifetime regression test encodes this.
-//!
-//! # `bytes_outstanding` and pending-free accounting
-//!
-//! The trait contract is "live + retired-but-not-yet-freed". A queued
-//! `cuMemFreeAsync` is "retired-but-not-yet-freed" until the host
-//! synchronizes the stream the free was queued on. We therefore keep
-//! two atomic counters:
-//!
-//!   * `live_bytes` — bytes for blocks currently in the live map.
-//!   * `pending_bytes` — bytes for blocks whose `CudaSlice` has been
-//!     dropped (so a `cuMemFreeAsync` is queued on the alloc stream)
-//!     but whose stream has not yet been synchronized by us.
-//!
-//! `bytes_outstanding()` returns `live_bytes + pending_bytes`.
-//!
-//! `reap_pending()` drains the per-stream pending map under the
-//! per-stream mutex, synchronizes each drained stream, and then
-//! subtracts only the **synchronized** total from `pending_bytes`
-//! via `fetch_sub` — it does **not** zero the counter. A
-//! `deallocate` that races between reap's drain and its `fetch_sub`
-//! re-populates both the per-stream map and the global atomic
-//! together (under the same mutex), so its bytes either land
-//! entirely before the drain (reaped this round) or entirely after
-//! (kept for the next reap), never split.
-//!
-//! On the first stream-sync failure, the failing entry and every
-//! remaining un-iterated drained entry are **restored** into
-//! `pending_per_stream` so a subsequent reap can retry them. Only
-//! the bytes for streams that successfully synchronized are
-//! decremented from `pending_bytes`. Without this recovery, a
-//! transient driver error mid-reap would lose track of pending
-//! bytes forever — the drained map would be gone, `pending_bytes`
-//! would still count them, but no stream id would be queued for
-//! a future reap. Production callers (`GlobalDeviceBudget`, the
-//! stream-ordered allocation lifetime tests' final assertions) thus see consistent
-//! `bytes_outstanding()` even on transient sync failures.
+//! Allocation uses one device-owned lifecycle stream and completes before block
+//! publication. Failed initialization retains actual storage and its byte charge.
+//! Deallocation moves real owners into the existing pending queue. Cold reaping
+//! proves physical free before releasing accounting; pool IDs alone are not
+//! completion evidence. Device/sanitizer qualification remains a separate gate.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cudarc::driver::{CudaEvent, CudaSlice};
+use crate::memory::RawDeviceAllocation;
 
+#[cfg(test)]
+use super::resource::AllocTag;
 use super::resource::{
-    Access, AllocTag, BlockId, BlockState, DeviceBlock, DeviceMemoryResource, Generation,
-    ResourceBudgetSnapshot, ResourceError, ResourceResult, StreamId,
+    Access, AllocationAccounting, AllocationRequest, BlockId, BlockState, DeviceAccessDependencies,
+    DeviceBlock, DeviceMemoryResource, Generation, ResourceBudgetSnapshot, ResourceError,
+    ResourceResult, StreamId,
 };
 use super::stream_pool::StreamPool;
 use crate::CudaDevice;
 
-/// One live allocation tracked by [`AsyncCudaResource`]. Carries
-/// the cudarc-owned `CudaSlice<u8>` (whose drop queues the
-/// underlying `cuMemFreeAsync`) plus access-aware dependency
-/// state and the allocation's [`Generation`].
-///
-/// # Dependency state
-///
-/// The block's outstanding dependencies are tracked in two
-/// distinct sets so future operations can wait on the minimal
-/// correct fence:
-///
-///   * `last_write` — the most recent write event recorded on
-///     the block, paired with the stream that recorded it. A
-///     subsequent read on a different stream must wait on this
-///     event; a subsequent write on a different stream must wait
-///     on this event AND every entry in `outstanding_reads`.
-///   * `outstanding_reads` — every read event recorded since the
-///     current `last_write` was installed (or since allocation,
-///     if no write has occurred yet), each paired with its
-///     recording stream. A subsequent write on a different
-///     stream must wait on each entry here. Cleared at finish
-///     time when a new write event replaces `last_write`: the
-///     writer's prepare-time waits already subsumed every prior
-///     reader's dependency, so any future operation that waits
-///     on the new `last_write` transitively observes those
-///     reads' completion.
-///
-/// On `deallocate`, the alloc stream waits on `last_write` (if
-/// any) AND every entry in `outstanding_reads` before the queued
-/// `cuMemFreeAsync` runs.
-///
-/// # ABA / generation guard
-///
-/// The `generation` field guards against address recycling:
-/// every API that mutates the entry validates
-/// `block.generation == entry.generation` before touching it.
-/// Mismatch returns [`ResourceError::UseAfterFree`] and the
-/// entry is unchanged.
+/// A live raw allocation, its generation, and the authoritative dependency
+/// owner shared by storage aliases. Read and write frontiers retain every
+/// recorded execution stream until its ordering is proved. Deallocation moves
+/// this owner to the pending queue; physical release waits those frontiers.
+/// Generation checks reject stale identities before mutating the live entry.
 struct LiveEntry {
-    slice: CudaSlice<u8>,
+    slice: Arc<RawDeviceAllocation>,
     generation: Generation,
-    /// Most recent write event on this block, OR the
-    /// allocation-ready event if no write has happened yet.
-    /// Future reads/writes on a different stream wait on this
-    /// event. Replaced by `finish_block_use` for
-    /// `Access::Write` / `Access::ReadWrite`. The
-    /// allocation-ready seed exists because cuMemAllocAsync
-    /// orders the allocation only on `alloc_stream` — a
-    /// cross-stream consumer that submits a kernel before
-    /// allocation completes would read pool-recycled garbage.
-    last_write: Option<(StreamId, CudaEvent)>,
-    /// Read events recorded since `last_write` was installed
-    /// (or since allocation). Future writes on a different
-    /// stream wait on each entry. Cleared by `finish_block_use`
-    /// when a write replaces `last_write`.
-    outstanding_reads: Vec<(StreamId, CudaEvent)>,
+    alloc_stream: StreamId,
+    /// The same event history used by storage aliases. Allocation is complete
+    /// before publication; subsequent accesses record the authoritative read
+    /// and write frontiers on their exact CUDA streams.
+    dependencies: Arc<DeviceAccessDependencies>,
 }
 
-/// Stream-ordered cudarc-backed allocator.
+/// Stream-bound allocator with explicitly owned deferred reclamation.
 pub struct AsyncCudaResource {
     device: Arc<CudaDevice>,
     device_ordinal: u32,
     stream_pool: Arc<StreamPool>,
-    /// Live allocations keyed by raw device pointer. Each entry
-    /// holds the cudarc slice and any recorded last-use events
-    /// from cross-stream consumers. Removed on deallocate; the
-    /// slice is then dropped, queueing `cuMemFreeAsync` on its
-    /// bound stream — *after* the stream has been told to wait on
-    /// every recorded event.
+    /// Live raw owners keyed by device pointer. Deallocation transfers the
+    /// complete owner and dependency history into `pending_per_stream`.
     live: Mutex<HashMap<u64, LiveEntry>>,
     /// Bytes for blocks currently in `live`. Always accurate.
     live_bytes: AtomicUsize,
-    /// Bytes for blocks dropped (queued for cuMemFreeAsync) but
-    /// whose owning stream has not yet been synchronized by us.
-    /// Equal to the sum of values in `pending_per_stream`. Both are
-    /// updated under the `pending_per_stream` mutex so a concurrent
-    /// `reap_pending` cannot wipe out bytes that a racing
-    /// `deallocate` queued after reap drained the per-stream map.
-    pending_bytes: AtomicUsize,
-    /// Per-stream pending-free byte totals. Used by `reap_pending`
-    /// to (a) compute the total to subtract from `pending_bytes`
-    /// after stream synchronization, and (b) preserve any bytes
-    /// added by a `deallocate` that races with reap — those bytes
-    /// remain in this map and in `pending_bytes`, ready for the
-    /// next reap.
-    pending_per_stream: Mutex<HashMap<StreamId, usize>>,
+    /// Includes allocations retained after failed initialization, before a
+    /// public block exists. The raw owner releases this counter only after free.
+    outstanding_bytes: Arc<AllocationAccounting>,
+    /// Bytes transferred to pending reclamation but not yet proven freed.
+    /// Charged to each exact allocation ticket, independently of queue or
+    /// backend lifetime. Retained stream handles alone do not count as bytes.
+    pending_bytes: Arc<AtomicUsize>,
+    /// Actual owners awaiting physical reclamation, grouped by stream. A reap
+    /// removes only its own batch; concurrently queued owners remain here until
+    /// the next reap. Unfinished owners are restored; their tickets settle
+    /// physical bytes independently of any later handle-cleanup failure.
+    pending_per_stream: Mutex<HashMap<StreamId, Vec<Option<Arc<RawDeviceAllocation>>>>>,
+}
+
+impl Drop for AsyncCudaResource {
+    fn drop(&mut self) {
+        // Backend destruction must not bypass the access history merely because
+        // no DeviceStorage wrapper remains (for example, a bare recorded block).
+        // Move real native allocations and their context/stream owners out before
+        // scheduling cold cleanup; no live-map or admission mutex is held there.
+        let live = std::mem::take(
+            self.live
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        let pending = std::mem::take(
+            self.pending_per_stream
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        // The last raw owner performs its own dependency wait and retryable
+        // physical release. A second batch-level wait here would strand every
+        // allocation if it failed before handing them to that canonical owner.
+        // Outstanding leases keep their exact raw allocation alive independently.
+        drop(live);
+        drop(pending);
+    }
 }
 
 impl AsyncCudaResource {
@@ -175,7 +97,8 @@ impl AsyncCudaResource {
             stream_pool,
             live: Mutex::new(HashMap::new()),
             live_bytes: AtomicUsize::new(0),
-            pending_bytes: AtomicUsize::new(0),
+            outstanding_bytes: Arc::default(),
+            pending_bytes: Arc::new(AtomicUsize::new(0)),
             pending_per_stream: Mutex::new(HashMap::new()),
         }
     }
@@ -204,16 +127,21 @@ impl AsyncCudaResource {
     /// Sum of per-stream pending byte tallies. Test/diagnostic
     /// accessor used to assert the invariant
     /// `pending_free_bytes() == pending_per_stream_total()`. The
-    /// invariant must hold at any quiescent moment; if it fails
-    /// the bookkeeping under the `pending_per_stream` mutex has
-    /// drifted from the global atomic — see `deallocate` and
-    /// `reap_pending`, which update both as a unit.
+    /// invariant holds after successful queue handoff at quiescent moments.
+    /// After a failed handoff, the canonical cold queue can own charged bytes
+    /// outside this map. Physically freed owners retained for handle cleanup
+    /// are excluded from both physical-byte counts.
     pub fn pending_per_stream_total(&self) -> usize {
         let map = self
             .pending_per_stream
             .lock()
             .expect("AsyncCudaResource pending_per_stream poisoned");
-        map.values().copied().sum()
+        map.values()
+            .flatten()
+            .flatten()
+            .filter(|owner| !owner.reclamation().was_released())
+            .map(|owner| owner.len())
+            .sum()
     }
 
     /// Number of recorded outstanding-read events plus a
@@ -228,17 +156,19 @@ impl AsyncCudaResource {
             .lock()
             .expect("AsyncCudaResource live map poisoned");
         live.get(&ptr)
-            .map(|e| e.outstanding_reads.len() + if e.last_write.is_some() { 1 } else { 0 })
+            .map(|entry| entry.dependencies.pending_event_count())
     }
 }
 
 impl DeviceMemoryResource for AsyncCudaResource {
-    fn allocate(
-        &self,
-        bytes: usize,
-        stream: StreamId,
-        tag: AllocTag,
-    ) -> ResourceResult<DeviceBlock> {
+    fn materialize(&self, request: AllocationRequest) -> ResourceResult<DeviceBlock> {
+        let AllocationRequest {
+            bytes,
+            stream,
+            tag,
+            reclamation,
+            ..
+        } = request;
         if bytes == 0 {
             return Err(ResourceError::Driver(
                 "AsyncCudaResource: zero-byte allocation not supported".to_string(),
@@ -250,88 +180,47 @@ impl DeviceMemoryResource for AsyncCudaResource {
                 stream.0
             ))
         })?;
-
-        // SAFETY: bytes > 0 verified above. cudarc's
-        // `CudaStream::alloc::<u8>(len)` forwards to `cuMemAllocAsync`
-        // when the context has async-alloc enabled (CUDA 11.2+);
-        // otherwise it falls back to synchronous alloc internally.
-        // Failures are surfaced as `ResourceError::Driver`.
-        let slice = unsafe {
-            cu_stream
-                .alloc::<u8>(bytes)
-                .map_err(|e| ResourceError::Driver(format!("cuMemAllocAsync({}): {}", bytes, e)))?
-        };
-
-        // Record an "allocation-ready" event on the alloc stream
-        // immediately after the cuMemAllocAsync call. Cross-
-        // stream consumers MUST wait on this event before
-        // touching the bytes, otherwise the launch (on a
-        // different stream) may begin before the allocation
-        // completes and read pre-init / pool-recycled garbage.
-        // We store it in `last_write` so the access-aware
-        // prepare path's existing read-waits-on-last_write and
-        // write-waits-on-last_write rules cover it for free.
-        // Same-stream consumers skip the wait (already ordered).
-        let alloc_event = cu_stream.record_event(None).map_err(|e| {
-            ResourceError::Driver(format!(
-                "AsyncCudaResource::allocate: record allocation-ready event failed: {}",
-                e
-            ))
-        })?;
-
-        // Extract the raw device pointer for the DeviceBlock surface.
-        // The "sync" handle returned by `device_ptr` is intentionally
-        // leaked — the slice's lifetime is managed by our live map,
-        // not by the sync token.
-        let (raw_ptr, sync) =
-            <CudaSlice<u8> as cudarc::driver::DevicePtr<u8>>::device_ptr(&slice, slice.stream());
-        std::mem::forget(sync);
-        let ptr = raw_ptr;
-
-        {
-            let mut live = self
-                .live
-                .lock()
-                .expect("AsyncCudaResource live map poisoned");
-            // Use `contains_key` then `insert` so a (theoretical)
-            // pointer collision returns `Err` without mutating the
-            // map. The `live.insert(ptr, slice).is_some()` pattern
-            // would replace the existing entry, drop the old slice
-            // (queueing cuMemFreeAsync on memory we still believe
-            // we own), and leave the new slice resident while we
-            // return Err — `live_bytes` would also not be updated.
-            // Avoid that here.
-            if live.contains_key(&ptr) {
-                return Err(ResourceError::Driver(format!(
-                    "AsyncCudaResource: pointer collision on alloc ({:#x})",
-                    ptr
-                )));
-            }
-            // Generation must match between the LiveEntry and the
-            // returned DeviceBlock so record_block_use and
-            // deallocate can ABA-validate by (ptr, generation).
-            let generation = Generation::next();
-            live.insert(
-                ptr,
-                LiveEntry {
-                    slice,
-                    generation,
-                    last_write: Some((stream, alloc_event)),
-                    outstanding_reads: Vec::new(),
-                },
+        reclamation.attach_resource(Arc::clone(&self.outstanding_bytes), bytes)?;
+        let allocation = crate::memory::RawDeviceAllocation::allocate(
+            Arc::clone(&cu_stream),
+            Arc::clone(self.device.inner().allocation_stream()),
+            bytes,
+            None,
+            Arc::clone(&reclamation),
+        )?;
+        let ptr = allocation.ptr();
+        let dependencies = allocation.dependencies();
+        let mut live = self
+            .live
+            .lock()
+            .expect("AsyncCudaResource live map poisoned");
+        if live.contains_key(&ptr) {
+            return Err(
+                ResourceError::Driver(format!("allocation pointer collision: {ptr:#x}"))
+                    .retaining(bytes, reclamation),
             );
-            self.live_bytes.fetch_add(bytes, Ordering::Relaxed);
-            Ok(DeviceBlock {
-                ptr,
-                device_ordinal: self.device_ordinal,
-                alloc_stream: stream,
-                bytes,
-                align: std::mem::align_of::<u8>(),
-                tag,
-                generation,
-                state: BlockState::Live,
-            })
         }
+        let generation = Generation::next();
+        live.insert(
+            ptr,
+            LiveEntry {
+                slice: allocation,
+                generation,
+                alloc_stream: stream,
+                dependencies,
+            },
+        );
+        self.live_bytes.fetch_add(bytes, Ordering::Relaxed);
+        Ok(DeviceBlock {
+            ptr,
+            device_ordinal: self.device_ordinal,
+            alloc_stream: stream,
+            bytes,
+            align: std::mem::align_of::<u8>(),
+            tag,
+            generation,
+            state: BlockState::Live,
+        })
     }
 
     fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
@@ -347,7 +236,7 @@ impl DeviceMemoryResource for AsyncCudaResource {
         // erroring would queue `cuMemFreeAsync` on a stream the
         // caller did not expect (via the slice drop on the error
         // return path) AND leave accounting drift behind.
-        let alloc_stream = self
+        let _alloc_stream = self
             .stream_pool
             .resolve(block.alloc_stream)
             .ok_or_else(|| {
@@ -357,71 +246,41 @@ impl DeviceMemoryResource for AsyncCudaResource {
                 ))
             })?;
 
-        // Take the live-map lock and validate (ptr, generation)
-        // before removing. The generation guard closes the ABA
-        // window: if the address was freed and reused, the older
-        // block's deallocate must NOT tear down the new live
-        // entry. Mismatch -> UseAfterFree, no mutation.
-        //
-        // While the entry is still in the map, queue waits on
-        // alloc_stream for: the block's last_write (if any) and
-        // every outstanding_read. cudarc's `wait` records the
-        // dependency synchronously; if any wait call fails, the
-        // events stay owned by the entry, the entry stays in the
-        // map, and accounting is untouched — caller can retry.
-        //
-        // Same-stream waits are skipped — events recorded on
-        // `block.alloc_stream` are already ordered before
-        // anything else queued there, so requesting a wait would
-        // just be busywork. Cross-stream events are the ones
-        // that fence the queued cuMemFreeAsync against in-flight
-        // consumers.
-        //
-        // Only after every wait succeeds do we remove the entry,
-        // taking ownership of the slice and events, and exit the
-        // lock. From that point removal is committed and the
-        // slice drop below queues cuMemFreeAsync correctly
-        // ordered after every wait we just submitted.
-        let (slice, last_write, outstanding_reads) = {
+        // Logical detach validates the complete identity but submits no free
+        // or dependency waits. Existing storage leases remain usable. The
+        // unique physical owner later reserves and waits its exact range.
+        let (slice, dependencies) = {
             let mut live = self
                 .live
                 .lock()
                 .expect("AsyncCudaResource live map poisoned");
             match live.get(&block.ptr) {
-                Some(entry) if entry.generation == block.generation => {
-                    if let Some((write_stream, event)) = &entry.last_write {
-                        if *write_stream != block.alloc_stream {
-                            alloc_stream.wait(event).map_err(|e| {
-                                ResourceError::Driver(format!(
-                                    "AsyncCudaResource::deallocate: cuStreamWaitEvent on \
-                                     last_write failed: {}",
-                                    e
-                                ))
-                            })?;
-                        }
-                    }
-                    for (read_stream, event) in &entry.outstanding_reads {
-                        if *read_stream != block.alloc_stream {
-                            alloc_stream.wait(event).map_err(|e| {
-                                ResourceError::Driver(format!(
-                                    "AsyncCudaResource::deallocate: cuStreamWaitEvent on \
-                                     outstanding read failed: {}",
-                                    e
-                                ))
-                            })?;
-                        }
-                    }
+                Some(entry) => {
+                    BlockId::from_block(&block).validate_allocation(
+                        block.bytes,
+                        BlockId {
+                            ptr: block.ptr,
+                            generation: entry.generation,
+                            alloc_stream: entry.alloc_stream,
+                            device_ordinal: self.device_ordinal,
+                        },
+                        entry.slice.len(),
+                    )?;
+                    entry
+                        .slice
+                        .reclamation()
+                        .attach_pending(Arc::clone(&self.pending_bytes), block.bytes)?;
                     let LiveEntry {
                         slice,
-                        last_write,
-                        outstanding_reads,
+                        dependencies,
                         ..
                     } = live
                         .remove(&block.ptr)
                         .expect("present under lock per get above");
-                    (slice, last_write, outstanding_reads)
+                    self.live_bytes.fetch_sub(block.bytes, Ordering::Relaxed);
+                    (slice, dependencies)
                 }
-                Some(_) | None => {
+                None => {
                     return Err(ResourceError::UseAfterFree {
                         generation: block.generation,
                     });
@@ -429,46 +288,18 @@ impl DeviceMemoryResource for AsyncCudaResource {
             }
         };
 
-        // Move the bytes from "live" to "pending free": the slice
-        // drop below queues `cuMemFreeAsync` on `block.alloc_stream`,
-        // but the driver may not actually free until that stream
-        // drains. The trait contract requires us to keep counting
-        // these bytes until `reap_pending` confirms completion.
-        //
-        // The pending bookkeeping is updated as a unit under the
-        // `pending_per_stream` mutex: per-stream tally first, then
-        // the global atomic. `reap_pending` reads (drain, sync,
-        // subtract) symmetrically under the same mutex around the
-        // drain so it can only subtract the exact total it drained.
-        // A `deallocate` that races with reap therefore lands either
-        // entirely before reap's drain (its bytes are reaped this
-        // round) or entirely after (its bytes stay pending for the
-        // next reap) — never split.
-        self.live_bytes.fetch_sub(block.bytes, Ordering::Relaxed);
-        {
-            let mut per_stream = self
-                .pending_per_stream
-                .lock()
-                .expect("AsyncCudaResource pending_per_stream poisoned");
-            *per_stream.entry(block.alloc_stream).or_insert(0) += block.bytes;
-            self.pending_bytes.fetch_add(block.bytes, Ordering::Relaxed);
-        }
-
-        // Dropping the CudaSlice<u8> invokes cuMemFreeAsync on its
-        // bound stream when async-alloc is enabled, otherwise falls
-        // back to synchronous cuMemFree. Either way the deallocation
-        // is ordered on the slice's stream, which matches the
-        // DeviceBlock's `alloc_stream` — and now also waits for
-        // every recorded cross-stream use event we just queued
-        // above.
-        drop(slice);
-        // Drop the events explicitly after the slice drop has
-        // queued the free. The event handles can be released as
-        // soon as the wait calls return — cudarc's `wait` records
-        // the dependency in the stream and does not retain the
-        // event.
-        drop(last_write);
-        drop(outstanding_reads);
+        // Keep the real owner in the existing pending-free queue until cold
+        // reclamation proves free. A byte tally alone cannot retain CUDA events.
+        let mut pending = self
+            .pending_per_stream
+            .lock()
+            .expect("pending allocation queue poisoned");
+        pending
+            .entry(block.alloc_stream)
+            .or_default()
+            .push(Some(slice));
+        drop(pending);
+        drop(dependencies);
         Ok(())
     }
 
@@ -477,7 +308,11 @@ impl DeviceMemoryResource for AsyncCudaResource {
     }
 
     fn bytes_outstanding(&self) -> usize {
-        self.live_bytes.load(Ordering::Relaxed) + self.pending_bytes.load(Ordering::Relaxed)
+        self.outstanding_bytes.snapshot().0
+    }
+
+    fn allocation_accounting(&self) -> Arc<AllocationAccounting> {
+        Arc::clone(&self.outstanding_bytes)
     }
 
     fn budget_snapshot(&self) -> Option<ResourceBudgetSnapshot> {
@@ -485,22 +320,9 @@ impl DeviceMemoryResource for AsyncCudaResource {
     }
 
     fn reap_pending(&self) -> ResourceResult<()> {
-        self.reap_pending_with(|stream_id| match self.stream_pool.resolve(stream_id) {
-            Some(stream) => stream.synchronize().map_err(|e| {
-                ResourceError::Driver(format!(
-                    "AsyncCudaResource::reap_pending: stream sync failed: {}",
-                    e
-                ))
-            }),
-            // Pool returned no handle for this id. The pool currently
-            // never rotates entries, so this is a defensive branch.
-            // If the id is unresolved there is no stream we can
-            // synchronize on; treat the bytes as definitely freed —
-            // the only consistent accounting is to release them and
-            // let the caller surface any subsequent error against a
-            // known stream.
-            None => Ok(()),
-        })
+        // Each pending owner authenticates and waits its own context/event
+        // history. Pool-local default-stream IDs are not completion evidence.
+        self.reap_pending_with(|_| Ok(()))
     }
 
     fn supports_block_use_tracking(&self) -> bool {
@@ -519,6 +341,31 @@ impl DeviceMemoryResource for AsyncCudaResource {
         // the pre-launch wait so it is unsafe for use-after-write
         // / use-after-prior-read scenarios.
         self.finish_block_use(BlockId::from_block(block), use_stream, Access::Read)
+    }
+
+    fn access_dependencies(
+        &self,
+        block: BlockId,
+        bytes: usize,
+    ) -> ResourceResult<Option<Arc<DeviceAccessDependencies>>> {
+        let live = self
+            .live
+            .lock()
+            .expect("AsyncCudaResource live map poisoned");
+        let entry = live.get(&block.ptr).ok_or(ResourceError::UseAfterFree {
+            generation: block.generation,
+        })?;
+        block.validate_allocation(
+            bytes,
+            BlockId {
+                ptr: block.ptr,
+                generation: entry.generation,
+                alloc_stream: entry.alloc_stream,
+                device_ordinal: self.device_ordinal,
+            },
+            entry.slice.len(),
+        )?;
+        Ok(Some(Arc::clone(&entry.dependencies)))
     }
 
     fn prepare_block_use(
@@ -558,34 +405,7 @@ impl DeviceMemoryResource for AsyncCudaResource {
                 });
             }
         };
-        if access.reads() || access.writes() {
-            // Reader: wait on prior write.
-            // Writer / RW: wait on prior write AND every prior reader.
-            if let Some((write_stream, event)) = &entry.last_write {
-                if *write_stream != use_stream {
-                    use_cu_stream.wait(event).map_err(|e| {
-                        ResourceError::Driver(format!(
-                            "AsyncCudaResource::prepare_block_use: wait on last_write failed: {}",
-                            e
-                        ))
-                    })?;
-                }
-            }
-        }
-        if access.writes() {
-            for (read_stream, event) in &entry.outstanding_reads {
-                if *read_stream != use_stream {
-                    use_cu_stream.wait(event).map_err(|e| {
-                        ResourceError::Driver(format!(
-                            "AsyncCudaResource::prepare_block_use: wait on outstanding read \
-                             failed: {}",
-                            e
-                        ))
-                    })?;
-                }
-            }
-        }
-        Ok(())
+        entry.dependencies.prepare(&use_cu_stream, access)
     }
 
     fn finish_block_use(
@@ -606,90 +426,34 @@ impl DeviceMemoryResource for AsyncCudaResource {
                 use_stream.0
             ))
         })?;
-        // Validate (ptr, generation) BEFORE recording the event
-        // on `use_stream`. This avoids creating an event that we
-        // would have to immediately destroy on the ABA failure
-        // path.
-        {
-            let live = self
-                .live
-                .lock()
-                .expect("AsyncCudaResource live map poisoned");
-            match live.get(&block.ptr) {
-                Some(entry) if entry.generation == block.generation => {}
-                Some(_) | None => {
-                    return Err(ResourceError::UseAfterFree {
-                        generation: block.generation,
-                    });
-                }
-            }
-        }
-        // Record the event on the use stream OUTSIDE the live-map
-        // lock — event creation/record can block on the CUDA
-        // driver and we don't want to hold the live-map lock
-        // across that. Re-validate generation after acquiring the
-        // lock so a racing dealloc that already removed the entry
-        // doesn't see a phantom event attached to a stale block.
-        let event = use_cu_stream.record_event(None).map_err(|e| {
-            ResourceError::Driver(format!(
-                "AsyncCudaResource::finish_block_use: event record failed: {}",
-                e
-            ))
-        })?;
-        let mut live = self
+        // Keep validation and publication atomic with backend deallocation,
+        // including direct resource callers without a runtime reservation.
+        let live = self
             .live
             .lock()
             .expect("AsyncCudaResource live map poisoned");
-        match live.get_mut(&block.ptr) {
-            Some(entry) if entry.generation == block.generation => {
-                if access.writes() {
-                    // Writer: the prepare phase queued waits on
-                    // every prior reader and on last_write, so
-                    // any future op that observes the new
-                    // last_write transitively observes those
-                    // dependencies. Drop the prior state.
-                    entry.last_write = Some((use_stream, event));
-                    entry.outstanding_reads.clear();
-                } else {
-                    debug_assert!(access.reads());
-                    entry.outstanding_reads.push((use_stream, event));
-                }
-                Ok(())
-            }
-            Some(_) | None => {
-                // Event drops here, releasing the CUDA event.
-                // cudarc's wait was never queued so no stream
-                // dependency leaks.
-                drop(event);
-                Err(ResourceError::UseAfterFree {
+        let entry = match live.get(&block.ptr) {
+            Some(entry) if entry.generation == block.generation => entry,
+            _ => {
+                return Err(ResourceError::UseAfterFree {
                     generation: block.generation,
-                })
+                });
             }
-        }
+        };
+        // Frontier retirement replaces only the same execution stream, whose
+        // new event retains that stream/context; it cannot drop their last owner.
+        entry.dependencies.record_completion(use_cu_stream, access)
     }
 }
 
 impl AsyncCudaResource {
-    /// Drain pending per-stream entries and synchronize each
-    /// drained stream via `sync_stream`, releasing only the bytes
-    /// for streams that the closure successfully synchronized.
+    /// Reap drained actual owners, skipping shared leases. Each unique raw
+    /// owner proves its own dependency and physical-free completion. The
+    /// per-stream hook is a no-op in production and lets tests inject failure
+    /// before a stream's owners are visited.
     ///
-    /// On the first synchronization failure, the failing entry and
-    /// **every remaining un-iterated drained entry** are restored
-    /// into `pending_per_stream` so a subsequent reap can retry
-    /// them, and `pending_bytes` is decremented only by the
-    /// already-synchronized total. The closure's error is then
-    /// returned to the caller. Without this recovery, a transient
-    /// driver error mid-reap would lose track of pending bytes
-    /// forever (drained map is gone, `pending_bytes` still counts
-    /// them, but no stream is queued for a future reap).
-    ///
-    /// Production callers go through [`reap_pending`]
-    /// (the trait method), which passes a closure that resolves
-    /// the [`StreamId`] against [`StreamPool`] and calls
-    /// `CudaStream::synchronize`. This helper exists so unit tests
-    /// can inject controlled sync failures without touching the
-    /// CUDA driver.
+    /// Errors and unwind restore every unfinished owner to the same pending
+    /// queue. Only proven physical releases decrement `pending_bytes`.
     pub(crate) fn reap_pending_with<F>(&self, mut sync_stream: F) -> ResourceResult<()>
     where
         F: FnMut(StreamId) -> ResourceResult<()>,
@@ -698,62 +462,35 @@ impl AsyncCudaResource {
         // racing `deallocate` after this point lands in a fresh
         // entry and waits for the next reap.
         //
-        // Critically, we do NOT touch `pending_bytes` here — only
-        // after a stream has synchronized do we subtract its bytes.
-        // A `deallocate` that races between our drain and our
-        // subtract has already added to `pending_bytes` under the
-        // same mutex (see `deallocate`), and that addition is
-        // preserved because we `fetch_sub` the synchronized total
-        // rather than `store(0)`.
-        let drained: HashMap<StreamId, usize> = {
-            let mut per_stream = self
-                .pending_per_stream
-                .lock()
-                .expect("AsyncCudaResource pending_per_stream poisoned");
-            std::mem::take(&mut *per_stream)
-        };
-        if drained.is_empty() {
-            return Ok(());
-        }
-
-        let mut synced_total: usize = 0;
-        let mut failure: Option<ResourceError> = None;
-        let mut unsynced: Vec<(StreamId, usize)> = Vec::new();
-        let mut iter = drained.into_iter();
-        while let Some((stream_id, bytes)) = iter.next() {
-            match sync_stream(stream_id) {
-                Ok(()) => {
-                    synced_total = synced_total.saturating_add(bytes);
+        // Each allocation ticket subtracts only its own pending charge after
+        // physical release. A concurrent detach or a retained handle owner
+        // cannot erase another allocation's bytes.
+        let mut pending = crate::memory::PendingReclamationBatch::take(
+            &self.pending_per_stream,
+            |queue, pending| {
+                for (id, owners) in pending.iter_mut() {
+                    owners.retain(Option::is_some);
+                    if !owners.is_empty() {
+                        queue.entry(*id).or_default().append(owners);
+                    }
                 }
-                Err(e) => {
-                    // Restore the failing entry and every remaining
-                    // drained entry so they can be retried by a
-                    // future reap.
-                    unsynced.push((stream_id, bytes));
-                    unsynced.extend(iter.by_ref());
-                    failure = Some(e);
-                    break;
-                }
+                pending.clear();
+            },
+        );
+        let mut failure = None;
+        for (stream_id, allocations) in pending.iter_mut() {
+            if let Err(error) = sync_stream(*stream_id) {
+                failure = Some(error);
+                break;
+            }
+            if let Err(error) = crate::memory::reap_raw_allocations(allocations) {
+                failure = Some(error);
+                break;
             }
         }
-
-        if !unsynced.is_empty() {
-            let mut per_stream = self
-                .pending_per_stream
-                .lock()
-                .expect("AsyncCudaResource pending_per_stream poisoned");
-            for (stream_id, bytes) in unsynced {
-                *per_stream.entry(stream_id).or_insert(0) += bytes;
-            }
-        }
-
-        if synced_total > 0 {
-            self.pending_bytes
-                .fetch_sub(synced_total, Ordering::Relaxed);
-        }
-
+        // The batch guard restores unfinished owners on return and unwind.
         match failure {
-            Some(e) => Err(e),
+            Some(error) => Err(error),
             None => Ok(()),
         }
     }
@@ -860,17 +597,12 @@ mod tests {
     /// CUDA streams. Bypasses the normal `allocate`/`deallocate`
     /// path; intended exclusively for the failure-recovery test.
     fn install_pending(r: &AsyncCudaResource, entries: &[(StreamId, usize)]) {
-        let mut per_stream = r
-            .pending_per_stream
-            .lock()
-            .expect("AsyncCudaResource pending_per_stream poisoned");
-        let mut total: usize = 0;
         for (id, bytes) in entries {
-            *per_stream.entry(*id).or_insert(0) += *bytes;
-            total = total.saturating_add(*bytes);
+            let block = r
+                .allocate(*bytes, *id, AllocTag::UNTAGGED)
+                .expect("allocate pending owner");
+            r.deallocate(block).expect("retire pending owner");
         }
-        drop(per_stream);
-        r.pending_bytes.fetch_add(total, Ordering::Relaxed);
     }
 
     #[test]
@@ -882,6 +614,10 @@ mod tests {
             return;
         };
         let r = AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool));
+
+        let first = pool.acquire().expect("first allocation stream");
+        let second = pool.acquire().expect("second allocation stream");
+        assert_eq!((first, second), (StreamId(1), StreamId(2)));
 
         // Install two pending entries: the test will fail sync for
         // StreamId(2). Bytes total 3072.
@@ -949,6 +685,10 @@ mod tests {
             return;
         };
         let r = AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool));
+
+        let first = pool.acquire().expect("first allocation stream");
+        let second = pool.acquire().expect("second allocation stream");
+        assert_eq!((first, second), (StreamId(1), StreamId(2)));
 
         install_pending(&r, &[(StreamId(1), 256), (StreamId(2), 512)]);
         r.reap_pending_with(|_| Ok(())).expect("reap");

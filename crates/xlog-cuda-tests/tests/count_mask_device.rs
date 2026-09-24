@@ -1,4 +1,3 @@
-use cudarc::driver::DeviceSlice;
 use xlog_cuda_tests::TestContext;
 
 #[test]

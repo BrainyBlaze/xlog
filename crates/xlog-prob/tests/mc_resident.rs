@@ -12,7 +12,6 @@ use common::setup_provider;
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use cudarc::driver::DeviceSlice;
 #[cfg(feature = "host-io")]
 use xlog_prob::mc::McSamplingMethod;
 use xlog_prob::mc::{

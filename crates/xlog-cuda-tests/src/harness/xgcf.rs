@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 
-use cudarc::driver::{DeviceSlice, LaunchConfig};
+use cudarc::driver::LaunchConfig;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{circuit_kernels, AsKernelParam, CudaFunction, LaunchAsync, CIRCUIT_MODULE};

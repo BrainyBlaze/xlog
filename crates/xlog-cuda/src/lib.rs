@@ -14,6 +14,10 @@ pub mod launch;
 pub mod memory;
 pub mod multi_gpu_memory;
 pub mod provider;
+mod semantic_hypergraph;
+mod semantic_training_view;
+mod semantic_transition;
+mod semantic_work;
 pub mod type_seam;
 pub mod wcoj_metadata;
 #[cfg(feature = "wcoj-phase-timing")]
@@ -47,6 +51,58 @@ pub use provider::{
     GROUPBY_MODULE, ILP_MODULE, JOIN_MODULE, PACK_MODULE, PIR_MODULE, SCAN_MODULE, SET_OPS_MODULE,
     SORT_MODULE,
 };
+pub use semantic_hypergraph::{
+    SemanticAdmission, SemanticAdmissionLimits, SemanticAdmissionRecords, SemanticArgument,
+    SemanticExtents, SemanticForkHandle, SemanticHandleKind, SemanticHypergraph,
+    SemanticHypergraphCapacities, SemanticHypergraphError, SemanticHypergraphExecutionStats,
+    SemanticInsertOutcome, SemanticInsertedSupport, SemanticPolarity, SemanticPredicateRecord,
+    SemanticRecordRole, SemanticRootDigest, SemanticRootHandle, SemanticRootSnapshot,
+    SemanticStatementHandle, SemanticStatementIdentity, SemanticStatementKey, SemanticStatementRef,
+    SemanticSupportEvent, SemanticSupportHandle, SemanticSupportIdentity, SemanticSupportRecord,
+    SemanticSupportRef, SemanticTruth, SemanticTypedRecord, SemanticVersionHandle,
+    SemanticVersionIdentity, SemanticVersionRef, SemanticView,
+};
+pub use semantic_training_view::{
+    SemanticSelectedTrainingView, SemanticTrainingCanary, SemanticTrainingCanaryKind,
+    SemanticTrainingCanaryRecord, SemanticTrainingCanaryRefusalReason,
+    SemanticTrainingCanaryRefusalRecord, SemanticTrainingObjective, SemanticTrainingObjectiveGroup,
+    SemanticTrainingObjectiveGroupKind, SemanticTrainingObjectiveGroupRecord,
+    SemanticTrainingObjectiveRecord, SemanticTrainingRosterRow, SemanticTrainingViewBasis,
+    SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
+    SemanticTrainingViewRow, SemanticTrainingViewSelection, SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI,
+};
+pub use semantic_transition::{
+    Identity256, SemanticActionCatalogue, SemanticActionDescriptor, SemanticActiveRow,
+    SemanticActiveRows, SemanticCatalogueBinding, SemanticCatalogueField,
+    SemanticCatalogueSignature, SemanticComponent, SemanticComponentInput,
+    SemanticContinuationInput, SemanticFeedback, SemanticFeedbackRecordMaterial,
+    SemanticFeedbackSchema, SemanticGradientDeliveryBinding, SemanticModelContext,
+    SemanticModelContractLayout, SemanticModelForwardWitness, SemanticModelMemory,
+    SemanticModelStorage, SemanticModelView, SemanticObservedSource, SemanticParentBinding,
+    SemanticPolicyFieldLayout, SemanticPolicyLayout, SemanticPreparedStep,
+    SemanticPreparedStepOutcome, SemanticPublishedIdentity, SemanticPublishedLease,
+    SemanticReplayMaterial, SemanticResidentModelMemory, SemanticRngBinding, SemanticSourceMapping,
+    SemanticStateRecord, SemanticStateRole, SemanticTaskContentIdentity, SemanticTaskEvaluation,
+    SemanticTaskEvaluationSpec, SemanticTaskFacts, SemanticTaskGoalWitness,
+    SemanticTaskObservation, SemanticTaskObservationRoots, SemanticTaskProgram,
+    SemanticTaskRefusal, SemanticTaskScoring, SemanticTensorContentWitness, SemanticTensorInput,
+    SemanticTensorLayout, SemanticTextRow, SemanticTextSlot, SemanticTransitionError,
+    SemanticTransitionHostIoStats, SemanticTransitionKind, SemanticTransitionLane,
+    SemanticTransitionObservation, SemanticTransitionOutcome, SemanticTransitionReceipt,
+    SemanticTransitionRefusal, SemanticTransitionSession, SemanticTransitionWork,
+    SEMANTIC_FEEDBACK_SUPPORT_FIELDS, SEMANTIC_TRANSITION_COMPONENT_COUNT,
+    SEMANTIC_TRANSITION_GENERATION,
+};
+#[cfg(feature = "semantic-policy")]
+pub use semantic_transition::{
+    SemanticCompletedActionComponentMaterial, SemanticCompletedActionLaneMaterial,
+    SemanticCompletedActionProjectionMaterial, SemanticCompletedEditSolutionMaterial,
+    SemanticCompletedLaneOutcomeMaterial, SemanticCompletedModelCarrierMaterial,
+    SemanticCompletedStepWitnessMaterial, SemanticCompletedTaskGroundMaterial,
+    SemanticPolicyGradients, SemanticSelectedPolicyGradients,
+};
+pub use semantic_work::ModelWorkKind;
+
 pub use wcoj_metadata::{
     HeatDist, LayoutSignature, RootMetadata, VertexId, WcojCycle4HgWorkPlanU32,
     WcojCycle4HgWorkPlanU64, WcojRelationMetadata, WcojTriangleHgWorkPlanU32,

@@ -39,10 +39,25 @@ impl CudaKernelProvider {
             for source in sources {
                 match source {
                     KernelModuleSource::File { path, is_cubin } => {
-                        match device
-                            .inner()
-                            .load_file(&path, spec.module_name, spec.kernels)
-                        {
+                        let artifact_name = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("file-artifact");
+                        let source_load = std::fs::read(&path)
+                            .map_err(|error| error.to_string())
+                            .and_then(|bytes| {
+                                device
+                                    .inner()
+                                    .load_artifact_bytes(
+                                        &bytes,
+                                        is_cubin,
+                                        spec.module_name,
+                                        artifact_name,
+                                        spec.kernels,
+                                    )
+                                    .map_err(|error| error.to_string())
+                            });
+                        match source_load {
                             Ok(()) => {
                                 loaded_from_cubin = is_cubin;
                                 loaded = true;
@@ -58,9 +73,10 @@ impl CudaKernelProvider {
                         }
                     }
                     KernelModuleSource::EmbeddedPortablePtx { ptx } => {
-                        match device.inner().load_ptx(
+                        match device.inner().load_ptx_named(
                             Ptx::from_src(ptx),
                             spec.module_name,
+                            &format!("{}.portable.ptx", spec.cu_name),
                             spec.kernels,
                         ) {
                             Ok(()) => {

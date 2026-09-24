@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use xlog_core::{MemoryBudget, Result, XlogError};
 
-use super::CudaKernelProvider;
+use super::{warmup_profiling_enabled, CudaKernelProvider, PtxLoadProfile};
 use crate::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LoggingResource, LoggingSink,
     StreamPool, XlogDeviceRuntime,
@@ -11,10 +12,12 @@ use crate::{CudaDevice, GpuMemoryManager};
 
 /// Builds the complete production CUDA provider ownership graph.
 ///
-/// Every provider created here owns one device handle, one stream pool, one
-/// asynchronous resource stack, one runtime, and one memory manager. The same
-/// handles are shared through that graph; callers cannot inject mismatched
-/// allocator or device components.
+/// Every provider created here owns one stream pool, one asynchronous resource
+/// stack, one runtime, and one memory manager. Providers on the same device
+/// share the canonical loaded device handle so CUDA module images are owned
+/// once per overlapping device lifetime. The same handle is shared through
+/// each provider graph; callers cannot inject mismatched allocator or device
+/// components.
 pub struct CudaProviderBuilder {
     device_ordinal: usize,
     memory_budget: MemoryBudget,
@@ -67,7 +70,8 @@ impl CudaProviderBuilder {
             })?;
         let runtime_budget_limit = checked_runtime_budget_limit(self.runtime_budget_bytes())?;
 
-        let device = Arc::new(CudaDevice::new(self.device_ordinal)?);
+        let profiling = warmup_profiling_enabled()?;
+        let (device, ptx_load_profile) = loaded_device(self.device_ordinal, profiling)?;
         let stream_pool = Arc::new(match self.stream_capacity {
             Some(stream_capacity) => StreamPool::new(Arc::clone(&device), stream_capacity),
             None => StreamPool::with_defaults(Arc::clone(&device)),
@@ -98,13 +102,33 @@ impl CudaProviderBuilder {
             runtime,
         ));
 
-        CudaKernelProvider::from_runtime_parts(device, memory)
+        CudaKernelProvider::from_loaded_runtime_parts(device, memory, ptx_load_profile)
     }
 
     fn runtime_budget_bytes(&self) -> u64 {
         self.runtime_budget_bytes
             .unwrap_or(self.memory_budget.device_bytes)
     }
+}
+
+fn loaded_device(
+    ordinal: usize,
+    profiling: bool,
+) -> Result<(Arc<CudaDevice>, Option<PtxLoadProfile>)> {
+    static DEVICES: OnceLock<Mutex<HashMap<usize, Weak<CudaDevice>>>> = OnceLock::new();
+
+    let mut devices = DEVICES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| XlogError::Kernel("canonical CUDA device registry is poisoned".to_string()))?;
+    if let Some(device) = devices.get(&ordinal).and_then(Weak::upgrade) {
+        return Ok((device, None));
+    }
+
+    let device = Arc::new(CudaDevice::new(ordinal)?);
+    let ptx_load_profile = CudaKernelProvider::load_all_kernel_modules(&device, profiling)?;
+    devices.insert(ordinal, Arc::downgrade(&device));
+    Ok((device, ptx_load_profile))
 }
 
 fn checked_runtime_budget_limit(bytes: u64) -> Result<usize> {

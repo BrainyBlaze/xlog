@@ -39,6 +39,9 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
     "resident_relational",
     "resident_filter_project",
     "resident_schedule",
+    "semantic_hypergraph",
+    "semantic_training_view",
+    "semantic_transition",
 ];
 
 /// Describes a single CUDA module: the .cu file name, the runtime module name
@@ -649,6 +652,45 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
         module_name: "xlog_resident_schedule",
         kernels: &["resident_schedule_execute"],
     },
+    KernelModuleSpec {
+        cu_name: "semantic_hypergraph",
+        module_name: "xlog_semantic_hypergraph",
+        kernels: &["semantic_hypergraph_execute"],
+    },
+    KernelModuleSpec {
+        cu_name: "semantic_training_view",
+        module_name: "xlog_semantic_training_view",
+        kernels: &[
+            "semantic_training_view_select",
+            "semantic_training_view_gather",
+        ],
+    },
+    KernelModuleSpec {
+        cu_name: "semantic_transition",
+        module_name: "xlog_semantic_transition",
+        kernels: &[
+            "semantic_transition_execute",
+            "semantic_feedback_encode",
+            "semantic_feedback_project",
+            "semantic_publication_content_guard",
+            "semantic_retained_model_contract_guard",
+            "semantic_tensor_content_witness",
+            "semantic_model_work_reset",
+            "semantic_publication_step_inputs",
+            "semantic_publication_step_input_guard",
+            "semantic_publication_step_admit",
+            "semantic_publication_step_kind_gate",
+            "semantic_publication_step_kind_bank_gate",
+            "semantic_publication_step_active_gate",
+            "semantic_publication_step_release",
+            "semantic_publication_model_seals",
+            "semantic_publication_step_result",
+            "semantic_publication_prepare_continuation",
+            "semantic_publication_prepare_model_update_admissibility",
+            "semantic_publication_apply_model_update",
+            "semantic_publication_prepare_drain",
+        ],
+    },
 ];
 
 #[cfg(test)]
@@ -674,8 +716,44 @@ mod tests {
     }
 
     #[test]
-    fn kernel_modules_count_is_30() {
-        assert_eq!(KERNEL_MODULES.len(), 30);
+    fn semantic_consumers_are_loaded_with_their_producer_guards() {
+        let module = KERNEL_MODULES
+            .iter()
+            .find(|module| module.module_name == "xlog_semantic_transition")
+            .expect("semantic transition module is registered");
+        for entry in [
+            "semantic_feedback_encode",
+            "semantic_feedback_project",
+            "semantic_publication_content_guard",
+            "semantic_tensor_content_witness",
+            "semantic_publication_prepare_continuation",
+        ] {
+            assert!(
+                module.kernels.contains(&entry),
+                "native semantic entry {entry} is absent from the loaded symbol roster"
+            );
+        }
+    }
+
+    #[test]
+    fn acquired_step_inputs_and_original_baseline_guard_are_loaded_together() {
+        let module = KERNEL_MODULES
+            .iter()
+            .find(|module| module.module_name == "xlog_semantic_transition")
+            .expect("semantic transition module is registered");
+        for entry in [
+            "semantic_publication_step_inputs",
+            "semantic_publication_step_input_guard",
+            "semantic_publication_step_admit",
+            "semantic_publication_step_release",
+            "semantic_publication_step_result",
+            "semantic_publication_model_seals",
+        ] {
+            assert!(
+                module.kernels.contains(&entry),
+                "acquired step input entry {entry} is absent from the loaded symbol roster"
+            );
+        }
     }
 
     #[test]

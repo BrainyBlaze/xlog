@@ -2,10 +2,11 @@
 //! pool, and decorated memory-resource stack.
 //!
 //! The canonical provider builder constructs the complete ownership graph and
-//! shares its exact handles with the memory manager. There is no process-global
-//! runtime registry: dropping a provider releases its runtime normally, and
-//! independently built providers never share allocator state accidentally.
+//! shares its exact handles with the memory manager. Allocation state remains
+//! provider-owned. The common admission registry compares pending storage
+//! ranges across runtimes without owning their allocator state.
 
+use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -14,8 +15,8 @@ use cudarc::driver::{CudaEvent, CudaStream};
 use xlog_core::{Result, XlogError};
 
 use super::resource::{
-    Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, ResourceError, ResourceResult,
-    StreamId,
+    AllocTag, AllocationRequest, BlockId, DeviceBlock, DeviceMemoryResource, ResourceError,
+    ResourceResult, StreamId,
 };
 use super::stream_pool::StreamPool;
 use crate::CudaDevice;
@@ -114,6 +115,7 @@ impl Drop for ResidentGraphHandleLease {
 /// Completion event whose accounting is tied to a real cudarc event handle.
 pub struct ResidentCompletionEvent {
     event: Option<CudaEvent>,
+    stream: Arc<CudaStream>,
     telemetry: Arc<ResidentRuntimeTelemetry>,
     synchronized: bool,
 }
@@ -124,6 +126,12 @@ impl ResidentCompletionEvent {
         if self.synchronized {
             return Ok(());
         }
+        let _capture_exclusion = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+            .map_err(|error| {
+                XlogError::Kernel(format!(
+                    "resident completion wait requires an uncaptured stream: {error}"
+                ))
+            })?;
         self.event
             .as_ref()
             .expect("resident completion event missing before drop")
@@ -143,21 +151,45 @@ impl ResidentCompletionEvent {
 
 impl Drop for ResidentCompletionEvent {
     fn drop(&mut self) {
-        if !self.synchronized {
-            self.telemetry.drop_waits.fetch_add(1, Ordering::Relaxed);
-            if let Some(event) = &self.event {
-                // Buffer and module lifetimes cannot end while the graph is in
-                // flight. Drop cannot return an error, so this is best effort.
-                let _ = event.synchronize();
-            }
-        }
-        if self.event.take().is_some() {
-            self.telemetry.live_events.fetch_sub(1, Ordering::AcqRel);
-            self.telemetry
-                .destroyed_events
-                .fetch_add(1, Ordering::Relaxed);
+        if let Some(event) = self.event.take() {
+            retire_resident_completion(
+                (event, Arc::clone(&self.stream)),
+                Arc::clone(&self.telemetry),
+                self.synchronized,
+                |(event, _)| event.synchronize().is_ok(),
+                || eprintln!("CUDA completion remains unknown; retaining event and stream owners"),
+            );
         }
     }
+}
+
+fn retire_resident_completion<T: Send + 'static>(
+    owners: T,
+    telemetry: Arc<ResidentRuntimeTelemetry>,
+    synchronized: bool,
+    wait: impl FnOnce(&T) -> bool + Send + 'static,
+    diagnose: impl FnOnce() + Send + 'static,
+) {
+    let mut owners = ManuallyDrop::new(owners);
+    let mut telemetry = ManuallyDrop::new(telemetry);
+    crate::cuda_graph::retire_after_stream_captures(move || {
+        // An unsuccessful or unwinding wait is not permission to release the
+        // event, exact stream/context, or their accounting owner.
+        if !synchronized {
+            telemetry.drop_waits.fetch_add(1, Ordering::Relaxed);
+            if !wait(&owners) {
+                diagnose();
+                return;
+            }
+        }
+        // SAFETY: a successful terminal wait proves the event's completion.
+        // This is the only release; unknown completion retains both owners.
+        unsafe { ManuallyDrop::drop(&mut owners) };
+        telemetry.live_events.fetch_sub(1, Ordering::AcqRel);
+        telemetry.destroyed_events.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: accounting has completed and this owner was not released above.
+        unsafe { ManuallyDrop::drop(&mut telemetry) };
+    });
 }
 
 /// Provider-owned CUDA device runtime.
@@ -171,10 +203,12 @@ pub struct XlogDeviceRuntime {
     device_ordinal: u32,
     device: Arc<CudaDevice>,
     stream_pool: Arc<StreamPool>,
-    resource: Mutex<Box<dyn DeviceMemoryResource + Send + Sync>>,
+
+    resource: Arc<dyn DeviceMemoryResource + Send + Sync>,
     /// Complete-request bytes promised but not yet materialized through the
-    /// resource stack. Always inspected while `resource` is locked when an
-    /// allocation or new reservation competes for budget.
+    /// resource stack. This mutex serializes complete budget snapshots and
+    /// materialization. Reclamation only lowers the independent physical ledger
+    /// and never takes this lock, including reentry from failed initialization.
     reservation_bytes: Mutex<usize>,
     resident_telemetry: Arc<ResidentRuntimeTelemetry>,
 }
@@ -187,12 +221,11 @@ pub(crate) struct RuntimeMemoryReservation {
 }
 
 impl RuntimeMemoryReservation {
-    pub(crate) fn allocate(
+    pub(crate) fn materialize(
         &mut self,
-        bytes: usize,
-        stream: StreamId,
-        tag: AllocTag,
+        mut request: AllocationRequest,
     ) -> ResourceResult<DeviceBlock> {
+        let bytes = request.bytes;
         if bytes > self.remaining_bytes {
             return Err(ResourceError::OutOfBudget {
                 requested: bytes,
@@ -202,11 +235,6 @@ impl RuntimeMemoryReservation {
             });
         }
 
-        let resource = self
-            .runtime
-            .resource
-            .lock()
-            .expect("device-runtime resource poisoned");
         let mut reserved = self
             .runtime
             .reservation_bytes
@@ -217,20 +245,45 @@ impl RuntimeMemoryReservation {
         })?;
         self.remaining_bytes -= bytes;
 
-        match resource.allocate(bytes, stream, tag) {
-            Ok(block) => Ok(block),
-            Err(error) => {
-                *reserved = reserved.checked_add(bytes).ok_or_else(|| {
-                    ResourceError::Driver(
-                        "device-runtime reservation rollback overflow".to_string(),
-                    )
-                })?;
-                self.remaining_bytes =
-                    self.remaining_bytes.checked_add(bytes).ok_or_else(|| {
-                        ResourceError::Driver("device-runtime token rollback overflow".to_string())
-                    })?;
-                Err(error)
-            }
+        request.reservation_pressure_bytes = *reserved;
+        let attempt = RuntimeReservationAttempt {
+            reserved: &mut reserved,
+            remaining: &mut self.remaining_bytes,
+            bytes,
+            reclamation: request.reclamation(),
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.runtime.resource.materialize(request)
+        }));
+        // Restore only an unacquired promise, then unlock before resuming a
+        // panic. An initializer panic must not poison future cold reclamation.
+        drop(attempt);
+        drop(reserved);
+        match outcome {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+}
+
+struct RuntimeReservationAttempt<'a> {
+    reserved: &'a mut usize,
+    remaining: &'a mut usize,
+    bytes: usize,
+    reclamation: Arc<crate::memory::AllocationReclamation>,
+}
+
+impl Drop for RuntimeReservationAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.reclamation.was_acquired() {
+            *self.reserved = self
+                .reserved
+                .checked_add(self.bytes)
+                .expect("runtime promise rollback remains representable");
+            *self.remaining = self
+                .remaining
+                .checked_add(self.bytes)
+                .expect("runtime token rollback remains representable");
         }
     }
 }
@@ -241,7 +294,7 @@ impl Drop for RuntimeMemoryReservation {
             .runtime
             .reservation_bytes
             .lock()
-            .expect("device-runtime reservation accounting poisoned");
+            .unwrap_or_else(|error| error.into_inner());
         *reserved = reserved
             .checked_sub(self.remaining_bytes)
             .expect("device-runtime reservation accounting underflow");
@@ -264,7 +317,8 @@ impl XlogDeviceRuntime {
             device_ordinal,
             device,
             stream_pool,
-            resource: Mutex::new(resource),
+
+            resource: Arc::from(resource),
             reservation_bytes: Mutex::new(0),
             resident_telemetry: Arc::new(ResidentRuntimeTelemetry::default()),
         }
@@ -277,19 +331,15 @@ impl XlogDeviceRuntime {
         self: &Arc<Self>,
         bytes: usize,
     ) -> ResourceResult<RuntimeMemoryReservation> {
-        let resource = self
-            .resource
-            .lock()
-            .expect("device-runtime resource poisoned");
-        let snapshot = resource.budget_snapshot().ok_or_else(|| {
-            ResourceError::Driver(
-                "device-runtime resource stack has no reservable global budget".to_string(),
-            )
-        })?;
         let mut reserved = self
             .reservation_bytes
             .lock()
             .expect("device-runtime reservation accounting poisoned");
+        let snapshot = self.resource.budget_snapshot().ok_or_else(|| {
+            ResourceError::Driver(
+                "device-runtime resource stack has no reservable global budget".to_string(),
+            )
+        })?;
         let current = snapshot.reserved.checked_add(*reserved).ok_or_else(|| {
             ResourceError::Driver("device-runtime reservation accounting overflow".to_string())
         })?;
@@ -413,8 +463,14 @@ impl XlogDeviceRuntime {
     #[doc(hidden)]
     pub fn record_resident_completion_event(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
     ) -> Result<ResidentCompletionEvent> {
+        let _capture_exclusion =
+            crate::cuda_graph::reserve_uncaptured_stream(stream).map_err(|error| {
+                XlogError::Kernel(format!(
+                    "resident completion record requires an uncaptured stream: {error}"
+                ))
+            })?;
         let event = stream.record_event(None).map_err(|error| {
             XlogError::Kernel(format!(
                 "resident conditional graph completion event record failed: {error}"
@@ -425,6 +481,7 @@ impl XlogDeviceRuntime {
         telemetry.created_events.fetch_add(1, Ordering::Relaxed);
         Ok(ResidentCompletionEvent {
             event: Some(event),
+            stream: Arc::clone(stream),
             telemetry,
             synchronized: false,
         })
@@ -438,33 +495,46 @@ impl XlogDeviceRuntime {
         stream: StreamId,
         tag: AllocTag,
     ) -> ResourceResult<DeviceBlock> {
-        let resource = self
-            .resource
-            .lock()
-            .expect("device-runtime resource poisoned");
-        let reservation_pressure_bytes = *self
+        self.materialize(AllocationRequest::new(bytes, stream, tag))
+    }
+
+    pub(crate) fn materialize(
+        &self,
+        mut request: AllocationRequest,
+    ) -> ResourceResult<DeviceBlock> {
+        let reservation_pressure_bytes = self
             .reservation_bytes
             .lock()
             .expect("device-runtime reservation accounting poisoned");
-        resource.allocate_with_reservation_pressure(bytes, reservation_pressure_bytes, stream, tag)
+        request.reservation_pressure_bytes = *reservation_pressure_bytes;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.resource.materialize(request)
+        }));
+        drop(reservation_pressure_bytes);
+        match outcome {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     /// Deallocate via the underlying resource.
     pub fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
-        self.resource
-            .lock()
-            .expect("device-runtime resource poisoned")
-            .deallocate(block)
+        // This is logical detachment, not proof of physical free. The backend
+        // validates the exact live identity and transfers its actual Arc into
+        // pending ownership. Only the last shared owner may reserve a free.
+        // No promises change here. Reclamation can run from failed allocation
+        // cleanup while materialization holds the promise lock on this thread.
+        self.resource.deallocate(block)
     }
 
     /// Sum of bytes currently outstanding on this device, as reported
-    /// by the underlying resource. Used by the global-budget adaptor
-    /// (later commit) and the parallel-stress acceptance test.
+    /// by the underlying resource.
     pub fn bytes_outstanding(&self) -> usize {
-        self.resource
-            .lock()
-            .expect("device-runtime resource poisoned")
-            .bytes_outstanding()
+        self.resource.bytes_outstanding()
+    }
+
+    pub(crate) fn retirement_resource(&self) -> Arc<dyn DeviceMemoryResource + Send + Sync> {
+        Arc::clone(&self.resource)
     }
 
     /// Drain pending async frees on the underlying resource. No-op
@@ -472,10 +542,12 @@ impl XlogDeviceRuntime {
     /// `bytes_outstanding` reading after a burst of asynchronous
     /// deallocations should call this first.
     pub fn reap_pending(&self) -> ResourceResult<()> {
-        self.resource
-            .lock()
-            .expect("device-runtime resource poisoned")
-            .reap_pending()
+        // Last-owner retirement can invoke accounting callbacks. Drain outside
+        // this runtime's budget lock and outside every allocator-map lock.
+        crate::cuda_graph::reap_capture_retirements();
+        // The backend owns its queue synchronization; physical settlement is
+        // atomic in its ledger and needs no promise serialization.
+        self.resource.reap_pending()
     }
 
     /// Record that work has been (or is being) submitted on
@@ -495,10 +567,7 @@ impl XlogDeviceRuntime {
         block: &DeviceBlock,
         use_stream: StreamId,
     ) -> ResourceResult<()> {
-        self.resource
-            .lock()
-            .expect("device-runtime resource poisoned")
-            .record_block_use(block, use_stream)
+        self.resource.record_block_use(block, use_stream)
     }
 
     /// Whether the active resource stack tracks cross-stream
@@ -507,99 +576,227 @@ impl XlogDeviceRuntime {
     /// work, so a misconfigured runtime fails loudly at the
     /// boundary rather than after the launch is in flight.
     pub fn supports_block_use_tracking(&self) -> bool {
-        self.resource
-            .lock()
-            .expect("device-runtime resource poisoned")
-            .supports_block_use_tracking()
+        self.resource.supports_block_use_tracking()
     }
 
-    /// Pre-launch hook: queue cross-stream waits required for
-    /// `use_stream` to safely access `block` with `access`
-    /// semantics. MUST be called BEFORE the GPU work is enqueued
-    /// on `use_stream`. Forwards to the resource stack; see
-    /// [`DeviceMemoryResource::prepare_block_use`] for the
-    /// underlying contract.
-    pub fn prepare_block_use(
+    pub(crate) fn allocation_dependencies(
         &self,
         block: BlockId,
-        use_stream: StreamId,
-        access: Access,
-    ) -> ResourceResult<()> {
-        self.resource
-            .lock()
-            .expect("device-runtime resource poisoned")
-            .prepare_block_use(block, use_stream, access)
-    }
-
-    /// Post-launch hook: record an event on `use_stream`
-    /// capturing the work just enqueued and update `block`'s
-    /// dependency state. MUST be called AFTER the launch /
-    /// copy is queued. Forwards to the resource stack; see
-    /// [`DeviceMemoryResource::finish_block_use`] for the
-    /// underlying contract.
-    pub fn finish_block_use(
-        &self,
-        block: BlockId,
-        use_stream: StreamId,
-        access: Access,
-    ) -> ResourceResult<()> {
-        self.resource
-            .lock()
-            .expect("device-runtime resource poisoned")
-            .finish_block_use(block, use_stream, access)
-    }
-
-    /// Convenience for helper-internal scratch allocations that
-    /// will be immediately written / read on `use_stream`.
-    ///
-    /// Looks up the [`BlockId`] from the slice's runtime block
-    /// and calls [`Self::prepare_block_use`] with `access`. Use
-    /// this directly after `GpuMemoryManager::alloc` when the
-    /// buffer's first cross-stream consumer is the same operator
-    /// (e.g., a hash-table bucket array memset on `launch_stream`
-    /// against a buffer freshly allocated on the manager's
-    /// default stream).
-    ///
-    /// Returns `Err(ResourceError::StreamMisuse)` if `slice` is
-    /// not runtime-backed — strict callers should ensure their
-    /// memory manager carries a runtime.
-    pub fn prepare_first_use<T: cudarc::driver::DeviceRepr>(
-        &self,
-        slice: &crate::memory::TrackedCudaSlice<T>,
-        use_stream: StreamId,
-        access: Access,
-    ) -> ResourceResult<()> {
-        let block = slice.runtime_block().ok_or_else(|| {
-            super::resource::ResourceError::StreamMisuse(
-                "prepare_first_use: slice is not runtime-backed (the helper's \
-                 GpuMemoryManager must be built via with_runtime)"
-                    .to_string(),
-            )
-        })?;
-        self.prepare_block_use(BlockId::from_block(block), use_stream, access)
-    }
-
-    /// Convenience for helper-internal scratch finish: looks up
-    /// the [`BlockId`] from the slice and forwards to
-    /// [`Self::finish_block_use`].
-    pub fn finish_first_use<T: cudarc::driver::DeviceRepr>(
-        &self,
-        slice: &crate::memory::TrackedCudaSlice<T>,
-        use_stream: StreamId,
-        access: Access,
-    ) -> ResourceResult<()> {
-        let block = slice.runtime_block().ok_or_else(|| {
-            super::resource::ResourceError::StreamMisuse(
-                "finish_first_use: slice is not runtime-backed".to_string(),
-            )
-        })?;
-        self.finish_block_use(BlockId::from_block(block), use_stream, access)
+        bytes: usize,
+    ) -> ResourceResult<Option<Arc<super::resource::DeviceAccessDependencies>>> {
+        self.resource.access_dependencies(block, bytes)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allocation_reservation_unwind_restores_only_unacquired_promises() {
+        for acquired in [false, true] {
+            for already_released in [false, true] {
+                if already_released && !acquired {
+                    continue;
+                }
+                let ticket = Arc::new(crate::memory::AllocationReclamation::default());
+                let mut reserved = 64;
+                let mut remaining = 64;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _attempt = RuntimeReservationAttempt {
+                        reserved: &mut reserved,
+                        remaining: &mut remaining,
+                        bytes: 64,
+                        reclamation: Arc::clone(&ticket),
+                    };
+                    if acquired {
+                        ticket.acquired().unwrap();
+                    }
+                    if already_released {
+                        ticket.complete().unwrap();
+                    }
+                    panic!("materialization interrupted");
+                }));
+                assert!(result.is_err());
+                assert_eq!(reserved, if acquired { 64 } else { 128 });
+                assert_eq!(remaining, if acquired { 64 } else { 128 });
+            }
+        }
+    }
+    use crate::device_runtime::resource::{
+        with_reclamation_admission, BlockUseRegistry, MemoryUse,
+    };
+    use crate::device_runtime::{Access, BlockState, Generation};
+    use std::cell::Cell;
+
+    #[test]
+    fn accepted_pending_reclamation_does_not_release_range() {
+        let registry = Mutex::new(BlockUseRegistry::default());
+        let block = DeviceBlock {
+            ptr: 0x1000,
+            bytes: 64,
+            align: 8,
+            device_ordinal: 0,
+            alloc_stream: StreamId::DEFAULT,
+            tag: AllocTag::UNTAGGED,
+            generation: Generation(1),
+            state: BlockState::Live,
+        };
+        let mut admission = None;
+        let reclamation = crate::memory::AllocationReclamation::default();
+        with_reclamation_admission(
+            &registry,
+            7,
+            MemoryUse::new(block.ptr, block.bytes, Access::ReadWrite).unwrap(),
+            reclamation.release_proof(),
+            &mut admission,
+            || Ok(()),
+        )
+        .unwrap();
+        assert!(admission.is_some());
+        assert!(registry
+            .lock()
+            .unwrap()
+            .reserve_memory_uses(
+                7,
+                &[MemoryUse::new(block.ptr, block.bytes, Access::ReadWrite).unwrap()]
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn physical_admission_conflict_does_not_strand_an_exact_retry() {
+        let registry = Mutex::new(BlockUseRegistry::default());
+        let reclamation = crate::memory::AllocationReclamation::default();
+        let memory = MemoryUse::new(0x1000, 64, Access::ReadWrite).unwrap();
+        let use_group = registry
+            .lock()
+            .unwrap()
+            .reserve_memory_uses(7, &[memory])
+            .unwrap();
+        let mut admission = None;
+        assert!(with_reclamation_admission(
+            &registry,
+            7,
+            memory,
+            reclamation.release_proof(),
+            &mut admission,
+            || panic!("conflicting admission must precede any physical release"),
+        )
+        .is_err());
+        assert!(admission.is_none());
+        registry
+            .lock()
+            .unwrap()
+            .release_memory_uses(use_group)
+            .unwrap();
+        with_reclamation_admission(
+            &registry,
+            7,
+            memory,
+            reclamation.release_proof(),
+            &mut admission,
+            || {
+                reclamation.complete().unwrap();
+                // Another admission may already prune the completed free group.
+                let mut registry = registry.try_lock().unwrap();
+                let next = registry
+                    .reserve_memory_uses(
+                        7,
+                        &[
+                            super::super::resource::MemoryUse::new(0x1000, 64, Access::Write)
+                                .unwrap(),
+                        ],
+                    )
+                    .unwrap();
+                registry.release_memory_uses(next).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn physical_reclamation_keeps_range_reserved_without_holding_registry_mutex() {
+        let registry = Mutex::new(BlockUseRegistry::default());
+        let block = DeviceBlock {
+            ptr: 0x1000,
+            bytes: 64,
+            align: 8,
+            device_ordinal: 0,
+            alloc_stream: StreamId::DEFAULT,
+            tag: AllocTag::UNTAGGED,
+            generation: Generation(1),
+            state: BlockState::Live,
+        };
+        let memory = MemoryUse::new(block.ptr, block.bytes, Access::ReadWrite).unwrap();
+        let reclamation = crate::memory::AllocationReclamation::default();
+        let mut admission = None;
+        with_reclamation_admission(
+            &registry,
+            7,
+            MemoryUse::new(block.ptr, block.bytes, Access::ReadWrite).unwrap(),
+            reclamation.release_proof(),
+            &mut admission,
+            || {
+                let mut guard = registry
+                    .try_lock()
+                    .expect("driver wait must not hold registry mutex");
+                assert!(guard.reserve_memory_uses(7, &[memory]).is_err());
+                reclamation.complete()
+            },
+        )
+        .unwrap();
+        let mut registry = registry.lock().unwrap();
+        let reused = registry.reserve_memory_uses(7, &[memory]).unwrap();
+        registry.release_memory_uses(reused).unwrap();
+    }
+
+    #[test]
+    fn physical_reclamation_is_not_forwarded_while_a_block_use_is_pending() {
+        let mut registry = BlockUseRegistry::default();
+        let context = 7;
+        let block_id = BlockId {
+            ptr: 0x1000,
+            generation: Generation(1),
+            alloc_stream: StreamId::DEFAULT,
+            device_ordinal: 0,
+        };
+        registry
+            .reserve_memory_uses(
+                context,
+                &[super::super::resource::MemoryUse::new(block_id.ptr, 64, Access::Read).unwrap()],
+            )
+            .expect("memory-use reservation");
+
+        let forwarded = Cell::new(false);
+        let block = DeviceBlock {
+            ptr: block_id.ptr,
+            device_ordinal: block_id.device_ordinal,
+            alloc_stream: block_id.alloc_stream,
+            bytes: 64,
+            align: 8,
+            tag: AllocTag::UNTAGGED,
+            generation: block_id.generation,
+            state: BlockState::Live,
+        };
+        assert!(with_reclamation_admission(
+            &Mutex::new(registry),
+            context,
+            MemoryUse::new(block.ptr, block.bytes, Access::ReadWrite).unwrap(),
+            crate::memory::AllocationReclamation::default().release_proof(),
+            &mut None,
+            || {
+                forwarded.set(true);
+                Ok(())
+            }
+        )
+        .is_err());
+        assert!(
+            !forwarded.get(),
+            "pending-use rejection must happen before resource deallocation"
+        );
+    }
 
     fn try_runtime() -> Option<XlogDeviceRuntime> {
         use super::super::async_resource::AsyncCudaResource;
@@ -667,6 +864,94 @@ mod tests {
         owned.deallocate(block).expect("dealloc");
         owned.reap_pending().expect("reap");
         assert_eq!(owned.bytes_outstanding(), 0);
+    }
+
+    #[test]
+    fn resident_completion_retirement_retains_unknown_event_and_stream() {
+        let _capture_test = crate::cuda_graph::capture_lifecycle_test_guard();
+        use std::sync::atomic::AtomicUsize;
+
+        struct Owner(Arc<AtomicUsize>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for completion in [false, true] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let event = Arc::new(Owner(Arc::clone(&drops)));
+            let stream = Arc::new(Owner(Arc::clone(&drops)));
+            let event_observer = Arc::downgrade(&event);
+            let stream_observer = Arc::downgrade(&stream);
+            let telemetry = Arc::new(super::ResidentRuntimeTelemetry::default());
+            telemetry.live_events.store(1, Ordering::Relaxed);
+            super::retire_resident_completion(
+                (event, stream),
+                Arc::clone(&telemetry),
+                false,
+                move |_| completion,
+                || {},
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), if completion { 2 } else { 0 });
+            assert_eq!(event_observer.upgrade().is_some(), !completion);
+            assert_eq!(stream_observer.upgrade().is_some(), !completion);
+            assert_eq!(
+                telemetry.live_events.load(Ordering::Relaxed),
+                u64::from(!completion)
+            );
+            assert_eq!(
+                telemetry.destroyed_events.load(Ordering::Relaxed),
+                u64::from(completion)
+            );
+            assert_eq!(telemetry.drop_waits.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn resident_completion_retirement_preserves_owners_when_diagnostics_unwind() {
+        let _capture_test = crate::cuda_graph::capture_lifecycle_test_guard();
+        let owner = Arc::new(());
+        let observer = Arc::downgrade(&owner);
+        let telemetry = Arc::new(super::ResidentRuntimeTelemetry::default());
+        telemetry.live_events.store(1, Ordering::Relaxed);
+        let observed_telemetry = Arc::clone(&telemetry);
+        let outcome = std::panic::catch_unwind(move || {
+            super::retire_resident_completion(
+                owner,
+                telemetry,
+                false,
+                |_| false,
+                || panic!("controlled completion diagnostic failure"),
+            );
+        });
+        assert!(outcome.is_err());
+        assert!(observer.upgrade().is_some());
+        assert_eq!(observed_telemetry.live_events.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            observed_telemetry.destroyed_events.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn resident_completion_retirement_does_not_repeat_a_proven_wait() {
+        let _capture_test = crate::cuda_graph::capture_lifecycle_test_guard();
+        let owner = Arc::new(());
+        let observer = Arc::downgrade(&owner);
+        let telemetry = Arc::new(super::ResidentRuntimeTelemetry::default());
+        telemetry.live_events.store(1, Ordering::Relaxed);
+        super::retire_resident_completion(
+            owner,
+            Arc::clone(&telemetry),
+            true,
+            |_| panic!("already completed event must not wait again"),
+            || panic!("already completed event must not report unknown completion"),
+        );
+        assert!(observer.upgrade().is_none());
+        assert_eq!(telemetry.drop_waits.load(Ordering::Relaxed), 0);
+        assert_eq!(telemetry.live_events.load(Ordering::Relaxed), 0);
+        assert_eq!(telemetry.destroyed_events.load(Ordering::Relaxed), 1);
     }
 
     #[test]

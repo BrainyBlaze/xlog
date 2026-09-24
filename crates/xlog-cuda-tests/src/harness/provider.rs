@@ -1,13 +1,14 @@
 //! Test context and provider setup for CUDA certification tests.
 
 use cudarc::driver::sys;
-use cudarc::driver::{DevicePtr, DevicePtrMut, DeviceRepr};
+use cudarc::driver::DeviceRepr;
 use fs2::FileExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::{fs::OpenOptions, path::Path};
 use xlog_core::{resolve_bool, MemoryBudget, Result, XlogError};
 use xlog_cuda::device_runtime::{LogRecord, LoggingSink, SinkError, XlogDeviceRuntime};
+use xlog_cuda::memory::{DeviceRead, DeviceWrite};
 use xlog_cuda::{
     CudaBuffer, CudaDevice, CudaKernelProvider, CudaProviderBuilder, GpuMemoryManager,
 };
@@ -216,7 +217,7 @@ impl TestContext {
     }
 
     /// Track a synchronous host-to-device copy.
-    pub fn htod_sync_copy_into<T: DeviceRepr, Dst: DevicePtrMut<T>>(
+    pub fn htod_sync_copy_into<T: DeviceRepr, Dst: DeviceWrite<T>>(
         &self,
         src: &[T],
         dst: &mut Dst,
@@ -233,9 +234,9 @@ impl TestContext {
     }
 
     /// Track a synchronous device-to-host copy returning a Vec.
-    pub fn dtoh_sync_copy<T: DeviceRepr, Src: DevicePtr<T>>(&self, src: &Src) -> Result<Vec<T>> {
+    pub fn dtoh_sync_copy<T: DeviceRepr, Src: DeviceRead<T>>(&self, src: &Src) -> Result<Vec<T>> {
         let bytes = std::mem::size_of::<T>()
-            .checked_mul(src.len())
+            .checked_mul(src.device_view().len())
             .ok_or_else(|| XlogError::Kernel("dtoh byte count overflow".to_string()))?;
         self.transfer.add_dtoh(bytes as u64);
         self.device
@@ -245,7 +246,7 @@ impl TestContext {
     }
 
     /// Track a synchronous device-to-host copy into a slice.
-    pub fn dtoh_sync_copy_into<T: DeviceRepr, Src: DevicePtr<T>>(
+    pub fn dtoh_sync_copy_into<T: DeviceRepr, Src: DeviceRead<T>>(
         &self,
         src: &Src,
         dst: &mut [T],

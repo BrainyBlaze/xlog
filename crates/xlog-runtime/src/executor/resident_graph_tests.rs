@@ -716,7 +716,7 @@ fn full_row_dedup_proof_survives_exact_clone_and_public_mutation_invalidates_it(
             ResidentGraphPrepareOptions::default(),
         )
         .expect("real full-row set proof must admit")
-        .launch()
+        .launch(&authored.executor)
         .expect("launch")
         .synchronize_core()
         .expect("sync")
@@ -744,7 +744,7 @@ fn clear_and_reinsert_aba_rejects_observed_transaction_before_commit() {
             ResidentGraphPrepareOptions::default(),
         )
         .expect("prepare")
-        .launch()
+        .launch(&authored.executor)
         .expect("launch")
         .synchronize_core()
         .expect("sync")
@@ -784,7 +784,7 @@ fn stale_source_epoch_is_rejected_before_graph_enqueue() {
         .expect("prepare");
     let graph_before = fixture.runtime.conditional_graph_stats();
     prepared.invalidate_expected_source_epoch();
-    match prepared.launch() {
+    match prepared.launch(&authored.executor) {
         Err(ResidentGraphExecutionError::Declined(
             ResidentGraphDeclineReason::SourceSetUncertified { relation },
         )) => assert_eq!(
@@ -938,7 +938,7 @@ fn authored_recursive_executor_uses_zero_transfer_conditional_core_and_one_final
         fixture.provider.memory().reset_alloc_count();
         let allocations_before = fixture.provider.memory().alloc_count();
         let synchronized = prepared
-            .launch()
+            .launch(&authored.executor)
             .expect("real conditional graph launch")
             .synchronize_core()
             .expect("one terminal synchronization");
@@ -1091,7 +1091,7 @@ fn schema_winner_matches_first_nonempty_installation_order() {
                 ResidentGraphPrepareOptions::default(),
             )
             .unwrap_or_else(|error| panic!("{} prepare failed: {error:?}", case.name))
-            .launch()
+            .launch(&authored.executor)
             .unwrap_or_else(|error| panic!("{} launch failed: {error:?}", case.name))
             .synchronize_core()
             .unwrap_or_else(|error| panic!("{} synchronization failed: {error:?}", case.name))
@@ -1140,7 +1140,7 @@ fn schema_equations_accept_stable_collapse_and_acyclic_lineage_but_decline_ambig
             ResidentGraphPrepareOptions::default(),
         )
         .expect("stable type-compatible recursive rule metadata must prepare")
-        .launch()
+        .launch(&authored.executor)
         .expect("recursive catalog-schema graph launch")
         .synchronize_core()
         .expect("recursive catalog-schema synchronization")
@@ -1229,7 +1229,7 @@ fn schema_equations_accept_stable_collapse_and_acyclic_lineage_but_decline_ambig
             ResidentGraphPrepareOptions::default(),
         )
         .expect("ordinary consumer must accept source metadata variants that it erases")
-        .launch()
+        .launch(&collapsed.executor)
         .expect("stable-collapse graph launch")
         .synchronize_core()
         .expect("stable-collapse graph synchronization")
@@ -1324,7 +1324,7 @@ fn schema_equations_accept_stable_collapse_and_acyclic_lineage_but_decline_ambig
                 ResidentGraphPrepareOptions::default(),
             )
             .expect("acyclic ordinary metadata lineage must prepare")
-            .launch()
+            .launch(&inherited.executor)
             .expect("acyclic ordinary metadata lineage graph launch")
             .synchronize_core()
             .expect("acyclic ordinary metadata lineage synchronization")
@@ -1686,7 +1686,7 @@ fn real_recursive_plan_preserves_exact_iteration_limit_and_context_reuse() {
         fixture.provider.memory().reset_alloc_count();
         let allocations_before = fixture.provider.memory().alloc_count();
         let synchronized = prepared
-            .launch()
+            .launch(&authored.executor)
             .expect("launch")
             .synchronize_core()
             .expect("terminal sync");
@@ -1730,7 +1730,7 @@ fn real_recursive_plan_preserves_exact_iteration_limit_and_context_reuse() {
             ResidentGraphPrepareOptions::default(),
         )
         .expect("setup after limit")
-        .launch()
+        .launch(&succeeding.executor)
         .expect("launch after limit")
         .synchronize_core()
         .expect("sync after limit")
@@ -1789,7 +1789,7 @@ fn device_status_writer_drives_exact_overflow_and_resource_errors_without_store_
             .expect("default setup");
         reset_independent_recorders(&fixture);
         default_prepared
-            .launch()
+            .launch(&default_authored.executor)
             .expect("default launch")
             .synchronize_core()
             .expect("default terminal sync")
@@ -1824,7 +1824,7 @@ fn device_status_writer_drives_exact_overflow_and_resource_errors_without_store_
         fixture.provider.memory().reset_alloc_count();
         let allocations_before = fixture.provider.memory().alloc_count();
         let synchronized = prepared
-            .launch()
+            .launch(&authored.executor)
             .expect("launch")
             .synchronize_core()
             .expect("terminal sync");
@@ -1931,7 +1931,9 @@ fn dropping_a_real_inflight_graph_releases_handles_workspace_and_events_without_
         "the retained private workspace must account for every added runtime byte"
     );
 
-    let in_flight = prepared.launch().expect("real conditional launch");
+    let in_flight = prepared
+        .launch(&authored.executor)
+        .expect("real conditional launch");
     let events_during_launch = fixture.runtime.event_lifecycle_stats();
     assert!(
         events_during_launch.live_events > events_before_prepare.live_events,
@@ -1968,15 +1970,16 @@ fn dropping_a_real_inflight_graph_releases_handles_workspace_and_events_without_
         handles_after_drop.live_graph_execs,
         handles_before_prepare.live_graph_execs
     );
-    assert_eq!(
-        fixture.runtime.bytes_outstanding(),
-        runtime_bytes_before_prepare + private_workspace_bytes,
-        "Drop must keep queued workspace frees accounted until reap"
+    let bytes_after_drop = fixture.runtime.bytes_outstanding();
+    assert!(
+        bytes_after_drop == runtime_bytes_before_prepare
+            || bytes_after_drop == runtime_bytes_before_prepare + private_workspace_bytes,
+        "Drop must either release private workspace or keep its frees accounted until reap"
     );
     fixture
         .runtime
         .reap_pending()
-        .expect("reap dropped graph workspace");
+        .expect("reap after dropped graph");
     let events_after_reap = fixture.runtime.event_lifecycle_stats();
     assert_eq!(
         events_after_reap.live_events,
@@ -1987,7 +1990,16 @@ fn dropping_a_real_inflight_graph_releases_handles_workspace_and_events_without_
         events_after_reap.created_events - events_before_prepare.created_events,
         events_after_reap.destroyed_events - events_before_prepare.destroyed_events
     );
-    assert!(events_after_reap.drop_waits > events_before_prepare.drop_waits);
+    assert_eq!(
+        events_after_reap.drop_waits, events_before_prepare.drop_waits,
+        "the owner wait must prove completion before event retirement"
+    );
+    let graph_after_reap = fixture.runtime.conditional_graph_stats();
+    assert_eq!(
+        graph_after_reap.terminal_synchronizations,
+        graph_before_prepare.terminal_synchronizations + 1,
+        "dropping the in-flight owner must perform exactly one terminal synchronization"
+    );
     let handles_after_reap = fixture.runtime.resident_graph_handle_lifecycle_stats();
     assert_eq!(
         handles_after_reap.live_graphs,
@@ -2008,7 +2020,7 @@ fn dropping_a_real_inflight_graph_releases_handles_workspace_and_events_without_
     assert_eq!(
         fixture.runtime.bytes_outstanding(),
         runtime_bytes_before_prepare,
-        "reap must release every private graph-workspace byte"
+        "reap must leave every private graph-workspace byte released"
     );
     let records_after_reap = fixture.sink.snapshot();
     for (ptr, (_, allocation_order)) in &live_workspace_allocations {
@@ -2018,7 +2030,7 @@ fn dropping_a_real_inflight_graph_releases_handles_workspace_and_events_without_
                     && record.ptr == Some(*ptr)
                     && record.order_counter > *allocation_order
             }),
-            "reap must log deallocation of private workspace pointer {ptr:#x}"
+            "Drop or reap must log deallocation of private workspace pointer {ptr:#x}"
         );
     }
     assert_eq!(

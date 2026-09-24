@@ -1,10 +1,10 @@
 //! GPU-accelerated evaluation of compiled Datalog programs.
 
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use xlog_core::{resolve_bool, symbol, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaColumn, CudaKernelProvider};
@@ -24,7 +24,7 @@ use xlog_logic::{
     format_constraint_body, Atom, BodyLiteral, Compiler, Constraint, EpistemicLiteral, EpistemicOp,
     Program, Query, Rule, Term,
 };
-use xlog_runtime::executor::JoinIndexCacheStats;
+use xlog_runtime::executor::{JoinIndexCacheStats, PreparedResidentGraph};
 use xlog_runtime::resident_graph::{
     ResidentGraphCertifiedPlan, ResidentGraphCoreTransferStats, ResidentGraphDeclineReason,
     ResidentGraphDeferredProfile, ResidentGraphExecutionError, ResidentGraphExecutionStats,
@@ -478,10 +478,18 @@ pub struct LogicSessionRuntime {
     profiling: bool,
 }
 
-#[derive(Debug)]
+struct ResidentEvaluationOwner {
+    provider: Arc<CudaKernelProvider>,
+    input_shape: Vec<(String, Schema, u64)>,
+    profiling: bool,
+    executor: Executor,
+    prepared: PreparedResidentGraph,
+}
+
 struct LogicProgramIdentity {
     resident_certification:
         OnceLock<std::result::Result<Arc<ResidentGraphCertifiedPlan>, Arc<str>>>,
+    resident_evaluation_owner: Mutex<Option<ResidentEvaluationOwner>>,
     #[cfg(test)]
     resident_certification_initializations: AtomicU64,
 }
@@ -490,9 +498,39 @@ impl LogicProgramIdentity {
     fn new() -> Self {
         Self {
             resident_certification: OnceLock::new(),
+            resident_evaluation_owner: Mutex::new(None),
             #[cfg(test)]
             resident_certification_initializations: AtomicU64::new(0),
         }
+    }
+
+    fn take_resident_evaluation_owner(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        input_shape: &[(String, Schema, u64)],
+        profiling: bool,
+    ) -> Result<Option<ResidentEvaluationOwner>> {
+        let mut cached = self.resident_evaluation_owner.lock().map_err(|_| {
+            XlogError::Execution("resident evaluation owner lock is poisoned".into())
+        })?;
+        let matches = cached.as_ref().is_some_and(|owner| {
+            Arc::ptr_eq(&owner.provider, provider)
+                && owner.input_shape == input_shape
+                && owner.profiling == profiling
+        });
+        let owner = cached.take();
+        drop(cached);
+        Ok(owner.filter(|_| matches))
+    }
+
+    fn retain_resident_evaluation_owner(&self, owner: ResidentEvaluationOwner) -> Result<()> {
+        let mut cached = self.resident_evaluation_owner.lock().map_err(|_| {
+            XlogError::Execution("resident evaluation owner lock is poisoned".into())
+        })?;
+        let previous = cached.replace(owner);
+        drop(cached);
+        drop(previous);
+        Ok(())
     }
 
     fn get_or_init_resident_certification(
@@ -1047,9 +1085,132 @@ pub struct LogicProgram {
     plan: LogicExecutionPlan,
     schemas: HashMap<String, Schema>,
     rel_ids: HashMap<String, RelId>,
+    fact_arity_qualifications: OnceLock<BTreeSet<String>>,
     /// `Some` iff the source program contained epistemic literals (regardless of
     /// whether the executable plan ended up epistemic or ordinary).
     epistemic_provenance: Option<EpistemicProvenance>,
+}
+
+/// A self-contained XLOG program whose three selected zero-arity queries define
+/// a semantic task's positive support. Compilation preserves the authored
+/// source; observation executes the canonical GPU evaluator before deriving any
+/// result. Presence is `True` and absence is `Neither`, never negative support.
+/// Other native observers may produce `False` or `Both`; all four values share
+/// the same task-result contract. Source facts are the complete concrete inputs,
+/// and query ordinals retain the caller's order. No caller-supplied answers enter
+/// this adapter.
+pub struct SemanticLogicTaskProgram {
+    source: String,
+    query_ordinals: [usize; 3],
+    program: LogicProgram,
+}
+
+impl std::fmt::Debug for SemanticLogicTaskProgram {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SemanticLogicTaskProgram")
+            .field("source", &self.source)
+            .field("query_ordinals", &self.query_ordinals)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SemanticLogicTaskProgram {
+    /// Compile a complete source program and select three zero-arity query results.
+    /// This performs no GPU execution; the native semantic owner calls `observe`
+    /// during cold binding, including when restoring a retained task.
+    pub fn compile(source: String, query_ordinals: [usize; 3]) -> Result<Self> {
+        let program = LogicProgram::compile(&source)?;
+        if !program.source_program.imports.is_empty() {
+            return Err(XlogError::Compilation(
+                "semantic task source must contain its complete program without imports".into(),
+            ));
+        }
+        for ordinal in query_ordinals {
+            let query = program.source_program.queries.get(ordinal).ok_or_else(|| {
+                XlogError::Compilation(format!("semantic task query ordinal {ordinal} is absent"))
+            })?;
+            if !query_output_vars(query).is_empty() {
+                return Err(XlogError::Compilation(format!(
+                    "semantic task query ordinal {ordinal} must have a zero-arity result",
+                )));
+            }
+        }
+        Ok(Self {
+            source,
+            query_ordinals,
+            program,
+        })
+    }
+}
+
+impl xlog_cuda::SemanticTaskProgram for SemanticLogicTaskProgram {
+    fn observe(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+    ) -> std::result::Result<xlog_cuda::SemanticTaskObservation, xlog_cuda::SemanticTransitionError>
+    {
+        let execution_error = |error: XlogError| xlog_cuda::SemanticTransitionError::InvalidInput {
+            detail: format!("native semantic task program: {error}"),
+        };
+        let result = self
+            .program
+            .evaluate(Arc::clone(&provider), HashMap::new())
+            .map_err(execution_error)?;
+        // Query counts may already be cached on the host. Complete every
+        // executor stream explicitly before treating any result as observed;
+        // the semantic owner's cold binding poisons the session on failure.
+        let context = provider.device().inner().stream().context();
+        context.bind_to_thread().map_err(|error| {
+            execution_error(XlogError::Kernel(format!(
+                "task observer context binding failed: {error}"
+            )))
+        })?;
+        context.synchronize().map_err(|error| {
+            execution_error(XlogError::Kernel(format!(
+                "task observer completion failed: {error}"
+            )))
+        })?;
+        let mut input_bytes = b"xlog.semantic-task.query-selection.v1\0".to_vec();
+        let mut result_bytes = b"xlog.semantic-task.four-valued-results.v1\0".to_vec();
+        let mut expected_truth = [xlog_cuda::SemanticTruth::Neither; 3];
+        for (slot, ordinal) in self.query_ordinals.into_iter().enumerate() {
+            let query = result.queries.get(ordinal).ok_or_else(|| {
+                execution_error(XlogError::Execution(format!(
+                    "semantic task query ordinal {ordinal} was not returned"
+                )))
+            })?;
+            if query.buffer.schema().arity() != 0 {
+                return Err(execution_error(XlogError::Execution(format!(
+                    "semantic task query ordinal {ordinal} returned a nonzero-arity relation",
+                ))));
+            }
+            // This is the canonical completed-result boundary. Device validity
+            // and logical row count are checked before the cold result is used;
+            // no observation or host transfer occurs in the transition hot loop.
+            let rows = provider
+                .validated_logical_row_count(&query.buffer)
+                .map_err(execution_error)?;
+            if rows > 1 {
+                return Err(execution_error(XlogError::Execution(format!(
+                    "semantic task query ordinal {ordinal} returned multiple zero-arity rows",
+                ))));
+            }
+            input_bytes.extend_from_slice(&(ordinal as u64).to_le_bytes());
+            expected_truth[slot] = if rows == 1 {
+                xlog_cuda::SemanticTruth::True
+            } else {
+                xlog_cuda::SemanticTruth::Neither
+            };
+            result_bytes.extend_from_slice(&(expected_truth[slot] as u64).to_le_bytes());
+        }
+        Ok(xlog_cuda::SemanticTaskObservation {
+            program_source: self.source.as_bytes().to_vec(),
+            input_bytes,
+            result_bytes,
+            expected_truth,
+        })
+    }
 }
 
 /// Read-only metadata for one argument of a compiled relation.
@@ -1167,6 +1328,7 @@ impl LogicProgram {
                 plan: LogicExecutionPlan::Ordinary(Box::new(plan)),
                 schemas,
                 rel_ids: compiler.rel_ids().clone(),
+                fact_arity_qualifications: OnceLock::new(),
                 epistemic_provenance: None,
             }
         };
@@ -1253,6 +1415,7 @@ impl LogicProgram {
                 plan: LogicExecutionPlan::EpistemicG91Compatibility(Box::new(plan)),
                 schemas,
                 rel_ids,
+                fact_arity_qualifications: OnceLock::new(),
                 epistemic_provenance: Some(EpistemicProvenance {
                     reduction: "g91_tuple_compatibility",
                     literals: provenance_literals,
@@ -1317,6 +1480,7 @@ impl LogicProgram {
                 plan,
                 schemas,
                 rel_ids,
+                fact_arity_qualifications: OnceLock::new(),
                 epistemic_provenance: Some(EpistemicProvenance {
                     reduction: "stratified",
                     literals: provenance_literals,
@@ -1345,6 +1509,7 @@ impl LogicProgram {
                     plan: LogicExecutionPlan::EpistemicWfsGpu(Box::new(wfs_plan)),
                     schemas,
                     rel_ids,
+                    fact_arity_qualifications: OnceLock::new(),
                     epistemic_provenance: Some(EpistemicProvenance {
                         reduction: "wfs_gpu_recursive",
                         literals: provenance_literals,
@@ -1362,6 +1527,7 @@ impl LogicProgram {
                 plan: LogicExecutionPlan::Ordinary(Box::new(plan)),
                 schemas: compiler.schemas().clone(),
                 rel_ids: compiler.rel_ids().clone(),
+                fact_arity_qualifications: OnceLock::new(),
                 epistemic_provenance: Some(EpistemicProvenance {
                     reduction: "ordinary_recursive_modal_reduction",
                     literals: provenance_literals,
@@ -1402,6 +1568,7 @@ impl LogicProgram {
             plan,
             schemas,
             rel_ids,
+            fact_arity_qualifications: OnceLock::new(),
             epistemic_provenance: Some(EpistemicProvenance {
                 reduction: "epistemic_executable",
                 literals: provenance_literals,
@@ -2537,7 +2704,16 @@ impl LogicProgram {
                 let canonical = canonical_replacements.remove(&name).unwrap_or(buffer);
                 (name, canonical)
             })
-            .collect();
+            .collect::<HashMap<_, _>>();
+        let mut input_shape = resident_inputs
+            .iter()
+            .map(|(name, buffer)| (name.clone(), buffer.schema().clone(), buffer.num_rows()))
+            .collect::<Vec<_>>();
+        input_shape.sort_by(|left, right| left.0.cmp(&right.0));
+        // Fixed authored facts need no replacement when there are no external
+        // inputs. With external inputs, fact merging can change captured source
+        // geometry, so reuse is limited to programs without authored facts.
+        let reusable_source_shape = input_shape.is_empty() || self.program.facts().next().is_none();
 
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.input_setup_ns = resident_latency_elapsed_ns(input_setup_started);
@@ -2549,12 +2725,6 @@ impl LogicProgram {
         let prepare_started = latency_diagnostic
             .as_ref()
             .map(|_| std::time::Instant::now());
-        let mut executor = self.prepare_resident_executor(
-            &resident_provider,
-            resident_inputs,
-            profiling,
-            ordinary_plan,
-        )?;
         let prepare_options = latency_diagnostic
             .as_ref()
             .map(|diagnostic| {
@@ -2562,15 +2732,42 @@ impl LogicProgram {
                     .with_latency_diagnostic_sample(diagnostic.sample)
             })
             .unwrap_or_default();
-        let mut prepared = match executor
-            .prepare_certified_resident_graph(certified_plan.as_ref(), prepare_options)
-        {
-            Ok(prepared) => prepared,
-            Err(ResidentGraphExecutionError::Declined(reason)) => {
-                runtime
-                    .reap_pending()
-                    .map_err(|error| XlogError::Kernel(error.to_string()))?;
-                return match mode {
+        let cached = if reusable_source_shape {
+            self.reusable_state_identity
+                .take_resident_evaluation_owner(&resident_provider, &input_shape, profiling)?
+        } else {
+            None
+        };
+        let (mut executor, mut prepared) = if let Some(mut owner) = cached {
+            for (name, input) in resident_inputs {
+                let target = owner.executor.store_mut().get_mut(&name).ok_or_else(|| {
+                    XlogError::Execution(format!(
+                        "resident source {name} disappeared before in-place replacement"
+                    ))
+                })?;
+                resident_provider.overwrite_resident_source(target, &input)?;
+            }
+            owner
+                .prepared
+                .refresh_source_set_snapshots(&owner.executor)
+                .map_err(Self::resident_execution_error)?;
+            (owner.executor, owner.prepared)
+        } else {
+            let mut executor = self.prepare_resident_executor(
+                &resident_provider,
+                resident_inputs,
+                profiling,
+                ordinary_plan,
+            )?;
+            let prepared = match executor
+                .prepare_certified_resident_graph(certified_plan.as_ref(), prepare_options)
+            {
+                Ok(prepared) => prepared,
+                Err(ResidentGraphExecutionError::Declined(reason)) => {
+                    runtime
+                        .reap_pending()
+                        .map_err(|error| XlogError::Kernel(error.to_string()))?;
+                    return match mode {
                         ResidentSelectionMode::Auto => {
                             executor.execute_plan(ordinary_plan)?;
                             let mut result = self.finish_ordinary_evaluation(
@@ -2593,8 +2790,10 @@ impl LogicProgram {
                             "disabled resident selection does not call the resident evaluator"
                         ),
                     };
-            }
-            Err(error) => return Err(Self::resident_execution_error(error)),
+                }
+                Err(error) => return Err(Self::resident_execution_error(error)),
+            };
+            (executor, prepared)
         };
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.prepare_capture_allocation_ns = resident_latency_elapsed_ns(prepare_started);
@@ -2603,17 +2802,14 @@ impl LogicProgram {
         }
         let prepare_diagnostic = prepared.take_prepare_diagnostic();
 
-        let transfer_before = resident_provider.host_transfer_stats();
-        let provider_dtoh_before = resident_provider.d2h_transfer_count();
-        let untracked_dtoh_before = resident_provider.untracked_metadata_dtoh_count();
-        let deterministic_d2h_before = resident_provider.deterministic_d2h_violation_count();
-        let final_before = resident_provider.final_observation_transfer_stats();
-        let graph_before = runtime.conditional_graph_stats();
+        let transfer_scope = resident_provider.begin_resident_host_transfer_scope();
 
         let launch_started = latency_diagnostic
             .as_ref()
             .map(|_| std::time::Instant::now());
-        let in_flight = prepared.launch().map_err(Self::resident_execution_error)?;
+        let in_flight = prepared
+            .launch(&executor)
+            .map_err(Self::resident_execution_error)?;
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.launch_submission_ns = resident_latency_elapsed_ns(launch_started);
             diagnostic.runtime_bytes[3] = runtime.bytes_outstanding();
@@ -2631,28 +2827,14 @@ impl LogicProgram {
             diagnostic.manager_bytes[4] = resident_provider.memory().allocated_bytes();
         }
 
-        let transfer_after = resident_provider.host_transfer_stats();
-        let provider_dtoh_after = resident_provider.d2h_transfer_count();
-        let untracked_dtoh_after = resident_provider.untracked_metadata_dtoh_count();
-        let deterministic_d2h_after = resident_provider.deterministic_d2h_violation_count();
-        let final_before_observation = resident_provider.final_observation_transfer_stats();
-        let graph_after = runtime.conditional_graph_stats();
+        let core_snapshot = transfer_scope.snapshot();
         let core_transfers = ResidentGraphCoreTransferStats {
-            tracked_htod_calls: transfer_after
-                .htod_calls
-                .saturating_sub(transfer_before.htod_calls),
-            tracked_htod_bytes: transfer_after
-                .htod_bytes
-                .saturating_sub(transfer_before.htod_bytes),
-            tracked_dtoh_calls: transfer_after
-                .dtoh_calls
-                .saturating_sub(transfer_before.dtoh_calls),
-            tracked_dtoh_bytes: transfer_after
-                .dtoh_bytes
-                .saturating_sub(transfer_before.dtoh_bytes),
-            provider_dtoh_calls: provider_dtoh_after.saturating_sub(provider_dtoh_before),
-            untracked_metadata_dtoh_calls: untracked_dtoh_after
-                .saturating_sub(untracked_dtoh_before),
+            tracked_htod_calls: core_snapshot.tracked_htod_calls,
+            tracked_htod_bytes: core_snapshot.tracked_htod_bytes,
+            tracked_dtoh_calls: core_snapshot.tracked_dtoh_calls,
+            tracked_dtoh_bytes: core_snapshot.tracked_dtoh_bytes,
+            provider_dtoh_calls: core_snapshot.provider_dtoh_calls,
+            untracked_metadata_dtoh_calls: core_snapshot.untracked_metadata_dtoh_calls,
         };
         if core_transfers.tracked_htod_calls != 0
             || core_transfers.tracked_htod_bytes != 0
@@ -2660,39 +2842,27 @@ impl LogicProgram {
             || core_transfers.tracked_dtoh_bytes != 0
             || core_transfers.provider_dtoh_calls != 0
             || core_transfers.untracked_metadata_dtoh_calls != 0
-            || final_before_observation.dtoh_calls != final_before.dtoh_calls
-            || final_before_observation.dtoh_bytes != final_before.dtoh_bytes
-            || final_before_observation.pinned_receipts != final_before.pinned_receipts
+            || core_snapshot.final_dtoh_calls != 0
+            || core_snapshot.final_dtoh_bytes != 0
+            || core_snapshot.final_pinned_receipts != 0
         {
             return Err(XlogError::Execution(
                 "resident conditional-graph core performed a host transfer".into(),
             ));
         }
-        let graph_launches = graph_after.launches.saturating_sub(graph_before.launches);
-        let terminal_synchronizations = graph_after
-            .terminal_synchronizations
-            .saturating_sub(graph_before.terminal_synchronizations);
-        let host_iterations = graph_after
-            .host_iterations
-            .saturating_sub(graph_before.host_iterations);
-        let host_allocations = graph_after
-            .host_allocations
-            .saturating_sub(graph_before.host_allocations);
-        let host_status_injections = graph_after
-            .host_status_injections
-            .saturating_sub(graph_before.host_status_injections);
-        let deterministic_d2h_violations =
-            deterministic_d2h_after.saturating_sub(deterministic_d2h_before);
-        if graph_launches != 1
-            || terminal_synchronizations != 1
-            || host_iterations != 0
-            || host_allocations != 0
-            || host_status_injections != 0
-            || deterministic_d2h_violations != 0
-        {
+        // The successful launch and one successful completion wait above are
+        // owned by this invocation. Provider-wide telemetry also includes
+        // concurrent callers and cannot establish these per-call counts.
+        let graph_launches = 1;
+        let terminal_synchronizations = 1;
+        let host_iterations = 0;
+        let host_allocations = 0;
+        let host_status_injections = 0;
+        let deterministic_d2h_violations = core_snapshot.deterministic_dtoh_violations;
+        if deterministic_d2h_violations != 0 {
             return Err(XlogError::Execution(format!(
-                    "resident conditional-graph runtime invariant failed: launches={graph_launches}, terminal_synchronizations={terminal_synchronizations}, host_iterations={host_iterations}, host_allocations={host_allocations}, host_status_injections={host_status_injections}, deterministic_d2h_violations={deterministic_d2h_violations}"
-                )));
+                "resident conditional-graph core attempted {deterministic_d2h_violations} forbidden device-to-host transfers"
+            )));
         }
 
         let observation_started = latency_diagnostic
@@ -2727,17 +2897,11 @@ impl LogicProgram {
         let semantic_filter_invocations = observed.semantic_filter_invocations();
         let staged_store_mutations = observed.staged_output_count();
         let iterations = observed.iterations();
-        let final_after = resident_provider.final_observation_transfer_stats();
+        let final_after = transfer_scope.snapshot();
         let final_observation = ResidentGraphFinalObservationStats {
-            dtoh_calls: final_after
-                .dtoh_calls
-                .saturating_sub(final_before_observation.dtoh_calls),
-            dtoh_bytes: final_after
-                .dtoh_bytes
-                .saturating_sub(final_before_observation.dtoh_bytes),
-            pinned_receipts: final_after
-                .pinned_receipts
-                .saturating_sub(final_before_observation.pinned_receipts),
+            dtoh_calls: final_after.final_dtoh_calls,
+            dtoh_bytes: final_after.final_dtoh_bytes,
+            pinned_receipts: final_after.final_pinned_receipts,
         };
         if final_observation.dtoh_calls != 1
             || final_observation.dtoh_bytes != encoded_len
@@ -2756,9 +2920,18 @@ impl LogicProgram {
         let commit_started = latency_diagnostic
             .as_ref()
             .map(|_| std::time::Instant::now());
-        observed
-            .commit(&mut executor)
-            .map_err(Self::resident_execution_error)?;
+        let prepared = if reusable_source_shape {
+            Some(
+                observed
+                    .commit_for_reuse(&mut executor)
+                    .map_err(Self::resident_execution_error)?,
+            )
+        } else {
+            observed
+                .commit(&mut executor)
+                .map_err(Self::resident_execution_error)?;
+            None
+        };
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.commit_ns = resident_latency_elapsed_ns(commit_started);
             diagnostic.runtime_bytes[6] = runtime.bytes_outstanding();
@@ -2801,16 +2974,40 @@ impl LogicProgram {
             diagnostic.result_stats_construction_ns =
                 resident_latency_elapsed_ns(telemetry_started);
         }
-        let result = self.finish_ordinary_evaluation(
-            &resident_provider,
-            executor,
-            profiling,
-            Some(ResidentCompletedProfile {
-                telemetry,
-                iterations,
-            }),
-            latency_diagnostic.as_mut(),
-        )?;
+        let completed_profile = Some(ResidentCompletedProfile {
+            telemetry,
+            iterations,
+        });
+        let result = if let Some(mut prepared) = prepared {
+            let result = self.collect_ordinary_evaluation(
+                &resident_provider,
+                &mut executor,
+                profiling,
+                completed_profile,
+                true,
+                latency_diagnostic.as_mut(),
+            )?;
+            prepared
+                .restore_outputs(&mut executor)
+                .map_err(Self::resident_execution_error)?;
+            self.reusable_state_identity
+                .retain_resident_evaluation_owner(ResidentEvaluationOwner {
+                    provider: Arc::clone(&resident_provider),
+                    input_shape,
+                    profiling,
+                    executor,
+                    prepared,
+                })?;
+            result
+        } else {
+            self.finish_ordinary_evaluation(
+                &resident_provider,
+                executor,
+                profiling,
+                completed_profile,
+                latency_diagnostic.as_mut(),
+            )?
+        };
         if let Some(diagnostic) = latency_diagnostic.as_mut() {
             diagnostic.runtime_bytes[7] = runtime.bytes_outstanding();
             diagnostic.manager_bytes[7] = resident_provider.memory().allocated_bytes();
@@ -2885,22 +3082,60 @@ impl LogicProgram {
         resident_profile: Option<ResidentCompletedProfile>,
         mut latency_diagnostic: Option<&mut ResidentLatencyDiagnostic>,
     ) -> Result<LogicEvalResult> {
+        let result = self.collect_ordinary_evaluation(
+            provider,
+            &mut executor,
+            profiling,
+            resident_profile,
+            false,
+            latency_diagnostic.as_deref_mut(),
+        )?;
+        let executor_drop_started = latency_diagnostic
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        drop(executor);
+        if let Some(diagnostic) = latency_diagnostic.as_mut() {
+            diagnostic.executor_store_teardown_ns =
+                resident_latency_elapsed_ns(executor_drop_started);
+        }
+        Ok(result)
+    }
+
+    fn collect_ordinary_evaluation(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        executor: &mut Executor,
+        profiling: bool,
+        resident_profile: Option<ResidentCompletedProfile>,
+        retain_query_owners: bool,
+        mut latency_diagnostic: Option<&mut ResidentLatencyDiagnostic>,
+    ) -> Result<LogicEvalResult> {
         let result_started = latency_diagnostic
             .as_ref()
             .map(|_| std::time::Instant::now());
-        self.enforce_constraints(provider, &executor)?;
+        self.enforce_constraints(provider, executor)?;
 
         let mut queries = Vec::with_capacity(self.program.queries.len());
         for (index, query) in self.program.queries.iter().enumerate() {
             let internal_relation_name = format!("__xlog_query_{index}");
-            let buffer = executor
-                .store_mut()
-                .remove(&internal_relation_name)
-                .ok_or_else(|| {
-                    XlogError::Execution(format!(
-                        "Missing query result relation {internal_relation_name} (compiler bug?)"
-                    ))
-                })?;
+            let missing_query = || {
+                XlogError::Execution(format!(
+                    "Missing query result relation {internal_relation_name} (compiler bug?)"
+                ))
+            };
+            let buffer = if retain_query_owners {
+                provider.clone_buffer(
+                    executor
+                        .store()
+                        .get(&internal_relation_name)
+                        .ok_or_else(missing_query)?,
+                )?
+            } else {
+                executor
+                    .store_mut()
+                    .remove(&internal_relation_name)
+                    .ok_or_else(missing_query)?
+            };
             queries.push(self.logic_query_result(
                 provider.as_ref(),
                 index,
@@ -2957,14 +3192,6 @@ impl LogicProgram {
                 .saturating_add(resident_latency_elapsed_ns(result_started));
             diagnostic.remaining_store_relations_before_drop = executor.store().len();
         }
-        let executor_drop_started = latency_diagnostic
-            .as_ref()
-            .map(|_| std::time::Instant::now());
-        drop(executor);
-        if let Some(diagnostic) = latency_diagnostic.as_mut() {
-            diagnostic.executor_store_teardown_ns =
-                resident_latency_elapsed_ns(executor_drop_started);
-        }
         Ok(result)
     }
 
@@ -3003,17 +3230,41 @@ impl LogicProgram {
         }
 
         let arity_qualified_predicates = self.arity_qualified_fact_predicates();
-        let fact_rows = self.fact_rows_by_relation(&arity_qualified_predicates);
+        let fact_rows = self.fact_rows_by_relation(arity_qualified_predicates);
+        // Multi-row fact-only sources must be sorted and certified before
+        // resident capture. Caller inputs still need a device union.
+        let directly_loaded_fact_names = fact_rows
+            .iter()
+            .filter(|(name, rows)| {
+                !inputs.contains_key(*name)
+                    && (rows.len() == 1
+                        || self
+                            .schemas
+                            .get(*name)
+                            .is_some_and(Self::host_fact_rows_can_be_canonicalized))
+            })
+            .map(|(name, _)| name.clone())
+            .collect::<BTreeSet<_>>();
 
+        let mut empty_names = Vec::new();
+        let mut empty_schemas = Vec::new();
         for (name, schema) in &self.schemas {
             let is_derived_placeholder = derived_relations.is_some_and(|set| set.contains(name))
                 && !fact_rows.contains_key(name);
-            if is_derived_placeholder {
+            if is_derived_placeholder
+                || inputs.contains_key(name)
+                || directly_loaded_fact_names.contains(name)
+            {
                 continue;
             }
-            executor
-                .store_mut()
-                .put(name, provider.create_empty_buffer(schema.clone())?);
+            empty_names.push(name);
+            empty_schemas.push(schema.clone());
+        }
+        for (name, buffer) in empty_names
+            .into_iter()
+            .zip(provider.create_empty_buffers(&empty_schemas)?)
+        {
+            executor.store_mut().put(name, buffer);
         }
 
         for (name, buffer) in inputs {
@@ -3029,7 +3280,12 @@ impl LogicProgram {
             executor.store_mut().put(&name, buffer);
         }
 
-        self.load_grouped_facts_into_store(provider, executor.store_mut(), fact_rows)?;
+        self.load_grouped_facts_into_store(
+            provider,
+            executor.store_mut(),
+            fact_rows,
+            &directly_loaded_fact_names,
+        )?;
         Ok(executor)
     }
 
@@ -3512,15 +3768,17 @@ impl LogicProgram {
         })
     }
 
-    fn arity_qualified_fact_predicates(&self) -> BTreeSet<String> {
-        if self.epistemic_provenance.is_some() {
-            epistemic_extensional_multi_arity_predicates(&self.program)
-        } else {
-            predicate_arities(&self.program)
-                .into_iter()
-                .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
-                .collect()
-        }
+    fn arity_qualified_fact_predicates(&self) -> &BTreeSet<String> {
+        self.fact_arity_qualifications.get_or_init(|| {
+            if self.epistemic_provenance.is_some() {
+                epistemic_extensional_multi_arity_predicates(&self.program)
+            } else {
+                predicate_arities(&self.program)
+                    .into_iter()
+                    .filter_map(|(predicate, arities)| (arities.len() > 1).then_some(predicate))
+                    .collect()
+            }
+        })
     }
 
     fn fact_rows_by_relation<'program>(
@@ -3549,8 +3807,27 @@ impl LogicProgram {
         store: &mut RelationStore,
     ) -> Result<()> {
         let arity_qualified_predicates = self.arity_qualified_fact_predicates();
-        let rows_by_pred = self.fact_rows_by_relation(&arity_qualified_predicates);
-        self.load_grouped_facts_into_store(provider, store, rows_by_pred)
+        let rows_by_pred = self.fact_rows_by_relation(arity_qualified_predicates);
+        self.load_grouped_facts_into_store(provider, store, rows_by_pred, &BTreeSet::new())
+    }
+
+    fn host_fact_row_equality_matches_union(schema: &Schema) -> bool {
+        // The GPU's unary float dedup equates signed zeros. Multi-column set
+        // dedup uses full-row encoded-byte equality instead.
+        schema.arity() != 1
+            || !matches!(
+                schema.column_type(0),
+                Some(ScalarType::F32 | ScalarType::F64)
+            )
+    }
+
+    fn host_fact_rows_can_be_canonicalized(schema: &Schema) -> bool {
+        (0..schema.arity()).all(|index| {
+            matches!(
+                schema.column_type(index),
+                Some(ScalarType::U32 | ScalarType::Symbol)
+            )
+        })
     }
 
     fn load_grouped_facts_into_store(
@@ -3558,7 +3835,10 @@ impl LogicProgram {
         provider: &CudaKernelProvider,
         store: &mut RelationStore,
         rows_by_pred: HashMap<String, Vec<&[Term]>>,
+        directly_loaded_fact_names: &BTreeSet<String>,
     ) -> Result<()> {
+        let mut names = Vec::with_capacity(rows_by_pred.len());
+        let mut host_relations = Vec::with_capacity(rows_by_pred.len());
         for (pred, rows) in rows_by_pred {
             let schema = self.schemas.get(pred.as_str()).ok_or_else(|| {
                 XlogError::Execution(format!(
@@ -3575,32 +3855,81 @@ impl LogicProgram {
                 )));
             }
 
+            let mut seen_rows = Self::host_fact_row_equality_matches_union(schema)
+                .then(|| HashSet::with_capacity(rows.len()));
+            let mut fact_rows = 0;
             let mut columns: Vec<Vec<u8>> = vec![Vec::new(); schema.arity()];
+            let mut column_starts = Vec::with_capacity(schema.arity());
             for row in rows {
+                column_starts.clear();
+                let mut row_key = Vec::with_capacity(schema.row_size_bytes());
                 for (col_idx, term) in row.iter().enumerate() {
                     let typ = schema.column_type(col_idx).ok_or_else(|| {
                         XlogError::Execution(format!("Missing type for column {}", col_idx))
                     })?;
+                    column_starts.push(columns[col_idx].len());
                     append_ground_term_bytes(&mut columns[col_idx], term, typ).map_err(|error| {
                         XlogError::Execution(format!(
                             "Failed to encode fact for predicate {pred} at column {col_idx}: {error}"
                         ))
                     })?;
+                    if seen_rows.is_some() {
+                        row_key.extend_from_slice(&columns[col_idx][column_starts[col_idx]..]);
+                    }
+                }
+                if seen_rows.as_mut().is_some_and(|seen| !seen.insert(row_key)) {
+                    for (column, start) in columns.iter_mut().zip(&column_starts) {
+                        column.truncate(*start);
+                    }
+                } else {
+                    fact_rows += 1;
                 }
             }
+            if directly_loaded_fact_names.contains(&pred) && fact_rows > 1 {
+                let mut order = (0..fact_rows).collect::<Vec<_>>();
+                order.sort_unstable_by(|&left, &right| {
+                    columns
+                        .iter()
+                        .map(|column| {
+                            let left_start = left * std::mem::size_of::<u32>();
+                            let right_start = right * std::mem::size_of::<u32>();
+                            let left_value = u32::from_le_bytes(
+                                column[left_start..left_start + 4]
+                                    .try_into()
+                                    .expect("u32 fact column"),
+                            );
+                            let right_value = u32::from_le_bytes(
+                                column[right_start..right_start + 4]
+                                    .try_into()
+                                    .expect("u32 fact column"),
+                            );
+                            left_value.cmp(&right_value)
+                        })
+                        .find(|ordering| *ordering != CmpOrdering::Equal)
+                        .unwrap_or(CmpOrdering::Equal)
+                });
+                for column in &mut columns {
+                    let mut sorted = Vec::with_capacity(column.len());
+                    for &row in &order {
+                        let start = row * std::mem::size_of::<u32>();
+                        sorted.extend_from_slice(&column[start..start + 4]);
+                    }
+                    *column = sorted;
+                }
+            }
+            // Every asserted nullary fact denotes the same unit tuple.
+            names.push(pred);
+            host_relations.push((schema.clone(), columns, fact_rows));
+        }
 
-            let fact_buf = if schema.arity() == 0 {
-                // Nullary predicate: every `pred().` assertion denotes the same unit
-                // tuple `()`, so presence is a single row. `create_buffer_from_slices`
-                // with no column slices yields a 0-row (absent) relation, which would
-                // make an asserted nullary fact read as false everywhere downstream
-                // (ordinary joins and epistemic modal membership alike).
-                provider.create_zero_arity_buffer(schema.clone(), 1)?
-            } else {
-                let slices: Vec<&[u8]> = columns.iter().map(|c| c.as_slice()).collect();
-                provider.create_buffer_from_slices(&slices, schema.clone())?
-            };
-
+        for (pred, fact_buf) in names
+            .into_iter()
+            .zip(provider.create_buffers_from_host_columns(&host_relations)?)
+        {
+            if directly_loaded_fact_names.contains(&pred) {
+                store.put(pred.as_str(), fact_buf);
+                continue;
+            }
             let existing = store.get(&pred).ok_or_else(|| {
                 XlogError::Execution(format!(
                     "Missing base relation {} while loading facts",
@@ -6006,6 +6335,28 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    #[test]
+    fn semantic_task_program_compiles_distinct_domains_and_preserves_query_order() {
+        for source in [
+            "pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2).",
+            "pred connected(u32,u32). connected(3,4). ?- connected(3,4). ?- connected(4,3).",
+        ] {
+            let observer = SemanticLogicTaskProgram::compile(source.to_owned(), [1, 0, 1]).unwrap();
+            assert_eq!(observer.source, source);
+            assert_eq!(observer.query_ordinals, [1, 0, 1]);
+        }
+    }
+
+    #[test]
+    fn semantic_task_program_rejects_non_boolean_or_missing_queries() {
+        let source = "pred rainfall(u32). rainfall(8). ?- rainfall(X). ?- rainfall(8).";
+        assert!(SemanticLogicTaskProgram::compile(source.to_owned(), [0, 1, 1]).is_err());
+        assert!(SemanticLogicTaskProgram::compile(source.to_owned(), [1, 2, 1]).is_err());
+        assert!(
+            SemanticLogicTaskProgram::compile("invalid program".to_owned(), [0, 1, 0]).is_err()
+        );
+    }
+
     use xlog_core::{symbol, MemoryBudget, ScalarType};
     use xlog_cuda::cuda_graph::CudaGraphNodeKind;
     use xlog_ir::RirNode;
@@ -6112,6 +6463,41 @@ mod tests {
             clean_submodules.success(),
             "recursive submodule checkout is dirty"
         );
+    }
+
+    #[test]
+    #[ignore = "requires authorized CUDA execution"]
+    fn logic_observer_derives_task_truth_from_native_query_execution() -> Result<()> {
+        let provider = ground_term_encoding_test_provider().ok_or_else(|| {
+            XlogError::Execution("authorized CUDA observer test requires a working provider".into())
+        })?;
+        let source = "pred connected(u32,u32). pred reachable(u32,u32). connected(3,4). reachable(X,Y) :- connected(X,Y). ?- reachable(3,4). ?- reachable(4,3).";
+        let forward = SemanticLogicTaskProgram::compile(source.to_owned(), [0, 1, 1])?;
+        let reversed = SemanticLogicTaskProgram::compile(source.to_owned(), [1, 0, 0])?;
+        let observed = xlog_cuda::SemanticTaskProgram::observe(&forward, Arc::clone(&provider))
+            .map_err(|error| XlogError::Execution(error.to_string()))?;
+        let reordered = xlog_cuda::SemanticTaskProgram::observe(&reversed, provider)
+            .map_err(|error| XlogError::Execution(error.to_string()))?;
+        assert_eq!(
+            observed.expected_truth,
+            [
+                xlog_cuda::SemanticTruth::True,
+                xlog_cuda::SemanticTruth::Neither,
+                xlog_cuda::SemanticTruth::Neither,
+            ]
+        );
+        assert_eq!(
+            reordered.expected_truth,
+            [
+                xlog_cuda::SemanticTruth::Neither,
+                xlog_cuda::SemanticTruth::True,
+                xlog_cuda::SemanticTruth::True,
+            ]
+        );
+        assert_eq!(observed.program_source, source.as_bytes());
+        assert_ne!(observed.input_bytes, reordered.input_bytes);
+        assert_ne!(observed.result_bytes, reordered.result_bytes);
+        Ok(())
     }
 
     struct ResidentEnvGuard {
@@ -7178,6 +7564,7 @@ mod tests {
 
         const WARMUP_RUNS: usize = 2;
         const MEASURED_RUNS: usize = 5;
+        let latency_diagnostics_enabled = resident_latency_diagnostics_enabled()?;
         let mut warmup_seconds = Vec::with_capacity(WARMUP_RUNS);
         let mut warmup_device_seconds = Vec::with_capacity(WARMUP_RUNS);
         let mut resident_seconds = Vec::with_capacity(MEASURED_RUNS);
@@ -7185,7 +7572,14 @@ mod tests {
         for run in 0..(WARMUP_RUNS + MEASURED_RUNS) {
             let started = std::time::Instant::now();
             let resident = {
-                let _env = ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")]);
+                let _env = if latency_diagnostics_enabled {
+                    ResidentEnvGuard::set(&[
+                        ("XLOG_REQUIRE_RESIDENT_RECURSION", "1"),
+                        (RESIDENT_LATENCY_DIAGNOSTICS_ENV, "1"),
+                    ])
+                } else {
+                    ResidentEnvGuard::set(&[("XLOG_REQUIRE_RESIDENT_RECURSION", "1")])
+                };
                 program.evaluate_with_options(provider.clone(), HashMap::new(), true)?
             };
             assert_eq!(
@@ -9219,7 +9613,7 @@ mod tests {
         assert_eq!(fact_load_transfers.htod_calls, 1);
         assert_eq!(
             fact_load_transfers.htod_bytes,
-            3 * std::mem::size_of::<u32>() as u64
+            2 * std::mem::size_of::<u32>() as u64
         );
         assert_eq!(fact_load_transfers.dtoh_calls, 0);
         assert_eq!(fact_load_transfers.dtoh_bytes, 0);

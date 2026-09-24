@@ -229,8 +229,26 @@ jobs:
       - name: Show CUDA toolkit
         run: nvcc --version
 
-      - name: Run complete workspace Clippy policy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Run workspace Clippy policy for self-contained features
+        env:
+          # semantic-policy requires externally delivered pinned policy inputs.
+          XLOG_CLIPPY_FEATURES: >-
+            xlog-cuda/arrow-device-import
+            xlog-cuda/wcoj-phase-timing
+            xlog-runtime/epistemic-logic-tests
+            xlog-runtime/recursive-stats-trace
+            xlog-runtime/resident-graph-tests
+            xlog-runtime/wcoj-phase-timing
+            xlog-prob/host-io
+            pyxlog/arrow-device-import
+            pyxlog/extension-module
+            pyxlog/host-io
+            xlog-neural/pyo3
+            xlog-neural/python
+            xlog-neural/python-tests
+            xlog-integration/wcoj-phase-timing
+            xlog-cli/host-io
+        run: cargo clippy --workspace --all-targets --features "$XLOG_CLIPPY_FEATURES" --locked -- -D warnings
 
   workspace-tests:
     name: workspace-tests

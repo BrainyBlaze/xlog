@@ -7,7 +7,7 @@ use xlog_core::{AggOp, Result, ScalarType, Schema, XlogError};
 use super::{arith_kernels, wcoj_kernels, CudaKernelProvider, ARITH_MODULE, WCOJ_MODULE};
 use crate::device_runtime::StreamId;
 use crate::launch::LaunchRecorder;
-use crate::memory::{CudaColumn, TrackedCudaSlice};
+use crate::memory::{CudaColumn, DeviceMemoryView, DeviceRead, TrackedCudaSlice};
 use crate::wcoj_metadata::{
     Wcoj4CycleRootAggValue, WcojCycle4HgWorkPlanU32, WcojCycle4HgWorkPlanU64, WcojRelationMetadata,
     WcojRootAggValue, WcojTriangleHgCountPhaseU32, WcojTriangleHgWorkPlanU32,
@@ -26,7 +26,7 @@ impl CudaKernelProvider {
         launch_stream: StreamId,
     ) -> Result<WcojRelationMetadata<u32>> {
         self.validate_metadata_column(input, key_col_idx, MetadataWidth::U32)?;
-        let keys = metadata_column_u32(input, key_col_idx)?;
+        let keys = &metadata_column_u32(input, key_col_idx)?;
         self.build_metadata_u32_from_column(input, key_col_idx, keys, launch_stream)
     }
 
@@ -37,7 +37,7 @@ impl CudaKernelProvider {
         launch_stream: StreamId,
     ) -> Result<WcojRelationMetadata<u64>> {
         self.validate_metadata_column(input, key_col_idx, MetadataWidth::U64)?;
-        let keys = metadata_column_u64(input, key_col_idx)?;
+        let keys = &metadata_column_u64(input, key_col_idx)?;
         self.build_metadata_u64_from_column(input, key_col_idx, keys, launch_stream)
     }
 
@@ -107,11 +107,12 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let xy_col0 = metadata_column_u32(e_xy, 0)?;
-        let xy_col1 = metadata_column_u32(e_xy, 1)?;
-        let yz_col0 = metadata_column_u32(e_yz, 0)?;
-        let xz_col0 = metadata_column_u32(e_xz, 0)?;
+        let xy_col0 = &metadata_column_u32(e_xy, 0)?;
+        let xy_col1 = &metadata_column_u32(e_xy, 1)?;
+        let yz_col0 = &metadata_column_u32(e_yz, 0)?;
+        let xz_col0 = &metadata_column_u32(e_xz, 0)?;
 
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(prefix_len)?;
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(e_xy.num_rows_device());
         rec.read(e_yz.num_rows_device());
@@ -125,61 +126,69 @@ impl CudaKernelProvider {
         rec.write(&xy_yz_end);
         rec.write(&xy_xz_start);
         rec.write(&xy_xz_end);
+        for level in scan_scratch.levels() {
+            rec.read_write(level);
+        }
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
-
-        let kernel = self
-            .device()
-            .inner()
-            .get_func(
-                WCOJ_MODULE,
-                wcoj_kernels::WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U32,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel(
-                    "wcoj_triangle_build_hg_work_plan_u32 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(
+                    WCOJ_MODULE,
+                    wcoj_kernels::WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U32,
                 )
-            })?;
-        let grid = n_xy.div_ceil(BLOCK_SIZE);
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        xy_col0,
-                        xy_col1,
-                        n_xy,
-                        yz_col0,
-                        n_yz,
-                        xz_col0,
-                        n_xz,
-                        &mut xy_work_prefix,
-                        &mut xy_yz_start,
-                        &mut xy_yz_end,
-                        &mut xy_xz_start,
-                        &mut xy_xz_end,
-                    ),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "wcoj_triangle_build_hg_work_plan_u32 launch failed: {e}"
-                    ))
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_triangle_build_hg_work_plan_u32 kernel not found".to_string(),
+                    )
                 })?;
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            &mut xy_work_prefix,
-            prefix_len,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
-        rec.commit(runtime)
+            let grid = n_xy.div_ceil(BLOCK_SIZE);
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            xy_col0,
+                            xy_col1,
+                            n_xy,
+                            yz_col0,
+                            n_yz,
+                            xz_col0,
+                            n_xz,
+                            &mut xy_work_prefix,
+                            &mut xy_yz_start,
+                            &mut xy_yz_end,
+                            &mut xy_xz_start,
+                            &mut xy_xz_end,
+                        ),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_triangle_build_hg_work_plan_u32 launch failed: {e}"
+                        ))
+                    })?;
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut xy_work_prefix,
+                prefix_len,
+                stream,
+                &mut scan_scratch,
+            )?;
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -256,8 +265,8 @@ impl CudaKernelProvider {
                     launch_stream.0
                 ))
             })?;
-        let yz_col1 = metadata_column_u32(e_yz, 1)?;
-        let xz_col1 = metadata_column_u32(e_xz, 1)?;
+        let yz_col1 = &metadata_column_u32(e_yz, 1)?;
+        let xz_col1 = &metadata_column_u32(e_xz, 1)?;
 
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(e_yz.num_rows_device());
@@ -273,52 +282,58 @@ impl CudaKernelProvider {
         rec.write(&d_num_rows);
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            self.initialize_launch_metadata_u32(
+                grid,
+                &d_num_rows,
+                stream,
+                &format!("{ctx}: d_num_rows"),
+            )?;
 
-        self.htod_launch_metadata_async_copy_one(
-            &grid,
-            &d_num_rows,
-            &cu_stream,
-            &format!("{ctx}: d_num_rows"),
-        )?;
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_COUNT_HG_U32)
+                .ok_or_else(|| {
+                    XlogError::Kernel("wcoj_triangle_count_hg_u32 kernel not found".to_string())
+                })?;
+            let count_u32 = &mut reinterpret_u8_as_u32(&mut count_bytes)?;
+            let mut params: Vec<*mut c_void> = vec![
+                yz_col1.as_kernel_param(),
+                n_yz.as_kernel_param(),
+                xz_col1.as_kernel_param(),
+                n_xz.as_kernel_param(),
+                (&plan.xy_work_prefix).as_kernel_param(),
+                (&plan.xy_yz_start).as_kernel_param(),
+                (&plan.xy_yz_end).as_kernel_param(),
+                (&plan.xy_xz_start).as_kernel_param(),
+                (&plan.xy_xz_end).as_kernel_param(),
+                plan.row_count.as_kernel_param(),
+                plan.total_work.as_kernel_param(),
+                plan.block_work_unit.as_kernel_param(),
+                count_u32.as_kernel_param(),
+            ];
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| XlogError::Kernel(format!("{ctx}: launch failed: {e}")))?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
 
-        let kernel = self
-            .device()
-            .inner()
-            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_COUNT_HG_U32)
-            .ok_or_else(|| {
-                XlogError::Kernel("wcoj_triangle_count_hg_u32 kernel not found".to_string())
-            })?;
-        let count_u32 = unsafe { reinterpret_u8_as_u32(&mut count_bytes) };
-        let mut params: Vec<*mut c_void> = vec![
-            yz_col1.as_kernel_param(),
-            n_yz.as_kernel_param(),
-            xz_col1.as_kernel_param(),
-            n_xz.as_kernel_param(),
-            (&plan.xy_work_prefix).as_kernel_param(),
-            (&plan.xy_yz_start).as_kernel_param(),
-            (&plan.xy_yz_end).as_kernel_param(),
-            (&plan.xy_xz_start).as_kernel_param(),
-            (&plan.xy_xz_end).as_kernel_param(),
-            plan.row_count.as_kernel_param(),
-            plan.total_work.as_kernel_param(),
-            plan.block_work_unit.as_kernel_param(),
-            count_u32.as_kernel_param(),
-        ];
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut params,
-                )
-                .map_err(|e| XlogError::Kernel(format!("{ctx}: launch failed: {e}")))?;
-        }
-        rec.commit(runtime)
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -429,8 +444,8 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let yz_col1 = metadata_column_u32(e_yz, 1)?;
-        let xz_col1 = metadata_column_u32(e_xz, 1)?;
+        let yz_col1 = &metadata_column_u32(e_yz, 1)?;
+        let xz_col1 = &metadata_column_u32(e_xz, 1)?;
         let n_yz = self.metadata_logical_rows(e_yz)?;
         let n_xz = self.metadata_logical_rows(e_xz)?;
 
@@ -460,52 +475,59 @@ impl CudaKernelProvider {
         rec.write(&row_counts);
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(
-                    WCOJ_MODULE,
-                    wcoj_kernels::WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U32,
-                )
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "wcoj_triangle_groupby_root_count_hg_u32 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(
+                        WCOJ_MODULE,
+                        wcoj_kernels::WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U32,
                     )
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                yz_col1.as_kernel_param(),
-                n_yz.as_kernel_param(),
-                xz_col1.as_kernel_param(),
-                n_xz.as_kernel_param(),
-                (&plan.xy_work_prefix).as_kernel_param(),
-                (&plan.xy_yz_start).as_kernel_param(),
-                (&plan.xy_yz_end).as_kernel_param(),
-                (&plan.xy_xz_start).as_kernel_param(),
-                (&plan.xy_xz_end).as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                (&row_counts).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: groupby-count launch failed: {e}"))
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_triangle_groupby_root_count_hg_u32 kernel not found".to_string(),
+                        )
                     })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    yz_col1.as_kernel_param(),
+                    n_yz.as_kernel_param(),
+                    xz_col1.as_kernel_param(),
+                    n_xz.as_kernel_param(),
+                    (&plan.xy_work_prefix).as_kernel_param(),
+                    (&plan.xy_yz_start).as_kernel_param(),
+                    (&plan.xy_yz_end).as_kernel_param(),
+                    (&plan.xy_xz_start).as_kernel_param(),
+                    (&plan.xy_xz_end).as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    (&row_counts).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: groupby-count launch failed: {e}"))
+                        })?;
+                }
             }
-        }
-        rec.commit(runtime)
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
 
         // Staging buffer (X, count) over the n_xy input rows: X is a
@@ -701,9 +723,9 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let yz_col1 = metadata_column_u32(e_yz, 1)?;
-        let xz_col1 = metadata_column_u32(e_xz, 1)?;
-        let xy_col1 = metadata_column_u32(e_xy, 1)?;
+        let yz_col1 = &metadata_column_u32(e_yz, 1)?;
+        let xz_col1 = &metadata_column_u32(e_xz, 1)?;
+        let xy_col1 = &metadata_column_u32(e_xy, 1)?;
         let n_yz = self.metadata_logical_rows(e_yz)?;
         let n_xz = self.metadata_logical_rows(e_xz)?;
         let value_from_z: u32 = match value {
@@ -744,71 +766,78 @@ impl CudaKernelProvider {
         rec.write(&row_agg);
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
-        if matches!(agg_op, AggOp::Min) {
-            // Min identity: u32::MAX (compaction drops untouched rows).
-            let fill = self
-                .device()
-                .inner()
-                .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel("arith_fill_const_u32 kernel not found".to_string())
-                })?;
-            let row_agg_u32 = unsafe { reinterpret_u8_as_u32(&mut row_agg) };
-            // SAFETY: arith_fill_const_u32(value, n, output)
-            unsafe {
-                fill.clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig::for_num_elems(n_xy),
-                        (u32::MAX, n_xy, &mut *row_agg_u32),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: min identity fill failed: {e}"))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            if matches!(agg_op, AggOp::Min) {
+                // Min identity: u32::MAX (compaction drops untouched rows).
+                let fill = self
+                    .device()
+                    .inner()
+                    .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("arith_fill_const_u32 kernel not found".to_string())
                     })?;
+                let row_agg_u32 = &mut reinterpret_u8_as_u32(&mut row_agg)?;
+                // SAFETY: arith_fill_const_u32(value, n, output)
+                unsafe {
+                    fill.clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig::for_num_elems(n_xy),
+                            (u32::MAX, n_xy, &mut *row_agg_u32),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: min identity fill failed: {e}"))
+                        })?;
+                }
             }
-        }
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, kernel_name)
-                .ok_or_else(|| XlogError::Kernel(format!("{kernel_name} kernel not found")))?;
-            let mut params: Vec<*mut c_void> = vec![
-                yz_col1.as_kernel_param(),
-                n_yz.as_kernel_param(),
-                xz_col1.as_kernel_param(),
-                n_xz.as_kernel_param(),
-                xy_col1.as_kernel_param(),
-                value_from_z.as_kernel_param(),
-                (&plan.xy_work_prefix).as_kernel_param(),
-                (&plan.xy_yz_start).as_kernel_param(),
-                (&plan.xy_yz_end).as_kernel_param(),
-                (&plan.xy_xz_start).as_kernel_param(),
-                (&plan.xy_xz_end).as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                (&row_counts).as_kernel_param(),
-                (&row_agg).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: groupby-agg launch failed: {e}"))
-                    })?;
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, kernel_name)
+                    .ok_or_else(|| XlogError::Kernel(format!("{kernel_name} kernel not found")))?;
+                let mut params: Vec<*mut c_void> = vec![
+                    yz_col1.as_kernel_param(),
+                    n_yz.as_kernel_param(),
+                    xz_col1.as_kernel_param(),
+                    n_xz.as_kernel_param(),
+                    xy_col1.as_kernel_param(),
+                    value_from_z.as_kernel_param(),
+                    (&plan.xy_work_prefix).as_kernel_param(),
+                    (&plan.xy_yz_start).as_kernel_param(),
+                    (&plan.xy_yz_end).as_kernel_param(),
+                    (&plan.xy_xz_start).as_kernel_param(),
+                    (&plan.xy_xz_end).as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    (&row_counts).as_kernel_param(),
+                    (&row_agg).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: groupby-agg launch failed: {e}"))
+                        })?;
+                }
             }
-        }
-        rec.commit(runtime)
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
 
         // Staging buffer (X, count, agg) over the n_xy input rows: X is a
@@ -941,8 +970,8 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let yz_col1 = metadata_column_u64(e_yz, 1)?;
-        let xz_col1 = metadata_column_u64(e_xz, 1)?;
+        let yz_col1 = &metadata_column_u64(e_yz, 1)?;
+        let xz_col1 = &metadata_column_u64(e_xz, 1)?;
         let n_yz = self.metadata_logical_rows(e_yz)?;
         let n_xz = self.metadata_logical_rows(e_xz)?;
 
@@ -968,52 +997,59 @@ impl CudaKernelProvider {
         rec.write(&row_counts);
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(
-                    WCOJ_MODULE,
-                    wcoj_kernels::WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U64,
-                )
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "wcoj_triangle_groupby_root_count_hg_u64 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(
+                        WCOJ_MODULE,
+                        wcoj_kernels::WCOJ_TRIANGLE_GROUPBY_ROOT_COUNT_HG_U64,
                     )
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                yz_col1.as_kernel_param(),
-                n_yz.as_kernel_param(),
-                xz_col1.as_kernel_param(),
-                n_xz.as_kernel_param(),
-                (&plan.xy_work_prefix).as_kernel_param(),
-                (&plan.xy_yz_start).as_kernel_param(),
-                (&plan.xy_yz_end).as_kernel_param(),
-                (&plan.xy_xz_start).as_kernel_param(),
-                (&plan.xy_xz_end).as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                (&row_counts).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: groupby-count launch failed: {e}"))
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_triangle_groupby_root_count_hg_u64 kernel not found".to_string(),
+                        )
                     })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    yz_col1.as_kernel_param(),
+                    n_yz.as_kernel_param(),
+                    xz_col1.as_kernel_param(),
+                    n_xz.as_kernel_param(),
+                    (&plan.xy_work_prefix).as_kernel_param(),
+                    (&plan.xy_yz_start).as_kernel_param(),
+                    (&plan.xy_yz_end).as_kernel_param(),
+                    (&plan.xy_xz_start).as_kernel_param(),
+                    (&plan.xy_xz_end).as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    (&row_counts).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: groupby-count launch failed: {e}"))
+                        })?;
+                }
             }
-        }
-        rec.commit(runtime)
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
 
         // Per-X reduction via the relation metadata: one (unique X, group
@@ -1039,44 +1075,53 @@ impl CudaKernelProvider {
         rec_sum
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: reduce preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(
-                    WCOJ_MODULE,
-                    wcoj_kernels::WCOJ_GROUPBY_ROOT_SEGMENT_SUM_COUNTS_U32,
-                )
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "wcoj_groupby_root_segment_sum_counts_u32 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(
+                        WCOJ_MODULE,
+                        wcoj_kernels::WCOJ_GROUPBY_ROOT_SEGMENT_SUM_COUNTS_U32,
                     )
-                })?;
-            let reduce_grid = n_xy.div_ceil(BLOCK_SIZE);
-            let mut params: Vec<*mut c_void> = vec![
-                (&row_counts).as_kernel_param(),
-                n_xy.as_kernel_param(),
-                (&meta.prefix_sum).as_kernel_param(),
-                key_count.as_kernel_param(),
-                (&sums).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (reduce_grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("{ctx}: reduce launch failed: {e}")))?;
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_groupby_root_segment_sum_counts_u32 kernel not found".to_string(),
+                        )
+                    })?;
+                let reduce_grid = n_xy.div_ceil(BLOCK_SIZE);
+                let mut params: Vec<*mut c_void> = vec![
+                    (&row_counts).as_kernel_param(),
+                    n_xy.as_kernel_param(),
+                    (&meta.prefix_sum).as_kernel_param(),
+                    key_count.as_kernel_param(),
+                    (&sums).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (reduce_grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: reduce launch failed: {e}"))
+                        })?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_sum = unsafe { rec_sum.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_sum
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: reduce commit failed: {e}")))?;
 
         // (unique X, total) buffer over the key_count roots, then drop the
@@ -1095,27 +1140,34 @@ impl CudaKernelProvider {
         rec_copy
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: copy preflight failed: {e}")))?;
-        unsafe {
-            let res = sys::cuMemcpyDtoDAsync_v2(
-                *x_copy.device_ptr(),
-                *meta.unique_keys.device_ptr(),
-                key_count as usize * std::mem::size_of::<u64>(),
-                cu_stream.cu_stream(),
-            );
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "{ctx}: DtoD unique keys copy failed: {res:?}"
-                )));
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                let res = sys::cuMemcpyDtoDAsync_v2(
+                    *x_copy.device_ptr(),
+                    *meta.unique_keys.device_ptr(),
+                    key_count as usize * std::mem::size_of::<u64>(),
+                    stream.stream().cu_stream(),
+                );
+                if res != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "{ctx}: DtoD unique keys copy failed: {res:?}"
+                    )));
+                }
             }
-        }
-        self.htod_launch_metadata_async_copy_one(
-            &key_count,
-            &d_num_rows,
-            &cu_stream,
-            &format!("{ctx}: d_num_rows"),
-        )?;
+            self.initialize_launch_metadata_u32(
+                key_count,
+                &d_num_rows,
+                stream,
+                &format!("{ctx}: d_num_rows"),
+            )?;
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_copy = unsafe { rec_copy.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_copy
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: copy commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -1251,9 +1303,9 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let yz_col1 = metadata_column_u64(e_yz, 1)?;
-        let xz_col1 = metadata_column_u64(e_xz, 1)?;
-        let xy_col1 = metadata_column_u64(e_xy, 1)?;
+        let yz_col1 = &metadata_column_u64(e_yz, 1)?;
+        let xz_col1 = &metadata_column_u64(e_xz, 1)?;
+        let xy_col1 = &metadata_column_u64(e_xy, 1)?;
         let n_yz = self.metadata_logical_rows(e_yz)?;
         let n_xz = self.metadata_logical_rows(e_xz)?;
         let value_from_z: u32 = match value {
@@ -1292,71 +1344,78 @@ impl CudaKernelProvider {
         rec.write(&row_agg);
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
-        if matches!(agg_op, AggOp::Min) {
-            // Min identity: u64::MAX (compaction drops untouched groups).
-            let fill = self
-                .device()
-                .inner()
-                .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U64)
-                .ok_or_else(|| {
-                    XlogError::Kernel("arith_fill_const_u64 kernel not found".to_string())
-                })?;
-            let row_agg_u64 = unsafe { reinterpret_u8_as_u64(&mut row_agg) };
-            // SAFETY: arith_fill_const_u64(value, n, output)
-            unsafe {
-                fill.clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig::for_num_elems(n_xy),
-                        (u64::MAX, n_xy, &mut *row_agg_u64),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: min identity fill failed: {e}"))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            if matches!(agg_op, AggOp::Min) {
+                // Min identity: u64::MAX (compaction drops untouched groups).
+                let fill = self
+                    .device()
+                    .inner()
+                    .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U64)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("arith_fill_const_u64 kernel not found".to_string())
                     })?;
+                let row_agg_u64 = &mut reinterpret_u8_as_u64(&mut row_agg)?;
+                // SAFETY: arith_fill_const_u64(value, n, output)
+                unsafe {
+                    fill.clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig::for_num_elems(n_xy),
+                            (u64::MAX, n_xy, &mut *row_agg_u64),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: min identity fill failed: {e}"))
+                        })?;
+                }
             }
-        }
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, kernel_name)
-                .ok_or_else(|| XlogError::Kernel(format!("{kernel_name} kernel not found")))?;
-            let mut params: Vec<*mut c_void> = vec![
-                yz_col1.as_kernel_param(),
-                n_yz.as_kernel_param(),
-                xz_col1.as_kernel_param(),
-                n_xz.as_kernel_param(),
-                xy_col1.as_kernel_param(),
-                value_from_z.as_kernel_param(),
-                (&plan.xy_work_prefix).as_kernel_param(),
-                (&plan.xy_yz_start).as_kernel_param(),
-                (&plan.xy_yz_end).as_kernel_param(),
-                (&plan.xy_xz_start).as_kernel_param(),
-                (&plan.xy_xz_end).as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                (&row_counts).as_kernel_param(),
-                (&row_agg).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: groupby-agg launch failed: {e}"))
-                    })?;
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, kernel_name)
+                    .ok_or_else(|| XlogError::Kernel(format!("{kernel_name} kernel not found")))?;
+                let mut params: Vec<*mut c_void> = vec![
+                    yz_col1.as_kernel_param(),
+                    n_yz.as_kernel_param(),
+                    xz_col1.as_kernel_param(),
+                    n_xz.as_kernel_param(),
+                    xy_col1.as_kernel_param(),
+                    value_from_z.as_kernel_param(),
+                    (&plan.xy_work_prefix).as_kernel_param(),
+                    (&plan.xy_yz_start).as_kernel_param(),
+                    (&plan.xy_yz_end).as_kernel_param(),
+                    (&plan.xy_xz_start).as_kernel_param(),
+                    (&plan.xy_xz_end).as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    (&row_counts).as_kernel_param(),
+                    (&row_agg).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: groupby-agg launch failed: {e}"))
+                        })?;
+                }
             }
-        }
-        rec.commit(runtime)
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
 
         // Per-X reduction via the relation metadata: one (unique X, group
@@ -1391,101 +1450,108 @@ impl CudaKernelProvider {
         rec_reduce
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: reduce preflight failed: {e}")))?;
-        if matches!(agg_op, AggOp::Min) {
-            let fill = self
-                .device()
-                .inner()
-                .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U64)
-                .ok_or_else(|| {
-                    XlogError::Kernel("arith_fill_const_u64 kernel not found".to_string())
-                })?;
-            let group_agg_u64 = unsafe { reinterpret_u8_as_u64(&mut group_agg) };
-            // SAFETY: arith_fill_const_u64(value, n, output)
-            unsafe {
-                fill.clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig::for_num_elems(key_count),
-                        (u64::MAX, key_count, &mut *group_agg_u64),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: group min identity fill failed: {e}"))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            if matches!(agg_op, AggOp::Min) {
+                let fill = self
+                    .device()
+                    .inner()
+                    .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U64)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("arith_fill_const_u64 kernel not found".to_string())
                     })?;
+                let group_agg_u64 = &mut reinterpret_u8_as_u64(&mut group_agg)?;
+                // SAFETY: arith_fill_const_u64(value, n, output)
+                unsafe {
+                    fill.clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig::for_num_elems(key_count),
+                            (u64::MAX, key_count, &mut *group_agg_u64),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: group min identity fill failed: {e}"))
+                        })?;
+                }
             }
-        }
-        let reduce_grid = n_xy.div_ceil(BLOCK_SIZE);
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(
-                    WCOJ_MODULE,
-                    wcoj_kernels::WCOJ_GROUPBY_ROOT_SEGMENT_SUM_COUNTS_U32,
-                )
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "wcoj_groupby_root_segment_sum_counts_u32 kernel not found".to_string(),
+            let reduce_grid = n_xy.div_ceil(BLOCK_SIZE);
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(
+                        WCOJ_MODULE,
+                        wcoj_kernels::WCOJ_GROUPBY_ROOT_SEGMENT_SUM_COUNTS_U32,
                     )
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                (&row_counts).as_kernel_param(),
-                n_xy.as_kernel_param(),
-                (&meta.prefix_sum).as_kernel_param(),
-                key_count.as_kernel_param(),
-                (&count_sums).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (reduce_grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: count reduce launch failed: {e}"))
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_groupby_root_segment_sum_counts_u32 kernel not found".to_string(),
+                        )
                     })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    (&row_counts).as_kernel_param(),
+                    n_xy.as_kernel_param(),
+                    (&meta.prefix_sum).as_kernel_param(),
+                    key_count.as_kernel_param(),
+                    (&count_sums).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (reduce_grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: count reduce launch failed: {e}"))
+                        })?;
+                }
             }
-        }
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, segment_kernel_name)
-                .ok_or_else(|| {
-                    XlogError::Kernel(format!("{segment_kernel_name} kernel not found"))
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                (&row_counts).as_kernel_param(),
-                (&row_agg).as_kernel_param(),
-                n_xy.as_kernel_param(),
-                (&meta.prefix_sum).as_kernel_param(),
-                key_count.as_kernel_param(),
-                (&group_agg).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (reduce_grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: agg reduce launch failed: {e}"))
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, segment_kernel_name)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(format!("{segment_kernel_name} kernel not found"))
                     })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    (&row_counts).as_kernel_param(),
+                    (&row_agg).as_kernel_param(),
+                    n_xy.as_kernel_param(),
+                    (&meta.prefix_sum).as_kernel_param(),
+                    key_count.as_kernel_param(),
+                    (&group_agg).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (reduce_grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: agg reduce launch failed: {e}"))
+                        })?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_reduce = unsafe { rec_reduce.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_reduce
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: reduce commit failed: {e}")))?;
 
         // (unique X, agg) staging plus a counts-only buffer whose mask
@@ -1506,33 +1572,40 @@ impl CudaKernelProvider {
         rec_copy
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: copy preflight failed: {e}")))?;
-        unsafe {
-            let res = sys::cuMemcpyDtoDAsync_v2(
-                *x_copy.device_ptr(),
-                *meta.unique_keys.device_ptr(),
-                key_count as usize * std::mem::size_of::<u64>(),
-                cu_stream.cu_stream(),
-            );
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "{ctx}: DtoD unique keys copy failed: {res:?}"
-                )));
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                let res = sys::cuMemcpyDtoDAsync_v2(
+                    *x_copy.device_ptr(),
+                    *meta.unique_keys.device_ptr(),
+                    key_count as usize * std::mem::size_of::<u64>(),
+                    stream.stream().cu_stream(),
+                );
+                if res != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "{ctx}: DtoD unique keys copy failed: {res:?}"
+                    )));
+                }
             }
-        }
-        self.htod_launch_metadata_async_copy_one(
-            &key_count,
-            &d_num_rows_agg,
-            &cu_stream,
-            &format!("{ctx}: d_num_rows_agg"),
-        )?;
-        self.htod_launch_metadata_async_copy_one(
-            &key_count,
-            &d_num_rows_counts,
-            &cu_stream,
-            &format!("{ctx}: d_num_rows_counts"),
-        )?;
+            self.initialize_launch_metadata_u32(
+                key_count,
+                &d_num_rows_agg,
+                stream,
+                &format!("{ctx}: d_num_rows_agg"),
+            )?;
+            self.initialize_launch_metadata_u32(
+                key_count,
+                &d_num_rows_counts,
+                stream,
+                &format!("{ctx}: d_num_rows_counts"),
+            )?;
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_copy = unsafe { rec_copy.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_copy
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: copy commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -1602,8 +1675,8 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let yz_col1 = metadata_column_u32(e_yz, 1)?;
-        let xz_col1 = metadata_column_u32(e_xz, 1)?;
+        let yz_col1 = &metadata_column_u32(e_yz, 1)?;
+        let xz_col1 = &metadata_column_u32(e_xz, 1)?;
         let n_yz = self.metadata_logical_rows(e_yz)?;
         let n_xz = self.metadata_logical_rows(e_xz)?;
 
@@ -1624,75 +1697,88 @@ impl CudaKernelProvider {
         rec_hg
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: count preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_COUNT_HG_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_triangle_count_hg_u32 kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                yz_col1.as_kernel_param(),
-                n_yz.as_kernel_param(),
-                xz_col1.as_kernel_param(),
-                n_xz.as_kernel_param(),
-                (&plan.xy_work_prefix).as_kernel_param(),
-                (&plan.xy_yz_start).as_kernel_param(),
-                (&plan.xy_yz_end).as_kernel_param(),
-                (&plan.xy_xz_start).as_kernel_param(),
-                (&plan.xy_xz_end).as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                (&plan.block_counts).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("{ctx}: count launch failed: {e}")))?;
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_COUNT_HG_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("wcoj_triangle_count_hg_u32 kernel not found".to_string())
+                    })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    yz_col1.as_kernel_param(),
+                    n_yz.as_kernel_param(),
+                    xz_col1.as_kernel_param(),
+                    n_xz.as_kernel_param(),
+                    (&plan.xy_work_prefix).as_kernel_param(),
+                    (&plan.xy_yz_start).as_kernel_param(),
+                    (&plan.xy_yz_end).as_kernel_param(),
+                    (&plan.xy_xz_start).as_kernel_param(),
+                    (&plan.xy_xz_end).as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    (&plan.block_counts).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: count launch failed: {e}"))
+                        })?;
+                }
             }
-        }
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_SCAN_HG_BLOCK_COUNTS_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_scan_hg_block_counts_u32 kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                (&plan.block_counts).as_kernel_param(),
-                grid.as_kernel_param(),
-                (&plan.block_offsets).as_kernel_param(),
-                (&total_rows_device).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (1, 1, 1),
-                            block_dim: (1024, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("{ctx}: scan launch failed: {e}")))?;
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_SCAN_HG_BLOCK_COUNTS_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_scan_hg_block_counts_u32 kernel not found".to_string(),
+                        )
+                    })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    (&plan.block_counts).as_kernel_param(),
+                    grid.as_kernel_param(),
+                    (&plan.block_offsets).as_kernel_param(),
+                    (&total_rows_device).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1024, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: scan launch failed: {e}"))
+                        })?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_hg = unsafe { rec_hg.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_hg
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: count commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -1754,10 +1840,10 @@ impl CudaKernelProvider {
                     launch_stream.0
                 ))
             })?;
-        let xy_col0 = metadata_column_u32(e_xy, 0)?;
-        let xy_col1 = metadata_column_u32(e_xy, 1)?;
-        let yz_col1 = metadata_column_u32(e_yz, 1)?;
-        let xz_col1 = metadata_column_u32(e_xz, 1)?;
+        let xy_col0 = &metadata_column_u32(e_xy, 0)?;
+        let xy_col1 = &metadata_column_u32(e_xy, 1)?;
+        let yz_col1 = &metadata_column_u32(e_yz, 1)?;
+        let xz_col1 = &metadata_column_u32(e_xz, 1)?;
         let n_yz = self.metadata_logical_rows(e_yz)?;
         let n_xz = self.metadata_logical_rows(e_xz)?;
         let bytes_per_col = (count.total_rows as usize)
@@ -1786,59 +1872,66 @@ impl CudaKernelProvider {
         rec_mat
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_MATERIALIZE_HG_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "wcoj_triangle_materialize_hg_u32 kernel not found".to_string(),
-                    )
-                })?;
-            let out_x_u32 = unsafe { reinterpret_u8_as_u32(&mut out_x) };
-            let out_y_u32 = unsafe { reinterpret_u8_as_u32(&mut out_y) };
-            let out_z_u32 = unsafe { reinterpret_u8_as_u32(&mut out_z) };
-            let mut params: Vec<*mut c_void> = vec![
-                xy_col0.as_kernel_param(),
-                xy_col1.as_kernel_param(),
-                yz_col1.as_kernel_param(),
-                n_yz.as_kernel_param(),
-                xz_col1.as_kernel_param(),
-                n_xz.as_kernel_param(),
-                (&plan.xy_work_prefix).as_kernel_param(),
-                (&plan.xy_yz_start).as_kernel_param(),
-                (&plan.xy_yz_end).as_kernel_param(),
-                (&plan.xy_xz_start).as_kernel_param(),
-                (&plan.xy_xz_end).as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                (&plan.block_offsets).as_kernel_param(),
-                count.total_rows.as_kernel_param(),
-                out_x_u32.as_kernel_param(),
-                out_y_u32.as_kernel_param(),
-                out_z_u32.as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_MATERIALIZE_HG_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_triangle_materialize_hg_u32 kernel not found".to_string(),
+                        )
                     })?;
+                let out_x_u32 = &mut reinterpret_u8_as_u32(&mut out_x)?;
+                let out_y_u32 = &mut reinterpret_u8_as_u32(&mut out_y)?;
+                let out_z_u32 = &mut reinterpret_u8_as_u32(&mut out_z)?;
+                let mut params: Vec<*mut c_void> = vec![
+                    xy_col0.as_kernel_param(),
+                    xy_col1.as_kernel_param(),
+                    yz_col1.as_kernel_param(),
+                    n_yz.as_kernel_param(),
+                    xz_col1.as_kernel_param(),
+                    n_xz.as_kernel_param(),
+                    (&plan.xy_work_prefix).as_kernel_param(),
+                    (&plan.xy_yz_start).as_kernel_param(),
+                    (&plan.xy_yz_end).as_kernel_param(),
+                    (&plan.xy_xz_start).as_kernel_param(),
+                    (&plan.xy_xz_end).as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    (&plan.block_offsets).as_kernel_param(),
+                    count.total_rows.as_kernel_param(),
+                    out_x_u32.as_kernel_param(),
+                    out_y_u32.as_kernel_param(),
+                    out_z_u32.as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+                        })?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_mat
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize commit failed: {e}")))?;
         cu_stream.synchronize().map_err(|e| {
             XlogError::Kernel(format!("{ctx}: materialize stream sync failed: {e}"))
@@ -1907,10 +2000,10 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let xy_col0 = metadata_column_u32(e_xy, 0)?;
-        let xy_col1 = metadata_column_u32(e_xy, 1)?;
-        let yz_col1 = metadata_column_u32(e_yz, 1)?;
-        let xz_col1 = metadata_column_u32(e_xz, 1)?;
+        let xy_col0 = &metadata_column_u32(e_xy, 0)?;
+        let xy_col1 = &metadata_column_u32(e_xy, 1)?;
+        let yz_col1 = &metadata_column_u32(e_yz, 1)?;
+        let xz_col1 = &metadata_column_u32(e_xz, 1)?;
         let n_yz = self.metadata_logical_rows(e_yz)?;
         let n_xz = self.metadata_logical_rows(e_xz)?;
 
@@ -1921,6 +2014,8 @@ impl CudaKernelProvider {
                 .as_ref()
                 .expect("local HG counts allocated when grid exceeds single-block scan")
         };
+        let mut scan_scratch =
+            self.multiblock_scan_u32_scratch_for_len(if grid > 1024 { grid } else { 0 })?;
         let mut rec_hg = LaunchRecorder::new_strict(launch_stream);
         rec_hg.read(e_xy.num_rows_device());
         rec_hg.read(e_yz.num_rows_device());
@@ -1948,142 +2043,153 @@ impl CudaKernelProvider {
         rec_hg.read_write(&plan.scratch_x);
         rec_hg.read_write(&plan.scratch_y);
         rec_hg.read_write(&plan.scratch_z);
+        for level in scan_scratch.levels() {
+            rec_hg.read_write(level);
+        }
         rec_hg
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: HG preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_COUNT_HG_CACHED_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "wcoj_triangle_count_hg_cached_u32 kernel not found".to_string(),
-                    )
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                xy_col0.as_kernel_param(),
-                xy_col1.as_kernel_param(),
-                yz_col1.as_kernel_param(),
-                n_yz.as_kernel_param(),
-                xz_col1.as_kernel_param(),
-                n_xz.as_kernel_param(),
-                (&plan.xy_work_prefix).as_kernel_param(),
-                (&plan.xy_yz_start).as_kernel_param(),
-                (&plan.xy_yz_end).as_kernel_param(),
-                (&plan.xy_xz_start).as_kernel_param(),
-                (&plan.xy_xz_end).as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                count_u32.as_kernel_param(),
-                (&plan.scratch_x).as_kernel_param(),
-                (&plan.scratch_y).as_kernel_param(),
-                (&plan.scratch_z).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (HG_COUNT_BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: cached count launch failed: {e}"))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_COUNT_HG_CACHED_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_triangle_count_hg_cached_u32 kernel not found".to_string(),
+                        )
                     })?;
-            }
-        }
-        if grid <= 1024 {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_SCAN_HG_BLOCK_COUNTS_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_scan_hg_block_counts_u32 kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                count_u32.as_kernel_param(),
-                grid.as_kernel_param(),
-                (&plan.block_offsets).as_kernel_param(),
-                (&total_rows_device).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (1, 1, 1),
-                            block_dim: (1024, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: HG block-count scan failed: {e}"))
-                    })?;
-            }
-        } else {
-            let offsets_mut = local_offsets
-                .as_mut()
-                .expect("local HG offsets allocated when grid exceeds single-block scan");
-            unsafe {
-                let res = sys::cuMemcpyDtoDAsync_v2(
-                    *offsets_mut.device_ptr(),
-                    *count_u32.device_ptr(),
-                    bytes_count,
-                    cu_stream.cu_stream(),
-                );
-                if res != sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "{ctx}: DtoD count to offsets failed: {res:?}"
-                    )));
+                let mut params: Vec<*mut c_void> = vec![
+                    xy_col0.as_kernel_param(),
+                    xy_col1.as_kernel_param(),
+                    yz_col1.as_kernel_param(),
+                    n_yz.as_kernel_param(),
+                    xz_col1.as_kernel_param(),
+                    n_xz.as_kernel_param(),
+                    (&plan.xy_work_prefix).as_kernel_param(),
+                    (&plan.xy_yz_start).as_kernel_param(),
+                    (&plan.xy_yz_end).as_kernel_param(),
+                    (&plan.xy_xz_start).as_kernel_param(),
+                    (&plan.xy_xz_end).as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    count_u32.as_kernel_param(),
+                    (&plan.scratch_x).as_kernel_param(),
+                    (&plan.scratch_y).as_kernel_param(),
+                    (&plan.scratch_z).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (HG_COUNT_BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: cached count launch failed: {e}"))
+                        })?;
                 }
             }
-            self.multiblock_scan_u32_inplace_on_stream(
-                offsets_mut,
-                grid,
-                &cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-            let total_kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                count_u32.as_kernel_param(),
-                (&*offsets_mut).as_kernel_param(),
-                grid.as_kernel_param(),
-                (&total_rows_device).as_kernel_param(),
-            ];
-            unsafe {
-                total_kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (1, 1, 1),
-                            block_dim: (1, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: HG total reducer failed: {e}"))
+            if grid <= 1024 {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_SCAN_HG_BLOCK_COUNTS_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_scan_hg_block_counts_u32 kernel not found".to_string(),
+                        )
                     })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    count_u32.as_kernel_param(),
+                    grid.as_kernel_param(),
+                    (&plan.block_offsets).as_kernel_param(),
+                    (&total_rows_device).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1024, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: HG block-count scan failed: {e}"))
+                        })?;
+                }
+            } else {
+                let offsets_mut = local_offsets
+                    .as_mut()
+                    .expect("local HG offsets allocated when grid exceeds single-block scan");
+                unsafe {
+                    let res = sys::cuMemcpyDtoDAsync_v2(
+                        *offsets_mut.device_ptr(),
+                        *count_u32.device_ptr(),
+                        bytes_count,
+                        stream.stream().cu_stream(),
+                    );
+                    if res != sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "{ctx}: DtoD count to offsets failed: {res:?}"
+                        )));
+                    }
+                }
+                self.multiblock_scan_u32_inplace_on_stream(
+                    offsets_mut,
+                    grid,
+                    stream,
+                    &mut scan_scratch,
+                )?;
+                let total_kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
+                    })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    count_u32.as_kernel_param(),
+                    (&*offsets_mut).as_kernel_param(),
+                    grid.as_kernel_param(),
+                    (&total_rows_device).as_kernel_param(),
+                ];
+                unsafe {
+                    total_kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: HG total reducer failed: {e}"))
+                        })?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_hg = unsafe { rec_hg.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_hg
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: HG count commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -2120,53 +2226,60 @@ impl CudaKernelProvider {
         rec_mat
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(
-                    WCOJ_MODULE,
-                    wcoj_kernels::WCOJ_TRIANGLE_MATERIALIZE_HG_CACHED_U32,
-                )
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "wcoj_triangle_materialize_hg_cached_u32 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(
+                        WCOJ_MODULE,
+                        wcoj_kernels::WCOJ_TRIANGLE_MATERIALIZE_HG_CACHED_U32,
                     )
-                })?;
-            let out_x_u32 = unsafe { reinterpret_u8_as_u32(&mut out_x) };
-            let out_y_u32 = unsafe { reinterpret_u8_as_u32(&mut out_y) };
-            let out_z_u32 = unsafe { reinterpret_u8_as_u32(&mut out_z) };
-            let mut params: Vec<*mut c_void> = vec![
-                count_u32.as_kernel_param(),
-                materialize_offsets.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                total_rows.as_kernel_param(),
-                (&plan.scratch_x).as_kernel_param(),
-                (&plan.scratch_y).as_kernel_param(),
-                (&plan.scratch_z).as_kernel_param(),
-                out_x_u32.as_kernel_param(),
-                out_y_u32.as_kernel_param(),
-                out_z_u32.as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_triangle_materialize_hg_cached_u32 kernel not found".to_string(),
+                        )
                     })?;
+                let out_x_u32 = &mut reinterpret_u8_as_u32(&mut out_x)?;
+                let out_y_u32 = &mut reinterpret_u8_as_u32(&mut out_y)?;
+                let out_z_u32 = &mut reinterpret_u8_as_u32(&mut out_z)?;
+                let mut params: Vec<*mut c_void> = vec![
+                    count_u32.as_kernel_param(),
+                    materialize_offsets.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    total_rows.as_kernel_param(),
+                    (&plan.scratch_x).as_kernel_param(),
+                    (&plan.scratch_y).as_kernel_param(),
+                    (&plan.scratch_z).as_kernel_param(),
+                    out_x_u32.as_kernel_param(),
+                    out_y_u32.as_kernel_param(),
+                    out_z_u32.as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+                        })?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_mat
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize commit failed: {e}")))?;
         cu_stream.synchronize().map_err(|e| {
             XlogError::Kernel(format!("{ctx}: materialize stream sync failed: {e}"))
@@ -2241,11 +2354,12 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let xy_col0 = metadata_column_u64(e_xy, 0)?;
-        let xy_col1 = metadata_column_u64(e_xy, 1)?;
-        let yz_col0 = metadata_column_u64(e_yz, 0)?;
-        let xz_col0 = metadata_column_u64(e_xz, 0)?;
+        let xy_col0 = &metadata_column_u64(e_xy, 0)?;
+        let xy_col1 = &metadata_column_u64(e_xy, 1)?;
+        let yz_col0 = &metadata_column_u64(e_yz, 0)?;
+        let xz_col0 = &metadata_column_u64(e_xz, 0)?;
 
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(prefix_len)?;
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(e_xy.num_rows_device());
         rec.read(e_yz.num_rows_device());
@@ -2259,61 +2373,69 @@ impl CudaKernelProvider {
         rec.write(&xy_yz_end);
         rec.write(&xy_xz_start);
         rec.write(&xy_xz_end);
+        for level in scan_scratch.levels() {
+            rec.read_write(level);
+        }
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
-
-        let kernel = self
-            .device()
-            .inner()
-            .get_func(
-                WCOJ_MODULE,
-                wcoj_kernels::WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U64,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel(
-                    "wcoj_triangle_build_hg_work_plan_u64 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(
+                    WCOJ_MODULE,
+                    wcoj_kernels::WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U64,
                 )
-            })?;
-        let grid = n_xy.div_ceil(BLOCK_SIZE);
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        xy_col0,
-                        xy_col1,
-                        n_xy,
-                        yz_col0,
-                        n_yz,
-                        xz_col0,
-                        n_xz,
-                        &mut xy_work_prefix,
-                        &mut xy_yz_start,
-                        &mut xy_yz_end,
-                        &mut xy_xz_start,
-                        &mut xy_xz_end,
-                    ),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "wcoj_triangle_build_hg_work_plan_u64 launch failed: {e}"
-                    ))
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_triangle_build_hg_work_plan_u64 kernel not found".to_string(),
+                    )
                 })?;
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            &mut xy_work_prefix,
-            prefix_len,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
-        rec.commit(runtime)
+            let grid = n_xy.div_ceil(BLOCK_SIZE);
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            xy_col0,
+                            xy_col1,
+                            n_xy,
+                            yz_col0,
+                            n_yz,
+                            xz_col0,
+                            n_xz,
+                            &mut xy_work_prefix,
+                            &mut xy_yz_start,
+                            &mut xy_yz_end,
+                            &mut xy_xz_start,
+                            &mut xy_xz_end,
+                        ),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_triangle_build_hg_work_plan_u64 launch failed: {e}"
+                        ))
+                    })?;
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut xy_work_prefix,
+                prefix_len,
+                stream,
+                &mut scan_scratch,
+            )?;
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -2394,10 +2516,10 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let xy_col0 = metadata_column_u64(e_xy, 0)?;
-        let xy_col1 = metadata_column_u64(e_xy, 1)?;
-        let yz_col1 = metadata_column_u64(e_yz, 1)?;
-        let xz_col1 = metadata_column_u64(e_xz, 1)?;
+        let xy_col0 = &metadata_column_u64(e_xy, 0)?;
+        let xy_col1 = &metadata_column_u64(e_xy, 1)?;
+        let yz_col1 = &metadata_column_u64(e_yz, 1)?;
+        let xz_col1 = &metadata_column_u64(e_xz, 1)?;
         let n_yz = self.metadata_logical_rows(e_yz)?;
         let n_xz = self.metadata_logical_rows(e_xz)?;
 
@@ -2408,6 +2530,8 @@ impl CudaKernelProvider {
                 .as_ref()
                 .expect("local HG counts allocated when grid exceeds single-block scan")
         };
+        let mut scan_scratch =
+            self.multiblock_scan_u32_scratch_for_len(if grid > 1024 { grid } else { 0 })?;
         let mut rec_hg = LaunchRecorder::new_strict(launch_stream);
         rec_hg.read(e_xy.num_rows_device());
         rec_hg.read(e_yz.num_rows_device());
@@ -2430,133 +2554,146 @@ impl CudaKernelProvider {
             );
         }
         rec_hg.write(&total_rows_device);
+        for level in scan_scratch.levels() {
+            rec_hg.read_write(level);
+        }
         rec_hg
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: HG preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_COUNT_HG_U64)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_triangle_count_hg_u64 kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                yz_col1.as_kernel_param(),
-                n_yz.as_kernel_param(),
-                xz_col1.as_kernel_param(),
-                n_xz.as_kernel_param(),
-                (&plan.xy_work_prefix).as_kernel_param(),
-                (&plan.xy_yz_start).as_kernel_param(),
-                (&plan.xy_yz_end).as_kernel_param(),
-                (&plan.xy_xz_start).as_kernel_param(),
-                (&plan.xy_xz_end).as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                count_u32.as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("{ctx}: count launch failed: {e}")))?;
-            }
-        }
-        if grid <= 1024 {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_SCAN_HG_BLOCK_COUNTS_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_scan_hg_block_counts_u32 kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                count_u32.as_kernel_param(),
-                grid.as_kernel_param(),
-                (&plan.block_offsets).as_kernel_param(),
-                (&total_rows_device).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (1, 1, 1),
-                            block_dim: (1024, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: HG block-count scan failed: {e}"))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_COUNT_HG_U64)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("wcoj_triangle_count_hg_u64 kernel not found".to_string())
                     })?;
-            }
-        } else {
-            let offsets_mut = local_offsets
-                .as_mut()
-                .expect("local HG offsets allocated when grid exceeds single-block scan");
-            unsafe {
-                let res = sys::cuMemcpyDtoDAsync_v2(
-                    *offsets_mut.device_ptr(),
-                    *count_u32.device_ptr(),
-                    bytes_count,
-                    cu_stream.cu_stream(),
-                );
-                if res != sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "{ctx}: DtoD count to offsets failed: {res:?}"
-                    )));
+                let mut params: Vec<*mut c_void> = vec![
+                    yz_col1.as_kernel_param(),
+                    n_yz.as_kernel_param(),
+                    xz_col1.as_kernel_param(),
+                    n_xz.as_kernel_param(),
+                    (&plan.xy_work_prefix).as_kernel_param(),
+                    (&plan.xy_yz_start).as_kernel_param(),
+                    (&plan.xy_yz_end).as_kernel_param(),
+                    (&plan.xy_xz_start).as_kernel_param(),
+                    (&plan.xy_xz_end).as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    count_u32.as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: count launch failed: {e}"))
+                        })?;
                 }
             }
-            self.multiblock_scan_u32_inplace_on_stream(
-                offsets_mut,
-                grid,
-                &cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-            let total_kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                count_u32.as_kernel_param(),
-                (&*offsets_mut).as_kernel_param(),
-                grid.as_kernel_param(),
-                (&total_rows_device).as_kernel_param(),
-            ];
-            unsafe {
-                total_kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (1, 1, 1),
-                            block_dim: (1, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: HG total reducer failed: {e}"))
+            if grid <= 1024 {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_SCAN_HG_BLOCK_COUNTS_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_scan_hg_block_counts_u32 kernel not found".to_string(),
+                        )
                     })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    count_u32.as_kernel_param(),
+                    grid.as_kernel_param(),
+                    (&plan.block_offsets).as_kernel_param(),
+                    (&total_rows_device).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1024, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: HG block-count scan failed: {e}"))
+                        })?;
+                }
+            } else {
+                let offsets_mut = local_offsets
+                    .as_mut()
+                    .expect("local HG offsets allocated when grid exceeds single-block scan");
+                unsafe {
+                    let res = sys::cuMemcpyDtoDAsync_v2(
+                        *offsets_mut.device_ptr(),
+                        *count_u32.device_ptr(),
+                        bytes_count,
+                        stream.stream().cu_stream(),
+                    );
+                    if res != sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "{ctx}: DtoD count to offsets failed: {res:?}"
+                        )));
+                    }
+                }
+                self.multiblock_scan_u32_inplace_on_stream(
+                    offsets_mut,
+                    grid,
+                    stream,
+                    &mut scan_scratch,
+                )?;
+                let total_kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
+                    })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    count_u32.as_kernel_param(),
+                    (&*offsets_mut).as_kernel_param(),
+                    grid.as_kernel_param(),
+                    (&total_rows_device).as_kernel_param(),
+                ];
+                unsafe {
+                    total_kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: HG total reducer failed: {e}"))
+                        })?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_hg = unsafe { rec_hg.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_hg
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: HG count commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -2601,59 +2738,66 @@ impl CudaKernelProvider {
         rec_mat
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_MATERIALIZE_HG_U64)
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "wcoj_triangle_materialize_hg_u64 kernel not found".to_string(),
-                    )
-                })?;
-            let out_x_u64 = unsafe { reinterpret_u8_as_u64(&mut out_x) };
-            let out_y_u64 = unsafe { reinterpret_u8_as_u64(&mut out_y) };
-            let out_z_u64 = unsafe { reinterpret_u8_as_u64(&mut out_z) };
-            let mut params: Vec<*mut c_void> = vec![
-                xy_col0.as_kernel_param(),
-                xy_col1.as_kernel_param(),
-                yz_col1.as_kernel_param(),
-                n_yz.as_kernel_param(),
-                xz_col1.as_kernel_param(),
-                n_xz.as_kernel_param(),
-                (&plan.xy_work_prefix).as_kernel_param(),
-                (&plan.xy_yz_start).as_kernel_param(),
-                (&plan.xy_yz_end).as_kernel_param(),
-                (&plan.xy_xz_start).as_kernel_param(),
-                (&plan.xy_xz_end).as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                materialize_offsets.as_kernel_param(),
-                total_rows.as_kernel_param(),
-                out_x_u64.as_kernel_param(),
-                out_y_u64.as_kernel_param(),
-                out_z_u64.as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_MATERIALIZE_HG_U64)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_triangle_materialize_hg_u64 kernel not found".to_string(),
+                        )
                     })?;
+                let out_x_u64 = &mut reinterpret_u8_as_u64(&mut out_x)?;
+                let out_y_u64 = &mut reinterpret_u8_as_u64(&mut out_y)?;
+                let out_z_u64 = &mut reinterpret_u8_as_u64(&mut out_z)?;
+                let mut params: Vec<*mut c_void> = vec![
+                    xy_col0.as_kernel_param(),
+                    xy_col1.as_kernel_param(),
+                    yz_col1.as_kernel_param(),
+                    n_yz.as_kernel_param(),
+                    xz_col1.as_kernel_param(),
+                    n_xz.as_kernel_param(),
+                    (&plan.xy_work_prefix).as_kernel_param(),
+                    (&plan.xy_yz_start).as_kernel_param(),
+                    (&plan.xy_yz_end).as_kernel_param(),
+                    (&plan.xy_xz_start).as_kernel_param(),
+                    (&plan.xy_xz_end).as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    materialize_offsets.as_kernel_param(),
+                    total_rows.as_kernel_param(),
+                    out_x_u64.as_kernel_param(),
+                    out_y_u64.as_kernel_param(),
+                    out_z_u64.as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+                        })?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_mat
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize commit failed: {e}")))?;
         cu_stream.synchronize().map_err(|e| {
             XlogError::Kernel(format!("{ctx}: materialize stream sync failed: {e}"))
@@ -2731,11 +2875,13 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let e1_col1 = metadata_column_u32(e1, 1)?;
-        let e2_col0 = metadata_column_u32(e2, 0)?;
-        let e2_col1 = metadata_column_u32(e2, 1)?;
-        let e3_col0 = metadata_column_u32(e3, 0)?;
+        let e1_col1 = &metadata_column_u32(e1, 1)?;
+        let e2_col0 = &metadata_column_u32(e2, 0)?;
+        let e2_col1 = &metadata_column_u32(e2, 1)?;
+        let e3_col0 = &metadata_column_u32(e3, 0)?;
 
+        let mut scan_scratch =
+            self.multiblock_scan_u32_scratch_for_len(e2_prefix_len.max(prefix_len))?;
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(e1.num_rows_device());
         rec.read(e2.num_rows_device());
@@ -2748,94 +2894,103 @@ impl CudaKernelProvider {
         rec.write(&e1_work_prefix);
         rec.write(&e1_e2_start);
         rec.write(&e1_e2_end);
+        for level in scan_scratch.levels() {
+            rec.read_write(level);
+        }
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
-
-        let e2_kernel = self
-            .device()
-            .inner()
-            .get_func(
-                WCOJ_MODULE,
-                wcoj_kernels::WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U32,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel(
-                    "wcoj_4cycle_build_e2_work_prefix_u32 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            let e2_kernel = self
+                .device()
+                .inner()
+                .get_func(
+                    WCOJ_MODULE,
+                    wcoj_kernels::WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U32,
                 )
-            })?;
-        let e2_grid = n_e2.div_ceil(BLOCK_SIZE);
-        unsafe {
-            e2_kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (e2_grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (e2_col1, n_e2, e3_col0, n_e3, &mut e2_work_prefix),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "wcoj_4cycle_build_e2_work_prefix_u32 launch failed: {e}"
-                    ))
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_4cycle_build_e2_work_prefix_u32 kernel not found".to_string(),
+                    )
                 })?;
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            &mut e2_work_prefix,
-            e2_prefix_len,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
+            let e2_grid = n_e2.div_ceil(BLOCK_SIZE);
+            unsafe {
+                e2_kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (e2_grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (e2_col1, n_e2, e3_col0, n_e3, &mut e2_work_prefix),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_4cycle_build_e2_work_prefix_u32 launch failed: {e}"
+                        ))
+                    })?;
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut e2_work_prefix,
+                e2_prefix_len,
+                stream,
+                &mut scan_scratch,
+            )?;
 
-        let kernel = self
-            .device()
-            .inner()
-            .get_func(
-                WCOJ_MODULE,
-                wcoj_kernels::WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U32,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel("wcoj_4cycle_build_hg_work_plan_u32 kernel not found".to_string())
-            })?;
-        let grid = n_e1.div_ceil(BLOCK_SIZE);
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        e1_col1,
-                        n_e1,
-                        e2_col0,
-                        n_e2,
-                        &e2_work_prefix,
-                        &mut e1_work_prefix,
-                        &mut e1_e2_start,
-                        &mut e1_e2_end,
-                    ),
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(
+                    WCOJ_MODULE,
+                    wcoj_kernels::WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U32,
                 )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "wcoj_4cycle_build_hg_work_plan_u32 launch failed: {e}"
-                    ))
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_4cycle_build_hg_work_plan_u32 kernel not found".to_string(),
+                    )
                 })?;
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            &mut e1_work_prefix,
-            prefix_len,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
-        rec.commit(runtime)
+            let grid = n_e1.div_ceil(BLOCK_SIZE);
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            e1_col1,
+                            n_e1,
+                            e2_col0,
+                            n_e2,
+                            &e2_work_prefix,
+                            &mut e1_work_prefix,
+                            &mut e1_e2_start,
+                            &mut e1_e2_end,
+                        ),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_4cycle_build_hg_work_plan_u32 launch failed: {e}"
+                        ))
+                    })?;
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut e1_work_prefix,
+                prefix_len,
+                stream,
+                &mut scan_scratch,
+            )?;
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -2931,13 +3086,13 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let e1_col0 = metadata_column_u32(e1, 0)?;
-        let e1_col1 = metadata_column_u32(e1, 1)?;
-        let e2_col1 = metadata_column_u32(e2, 1)?;
-        let e3_col0 = metadata_column_u32(e3, 0)?;
-        let e3_col1 = metadata_column_u32(e3, 1)?;
-        let e4_col0 = metadata_column_u32(e4, 0)?;
-        let e4_col1 = metadata_column_u32(e4, 1)?;
+        let e1_col0 = &metadata_column_u32(e1, 0)?;
+        let e1_col1 = &metadata_column_u32(e1, 1)?;
+        let e2_col1 = &metadata_column_u32(e2, 1)?;
+        let e3_col0 = &metadata_column_u32(e3, 0)?;
+        let e3_col1 = &metadata_column_u32(e3, 1)?;
+        let e4_col0 = &metadata_column_u32(e4, 0)?;
+        let e4_col1 = &metadata_column_u32(e4, 1)?;
         let n_e3 = self.metadata_logical_rows(e3)?;
         let n_e4 = self.metadata_logical_rows(e4)?;
 
@@ -2948,6 +3103,8 @@ impl CudaKernelProvider {
                 .as_ref()
                 .expect("local HG counts allocated when grid exceeds single-block scan")
         };
+        let mut scan_scratch =
+            self.multiblock_scan_u32_scratch_for_len(if grid > 1024 { grid } else { 0 })?;
         let mut rec_hg = LaunchRecorder::new_strict(launch_stream);
         rec_hg.read(e1.num_rows_device());
         rec_hg.read(e2.num_rows_device());
@@ -2975,133 +3132,146 @@ impl CudaKernelProvider {
             );
         }
         rec_hg.write(&total_rows_device);
+        for level in scan_scratch.levels() {
+            rec_hg.read_write(level);
+        }
         rec_hg
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: HG preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_COUNT_HG_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_4cycle_count_hg_u32 kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                e1_col0.as_kernel_param(),
-                e1_col1.as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                e2_col1.as_kernel_param(),
-                e3_col0.as_kernel_param(),
-                e3_col1.as_kernel_param(),
-                n_e3.as_kernel_param(),
-                e4_col0.as_kernel_param(),
-                e4_col1.as_kernel_param(),
-                n_e4.as_kernel_param(),
-                (&plan.e1_work_prefix).as_kernel_param(),
-                (&plan.e2_work_prefix).as_kernel_param(),
-                (&plan.e1_e2_start).as_kernel_param(),
-                (&plan.e1_e2_end).as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                count_u32.as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("{ctx}: count launch failed: {e}")))?;
-            }
-        }
-        if grid <= 1024 {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_SCAN_HG_BLOCK_COUNTS_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_scan_hg_block_counts_u32 kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                count_u32.as_kernel_param(),
-                grid.as_kernel_param(),
-                (&plan.block_offsets).as_kernel_param(),
-                (&total_rows_device).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (1, 1, 1),
-                            block_dim: (1024, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("{ctx}: scan failed: {e}")))?;
-            }
-        } else {
-            let offsets_mut = local_offsets
-                .as_mut()
-                .expect("local HG offsets allocated when grid exceeds single-block scan");
-            unsafe {
-                let res = sys::cuMemcpyDtoDAsync_v2(
-                    *offsets_mut.device_ptr(),
-                    *count_u32.device_ptr(),
-                    bytes_count,
-                    cu_stream.cu_stream(),
-                );
-                if res != sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "{ctx}: DtoD count to offsets failed: {res:?}"
-                    )));
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_COUNT_HG_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("wcoj_4cycle_count_hg_u32 kernel not found".to_string())
+                    })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    e1_col0.as_kernel_param(),
+                    e1_col1.as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    e2_col1.as_kernel_param(),
+                    e3_col0.as_kernel_param(),
+                    e3_col1.as_kernel_param(),
+                    n_e3.as_kernel_param(),
+                    e4_col0.as_kernel_param(),
+                    e4_col1.as_kernel_param(),
+                    n_e4.as_kernel_param(),
+                    (&plan.e1_work_prefix).as_kernel_param(),
+                    (&plan.e2_work_prefix).as_kernel_param(),
+                    (&plan.e1_e2_start).as_kernel_param(),
+                    (&plan.e1_e2_end).as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    count_u32.as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: count launch failed: {e}"))
+                        })?;
                 }
             }
-            self.multiblock_scan_u32_inplace_on_stream(
-                offsets_mut,
-                grid,
-                &cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-            let total_kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                count_u32.as_kernel_param(),
-                (&*offsets_mut).as_kernel_param(),
-                grid.as_kernel_param(),
-                (&total_rows_device).as_kernel_param(),
-            ];
-            unsafe {
-                total_kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (1, 1, 1),
-                            block_dim: (1, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("{ctx}: total failed: {e}")))?;
+            if grid <= 1024 {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_SCAN_HG_BLOCK_COUNTS_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_scan_hg_block_counts_u32 kernel not found".to_string(),
+                        )
+                    })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    count_u32.as_kernel_param(),
+                    grid.as_kernel_param(),
+                    (&plan.block_offsets).as_kernel_param(),
+                    (&total_rows_device).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1024, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| XlogError::Kernel(format!("{ctx}: scan failed: {e}")))?;
+                }
+            } else {
+                let offsets_mut = local_offsets
+                    .as_mut()
+                    .expect("local HG offsets allocated when grid exceeds single-block scan");
+                unsafe {
+                    let res = sys::cuMemcpyDtoDAsync_v2(
+                        *offsets_mut.device_ptr(),
+                        *count_u32.device_ptr(),
+                        bytes_count,
+                        stream.stream().cu_stream(),
+                    );
+                    if res != sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "{ctx}: DtoD count to offsets failed: {res:?}"
+                        )));
+                    }
+                }
+                self.multiblock_scan_u32_inplace_on_stream(
+                    offsets_mut,
+                    grid,
+                    stream,
+                    &mut scan_scratch,
+                )?;
+                let total_kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
+                    })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    count_u32.as_kernel_param(),
+                    (&*offsets_mut).as_kernel_param(),
+                    grid.as_kernel_param(),
+                    (&total_rows_device).as_kernel_param(),
+                ];
+                unsafe {
+                    total_kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| XlogError::Kernel(format!("{ctx}: total failed: {e}")))?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_hg = unsafe { rec_hg.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_hg
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: count commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -3151,61 +3321,70 @@ impl CudaKernelProvider {
         rec_mat
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_MATERIALIZE_HG_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_4cycle_materialize_hg_u32 kernel not found".to_string())
-                })?;
-            let out_w_u32 = unsafe { reinterpret_u8_as_u32(&mut out_w) };
-            let out_x_u32 = unsafe { reinterpret_u8_as_u32(&mut out_x) };
-            let out_y_u32 = unsafe { reinterpret_u8_as_u32(&mut out_y) };
-            let out_z_u32 = unsafe { reinterpret_u8_as_u32(&mut out_z) };
-            let mut params: Vec<*mut c_void> = vec![
-                e1_col0.as_kernel_param(),
-                e1_col1.as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                e2_col1.as_kernel_param(),
-                e3_col0.as_kernel_param(),
-                e3_col1.as_kernel_param(),
-                n_e3.as_kernel_param(),
-                e4_col0.as_kernel_param(),
-                e4_col1.as_kernel_param(),
-                n_e4.as_kernel_param(),
-                (&plan.e1_work_prefix).as_kernel_param(),
-                (&plan.e2_work_prefix).as_kernel_param(),
-                (&plan.e1_e2_start).as_kernel_param(),
-                (&plan.e1_e2_end).as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                materialize_offsets.as_kernel_param(),
-                total_rows.as_kernel_param(),
-                out_w_u32.as_kernel_param(),
-                out_x_u32.as_kernel_param(),
-                out_y_u32.as_kernel_param(),
-                out_z_u32.as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_MATERIALIZE_HG_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_4cycle_materialize_hg_u32 kernel not found".to_string(),
+                        )
                     })?;
+                let out_w_u32 = &mut reinterpret_u8_as_u32(&mut out_w)?;
+                let out_x_u32 = &mut reinterpret_u8_as_u32(&mut out_x)?;
+                let out_y_u32 = &mut reinterpret_u8_as_u32(&mut out_y)?;
+                let out_z_u32 = &mut reinterpret_u8_as_u32(&mut out_z)?;
+                let mut params: Vec<*mut c_void> = vec![
+                    e1_col0.as_kernel_param(),
+                    e1_col1.as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    e2_col1.as_kernel_param(),
+                    e3_col0.as_kernel_param(),
+                    e3_col1.as_kernel_param(),
+                    n_e3.as_kernel_param(),
+                    e4_col0.as_kernel_param(),
+                    e4_col1.as_kernel_param(),
+                    n_e4.as_kernel_param(),
+                    (&plan.e1_work_prefix).as_kernel_param(),
+                    (&plan.e2_work_prefix).as_kernel_param(),
+                    (&plan.e1_e2_start).as_kernel_param(),
+                    (&plan.e1_e2_end).as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    materialize_offsets.as_kernel_param(),
+                    total_rows.as_kernel_param(),
+                    out_w_u32.as_kernel_param(),
+                    out_x_u32.as_kernel_param(),
+                    out_y_u32.as_kernel_param(),
+                    out_z_u32.as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+                        })?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_mat
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize commit failed: {e}")))?;
         cu_stream.synchronize().map_err(|e| {
             XlogError::Kernel(format!("{ctx}: materialize stream sync failed: {e}"))
@@ -3296,13 +3475,13 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let e1_col0 = metadata_column_u32(e1, 0)?;
-        let e1_col1 = metadata_column_u32(e1, 1)?;
-        let e2_col1 = metadata_column_u32(e2, 1)?;
-        let e3_col0 = metadata_column_u32(e3, 0)?;
-        let e3_col1 = metadata_column_u32(e3, 1)?;
-        let e4_col0 = metadata_column_u32(e4, 0)?;
-        let e4_col1 = metadata_column_u32(e4, 1)?;
+        let e1_col0 = &metadata_column_u32(e1, 0)?;
+        let e1_col1 = &metadata_column_u32(e1, 1)?;
+        let e2_col1 = &metadata_column_u32(e2, 1)?;
+        let e3_col0 = &metadata_column_u32(e3, 0)?;
+        let e3_col1 = &metadata_column_u32(e3, 1)?;
+        let e4_col0 = &metadata_column_u32(e4, 0)?;
+        let e4_col1 = &metadata_column_u32(e4, 1)?;
         let n_e3 = self.metadata_logical_rows(e3)?;
         let n_e4 = self.metadata_logical_rows(e4)?;
 
@@ -3337,56 +3516,63 @@ impl CudaKernelProvider {
         rec.write(&row_counts);
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(
-                    WCOJ_MODULE,
-                    wcoj_kernels::WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U32,
-                )
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "wcoj_4cycle_groupby_root_count_hg_u32 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(
+                        WCOJ_MODULE,
+                        wcoj_kernels::WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U32,
                     )
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                e1_col0.as_kernel_param(),
-                e1_col1.as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                e2_col1.as_kernel_param(),
-                e3_col0.as_kernel_param(),
-                e3_col1.as_kernel_param(),
-                n_e3.as_kernel_param(),
-                e4_col0.as_kernel_param(),
-                e4_col1.as_kernel_param(),
-                n_e4.as_kernel_param(),
-                (&plan.e1_work_prefix).as_kernel_param(),
-                (&plan.e2_work_prefix).as_kernel_param(),
-                (&plan.e1_e2_start).as_kernel_param(),
-                (&plan.e1_e2_end).as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                (&row_counts).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: groupby-count launch failed: {e}"))
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_4cycle_groupby_root_count_hg_u32 kernel not found".to_string(),
+                        )
                     })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    e1_col0.as_kernel_param(),
+                    e1_col1.as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    e2_col1.as_kernel_param(),
+                    e3_col0.as_kernel_param(),
+                    e3_col1.as_kernel_param(),
+                    n_e3.as_kernel_param(),
+                    e4_col0.as_kernel_param(),
+                    e4_col1.as_kernel_param(),
+                    n_e4.as_kernel_param(),
+                    (&plan.e1_work_prefix).as_kernel_param(),
+                    (&plan.e2_work_prefix).as_kernel_param(),
+                    (&plan.e1_e2_start).as_kernel_param(),
+                    (&plan.e1_e2_end).as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    (&row_counts).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: groupby-count launch failed: {e}"))
+                        })?;
+                }
             }
-        }
-        rec.commit(runtime)
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
 
         // Staging buffer (W, count) over the n_e1 input rows: W is a
@@ -3580,13 +3766,13 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let e1_col0 = metadata_column_u32(e1, 0)?;
-        let e1_col1 = metadata_column_u32(e1, 1)?;
-        let e2_col1 = metadata_column_u32(e2, 1)?;
-        let e3_col0 = metadata_column_u32(e3, 0)?;
-        let e3_col1 = metadata_column_u32(e3, 1)?;
-        let e4_col0 = metadata_column_u32(e4, 0)?;
-        let e4_col1 = metadata_column_u32(e4, 1)?;
+        let e1_col0 = &metadata_column_u32(e1, 0)?;
+        let e1_col1 = &metadata_column_u32(e1, 1)?;
+        let e2_col1 = &metadata_column_u32(e2, 1)?;
+        let e3_col0 = &metadata_column_u32(e3, 0)?;
+        let e3_col1 = &metadata_column_u32(e3, 1)?;
+        let e4_col0 = &metadata_column_u32(e4, 0)?;
+        let e4_col1 = &metadata_column_u32(e4, 1)?;
         let n_e3 = self.metadata_logical_rows(e3)?;
         let n_e4 = self.metadata_logical_rows(e4)?;
         let value_sel: u32 = match value {
@@ -3632,74 +3818,81 @@ impl CudaKernelProvider {
         rec.write(&row_agg);
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
-        if matches!(agg_op, AggOp::Min) {
-            // Min identity: u32::MAX (compaction drops untouched rows).
-            let fill = self
-                .device()
-                .inner()
-                .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel("arith_fill_const_u32 kernel not found".to_string())
-                })?;
-            let row_agg_u32 = unsafe { reinterpret_u8_as_u32(&mut row_agg) };
-            // SAFETY: arith_fill_const_u32(value, n, output)
-            unsafe {
-                fill.clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig::for_num_elems(n_e1),
-                        (u32::MAX, n_e1, &mut *row_agg_u32),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: min identity fill failed: {e}"))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            if matches!(agg_op, AggOp::Min) {
+                // Min identity: u32::MAX (compaction drops untouched rows).
+                let fill = self
+                    .device()
+                    .inner()
+                    .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("arith_fill_const_u32 kernel not found".to_string())
                     })?;
+                let row_agg_u32 = &mut reinterpret_u8_as_u32(&mut row_agg)?;
+                // SAFETY: arith_fill_const_u32(value, n, output)
+                unsafe {
+                    fill.clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig::for_num_elems(n_e1),
+                            (u32::MAX, n_e1, &mut *row_agg_u32),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: min identity fill failed: {e}"))
+                        })?;
+                }
             }
-        }
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, kernel_name)
-                .ok_or_else(|| XlogError::Kernel(format!("{kernel_name} kernel not found")))?;
-            let mut params: Vec<*mut c_void> = vec![
-                e1_col0.as_kernel_param(),
-                e1_col1.as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                e2_col1.as_kernel_param(),
-                e3_col0.as_kernel_param(),
-                e3_col1.as_kernel_param(),
-                n_e3.as_kernel_param(),
-                e4_col0.as_kernel_param(),
-                e4_col1.as_kernel_param(),
-                n_e4.as_kernel_param(),
-                value_sel.as_kernel_param(),
-                (&plan.e1_work_prefix).as_kernel_param(),
-                (&plan.e2_work_prefix).as_kernel_param(),
-                (&plan.e1_e2_start).as_kernel_param(),
-                (&plan.e1_e2_end).as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                (&row_counts).as_kernel_param(),
-                (&row_agg).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: groupby-agg launch failed: {e}"))
-                    })?;
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, kernel_name)
+                    .ok_or_else(|| XlogError::Kernel(format!("{kernel_name} kernel not found")))?;
+                let mut params: Vec<*mut c_void> = vec![
+                    e1_col0.as_kernel_param(),
+                    e1_col1.as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    e2_col1.as_kernel_param(),
+                    e3_col0.as_kernel_param(),
+                    e3_col1.as_kernel_param(),
+                    n_e3.as_kernel_param(),
+                    e4_col0.as_kernel_param(),
+                    e4_col1.as_kernel_param(),
+                    n_e4.as_kernel_param(),
+                    value_sel.as_kernel_param(),
+                    (&plan.e1_work_prefix).as_kernel_param(),
+                    (&plan.e2_work_prefix).as_kernel_param(),
+                    (&plan.e1_e2_start).as_kernel_param(),
+                    (&plan.e1_e2_end).as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    (&row_counts).as_kernel_param(),
+                    (&row_agg).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: groupby-agg launch failed: {e}"))
+                        })?;
+                }
             }
-        }
-        rec.commit(runtime)
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
 
         // Staging buffer (W, count, agg) over the n_e1 input rows: W is a
@@ -3839,13 +4032,13 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let e1_col0 = metadata_column_u64(e1, 0)?;
-        let e1_col1 = metadata_column_u64(e1, 1)?;
-        let e2_col1 = metadata_column_u64(e2, 1)?;
-        let e3_col0 = metadata_column_u64(e3, 0)?;
-        let e3_col1 = metadata_column_u64(e3, 1)?;
-        let e4_col0 = metadata_column_u64(e4, 0)?;
-        let e4_col1 = metadata_column_u64(e4, 1)?;
+        let e1_col0 = &metadata_column_u64(e1, 0)?;
+        let e1_col1 = &metadata_column_u64(e1, 1)?;
+        let e2_col1 = &metadata_column_u64(e2, 1)?;
+        let e3_col0 = &metadata_column_u64(e3, 0)?;
+        let e3_col1 = &metadata_column_u64(e3, 1)?;
+        let e4_col0 = &metadata_column_u64(e4, 0)?;
+        let e4_col1 = &metadata_column_u64(e4, 1)?;
         let n_e3 = self.metadata_logical_rows(e3)?;
         let n_e4 = self.metadata_logical_rows(e4)?;
 
@@ -3876,56 +4069,63 @@ impl CudaKernelProvider {
         rec.write(&row_counts);
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(
-                    WCOJ_MODULE,
-                    wcoj_kernels::WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U64,
-                )
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "wcoj_4cycle_groupby_root_count_hg_u64 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(
+                        WCOJ_MODULE,
+                        wcoj_kernels::WCOJ_4CYCLE_GROUPBY_ROOT_COUNT_HG_U64,
                     )
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                e1_col0.as_kernel_param(),
-                e1_col1.as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                e2_col1.as_kernel_param(),
-                e3_col0.as_kernel_param(),
-                e3_col1.as_kernel_param(),
-                n_e3.as_kernel_param(),
-                e4_col0.as_kernel_param(),
-                e4_col1.as_kernel_param(),
-                n_e4.as_kernel_param(),
-                (&plan.e1_work_prefix).as_kernel_param(),
-                (&plan.e2_work_prefix).as_kernel_param(),
-                (&plan.e1_e2_start).as_kernel_param(),
-                (&plan.e1_e2_end).as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                (&row_counts).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: groupby-count launch failed: {e}"))
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_4cycle_groupby_root_count_hg_u64 kernel not found".to_string(),
+                        )
                     })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    e1_col0.as_kernel_param(),
+                    e1_col1.as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    e2_col1.as_kernel_param(),
+                    e3_col0.as_kernel_param(),
+                    e3_col1.as_kernel_param(),
+                    n_e3.as_kernel_param(),
+                    e4_col0.as_kernel_param(),
+                    e4_col1.as_kernel_param(),
+                    n_e4.as_kernel_param(),
+                    (&plan.e1_work_prefix).as_kernel_param(),
+                    (&plan.e2_work_prefix).as_kernel_param(),
+                    (&plan.e1_e2_start).as_kernel_param(),
+                    (&plan.e1_e2_end).as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    (&row_counts).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: groupby-count launch failed: {e}"))
+                        })?;
+                }
             }
-        }
-        rec.commit(runtime)
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
 
         // Per-W reduction via the relation metadata: one (unique W, group
@@ -3951,44 +4151,53 @@ impl CudaKernelProvider {
         rec_sum
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: reduce preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(
-                    WCOJ_MODULE,
-                    wcoj_kernels::WCOJ_GROUPBY_ROOT_SEGMENT_SUM_COUNTS_U32,
-                )
-                .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "wcoj_groupby_root_segment_sum_counts_u32 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(
+                        WCOJ_MODULE,
+                        wcoj_kernels::WCOJ_GROUPBY_ROOT_SEGMENT_SUM_COUNTS_U32,
                     )
-                })?;
-            let reduce_grid = n_e1.div_ceil(BLOCK_SIZE);
-            let mut params: Vec<*mut c_void> = vec![
-                (&row_counts).as_kernel_param(),
-                n_e1.as_kernel_param(),
-                (&meta.prefix_sum).as_kernel_param(),
-                key_count.as_kernel_param(),
-                (&sums).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (reduce_grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("{ctx}: reduce launch failed: {e}")))?;
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_groupby_root_segment_sum_counts_u32 kernel not found".to_string(),
+                        )
+                    })?;
+                let reduce_grid = n_e1.div_ceil(BLOCK_SIZE);
+                let mut params: Vec<*mut c_void> = vec![
+                    (&row_counts).as_kernel_param(),
+                    n_e1.as_kernel_param(),
+                    (&meta.prefix_sum).as_kernel_param(),
+                    key_count.as_kernel_param(),
+                    (&sums).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (reduce_grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: reduce launch failed: {e}"))
+                        })?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_sum = unsafe { rec_sum.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_sum
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: reduce commit failed: {e}")))?;
 
         // (unique W, total) buffer over the key_count roots, then drop the
@@ -4007,27 +4216,34 @@ impl CudaKernelProvider {
         rec_copy
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: copy preflight failed: {e}")))?;
-        unsafe {
-            let res = sys::cuMemcpyDtoDAsync_v2(
-                *w_copy.device_ptr(),
-                *meta.unique_keys.device_ptr(),
-                key_count as usize * std::mem::size_of::<u64>(),
-                cu_stream.cu_stream(),
-            );
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "{ctx}: DtoD unique keys copy failed: {res:?}"
-                )));
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                let res = sys::cuMemcpyDtoDAsync_v2(
+                    *w_copy.device_ptr(),
+                    *meta.unique_keys.device_ptr(),
+                    key_count as usize * std::mem::size_of::<u64>(),
+                    stream.stream().cu_stream(),
+                );
+                if res != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "{ctx}: DtoD unique keys copy failed: {res:?}"
+                    )));
+                }
             }
-        }
-        self.htod_launch_metadata_async_copy_one(
-            &key_count,
-            &d_num_rows,
-            &cu_stream,
-            &format!("{ctx}: d_num_rows"),
-        )?;
+            self.initialize_launch_metadata_u32(
+                key_count,
+                &d_num_rows,
+                stream,
+                &format!("{ctx}: d_num_rows"),
+            )?;
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_copy = unsafe { rec_copy.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_copy
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: copy commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -4116,11 +4332,13 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let e1_col1 = metadata_column_u64(e1, 1)?;
-        let e2_col0 = metadata_column_u64(e2, 0)?;
-        let e2_col1 = metadata_column_u64(e2, 1)?;
-        let e3_col0 = metadata_column_u64(e3, 0)?;
+        let e1_col1 = &metadata_column_u64(e1, 1)?;
+        let e2_col0 = &metadata_column_u64(e2, 0)?;
+        let e2_col1 = &metadata_column_u64(e2, 1)?;
+        let e3_col0 = &metadata_column_u64(e3, 0)?;
 
+        let mut scan_scratch =
+            self.multiblock_scan_u32_scratch_for_len(e2_prefix_len.max(prefix_len))?;
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(e1.num_rows_device());
         rec.read(e2.num_rows_device());
@@ -4133,94 +4351,103 @@ impl CudaKernelProvider {
         rec.write(&e1_work_prefix);
         rec.write(&e1_e2_start);
         rec.write(&e1_e2_end);
+        for level in scan_scratch.levels() {
+            rec.read_write(level);
+        }
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
-
-        let e2_kernel = self
-            .device()
-            .inner()
-            .get_func(
-                WCOJ_MODULE,
-                wcoj_kernels::WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U64,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel(
-                    "wcoj_4cycle_build_e2_work_prefix_u64 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            let e2_kernel = self
+                .device()
+                .inner()
+                .get_func(
+                    WCOJ_MODULE,
+                    wcoj_kernels::WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U64,
                 )
-            })?;
-        let e2_grid = n_e2.div_ceil(BLOCK_SIZE);
-        unsafe {
-            e2_kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (e2_grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (e2_col1, n_e2, e3_col0, n_e3, &mut e2_work_prefix),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "wcoj_4cycle_build_e2_work_prefix_u64 launch failed: {e}"
-                    ))
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_4cycle_build_e2_work_prefix_u64 kernel not found".to_string(),
+                    )
                 })?;
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            &mut e2_work_prefix,
-            e2_prefix_len,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
+            let e2_grid = n_e2.div_ceil(BLOCK_SIZE);
+            unsafe {
+                e2_kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (e2_grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (e2_col1, n_e2, e3_col0, n_e3, &mut e2_work_prefix),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_4cycle_build_e2_work_prefix_u64 launch failed: {e}"
+                        ))
+                    })?;
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut e2_work_prefix,
+                e2_prefix_len,
+                stream,
+                &mut scan_scratch,
+            )?;
 
-        let kernel = self
-            .device()
-            .inner()
-            .get_func(
-                WCOJ_MODULE,
-                wcoj_kernels::WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U64,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel("wcoj_4cycle_build_hg_work_plan_u64 kernel not found".to_string())
-            })?;
-        let grid = n_e1.div_ceil(BLOCK_SIZE);
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        e1_col1,
-                        n_e1,
-                        e2_col0,
-                        n_e2,
-                        &e2_work_prefix,
-                        &mut e1_work_prefix,
-                        &mut e1_e2_start,
-                        &mut e1_e2_end,
-                    ),
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(
+                    WCOJ_MODULE,
+                    wcoj_kernels::WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U64,
                 )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "wcoj_4cycle_build_hg_work_plan_u64 launch failed: {e}"
-                    ))
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_4cycle_build_hg_work_plan_u64 kernel not found".to_string(),
+                    )
                 })?;
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            &mut e1_work_prefix,
-            prefix_len,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
-        rec.commit(runtime)
+            let grid = n_e1.div_ceil(BLOCK_SIZE);
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            e1_col1,
+                            n_e1,
+                            e2_col0,
+                            n_e2,
+                            &e2_work_prefix,
+                            &mut e1_work_prefix,
+                            &mut e1_e2_start,
+                            &mut e1_e2_end,
+                        ),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_4cycle_build_hg_work_plan_u64 launch failed: {e}"
+                        ))
+                    })?;
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut e1_work_prefix,
+                prefix_len,
+                stream,
+                &mut scan_scratch,
+            )?;
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -4304,13 +4531,13 @@ impl CudaKernelProvider {
                 ))
             })?;
 
-        let e1_col0 = metadata_column_u64(e1, 0)?;
-        let e1_col1 = metadata_column_u64(e1, 1)?;
-        let e2_col1 = metadata_column_u64(e2, 1)?;
-        let e3_col0 = metadata_column_u64(e3, 0)?;
-        let e3_col1 = metadata_column_u64(e3, 1)?;
-        let e4_col0 = metadata_column_u64(e4, 0)?;
-        let e4_col1 = metadata_column_u64(e4, 1)?;
+        let e1_col0 = &metadata_column_u64(e1, 0)?;
+        let e1_col1 = &metadata_column_u64(e1, 1)?;
+        let e2_col1 = &metadata_column_u64(e2, 1)?;
+        let e3_col0 = &metadata_column_u64(e3, 0)?;
+        let e3_col1 = &metadata_column_u64(e3, 1)?;
+        let e4_col0 = &metadata_column_u64(e4, 0)?;
+        let e4_col1 = &metadata_column_u64(e4, 1)?;
         let n_e3 = self.metadata_logical_rows(e3)?;
         let n_e4 = self.metadata_logical_rows(e4)?;
 
@@ -4321,6 +4548,8 @@ impl CudaKernelProvider {
                 .as_ref()
                 .expect("local HG counts allocated when grid exceeds single-block scan")
         };
+        let mut scan_scratch =
+            self.multiblock_scan_u32_scratch_for_len(if grid > 1024 { grid } else { 0 })?;
         let mut rec_hg = LaunchRecorder::new_strict(launch_stream);
         rec_hg.read(e1.num_rows_device());
         rec_hg.read(e2.num_rows_device());
@@ -4348,133 +4577,146 @@ impl CudaKernelProvider {
             );
         }
         rec_hg.write(&total_rows_device);
+        for level in scan_scratch.levels() {
+            rec_hg.read_write(level);
+        }
         rec_hg
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: HG preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_COUNT_HG_U64)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_4cycle_count_hg_u64 kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                e1_col0.as_kernel_param(),
-                e1_col1.as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                e2_col1.as_kernel_param(),
-                e3_col0.as_kernel_param(),
-                e3_col1.as_kernel_param(),
-                n_e3.as_kernel_param(),
-                e4_col0.as_kernel_param(),
-                e4_col1.as_kernel_param(),
-                n_e4.as_kernel_param(),
-                (&plan.e1_work_prefix).as_kernel_param(),
-                (&plan.e2_work_prefix).as_kernel_param(),
-                (&plan.e1_e2_start).as_kernel_param(),
-                (&plan.e1_e2_end).as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                count_u32.as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("{ctx}: count launch failed: {e}")))?;
-            }
-        }
-        if grid <= 1024 {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_SCAN_HG_BLOCK_COUNTS_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_scan_hg_block_counts_u32 kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                count_u32.as_kernel_param(),
-                grid.as_kernel_param(),
-                (&plan.block_offsets).as_kernel_param(),
-                (&total_rows_device).as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (1, 1, 1),
-                            block_dim: (1024, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("{ctx}: scan failed: {e}")))?;
-            }
-        } else {
-            let offsets_mut = local_offsets
-                .as_mut()
-                .expect("local HG offsets allocated when grid exceeds single-block scan");
-            unsafe {
-                let res = sys::cuMemcpyDtoDAsync_v2(
-                    *offsets_mut.device_ptr(),
-                    *count_u32.device_ptr(),
-                    bytes_count,
-                    cu_stream.cu_stream(),
-                );
-                if res != sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "{ctx}: DtoD count to offsets failed: {res:?}"
-                    )));
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_COUNT_HG_U64)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("wcoj_4cycle_count_hg_u64 kernel not found".to_string())
+                    })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    e1_col0.as_kernel_param(),
+                    e1_col1.as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    e2_col1.as_kernel_param(),
+                    e3_col0.as_kernel_param(),
+                    e3_col1.as_kernel_param(),
+                    n_e3.as_kernel_param(),
+                    e4_col0.as_kernel_param(),
+                    e4_col1.as_kernel_param(),
+                    n_e4.as_kernel_param(),
+                    (&plan.e1_work_prefix).as_kernel_param(),
+                    (&plan.e2_work_prefix).as_kernel_param(),
+                    (&plan.e1_e2_start).as_kernel_param(),
+                    (&plan.e1_e2_end).as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    count_u32.as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: count launch failed: {e}"))
+                        })?;
                 }
             }
-            self.multiblock_scan_u32_inplace_on_stream(
-                offsets_mut,
-                grid,
-                &cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-            let total_kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
-                })?;
-            let mut params: Vec<*mut c_void> = vec![
-                count_u32.as_kernel_param(),
-                (&*offsets_mut).as_kernel_param(),
-                grid.as_kernel_param(),
-                (&total_rows_device).as_kernel_param(),
-            ];
-            unsafe {
-                total_kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (1, 1, 1),
-                            block_dim: (1, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| XlogError::Kernel(format!("{ctx}: total failed: {e}")))?;
+            if grid <= 1024 {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_SCAN_HG_BLOCK_COUNTS_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_scan_hg_block_counts_u32 kernel not found".to_string(),
+                        )
+                    })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    count_u32.as_kernel_param(),
+                    grid.as_kernel_param(),
+                    (&plan.block_offsets).as_kernel_param(),
+                    (&total_rows_device).as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1024, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| XlogError::Kernel(format!("{ctx}: scan failed: {e}")))?;
+                }
+            } else {
+                let offsets_mut = local_offsets
+                    .as_mut()
+                    .expect("local HG offsets allocated when grid exceeds single-block scan");
+                unsafe {
+                    let res = sys::cuMemcpyDtoDAsync_v2(
+                        *offsets_mut.device_ptr(),
+                        *count_u32.device_ptr(),
+                        bytes_count,
+                        stream.stream().cu_stream(),
+                    );
+                    if res != sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "{ctx}: DtoD count to offsets failed: {res:?}"
+                        )));
+                    }
+                }
+                self.multiblock_scan_u32_inplace_on_stream(
+                    offsets_mut,
+                    grid,
+                    stream,
+                    &mut scan_scratch,
+                )?;
+                let total_kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
+                    })?;
+                let mut params: Vec<*mut c_void> = vec![
+                    count_u32.as_kernel_param(),
+                    (&*offsets_mut).as_kernel_param(),
+                    grid.as_kernel_param(),
+                    (&total_rows_device).as_kernel_param(),
+                ];
+                unsafe {
+                    total_kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| XlogError::Kernel(format!("{ctx}: total failed: {e}")))?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_hg = unsafe { rec_hg.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_hg
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: count commit failed: {e}")))?;
         cu_stream
             .synchronize()
@@ -4524,61 +4766,70 @@ impl CudaKernelProvider {
         rec_mat
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize preflight failed: {e}")))?;
-        {
-            let kernel = self
-                .device()
-                .inner()
-                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_MATERIALIZE_HG_U64)
-                .ok_or_else(|| {
-                    XlogError::Kernel("wcoj_4cycle_materialize_hg_u64 kernel not found".to_string())
-                })?;
-            let out_w_u64 = unsafe { reinterpret_u8_as_u64(&mut out_w) };
-            let out_x_u64 = unsafe { reinterpret_u8_as_u64(&mut out_x) };
-            let out_y_u64 = unsafe { reinterpret_u8_as_u64(&mut out_y) };
-            let out_z_u64 = unsafe { reinterpret_u8_as_u64(&mut out_z) };
-            let mut params: Vec<*mut c_void> = vec![
-                e1_col0.as_kernel_param(),
-                e1_col1.as_kernel_param(),
-                plan.row_count.as_kernel_param(),
-                e2_col1.as_kernel_param(),
-                e3_col0.as_kernel_param(),
-                e3_col1.as_kernel_param(),
-                n_e3.as_kernel_param(),
-                e4_col0.as_kernel_param(),
-                e4_col1.as_kernel_param(),
-                n_e4.as_kernel_param(),
-                (&plan.e1_work_prefix).as_kernel_param(),
-                (&plan.e2_work_prefix).as_kernel_param(),
-                (&plan.e1_e2_start).as_kernel_param(),
-                (&plan.e1_e2_end).as_kernel_param(),
-                plan.total_work.as_kernel_param(),
-                plan.block_work_unit.as_kernel_param(),
-                materialize_offsets.as_kernel_param(),
-                total_rows.as_kernel_param(),
-                out_w_u64.as_kernel_param(),
-                out_x_u64.as_kernel_param(),
-                out_y_u64.as_kernel_param(),
-                out_z_u64.as_kernel_param(),
-            ];
-            unsafe {
-                kernel
-                    .clone()
-                    .launch_on_stream(
-                        &cu_stream,
-                        LaunchConfig {
-                            grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            {
+                let kernel = self
+                    .device()
+                    .inner()
+                    .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_MATERIALIZE_HG_U64)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "wcoj_4cycle_materialize_hg_u64 kernel not found".to_string(),
+                        )
                     })?;
+                let out_w_u64 = &mut reinterpret_u8_as_u64(&mut out_w)?;
+                let out_x_u64 = &mut reinterpret_u8_as_u64(&mut out_x)?;
+                let out_y_u64 = &mut reinterpret_u8_as_u64(&mut out_y)?;
+                let out_z_u64 = &mut reinterpret_u8_as_u64(&mut out_z)?;
+                let mut params: Vec<*mut c_void> = vec![
+                    e1_col0.as_kernel_param(),
+                    e1_col1.as_kernel_param(),
+                    plan.row_count.as_kernel_param(),
+                    e2_col1.as_kernel_param(),
+                    e3_col0.as_kernel_param(),
+                    e3_col1.as_kernel_param(),
+                    n_e3.as_kernel_param(),
+                    e4_col0.as_kernel_param(),
+                    e4_col1.as_kernel_param(),
+                    n_e4.as_kernel_param(),
+                    (&plan.e1_work_prefix).as_kernel_param(),
+                    (&plan.e2_work_prefix).as_kernel_param(),
+                    (&plan.e1_e2_start).as_kernel_param(),
+                    (&plan.e1_e2_end).as_kernel_param(),
+                    plan.total_work.as_kernel_param(),
+                    plan.block_work_unit.as_kernel_param(),
+                    materialize_offsets.as_kernel_param(),
+                    total_rows.as_kernel_param(),
+                    out_w_u64.as_kernel_param(),
+                    out_x_u64.as_kernel_param(),
+                    out_y_u64.as_kernel_param(),
+                    out_z_u64.as_kernel_param(),
+                ];
+                unsafe {
+                    kernel
+                        .clone()
+                        .launch_in(
+                            stream,
+                            LaunchConfig {
+                                grid_dim: (grid, 1, 1),
+                                block_dim: (BLOCK_SIZE, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut params,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+                        })?;
+                }
             }
-        }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec_mat = unsafe { rec_mat.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
         rec_mat
-            .commit(runtime)
+            .commit()
             .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize commit failed: {e}")))?;
         cu_stream.synchronize().map_err(|e| {
             XlogError::Kernel(format!("{ctx}: materialize stream sync failed: {e}"))
@@ -4630,7 +4881,7 @@ impl CudaKernelProvider {
         &self,
         input: &CudaBuffer,
         key_col_idx: usize,
-        keys: &TrackedCudaSlice<u32>,
+        keys: &DeviceMemoryView<u32>,
         launch_stream: StreamId,
     ) -> Result<WcojRelationMetadata<u32>> {
         let n = self.metadata_logical_rows(input)?;
@@ -4689,7 +4940,7 @@ impl CudaKernelProvider {
         &self,
         input: &CudaBuffer,
         key_col_idx: usize,
-        keys: &TrackedCudaSlice<u64>,
+        keys: &DeviceMemoryView<u64>,
         launch_stream: StreamId,
     ) -> Result<WcojRelationMetadata<u64>> {
         let n = self.metadata_logical_rows(input)?;
@@ -4752,7 +5003,7 @@ impl CudaKernelProvider {
         &self,
         input: &CudaBuffer,
         key_col_idx: usize,
-        keys: &TrackedCudaSlice<u32>,
+        keys: &DeviceMemoryView<u32>,
         n: u32,
         boundary_mask: &mut TrackedCudaSlice<u32>,
         boundary_prefix: &mut TrackedCudaSlice<u32>,
@@ -4773,56 +5024,65 @@ impl CudaKernelProvider {
                     launch_stream.0
                 ))
             })?;
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(n)?;
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(input.num_rows_device());
         rec.read_column(input.column(key_col_idx).expect("metadata key column"));
         rec.write(boundary_mask);
         rec.write(boundary_prefix);
+        for level in scan_scratch.levels() {
+            rec.read_write(level);
+        }
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "wcoj_build_metadata_u32_recorded: mark preflight failed: {e}"
             ))
         })?;
-
-        let kernel = self
-            .device()
-            .inner()
-            .get_func(
-                WCOJ_MODULE,
-                wcoj_kernels::WCOJ_BUILD_METADATA_MARK_BOUNDARIES_U32,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel(
-                    "wcoj_build_metadata_mark_boundaries_u32 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(
+                    WCOJ_MODULE,
+                    wcoj_kernels::WCOJ_BUILD_METADATA_MARK_BOUNDARIES_U32,
                 )
-            })?;
-        let grid = n.div_ceil(BLOCK_SIZE);
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (keys, n, &mut *boundary_mask, &mut *boundary_prefix),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "wcoj_build_metadata_mark_boundaries_u32 launch failed: {e}"
-                    ))
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_build_metadata_mark_boundaries_u32 kernel not found".to_string(),
+                    )
                 })?;
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            boundary_prefix,
-            n,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
-        rec.commit(runtime).map_err(|e| {
+            let grid = n.div_ceil(BLOCK_SIZE);
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (keys, n, &mut *boundary_mask, &mut *boundary_prefix),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_build_metadata_mark_boundaries_u32 launch failed: {e}"
+                        ))
+                    })?;
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                boundary_prefix,
+                n,
+                stream,
+                &mut scan_scratch,
+            )?;
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "wcoj_build_metadata_u32_recorded: mark commit failed: {e}"
             ))
@@ -4843,7 +5103,7 @@ impl CudaKernelProvider {
         &self,
         input: &CudaBuffer,
         key_col_idx: usize,
-        keys: &TrackedCudaSlice<u64>,
+        keys: &DeviceMemoryView<u64>,
         n: u32,
         boundary_mask: &mut TrackedCudaSlice<u32>,
         boundary_prefix: &mut TrackedCudaSlice<u32>,
@@ -4864,56 +5124,65 @@ impl CudaKernelProvider {
                     launch_stream.0
                 ))
             })?;
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(n)?;
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(input.num_rows_device());
         rec.read_column(input.column(key_col_idx).expect("metadata key column"));
         rec.write(boundary_mask);
         rec.write(boundary_prefix);
+        for level in scan_scratch.levels() {
+            rec.read_write(level);
+        }
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "wcoj_build_metadata_u64_recorded: mark preflight failed: {e}"
             ))
         })?;
-
-        let kernel = self
-            .device()
-            .inner()
-            .get_func(
-                WCOJ_MODULE,
-                wcoj_kernels::WCOJ_BUILD_METADATA_MARK_BOUNDARIES_U64,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel(
-                    "wcoj_build_metadata_mark_boundaries_u64 kernel not found".to_string(),
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(
+                    WCOJ_MODULE,
+                    wcoj_kernels::WCOJ_BUILD_METADATA_MARK_BOUNDARIES_U64,
                 )
-            })?;
-        let grid = n.div_ceil(BLOCK_SIZE);
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (keys, n, &mut *boundary_mask, &mut *boundary_prefix),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "wcoj_build_metadata_mark_boundaries_u64 launch failed: {e}"
-                    ))
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_build_metadata_mark_boundaries_u64 kernel not found".to_string(),
+                    )
                 })?;
-        }
-        self.multiblock_scan_u32_inplace_on_stream(
-            boundary_prefix,
-            n,
-            &cu_stream,
-            launch_stream,
-            runtime,
-        )?;
-        rec.commit(runtime).map_err(|e| {
+            let grid = n.div_ceil(BLOCK_SIZE);
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (keys, n, &mut *boundary_mask, &mut *boundary_prefix),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_build_metadata_mark_boundaries_u64 launch failed: {e}"
+                        ))
+                    })?;
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                boundary_prefix,
+                n,
+                stream,
+                &mut scan_scratch,
+            )?;
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "wcoj_build_metadata_u64_recorded: mark commit failed: {e}"
             ))
@@ -4934,7 +5203,7 @@ impl CudaKernelProvider {
         &self,
         input: &CudaBuffer,
         key_col_idx: usize,
-        keys: &TrackedCudaSlice<u32>,
+        keys: &DeviceMemoryView<u32>,
         n: u32,
         boundary_mask: &TrackedCudaSlice<u32>,
         boundary_prefix: &TrackedCudaSlice<u32>,
@@ -4971,42 +5240,50 @@ impl CudaKernelProvider {
                 "wcoj_build_metadata_u32_recorded: scatter preflight failed: {e}"
             ))
         })?;
-
-        let kernel = self
-            .device()
-            .inner()
-            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_BUILD_METADATA_SCATTER_U32)
-            .ok_or_else(|| {
-                XlogError::Kernel("wcoj_build_metadata_scatter_u32 kernel not found".to_string())
-            })?;
-        let grid = n.div_ceil(BLOCK_SIZE);
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        keys,
-                        n,
-                        boundary_mask,
-                        boundary_prefix,
-                        &mut *unique_keys,
-                        &mut *fan_out,
-                        &mut *prefix_sum,
-                    ),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "wcoj_build_metadata_scatter_u32 launch failed: {e}"
-                    ))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_BUILD_METADATA_SCATTER_U32)
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_build_metadata_scatter_u32 kernel not found".to_string(),
+                    )
                 })?;
-        }
-        rec.commit(runtime).map_err(|e| {
+            let grid = n.div_ceil(BLOCK_SIZE);
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            keys,
+                            n,
+                            boundary_mask,
+                            boundary_prefix,
+                            &mut *unique_keys,
+                            &mut *fan_out,
+                            &mut *prefix_sum,
+                        ),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_build_metadata_scatter_u32 launch failed: {e}"
+                        ))
+                    })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "wcoj_build_metadata_u32_recorded: scatter commit failed: {e}"
             ))
@@ -5027,7 +5304,7 @@ impl CudaKernelProvider {
         &self,
         input: &CudaBuffer,
         key_col_idx: usize,
-        keys: &TrackedCudaSlice<u64>,
+        keys: &DeviceMemoryView<u64>,
         n: u32,
         boundary_mask: &TrackedCudaSlice<u32>,
         boundary_prefix: &TrackedCudaSlice<u32>,
@@ -5064,42 +5341,50 @@ impl CudaKernelProvider {
                 "wcoj_build_metadata_u64_recorded: scatter preflight failed: {e}"
             ))
         })?;
-
-        let kernel = self
-            .device()
-            .inner()
-            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_BUILD_METADATA_SCATTER_U64)
-            .ok_or_else(|| {
-                XlogError::Kernel("wcoj_build_metadata_scatter_u64 kernel not found".to_string())
-            })?;
-        let grid = n.div_ceil(BLOCK_SIZE);
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        keys,
-                        n,
-                        boundary_mask,
-                        boundary_prefix,
-                        &mut *unique_keys,
-                        &mut *fan_out,
-                        &mut *prefix_sum,
-                    ),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "wcoj_build_metadata_scatter_u64 launch failed: {e}"
-                    ))
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_BUILD_METADATA_SCATTER_U64)
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_build_metadata_scatter_u64 kernel not found".to_string(),
+                    )
                 })?;
-        }
-        rec.commit(runtime).map_err(|e| {
+            let grid = n.div_ceil(BLOCK_SIZE);
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            keys,
+                            n,
+                            boundary_mask,
+                            boundary_prefix,
+                            &mut *unique_keys,
+                            &mut *fan_out,
+                            &mut *prefix_sum,
+                        ),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_build_metadata_scatter_u64 launch failed: {e}"
+                        ))
+                    })?;
+            }
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
+
+        rec.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "wcoj_build_metadata_u64_recorded: scatter commit failed: {e}"
             ))
@@ -5138,38 +5423,30 @@ enum MetadataWidth {
     U64,
 }
 
-fn metadata_column_u32(input: &CudaBuffer, key_col_idx: usize) -> Result<&TrackedCudaSlice<u32>> {
+fn metadata_column_u32(input: &CudaBuffer, key_col_idx: usize) -> Result<DeviceMemoryView<u32>> {
     let col = input.column(key_col_idx).ok_or_else(|| {
         XlogError::Kernel(format!(
             "wcoj_build_metadata_u32_recorded: column {} not found",
             key_col_idx
         ))
     })?;
-    match col {
-        CudaColumn::Owned(slice) => unsafe {
-            Ok(&*(slice as *const TrackedCudaSlice<u8> as *const TrackedCudaSlice<u32>))
-        },
-        _ => Err(XlogError::Kernel(
-            "wcoj_build_metadata_u32_recorded: key column must be an owned CudaColumn".to_string(),
-        )),
-    }
+    // SAFETY: unsigned integers accept every bit pattern. The checked cast
+    // preserves the storage owner and validates byte length and alignment.
+    unsafe { col.device_view().cast() }
+        .ok_or_else(|| XlogError::Kernel("invalid u32 device column layout".into()))
 }
 
-fn metadata_column_u64(input: &CudaBuffer, key_col_idx: usize) -> Result<&TrackedCudaSlice<u64>> {
+fn metadata_column_u64(input: &CudaBuffer, key_col_idx: usize) -> Result<DeviceMemoryView<u64>> {
     let col = input.column(key_col_idx).ok_or_else(|| {
         XlogError::Kernel(format!(
             "wcoj_build_metadata_u64_recorded: column {} not found",
             key_col_idx
         ))
     })?;
-    match col {
-        CudaColumn::Owned(slice) => unsafe {
-            Ok(&*(slice as *const TrackedCudaSlice<u8> as *const TrackedCudaSlice<u64>))
-        },
-        _ => Err(XlogError::Kernel(
-            "wcoj_build_metadata_u64_recorded: key column must be an owned CudaColumn".to_string(),
-        )),
-    }
+    // SAFETY: unsigned integers accept every bit pattern. The checked cast
+    // preserves the storage owner and validates byte length and alignment.
+    unsafe { col.device_view().cast() }
+        .ok_or_else(|| XlogError::Kernel("invalid u64 device column layout".into()))
 }
 
 fn validate_binary_u32(ctx: &str, label: &str, input: &CudaBuffer) -> Result<()> {
@@ -5214,10 +5491,14 @@ fn validate_binary_u64(ctx: &str, label: &str, input: &CudaBuffer) -> Result<()>
     Ok(())
 }
 
-unsafe fn reinterpret_u8_as_u32(slice: &mut TrackedCudaSlice<u8>) -> &mut TrackedCudaSlice<u32> {
-    &mut *(slice as *mut TrackedCudaSlice<u8> as *mut TrackedCudaSlice<u32>)
+fn reinterpret_u8_as_u32(slice: &mut TrackedCudaSlice<u8>) -> Result<DeviceMemoryView<u32>> {
+    // SAFETY: u32 accepts every bit pattern; the cast checks extent/alignment.
+    unsafe { slice.device_view().cast() }
+        .ok_or_else(|| XlogError::Kernel("invalid u32 scratch allocation layout".into()))
 }
 
-unsafe fn reinterpret_u8_as_u64(slice: &mut TrackedCudaSlice<u8>) -> &mut TrackedCudaSlice<u64> {
-    &mut *(slice as *mut TrackedCudaSlice<u8> as *mut TrackedCudaSlice<u64>)
+fn reinterpret_u8_as_u64(slice: &mut TrackedCudaSlice<u8>) -> Result<DeviceMemoryView<u64>> {
+    // SAFETY: u64 accepts every bit pattern; the cast checks extent/alignment.
+    unsafe { slice.device_view().cast() }
+        .ok_or_else(|| XlogError::Kernel("invalid u64 scratch allocation layout".into()))
 }

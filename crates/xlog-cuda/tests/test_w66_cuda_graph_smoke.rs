@@ -4,7 +4,7 @@ use cudarc::driver::sys;
 use std::sync::{Mutex, OnceLock};
 use xlog_core::{ScalarType, Schema};
 use xlog_cuda::cuda_graph::{CapturedCudaGraph, CudaGraphNodeKind};
-use xlog_cuda::device_runtime::Access;
+use xlog_cuda::launch::LaunchRecorder;
 
 const BYTES: usize = 4096;
 const PATTERN: u8 = 0x5a;
@@ -29,49 +29,60 @@ fn cuda_graph_replays_runtime_backed_memset_on_launch_stream() {
         .expect("launch stream resolves");
     let buf = handles.memory.alloc::<u8>(BYTES).expect("alloc graph buf");
 
-    handles
-        .runtime
-        .prepare_first_use(&buf, launch_stream_id, Access::Write)
-        .expect("prepare graph write");
-
-    let graph = CapturedCudaGraph::capture_on_stream(&launch_stream, || unsafe {
-        let result =
-            sys::cuMemsetD8Async(*buf.device_ptr(), PATTERN, BYTES, launch_stream.cu_stream());
-        if result == sys::CUresult::CUDA_SUCCESS {
-            Ok(())
-        } else {
-            Err(xlog_core::XlogError::Kernel(format!(
-                "cuMemsetD8Async failed: {result:?}"
-            )))
+    let mut graph = CapturedCudaGraph::capture_on_stream(&launch_stream, || {
+        let mut recorder = LaunchRecorder::new_strict(launch_stream_id);
+        recorder.write(&buf);
+        // SAFETY: the captured operation transfers this exact buffer owner.
+        let enqueued = unsafe {
+            recorder.enqueue(&handles.runtime, |enqueue| {
+                let result = sys::cuMemsetD8Async(
+                    *buf.device_ptr(),
+                    PATTERN,
+                    BYTES,
+                    enqueue.stream().cu_stream(),
+                );
+                if result == sys::CUresult::CUDA_SUCCESS {
+                    Ok(())
+                } else {
+                    Err(xlog_core::XlogError::Kernel(format!(
+                        "cuMemsetD8Async failed: {result:?}"
+                    )))
+                }
+            })
         }
+        .map_err(|error| xlog_core::XlogError::Kernel(error.to_string()))?;
+        enqueued
+            .commit()
+            .map_err(|error| xlog_core::XlogError::Kernel(error.to_string()))
     })
-    .expect("capture memset graph");
-    assert_eq!(graph.node_count().expect("graph node count"), 1);
-    let nodes = graph.nodes().expect("graph node inventory");
-    assert_eq!(nodes.len(), 1);
-    assert_eq!(nodes[0].kind, CudaGraphNodeKind::Memset);
-    assert!(!graph.graph().is_null(), "capture should return a graph");
-    assert!(
-        !graph.exec().is_null(),
-        "instantiate should return an executable graph"
-    );
-    let mut memset_params = graph
-        .memset_node_params(nodes[0])
-        .expect("memset node params");
-    assert_eq!(memset_params.value, PATTERN as u32);
-    assert_eq!(memset_params.width, BYTES);
-    memset_params.value = UPDATED_PATTERN as u32;
-    graph
-        .set_memset_node_params(nodes[0], &memset_params, &launch_stream)
-        .expect("update memset node params");
-    for _ in 0..3 {
-        graph.launch(&launch_stream).expect("graph launch");
+    .expect("capture graph with its actual memory owner");
+    let mut recorder = LaunchRecorder::new_strict(launch_stream_id);
+    recorder.write(&buf);
+    // SAFETY: complete candidate write, matching captured graph topology.
+    let enqueued = unsafe {
+        recorder.enqueue(&handles.runtime, |enqueue| {
+            assert_eq!(graph.node_count()?, 1);
+            let nodes = graph.nodes()?;
+            assert_eq!(nodes.len(), 1);
+            assert_eq!(nodes[0].kind, CudaGraphNodeKind::Memset);
+            assert!(!graph.graph().is_null(), "capture should return a graph");
+            assert!(
+                !graph.exec().is_null(),
+                "instantiate should return an executable graph"
+            );
+            let mut memset_params = graph.memset_node_params(nodes[0])?;
+            assert_eq!(memset_params.value, PATTERN as u32);
+            assert_eq!(memset_params.width, BYTES);
+            memset_params.value = UPDATED_PATTERN as u32;
+            graph.set_memset_node_params_in(nodes[0], &memset_params, enqueue)?;
+            for _ in 0..3 {
+                graph.launch_in(enqueue)?;
+            }
+            Ok::<(), xlog_core::XlogError>(())
+        })
     }
-
-    handles
-        .runtime
-        .finish_first_use(&buf, launch_stream_id, Access::Write)
-        .expect("finish graph write");
+    .expect("capture and enqueue graph replays");
+    enqueued.commit().expect("commit graph write");
     launch_stream.synchronize().expect("graph stream sync");
 
     let host = handles

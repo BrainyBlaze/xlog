@@ -39,14 +39,14 @@
 //! re-validated here fail-closed before any upload; the kernel never sees
 //! an out-of-bounds batch.
 
-use std::marker::PhantomData;
+use crate::memory::DeviceMemoryView;
 use std::sync::atomic::Ordering;
 
 use crate::memory::{CudaBuffer, TrackedCudaSlice};
 use crate::{LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, XlogError};
 
-use super::{ilp_exact_nary_kernels, RawCudaView, ILP_EXACT_NARY_MODULE};
+use super::{ilp_exact_nary_kernels, ILP_EXACT_NARY_MODULE};
 
 /// MUST equal `ILP_EXACT_NARY_BLOCK_SIZE` in `kernels/ilp_exact_nary.cu`:
 /// the kernel sizes its static `__shared__` scratch from that macro, so a
@@ -279,13 +279,11 @@ fn validate_request(request: &IlpExactNaryRequest<'_>) -> Result<(u32, u32, u32)
     Ok((num_patterns, num_pos, num_neg))
 }
 
-fn u64_view<'a>(slice: &'a TrackedCudaSlice<u8>, elements: usize) -> RawCudaView<'a, u64> {
-    RawCudaView {
-        ptr: *slice.device_ptr(),
-        len: elements,
-        stream: slice.stream().clone(),
-        _marker: PhantomData,
-    }
+fn u64_view(slice: &TrackedCudaSlice<u8>, elements: usize) -> DeviceMemoryView<u64> {
+    // SAFETY: the arena stores u64 values and is checked before this view.
+    unsafe { slice.view().cast::<u64>() }
+        .and_then(|view| view.try_slice(..elements))
+        .expect("validated u64 arena extent")
 }
 
 /// One columnar u64 buffer requirement, validated fail-closed.
@@ -327,7 +325,7 @@ impl super::CudaKernelProvider {
             ($host:expr) => {{
                 let host: &[u64] = $host;
                 let bytes: Vec<u8> = host.iter().flat_map(|v| v.to_le_bytes()).collect();
-                let mut buf = self.memory.alloc::<u8>(bytes.len().max(1))?;
+                let mut buf = self.memory.alloc::<u8>(bytes.len().max(U64_SIZE))?;
                 if !bytes.is_empty() {
                     self.htod_sync_copy_into_tracked(&bytes, &mut buf)
                         .map_err(|e| nary_err(format!("h2d u64 values: {e}")))?;
@@ -433,7 +431,7 @@ impl super::CudaKernelProvider {
         // ── D2D columnar concatenation (setup-phase, never host) ──────
         let concat =
             |bufs: &[(&CudaBuffer, u32, u32)], total: usize| -> Result<TrackedCudaSlice<u8>> {
-                let mut out = self.memory.alloc::<u8>((total * U64_SIZE).max(1))?;
+                let mut out = self.memory.alloc::<u8>((total * U64_SIZE).max(U64_SIZE))?;
                 let device = self.device.inner();
                 let mut element_offset: usize = 0;
                 for (buf, arity, rows) in bufs {
@@ -496,9 +494,9 @@ impl super::CudaKernelProvider {
         num_neg: u32,
         cand_value_offset: &[u32],
         cand_rows: &[u32],
-        cand_values: RawCudaView<'_, u64>,
-        pos_values: RawCudaView<'_, u64>,
-        neg_values: RawCudaView<'_, u64>,
+        cand_values: DeviceMemoryView<u64>,
+        pos_values: DeviceMemoryView<u64>,
+        neg_values: DeviceMemoryView<u64>,
     ) -> Result<(Vec<u32>, Vec<u32>)> {
         let device = self.device.inner();
 
