@@ -484,6 +484,16 @@ pub(super) fn compile_gpu_d4_with_gate(
     };
 
     let circuit = GpuXgcf::from_device(builder, layout, provider)?;
+    // The raw CUDA launches above borrow scratch allocations that are not part
+    // of the returned circuit. Release builds do not have the debug-only
+    // synchronization in the caller, so those owners must not enter physical
+    // retirement while the final levelization launch can still read them.
+    // This is a cold compilation boundary and performs no device-to-host copy.
+    provider.device().synchronize().map_err(|error| {
+        XlogError::Kernel(format!(
+            "GPU Decision-DNNF compilation completion failed: {error}"
+        ))
+    })?;
     Ok((circuit, frontier_items))
 }
 

@@ -37,9 +37,11 @@ pub use logging::{
     InMemorySink, LogAction, LogRecord, LogResult, LoggingResource, LoggingSink, NullSink,
     SinkError,
 };
+pub(crate) use resource::BlockUse;
 pub use resource::{
-    Access, AllocTag, BlockId, BlockState, DeviceBlock, DeviceMemoryResource, Generation,
-    ResourceBudgetSnapshot, ResourceError, ResourceResult, StreamId,
+    Access, AllocTag, AllocationAccounting, AllocationRequest, BlockId, BlockState, DeviceBlock,
+    DeviceMemoryResource, Generation, ResourceBudgetSnapshot, ResourceError, ResourceResult,
+    StreamId,
 };
 pub(crate) use runtime::RuntimeMemoryReservation;
 pub use runtime::{

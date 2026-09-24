@@ -6,7 +6,45 @@ use crate::{LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use super::{d4_kernels, pack_kernels, D4_MODULE, PACK_MODULE};
-use crate::CudaBuffer;
+use crate::{CudaBuffer, CudaColumn};
+
+fn host_columns_form_canonical_u32_set(schema: &Schema, columns: &[Vec<u8>], rows: usize) -> bool {
+    if rows <= 1 {
+        return true;
+    }
+    if schema.arity() == 0
+        || !(0..schema.arity()).all(|index| {
+            matches!(
+                schema.column_type(index),
+                Some(ScalarType::U32 | ScalarType::Symbol)
+            )
+        })
+    {
+        return false;
+    }
+
+    (1..rows).all(|row| {
+        columns
+            .iter()
+            .map(|column| {
+                let prior = (row - 1) * std::mem::size_of::<u32>();
+                let current = row * std::mem::size_of::<u32>();
+                let prior_value = u32::from_le_bytes(
+                    column[prior..prior + 4]
+                        .try_into()
+                        .expect("validated u32 column"),
+                );
+                let current_value = u32::from_le_bytes(
+                    column[current..current + 4]
+                        .try_into()
+                        .expect("validated u32 column"),
+                );
+                prior_value.cmp(&current_value)
+            })
+            .find(|ordering| *ordering != std::cmp::Ordering::Equal)
+            == Some(std::cmp::Ordering::Less)
+    })
+}
 
 impl super::CudaKernelProvider {
     // ============== Buffer Helper Methods ==============
@@ -125,6 +163,128 @@ impl super::CudaKernelProvider {
         self.buffer_from_columns(columns, num_rows as u64, schema)
     }
 
+    /// Upload a group of host-columnar relations with one payload transfer and
+    /// one row-count transfer. Each returned buffer owns disjoint views of the
+    /// shared device allocations, so dropping one relation cannot invalidate
+    /// another. Strictly sorted, unique U32/Symbol rows receive a canonical
+    /// full-row set proof after their host columns are checked.
+    pub fn create_buffers_from_host_columns(
+        &self,
+        relations: &[(Schema, Vec<Vec<u8>>, usize)],
+    ) -> Result<Vec<CudaBuffer>> {
+        if relations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let count_capacity = relations
+            .len()
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| XlogError::Kernel("Host relation count size overflow".into()))?;
+        let mut payload_bytes = 0usize;
+        let mut spans = Vec::with_capacity(relations.len());
+        let mut count_bytes = Vec::with_capacity(count_capacity);
+        let mut canonical_sets = Vec::with_capacity(relations.len());
+        for (schema, columns, rows) in relations {
+            if columns.len() != schema.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Column count {} doesn't match schema arity {}",
+                    columns.len(),
+                    schema.arity()
+                )));
+            }
+            let rows_u32 = u32::try_from(*rows)
+                .map_err(|_| XlogError::Kernel(format!("Row count {} exceeds u32::MAX", rows)))?;
+            count_bytes.extend_from_slice(&rows_u32.to_le_bytes());
+
+            let mut column_spans = Vec::with_capacity(columns.len());
+            for (index, column) in columns.iter().enumerate() {
+                let width = schema
+                    .column_type(index)
+                    .map(|typ| typ.size_bytes())
+                    .unwrap_or(4);
+                let expected = rows
+                    .checked_mul(width)
+                    .ok_or_else(|| XlogError::Kernel("Host column byte length overflow".into()))?;
+                if column.len() != expected {
+                    return Err(XlogError::Kernel(format!(
+                        "Column {} has {} bytes but expected {} for {} rows",
+                        index,
+                        column.len(),
+                        expected,
+                        rows
+                    )));
+                }
+                // A later u64/f64 view may borrow this byte slice directly.
+                // Keep every column start aligned even after a shorter column.
+                let alignment = width.max(std::mem::align_of::<u64>());
+                let remainder = payload_bytes % alignment;
+                let padding = if remainder == 0 {
+                    0
+                } else {
+                    alignment - remainder
+                };
+                let start = payload_bytes.checked_add(padding).ok_or_else(|| {
+                    XlogError::Kernel("Host relation payload size overflow".into())
+                })?;
+                let end = start.checked_add(column.len()).ok_or_else(|| {
+                    XlogError::Kernel("Host relation payload size overflow".into())
+                })?;
+                column_spans.push(start..end);
+                payload_bytes = end;
+            }
+            canonical_sets.push(host_columns_form_canonical_u32_set(schema, columns, *rows));
+            spans.push(column_spans);
+        }
+
+        let mut payload = Vec::with_capacity(payload_bytes);
+        for ((_, columns, _), column_spans) in relations.iter().zip(&spans) {
+            for (column, span) in columns.iter().zip(column_spans) {
+                payload.resize(span.start, 0);
+                payload.extend_from_slice(column);
+            }
+        }
+        let payload_owner = if relations.iter().any(|(_, columns, _)| !columns.is_empty()) {
+            let mut allocation = self.memory.alloc::<u8>(payload.len())?;
+            if !payload.is_empty() {
+                self.htod_sync_copy_into_tracked(&payload, &mut allocation)?;
+            }
+            Some(allocation)
+        } else {
+            None
+        };
+        let mut counts = self.memory.alloc::<u8>(count_bytes.len())?;
+        self.htod_launch_metadata_sync_copy_into(&count_bytes, &mut counts)?;
+
+        let mut buffers = Vec::with_capacity(relations.len());
+        for (index, ((schema, _, rows), column_spans)) in relations.iter().zip(spans).enumerate() {
+            let mut columns = Vec::<CudaColumn>::with_capacity(column_spans.len());
+            for span in column_spans {
+                let column = payload_owner
+                    .as_ref()
+                    .expect("non-nullary relation has a payload owner")
+                    .try_owned_subslice::<u8>(span)
+                    .ok_or_else(|| XlogError::Kernel("Host column view is invalid".into()))?;
+                columns.push(column.into());
+            }
+            let start = index * std::mem::size_of::<u32>();
+            let count = counts
+                .try_owned_subslice::<u32>(start..start + std::mem::size_of::<u32>())
+                .ok_or_else(|| XlogError::Kernel("Host row count view is invalid".into()))?;
+            let mut buffer = CudaBuffer::from_columns_with_host_count(
+                columns,
+                *rows as u64,
+                count,
+                schema.clone(),
+                *rows as u32,
+            );
+            if canonical_sets[index] {
+                buffer.certify_canonical_full_row_set();
+            }
+            buffers.push(buffer);
+        }
+        Ok(buffers)
+    }
+
     /// Export CudaBuffer to Arrow C Data Interface (device-resident).
     ///
     /// This is a zero-copy export: column buffers remain on device, and the
@@ -135,12 +295,18 @@ impl super::CudaKernelProvider {
         &self,
         buffer: CudaBuffer,
     ) -> Result<crate::arrow_device::ArrowDeviceArrayOwned> {
+        use crate::device_runtime::Access;
+        use crate::memory::{with_memory_access, DeviceRead};
         use arrow::array::ArrayData;
         use arrow::datatypes::{DataType, Field};
         use arrow::ffi::to_ffi;
 
         use crate::arrow_device::{ArrowDeviceArray, ARROW_DEVICE_CUDA};
 
+        let stream = self.device.inner().stream();
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(stream).map_err(|error| {
+            XlogError::Kernel(format!("Arrow export stream admission: {error}"))
+        })?;
         let buffer = Arc::new(buffer);
         let row_cap = buffer.num_rows();
         let num_rows_u32 = u32::try_from(row_cap).map_err(|_| {
@@ -169,7 +335,17 @@ impl super::CudaKernelProvider {
             )
         }
         .map_err(|e| XlogError::Kernel(format!("d4_assert_u32_eq failed: {}", e)))?;
-        self.device.synchronize()?;
+        // A null Arrow sync_event promises ready buffers, not merely a ready
+        // row count. Admit every exported column so nonblocking producer-stream
+        // dependencies are included in the wait without copying host data.
+        let accesses = buffer
+            .columns()
+            .iter()
+            .map(|column| column.device_view().access(Access::Read))
+            .collect::<crate::device_runtime::ResourceResult<Vec<_>>>()
+            .map_err(|error| XlogError::Kernel(error.to_string()))?;
+        with_memory_access(Arc::clone(stream), accesses, |_| Ok(stream.synchronize()?))
+            .map_err(|error| XlogError::Kernel(format!("Arrow producer readiness: {error}")))?;
 
         let num_rows = usize::try_from(num_rows_u32)
             .map_err(|_| XlogError::Kernel("Arrow device export row count overflow".to_string()))?;
@@ -196,12 +372,16 @@ impl super::CudaKernelProvider {
         let array_ptr = Box::into_raw(Box::new(ffi_array));
         let schema_ptr = Box::into_raw(Box::new(ffi_schema));
 
-        Ok(ArrowDeviceArray::new(
-            ARROW_DEVICE_CUDA,
-            self.device.ordinal() as i32,
-            array_ptr,
-            schema_ptr,
-        ))
+        // SAFETY: these uniquely transferred Box allocations retain all GPU
+        // buffers through their thread-safe Arrow custom allocation owners.
+        Ok(unsafe {
+            ArrowDeviceArray::new(
+                ARROW_DEVICE_CUDA,
+                self.device.ordinal() as i32,
+                array_ptr,
+                schema_ptr,
+            )
+        })
     }
 
     /// Import Arrow C Data Interface (device-resident) into a CudaBuffer (zero-copy).
@@ -220,7 +400,7 @@ impl super::CudaKernelProvider {
         use crate::arrow_device::{ArrowDeviceImport, ARROW_DEVICE_CUDA};
         use crate::memory::CudaColumn;
 
-        let (device_type, device_id, ffi_array, ffi_schema) =
+        let (device_type, device_id, outer_owner, ffi_array, ffi_schema) =
             // SAFETY: device_array is a valid ArrowDeviceArrayOwned; into_ffi_parts transfers ownership per Arrow C Data Interface
             unsafe { device_array.into_ffi_parts() };
 
@@ -241,6 +421,9 @@ impl super::CudaKernelProvider {
         // SAFETY: ffi_array and ffi_schema conform to the Arrow C Data Interface; device and type checks passed above
         let data: ArrayData = unsafe { from_ffi(ffi_array, &ffi_schema) }
             .map_err(|e| XlogError::Kernel(format!("Arrow device import failed: {}", e)))?;
+        drop(ffi_schema);
+        let keepalive = Arc::new(ArrowDeviceImport::from_ffi(data, outer_owner));
+        let data = keepalive.data();
 
         let (fields, children) = match data.data_type() {
             DataType::Struct(fields) => (fields.clone(), data.child_data().to_vec()),
@@ -270,7 +453,6 @@ impl super::CudaKernelProvider {
             ));
         }
 
-        let keepalive = Arc::new(ArrowDeviceImport::new(data));
         let mut columns = Vec::with_capacity(children.len());
         let mut schema_cols = Vec::with_capacity(children.len());
 
@@ -314,12 +496,16 @@ impl super::CudaKernelProvider {
                 ));
             }
             let device_ptr = ptr as usize as cudarc::driver::sys::CUdeviceptr;
-            columns.push(CudaColumn::arrow_device(
-                device_ptr,
-                len_bytes,
-                self.device().inner().stream().clone(),
-                keepalive.clone(),
-            ));
+            // SAFETY: the validated FFI child is retained with its full outer
+            // producer owner; from_raw's contract supplies producer readiness.
+            columns.push(unsafe {
+                CudaColumn::arrow_device(
+                    device_ptr,
+                    len_bytes,
+                    self.device().inner().stream().clone(),
+                    keepalive.clone(),
+                )
+            });
             schema_cols.push((field.name().to_string(), scalar_type));
         }
 

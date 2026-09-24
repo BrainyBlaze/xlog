@@ -51,6 +51,7 @@ pub use epistemic_workspace::{
 };
 use join_cache::JoinIndexCache;
 pub use join_cache::JoinIndexCacheStats;
+pub use resident::PreparedResidentGraph;
 
 /// Incremental update for a base relation.
 pub struct RelationDelta {

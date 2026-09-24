@@ -2,10 +2,8 @@ mod common;
 use common::setup_provider;
 
 use arrow::ffi::FFI_ArrowArray;
-use cudarc::driver::SyncOnDrop;
-use std::sync::Arc;
 use xlog_core::{ScalarType, Schema};
-use xlog_cuda::{sys, CudaStream, DevicePtr, DeviceSlice};
+use xlog_cuda::sys;
 
 #[repr(C)]
 struct RawArrowArray {
@@ -19,28 +17,6 @@ struct RawArrowArray {
     dictionary: *mut FFI_ArrowArray,
     release: Option<unsafe extern "C" fn(*mut FFI_ArrowArray)>,
     private_data: *mut std::ffi::c_void,
-}
-
-struct RawDeviceSlice {
-    ptr: sys::CUdeviceptr,
-    len: usize,
-    stream: Arc<CudaStream>,
-}
-
-impl DeviceSlice<u8> for RawDeviceSlice {
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn stream(&self) -> &Arc<CudaStream> {
-        &self.stream
-    }
-}
-
-impl DevicePtr<u8> for RawDeviceSlice {
-    fn device_ptr<'a>(&'a self, _stream: &'a CudaStream) -> (sys::CUdeviceptr, SyncOnDrop<'a>) {
-        (self.ptr, SyncOnDrop::Sync(None))
-    }
 }
 
 #[test]
@@ -151,13 +127,13 @@ fn test_arrow_device_export_bool_bitpacked() {
 
         let packed_len = flags.len().div_ceil(8);
         let mut host = vec![0u8; packed_len];
-        let device = provider.device().inner();
-        let dev_slice = RawDeviceSlice {
-            ptr: values_ptr as u64,
-            len: packed_len,
-            stream: provider.device().inner().stream().clone(),
-        };
-        device.dtoh_sync_copy_into(&dev_slice, &mut host).unwrap();
+        // Read the exported C ABI as a foreign consumer: the real export owner
+        // stays in scope through this synchronous read. No raw-pointer wrapper
+        // is presented to XLOG's owner-bearing safe copy API.
+        provider.device().inner().stream().synchronize().unwrap();
+        sys::cuMemcpyDtoH_v2(host.as_mut_ptr().cast(), values_ptr as u64, packed_len)
+            .result()
+            .unwrap();
 
         assert_eq!(host[0], 0b0100_1101u8);
         assert_eq!(host[1], 0b0000_0001u8);

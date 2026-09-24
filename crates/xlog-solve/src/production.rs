@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::{CudaKernelProvider, DeviceSlice};
+use xlog_cuda::CudaKernelProvider;
 use xlog_runtime::{
     EpistemicGpuBatchExecutionResult, EpistemicGpuExecutionResult, EpistemicGpuKernelTimingTrace,
     EpistemicGpuProviderIdentity,

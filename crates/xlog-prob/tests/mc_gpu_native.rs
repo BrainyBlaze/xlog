@@ -1,7 +1,6 @@
 mod common;
 use common::setup_provider;
 
-use cudarc::driver::DeviceSlice;
 use xlog_cuda::LaunchAsync;
 use xlog_prob::mc::{McDeviceResult, McEvalConfig, McProgram, McSamplingMethod};
 

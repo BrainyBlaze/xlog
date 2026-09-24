@@ -7,7 +7,6 @@
 //
 // The #[pyclass] struct definitions remain in lib.rs.
 
-use cudarc::driver::DeviceSlice;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;

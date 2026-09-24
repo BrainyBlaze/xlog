@@ -844,7 +844,7 @@ impl super::CudaKernelProvider {
         key_cols: &[usize],
         cu_stream: &cudarc::driver::CudaStream,
         launch_stream: crate::device_runtime::StreamId,
-        runtime: &crate::device_runtime::XlogDeviceRuntime,
+        runtime: &std::sync::Arc<crate::device_runtime::XlogDeviceRuntime>,
     ) -> Result<crate::provider::PackedKeyData> {
         use crate::launch::LaunchRecorder;
 
@@ -946,32 +946,40 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
         // SAFETY: pack_and_hash_keys signature.
-        unsafe {
-            func.clone().launch_on_stream(
-                cu_stream,
-                cfg,
-                (
-                    col_ptrs[0],
-                    col_ptrs[1],
-                    col_ptrs[2],
-                    col_ptrs[3],
-                    packed_col_sizes,
-                    key_cols.len() as u32,
-                    num_rows,
-                    row_size,
-                    &packed_slice,
-                    &hash_slice,
-                ),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("pack_and_hash_keys (on_stream) failed: {}", e)))?;
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
+            unsafe {
+                func.clone().launch_in(
+                    stream,
+                    cfg,
+                    (
+                        col_ptrs[0],
+                        col_ptrs[1],
+                        col_ptrs[2],
+                        col_ptrs[3],
+                        packed_col_sizes,
+                        key_cols.len() as u32,
+                        num_rows,
+                        row_size,
+                        &packed_slice,
+                        &hash_slice,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("pack_and_hash_keys (on_stream) failed: {}", e))
+            })?;
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
 
         // Record uses for buffers touched on launch_stream.
         // `packed_slice` / `hash_slice` are fresh outputs that
         // escape to the caller. The post-preflight-fresh path is
         // valid because they were allocated by this helper before
         // preflight and first used by the queued pack launch.
-        rec.commit(runtime).map_err(|e| {
+        rec.commit().map_err(|e| {
             XlogError::Kernel(format!(
                 "pack_keys_gpu_on_stream: launch recorder commit failed: {}",
                 e
@@ -991,7 +999,7 @@ impl super::CudaKernelProvider {
     fn memset_zeros_u8_on_stream(
         &self,
         buf: &mut TrackedCudaSlice<u8>,
-        cu_stream: &cudarc::driver::CudaStream,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
     ) -> Result<()> {
         if buf.is_empty() {
             return Ok(());
@@ -1003,7 +1011,8 @@ impl super::CudaKernelProvider {
         // owned by the runtime's pool. cuMemsetD8Async queues
         // and returns immediately.
         unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(ptr, 0, len, cu_stream.cu_stream());
+            let res =
+                cudarc::driver::sys::cuMemsetD8Async(ptr, 0, len, enqueue.stream().cu_stream());
             if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
                 return Err(XlogError::Kernel(format!(
                     "cuMemsetD8Async (groupby init) failed: {:?}",
@@ -1264,6 +1273,7 @@ impl super::CudaKernelProvider {
         // (which already recorded its own writes against
         // launch_stream — we record reads here so the chain
         // ordering is explicit).
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(num_blocks)?;
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(sorted.num_rows_device());
         // sort_recorded already recorded reads on every input
@@ -1289,6 +1299,9 @@ impl super::CudaKernelProvider {
         for k in &key_unpacked {
             rec.write(k);
         }
+        for level in scan_scratch.levels() {
+            rec.read_write(level);
+        }
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "groupby_multi_agg_recorded: preflight failed: {}",
@@ -1305,393 +1318,422 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("detect_group_boundaries kernel not found".to_string())
             })?;
         // SAFETY: detect_group_boundaries(packed_u32, num_rows, segments_per_row, segments_per_row, boundaries)
-        unsafe {
-            boundary_func.clone().launch_on_stream(
-                &cu_stream,
-                cfg,
-                (
-                    &packed_u32,
-                    num_rows,
-                    segments_per_row as u32,
-                    segments_per_row as u32,
-                    &boundaries,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!("detect_group_boundaries (on_stream) failed: {}", e))
-        })?;
-
-        // Step 5: multi-block scan over boundary mask (yielding boundary positions).
-        let phase1_fn = device
-            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
-            .ok_or_else(|| {
-                XlogError::Kernel("Failed to get multiblock_scan_phase1 kernel".to_string())
-            })?;
-        // SAFETY: multiblock_scan_phase1(mask, prefix_sum, block_sums, n)
-        unsafe {
-            phase1_fn.clone().launch_on_stream(
-                &cu_stream,
-                LaunchConfig {
-                    grid_dim: (num_blocks, 1, 1),
-                    block_dim: (block_size, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (&boundaries, &d_boundary_pos, &d_block_sums, num_rows),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!("multiblock_scan_phase1 (on_stream) failed: {}", e))
-        })?;
-
-        if num_blocks > 1 {
-            self.multiblock_scan_u32_inplace_on_stream(
-                &mut d_block_sums,
-                num_blocks,
-                &cu_stream,
-                launch_stream,
-                runtime,
-            )?;
-            let phase3_fn = device
-                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
-                })?;
-            // SAFETY: multiblock_scan_phase3(prefix_sum, block_offsets, n)
+        let enqueue = |stream: &crate::launch::CudaEnqueue<'_>| -> Result<()> {
             unsafe {
-                phase3_fn.clone().launch_on_stream(
-                    &cu_stream,
+                boundary_func.clone().launch_in(
+                    stream,
+                    cfg,
+                    (
+                        &packed_u32,
+                        num_rows,
+                        segments_per_row as u32,
+                        segments_per_row as u32,
+                        &boundaries,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("detect_group_boundaries (on_stream) failed: {}", e))
+            })?;
+
+            // Step 5: multi-block scan over boundary mask (yielding boundary positions).
+            let phase1_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase1 kernel".to_string())
+                })?;
+            // SAFETY: multiblock_scan_phase1(mask, prefix_sum, block_sums, n)
+            unsafe {
+                phase1_fn.clone().launch_in(
+                    stream,
                     LaunchConfig {
                         grid_dim: (num_blocks, 1, 1),
                         block_dim: (block_size, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&d_boundary_pos, &d_block_sums, num_rows),
+                    (&boundaries, &d_boundary_pos, &d_block_sums, num_rows),
                 )
             }
             .map_err(|e| {
-                XlogError::Kernel(format!("multiblock_scan_phase3 (on_stream) failed: {}", e))
+                XlogError::Kernel(format!("multiblock_scan_phase1 (on_stream) failed: {}", e))
             })?;
-        }
 
-        // Step 6: capture_num_groups on launch_stream.
-        let capture_fn = device
-            .get_func(GROUPBY_MODULE, groupby_kernels::CAPTURE_NUM_GROUPS)
-            .ok_or_else(|| XlogError::Kernel("capture_num_groups kernel not found".to_string()))?;
-        // SAFETY: capture_num_groups(boundary_pos, boundaries, num_rows, num_groups)
-        unsafe {
-            capture_fn.clone().launch_on_stream(
-                &cu_stream,
-                LaunchConfig {
-                    grid_dim: (1, 1, 1),
-                    block_dim: (1, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (&d_boundary_pos, &boundaries, num_rows, &mut d_num_groups),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("capture_num_groups (on_stream) failed: {}", e)))?;
-
-        // Step 7: derive group_ids + group_first_idx on launch_stream.
-        let group_ids_fn = device
-            .get_func(GROUPBY_MODULE, groupby_kernels::GROUP_IDS_FROM_BOUNDARIES)
-            .ok_or_else(|| {
-                XlogError::Kernel("group_ids_from_boundaries kernel not found".to_string())
-            })?;
-        let group_start_fn = device
-            .get_func(GROUPBY_MODULE, groupby_kernels::GROUP_START_INDICES)
-            .ok_or_else(|| XlogError::Kernel("group_start_indices kernel not found".to_string()))?;
-        // SAFETY: matches kernel signatures.
-        unsafe {
-            group_ids_fn.clone().launch_on_stream(
-                &cu_stream,
-                cfg,
-                (&boundaries, &d_boundary_pos, num_rows, &mut group_ids),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "group_ids_from_boundaries (on_stream) failed: {}",
-                e
-            ))
-        })?;
-        unsafe {
-            group_start_fn.clone().launch_on_stream(
-                &cu_stream,
-                cfg,
-                (&boundaries, &d_boundary_pos, num_rows, &mut group_first_idx),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("group_start_indices (on_stream) failed: {}", e)))?;
-
-        // Step 8: per-aggregation kernels.
-        for ((value_col, agg_op), output) in aggs.iter().zip(agg_outputs.iter_mut()) {
-            let values = sorted.column(*value_col).ok_or_else(|| {
-                XlogError::Kernel(format!("Value column {} not found", value_col))
-            })?;
-            match agg_op {
-                AggOp::Count => {
-                    self.memset_zeros_u8_on_stream(output, &cu_stream)?;
-                    let count_func = device
-                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_COUNT)
-                        .ok_or_else(|| {
-                            XlogError::Kernel("groupby_count kernel not found".to_string())
-                        })?;
-                    // SAFETY: groupby_count(boundaries, group_ids, num_rows, counts)
-                    unsafe {
-                        count_func.clone().launch_on_stream(
-                            &cu_stream,
-                            cfg,
-                            (&boundaries, &group_ids, num_rows, &*output),
-                        )
-                    }
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("groupby_count (on_stream) failed: {}", e))
+            if num_blocks > 1 {
+                self.multiblock_scan_u32_inplace_on_stream(
+                    &mut d_block_sums,
+                    num_blocks,
+                    stream,
+                    &mut scan_scratch,
+                )?;
+                let phase3_fn = device
+                    .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
                     })?;
+                // SAFETY: multiblock_scan_phase3(prefix_sum, block_offsets, n)
+                unsafe {
+                    phase3_fn.clone().launch_in(
+                        stream,
+                        LaunchConfig {
+                            grid_dim: (num_blocks, 1, 1),
+                            block_dim: (block_size, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (&d_boundary_pos, &d_block_sums, num_rows),
+                    )
                 }
-                AggOp::Sum => {
-                    self.memset_zeros_u8_on_stream(output, &cu_stream)?;
-                    let value_ty = sorted
-                        .schema()
-                        .column_type(*value_col)
-                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
-                    if value_ty == ScalarType::U64 {
-                        let values_view = self.column_as_u64_view(values, row_cap_usize)?;
-                        let sum_func = device
-                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM_U64)
-                            .ok_or_else(|| {
-                                XlogError::Kernel("groupby_sum_u64 kernel not found".to_string())
-                            })?;
-                        // SAFETY: groupby_sum_u64(values, group_ids, num_rows, sums)
-                        unsafe {
-                            sum_func.clone().launch_on_stream(
-                                &cu_stream,
-                                cfg,
-                                (&values_view, &group_ids, num_rows, &*output),
-                            )
-                        }
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("groupby_sum_u64 (on_stream) failed: {}", e))
-                        })?;
-                    } else {
-                        let values_view = self.column_as_u32_view(values, row_cap_usize)?;
-                        let sum_func = device
-                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
-                            .ok_or_else(|| {
-                                XlogError::Kernel("groupby_sum kernel not found".to_string())
-                            })?;
-                        // SAFETY: groupby_sum(values, group_ids, num_rows, sums)
-                        unsafe {
-                            sum_func.clone().launch_on_stream(
-                                &cu_stream,
-                                cfg,
-                                (&values_view, &group_ids, num_rows, &*output),
-                            )
-                        }
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("groupby_sum (on_stream) failed: {}", e))
-                        })?;
-                    }
-                }
-                AggOp::Min => {
-                    let value_ty = sorted
-                        .schema()
-                        .column_type(*value_col)
-                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
-                    let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
-                    if value_ty == ScalarType::U64 {
-                        // U64 value-column min path (output U64,
-                        // identity u64::MAX).
-                        let fill_fn = device
-                            .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U64)
-                            .ok_or_else(|| {
-                                XlogError::Kernel("arith_fill_const_u64 not found".to_string())
-                            })?;
-                        // SAFETY: arith_fill_const_u64(value, n, output)
-                        unsafe {
-                            fill_fn.clone().launch_on_stream(
-                                &cu_stream,
-                                fill_config,
-                                (u64::MAX, row_cap_u32, &mut *output),
-                            )
-                        }
-                        .map_err(|e| {
-                            XlogError::Kernel(format!(
-                                "arith_fill_const_u64 (on_stream) failed: {}",
-                                e
-                            ))
-                        })?;
-                        let values_view = self.column_as_u64_view(values, row_cap_usize)?;
-                        let min_func = device
-                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN_U64)
-                            .ok_or_else(|| {
-                                XlogError::Kernel("groupby_min_u64 kernel not found".to_string())
-                            })?;
-                        // SAFETY: groupby_min_u64(values, group_ids, num_rows, mins)
-                        unsafe {
-                            min_func.clone().launch_on_stream(
-                                &cu_stream,
-                                cfg,
-                                (&values_view, &group_ids, num_rows, &*output),
-                            )
-                        }
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("groupby_min_u64 (on_stream) failed: {}", e))
-                        })?;
-                    } else {
-                        let fill_fn = device
-                            .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
-                            .ok_or_else(|| {
-                                XlogError::Kernel("arith_fill_const_u32 not found".to_string())
-                            })?;
-                        // SAFETY: arith_fill_const_u32(value, n, output)
-                        unsafe {
-                            fill_fn.clone().launch_on_stream(
-                                &cu_stream,
-                                fill_config,
-                                (u32::MAX, row_cap_u32, &mut *output),
-                            )
-                        }
-                        .map_err(|e| {
-                            XlogError::Kernel(format!(
-                                "arith_fill_const_u32 (on_stream) failed: {}",
-                                e
-                            ))
-                        })?;
-                        let values_view = self.column_as_u32_view(values, row_cap_usize)?;
-                        let min_func = device
-                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN)
-                            .ok_or_else(|| {
-                                XlogError::Kernel("groupby_min kernel not found".to_string())
-                            })?;
-                        // SAFETY: groupby_min(values, group_ids, num_rows, mins)
-                        unsafe {
-                            min_func.clone().launch_on_stream(
-                                &cu_stream,
-                                cfg,
-                                (&values_view, &group_ids, num_rows, &*output),
-                            )
-                        }
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("groupby_min (on_stream) failed: {}", e))
-                        })?;
-                    }
-                }
-                AggOp::Max => {
-                    self.memset_zeros_u8_on_stream(output, &cu_stream)?;
-                    let value_ty = sorted
-                        .schema()
-                        .column_type(*value_col)
-                        .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
-                    if value_ty == ScalarType::U64 {
-                        // U64 value-column max path (output U64,
-                        // identity 0).
-                        let values_view = self.column_as_u64_view(values, row_cap_usize)?;
-                        let max_func = device
-                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX_U64)
-                            .ok_or_else(|| {
-                                XlogError::Kernel("groupby_max_u64 kernel not found".to_string())
-                            })?;
-                        // SAFETY: groupby_max_u64(values, group_ids, num_rows, maxs)
-                        unsafe {
-                            max_func.clone().launch_on_stream(
-                                &cu_stream,
-                                cfg,
-                                (&values_view, &group_ids, num_rows, &*output),
-                            )
-                        }
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("groupby_max_u64 (on_stream) failed: {}", e))
-                        })?;
-                    } else {
-                        let values_view = self.column_as_u32_view(values, row_cap_usize)?;
-                        let max_func = device
-                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX)
-                            .ok_or_else(|| {
-                                XlogError::Kernel("groupby_max kernel not found".to_string())
-                            })?;
-                        // SAFETY: groupby_max(values, group_ids, num_rows, maxs)
-                        unsafe {
-                            max_func.clone().launch_on_stream(
-                                &cu_stream,
-                                cfg,
-                                (&values_view, &group_ids, num_rows, &*output),
-                            )
-                        }
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("groupby_max (on_stream) failed: {}", e))
-                        })?;
-                    }
-                }
-                AggOp::LogSumExp => unreachable!("rejected above"),
+                .map_err(|e| {
+                    XlogError::Kernel(format!("multiblock_scan_phase3 (on_stream) failed: {}", e))
+                })?;
             }
-        }
 
-        // Step 9: gather packed key rows by group_first_idx.
-        let gather_fn = device
-            .get_func(PACK_MODULE, pack_kernels::GATHER_PACKED_ROWS_COUNTED)
-            .ok_or_else(|| {
-                XlogError::Kernel("gather_packed_rows_counted kernel not found".to_string())
-            })?;
-        let gather_config = LaunchConfig::for_num_elems(row_cap_u32);
-        // SAFETY: gather_packed_rows_counted(src_packed, row_size, indices, num_rows, capacity_rows, dst_packed)
-        unsafe {
-            gather_fn.clone().launch_on_stream(
-                &cu_stream,
-                gather_config,
-                (
-                    &packed.packed_keys,
-                    packed.key_bytes,
-                    &group_first_idx,
-                    &d_num_groups,
-                    row_cap_u32,
-                    &mut group_packed,
-                ),
-            )
-        }
-        .map_err(|e| {
-            XlogError::Kernel(format!(
-                "gather_packed_rows_counted (on_stream) failed: {}",
-                e
-            ))
-        })?;
-
-        // Step 10: unpack each key column from the gathered packed rows.
-        let unpack_fn = device
-            .get_func(PACK_MODULE, pack_kernels::UNPACK_COLUMN_COUNTED)
-            .ok_or_else(|| {
-                XlogError::Kernel("unpack_column_counted kernel not found".to_string())
-            })?;
-        let unpack_config = LaunchConfig::for_num_elems(row_cap_u32);
-        for idx in 0..key_cols.len() {
-            let col_size = col_sizes[idx];
-            let col_offset = col_offsets[idx];
-            // SAFETY: unpack_column_counted(packed, row_size, col_offset, col_size,
-            // num_rows, capacity_rows, col_output)
+            // Step 6: capture_num_groups on launch_stream.
+            let capture_fn = device
+                .get_func(GROUPBY_MODULE, groupby_kernels::CAPTURE_NUM_GROUPS)
+                .ok_or_else(|| {
+                    XlogError::Kernel("capture_num_groups kernel not found".to_string())
+                })?;
+            // SAFETY: capture_num_groups(boundary_pos, boundaries, num_rows, num_groups)
             unsafe {
-                unpack_fn.clone().launch_on_stream(
-                    &cu_stream,
-                    unpack_config,
+                capture_fn.clone().launch_in(
+                    stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_boundary_pos, &boundaries, num_rows, &mut d_num_groups),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("capture_num_groups (on_stream) failed: {}", e))
+            })?;
+
+            // Step 7: derive group_ids + group_first_idx on launch_stream.
+            let group_ids_fn = device
+                .get_func(GROUPBY_MODULE, groupby_kernels::GROUP_IDS_FROM_BOUNDARIES)
+                .ok_or_else(|| {
+                    XlogError::Kernel("group_ids_from_boundaries kernel not found".to_string())
+                })?;
+            let group_start_fn = device
+                .get_func(GROUPBY_MODULE, groupby_kernels::GROUP_START_INDICES)
+                .ok_or_else(|| {
+                    XlogError::Kernel("group_start_indices kernel not found".to_string())
+                })?;
+            // SAFETY: matches kernel signatures.
+            unsafe {
+                group_ids_fn.clone().launch_in(
+                    stream,
+                    cfg,
+                    (&boundaries, &d_boundary_pos, num_rows, &mut group_ids),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "group_ids_from_boundaries (on_stream) failed: {}",
+                    e
+                ))
+            })?;
+            unsafe {
+                group_start_fn.clone().launch_in(
+                    stream,
+                    cfg,
+                    (&boundaries, &d_boundary_pos, num_rows, &mut group_first_idx),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("group_start_indices (on_stream) failed: {}", e))
+            })?;
+
+            // Step 8: per-aggregation kernels.
+            for ((value_col, agg_op), output) in aggs.iter().zip(agg_outputs.iter_mut()) {
+                let values = sorted.column(*value_col).ok_or_else(|| {
+                    XlogError::Kernel(format!("Value column {} not found", value_col))
+                })?;
+                match agg_op {
+                    AggOp::Count => {
+                        self.memset_zeros_u8_on_stream(output, stream)?;
+                        let count_func = device
+                            .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_COUNT)
+                            .ok_or_else(|| {
+                                XlogError::Kernel("groupby_count kernel not found".to_string())
+                            })?;
+                        // SAFETY: groupby_count(boundaries, group_ids, num_rows, counts)
+                        unsafe {
+                            count_func.clone().launch_in(
+                                stream,
+                                cfg,
+                                (&boundaries, &group_ids, num_rows, &*output),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("groupby_count (on_stream) failed: {}", e))
+                        })?;
+                    }
+                    AggOp::Sum => {
+                        self.memset_zeros_u8_on_stream(output, stream)?;
+                        let value_ty =
+                            sorted.schema().column_type(*value_col).ok_or_else(|| {
+                                XlogError::Kernel("Value column has no type".to_string())
+                            })?;
+                        if value_ty == ScalarType::U64 {
+                            let values_view = self.column_as_u64_view(values, row_cap_usize)?;
+                            let sum_func = device
+                                .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM_U64)
+                                .ok_or_else(|| {
+                                    XlogError::Kernel(
+                                        "groupby_sum_u64 kernel not found".to_string(),
+                                    )
+                                })?;
+                            // SAFETY: groupby_sum_u64(values, group_ids, num_rows, sums)
+                            unsafe {
+                                sum_func.clone().launch_in(
+                                    stream,
+                                    cfg,
+                                    (&values_view, &group_ids, num_rows, &*output),
+                                )
+                            }
+                            .map_err(|e| {
+                                XlogError::Kernel(format!(
+                                    "groupby_sum_u64 (on_stream) failed: {}",
+                                    e
+                                ))
+                            })?;
+                        } else {
+                            let values_view = self.column_as_u32_view(values, row_cap_usize)?;
+                            let sum_func = device
+                                .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
+                                .ok_or_else(|| {
+                                    XlogError::Kernel("groupby_sum kernel not found".to_string())
+                                })?;
+                            // SAFETY: groupby_sum(values, group_ids, num_rows, sums)
+                            unsafe {
+                                sum_func.clone().launch_in(
+                                    stream,
+                                    cfg,
+                                    (&values_view, &group_ids, num_rows, &*output),
+                                )
+                            }
+                            .map_err(|e| {
+                                XlogError::Kernel(format!("groupby_sum (on_stream) failed: {}", e))
+                            })?;
+                        }
+                    }
+                    AggOp::Min => {
+                        let value_ty =
+                            sorted.schema().column_type(*value_col).ok_or_else(|| {
+                                XlogError::Kernel("Value column has no type".to_string())
+                            })?;
+                        let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
+                        if value_ty == ScalarType::U64 {
+                            // U64 value-column min path (output U64,
+                            // identity u64::MAX).
+                            let fill_fn = device
+                                .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U64)
+                                .ok_or_else(|| {
+                                    XlogError::Kernel("arith_fill_const_u64 not found".to_string())
+                                })?;
+                            // SAFETY: arith_fill_const_u64(value, n, output)
+                            unsafe {
+                                fill_fn.clone().launch_in(
+                                    stream,
+                                    fill_config,
+                                    (u64::MAX, row_cap_u32, &mut *output),
+                                )
+                            }
+                            .map_err(|e| {
+                                XlogError::Kernel(format!(
+                                    "arith_fill_const_u64 (on_stream) failed: {}",
+                                    e
+                                ))
+                            })?;
+                            let values_view = self.column_as_u64_view(values, row_cap_usize)?;
+                            let min_func = device
+                                .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN_U64)
+                                .ok_or_else(|| {
+                                    XlogError::Kernel(
+                                        "groupby_min_u64 kernel not found".to_string(),
+                                    )
+                                })?;
+                            // SAFETY: groupby_min_u64(values, group_ids, num_rows, mins)
+                            unsafe {
+                                min_func.clone().launch_in(
+                                    stream,
+                                    cfg,
+                                    (&values_view, &group_ids, num_rows, &*output),
+                                )
+                            }
+                            .map_err(|e| {
+                                XlogError::Kernel(format!(
+                                    "groupby_min_u64 (on_stream) failed: {}",
+                                    e
+                                ))
+                            })?;
+                        } else {
+                            let fill_fn = device
+                                .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
+                                .ok_or_else(|| {
+                                    XlogError::Kernel("arith_fill_const_u32 not found".to_string())
+                                })?;
+                            // SAFETY: arith_fill_const_u32(value, n, output)
+                            unsafe {
+                                fill_fn.clone().launch_in(
+                                    stream,
+                                    fill_config,
+                                    (u32::MAX, row_cap_u32, &mut *output),
+                                )
+                            }
+                            .map_err(|e| {
+                                XlogError::Kernel(format!(
+                                    "arith_fill_const_u32 (on_stream) failed: {}",
+                                    e
+                                ))
+                            })?;
+                            let values_view = self.column_as_u32_view(values, row_cap_usize)?;
+                            let min_func = device
+                                .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN)
+                                .ok_or_else(|| {
+                                    XlogError::Kernel("groupby_min kernel not found".to_string())
+                                })?;
+                            // SAFETY: groupby_min(values, group_ids, num_rows, mins)
+                            unsafe {
+                                min_func.clone().launch_in(
+                                    stream,
+                                    cfg,
+                                    (&values_view, &group_ids, num_rows, &*output),
+                                )
+                            }
+                            .map_err(|e| {
+                                XlogError::Kernel(format!("groupby_min (on_stream) failed: {}", e))
+                            })?;
+                        }
+                    }
+                    AggOp::Max => {
+                        self.memset_zeros_u8_on_stream(output, stream)?;
+                        let value_ty =
+                            sorted.schema().column_type(*value_col).ok_or_else(|| {
+                                XlogError::Kernel("Value column has no type".to_string())
+                            })?;
+                        if value_ty == ScalarType::U64 {
+                            // U64 value-column max path (output U64,
+                            // identity 0).
+                            let values_view = self.column_as_u64_view(values, row_cap_usize)?;
+                            let max_func = device
+                                .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX_U64)
+                                .ok_or_else(|| {
+                                    XlogError::Kernel(
+                                        "groupby_max_u64 kernel not found".to_string(),
+                                    )
+                                })?;
+                            // SAFETY: groupby_max_u64(values, group_ids, num_rows, maxs)
+                            unsafe {
+                                max_func.clone().launch_in(
+                                    stream,
+                                    cfg,
+                                    (&values_view, &group_ids, num_rows, &*output),
+                                )
+                            }
+                            .map_err(|e| {
+                                XlogError::Kernel(format!(
+                                    "groupby_max_u64 (on_stream) failed: {}",
+                                    e
+                                ))
+                            })?;
+                        } else {
+                            let values_view = self.column_as_u32_view(values, row_cap_usize)?;
+                            let max_func = device
+                                .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX)
+                                .ok_or_else(|| {
+                                    XlogError::Kernel("groupby_max kernel not found".to_string())
+                                })?;
+                            // SAFETY: groupby_max(values, group_ids, num_rows, maxs)
+                            unsafe {
+                                max_func.clone().launch_in(
+                                    stream,
+                                    cfg,
+                                    (&values_view, &group_ids, num_rows, &*output),
+                                )
+                            }
+                            .map_err(|e| {
+                                XlogError::Kernel(format!("groupby_max (on_stream) failed: {}", e))
+                            })?;
+                        }
+                    }
+                    AggOp::LogSumExp => unreachable!("rejected above"),
+                }
+            }
+
+            // Step 9: gather packed key rows by group_first_idx.
+            let gather_fn = device
+                .get_func(PACK_MODULE, pack_kernels::GATHER_PACKED_ROWS_COUNTED)
+                .ok_or_else(|| {
+                    XlogError::Kernel("gather_packed_rows_counted kernel not found".to_string())
+                })?;
+            let gather_config = LaunchConfig::for_num_elems(row_cap_u32);
+            // SAFETY: gather_packed_rows_counted(src_packed, row_size, indices, num_rows, capacity_rows, dst_packed)
+            unsafe {
+                gather_fn.clone().launch_in(
+                    stream,
+                    gather_config,
                     (
-                        &group_packed,
+                        &packed.packed_keys,
                         packed.key_bytes,
-                        col_offset,
-                        col_size,
+                        &group_first_idx,
                         &d_num_groups,
                         row_cap_u32,
-                        &mut key_unpacked[idx],
+                        &mut group_packed,
                     ),
                 )
             }
             .map_err(|e| {
-                XlogError::Kernel(format!("unpack_column_counted (on_stream) failed: {}", e))
+                XlogError::Kernel(format!(
+                    "gather_packed_rows_counted (on_stream) failed: {}",
+                    e
+                ))
             })?;
-        }
+
+            // Step 10: unpack each key column from the gathered packed rows.
+            let unpack_fn = device
+                .get_func(PACK_MODULE, pack_kernels::UNPACK_COLUMN_COUNTED)
+                .ok_or_else(|| {
+                    XlogError::Kernel("unpack_column_counted kernel not found".to_string())
+                })?;
+            let unpack_config = LaunchConfig::for_num_elems(row_cap_u32);
+            for idx in 0..key_cols.len() {
+                let col_size = col_sizes[idx];
+                let col_offset = col_offsets[idx];
+                // SAFETY: unpack_column_counted(packed, row_size, col_offset, col_size,
+                // num_rows, capacity_rows, col_output)
+                unsafe {
+                    unpack_fn.clone().launch_in(
+                        stream,
+                        unpack_config,
+                        (
+                            &group_packed,
+                            packed.key_bytes,
+                            col_offset,
+                            col_size,
+                            &d_num_groups,
+                            row_cap_u32,
+                            &mut key_unpacked[idx],
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("unpack_column_counted (on_stream) failed: {}", e))
+                })?;
+            }
+
+            Ok(())
+        };
+        // SAFETY: preflight retained the accessed buffers and bound this stream.
+        let rec = unsafe { rec.enqueue_prepared_with(&cu_stream, enqueue) }
+            .map_err(|error| error.into_xlog_error())?;
 
         // All outputs were registered as writes before preflight;
         // preflight waited for dependencies, and the kernels are now
         // enqueued. Commit publishes their write events for future uses.
-        rec.commit(runtime).map_err(|e| {
+        rec.commit().map_err(|e| {
             XlogError::Kernel(format!("groupby_multi_agg_recorded: commit failed: {}", e))
         })?;
 

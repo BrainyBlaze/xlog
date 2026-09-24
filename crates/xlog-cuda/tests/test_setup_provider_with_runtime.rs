@@ -86,15 +86,15 @@ fn setup_provider_with_runtime_routes_real_provider_alloc() {
     );
 
     // Drop the buffer: TrackedCudaSlice<u8>/<u32> with
-    // Backing::Runtime queues async frees through the runtime; the
-    // manager counter releases immediately, the runtime holds
-    // pending until reap.
+    // Backing::Runtime retires through the runtime. The manager counter
+    // releases immediately; runtime owners may retire immediately or remain
+    // pending until reap, depending on dependency completion.
     drop(buffer);
     assert_eq!(handles.memory.allocated_bytes(), baseline_local);
-    assert_eq!(
-        handles.runtime.bytes_outstanding(),
-        post_runtime,
-        "async backend: runtime holds bytes pending until reap"
+    let outstanding_after_drop = handles.runtime.bytes_outstanding();
+    assert!(
+        (baseline_runtime..=post_runtime).contains(&outstanding_after_drop),
+        "runtime bytes after drop must be physically released or pending: baseline={baseline_runtime} post={post_runtime} actual={outstanding_after_drop}"
     );
 
     handles.runtime.reap_pending().expect("reap");

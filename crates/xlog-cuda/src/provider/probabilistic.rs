@@ -1,10 +1,10 @@
 //! Probabilistic operations: Monte Carlo sampling (Bernoulli matrix).
 
-use crate::{CudaView, LaunchAsync, LaunchConfig};
+use crate::{LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 
 use super::{mc_sample_kernels, MC_SAMPLE_MODULE};
-use crate::memory::TrackedCudaSlice;
+use crate::memory::{DeviceMemoryView, TrackedCudaSlice};
 
 impl super::CudaKernelProvider {
     /// Sample independent Bernoulli variables on the GPU.
@@ -16,8 +16,8 @@ impl super::CudaKernelProvider {
         probs: &[f32],
         num_samples: usize,
         seed: u64,
-        force_mask: &CudaView<u8>,
-        forced_value: &CudaView<u8>,
+        force_mask: &DeviceMemoryView<u8>,
+        forced_value: &DeviceMemoryView<u8>,
     ) -> Result<Vec<u8>> {
         if probs.is_empty() || num_samples == 0 {
             return Ok(Vec::new());
@@ -99,8 +99,8 @@ impl super::CudaKernelProvider {
         probs: &[f32],
         num_samples: usize,
         seed: u64,
-        force_mask: &CudaView<u8>,
-        forced_value: &CudaView<u8>,
+        force_mask: &DeviceMemoryView<u8>,
+        forced_value: &DeviceMemoryView<u8>,
     ) -> Result<TrackedCudaSlice<u8>> {
         if probs.is_empty() || num_samples == 0 {
             return self.memory.alloc::<u8>(0).map_err(|e| {

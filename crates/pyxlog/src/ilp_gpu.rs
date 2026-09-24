@@ -307,7 +307,7 @@ pub(crate) fn sort_and_build_csr(
     }
     {
         let mut dst_view = d_row_offsets
-            .try_slice_mut(0..num_facts as usize)
+            .try_slice(0..num_facts as usize)
             .ok_or_else(|| PyRuntimeError::new_err("row_offsets slice failed"))?;
         provider
             .device()

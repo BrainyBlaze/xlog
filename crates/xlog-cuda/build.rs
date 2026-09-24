@@ -1,4 +1,4 @@
-//! Build script for xlog-cuda: compiles CUDA kernels to cubin + portable PTX.
+// Build script for xlog-cuda: compiles CUDA kernels to cubin + portable PTX.
 
 use std::env;
 use std::fs;
@@ -172,14 +172,355 @@ fn push_wcoj_register_cap(args: &mut Vec<String>, name: &str) {
     }
 }
 
-fn push_reproducible_nvcc_seed(args: &mut Vec<String>, name: &str) {
+fn push_common_nvcc_options(args: &mut Vec<String>, name: &str) {
+    // CUDA 13's CCCL/libcu++ headers require C++17. Apply the dialect to every
+    // kernel instead of coupling it to an optional kernel-specific feature.
+    args.push("--std=c++17".to_string());
+
     // NVCC otherwise assigns process-dependent suffixes to internal PTX symbols.
     // A distinct stable seed per CUDA source keeps both PTX and cubin output
     // independent of build directory and invocation order.
     args.push(format!("--frandom-seed=xlog-{name}"));
 }
 
+fn prepare_semantic_policy_header(out_dir: &Path) -> bool {
+    println!("cargo:rerun-if-env-changed=XLOG_SEMANTIC_POLICY_HEADER");
+    println!("cargo:rerun-if-env-changed=XLOG_SEMANTIC_POLICY_SHA256");
+    println!("cargo:rerun-if-env-changed=XLOG_SEMANTIC_POLICY_NAMESPACE");
+    if env::var_os("CARGO_FEATURE_SEMANTIC_POLICY").is_none() {
+        write_semantic_policy_identity(out_dir, None);
+        return false;
+    }
+    let path = PathBuf::from(env::var_os("XLOG_SEMANTIC_POLICY_HEADER").expect(
+        "semantic-policy requires XLOG_SEMANTIC_POLICY_HEADER pointing to the pinned delivered header",
+    ));
+    let pin = env::var("XLOG_SEMANTIC_POLICY_SHA256")
+        .expect("semantic-policy requires XLOG_SEMANTIC_POLICY_SHA256 from the policy producer");
+    assert!(
+        pin.len() == 64 && pin.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "XLOG_SEMANTIC_POLICY_SHA256 must contain exactly 64 hexadecimal digits"
+    );
+    let mut expected = [0; 32];
+    for (index, byte) in expected.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&pin[index * 2..index * 2 + 2], 16).unwrap();
+    }
+    let namespace = env::var("XLOG_SEMANTIC_POLICY_NAMESPACE")
+        .expect("semantic-policy requires XLOG_SEMANTIC_POLICY_NAMESPACE from the policy producer");
+    assert!(
+        namespace.split("::").all(|part| {
+            let mut bytes = part.bytes();
+            bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+                && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        }),
+        "XLOG_SEMANTIC_POLICY_NAMESPACE must be a qualified C++ namespace"
+    );
+    println!("cargo:rerun-if-changed={}", path.display());
+    let bytes = fs::read(&path).expect("read delivered semantic policy header");
+    // This is the numerical ABI and floating-point policy used by the model
+    // owner, not a second implementation of its formulas. Compile the exact
+    // verified bytes copied into OUT_DIR, never a subsequently reopened input.
+    assert_eq!(
+        catalogue_sha256(&bytes),
+        expected,
+        "semantic policy header digest mismatch"
+    );
+    fs::write(out_dir.join("semantic_policy_numeric.h"), bytes)
+        .expect("stage verified semantic policy header");
+    fs::write(
+        out_dir.join("semantic_policy_selection.cuh"),
+        format!(
+            "#pragma once\n#include \"semantic_policy_numeric.h\"\nnamespace model_policy = ::{namespace};\n"
+        ),
+    )
+    .expect("stage supplied semantic policy namespace");
+    write_semantic_policy_identity(out_dir, Some((expected, &namespace)));
+    true
+}
+
+fn write_semantic_policy_identity(out_dir: &Path, supplied: Option<([u8; 32], &str)>) {
+    let mut encoding = b"xlog.semantic-policy.build-identity.v1\0".to_vec();
+    match supplied {
+        Some((digest, namespace)) => {
+            encoding.push(1);
+            encoding.extend_from_slice(&digest);
+            encoding.extend_from_slice(&(namespace.len() as u64).to_le_bytes());
+            encoding.extend_from_slice(namespace.as_bytes());
+        }
+        None => encoding.push(0),
+    }
+    fs::write(
+        out_dir.join("semantic_policy_identity.rs"),
+        format!("{:?}\n", catalogue_sha256(&encoding)),
+    )
+    .expect("stage semantic policy build identity");
+}
+
+fn push_semantic_policy_options(args: &mut Vec<String>, name: &str, enabled: bool) {
+    if name == "semantic_transition" && enabled {
+        args.extend(
+            [
+                "-DXLOG_SEMANTIC_POLICY=1",
+                "--fmad=false",
+                "--ftz=false",
+                "--prec-div=true",
+                "--prec-sqrt=true",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+    }
+}
+
+fn write_semantic_transition_catalogue(out_dir: &Path) {
+    println!("cargo:rerun-if-changed=src/semantic_action_catalogue_v1.def");
+    let path = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+        .join("src/semantic_action_catalogue_v1.def");
+    let source = fs::read_to_string(path).expect("read semantic catalogue");
+    let lines: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            let line = line
+                .split('#')
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!line.is_empty()).then_some(line)
+        })
+        .collect();
+    let encoding = lines.join("\n") + "\n";
+    let digest = catalogue_sha256(encoding.as_bytes());
+    let mut constants = std::collections::BTreeMap::new();
+    let mut fields = Vec::new();
+    let mut roster = Vec::new();
+    let mut declarations = Vec::new();
+    let mut generation = None;
+    let number = |s: &str| -> u64 {
+        match s.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16).expect("hex catalogue integer"),
+            None => s.parse().expect("decimal catalogue integer"),
+        }
+    };
+    for line in &lines {
+        let parts: Vec<_> = line.split(' ').collect();
+        match parts.as_slice() {
+            ["generation", n] => {
+                assert!(generation.replace(number(n)).is_none());
+            }
+            ["constant", name, value] => {
+                assert!(constants.insert(*name, number(value)).is_none());
+            }
+            ["field", ordinal, name, role, cardinality] => {
+                assert_eq!(number(ordinal) as usize, fields.len());
+                fields.push((*name, *role, number(cardinality)));
+            }
+            ["roster", start, count, lane, kind, slot] => {
+                roster.push((
+                    number(start),
+                    number(count),
+                    number(lane),
+                    *kind,
+                    number(slot),
+                ));
+            }
+            ["domain", name] => {
+                assert_eq!(*name, "xlog.semantic-action-catalogue.v1");
+            }
+            [kind @ ("action" | "opcode"), value, name, signature @ ..] => {
+                assert!(!signature.is_empty());
+                assert!(declarations
+                    .iter()
+                    .all(|(k, v, n, _)| *k != *kind || (*v != number(value) && *n != *name)));
+                declarations.push((*kind, number(value), *name, signature.join(" ")));
+            }
+            ["rule", name, meaning @ ..] => {
+                assert!(!meaning.is_empty(), "empty catalogue rule {name}");
+            }
+            _ => panic!("invalid semantic catalogue declaration: {line}"),
+        }
+    }
+    let generation = generation.expect("catalogue generation");
+    assert_eq!(fields.len() as u64, constants["FIELD_COUNT"]);
+    let mut rust = format!("const CATALOGUE_ENCODING: &[u8] = {encoding:?}.as_bytes();\nconst CATALOGUE_DIGEST: [u8;32] = {digest:?};\nconst CATALOGUE_GENERATION: u64 = {generation};\n");
+    let mut cuda = format!("#pragma once\n#include <stdint.h>\nstatic constexpr uint64_t CATALOGUE_GENERATION = {generation};\n__device__ __constant__ uint8_t CATALOGUE_DIGEST[32] = {{ {} }};\n",
+        digest.iter().map(u8::to_string).collect::<Vec<_>>().join(","));
+    // Both consumers receive the same values, field signatures, and row layout.
+    for name in [
+        "TEXT_CARDINALITY",
+        "TEXT_NULL",
+        "MASK_TOKEN",
+        "SCRATCH_BYTES",
+        "COMPONENT_COUNT",
+        "COMPONENT_KIND_TEXT",
+        "COMPONENT_KIND_EDIT",
+        "NULL_CATEGORY",
+        "NO_EDIT_ACTIVE_MASK",
+        "NO_EDIT_NULL_MASK",
+        "INSERT_SUPPORT_ACTIVE_MASK",
+        "INSERT_SUPPORT_NULL_MASK",
+    ] {
+        if name != "NULL_CATEGORY" {
+            rust.push_str(&format!("const {name}: usize = {};\n", constants[name]));
+        }
+        cuda.push_str(&format!(
+            "static constexpr uint32_t {name} = {};\n",
+            constants[name]
+        ));
+    }
+    rust.push_str("const CATALOGUE_FIELDS: &[SemanticCatalogueField] = &[\n");
+    cuda.push_str("struct CatalogueField { uint32_t ordinal, cardinality; const char *name, *role; };\n__device__ const CatalogueField CATALOGUE_FIELDS[] = {\n");
+    for (index, (name, role, cardinality)) in fields.iter().enumerate() {
+        assert!(*cardinality > 0 && *cardinality <= 65536);
+        rust.push_str(&format!("SemanticCatalogueField {{ ordinal:{index}, cardinality:{cardinality}, name:{name:?}, role:{role:?} }},\n"));
+        cuda.push_str(&format!(
+            "{{{index}, {cardinality}, {name:?}, {role:?}}},\n"
+        ));
+    }
+    rust.push_str("];\n");
+    cuda.push_str("};\n");
+    rust.push_str("const CATALOGUE_SIGNATURES: &[SemanticCatalogueSignature] = &[\n");
+    cuda.push_str("struct CatalogueSignature { uint32_t value; const char *kind, *name, *signature; };\n__device__ const CatalogueSignature CATALOGUE_SIGNATURES[] = {\n");
+    for (kind, value, name, signature) in &declarations {
+        assert!(*value < 65536);
+        for token in signature.split(' ').filter(|s| s.ends_with("_MASK")) {
+            assert!(constants.contains_key(token), "undefined mask {token}");
+        }
+        rust.push_str(&format!("SemanticCatalogueSignature {{ value:{value}, kind:{kind:?}, name:{name:?}, signature:{signature:?} }},\n"));
+        cuda.push_str(&format!(
+            "{{{value}, {kind:?}, {name:?}, {signature:?}}},\n"
+        ));
+    }
+    rust.push_str("];\n");
+    cuda.push_str("};\n");
+    for (kind, name) in [("action", "NO_EDIT"), ("action", "APPLY")] {
+        let value = declarations
+            .iter()
+            .find(|(k, _, n, _)| *k == kind && *n == name)
+            .expect("required action declaration")
+            .1;
+        cuda.push_str(&format!(
+            "static constexpr uint32_t ACTION_{name} = {value};\n"
+        ));
+    }
+    let action_field = fields
+        .iter()
+        .position(|(name, _, _)| *name == "action_class")
+        .expect("action class field");
+    cuda.push_str(&format!(
+        "static constexpr uint32_t ACTION_CLASS_FIELD = {action_field};\n"
+    ));
+    rust.push_str("const COMPONENTS: &[SemanticComponent] = &[\n");
+    cuda.push_str("struct Component { uint64_t offset; uint32_t ordinal, lane, slot, field, kind, cardinality; };\n__device__ __constant__ Component COMPONENTS[] = {\n");
+    let mut ordinal = 0;
+    let mut offset = 0;
+    for (start, count, lane, kind, slot) in roster {
+        assert_eq!(start, ordinal, "noncontiguous catalogue roster");
+        for field in 0..count {
+            let (kind, cardinality) = match kind {
+                "text" => (
+                    constants["COMPONENT_KIND_TEXT"],
+                    constants["TEXT_CARDINALITY"],
+                ),
+                "edit" => (constants["COMPONENT_KIND_EDIT"], fields[field as usize].2),
+                _ => panic!("unknown component kind"),
+            };
+            rust.push_str(&format!("SemanticComponent {{ offset:{offset}, ordinal:{ordinal}, lane:{lane}, slot:{slot}, field:{field}, kind:{kind}, cardinality:{cardinality} }},\n"));
+            cuda.push_str(&format!(
+                "{{{offset}, {ordinal}, {lane}, {slot}, {field}, {kind}, {cardinality}}},\n"
+            ));
+            ordinal += 1;
+            offset += cardinality;
+        }
+    }
+    assert_eq!(ordinal, constants["COMPONENT_COUNT"]);
+    rust.push_str("];\n");
+    cuda.push_str("};\n");
+    // Canonical rule bytes remain available to both bindings, including descriptor
+    // roles and dependent arity rules used by the admitted device codebooks.
+    cuda.push_str(&format!(
+        "__device__ __constant__ char CATALOGUE_ENCODING[] = {encoding:?};\n"
+    ));
+    fs::write(out_dir.join("semantic_transition_catalogue.rs"), rust)
+        .expect("write Rust catalogue");
+    fs::write(out_dir.join("semantic_transition_catalogue.cuh"), cuda)
+        .expect("write CUDA catalogue");
+}
+
+// Build dependencies are intentionally limited to std and xlog-core. SHA-256
+// seals the normalized declaration; the public test independently uses sha2.
+fn catalogue_sha256(bytes: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut state: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let mut padded = bytes.to_vec();
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&(bytes.len() as u64 * 8).to_be_bytes());
+    for block in padded.as_chunks::<64>().0 {
+        let mut w = [0u32; 64];
+        for (word, chunk) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+            *word = u32::from_be_bytes(*chunk);
+        }
+        for i in 16..64 {
+            let a = w[i - 15];
+            let b = w[i - 2];
+            w[i] = w[i - 16]
+                .wrapping_add(a.rotate_right(7) ^ a.rotate_right(18) ^ (a >> 3))
+                .wrapping_add(w[i - 7])
+                .wrapping_add(b.rotate_right(17) ^ b.rotate_right(19) ^ (b >> 10));
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
+        for i in 0..64 {
+            let t = h
+                .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
+                .wrapping_add((e & f) ^ (!e & g))
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let u = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
+                .wrapping_add((a & b) ^ (a & c) ^ (b & c));
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t);
+            d = c;
+            c = b;
+            b = a;
+            a = t.wrapping_add(u);
+        }
+        for (s, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *s = s.wrapping_add(v);
+        }
+    }
+    let mut digest = [0; 32];
+    for (chunk, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+        chunk.copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    write_semantic_transition_catalogue(&out_dir);
+    let semantic_policy = prepare_semantic_policy_header(&out_dir);
     let manifest_dir =
         env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo");
     let manifest_dir = PathBuf::from(manifest_dir);
@@ -191,6 +532,14 @@ fn main() {
     // kernel module) leaves other build configs reusing a cached
     // OUT_DIR whose embedded PTX table predates the module.
     println!("cargo:rerun-if-changed=src/kernel_manifest_data.rs");
+    println!(
+        "cargo:rerun-if-changed={}",
+        kernels_dir.join("semantic_feedback_encoding.cuh").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        kernels_dir.join("semantic_policy_binding.cuh").display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         kernels_dir.join("totalorder.cuh").display()
@@ -247,6 +596,7 @@ fn main() {
         let ptx_path = out_dir.join(format!("{name}.portable.ptx"));
         let mut args = vec![
             "--ptx".to_string(),
+            format!("-I{}", out_dir.display()),
             "-arch=sm_75".to_string(),
             "-O3".to_string(),
             "-o".to_string(),
@@ -259,7 +609,8 @@ fn main() {
                 .expect("kernel source path must be valid UTF-8")
                 .to_string(),
         ];
-        push_reproducible_nvcc_seed(&mut args, name);
+        push_common_nvcc_options(&mut args, name);
+        push_semantic_policy_options(&mut args, name, semantic_policy);
         push_wcoj_register_cap(&mut args, name);
         let status = Command::new(&nvcc)
             .args(&args)
@@ -313,6 +664,7 @@ fn main() {
                 }
                 let mut args = vec![
                     "--cubin".to_string(),
+                    format!("-I{}", out_dir.display()),
                     format!("-arch={arch}"),
                     "-O3".to_string(),
                     "-o".to_string(),
@@ -325,7 +677,8 @@ fn main() {
                         .expect("kernel source path must be valid UTF-8")
                         .to_string(),
                 ];
-                push_reproducible_nvcc_seed(&mut args, name);
+                push_common_nvcc_options(&mut args, name);
+                push_semantic_policy_options(&mut args, name, semantic_policy);
                 push_wcoj_register_cap(&mut args, name);
                 let status = Command::new(&nvcc)
                     .args(&args)
@@ -367,4 +720,194 @@ fn maybe_downgrade_ptx_version(ptx_path: &Path) {
     }
     fs::write(ptx_path, out)
         .unwrap_or_else(|e| panic!("write downgraded PTX {}: {e}", ptx_path.display()));
+}
+
+#[cfg(test)]
+mod semantic_policy_build_tests {
+    use super::*;
+
+    #[test]
+    fn supplied_policy_pin_and_namespace_control_exact_staging() {
+        let directory = env::temp_dir().join(format!("xlog-policy-build-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let source = directory.join("input.h");
+        let output = directory.join("output");
+        fs::create_dir(&output).unwrap();
+        let variables = [
+            "CARGO_FEATURE_SEMANTIC_POLICY",
+            "XLOG_SEMANTIC_POLICY_HEADER",
+            "XLOG_SEMANTIC_POLICY_SHA256",
+            "XLOG_SEMANTIC_POLICY_NAMESPACE",
+        ];
+        let original = variables.map(|name| (name, env::var_os(name)));
+        let result = std::panic::catch_unwind(|| {
+            env::set_var(variables[0], "1");
+            env::set_var(variables[1], &source);
+            let mut identities = std::collections::HashSet::new();
+            for (namespace, bytes) in [
+                (
+                    "first_policy::numeric",
+                    b"// first pinned numerical policy\n".as_slice(),
+                ),
+                (
+                    "second_policy::numeric",
+                    b"// second pinned numerical policy\n".as_slice(),
+                ),
+            ] {
+                fs::write(&source, bytes).unwrap();
+                let pin = catalogue_sha256(bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                env::set_var(variables[2], pin.to_uppercase());
+                env::set_var(variables[3], namespace);
+                assert!(prepare_semantic_policy_header(&output));
+                let identity = fs::read(output.join("semantic_policy_identity.rs")).unwrap();
+                assert!(identities.insert(identity.clone()));
+                env::set_var(variables[3], "alternate_policy::numeric");
+                assert!(prepare_semantic_policy_header(&output));
+                assert!(identities
+                    .insert(fs::read(output.join("semantic_policy_identity.rs")).unwrap()));
+                env::set_var(variables[3], namespace);
+                assert!(prepare_semantic_policy_header(&output));
+                assert_eq!(
+                    fs::read(output.join("semantic_policy_identity.rs")).unwrap(),
+                    identity
+                );
+                assert_eq!(
+                    fs::read(output.join("semantic_policy_numeric.h")).unwrap(),
+                    bytes
+                );
+                let binding =
+                    fs::read_to_string(output.join("semantic_policy_selection.cuh")).unwrap();
+                assert!(binding.contains(&format!("namespace model_policy = ::{namespace};")));
+                fs::write(&source, b"changed after policy pinning").unwrap();
+                assert!(
+                    std::panic::catch_unwind(|| prepare_semantic_policy_header(&output)).is_err()
+                );
+                assert_eq!(
+                    fs::read(output.join("semantic_policy_numeric.h")).unwrap(),
+                    bytes
+                );
+                fs::write(&source, bytes).unwrap();
+                for invalid in ["", "abc", &"0".repeat(64), &"g".repeat(64)] {
+                    env::set_var(variables[2], invalid);
+                    assert!(
+                        std::panic::catch_unwind(|| prepare_semantic_policy_header(&output))
+                            .is_err()
+                    );
+                }
+                env::set_var(variables[2], &pin);
+                for invalid in [
+                    "",
+                    "a:b",
+                    "a::",
+                    "::a",
+                    "1name",
+                    "a; namespace injected",
+                    "a\n#error injected",
+                ] {
+                    env::set_var(variables[3], invalid);
+                    assert!(
+                        std::panic::catch_unwind(|| prepare_semantic_policy_header(&output))
+                            .is_err()
+                    );
+                }
+                env::set_var(variables[3], namespace);
+                for required in [variables[1], variables[2], variables[3]] {
+                    let value = env::var_os(required).unwrap();
+                    env::remove_var(required);
+                    assert!(
+                        std::panic::catch_unwind(|| prepare_semantic_policy_header(&output))
+                            .is_err()
+                    );
+                    env::set_var(required, value);
+                }
+            }
+            let fixture = include_str!("tests/semantic_policy_abi.h");
+            let translation_unit = directory.join("binding.cpp");
+            fs::write(
+                &translation_unit,
+                "#include \"semantic_policy_binding.cuh\"\n",
+            )
+            .unwrap();
+            for (header, namespace, accepted) in [
+                (fixture.to_owned(), "supplied_policy::numeric", true),
+                (
+                    fixture.replace("supplied_policy", "other_policy"),
+                    "other_policy::numeric",
+                    true,
+                ),
+                (
+                    fixture.replace("abi_version = 1", "abi_version = 2"),
+                    "supplied_policy::numeric",
+                    false,
+                ),
+                (
+                    fixture.replace("width = 128", "width = 64"),
+                    "supplied_policy::numeric",
+                    false,
+                ),
+                (
+                    fixture.replace("field_count = 18", "field_count = 17"),
+                    "supplied_policy::numeric",
+                    false,
+                ),
+                (
+                    fixture.replace("std::uint32_t cardinality", "std::uint64_t cardinality"),
+                    "supplied_policy::numeric",
+                    false,
+                ),
+                (
+                    fixture.replace("void readout_scores(", "int readout_scores("),
+                    "supplied_policy::numeric",
+                    false,
+                ),
+                (
+                    fixture.replace("void advance_vjp(", "void missing_vjp("),
+                    "supplied_policy::numeric",
+                    false,
+                ),
+            ] {
+                fs::write(&source, header.as_bytes()).unwrap();
+                let pin = catalogue_sha256(header.as_bytes())
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                env::set_var(variables[2], &pin);
+                env::set_var(variables[3], namespace);
+                assert!(prepare_semantic_policy_header(&output));
+                let compilation = Command::new(env::var_os("CXX").unwrap_or_else(|| "c++".into()))
+                    .args(["-std=c++17", "-fsyntax-only", "-I"])
+                    .arg(&output)
+                    .arg("-I")
+                    .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("kernels"))
+                    .arg(&translation_unit)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    compilation.status.success(),
+                    accepted,
+                    "{}",
+                    String::from_utf8_lossy(&compilation.stderr)
+                );
+            }
+            env::remove_var(variables[0]);
+            for variable in &variables[1..] {
+                env::remove_var(variable);
+            }
+            assert!(!prepare_semantic_policy_header(&output));
+            assert!(
+                identities.insert(fs::read(output.join("semantic_policy_identity.rs")).unwrap())
+            );
+        });
+        for (name, value) in original {
+            match value {
+                Some(value) => env::set_var(name, value),
+                None => env::remove_var(name),
+            }
+        }
+        fs::remove_dir_all(&directory).unwrap();
+        result.unwrap();
+    }
 }

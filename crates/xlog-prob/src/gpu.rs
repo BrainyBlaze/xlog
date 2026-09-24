@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 
-use cudarc::driver::{DeviceSlice, LaunchConfig};
+use cudarc::driver::LaunchConfig;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{
@@ -1072,7 +1072,15 @@ impl GpuXgcf {
             num_edges_device: Some(meta_num_edges),
         };
 
-        GpuXgcf::from_device(builder, layout, provider)
+        let circuit = GpuXgcf::from_device(builder, layout, provider)?;
+        // The smoothing kernels use scratch allocations that are intentionally
+        // absent from the returned circuit. Release builds must complete the
+        // final levelization launch before those owners enter physical
+        // retirement. This is a cold topology pass and performs no D2H copy.
+        provider.device().synchronize().map_err(|error| {
+            XlogError::Kernel(format!("GPU circuit smoothing completion failed: {error}"))
+        })?;
+        Ok(circuit)
     }
 
     /// Validates and uploads a host XGCF circuit.

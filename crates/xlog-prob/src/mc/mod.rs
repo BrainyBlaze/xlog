@@ -29,8 +29,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[cfg(feature = "host-io")]
-use cudarc::driver::DeviceSlice;
-#[cfg(feature = "host-io")]
 use xlog_core::Schema;
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;

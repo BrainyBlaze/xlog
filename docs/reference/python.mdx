@@ -97,6 +97,345 @@ python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python \
   --features extension-module,host-io,arrow-device-import
 ```
 
+### Semantic task binding
+
+The semantic controller's `task_observation_roots` and `import_task` methods
+require five explicit keyword arguments in addition to their admission and
+authority inputs:
+
+| Argument | Meaning |
+| --- | --- |
+| `task_program_source` | Complete authored XLOG source, including concrete input facts; imports and external relation inputs are not accepted by this adapter. |
+| `task_query_ordinals` | Three zero-based query ordinals, in admitted statement order; all queries must return zero-arity results. |
+| `task_scoring` | Six nonnegative `u32` coefficients in order: correct, all-correct, work, improvement, refusal, spent. |
+| `admissible_truth_masks` | Three nonzero four-bit masks, one per query; bit `n` permits truth value `n`. |
+| `actor_eligible` | Required Boolean application decision, frozen into the task before any action draw; it is never inferred from the winner or result. |
+
+Import runs the authored program through XLOG's native GPU evaluator and derives
+expected Boolean answers from its completed results. There is no expected-answer
+argument or built-in task. Source, selected queries, observed results, scoring,
+masks, and actor eligibility become part of the task identity checked during
+restoration. See the
+[Rust task contract](/reference/rust#semantic-task-programs) for scoring and
+numerical-policy build requirements. These inputs replace the former implicit
+task; there is no legacy fallback.
+
+### Semantic replay carrier
+
+Each nonempty `replay_rows` entry has this shape:
+
+```python
+row = (basis, identity, canonical_record_json, material_pairs, evidence_bytes)
+identity = (training_view, training_view_digest, record_sha256,
+            source_length, block_size, targets)
+```
+
+`basis` is `episode` or `anchor`. The adapter consumes the original producer's
+training identity: manifest hash, example identifier, split, tokenizer hash and
+revision, mask-policy hash, training seed, epoch and variant. These nine values
+and their original digest must match the canonical record. Integers remain exact,
+including values larger than 64 bits. No additional native identity projection or
+rewritten record is required.
+
+The transported material pairs retain the original ordered references and exact
+bytes (or an explicitly declared reconstruction). The training-view material
+contains the producer's 136-byte header, explicit answer boundary, MASK and
+autoregressive supervision, causal-memory retention labels and forest geometry.
+Its bytes, dimensions and target coordinates are bound to the original row.
+
+An episode requires authentic native execution evidence. An anchor instead
+retains its corpus admission evidence and retention group; it cannot be selected
+as native execution replay or confer actor credit. Its record contains exactly
+`example_id`, `group`, `training_view`, `training_view_identity` and
+`content_sha256`; corpus admission and training geometry do not carry an
+invocation's model generation. Neither carrier integrity nor
+corpus admission replaces the trusted application's fresh use permissions.
+Importing this carrier does not establish that device-side training, Update
+publication or restoration has completed.
+
+During proposal replay, the native importer owns final use of its original
+policy invocation. It schedules native finalization before asking the Runtime to
+retire its temporary aliases; reader retirement then joins the named consumer
+streams. Full predecessor and successor comparisons remain required. The Runtime
+cleanup callback must not call public policy finish or backward methods during
+import. A failed final-use call quarantines the original invocation, and uncertain
+completion prevents reader release. Import does not retry final use, repeat
+publication, or substitute a backward call.
+
+### Semantic runtime checkpoints
+
+`SemanticTransitionController.save_checkpoint(task_use, *, parent,
+consumer_streams, snapshot, snapshot_model_state)` returns one sealed `bytes`
+value containing the selected native publication, the task capsule, the session
+allocation contract, and the application's exact model-state bytes. The controller
+joins every listed consumer stream before the cold native export. It then calls
+`snapshot_model_state()` exactly once on the creator thread without holding the
+native owner or task-state lock, and revalidates the task binding and acquired
+publication before sealing the result. The callback must return exact builtin
+`bytes`; failure or concurrent mutation returns no checkpoint.
+
+`SemanticTransitionSession.restore_checkpoint(checkpoint, *, device_ordinal,
+snapshot, restore_model)` validates every section and the retained authority before
+allocating a fresh, never-reused native owner. `snapshot` must be newer than the
+snapshot sealed into the checkpoint. After restoring the selected native bank, the
+session creates one controller and task use, acquires their parent once, and invokes
+the trusted factory exactly once as
+`restore_model(controller, task_use, parent, exact_model_bytes)`. The application
+must return its reconstructed semantic runtime. The frozen
+`SemanticTransitionRestoredCheckpoint` exposes that same `session`, `controller`,
+`task_use`, `parent`, and returned `model` through read-only properties; none is a
+replacement or second acquisition.
+
+The checkpoint carries content, not current permissions. Restore rechecks a fresh
+authority snapshot and the reconstructed native publication after the model factory
+returns. A callback error or final revalidation failure poisons the new native owner
+and returns no reachable carrier. Checkpoint creation and restoration are cold-path
+operations; they are not evidence of device-resident execution, training, or update
+publication.
+
+### Acquired model numerical identity
+
+The existing acquired parent's `model_context(consumer_stream=...)` returns
+`(parent_identity, descriptor_digest, semantic_root, prefix, ring, generations,
+contracts, capacities, numerical_state)`. Its final pair contains two 32-byte
+identities from the same acquisition: complete model memory geometry, and the
+device-sealed numerical state. Geometry includes allocation extents, independent
+storage objects, view-to-storage offsets and all model tensor layouts. The
+numerical identity folds that geometry with the typed-view and full-backing
+seals of model roles 18 through 25, including optimizer and gradient-presence
+state. It is independent of physical bank addresses.
+Cold restoration checks the stored geometry against the complete saved map and
+compares the device-recomputed numerical identity with the original saved value;
+it does not replace the saved identity to accept a different state.
+
+The numerical fold excludes the enclosing parent identity and ModelContract;
+the full ModelContract remains covered by the parent identity. Consequently this
+pair is not a replacement for model architecture, names, executable attributes,
+Tensor-object/version-counter classes, or their complete restoration contract.
+It confers no independent authority. This is a cold acquired-context projection,
+not a host read permitted inside the measured resident loop.
+
+For cold execution reconstruction, the same acquired parent also exposes
+`terminal_state(consumer_stream=...)`: a single-consumer CUDA DLPack capsule of
+dtype `U64`, shape `(1,)` and element stride `(1,)`. It contains the original
+acquired terminal flag (`0` active, `1` requires Drain), not a value inferred
+from tokens or supplied by the model. It shares the native private step-input
+owner used by `source()` and `model_context()`; it does not acquire another
+parent or change the nine-field context tuple. Keep the imported tensor alive
+until final use, treat its bytes as read-only and name all final consumer streams
+when releasing the parent. The existing current-task, live-reader and consumer
+stream checks apply. This export enables the existing model reconstruction
+consumer; it does not establish complete restoration or Update execution.
+
+Initial `bind_parent` metadata also requires `model_contract_layout`, the six
+byte coordinates `(S_begin, S_bytes, S_digest_offset, generation_offset,
+N_offset, identity_offset)` in the single producer-owned ModelContract (role 44).
+`S` contains the complete immutable model schema; XLOG does not parse its format.
+The schema span and four output spans must be nonempty, disjoint and bounded by
+the actual record length. Digests occupy 32 raw bytes, and the generation is an
+eight-byte little-endian integer; no alignment is required. The layout is retained
+in the existing native runtime contract and publication material.
+
+After sealing the numerical model ranges, native initialization computes
+`S_digest = SHA256(S)` and
+`identity = SHA256(b"xlog.semantic.model-identity.v1\0" + S_digest +
+LE64(actual_model_generation) + N)`. It fills those four output fields before
+sealing the complete ModelContract and parent. There is no separate record serial.
+The sampler's `u32` generation must equal the actual native model generation;
+conversion cannot truncate or wrap.
+
+Each publication bank owns a separate record-44 destination. The existing
+prepared-input producer copies the acquired record into private fixed storage,
+which `prepared_record` exports and the retained content guard checks. Ordinary
+model-preserving continuations copy the original record into the unpublished
+bank before the same finalizer and sole publication. Cold restore instead compares
+all saved fields against the device-recomputed values without rewriting them.
+The separate Update execution, producer restoration and subsequent forward still
+require their connected runtime implementation and full GPU evidence.
+
+### Original model work recording
+
+The prepared producer records logical work on its original `SemanticPreparedStep`.
+Call `step.reserve_model_work(capacity)` during `prepare_segment`, before capture.
+The positive capacity bounds event occurrences, including every saved tensor.
+Native reserves the device budget before allocating the host roster and device
+buffer. It does not run the model to discover a capacity.
+
+During the original `enqueue_step`, call
+`step.record_model_work(kind, dimensions)` for each executed operator occurrence.
+`kind` and every dimension must be exact unsigned integers, excluding booleans.
+The geometry contains at most eight factors; their checked product is the number
+of units. An empty geometry describes one scalar unit; any zero factor gives zero.
+
+| Kind | Unit |
+| --- | --- |
+| 1: pointwise | Result coordinates |
+| 2: reduction; 3: scan | Input elements |
+| 4: fill | Filled coordinates |
+| 5: contraction | Summands in one opaque linear, matrix, einsum or convolution operation |
+| 6: softmax; 7: log-softmax; 8: log-sum-exp | Input elements of one compound operation |
+| 9: scatter | Source elements |
+| 10: gather | Selected output elements |
+| 11: copy | Destination bytes; include element width in the geometry |
+| 12: cast | Converted coordinates |
+| 13: sort | Input keys, not internal comparisons |
+| 14: bucket queries | Query elements, not internal comparisons |
+
+For each original autograd save clone, call
+`step.record_saved_tensor_work(witness)` with that occurrence's original native
+content witness. Native derives shape and element width from its retained tensors.
+Different save occurrences count independently even when storage is shared;
+the same witness/tensor occurrence cannot be charged twice. Kind 15 is reserved
+for this witness-bound method and cannot be submitted as an ordinary operation.
+Views are not copies; masks do not discount executed dense geometry. Do not count
+an opaque operation and its assumed internal decomposition together.
+
+When `enqueue_step` returns, the native transition freezes the roster and checks
+its exact, nonzero model-work sum. An empty or entirely zero-work recording is
+not a valid model body. The immutable geometry is uploaded after capture,
+before submission, and consumed once inside the original executed IF body.
+Skipped bodies incur no model charge; later numerical refusal does not erase
+the forward. Counter overflow returns `work_counter_overflow` without publishing
+a successor. The original step retains the roster and allocation through
+completion and retirement. This port excludes cold preparation and later Update.
+
+This checked model-work sum is not the full attempt bound. Complete native-event
+accounting, its proved total bound, the full return consumer, and path-specific
+GPU evidence remain unfinished. The model receiver does not establish those gates.
+
+### Completed-step model inputs
+
+Before retiring a completed segment, call its original step's
+`completed_model_binding(consumer_streams=[...])` to authenticate that step's
+retained model inputs. With the semantic-policy feature enabled, the result is
+`(predecessor_identity, successor_identity_or_None, model_generation,
+model_geometry_digest, model_numerical_digest, carrier_or_None)`. Each identity
+has the four fields returned by `PublishedParent.identity()`. The generation and
+both 32-byte digests belong to the acquired predecessor, not the final segment
+bank.
+
+For a successfully published Proposal, `carrier_or_None` is a frozen
+`SemanticCompletedModelCarrier`. Its `numerical_realization`, `logits`, and
+`random_state` properties are three separate immutable
+`(native_owner_identity, canonical_bytes)` pairs. The first pair binds the
+completed step and action realization to the CUDA execution and typed launch
+identities that produced it. The second carries the retained conditional edit
+FP32 distributions and their placement from that execution; it never recomputes
+logits or runs a second forward. The third carries the invocation and training
+RNG header followed by the ordered native draw-receipt records.
+
+The carrier is a cold observation owned by the original completed step. It
+retains that step's native owners only until retirement; it neither reacquires a
+publication nor grants execution or publication authority. Native code validates
+the same completed binding before and after serializing the carrier. Recompute,
+Update, Drain, and refused steps return `None` for the carrier; a completed
+numerical refusal also has no successor. A skipped step, an uncompleted segment,
+or uncertain execution cannot return a binding. When the semantic-policy feature
+is disabled, the method raises its typed feature-required error instead of
+returning a six-field tuple with a fabricated `None` carrier.
+
+Use the same step's `record(44, 0, consumer_stream=...)`, `tensor(...)` and
+`tensor_allocation(...)` exports to serialize the original model contract and
+complete model backings. Their private storage is preallocated before capture
+and populated by that step's recorded acquisition. The observation does not
+acquire an old publication bank or allocate another history of model states.
+Treat every export as read-only, retain it until final
+use, and include every original consumer stream in the binding call. Recheck the
+binding after serialization to authenticate the same original seals. Input
+corruption or unknown completion prevents further use of the session.
+
+This method joins consumers and reads device metadata on the host. Call it only
+outside capture and the measured resident loop, before `retire_segment`. It does
+not finish policy use or retire the step. Its returned identities are not live
+readers, complete predecessor/successor replay materials, or authorization for a
+new model invocation.
+
+### Completed-step action projection
+
+For a successfully published Proposal, call
+`completed_action_projection(consumer_streams=[...])` before retiring the
+segment. This typed cold projection returns the authenticated predecessor and
+successor, logical-state materials, proposal/stream/family/action-law/model
+coordinates, native winner and pre-draw actor eligibility, exact signed-return
+bits, the device-sealed batch receipt and root, the retained task-result material,
+and distinct action RNG base and successor materials. The projection does not
+manufacture an acquired-theory identity; that value remains an application-owned
+assembler input.
+
+The projection's `task_ground` is the one typed semantic ground retained by the
+same completed Proposal owner. It binds acquired base `B`, ordered query identity
+`Q`, expected observer results, the three actual base/no-op truth codes, and the
+bound goal-authority closure. Its two ordered lane outcomes are tagged
+`EXECUTED`, with the three actual lane truth codes, or `REFUSED`, with the
+canonical native refusal kind. `task_ground.facts` retains all three ordered
+truth-code vectors together with native agreement, eligibility, value, and work
+facts; a refused lane's terminal tag remains authoritative.
+
+Learned attempted requests are not duplicated in the ground. Read them from the
+same projection's lane `decoded_text_actions` and `decoded_edit_actions`. The
+optional `edit_solution` is present only for the lowest-numbered admitted lane
+with a nonempty effective support delta that satisfies the complete bound goal
+while the base does not. It binds that lane's complete original 68-component
+prefix, both native decode receipts, sealed resulting-state receipt, actual
+truths, catalogue, and device-forward component materials. Its half-open edit
+component interval is `32..68` for lane 1 or `100..136` for lane 2; policy winner
+and score do not determine membership.
+
+For an authenticated episode row in the supervised-edit objective,
+`temporal_update_vjp(...)` derives that same minimal decisive lane on device from
+the original completed Proposal state and bound goal closure. Its direct edit
+cotangent covers only the selected lane's 36 edit components. Text components
+and the other lane receive zero direct edit cotangent; the native backward still
+walks the complete original edit recurrence and original categorical choices,
+masks, catalogue, and decode-bound tape. It does not resample, consume a
+historical score array, or invoke the model a second time.
+
+The projection also contains the admitted slot-zero record, learned lane slots 1
+and 2 with their native admission or refusal, exact non-NULL text actions and
+hard-decoded edits, and exactly
+136 ordered component objects. Each component retains its selected category,
+legal and active counts, exact 192-bit probability and cumulative-mass values,
+CDF interval, draw, rank, Philox address, and byte-backed final-mask, PWL-cell,
+active-set, selected-score VJP, component-receipt, and applicable hard-decode
+receipt materials. PWL-cell and VJP bytes are original device-forward records,
+not host reconstructions. The successor publication's native `AttemptReceipt`
+remains a separate evidence material.
+
+The method joins declared consumers and reads retained device storage outside
+the resident loop. Its opaque owner is the original retained completed-step
+carrier; typed children do not reinterpret that private ABI. It never runs a
+second forward or reacquires a current publication. Native rechecks the
+same completed binding after serialization; a changed owner, non-Proposal step,
+refusal, unknown completion, or malformed retained law closes the call.
+
+### Completed-step raw feedback
+
+Call the same retained step's
+`completed_feedback_records(consumer_streams=[...])` outside capture and the
+measured resident loop. It returns
+`(predecessor_identity, successor_identity_or_None, records)`, using the same
+identity and completion rules as `completed_model_binding`. The native input
+guard brackets the readback and joins the declared consumers. The call neither
+acquires another bank nor runs a new encoder or semantic query.
+
+Records are ordered by `(role, index)`. Each tuple contains
+`(role, index, generation, capacity_bytes, logical_begin, logical_end,
+native_identity, raw_bytes)`. Role 15 contains the complete fixed-capacity raw
+feedback slots, including validity and native query receipts; its logical extent
+retains the original occupied interval. Role 16 contains each original statement's
+bytes. Role 17 contains the original provenance records. These records are copied
+by the original device acquisition into preallocated private step storage and
+remain available until step retirement, independently of publication-bank reuse.
+
+Keep each native identity: it is the original role/index/extent/content seal,
+not SHA-256 of `raw_bytes` alone. A canonical carrier stores the byte hash
+separately. Do not replace the model identity from record 44 with a new hash of
+these records. The six tensors returned by `feedback()` are separate encoded
+features and projected service values, not this raw feedback material. This
+raw-feedback export does not supply the canonical logits or complete RNG state
+carried by `completed_model_binding`, does not supply complete
+predecessor/successor replay material, and grants no new execution authority.
+
 ## Package Details
 
 | Attribute | Value |
@@ -1487,6 +1826,14 @@ producers include:
 - Any CUDA-backed DLPack-compatible library
 
 ### Input via DLPack
+
+Your producer's `__dlpack_device__()` must return an exact two-item tuple
+`(device_type, device_id)`. The device type accepts an integer enum such as
+PyTorch's CUDA tag, or another `int` instance with value `2`; `bool` is rejected.
+The device id must be an exact Python `int` in `0..=2147483647` and match the
+selected native device. XLOG reads the integer payload without calling custom
+`__int__` or `__index__` methods. This device-specific reader does not relax
+general metadata validation or replace validation of the actual DLPack capsule.
 
 ```python
 import torch

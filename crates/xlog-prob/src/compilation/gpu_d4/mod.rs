@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{DeviceSlice, LaunchConfig};
+use cudarc::driver::LaunchConfig;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{d4_kernels, scan_kernels, D4_MODULE, SCAN_MODULE};

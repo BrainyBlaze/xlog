@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use cudarc::driver::{DeviceSlice, LaunchConfig};
+use cudarc::driver::LaunchConfig;
 use xlog_core::MemoryBudget;
 use xlog_cuda::provider::{cnf_kernels, CNF_MODULE};
 use xlog_cuda::{CudaKernelProvider, LaunchAsync};

@@ -19,6 +19,7 @@ pyo3 = { workspace = true, features = ["multiple-pymethods"] }
 cudarc = { workspace = true }
 rand = "0.8"
 sha2 = "0.11"
+serde_json = { workspace = true, features = ["arbitrary_precision", "raw_value"] }
 xlog-core.workspace = true
 xlog-cuda.workspace = true
 xlog-gpu.workspace = true
@@ -34,6 +35,7 @@ default = ["host-io"]
 host-io = ["xlog-prob/host-io"]
 extension-module = ["pyo3/extension-module"]
 arrow-device-import = ["xlog-cuda/arrow-device-import"]
+semantic-policy = ["xlog-cuda/semantic-policy"]
 
 [lints]
 workspace = true

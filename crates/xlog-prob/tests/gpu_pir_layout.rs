@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
 use xlog_cuda::CudaKernelProvider;
 use xlog_prob::compilation::gpu_pir::{GpuPirGraph, PIR_AND, PIR_LIT, PIR_NEG_LIT, PIR_OR};

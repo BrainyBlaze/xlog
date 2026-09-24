@@ -3,7 +3,6 @@
 mod common;
 use common::setup_provider;
 
-use cudarc::driver::DeviceSlice;
 use xlog_core::Result;
 use xlog_prob::mc::{McEvalConfig, McProgram, McSamplingMethod};
 

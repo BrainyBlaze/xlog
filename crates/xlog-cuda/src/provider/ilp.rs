@@ -1,19 +1,15 @@
 //! ILP (Inductive Logic Programming) kernel operations: credit/loss, COO fill, CSR histogram, reduce_sum.
 
-use std::marker::PhantomData;
+use crate::memory::{DeviceMemoryView, DeviceRead};
 
 use crate::{DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
-use super::{ilp_credit_kernels, ilp_kernels, RawCudaView, ILP_CREDIT_MODULE, ILP_MODULE};
+use super::{ilp_credit_kernels, ilp_kernels, ILP_CREDIT_MODULE, ILP_MODULE};
 use crate::memory::{CudaBuffer, CudaColumn, TrackedCudaSlice};
 
 impl super::CudaKernelProvider {
-    fn ilp_i32_view<'a>(
-        &self,
-        col: &'a CudaColumn,
-        num_elements: usize,
-    ) -> Result<RawCudaView<'a, i32>> {
+    fn ilp_i32_view(&self, col: &CudaColumn, num_elements: usize) -> Result<DeviceMemoryView<i32>> {
         let required_bytes = num_elements * std::mem::size_of::<i32>();
         if col.num_bytes() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -29,19 +25,12 @@ impl super::CudaKernelProvider {
                 "Column device pointer is not i32-aligned".to_string(),
             ));
         }
-        Ok(RawCudaView {
-            ptr,
-            len: num_elements,
-            stream: col.stream().clone(),
-            _marker: PhantomData,
-        })
+        // SAFETY: integer representations accept every bit pattern.
+        unsafe { col.device_view().slice(..required_bytes).cast() }
+            .ok_or_else(|| XlogError::Kernel("device column cast is invalid".into()))
     }
 
-    fn ilp_i64_view<'a>(
-        &self,
-        col: &'a CudaColumn,
-        num_elements: usize,
-    ) -> Result<RawCudaView<'a, i64>> {
+    fn ilp_i64_view(&self, col: &CudaColumn, num_elements: usize) -> Result<DeviceMemoryView<i64>> {
         let required_bytes = num_elements * std::mem::size_of::<i64>();
         if col.num_bytes() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -57,12 +46,9 @@ impl super::CudaKernelProvider {
                 "Column device pointer is not i64-aligned".to_string(),
             ));
         }
-        Ok(RawCudaView {
-            ptr,
-            len: num_elements,
-            stream: col.stream().clone(),
-            _marker: PhantomData,
-        })
+        // SAFETY: integer representations accept every bit pattern.
+        unsafe { col.device_view().slice(..required_bytes).cast() }
+            .ok_or_else(|| XlogError::Kernel("device column cast is invalid".into()))
     }
 
     pub fn build_selected_id_mask(
@@ -629,12 +615,9 @@ impl super::CudaKernelProvider {
         let block_size = 256u32;
         let grid_size = num_facts.div_ceil(block_size);
         // reinterpret the u8 byte column as f32 for the kernel
-        let cand_view = RawCudaView::<f32> {
-            ptr: *cand_probs.device_ptr(),
-            len: cudarc::driver::DeviceSlice::len(cand_probs) / 4,
-            stream: cand_probs.stream().clone(),
-            _marker: PhantomData,
-        };
+        let cand_view = unsafe { cand_probs.device_view().cast::<f32>() }
+            .and_then(|view| view.try_slice(..cudarc::driver::DeviceSlice::len(cand_probs) / 4))
+            .ok_or_else(|| XlogError::Kernel("device scalar view is invalid".into()))?;
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
@@ -688,12 +671,9 @@ impl super::CudaKernelProvider {
             })?;
         let block_size = 256u32;
         let grid_size = num_facts.div_ceil(block_size);
-        let cand_view = RawCudaView::<f64> {
-            ptr: *cand_probs.device_ptr(),
-            len: cudarc::driver::DeviceSlice::len(cand_probs) / 8,
-            stream: cand_probs.stream().clone(),
-            _marker: PhantomData,
-        };
+        let cand_view = unsafe { cand_probs.device_view().cast::<f64>() }
+            .and_then(|view| view.try_slice(..cudarc::driver::DeviceSlice::len(cand_probs) / 8))
+            .ok_or_else(|| XlogError::Kernel("device scalar view is invalid".into()))?;
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(

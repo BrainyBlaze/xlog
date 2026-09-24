@@ -183,6 +183,28 @@ impl<'a, 'b, T> IntoKernelParamStorage for &'a mut CudaViewMut<'b, T> {
 /// parameter storage or referenced device memory expire before the launch is
 /// enqueued on the target stream.
 pub unsafe trait LaunchAsync<Params> {
+    /// Launch within an already admitted memory operation, retaining its capture pin.
+    ///
+    /// # Safety
+    /// Parameters must match the kernel ABI and all accessed memory must be
+    /// covered by `enqueue` or a live enclosing admission on the same stream.
+    unsafe fn launch_in(
+        self,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
+        cfg: LaunchConfig,
+        params: Params,
+    ) -> Result<(), DriverError>;
+
+    /// Launch cooperatively within an already admitted memory operation.
+    ///
+    /// # Safety
+    /// The requirements of `launch_in` and CUDA cooperative launch apply.
+    unsafe fn launch_cooperative_in(
+        self,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
+        cfg: LaunchConfig,
+        params: Params,
+    ) -> Result<(), DriverError>;
     /// Launch a kernel on the function's default stream.
     ///
     /// # Safety
@@ -229,6 +251,23 @@ pub unsafe trait LaunchAsync<Params> {
 }
 
 unsafe impl LaunchAsync<&mut [*mut c_void]> for CudaFunction {
+    unsafe fn launch_in(
+        self,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
+        cfg: LaunchConfig,
+        params: &mut [*mut c_void],
+    ) -> Result<(), DriverError> {
+        self.launch_raw_in(enqueue, cfg, params, false)
+    }
+
+    unsafe fn launch_cooperative_in(
+        self,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
+        cfg: LaunchConfig,
+        params: &mut [*mut c_void],
+    ) -> Result<(), DriverError> {
+        self.launch_raw_in(enqueue, cfg, params, true)
+    }
     unsafe fn launch(
         self,
         cfg: LaunchConfig,
@@ -265,6 +304,23 @@ unsafe impl LaunchAsync<&mut [*mut c_void]> for CudaFunction {
 }
 
 unsafe impl LaunchAsync<&mut Vec<*mut c_void>> for CudaFunction {
+    unsafe fn launch_in(
+        self,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
+        cfg: LaunchConfig,
+        params: &mut Vec<*mut c_void>,
+    ) -> Result<(), DriverError> {
+        self.launch_raw_in(enqueue, cfg, params, false)
+    }
+
+    unsafe fn launch_cooperative_in(
+        self,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
+        cfg: LaunchConfig,
+        params: &mut Vec<*mut c_void>,
+    ) -> Result<(), DriverError> {
+        self.launch_raw_in(enqueue, cfg, params, true)
+    }
     unsafe fn launch(
         self,
         cfg: LaunchConfig,
@@ -307,6 +363,19 @@ macro_rules! impl_launch_tuple {
             reason = "tuple type parameters are also destructured as bindings by this arity-generating macro"
         )]
         unsafe impl<$($var: IntoKernelParamStorage),*> LaunchAsync<($($var,)*)> for CudaFunction {
+            unsafe fn launch_in(self, enqueue: &crate::launch::CudaEnqueue<'_>, cfg: LaunchConfig, params: ($($var,)*)) -> Result<(), DriverError> {
+                let ($($var,)*) = params;
+                $(let $var = $var.into_kernel_param_storage();)*
+                let mut raw = [$( $var.as_kernel_param(), )*];
+                self.launch_raw_in(enqueue, cfg, &mut raw, false)
+            }
+
+            unsafe fn launch_cooperative_in(self, enqueue: &crate::launch::CudaEnqueue<'_>, cfg: LaunchConfig, params: ($($var,)*)) -> Result<(), DriverError> {
+                let ($($var,)*) = params;
+                $(let $var = $var.into_kernel_param_storage();)*
+                let mut raw = [$( $var.as_kernel_param(), )*];
+                self.launch_raw_in(enqueue, cfg, &mut raw, true)
+            }
             unsafe fn launch(
                 self,
                 cfg: LaunchConfig,
