@@ -529,7 +529,9 @@ impl PySemanticTransitionSession {
             AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
         current_snapshot.newer_than(&saved_snapshot)?;
         let validate_authority = |snapshot: &AuthoritySnapshot| match &phase {
-            CheckpointTaskPhase::Imported => authority.check_snapshot(snapshot).map(drop),
+            CheckpointTaskPhase::Imported | CheckpointTaskPhase::InitialPrefillBound => {
+                authority.check_snapshot(snapshot).map(drop)
+            }
             CheckpointTaskPhase::Segment(operation) => {
                 authority.check_use(operation, snapshot, false)
             }
@@ -589,6 +591,7 @@ impl PySemanticTransitionSession {
         };
         let task_phase = match &phase {
             CheckpointTaskPhase::Imported => TaskUsePhase::Imported,
+            CheckpointTaskPhase::InitialPrefillBound => TaskUsePhase::InitialPrefillBound,
             CheckpointTaskPhase::Segment(operation) => TaskUsePhase::Segment(operation.clone()),
         };
         let restored_snapshot = current_snapshot.canonical.clone();
@@ -4882,14 +4885,14 @@ struct TaskCheckpointSeed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CheckpointTaskPhase {
     Imported,
+    InitialPrefillBound,
     Segment(String),
 }
 
 fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> {
     match &state.phase {
-        TaskUsePhase::Imported | TaskUsePhase::InitialPrefillBound => {
-            Ok(CheckpointTaskPhase::Imported)
-        }
+        TaskUsePhase::Imported => Ok(CheckpointTaskPhase::Imported),
+        TaskUsePhase::InitialPrefillBound => Ok(CheckpointTaskPhase::InitialPrefillBound),
         TaskUsePhase::Segment(operation) => Ok(CheckpointTaskPhase::Segment(operation.clone())),
         _ => Err(invalid(
             "checkpoint requires an imported or admitted stable task phase",
@@ -4906,6 +4909,7 @@ impl TaskCheckpointSeed {
         let snapshot = ColdValue::from_canonical_bytes(&snapshot.canonical)?;
         let (phase, operation) = match phase {
             CheckpointTaskPhase::Imported => ("imported", ColdValue::None),
+            CheckpointTaskPhase::InitialPrefillBound => ("initial-prefill-bound", ColdValue::None),
             CheckpointTaskPhase::Segment(operation) => {
                 ("segment", ColdValue::Text(operation.clone()))
             }
@@ -4928,6 +4932,9 @@ impl TaskCheckpointSeed {
         let fields = value.fields(9)?;
         let phase = match fields[7].text()? {
             "imported" if fields[8] == ColdValue::None => CheckpointTaskPhase::Imported,
+            "initial-prefill-bound" if fields[8] == ColdValue::None => {
+                CheckpointTaskPhase::InitialPrefillBound
+            }
             "segment" => CheckpointTaskPhase::Segment(fields[8].text()?.to_owned()),
             _ => return Err(invalid("checkpoint task phase is invalid")),
         };
@@ -11175,7 +11182,7 @@ impl PySemanticTransitionController {
             snapshot.newer_than(&state.snapshot)?;
             let phase = checkpoint_task_phase(&state)?;
             match &phase {
-                CheckpointTaskPhase::Imported => {
+                CheckpointTaskPhase::Imported | CheckpointTaskPhase::InitialPrefillBound => {
                     task_use.authority.check_snapshot(&snapshot)?;
                 }
                 CheckpointTaskPhase::Segment(operation) => {
@@ -13326,6 +13333,40 @@ mod tests {
     use std::ffi::CString;
     use std::sync::Arc;
     use xlog_cuda::{SemanticArgument, SemanticPolarity, SemanticRecordRole};
+
+    #[test]
+    fn checkpoint_keeps_initial_prefill_distinct_from_imported_task() {
+        let (_, snapshot) = fresh_source_authority("").unwrap();
+        let imported = TaskUseState {
+            phase: TaskUsePhase::Imported,
+            snapshot: snapshot.clone(),
+        };
+        let prefilled = TaskUseState {
+            phase: TaskUsePhase::InitialPrefillBound,
+            snapshot: snapshot.clone(),
+        };
+        assert_ne!(
+            super::checkpoint_task_phase(&imported).unwrap(),
+            super::checkpoint_task_phase(&prefilled).unwrap(),
+        );
+        let seed = super::TaskCheckpointSeed {
+            authority: Vec::new(),
+            evaluation: Vec::new(),
+            training_objective: ColdValue::None,
+            initial_sources: ColdValue::None,
+            source_mapping: ColdValue::None,
+            replay_selection: ColdValue::None,
+        };
+        let bytes = seed
+            .encode(
+                &snapshot,
+                &super::checkpoint_task_phase(&prefilled).unwrap(),
+            )
+            .unwrap();
+        let (_, decoded_snapshot, phase) = super::TaskCheckpointSeed::decode(&bytes).unwrap();
+        assert_eq!(phase, super::CheckpointTaskPhase::InitialPrefillBound);
+        assert_eq!(decoded_snapshot.canonical, snapshot.canonical);
+    }
 
     #[test]
     #[cfg(feature = "semantic-policy")]
