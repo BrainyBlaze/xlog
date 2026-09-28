@@ -242,6 +242,10 @@ calls the existing `refresh_snapshot()` callback after each external read. That
 fresh snapshot must advance and still permit training. The callback and retained
 source are cold-path responsibilities; neither runs inside the resident segment.
 Missing or mismatched sources and revoked rights reject actor admission.
+This also applies when no replay row is selected: actor rows cannot enter the
+training arena until every resolved checkpoint has passed the fresh training-rights
+check. A fresh import without checkpoint-dependent rows still passes no refresh
+callback.
 
 The checkpoint carries content, not current permissions. Restore rechecks a fresh
 authority snapshot and the reconstructed native publication after the model factory

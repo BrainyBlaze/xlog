@@ -542,6 +542,25 @@ fn check_checkpoint_referent_limits(
     Ok(())
 }
 
+fn refresh_checkpoint_authority(
+    authority: &TaskAuthority,
+    snapshot: &mut AuthoritySnapshot,
+    refresh_snapshot: &Bound<'_, PyAny>,
+    operation: &str,
+    actor_row: bool,
+) -> PyResult<()> {
+    let refreshed = refresh_snapshot.call0()?;
+    let mut budget = 16 * 1024 * 1024;
+    let refreshed = AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut budget, 0)?)?;
+    refreshed.newer_than(snapshot)?;
+    if actor_row {
+        authority.check_use("training", &refreshed, true)?;
+    }
+    authority.check_use(operation, &refreshed, true)?;
+    *snapshot = refreshed;
+    Ok(())
+}
+
 fn resolve_replay_checkpoint_referents(
     py: Python<'_>,
     authority: &TaskAuthority,
@@ -615,6 +634,10 @@ fn resolve_replay_checkpoint_referents(
         } else {
             "training"
         };
+        let actor_row = row.checkpoint_referent()?.is_some();
+        if actor_row {
+            authority.check_use("training", snapshot, true)?;
+        }
         authority.check_use(operation, snapshot, true)?;
         if referent.scope_digest != checkpoint_scope_digest(&authority.scope) {
             return Err(invalid("replay checkpoint refers to another task scope"));
@@ -642,13 +665,13 @@ fn resolve_replay_checkpoint_referents(
             }
             referent.verify_source(source)?;
             verified.insert(referent.checkpoint_digest, source.to_vec());
-            let refreshed = refresh_snapshot.call0()?;
-            let mut budget = 16 * 1024 * 1024;
-            let refreshed =
-                AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut budget, 0)?)?;
-            refreshed.newer_than(snapshot)?;
-            authority.check_use(operation, &refreshed, true)?;
-            *snapshot = refreshed;
+            refresh_checkpoint_authority(
+                authority,
+                snapshot,
+                refresh_snapshot,
+                operation,
+                actor_row,
+            )?;
         } else {
             referent.verify_source(
                 verified
@@ -14136,6 +14159,49 @@ mod tests {
         assert_eq!(decoded_snapshot.canonical, snapshot.canonical);
         assert_eq!(binding.identity, [1; 32]);
         assert_eq!(binding.epoch, 2);
+    }
+
+    #[test]
+    fn actor_checkpoint_refresh_rechecks_training_without_weakening_inference() {
+        let (values, original) = task_inputs("");
+        let authority = TaskAuthority::parse(&values).unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = pyo3::types::PyDict::new(py);
+            py.run(
+                &CString::new(format!(
+                    "{TASK_INPUT}\nrefreshed = (1, ('1970-01-01T00:00:02Z', 2_000_000), snapshot[2], snapshot[3], ('training-revoke',))\nrefresh = lambda: refreshed"
+                ))
+                .unwrap(),
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+            let refresh = globals.get_item("refresh").unwrap().unwrap();
+            let mut refused = original.clone();
+            assert!(super::refresh_checkpoint_authority(
+                &authority,
+                &mut refused,
+                &refresh,
+                "inference",
+                true,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("revoked"));
+            assert_eq!(refused.canonical, original.canonical);
+
+            let mut non_actor = original.clone();
+            super::refresh_checkpoint_authority(
+                &authority,
+                &mut non_actor,
+                &refresh,
+                "inference",
+                false,
+            )
+            .unwrap();
+            assert_eq!(non_actor.revision, 1);
+        });
     }
 
     #[test]
