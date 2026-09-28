@@ -220,6 +220,29 @@ must return its reconstructed semantic runtime. The frozen
 `task_use`, `parent`, and returned `model` through read-only properties; none is a
 replacement or second acquisition.
 
+For actor replay, retain the complete original pre-action checkpoint with its
+application owner and call `SemanticTransitionSession.checkpoint_referent(checkpoint)`
+to obtain the compact native record. Store the exact record bytes as the episode's
+`downstream-snapshot` material. `inspect_checkpoint_referent(record)` exposes its
+checkpoint SHA-256 and length, original publication, model and task identities,
+content and scoring identities, authority scope, and saved phase. The record is
+not a replacement for the complete checkpoint. The owner must check a retrieved
+source with `verify_checkpoint_referent(record, checkpoint)`; `restore_checkpoint`
+accepts `referent=record` and performs that same exact check before allocating a
+new owner.
+The complete checkpoint and its task capsule use version 2; version 1 sources
+are not accepted by this referent contract.
+
+When importing actor replay, pass one `resolve_checkpoint(digest_bytes,
+item_limit) -> bytes` callback plus `max_checkpoint_bytes` and
+`max_total_checkpoint_bytes` to `SemanticTransitionController.import_task`.
+The native importer checks both limits before calling the resolver, validates the
+complete source against the record and the episode's original predecessor, then
+calls the existing `refresh_snapshot()` callback after each external read. That
+fresh snapshot must advance and still permit training. The callback and retained
+source are cold-path responsibilities; neither runs inside the resident segment.
+Missing or mismatched sources and revoked rights reject actor admission.
+
 The checkpoint carries content, not current permissions. Restore rechecks a fresh
 authority snapshot and the reconstructed native publication after the model factory
 returns. A callback error or final revalidation failure poisons the new native owner

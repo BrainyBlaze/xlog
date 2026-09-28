@@ -177,7 +177,6 @@ impl SemanticTaskScoring {
         self.return_bound(editable_program).map(|_| ())
     }
 
-    #[cfg(feature = "semantic-policy")]
     fn completed_law_bytes(
         self,
         task_identity: Identity256,
@@ -192,6 +191,19 @@ impl SemanticTaskScoring {
         bytes.extend_from_slice(&self.return_bound(editable_program)?.to_le_bytes());
         Ok(bytes)
     }
+}
+
+fn checkpoint_scoring_law_identity(
+    scoring: SemanticTaskScoring,
+    task_identity: Identity256,
+    editable_program: bool,
+) -> Result<Identity256, SemanticTransitionError> {
+    let law = scoring.completed_law_bytes(task_identity, editable_program)?;
+    let mut hash = Sha256::new();
+    hash.update(b"xlog.semantic.checkpoint.scoring-law.v1\0");
+    hash.update((law.len() as u64).to_le_bytes());
+    hash.update(law);
+    Ok(Identity256::from_bytes(hash.finalize().into()))
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -3083,6 +3095,14 @@ pub struct SemanticPublishedIdentity {
     pub word: u64,
     pub logical_digest: Identity256,
     pub state_digest: Identity256,
+}
+
+/// Read-only identity projected from one fully validated original publication material.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticCheckpointNativeProjection {
+    pub publication: SemanticPublishedIdentity,
+    pub semantic_root: Identity256,
+    pub model_generation: u64,
 }
 
 /// Model metadata projected from one acquired publication, not supplied by the
@@ -12434,6 +12454,25 @@ impl SemanticTransitionSession {
             .map_err(SemanticTransitionError::Semantic)
     }
 
+    /// Decode the original sealed material once and project its selected publication.
+    /// This performs no CUDA allocation and does not create a runnable owner.
+    pub fn state_material_projection(
+        bytes: &[u8],
+    ) -> Result<SemanticCheckpointNativeProjection, SemanticTransitionError> {
+        let material = PublicationMaterial::decode(bytes)?;
+        let header = material.bank.header;
+        Ok(SemanticCheckpointNativeProjection {
+            publication: SemanticPublishedIdentity {
+                instance: header.instance,
+                word: header.publication_word,
+                logical_digest: header.logical_digest,
+                state_digest: header.state_digest,
+            },
+            semantic_root: header.semantic_digest,
+            model_generation: header.model_generation,
+        })
+    }
+
     /// Allocate every native step owner before the first capture begins.
     /// Freeze requested modes and reserve the complete segment before creating
     /// per-step storage. Device admission alone selects terminal drain.
@@ -21557,6 +21596,22 @@ impl SemanticTransitionSession {
         self.task.as_ref().map(|(binding, _)| binding.content())
     }
 
+    /// Identity of the exact scoring law bound to the current native task.
+    pub fn task_scoring_law_identity(
+        &self,
+    ) -> Result<Option<Identity256>, SemanticTransitionError> {
+        self.task
+            .as_ref()
+            .map(|(binding, _)| {
+                checkpoint_scoring_law_identity(
+                    binding.spec.scoring,
+                    binding.identity(),
+                    binding.spec.program.editable_program().is_some(),
+                )
+            })
+            .transpose()
+    }
+
     /// Semantic root of the validated goal witness bound to the current task.
     /// This is the same root retained in its completed task ground.
     pub fn task_semantic_goal_root(&self) -> Option<Identity256> {
@@ -29009,6 +29064,21 @@ mod text_parent_tests {
         }
     }
 
+    #[test]
+    fn checkpoint_projection_uses_validated_original_publication() {
+        let material = publication_material_sample();
+        let header = material.bank.header;
+        let projection =
+            SemanticTransitionSession::state_material_projection(&material.encode().unwrap())
+                .unwrap();
+        assert_eq!(projection.publication.instance, header.instance);
+        assert_eq!(projection.publication.word, header.publication_word);
+        assert_eq!(projection.publication.logical_digest, header.logical_digest);
+        assert_eq!(projection.publication.state_digest, header.state_digest);
+        assert_eq!(projection.semantic_root, header.semantic_digest);
+        assert_eq!(projection.model_generation, header.model_generation);
+    }
+
     // Fixed native ABI records exercise the cold evidence parser. They are not
     // claimed to be a device execution or historical publication authority.
     fn replay_material_sample() -> (PublicationMaterial, PublicationReplayEvidence) {
@@ -32382,6 +32452,26 @@ pub(crate) mod task_binding_tests {
         assert_eq!(
             structural[structural.len() - size_of::<i64>()..],
             scoring.return_bound(true).unwrap().to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn checkpoint_scoring_identity_tracks_the_bound_law() {
+        let scoring = SemanticTaskScoring {
+            correct_weight: 14,
+            all_correct_weight: 7,
+            work_weight: 1,
+            improvement_weight: 45,
+            refusal_weight: 15,
+            spent_weight: 1,
+        };
+        let task = Identity256::from_bytes([11; 32]);
+        let baseline = checkpoint_scoring_law_identity(scoring, task, false).unwrap();
+        let mut changed = scoring;
+        changed.correct_weight += 1;
+        assert_ne!(
+            baseline,
+            checkpoint_scoring_law_identity(changed, task, false).unwrap()
         );
     }
 
