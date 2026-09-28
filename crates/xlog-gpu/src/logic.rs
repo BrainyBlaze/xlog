@@ -1103,6 +1103,7 @@ pub struct SemanticLogicTaskProgram {
     source: String,
     query_ordinals: [usize; 3],
     program: LogicProgram,
+    editable: Option<Arc<xlog_cuda::SemanticProgramAdmission>>,
 }
 
 impl std::fmt::Debug for SemanticLogicTaskProgram {
@@ -1140,11 +1141,323 @@ impl SemanticLogicTaskProgram {
             source,
             query_ordinals,
             program,
+            editable: None,
         })
+    }
+
+    /// Bind the independently admitted editable source to the observer without
+    /// deriving candidate syntax or order from the observer's expected answers.
+    pub fn with_editable_program(
+        mut self,
+        editable: Arc<xlog_cuda::SemanticProgramAdmission>,
+    ) -> Self {
+        self.editable = Some(editable);
+        self
+    }
+}
+
+/// Lower an admitted editable source to the exact positive binary program bank
+/// consumed by the resident semantic evaluator. The independent observer is
+/// deliberately absent: it may supply expected truth, never candidate syntax.
+pub fn compile_positive_binary_task(
+    initial_theory: &str,
+    input_facts: &str,
+    statements: [&str; 3],
+) -> Result<xlog_cuda::SemanticProgramAdmission> {
+    use xlog_cuda::{SemanticProgramAdmission, SemanticProgramFact};
+
+    let theory = xlog_logic::parse_program(initial_theory)?;
+    let facts = xlog_logic::parse_program(input_facts)?;
+    if !positive_binary_source_only(&theory)
+        || !positive_binary_source_only(&facts)
+        || !facts.predicates.is_empty()
+        || facts.rules.iter().any(|rule| !rule.is_fact())
+    {
+        return Err(XlogError::Compilation(
+            "editable semantic source requires declarations, positive binary rules and separate ground facts only".into(),
+        ));
+    }
+    // The production compiler remains the authority for XLOG syntax and type
+    // semantics. The resident lowering below only handles its admitted subset.
+    let mut executable_source = String::with_capacity(
+        initial_theory.len()
+            + input_facts.len()
+            + statements.iter().map(|s| s.len() + 5).sum::<usize>()
+            + 5,
+    );
+    executable_source.push_str(initial_theory);
+    executable_source.push('\n');
+    executable_source.push_str(input_facts);
+    executable_source.push('\n');
+    for statement in statements {
+        executable_source.push_str("?- ");
+        executable_source.push_str(statement);
+        executable_source.push_str(".\n");
+    }
+    LogicProgram::compile(&executable_source)?;
+
+    let mut predicate_indices = BTreeMap::new();
+    for (index, declaration) in theory.predicates.iter().enumerate() {
+        if declaration.types.len() != 2
+            || declaration
+                .types
+                .iter()
+                .any(|typ| *typ != xlog_logic::ast::TypeRef::Scalar(ScalarType::U32))
+            || predicate_indices
+                .insert(declaration.name.clone(), index as u32)
+                .is_some()
+        {
+            return Err(XlogError::Compilation(
+                "editable semantic predicates must be distinct binary u32 declarations".into(),
+            ));
+        }
+    }
+    if predicate_indices.is_empty() {
+        return Err(XlogError::Compilation(
+            "editable semantic source has no declared predicates".into(),
+        ));
+    }
+
+    let mut initial_facts = Vec::new();
+    let mut initial_rules = Vec::new();
+    for rule in theory.rules.iter().chain(&facts.rules) {
+        if rule.is_fact() {
+            initial_facts.push(lower_binary_fact(&rule.head, &predicate_indices)?);
+        } else {
+            initial_rules.push(lower_positive_binary_rule(rule, &predicate_indices)?);
+        }
+    }
+    let parsed_queries = xlog_logic::parse_program(&executable_source)?;
+    let queries: [SemanticProgramFact; 3] = parsed_queries
+        .queries
+        .iter()
+        .map(|query| lower_binary_fact(&query.atom, &predicate_indices))
+        .collect::<Result<Vec<_>>>()?
+        .try_into()
+        .map_err(|_| {
+            XlogError::Compilation("editable semantic task requires three ground queries".into())
+        })?;
+    Ok(SemanticProgramAdmission {
+        predicate_count: theory.predicates.len() as u32,
+        initial_facts,
+        initial_rules,
+        queries,
+    })
+}
+
+fn positive_binary_source_only(program: &Program) -> bool {
+    program.imports.is_empty()
+        && program.functions.is_empty()
+        && program.domains.is_empty()
+        && program.constraints.is_empty()
+        && program.authored_constraint_source_bound.is_none()
+        && program.queries.is_empty()
+        && program.prob_facts.is_empty()
+        && program.annotated_disjunctions.is_empty()
+        && program.evidence.is_empty()
+        && program.prob_queries.is_empty()
+        && program.neural_predicates.is_empty()
+        && program.learnable_rules.is_empty()
+        && program.directives == Default::default()
+}
+
+fn lower_binary_fact(
+    atom: &Atom,
+    predicates: &BTreeMap<String, u32>,
+) -> Result<xlog_cuda::SemanticProgramFact> {
+    use xlog_cuda::SemanticProgramFact;
+    let predicate = *predicates.get(&atom.predicate).ok_or_else(|| {
+        XlogError::Compilation(format!("undeclared editable predicate {}", atom.predicate))
+    })?;
+    if atom.terms.len() != 2 {
+        return Err(XlogError::Compilation(
+            "editable fact must be binary".into(),
+        ));
+    }
+    let value = |term: &Term| match term {
+        Term::Integer(value) => u32::try_from(*value).map_err(|_| {
+            XlogError::Compilation("editable fact requires a u32 ground value".into())
+        }),
+        _ => Err(XlogError::Compilation(
+            "editable fact requires a u32 ground value".into(),
+        )),
+    };
+    Ok(SemanticProgramFact {
+        predicate,
+        first: value(&atom.terms[0])?,
+        second: value(&atom.terms[1])?,
+    })
+}
+
+fn lower_positive_binary_rule(
+    rule: &Rule,
+    predicates: &BTreeMap<String, u32>,
+) -> Result<xlog_cuda::SemanticProgramRule> {
+    use xlog_cuda::SemanticProgramRule;
+    if !(1..=2).contains(&rule.body.len()) || rule.head.terms.len() != 2 {
+        return Err(XlogError::Compilation(
+            "editable rule requires one or two positive binary body atoms".into(),
+        ));
+    }
+    let predicate = |atom: &Atom| -> Result<u32> {
+        if atom.terms.len() != 2 {
+            return Err(XlogError::Compilation(
+                "editable rule atom must be binary".into(),
+            ));
+        }
+        predicates.get(&atom.predicate).copied().ok_or_else(|| {
+            XlogError::Compilation(format!("undeclared editable predicate {}", atom.predicate))
+        })
+    };
+    let mut names = BTreeMap::new();
+    let mut next = 0u32;
+    let mut body = Vec::with_capacity(rule.body.len());
+    for literal in &rule.body {
+        let BodyLiteral::Positive(atom) = literal else {
+            return Err(XlogError::Compilation(
+                "editable rule body must contain positive atoms only".into(),
+            ));
+        };
+        let mut variables = [0; 2];
+        for (position, term) in atom.terms.iter().enumerate().take(2) {
+            variables[position] = match term {
+                Term::Variable(name) => *names.entry(name.clone()).or_insert_with(|| {
+                    let value = next;
+                    next += 1;
+                    value
+                }),
+                Term::Anonymous => {
+                    let value = next;
+                    next += 1;
+                    value
+                }
+                _ => {
+                    return Err(XlogError::Compilation(
+                        "editable rule body requires variables only".into(),
+                    ))
+                }
+            };
+        }
+        body.push((predicate(atom)?, variables));
+    }
+    let mut head_variables = [0; 2];
+    for (position, term) in rule.head.terms.iter().enumerate() {
+        let Term::Variable(name) = term else {
+            return Err(XlogError::Compilation(
+                "editable rule head requires bound variables".into(),
+            ));
+        };
+        head_variables[position] = *names.get(name).ok_or_else(|| {
+            XlogError::Compilation("editable rule head variable is unbound".into())
+        })?;
+    }
+    Ok(SemanticProgramRule {
+        head_predicate: predicate(&rule.head)?,
+        left_predicate: body[0].0,
+        right_predicate: body.get(1).map_or(0, |item| item.0),
+        body_count: body.len() as u32,
+        head_variables,
+        left_variables: body[0].1,
+        right_variables: body.get(1).map_or([0, 0], |item| item.1),
+    })
+}
+
+#[cfg(test)]
+mod semantic_program_lowering_tests {
+    use super::compile_positive_binary_task;
+    use xlog_cuda::{SemanticProgramFact, SemanticProgramRule};
+
+    #[test]
+    fn admitted_source_lowers_base_rules_facts_and_ordered_queries() {
+        let theory = "pred p(u32, u32).\npred q(u32, u32).\npred t(u32, u32).\n\
+                      t(X, Y) :- q(X, Y).\n";
+        let facts = "p(1, 2).\nq(6, 7).\np(4, 5).\n";
+        let queries = ["t(1, 3)", "t(6, 7)", "t(4, 3)"];
+        let admission = compile_positive_binary_task(theory, facts, queries).unwrap();
+        assert_eq!(admission.predicate_count, 3);
+        assert_eq!(admission.initial_facts.len(), 3);
+        assert_eq!(admission.initial_rules.len(), 1);
+        assert_eq!(
+            admission.queries[0],
+            SemanticProgramFact {
+                predicate: 2,
+                first: 1,
+                second: 3
+            }
+        );
+        assert_eq!(
+            admission.initial_rules[0],
+            SemanticProgramRule {
+                head_predicate: 2,
+                left_predicate: 1,
+                right_predicate: 0,
+                body_count: 1,
+                head_variables: [0, 1],
+                left_variables: [0, 1],
+                right_variables: [0, 0],
+            }
+        );
+    }
+
+    #[test]
+    fn separate_rule_and_fact_sources_preserve_missing_composition() {
+        let theory = "pred p(u32, u32).\npred q(u32, u32).\npred r(u32, u32).\n\
+                      pred u(u32, u32).\npred t(u32, u32).\n\
+                      u(X, Y) :- p(X, Y).\nu(X, Y) :- r(X, Y).\nt(X, Y) :- r(X, Y).\n";
+        let facts = "p(1, 2).\np(4, 5).\nq(2, 3).\nq(1, 4).\nr(6, 7).\n";
+        let admission =
+            compile_positive_binary_task(theory, facts, ["t(1, 3)", "t(1, 4)", "t(4, 3)"]).unwrap();
+        assert_eq!(admission.predicate_count, 5);
+        assert_eq!(admission.initial_facts.len(), 5);
+        assert_eq!(admission.initial_rules.len(), 3);
+        assert_eq!(admission.queries[0].predicate, 4);
+        assert_eq!(admission.queries[0].first, 1);
+        assert_eq!(admission.queries[0].second, 3);
+        assert!(admission
+            .initial_rules
+            .iter()
+            .all(|rule| rule.body_count == 1));
+        assert!(!admission.initial_rules.iter().any(|rule| {
+            rule.head_predicate == 4 && rule.left_predicate == 0 && rule.right_predicate == 1
+        }));
+    }
+
+    #[test]
+    fn unsupported_or_unsafe_source_cannot_become_partial_program() {
+        let declaration = "pred p(u32, u32).\npred t(u32, u32).\n";
+        let queries = ["t(1, 2)", "t(2, 3)", "t(3, 4)"];
+        assert!(compile_positive_binary_task(
+            &(declaration.to_owned() + "t(X, Z) :- p(X, Y).\n"),
+            "p(1, 2).\n",
+            queries,
+        )
+        .is_err());
+        assert!(compile_positive_binary_task(
+            &(declaration.to_owned() + "t(X, Y) :- not p(X, Y).\n"),
+            "p(1, 2).\n",
+            queries,
+        )
+        .is_err());
+        assert!(compile_positive_binary_task(
+            declaration,
+            "p(1, 2).\nt(X, Y) :- p(X, Y).\n",
+            queries,
+        )
+        .is_err());
+        assert!(compile_positive_binary_task(
+            declaration,
+            "p(1, 2).\n",
+            ["t(1, 2)", "t(X, 2)", "t(3, 4)"],
+        )
+        .is_err());
     }
 }
 
 impl xlog_cuda::SemanticTaskProgram for SemanticLogicTaskProgram {
+    fn editable_program(&self) -> Option<&xlog_cuda::SemanticProgramAdmission> {
+        self.editable.as_deref()
+    }
+
     fn observe(
         &self,
         provider: Arc<CudaKernelProvider>,

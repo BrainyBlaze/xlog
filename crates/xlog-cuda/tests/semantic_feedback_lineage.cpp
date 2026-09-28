@@ -535,11 +535,12 @@ static void native_work_preserves_one_model_charge_through_refusal() {
 static void task_preflight_accepts_all_four_truth_states() {
     for(uint64_t first=0;first<4;++first)for(uint64_t second=0;second<4;++second) {
         RefusalExecution execution;
-        std::array<uint64_t,53> task{};
-        task[0]=5;task[1]=91;task[6]=11;task[10]=21;task[52]=1;
+        std::array<uint64_t,66> task{};
+        task[0]=6;task[1]=91;task[6]=11;task[10]=21;task[52]=1;
         task[18]=first;task[19]=second;task[20]=0;
         task[25]=task[26]=15;task[31]=task[32]=task[33]=15;
         execution.descriptor.task=reinterpret_cast<uint64_t>(task.data());
+        execution.descriptor.task_words=task.size();
         // Stop at the existing ordinary support refusal after the actual task
         // preflight and root truth queries, before any categorical draw.
         execution.support[0]=0;
@@ -553,9 +554,10 @@ static void task_preflight_accepts_all_four_truth_states() {
     }
     for(uint32_t slot=0;slot<3;++slot)for(uint64_t invalid : {uint64_t(4),UINT64_MAX}) {
         RefusalExecution execution;
-        std::array<uint64_t,53> task{};
-        task[0]=5;task[1]=91;task[18+slot]=invalid;task[25]=task[26]=15;task[52]=1;
+        std::array<uint64_t,66> task{};
+        task[0]=6;task[1]=91;task[18+slot]=invalid;task[25]=task[26]=15;task[52]=1;
         execution.descriptor.task=reinterpret_cast<uint64_t>(task.data());
+        execution.descriptor.task_words=task.size();
         semantic_transition_execute(execution.descriptor);
         require(execution.state.status==7 && execution.state.task_evaluation.query_count==0 &&
             execution.state.blocks==0,
@@ -652,11 +654,12 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
         std::copy(pending_layouts.begin(),pending_layouts.end(),reinterpret_cast<PublicationTensorLayout*>(table+1));
         pending_ranges.push_back(pending_table);
 
-        std::array<uint64_t,53> task{};task[0]=5;task[1]=91;task[6]=11;task[10]=task[14]=21;task[52]=1;
+        std::array<uint64_t,66> task{};task[0]=6;task[1]=91;task[6]=11;task[10]=task[14]=21;task[52]=1;
         task[18]=1;task[19]=task[20]=2;
         task[25]=14;task[26]=7;task[27]=1;task[28]=45;task[29]=15;task[30]=1;
         task[31]=task[32]=task[33]=7;
         descriptor.task=reinterpret_cast<uint64_t>(task.data());
+        descriptor.task_words=task.size();
         PublicationContract contract{};contract.abi=1;contract.range_capacity=ranges.size();
         contract.prefix_capacity=64;contract.window_capacity=32;contract.feedback_capacity=3;contract.max_position=128;
         contract.model_generation=3;contract.authority_generation=4;contract.semantic_owner=91;
@@ -1028,7 +1031,7 @@ struct StepPublicationFixture {
     PublicationControl control{};
     PublicationLease lease{};
     PendingContinuation pending{};
-    std::array<uint64_t,53> task{};
+    std::array<uint64_t,66> task{};
     uint64_t terminal_token=17;
 
     uint64_t allocate(uint64_t bytes) {
@@ -1129,12 +1132,13 @@ struct StepPublicationFixture {
             control.banks[bank]=reinterpret_cast<uint64_t>(&banks[bank]);
             control.directories[bank]=reinterpret_cast<uint64_t>(directories[bank].data());
         }
-        task[0]=5;task[1]=91;task[6]=11;task[10]=task[14]=21;task[52]=1;
+        task[0]=6;task[1]=91;task[6]=11;task[10]=task[14]=21;task[52]=1;
         task[18]=1;task[19]=task[20]=2;
         task[22]=task[23]=task[24]=0;
         task[25]=14;task[26]=7;task[27]=1;task[28]=45;task[29]=15;task[30]=1;
         task[31]=task[32]=task[33]=7;
         execution.descriptor.task=reinterpret_cast<uint64_t>(task.data());
+        execution.descriptor.task_words=task.size();
         contract.abi=1;contract.range_capacity=directories[0].size();contract.prefix_capacity=64;
         contract.window_capacity=32;contract.feedback_capacity=kFeedbackCapacity;contract.max_position=96;
         contract.model_generation=3;contract.authority_generation=4;contract.semantic_owner=91;
@@ -1709,8 +1713,8 @@ static void exact_task_occurrence() {
     uint64_t identity[4], digest[4];
     semantic_graph::decode_identity(statement.identity_words,identity);
     semantic_graph::support_digest(identity,support,digest);
-    std::array<uint64_t,58> task{};
-    task[0]=5; task[1]=91; task[57]=1;
+    std::array<uint64_t,71> task{};
+    task[0]=6; task[1]=91; task[57]=1;
     std::copy(identity,identity+4,task.begin()+6);
     task[10]=task[14]=92; task[18]=1; task[19]=task[20]=2; task[21]=1;
     task[22]=7; task[23]=task[24]=8; task[31]=task[32]=task[33]=7; task[34]=3;
@@ -1755,10 +1759,11 @@ static void acquired_feedback_history() {
     descriptor.arena[0]=reinterpret_cast<uint64_t>(arena.data());descriptor.arena[1]=91;
     descriptor.arena[2]=roots;descriptor.arena[3]=statements;descriptor.arena[4]=supports;
     descriptor.arena[5]=versions;descriptor.arena[6]=arena.size();
-    std::array<uint64_t,53> task{};
-    task[0]=5;task[1]=91;task[6]=11;task[10]=task[14]=21;task[52]=1;
+    std::array<uint64_t,66> task{};
+    task[0]=6;task[1]=91;task[6]=11;task[10]=task[14]=21;task[52]=1;
     task[22]=3;task[23]=task[24]=8;task[31]=task[32]=task[33]=7;
     descriptor.task=reinterpret_cast<uint64_t>(task.data());
+    descriptor.task_words=task.size();
     PublicationBank banks[2]{};auto& bank=banks[0];bank.header.abi=1;bank.header.semantic_owner=91;
     bank.header.semantic_slot=sealed.words[3];bank.header.semantic_generation=sealed.words[4];
     std::copy(sealed.words+13,sealed.words+16,bank.header.semantic_extents);
@@ -1966,24 +1971,42 @@ static void initial_prefix_identity_is_native_owned() {
 }
 
 static void task_selection_uses_supplied_scoring() {
-    std::array<uint64_t,34> task{};
+    std::array<uint64_t,66> task{};
     task[25]=3;task[26]=5;task[27]=7;task[28]=2;task[29]=11;task[30]=13;
+    task[53]=1;task[54]=1;task[57]=0;task[58]=1;task[59]=1;
     State state{};
     auto& evaluation=state.task_evaluation;
     evaluation.facts[0].eligible=1;
     evaluation.facts[1].eligible=1;evaluation.facts[1].g=2;evaluation.facts[1].p=1;
     state.work[0].edit_commands=2;
     evaluation.facts[2].eligible=1;evaluation.facts[2].g=1;
+    evaluation.facts[2].truth[0]=1;
     for(uint32_t slot=0;slot<3;++slot)task_cost(&state,slot,task.data());
     require(evaluation.facts[1].v==-3 && evaluation.facts[2].v==3,
         "task value ignored caller coefficients");
     evaluation.query_count=6;select_task(&state,task.data());
-    require(evaluation.winner==2,"selection ignored the supplied cost tradeoff");
+    require(evaluation.winner==2,"selection ignored the supplied higher-priority truth goal");
     require(evaluation.return_value==6-13*8,"return ignored improvement/spent coefficients");
     task[27]=0;
+    task[53]=task[54]=task[58]=task[59]=0;
     for(uint32_t slot=0;slot<3;++slot)task_cost(&state,slot,task.data());
     select_task(&state,task.data());
-    require(evaluation.winner==1,"changing the task scoring did not change the selected candidate");
+    require(evaluation.winner==1,"selection did not use improvement after removing the priority goal");
+}
+
+static void editable_program_excludes_graph_support_edits() {
+    uint64_t books[25]{};
+    Component components[18]{};
+    components[0].offset=0;components[0].cardinality=2;
+    const uint8_t support[2]={0,1};
+    uint32_t viable[1]{};
+    TaskProgramBank program{};program.editable=true;
+    require(!action_completes(books,components,support,viable,0,1,program),
+        "editable program offered a graph support edit with no program effect");
+    Component field{};field.kind=COMPONENT_KIND_EDIT;field.field=2;
+    uint32_t choices[18]{};choices[0]=ACTION_APPLY;choices[1]=1;
+    require(!legal_category(field,1,books,components,support,0,program,viable,choices,
+        false,true,false),"editable program accepted a graph support field");
 }
 
 int main(int argc, char** argv) {
@@ -2008,6 +2031,7 @@ int main(int argc, char** argv) {
     install_fatal_signal_backtraces();
     task_preflight_accepts_all_four_truth_states();
     task_selection_uses_supplied_scoring();
+    editable_program_excludes_graph_support_edits();
     initial_prefix_identity_is_native_owned();
     recompute_execution_preserves_proposal_state(false);
     recompute_execution_preserves_proposal_state(true);

@@ -82,31 +82,48 @@ unconditioned or CPU fallback is substituted when validation fails.
 
 `xlog_cuda::SemanticTaskEvaluationSpec` binds two ordered admitted statement
 records, their allowed supports, a native `SemanticTaskProgram`, explicit
-`SemanticTaskScoring` coefficients, and two truth-eligibility masks. XLOG does
+`SemanticTaskScoring` coefficients, ordered task-local priority levels, and
+three truth-eligibility masks. XLOG does
 not prescribe the statement predicate, arguments, task answers, or reward
-weights. The resident transition ABI still has two query slots and two candidate
+weights. The resident transition ABI has three query slots and two candidate
 lanes; this is a capacity limit, not a task definition.
 
 Use `xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)`
-for a self-contained XLOG source program with two selected zero-arity queries.
+for a self-contained XLOG source program with three selected zero-arity queries.
 Source facts provide its concrete inputs. During cold task binding, the native
 owner runs the canonical GPU evaluator and derives expected Boolean truth from
 the completed query results. Python cannot inject an expected-answer array.
 This adapter does not resolve imports or accept external relation buffers.
 
-Scoring maximizes `correct_weight * correct_queries + all_correct_weight *
-all_correct - work_weight * measured_work` among eligible candidates, retaining
-the earlier candidate on ties. Return scoring separately prices improvement,
-refusals, and spent work. All six coefficients are required nonnegative `u32`
-values; combinations that can overflow the signed return are rejected.
+Selection first excludes candidates outside the three hard truth masks. It then
+compares ordered `SemanticTaskPriorityLevel` values lexicographically. Each
+`SemanticTaskPriorityGoal` names one native query, target truth and positive
+weight; its normalized truth-match progress is the candidate's zero-or-one
+match minus the acquired base's match for the current step. At most three
+levels and three distinct query goals fit the bank. Predictive query agreement,
+lower measured work, then earlier candidate index break ties. The six
+`SemanticTaskScoring` coefficients remain measurement and return inputs, not
+priority levels: return separately prices improvement, refusals and spent work.
+They are required nonnegative `u32` values; combinations that can overflow the
+signed return are rejected.
 Each nonzero four-bit mask permits truth value `n` through bit `n`.
 
 Task identity binds the exact program source, query mapping, observed result
-bytes, expected truths, scoring, masks, and admitted record selections.
+bytes, expected truths, scoring, ordered priorities, masks, and admitted record
+selections.
 Restoration re-executes the observer and checks this identity. Observer failures
 poison the session; previous bindings cannot be reused after such a failure.
 Cold observer reads are outside the resident transition loop, and must not be
 reported as measured zero-transfer execution.
+
+For an admitted `SemanticProgramAdmission`, the resident proposal can insert a
+range-restricted rule with exactly two binary body atoms in either edit slot.
+Its typed result is `SemanticTransitionLane::program_rules`; graph support
+insertions remain in `SemanticTransitionLane::edits`. A rule attempt is retained
+in `program_rules` even if its lane later fails a hard constraint. Graph support
+insertion is unavailable for editable-program tasks because it would not change
+their program closure. Three task queries are evaluated from each candidate's
+actual closure, with rule and query receipts checked at observation.
 
 ### Supplied numerical policy
 

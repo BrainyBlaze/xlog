@@ -28,6 +28,10 @@ use crate::semantic_hypergraph::{
     material_bytes, material_u32, material_u64, SemanticMaterialReader, SemanticRootMaterial,
 };
 #[cfg(feature = "semantic-policy")]
+use crate::semantic_hypergraph::{
+    material_statement_key, SemanticStatementIdentity, SemanticSupportIdentity,
+};
+#[cfg(feature = "semantic-policy")]
 use crate::semantic_training_view::SemanticTrainingCanaryRefusalReason;
 use crate::semantic_training_view::{
     SemanticSelectedTrainingView, SemanticTrainingCanaryRefusalRecord,
@@ -71,6 +75,12 @@ impl Identity256 {
 /// host results. An error may follow device submission, so the calling session
 /// is poisoned and cannot reuse its previous task binding.
 pub trait SemanticTaskProgram: fmt::Debug + Send + Sync {
+    /// A cold, independently admitted mutable source bank. The observer may
+    /// report expected truth but never chooses editable rules or fact order.
+    fn editable_program(&self) -> Option<&crate::SemanticProgramAdmission> {
+        None
+    }
+
     fn observe(
         &self,
         provider: Arc<CudaKernelProvider>,
@@ -99,8 +109,8 @@ pub struct SemanticTaskContentIdentity {
 }
 
 /// Explicit nonnegative coefficients for query agreement and measured work.
-/// Selection maximizes the resulting value, retaining the earlier candidate on
-/// ties. The final return separately prices improvement, refusals, and spent work.
+/// These coefficients determine the measured value and final return; ordered
+/// task priorities, agreement, and cost select the candidate in that order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SemanticTaskScoring {
     pub correct_weight: u32,
@@ -109,6 +119,21 @@ pub struct SemanticTaskScoring {
     pub improvement_weight: u32,
     pub refusal_weight: u32,
     pub spent_weight: u32,
+}
+
+/// One normalized truth-match objective within an ordered task priority level.
+/// The native query result contributes one when it equals `target_truth`, zero
+/// otherwise; candidate progress subtracts the acquired base's contribution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticTaskPriorityGoal {
+    pub query: u8,
+    pub target_truth: u8,
+    pub weight: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticTaskPriorityLevel {
+    pub goals: Vec<SemanticTaskPriorityGoal>,
 }
 
 impl SemanticTaskScoring {
@@ -124,24 +149,148 @@ impl SemanticTaskScoring {
         .map(u64::from)
     }
 
-    fn validate(self) -> Result<(), SemanticTransitionError> {
-        // Two learned candidates each perform at most two commands, attachments,
-        // and defined truth changes. At most nine queries plus eight discarded
-        // command/truth units contribute to spent work. Check the entire signed
-        // return before upload.
+    fn return_bound(self, editable_program: bool) -> Result<i64, SemanticTransitionError> {
+        // A rule may derive many facts from one command. Successful resident
+        // materialization caps the fact bank at 4096, and a candidate can also
+        // change all three query truths. The graph-only path retains its smaller
+        // support-attachment cap. Priority selection need not maximize value,
+        // so both signs of selected-minus-base value must fit.
+        let max_cost = if editable_program {
+            2 + crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u128 + 3
+        } else {
+            6
+        };
+        let max_spent = if editable_program { 19 } else { 17 };
         let value_span = 3 * u128::from(self.correct_weight)
             + u128::from(self.all_correct_weight)
-            + 6 * u128::from(self.work_weight);
+            + max_cost * u128::from(self.work_weight);
+        i64::try_from(value_span)
+            .map_err(|_| publication_input_error("task value can overflow signed arithmetic"))?;
         let return_bound = value_span * u128::from(self.improvement_weight)
             + 2 * u128::from(self.refusal_weight)
-            + 17 * u128::from(self.spent_weight);
-        if return_bound > i64::MAX as u128 {
-            return Err(publication_input_error(
-                "task scoring can overflow the signed return",
-            ));
-        }
-        Ok(())
+            + max_spent * u128::from(self.spent_weight);
+        i64::try_from(return_bound)
+            .map_err(|_| publication_input_error("task scoring can overflow the signed return"))
     }
+
+    fn validate(self, editable_program: bool) -> Result<(), SemanticTransitionError> {
+        self.return_bound(editable_program).map(|_| ())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn completed_law_bytes(
+        self,
+        task_identity: Identity256,
+        editable_program: bool,
+    ) -> Result<Vec<u8>, SemanticTransitionError> {
+        let mut bytes = b"XLOG-TASK-SCORING-LAW\0".to_vec();
+        material_u64(&mut bytes, 1);
+        bytes.extend_from_slice(task_identity.as_bytes());
+        for weight in self.words() {
+            material_u64(&mut bytes, weight);
+        }
+        bytes.extend_from_slice(&self.return_bound(editable_program)?.to_le_bytes());
+        Ok(bytes)
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "completed scoring checks independent task, work, refusal, and result fields"
+)]
+fn validate_completed_task_scoring(
+    scoring: SemanticTaskScoring,
+    editable_program: bool,
+    priority_levels: &[SemanticTaskPriorityLevel],
+    facts: &[SemanticTaskFacts; 3],
+    work: &[SemanticTransitionWork; 2],
+    lane_refusal: [u64; 2],
+    query_count: u64,
+    winner: u64,
+    return_value: i64,
+) -> bool {
+    if scoring.validate(editable_program).is_err()
+        || query_count > 9
+        || winner > 2
+        || lane_refusal.iter().any(|&refusal| refusal > 2)
+        || work.iter().any(|work| !work.is_valid(editable_program))
+        || facts
+            .iter()
+            .any(|facts| facts.g > 3 || facts.p > 1 || facts.eligible > 1)
+    {
+        return false;
+    }
+    for (slot, facts) in facts.iter().enumerate() {
+        let measured = if slot == 0 {
+            0
+        } else {
+            let work = work[slot - 1];
+            work.edit_commands + work.added_supports + work.defined_truth_changes
+        };
+        let value = i128::from(scoring.correct_weight) * i128::from(facts.g)
+            + i128::from(scoring.all_correct_weight) * i128::from(facts.p)
+            - i128::from(scoring.work_weight) * i128::from(measured);
+        if facts.c != measured || i128::from(facts.v) != value {
+            return false;
+        }
+    }
+    let mut selected = 0;
+    for slot in 1..3 {
+        if facts[slot].eligible == 1
+            && (facts[selected].eligible == 0
+                || task_candidate_better(priority_levels, facts, slot, selected))
+        {
+            selected = slot;
+        }
+    }
+    if winner as usize != selected || facts[selected].eligible != 1 {
+        return false;
+    }
+    let refusals = lane_refusal.iter().filter(|&&refusal| refusal != 0).count() as i128;
+    let spent = i128::from(query_count)
+        + work
+            .iter()
+            .enumerate()
+            .filter(|(lane, _)| lane + 1 != selected)
+            .map(|(_, work)| i128::from(work.edit_commands + work.defined_truth_changes))
+            .sum::<i128>();
+    let expected_return = i128::from(scoring.improvement_weight)
+        * (i128::from(facts[selected].v) - i128::from(facts[0].v))
+        - i128::from(scoring.refusal_weight) * refusals
+        - i128::from(scoring.spent_weight) * spent;
+    i128::from(return_value) == expected_return
+}
+
+#[cfg(feature = "semantic-policy")]
+fn task_candidate_better(
+    priority_levels: &[SemanticTaskPriorityLevel],
+    facts: &[SemanticTaskFacts; 3],
+    candidate: usize,
+    incumbent: usize,
+) -> bool {
+    for level in priority_levels {
+        let score = |slot: usize| -> i64 {
+            level
+                .goals
+                .iter()
+                .map(|goal| {
+                    let query = usize::from(goal.query);
+                    let target = u64::from(goal.target_truth);
+                    let achieved = i64::from(facts[slot].truth[query] == target);
+                    let base = i64::from(facts[0].truth[query] == target);
+                    i64::from(goal.weight) * (achieved - base)
+                })
+                .sum()
+        };
+        let candidate_score = score(candidate);
+        let incumbent_score = score(incumbent);
+        if candidate_score != incumbent_score {
+            return candidate_score > incumbent_score;
+        }
+    }
+    facts[candidate].g > facts[incumbent].g
+        || (facts[candidate].g == facts[incumbent].g && facts[candidate].c < facts[incumbent].c)
 }
 
 /// Three ordered query selections for the bounded transition ABI. Predicate,
@@ -156,6 +305,9 @@ pub struct SemanticTaskEvaluationSpec {
     pub allowed_support_records: Vec<u32>,
     pub program: Arc<dyn SemanticTaskProgram>,
     pub scoring: SemanticTaskScoring,
+    /// Ordered, task-local lexicographic levels; an explicit empty list leaves
+    /// predictive agreement and measured cost as the selection cascade.
+    pub priority_levels: Vec<SemanticTaskPriorityLevel>,
     /// Bit n permits Truth4 value n for the corresponding candidate query.
     pub admissible_truth_masks: [u8; 3],
     /// Application-owned ex-ante decision that this episode may contribute an
@@ -202,7 +354,38 @@ impl SemanticTaskEvaluationSpec {
         let invalid = |detail: &str| SemanticTransitionError::InvalidInput {
             detail: format!("task binding: {detail}"),
         };
-        self.scoring.validate()?;
+        self.scoring
+            .validate(self.program.editable_program().is_some())?;
+        if self.priority_levels.len() > 3 {
+            return Err(invalid("task priorities exceed the three-query bank"));
+        }
+        let mut seen_queries = [false; 3];
+        let mut goal_count = 0usize;
+        for level in &self.priority_levels {
+            if level.goals.is_empty() {
+                return Err(invalid("task priority level must contain a goal"));
+            }
+            goal_count += level.goals.len();
+            if goal_count > 3 {
+                return Err(invalid("task priorities exceed the three-query bank"));
+            }
+            for goal in &level.goals {
+                let query = usize::from(goal.query);
+                if query >= 3 || goal.target_truth > 3 || goal.weight == 0 {
+                    return Err(invalid(
+                        "task priority goal has invalid query, truth or weight",
+                    ));
+                }
+                if std::mem::replace(&mut seen_queries[query], true) {
+                    return Err(invalid("task priority query appears more than once"));
+                }
+                if self.admissible_truth_masks[query] & (1 << goal.target_truth) == 0 {
+                    return Err(invalid(
+                        "task priority target is forbidden by hard truth mask",
+                    ));
+                }
+            }
+        }
         if self
             .admissible_truth_masks
             .iter()
@@ -302,6 +485,127 @@ pub(crate) struct TaskEvaluationBinding {
     goal_witness: Option<SemanticTaskGoalWitness>,
 }
 
+type TaskContentSelection = (
+    [crate::SemanticStatementKey; 3],
+    BTreeMap<u32, Vec<u8>>,
+    Vec<(u32, [u8; 32])>,
+);
+
+fn task_content_selection(
+    admission: &SemanticAdmission,
+    statement_records: [u32; 3],
+    allowed_support_records: &[u32],
+) -> Result<TaskContentSelection, SemanticTransitionError> {
+    let statements = statement_records.map(|record| {
+        admission
+            .statement_key(record)
+            .map_err(SemanticTransitionError::Semantic)
+    });
+    let statements = statements.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let statements: [_; 3] = statements
+        .try_into()
+        .expect("three selected task statements");
+    let mut statement_bytes = BTreeMap::new();
+    for record in statement_records {
+        statement_bytes.insert(
+            record,
+            feedback_statement_payload(admission.records(), &admission.encoded_records, record)?,
+        );
+    }
+    let mut allowed_supports = BTreeSet::new();
+    for &index in allowed_support_records {
+        let record = admission
+            .records()
+            .supports
+            .get(index as usize)
+            .ok_or(SemanticTransitionError::InvalidTaskBank)?;
+        if !statement_records.contains(&record.statement) {
+            return Err(SemanticTransitionError::InvalidTaskBank);
+        }
+        let statement = admission
+            .statement_key(record.statement)
+            .map_err(SemanticTransitionError::Semantic)?;
+        let event = admission
+            .support_event(index)
+            .map_err(SemanticTransitionError::Semantic)?;
+        allowed_supports.insert((index, *event.identity(statement.identity()).as_bytes()));
+    }
+    Ok((
+        statements,
+        statement_bytes,
+        allowed_supports.into_iter().collect(),
+    ))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "task content identity binds independent admitted and observed materials"
+)]
+fn task_content_identity(
+    admission_identity: Identity256,
+    schema_generation: Identity256,
+    statement_records: [u32; 3],
+    statements: [crate::SemanticStatementKey; 3],
+    statement_bytes: &BTreeMap<u32, Vec<u8>>,
+    allowed_supports: &[(u32, [u8; 32])],
+    observation: &SemanticTaskObservation,
+    editable: Option<&crate::SemanticProgramAdmission>,
+) -> SemanticTaskContentIdentity {
+    let append_bytes = |hash: &mut Sha256, bytes: &[u8]| {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    };
+
+    let mut query = Sha256::new();
+    query.update(b"xlog.semantic.task-query.v1\0");
+    query.update((statement_records.len() as u64).to_le_bytes());
+    for (record, statement) in statement_records.into_iter().zip(statements) {
+        query.update(record.to_le_bytes());
+        query.update(statement.identity().as_bytes());
+        append_bytes(
+            &mut query,
+            statement_bytes
+                .get(&record)
+                .expect("bound query statement retains canonical bytes"),
+        );
+    }
+    append_bytes(&mut query, &observation.input_bytes);
+    let query = Identity256::from_bytes(query.finalize().into());
+
+    let mut theory_program = Sha256::new();
+    theory_program.update(b"xlog.semantic.task-theory-program.v1\0");
+    theory_program.update(admission_identity.as_bytes());
+    theory_program.update(schema_generation.as_bytes());
+    theory_program.update((allowed_supports.len() as u64).to_le_bytes());
+    for (record, support) in allowed_supports {
+        theory_program.update(record.to_le_bytes());
+        theory_program.update(support);
+    }
+    append_bytes(&mut theory_program, &observation.program_source);
+    if let Some(editable) = editable {
+        theory_program.update(b"xlog.semantic.editable-program.v1\0");
+        for word in editable.words() {
+            theory_program.update(word.to_le_bytes());
+        }
+    }
+    let theory_program = Identity256::from_bytes(theory_program.finalize().into());
+
+    let mut result = Sha256::new();
+    result.update(b"xlog.semantic.task-four-valued-result.v1\0");
+    result.update(query.as_bytes());
+    result.update(theory_program.as_bytes());
+    append_bytes(&mut result, &observation.result_bytes);
+    for truth in observation.expected_truth {
+        result.update((truth as u64).to_le_bytes());
+    }
+
+    SemanticTaskContentIdentity {
+        query,
+        theory_program,
+        result: Identity256::from_bytes(result.finalize().into()),
+    }
+}
+
 impl TaskEvaluationBinding {
     pub(crate) fn bind(
         admission: &SemanticAdmission,
@@ -309,54 +613,18 @@ impl TaskEvaluationBinding {
         observation: SemanticTaskObservation,
     ) -> Result<Self, SemanticTransitionError> {
         spec.validate_records(admission.records())?;
-        let statements = [
-            admission
-                .statement_key(spec.statement_records[0])
-                .map_err(SemanticTransitionError::Semantic)?,
-            admission
-                .statement_key(spec.statement_records[1])
-                .map_err(SemanticTransitionError::Semantic)?,
-            admission
-                .statement_key(spec.statement_records[2])
-                .map_err(SemanticTransitionError::Semantic)?,
-        ];
-        let statement_bytes = BTreeMap::from([
-            (
-                spec.statement_records[0],
-                feedback_statement_payload(
-                    admission.records(),
-                    &admission.encoded_records,
-                    spec.statement_records[0],
-                )?,
-            ),
-            (
-                spec.statement_records[1],
-                feedback_statement_payload(
-                    admission.records(),
-                    &admission.encoded_records,
-                    spec.statement_records[1],
-                )?,
-            ),
-            (
-                spec.statement_records[2],
-                feedback_statement_payload(
-                    admission.records(),
-                    &admission.encoded_records,
-                    spec.statement_records[2],
-                )?,
-            ),
-        ]);
-        let mut allowed_supports = BTreeSet::new();
-        for &index in &spec.allowed_support_records {
-            let record = &admission.records().supports[index as usize];
-            let statement = admission
-                .statement_key(record.statement)
-                .map_err(SemanticTransitionError::Semantic)?;
-            let event = admission
-                .support_event(index)
-                .map_err(SemanticTransitionError::Semantic)?;
-            allowed_supports.insert((index, *event.identity(statement.identity()).as_bytes()));
+        if let Some(program) = spec.program.editable_program() {
+            program
+                .validate()
+                .map_err(|detail| SemanticTransitionError::InvalidInput {
+                    detail: format!("task binding: {detail}"),
+                })?;
         }
+        let (statements, statement_bytes, allowed_supports) = task_content_selection(
+            admission,
+            spec.statement_records,
+            &spec.allowed_support_records,
+        )?;
         if observation.program_source.is_empty() || observation.result_bytes.is_empty() {
             return Err(publication_input_error(
                 "native task observer omitted source or result custody",
@@ -368,7 +636,7 @@ impl TaskEvaluationBinding {
             spec,
             statements,
             statement_bytes,
-            allowed_supports: allowed_supports.into_iter().collect(),
+            allowed_supports,
             observation,
             goal_witness: None,
         })
@@ -376,7 +644,11 @@ impl TaskEvaluationBinding {
 
     pub(crate) fn identity(&self) -> Identity256 {
         let mut hash = Sha256::new();
-        hash.update(b"xlog.semantic.task-evaluation.v6\0");
+        hash.update(if self.spec.program.editable_program().is_some() {
+            b"xlog.semantic.task-evaluation.v8\0".as_slice()
+        } else {
+            b"xlog.semantic.task-evaluation.v7\0".as_slice()
+        });
         hash.update(self.admission_identity.as_bytes());
         hash.update(self.schema_generation.as_bytes());
         // Keep source occurrence and explicit selection order separate from
@@ -403,6 +675,21 @@ impl TaskEvaluationBinding {
         for weight in self.spec.scoring.words() {
             hash.update(weight.to_le_bytes());
         }
+        hash.update(b"xlog.semantic.task-priorities.v1\0");
+        hash.update((self.spec.priority_levels.len() as u64).to_le_bytes());
+        for level in &self.spec.priority_levels {
+            hash.update((level.goals.len() as u64).to_le_bytes());
+            for goal in &level.goals {
+                hash.update([goal.query, goal.target_truth]);
+                hash.update(goal.weight.to_le_bytes());
+            }
+        }
+        if let Some(editable) = self.spec.program.editable_program() {
+            hash.update(b"xlog.semantic.editable-program.v1\0");
+            for word in editable.words() {
+                hash.update(word.to_le_bytes());
+            }
+        }
         for statement in self.statements {
             hash.update(statement.identity().as_bytes());
         }
@@ -424,53 +711,51 @@ impl TaskEvaluationBinding {
     }
 
     pub(crate) fn content_identity(&self) -> SemanticTaskContentIdentity {
-        let append_bytes = |hash: &mut Sha256, bytes: &[u8]| {
-            hash.update((bytes.len() as u64).to_le_bytes());
-            hash.update(bytes);
-        };
+        task_content_identity(
+            self.admission_identity,
+            self.schema_generation,
+            self.spec.statement_records,
+            self.statements,
+            &self.statement_bytes,
+            &self.allowed_supports,
+            &self.observation,
+            self.spec.program.editable_program(),
+        )
+    }
 
-        let mut query = Sha256::new();
-        query.update(b"xlog.semantic.task-query.v1\0");
-        query.update((self.spec.statement_records.len() as u64).to_le_bytes());
-        for (record, statement) in self.spec.statement_records.into_iter().zip(self.statements) {
-            query.update(record.to_le_bytes());
-            query.update(statement.identity().as_bytes());
-            append_bytes(
-                &mut query,
-                self.statement_bytes
-                    .get(&record)
-                    .expect("bound query statement retains canonical bytes"),
-            );
+    pub(crate) fn cold_content(
+        admission: &SemanticAdmission,
+        statement_records: [u32; 3],
+        allowed_support_records: &[u32],
+        editable: Option<&crate::SemanticProgramAdmission>,
+        observation: SemanticTaskObservation,
+    ) -> Result<(SemanticTaskContentIdentity, [crate::SemanticTruth; 3]), SemanticTransitionError>
+    {
+        if observation.program_source.is_empty() || observation.result_bytes.is_empty() {
+            return Err(publication_input_error(
+                "native task observer omitted source or result custody",
+            ));
         }
-        append_bytes(&mut query, &self.observation.input_bytes);
-        let query = Identity256::from_bytes(query.finalize().into());
-
-        let mut theory_program = Sha256::new();
-        theory_program.update(b"xlog.semantic.task-theory-program.v1\0");
-        theory_program.update(self.admission_identity.as_bytes());
-        theory_program.update(self.schema_generation.as_bytes());
-        theory_program.update((self.allowed_supports.len() as u64).to_le_bytes());
-        for (record, support) in &self.allowed_supports {
-            theory_program.update(record.to_le_bytes());
-            theory_program.update(support);
+        if let Some(program) = editable {
+            program
+                .validate()
+                .map_err(|detail| SemanticTransitionError::InvalidInput {
+                    detail: format!("task binding: {detail}"),
+                })?;
         }
-        append_bytes(&mut theory_program, &self.observation.program_source);
-        let theory_program = Identity256::from_bytes(theory_program.finalize().into());
-
-        let mut result = Sha256::new();
-        result.update(b"xlog.semantic.task-four-valued-result.v1\0");
-        result.update(query.as_bytes());
-        result.update(theory_program.as_bytes());
-        append_bytes(&mut result, &self.observation.result_bytes);
-        for truth in self.observation.expected_truth {
-            result.update((truth as u64).to_le_bytes());
-        }
-
-        SemanticTaskContentIdentity {
-            query,
-            theory_program,
-            result: Identity256::from_bytes(result.finalize().into()),
-        }
+        let (statements, statement_bytes, allowed_supports) =
+            task_content_selection(admission, statement_records, allowed_support_records)?;
+        let content = task_content_identity(
+            admission.identity(),
+            admission.schema_generation(),
+            statement_records,
+            statements,
+            &statement_bytes,
+            &allowed_supports,
+            &observation,
+            editable,
+        );
+        Ok((content, observation.expected_truth))
     }
 
     pub(crate) fn expected_truth(&self) -> [crate::SemanticTruth; 3] {
@@ -508,8 +793,12 @@ impl TaskEvaluationBinding {
         &self.spec
     }
 
+    pub(crate) fn priority_levels(&self) -> &[SemanticTaskPriorityLevel] {
+        &self.spec.priority_levels
+    }
+
     pub(crate) fn words(&self, owner: u64) -> Vec<u64> {
-        let mut words = vec![5, owner];
+        let mut words = vec![6, owner];
         words.extend(identity_words(*self.identity().as_bytes()));
         for statement in self.statements {
             words.extend(identity_words(*statement.identity().as_bytes()));
@@ -534,6 +823,28 @@ impl TaskEvaluationBinding {
             words.extend([0; 18]);
         }
         words.push(u64::from(self.spec.actor_eligible));
+        words.push(self.spec.priority_levels.len() as u64);
+        for level in self.spec.priority_levels.iter().take(3) {
+            words.push(level.goals.len() as u64);
+        }
+        words.resize(words.len() + 3 - self.spec.priority_levels.len(), 0);
+        let mut goals = 0;
+        for level in &self.spec.priority_levels {
+            for goal in &level.goals {
+                words.extend([
+                    u64::from(goal.query),
+                    u64::from(goal.target_truth),
+                    u64::from(goal.weight),
+                ]);
+                goals += 1;
+            }
+        }
+        words.resize(words.len() + (3 - goals) * 3, 0);
+        if let Some(editable) = self.spec.program.editable_program() {
+            let bank = editable.words();
+            words.extend([1, bank.len() as u64]);
+            words.extend(bank);
+        }
         words
     }
 }
@@ -604,6 +915,13 @@ impl SemanticActionCatalogue {
     pub const fn canonical_bytes(&self) -> &'static [u8] {
         CATALOGUE_ENCODING
     }
+    #[cfg(feature = "semantic-policy")]
+    fn completed_material(&self) -> SemanticCompletedStepWitnessMaterial {
+        SemanticCompletedStepWitnessMaterial {
+            identity: self.binding().digest,
+            bytes: self.canonical_bytes().to_vec(),
+        }
+    }
     pub const fn components(&self) -> &'static [SemanticComponent] {
         COMPONENTS
     }
@@ -619,14 +937,15 @@ impl SemanticActionCatalogue {
     pub const fn scratch_bytes(&self) -> usize {
         SCRATCH_BYTES
     }
-    /// (active fields, forced-NULL fields) for NO_EDIT and INSERT_SUPPORT.
-    pub const fn field_masks(&self) -> [(u32, u32); 2] {
+    /// (active fields, forced-NULL fields) for NO_EDIT, INSERT_SUPPORT and INSERT_RULE.
+    pub const fn field_masks(&self) -> [(u32, u32); 3] {
         [
             (NO_EDIT_ACTIVE_MASK as u32, NO_EDIT_NULL_MASK as u32),
             (
                 INSERT_SUPPORT_ACTIVE_MASK as u32,
                 INSERT_SUPPORT_NULL_MASK as u32,
             ),
+            (INSERT_RULE_ACTIVE_MASK as u32, INSERT_RULE_NULL_MASK as u32),
         ]
     }
 }
@@ -751,7 +1070,7 @@ impl SemanticPolicyLayout {
 /// Category zero is NULL. Nonzero categories are sorted by logical typed bytes,
 /// independent of arena slots and digests. Equal-valued support records retain
 /// separate categories, ordered by their original admission index.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SemanticActionDescriptor {
     Target {
         predicate: xlog_core::RelId,
@@ -767,6 +1086,43 @@ pub enum SemanticActionDescriptor {
     SupportEvent {
         source_record: u32,
     },
+    RulePredicate {
+        predicate: u32,
+    },
+    RuleVariable {
+        index: u32,
+    },
+}
+
+#[cfg(feature = "semantic-policy")]
+struct SemanticDecodedSupportInsertion {
+    statement: SemanticStatementIdentity,
+    support: SemanticSupportIdentity,
+    source_event: u32,
+    reconstruction: [u32; 10],
+    bytes: Vec<u8>,
+}
+
+struct SemanticDecodedRuleInsertion {
+    rule: crate::SemanticProgramRule,
+    #[cfg(any(feature = "semantic-policy", test))]
+    bytes: Vec<u8>,
+}
+
+fn semantic_program_rule_words(rule: crate::SemanticProgramRule) -> [u64; 10] {
+    [
+        rule.head_predicate,
+        rule.left_predicate,
+        rule.right_predicate,
+        rule.body_count,
+        rule.head_variables[0],
+        rule.head_variables[1],
+        rule.left_variables[0],
+        rule.left_variables[1],
+        rule.right_variables[0],
+        rule.right_variables[1],
+    ]
+    .map(u64::from)
 }
 
 struct ActionCodebooks {
@@ -777,10 +1133,218 @@ struct ActionCodebooks {
     leaves: Vec<SemanticActionDescriptor>,
     components: Vec<SemanticComponent>,
     binding: SemanticCatalogueBinding,
+    program_binding: Option<Identity256>,
     input_cells: usize,
 }
 
 impl ActionCodebooks {
+    fn program_binding(program: &crate::SemanticProgramAdmission) -> Identity256 {
+        let mut hash = Sha256::new();
+        hash.update(b"xlog.semantic.rule-codebook.program.v1\0");
+        for word in program.words() {
+            hash.update(word.to_le_bytes());
+        }
+        Identity256::from_bytes(hash.finalize().into())
+    }
+
+    fn decoded_rule_insertion(
+        &self,
+        program: &crate::SemanticProgramAdmission,
+        choices: &[u32; 18],
+    ) -> Result<SemanticDecodedRuleInsertion, SemanticTransitionError> {
+        if self.program_binding != Some(Self::program_binding(program))
+            || choices[0] != 1
+            || choices[1] != 2
+            || choices[11..].iter().any(|&choice| choice != 0)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        fn chosen(
+            entries: &[SemanticActionDescriptor],
+            choice: u32,
+        ) -> Result<&SemanticActionDescriptor, SemanticTransitionError> {
+            choice
+                .checked_sub(1)
+                .and_then(|index| entries.get(index as usize))
+                .ok_or(SemanticTransitionError::ObservationMismatch)
+        }
+        let predicate = |entry: &SemanticActionDescriptor| match entry {
+            SemanticActionDescriptor::RulePredicate { predicate }
+                if *predicate < program.predicate_count =>
+            {
+                Ok(*predicate)
+            }
+            _ => Err(SemanticTransitionError::ObservationMismatch),
+        };
+        let variable = |entry: &SemanticActionDescriptor| match entry {
+            SemanticActionDescriptor::RuleVariable { index } if *index < 4 => Ok(*index),
+            _ => Err(SemanticTransitionError::ObservationMismatch),
+        };
+        let rule = crate::SemanticProgramRule {
+            head_predicate: predicate(chosen(&self.targets, choices[2])?)?,
+            left_predicate: predicate(chosen(&self.operands, choices[3])?)?,
+            right_predicate: predicate(chosen(&self.operands, choices[4])?)?,
+            body_count: 2,
+            head_variables: [
+                variable(chosen(&self.operands, choices[5])?)?,
+                variable(chosen(&self.operands, choices[6])?)?,
+            ],
+            left_variables: [
+                variable(chosen(&self.operands, choices[7])?)?,
+                variable(chosen(&self.operands, choices[8])?)?,
+            ],
+            right_variables: [
+                variable(chosen(&self.operands, choices[9])?)?,
+                variable(chosen(&self.operands, choices[10])?)?,
+            ],
+        };
+        let bound = rule
+            .left_variables
+            .into_iter()
+            .chain(rule.right_variables)
+            .fold(0u8, |set, index| set | (1 << index));
+        if rule
+            .head_variables
+            .iter()
+            .any(|index| bound & (1 << index) == 0)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        #[cfg(any(feature = "semantic-policy", test))]
+        let bytes = {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"XLOG-DECODED-RULE-INSERTION\0");
+            material_u64(&mut bytes, 1);
+            bytes.extend_from_slice(self.binding.digest.as_bytes());
+            bytes.extend_from_slice(Self::program_binding(program).as_bytes());
+            for &choice in choices {
+                material_u32(&mut bytes, choice);
+            }
+            for field in semantic_program_rule_words(rule) {
+                material_u32(&mut bytes, field as u32);
+            }
+            bytes
+        };
+        Ok(SemanticDecodedRuleInsertion {
+            rule,
+            #[cfg(any(feature = "semantic-policy", test))]
+            bytes,
+        })
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn decoded_support_insertion(
+        &self,
+        admission: &SemanticAdmission,
+        choices: &[u32; 18],
+    ) -> Result<Option<SemanticDecodedSupportInsertion>, SemanticTransitionError> {
+        if choices[0] == 0 {
+            return Ok(None);
+        }
+        if choices[0] != 1 || choices[1] != 1 {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let chosen = |count: usize, choice: u32| {
+            usize::try_from(choice)
+                .ok()
+                .and_then(|choice| choice.checked_sub(1))
+                .filter(|&index| index < count)
+                .ok_or(SemanticTransitionError::ObservationMismatch)
+        };
+        let target = chosen(self.targets.len(), choices[2])?;
+        let predicate = match self.targets[target] {
+            SemanticActionDescriptor::Target { predicate } => predicate,
+            _ => return Err(SemanticTransitionError::ObservationMismatch),
+        };
+        let arity = admission
+            .records()
+            .predicates
+            .iter()
+            .find(|entry| entry.predicate == predicate)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .schema
+            .arity();
+        let mut reconstruction = [0u32; 10];
+        reconstruction[0] = predicate.0;
+        for argument in 0..arity {
+            let choice = choices[3 + argument];
+            chosen(self.operands.len(), choice)?;
+            let offset = self.words[2] as usize + 6 * choice as usize;
+            reconstruction[1 + 2 * argument] = self.words[offset + 4] as u32;
+            reconstruction[2 + 2 * argument] = self.words[offset + 5] as u32;
+        }
+        let qualifier = choices[11];
+        chosen(self.qualifiers.len(), qualifier)?;
+        reconstruction[9] = self.words[self.words[4] as usize + 3 * qualifier as usize + 2] as u32;
+        let leaf = chosen(self.leaves.len(), choices[17])?;
+        let source_event = match self.leaves[leaf] {
+            SemanticActionDescriptor::SupportEvent { source_record } => source_record,
+            _ => return Err(SemanticTransitionError::ObservationMismatch),
+        };
+        let statement = material_statement_key(admission, None, &reconstruction)
+            .map_err(SemanticTransitionError::Semantic)?
+            .identity();
+        let support = admission
+            .support_event(source_event)
+            .map_err(SemanticTransitionError::Semantic)?
+            .identity(statement);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"XLOG-DECODED-SUPPORT-INSERTION\0");
+        material_u64(&mut bytes, 1);
+        bytes.extend_from_slice(self.binding.digest.as_bytes());
+        for &choice in choices {
+            material_u32(&mut bytes, choice);
+        }
+        bytes.extend_from_slice(statement.as_bytes());
+        bytes.extend_from_slice(support.as_bytes());
+        material_u32(&mut bytes, source_event);
+        for reference in reconstruction {
+            material_u32(&mut bytes, reference);
+        }
+        Ok(Some(SemanticDecodedSupportInsertion {
+            statement,
+            support,
+            source_event,
+            reconstruction,
+            bytes,
+        }))
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn completed_material(&self) -> SemanticCompletedStepWitnessMaterial {
+        SemanticCompletedStepWitnessMaterial {
+            identity: self.binding.digest,
+            bytes: publication_abi_bytes(&self.words),
+        }
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn completed_roster_material(&self) -> SemanticCompletedStepWitnessMaterial {
+        let mut bytes = Vec::with_capacity(
+            b"xlog.semantic-action-roster.v1\0".len() + 32 + 8 + self.components.len() * 7 * 8,
+        );
+        bytes.extend_from_slice(b"xlog.semantic-action-roster.v1\0");
+        bytes.extend_from_slice(self.binding.digest.as_bytes());
+        material_u64(&mut bytes, self.components.len() as u64);
+        for component in &self.components {
+            for value in [
+                component.offset,
+                component.ordinal as u64,
+                component.lane as u64,
+                component.slot as u64,
+                component.field as u64,
+                component.kind as u64,
+                component.cardinality as u64,
+            ] {
+                material_u64(&mut bytes, value);
+            }
+        }
+        SemanticCompletedStepWitnessMaterial {
+            identity: Identity256::from_bytes(Sha256::digest(&bytes).into()),
+            bytes,
+        }
+    }
+
     fn support_layout(&self) -> (Vec<std::ops::Range<usize>>, usize) {
         (
             self.components
@@ -794,7 +1358,18 @@ impl ActionCodebooks {
         )
     }
 
-    fn derive(admission: &SemanticAdmission, owner: u64) -> Result<Self, SemanticTransitionError> {
+    fn derive(
+        admission: &SemanticAdmission,
+        owner: u64,
+        program: Option<&crate::SemanticProgramAdmission>,
+    ) -> Result<Self, SemanticTransitionError> {
+        if let Some(program) = program {
+            program
+                .validate()
+                .map_err(|detail| SemanticTransitionError::InvalidInput {
+                    detail: detail.into(),
+                })?;
+        }
         let records = admission.records();
         let predicates: BTreeMap<_, _> = records
             .predicates
@@ -913,9 +1488,15 @@ impl ActionCodebooks {
                 ),
             );
         }
+        let additional_targets = program
+            .map(|program| program.predicate_count as usize)
+            .unwrap_or(0);
+        let additional_operands = program
+            .map(|program| program.predicate_count as usize + 4)
+            .unwrap_or(0);
         if [
-            targets.len(),
-            operands.len(),
+            targets.len().saturating_add(additional_targets),
+            operands.len().saturating_add(additional_operands),
             qualifiers.len(),
             leaves.len(),
         ]
@@ -929,19 +1510,25 @@ impl ActionCodebooks {
         let mut words = vec![0; 25];
         let mut bytes = Vec::new();
         words[0] = words.len() as u64;
-        words[1] = targets.len() as u64 + 1;
+        words[1] = (targets.len() + additional_targets) as u64 + 1;
         words.extend([0; 10]);
-        let target_views = targets
+        let mut target_views: Vec<SemanticActionDescriptor> = targets
             .into_values()
             .map(|(row, view)| {
                 words.extend(row);
                 view
             })
             .collect();
+        if let Some(program) = program {
+            for predicate in 0..program.predicate_count {
+                words.extend([u64::from(predicate), u64::MAX, 0, 0, 0, 0, 0, 0, 0, 0]);
+                target_views.push(SemanticActionDescriptor::RulePredicate { predicate });
+            }
+        }
         words[2] = words.len() as u64;
-        words[3] = operands.len() as u64 + 1;
+        words[3] = (operands.len() + additional_operands) as u64 + 1;
         words.extend([0; 6]);
-        let operand_views = operands
+        let mut operand_views: Vec<SemanticActionDescriptor> = operands
             .into_values()
             .map(|(value, ty, sort, record, argument, view)| {
                 words.extend([
@@ -956,6 +1543,16 @@ impl ActionCodebooks {
                 view
             })
             .collect();
+        if let Some(program) = program {
+            for predicate in 0..program.predicate_count {
+                words.extend([0, 0, 0, 1, u64::from(predicate), 0]);
+                operand_views.push(SemanticActionDescriptor::RulePredicate { predicate });
+            }
+            for index in 0..4 {
+                words.extend([0, 0, 0, 2, u64::from(index), 0]);
+                operand_views.push(SemanticActionDescriptor::RuleVariable { index });
+            }
+        }
         words[4] = words.len() as u64;
         words[5] = qualifiers.len() as u64 + 1;
         words.extend([0; 3]);
@@ -1005,9 +1602,13 @@ impl ActionCodebooks {
                 .map(|v| u64::from_le_bytes(*v)),
         );
         let mut hash = Sha256::new();
-        hash.update(b"xlog.semantic.action-binding.v3\0");
+        hash.update(b"xlog.semantic.action-binding.v4\0");
         hash.update(CATALOGUE_DIGEST);
         hash.update(admission.identity().as_bytes());
+        let program_binding = program.map(Self::program_binding);
+        if let Some(identity) = program_binding {
+            hash.update(identity.as_bytes());
+        }
         for &word in &words {
             hash.update(word.to_le_bytes());
         }
@@ -1023,6 +1624,8 @@ impl ActionCodebooks {
                     match c.field {
                         2 => words[1] as u32,
                         3..=6 => words[3] as u32,
+                        7..=10 if program.is_some() => words[3] as u32,
+                        1 if program.is_none() => 2,
                         11 => words[5] as u32,
                         17 => words[7] as u32,
                         _ => c.cardinality,
@@ -1048,6 +1651,7 @@ impl ActionCodebooks {
                 generation: CATALOGUE_GENERATION,
                 digest,
             },
+            program_binding,
             input_cells: offset as usize,
         })
     }
@@ -1830,6 +2434,297 @@ pub struct SemanticSourceMapping {
     pub source: String,
     pub offset: u64,
     pub logical_position: u64,
+}
+
+/// Initial source geometry issued from the admitted observation mapping before
+/// the model computes its prefix cache. The rows retain zero provenance indices;
+/// parent binding constructs and verifies the private ledger after prefill.
+#[derive(Clone)]
+pub struct SemanticInitialSourceLayout {
+    pub source: [SemanticTextSlot; 32],
+    pub prefix: Vec<SemanticTextSlot>,
+    pub prefill_tokens: Vec<u64>,
+    pub ring_head: u64,
+    #[cfg(feature = "semantic-policy")]
+    prefill_mapping: Vec<SemanticSourceMapping>,
+    provenance_bytes: Vec<u8>,
+    provenance_capacity_bytes: usize,
+    provenance_records: u64,
+}
+
+/// One imported task's pre-parent model input. Its source and owner are fixed
+/// before the actual model call; no second stage can be issued on this Session.
+struct InitialPrefillStage {
+    scope: Arc<()>,
+    task_identity: Identity256,
+    task_epoch: u64,
+    model_generation: u64,
+    layout: SemanticInitialSourceLayout,
+    expected_tokens: TrackedCudaSlice<u64>,
+    input: Option<PreparedSemanticTensor>,
+    model_content: Option<TensorContentBuffers>,
+    output_content: Option<TensorContentBuffers>,
+    captured_content: Vec<TensorContentBuffers>,
+    consumer_stream: Option<u64>,
+}
+
+/// Content needed by the original forward after the one-use prefill stage has
+/// joined its parent. The Session owns it until its final stream-safe release.
+struct RetainedInitialPrefillContent {
+    scope: Arc<()>,
+    task_identity: Identity256,
+    task_epoch: u64,
+    model_generation: u64,
+    model: TensorContentBuffers,
+    #[cfg(feature = "semantic-policy")]
+    output: TensorContentBuffers,
+    #[cfg(feature = "semantic-policy")]
+    record: InitialPrefillRecord,
+    captured: Vec<TensorContentBuffers>,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone)]
+struct InitialPrefillRecord {
+    predecessor: SemanticPublishedIdentity,
+    semantic_root: Identity256,
+    task_identity: Identity256,
+    task_epoch: u64,
+    task_content: SemanticTaskContentIdentity,
+    model_generation: u64,
+    tokens: Vec<u64>,
+    mapping: Vec<SemanticSourceMapping>,
+}
+
+/// Opaque handle to the single imported-task prefill stage. This is not a
+/// model-forward receipt; the actual input and outputs must be joined before
+/// the parent can be published.
+#[derive(Clone)]
+pub struct SemanticInitialPrefillLease {
+    issuer: Arc<()>,
+    scope: Arc<()>,
+}
+
+#[derive(Clone, Copy)]
+enum InitialPrefillContentSlot {
+    Model,
+    Captured(usize),
+}
+
+#[derive(Clone, Copy)]
+enum InitialPrefillCaptureKind {
+    Model,
+    Outputs,
+    Captured,
+}
+
+/// Exact content captured by one imported task's original model prefill.
+/// This handle never creates a new baseline during verification.
+#[derive(Clone)]
+pub struct SemanticInitialPrefillContentWitness {
+    issuer: Arc<()>,
+    scope: Arc<()>,
+    task_identity: Identity256,
+    task_epoch: u64,
+    model_generation: u64,
+    slot: InitialPrefillContentSlot,
+}
+
+impl SemanticInitialPrefillContentWitness {
+    fn matches(
+        &self,
+        issuer: &Arc<()>,
+        scope: &Arc<()>,
+        task_identity: Identity256,
+        task_epoch: u64,
+        model_generation: u64,
+        captured_count: usize,
+    ) -> bool {
+        Arc::ptr_eq(&self.issuer, issuer)
+            && Arc::ptr_eq(&self.scope, scope)
+            && self.task_identity == task_identity
+            && self.task_epoch == task_epoch
+            && self.model_generation == model_generation
+            && match self.slot {
+                InitialPrefillContentSlot::Model => true,
+                InitialPrefillContentSlot::Captured(index) => index < captured_count,
+            }
+    }
+}
+
+fn validate_initial_prefill_input_layout(
+    layout: &SemanticTensorLayout,
+    token_count: u64,
+) -> Result<(), SemanticTransitionError> {
+    let row_bytes = token_count
+        .checked_mul(size_of::<i64>() as u64)
+        .filter(|_| token_count != 0)
+        .ok_or_else(|| {
+            publication_input_error("initial prefill requires nonempty admitted prefix tokens")
+        })?;
+    if *layout
+        != (SemanticTensorLayout {
+            role: 0,
+            index: 0,
+            element_bytes: size_of::<i64>() as u64,
+            scalar_type: 7,
+            rank: 2,
+            logical_axis: 1,
+            dimensions: [1, token_count, 0, 0],
+            strides_bytes: [row_bytes, size_of::<i64>() as u64, 0, 0],
+        })
+    {
+        return Err(publication_input_error(
+            "initial prefill input must be the exact contiguous I64 model token tensor [1,prefix]",
+        ));
+    }
+    Ok(())
+}
+
+fn same_initial_source_rows(expected: &[SemanticTextSlot], actual: &[SemanticTextSlot]) -> bool {
+    expected.len() == actual.len()
+        && expected.iter().zip(actual).all(|(expected, actual)| {
+            SemanticTextSlot {
+                provenance_record: 0,
+                ..*expected
+            } == SemanticTextSlot {
+                provenance_record: 0,
+                ..*actual
+            }
+        })
+}
+
+/// Place the exact admitted tokens into an ordered computed prefix and original
+/// 32-row ring. No model cache or publication is claimed by this cold plan.
+/// The existing parent bind rechecks the same source mapping and cache geometry.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "cold planning checks the admitted source and complete parent text geometry together"
+)]
+pub fn initial_source_layout(
+    sources: &[SemanticObservedSource],
+    mapping: &[SemanticSourceMapping],
+    authority: &[u8],
+    generation: u64,
+    provenance_capacity_records: u64,
+    prefix_capacity: u64,
+    feedback_capacity: u64,
+    max_position: u64,
+    pad_token: u64,
+) -> Result<SemanticInitialSourceLayout, SemanticTransitionError> {
+    let invalid = publication_input_error;
+    if pad_token >= TEXT_CARDINALITY as u64 {
+        return Err(invalid(
+            "initial source padding token is outside the text vocabulary",
+        ));
+    }
+    let last_position = mapping.iter().map(|entry| entry.logical_position).max();
+    let source_extent = last_position
+        .map(|last| {
+            last.checked_add(1)
+                .ok_or_else(|| invalid("initial source position overflows"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let prefix_extent = source_extent.saturating_sub(32);
+    if prefix_extent > prefix_capacity || prefix_extent > mapping.len() as u64 {
+        return Err(invalid(
+            "admitted source exceeds its complete prefix capacity",
+        ));
+    }
+    let admitted = sources
+        .iter()
+        .map(|source| (source.identity.as_str(), source))
+        .collect::<BTreeMap<_, _>>();
+    let mut tokens = BTreeMap::new();
+    for entry in mapping {
+        let source = admitted
+            .get(entry.source.as_str())
+            .ok_or_else(|| invalid("source mapping names an unadmitted payload"))?;
+        let offset =
+            usize::try_from(entry.offset).map_err(|_| invalid("source token offset overflows"))?;
+        let token = *source
+            .tokens
+            .get(offset)
+            .ok_or_else(|| invalid("source mapping token offset is out of range"))?;
+        if tokens.insert(entry.logical_position, token).is_some() {
+            return Err(invalid("source mapping repeats a logical position"));
+        }
+    }
+    let mut source = [SemanticTextSlot {
+        token: pad_token,
+        ..SemanticTextSlot::default()
+    }; 32];
+    let mut prefix = Vec::with_capacity(prefix_extent as usize);
+    let mut prefill_tokens = Vec::with_capacity(prefix_extent as usize);
+    for position in 0..prefix_extent {
+        let token = *tokens
+            .get(&position)
+            .ok_or_else(|| invalid("computed prefix lacks an admitted source token"))?;
+        prefix.push(SemanticTextSlot {
+            token,
+            logical_position: position,
+            kind: 1,
+            provenance: 1,
+            valid: 1,
+            committed: 1,
+            ..SemanticTextSlot::default()
+        });
+        prefill_tokens.push(token);
+    }
+    for (&position, &token) in tokens.range(prefix_extent..) {
+        let index = usize::try_from(position - prefix_extent)
+            .map_err(|_| invalid("initial source ring offset overflows"))?;
+        if index >= source.len() {
+            return Err(invalid("admitted source exceeds its 32-row active ring"));
+        }
+        source[index] = SemanticTextSlot {
+            token,
+            logical_position: position,
+            kind: 1,
+            provenance: 1,
+            valid: 1,
+            ..SemanticTextSlot::default()
+        };
+    }
+    let (_, _, provenance) = initial_source_ledger(
+        source,
+        prefix.clone(),
+        sources,
+        mapping,
+        authority,
+        generation,
+        provenance_capacity_records,
+    )?;
+    #[cfg(feature = "semantic-policy")]
+    let mut prefill_mapping = mapping
+        .iter()
+        .filter(|entry| entry.logical_position < prefix_extent)
+        .cloned()
+        .collect::<Vec<_>>();
+    #[cfg(feature = "semantic-policy")]
+    prefill_mapping.sort_by_key(|entry| entry.logical_position);
+    let ring_head = (source_extent - prefix_extent) % 32;
+    validate_text_parent(
+        &source,
+        prefix_extent,
+        prefix_capacity,
+        feedback_capacity,
+        max_position,
+        ring_head,
+        mapping.len() as u64,
+    )?;
+    Ok(SemanticInitialSourceLayout {
+        source,
+        prefix,
+        prefill_tokens,
+        ring_head,
+        #[cfg(feature = "semantic-policy")]
+        prefill_mapping,
+        provenance_bytes: provenance.bytes,
+        provenance_capacity_bytes: provenance.capacity_bytes,
+        provenance_records: mapping.len() as u64,
+    })
 }
 
 impl SemanticParentBinding {
@@ -3560,6 +4455,20 @@ pub struct SemanticCompletedActionLaneMaterial {
     pub hard_decode_receipts: [SemanticCompletedStepWitnessMaterial; 2],
 }
 
+/// One actual native structural insertion attempt, including a duplicate
+/// attachment. The lane verdict is independent of winner selection.
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone)]
+pub struct SemanticCompletedTheoryDeltaMaterial {
+    pub kind: &'static str,
+    pub delta: SemanticCompletedStepWitnessMaterial,
+    pub theory_generation: Identity256,
+    pub verdict: &'static str,
+    pub evidence: SemanticCompletedStepWitnessMaterial,
+    pub lane: u32,
+    pub slot: u32,
+}
+
 /// Terminal native result for one learned lane of a completed task ground.
 /// A refusal never invents query results for a request that was not executed.
 #[cfg(feature = "semantic-policy")]
@@ -3576,9 +4485,14 @@ pub enum SemanticCompletedLaneOutcomeMaterial {
 #[derive(Clone)]
 pub struct SemanticCompletedTaskGroundMaterial {
     pub witness: SemanticCompletedStepWitnessMaterial,
+    /// Original six admitted coefficients and their finite signed return bound.
+    pub scoring_law: SemanticCompletedStepWitnessMaterial,
+    pub scoring: SemanticTaskScoring,
+    pub return_bound: i64,
     pub task_identity: Identity256,
     pub content: SemanticTaskContentIdentity,
     pub goal: SemanticTaskGoalWitness,
+    pub priority_levels: Vec<SemanticTaskPriorityLevel>,
     pub base: SemanticPublishedIdentity,
     pub expected_truth: [crate::SemanticTruth; 3],
     pub facts: [SemanticTaskFacts; 3],
@@ -3605,6 +4519,18 @@ pub struct SemanticCompletedEditSolutionMaterial {
 #[cfg(feature = "semantic-policy")]
 pub struct SemanticCompletedActionProjectionMaterial {
     pub owner: SemanticCompletedStepWitnessMaterial,
+    /// Original cold parent prefill only; later and restored parents have no
+    /// stage-owned input/output witness to export.
+    pub initial_prefill: Option<SemanticCompletedStepWitnessMaterial>,
+    /// Exact cold-exported predecessor root when its native digest still matches
+    /// this Proposal's acquired parent. Later changed roots are not invented.
+    pub world_root: Option<SemanticCompletedStepWitnessMaterial>,
+    pub schema_generation: SemanticCompletedStepWitnessMaterial,
+    pub action_law: SemanticCompletedStepWitnessMaterial,
+    pub edit_codebook: SemanticCompletedStepWitnessMaterial,
+    pub roster: SemanticCompletedStepWitnessMaterial,
+    /// Native digest of the semantic root acquired by this Proposal.
+    pub predecessor_semantic_root_digest: Identity256,
     pub predecessor: SemanticPublishedIdentity,
     pub successor: SemanticPublishedIdentity,
     pub proposal: u64,
@@ -3624,6 +4550,7 @@ pub struct SemanticCompletedActionProjectionMaterial {
     pub successor_logical_state: SemanticCompletedStepWitnessMaterial,
     pub slot_zero_admission: SemanticCompletedStepWitnessMaterial,
     pub lanes: [SemanticCompletedActionLaneMaterial; 2],
+    pub theory_deltas: Vec<SemanticCompletedTheoryDeltaMaterial>,
     pub components: Vec<SemanticCompletedActionComponentMaterial>,
     pub task_ground: SemanticCompletedTaskGroundMaterial,
     pub edit_solution: Option<SemanticCompletedEditSolutionMaterial>,
@@ -3979,6 +4906,292 @@ fn completed_receipt_material(
         material_u64(&mut payload, *value);
     }
     completed_action_child_material(owner, kind, ordinal, &payload)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native rule receipt binds task, lane, slot, current edit, and prior edit independently"
+)]
+fn validated_rule_receipt(
+    codebooks: &ActionCodebooks,
+    program: &crate::SemanticProgramAdmission,
+    task_identity: Identity256,
+    lane: usize,
+    slot: usize,
+    choices: &[u32; 18],
+    previous_choices: Option<&[u32; 18]>,
+    receipt: &[u64; 42],
+) -> Result<
+    (
+        SemanticDecodedRuleInsertion,
+        Option<crate::SemanticProgramRule>,
+    ),
+    SemanticTransitionError,
+> {
+    let mismatch = || SemanticTransitionError::ObservationMismatch;
+    if lane >= 2 || slot >= 2 {
+        return Err(mismatch());
+    }
+    let decoded = codebooks.decoded_rule_insertion(program, choices)?;
+    let previous = match previous_choices {
+        Some(prior) if prior[0] == 1 && prior[1] == 2 => {
+            Some(codebooks.decoded_rule_insertion(program, prior)?.rule)
+        }
+        Some(prior) if prior.iter().all(|&choice| choice == 0) => None,
+        None => None,
+        _ => return Err(mismatch()),
+    };
+    let previous_fields = previous.map(semantic_program_rule_words).unwrap_or([0; 10]);
+    if receipt[0] != 0
+        || receipt[1] != 3
+        || receipt[2] != lane as u64 + 1
+        || receipt[3] != slot as u64
+        || receipt[4..8] != identity_words(*task_identity.as_bytes())
+        || receipt[8..12] != identity_words(*codebooks.binding.digest.as_bytes())
+        || receipt[12..22] != semantic_program_rule_words(decoded.rule)
+        || receipt[22] != program.initial_facts.len() as u64
+        || receipt[23] != program.initial_rules.len() as u64
+        || receipt[24] != u64::from(previous.is_some())
+        || receipt[25..35] != previous_fields
+        || receipt[35..].iter().any(|&word| word != 0)
+    {
+        return Err(mismatch());
+    }
+    Ok((decoded, previous))
+}
+
+#[cfg(feature = "semantic-policy")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one delta binds independent native owner, source, decode, and admission receipts"
+)]
+fn completed_theory_delta_for_slot(
+    codebooks: &ActionCodebooks,
+    admission: &SemanticAdmission,
+    program: Option<&crate::SemanticProgramAdmission>,
+    task_identity: Identity256,
+    owner: Identity256,
+    predecessor_semantic_root_digest: Identity256,
+    lane: usize,
+    slot: usize,
+    choices: &[u32; 18],
+    previous_choices: Option<&[u32; 18]>,
+    hard_decode: &[u64; 42],
+    lane_admission: &[u64; 42],
+    component_receipts: &[SemanticTransitionReceipt],
+    lane_refusal: u64,
+) -> Result<Option<SemanticCompletedTheoryDeltaMaterial>, SemanticTransitionError> {
+    if lane >= 2
+        || slot >= 2
+        || component_receipts.len() != 18
+        || hard_decode[0] != 0
+        || hard_decode[1] > 3
+        || lane_refusal > 2
+    {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
+    if hard_decode[1] == 0 {
+        if choices[0] == 1 && choices[1] == 2 {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        return Ok(None);
+    }
+    if hard_decode[1] == 3 {
+        let program = program.ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let (decoded, previous) = validated_rule_receipt(
+            codebooks,
+            program,
+            task_identity,
+            lane,
+            slot,
+            choices,
+            previous_choices,
+            hard_decode,
+        )?;
+        let previous_fields = previous.map(semantic_program_rule_words).unwrap_or([0; 10]);
+        let program_binding = ActionCodebooks::program_binding(program);
+        let theory_generation = if previous.is_some() {
+            let mut hash = Sha256::new();
+            hash.update(b"xlog.semantic.program-theory.v1\0");
+            hash.update(program_binding.as_bytes());
+            for word in previous_fields {
+                hash.update(word.to_le_bytes());
+            }
+            Identity256::from_bytes(hash.finalize().into())
+        } else {
+            program_binding
+        };
+        let ordinal = (lane * 2 + slot) as u64;
+        let delta =
+            completed_action_child_material(owner, b"theory-rule-delta", ordinal, &decoded.bytes);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(theory_generation.as_bytes());
+        payload.extend_from_slice(task_identity.as_bytes());
+        material_u64(&mut payload, lane as u64 + 1);
+        material_u64(&mut payload, slot as u64);
+        material_u64(&mut payload, lane_refusal);
+        for receipt in [hard_decode, lane_admission] {
+            for &word in receipt {
+                material_u64(&mut payload, word);
+            }
+        }
+        for receipt in component_receipts {
+            encode_completed_component_receipt(&mut payload, *receipt);
+        }
+        let evidence = completed_action_child_material(
+            owner,
+            b"theory-rule-delta-evidence",
+            ordinal,
+            &payload,
+        );
+        return Ok(Some(SemanticCompletedTheoryDeltaMaterial {
+            kind: "rule",
+            delta,
+            theory_generation,
+            verdict: if lane_refusal == 0 {
+                "accepted"
+            } else {
+                "rejected"
+            },
+            evidence,
+            lane: lane as u32 + 1,
+            slot: slot as u32,
+        }));
+    }
+    if program.is_some() {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
+    let decoded = codebooks
+        .decoded_support_insertion(admission, choices)?
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    if hard_decode[20..24] != identity_words(*decoded.statement.as_bytes())
+        || hard_decode[24..28] != identity_words(*decoded.support.as_bytes())
+    {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
+    let ordinal = (lane * 2 + slot) as u64;
+    let delta = completed_action_child_material(owner, b"theory-delta", ordinal, &decoded.bytes);
+    let mut payload = Vec::new();
+    payload.extend_from_slice(predecessor_semantic_root_digest.as_bytes());
+    material_u64(&mut payload, lane as u64 + 1);
+    material_u64(&mut payload, slot as u64);
+    material_u64(&mut payload, lane_refusal);
+    material_u32(&mut payload, decoded.source_event);
+    for reference in decoded.reconstruction {
+        material_u32(&mut payload, reference);
+    }
+    for receipt in [hard_decode, lane_admission] {
+        for &word in receipt {
+            material_u64(&mut payload, word);
+        }
+    }
+    for receipt in component_receipts {
+        encode_completed_component_receipt(&mut payload, *receipt);
+    }
+    let evidence =
+        completed_action_child_material(owner, b"theory-delta-evidence", ordinal, &payload);
+    Ok(Some(SemanticCompletedTheoryDeltaMaterial {
+        kind: "fact",
+        delta,
+        theory_generation: predecessor_semantic_root_digest,
+        verdict: if lane_refusal == 0 {
+            "accepted"
+        } else {
+            "rejected"
+        },
+        evidence,
+        lane: lane as u32 + 1,
+        slot: slot as u32,
+    }))
+}
+
+fn validate_program_query_receipts(
+    program: &crate::SemanticProgramAdmission,
+    task_identity: Identity256,
+    codebooks: &ActionCodebooks,
+    state: &DeviceState,
+    edits: &[[[u32; 18]; 2]; 2],
+) -> Result<(), SemanticTransitionError> {
+    let mismatch = || SemanticTransitionError::ObservationMismatch;
+    if state.binding_digest != codebooks.binding.digest
+        || state.task_evaluation.query_count != 9
+        || state.task_evaluation.lane_refusal.contains(&1)
+    {
+        return Err(mismatch());
+    }
+    let mut inserted: [Vec<crate::SemanticProgramRule>; 2] = std::array::from_fn(|_| Vec::new());
+    for (lane, actions) in edits.iter().enumerate() {
+        for choices in actions {
+            match (choices[0], choices[1]) {
+                (0, 0) if choices[2..].iter().all(|&value| value == 0) => {}
+                (1, 2) => {
+                    inserted[lane].push(codebooks.decoded_rule_insertion(program, choices)?.rule)
+                }
+                _ => return Err(mismatch()),
+            }
+        }
+    }
+    let task_words = identity_words(*task_identity.as_bytes());
+    let binding_words = identity_words(*codebooks.binding.digest.as_bytes());
+    for slot in 0..3 {
+        let rules: &[crate::SemanticProgramRule] =
+            if slot == 0 { &[] } else { &inserted[slot - 1] };
+        let receipts = &state.task_evaluation.query_receipts[slot];
+        let facts = &state.task_evaluation.facts[slot];
+        let metrics = &receipts[0][37..40];
+        if metrics[1] > crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64
+            || metrics[2] > metrics[1]
+            || facts.truth.iter().any(|&truth| truth > 1)
+        {
+            return Err(mismatch());
+        }
+        for (query, receipt) in receipts.iter().enumerate() {
+            let mut expected = [0u64; 42];
+            expected[1] = 0x5850524f47515545;
+            expected[2] = facts.truth[query];
+            expected[3] = slot as u64;
+            expected[4] = query as u64;
+            expected[5..9].copy_from_slice(&task_words);
+            expected[9..13].copy_from_slice(&binding_words);
+            expected[13] = rules.len() as u64;
+            for (edit, rule) in rules.iter().enumerate() {
+                expected[14 + edit * 10..24 + edit * 10]
+                    .copy_from_slice(&semantic_program_rule_words(*rule));
+            }
+            let query_fact = program.queries[query];
+            expected[34..37].copy_from_slice(&[
+                u64::from(query_fact.predicate),
+                u64::from(query_fact.first),
+                u64::from(query_fact.second),
+            ]);
+            expected[37..40].copy_from_slice(metrics);
+            expected[40] = program.initial_rules.len() as u64;
+            expected[41] = program.initial_facts.len() as u64;
+            if receipt != &expected {
+                return Err(mismatch());
+            }
+        }
+        if slot != 0 {
+            let baseline = &state.task_evaluation.facts[0];
+            let derived = metrics[2]
+                .checked_sub(state.task_evaluation.query_receipts[0][0][39])
+                .ok_or_else(mismatch)?;
+            let truth_changes = facts
+                .truth
+                .iter()
+                .zip(baseline.truth)
+                .filter(|(current, original)| **current != *original)
+                .count() as u64;
+            let work = state.work[slot - 1];
+            if work.edit_commands != rules.len() as u64
+                || work.added_supports != derived
+                || work.defined_truth_changes != truth_changes
+            {
+                return Err(mismatch());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -7977,6 +9190,37 @@ impl TensorContentBuffers {
     }
 }
 
+#[cfg(feature = "semantic-policy")]
+fn initial_prefill_seal_sources(
+    content: &TensorContentBuffers,
+) -> Result<Vec<(u64, u64, Arc<TrackedCudaSlice<u64>>, usize)>, SemanticTransitionError> {
+    let TensorContentSeals::Captured(digests) = &content.seals else {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    };
+    if content.tensors.len() != digests.len() {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
+    content
+        .tensors
+        .iter()
+        .zip(digests)
+        .map(|(tensor, digest)| {
+            let CapturedTensorDigest::Tensor { cells, offset, .. } = digest else {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            };
+            if offset.checked_add(4).is_none_or(|end| end > cells.len()) {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            Ok((
+                tensor.layout.role,
+                tensor.layout.index,
+                Arc::clone(cells),
+                *offset,
+            ))
+        })
+        .collect()
+}
+
 fn model_content_ranges(
     directory: &[PublicationRange],
     layouts: &BTreeMap<(u64, u64), SemanticTensorLayout>,
@@ -9092,6 +10336,7 @@ struct Descriptor {
     policy: PolicyDescriptor,
     backward: PolicyBackward,
     task: u64,
+    task_words: u64,
     publication: PublicationCommand,
     text: TextBinding,
     model_work: ModelWorkInput,
@@ -9685,7 +10930,7 @@ const _: () = assert!(size_of::<DeviceState>() == 7568);
 const _: () = assert!(size_of::<PolicyField>() == 32);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 672);
 const _: () = assert!(size_of::<PolicyBackward>() == 144);
-const _: () = assert!(size_of::<Descriptor>() == 1008);
+const _: () = assert!(size_of::<Descriptor>() == 1016);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -9728,7 +10973,7 @@ mod task_state_contract {
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
         assert_eq!(size_of::<DeviceState>(), 7568);
-        assert_eq!(size_of::<Descriptor>(), 1008);
+        assert_eq!(size_of::<Descriptor>(), 1016);
     }
 
     #[test]
@@ -10105,6 +11350,9 @@ pub struct SemanticTransitionLane {
     /// remains an actual owner error, distinct from an evaluator decision.
     pub root: Option<Result<(SemanticRootHandle, SemanticRootSnapshot), SemanticHypergraphError>>,
     pub task_refusal: Option<SemanticTaskRefusal>,
+    /// Decoded binary rules attempted in the two edit slots, including a lane
+    /// later rejected by a hard constraint. Graph support edits remain in `edits`.
+    pub program_rules: [Option<crate::SemanticProgramRule>; 2],
     pub edits: [Result<Option<SemanticInsertOutcome>, SemanticHypergraphError>; 2],
     /// Actual owner work, retained even when the candidate is discarded.
     pub work: SemanticTransitionWork,
@@ -10118,19 +11366,28 @@ pub struct SemanticTransitionWork {
     /// Calls to the modifying semantic owner, including a call that refuses.
     /// A NO_EDIT or a suppressed edit does not call that owner.
     pub edit_commands: u64,
-    /// New reachable support attachments made before any candidate discard.
-    /// Re-inserting the same support event does not add an attachment.
+    /// New reachable support attachments, or new materialized facts for an
+    /// editable program, made before any candidate discard.
     pub added_supports: u64,
-    /// Successful edits that change a truth other than NEITHER. Adding another
-    /// reason for the same truth and repeating an event do not increment this.
+    /// Successful support edits that change a truth other than NEITHER, or
+    /// changed query truths after program materialization.
     pub defined_truth_changes: u64,
 }
 
 impl SemanticTransitionWork {
-    fn is_valid(self) -> bool {
-        self.edit_commands <= 2
-            && self.added_supports <= self.edit_commands
-            && self.defined_truth_changes <= self.added_supports
+    fn is_valid(self, editable_program: bool) -> bool {
+        if self.edit_commands > 2 {
+            return false;
+        }
+        if editable_program {
+            self.added_supports <= crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64
+                && self.defined_truth_changes <= 3
+                && (self.edit_commands != 0
+                    || (self.added_supports == 0 && self.defined_truth_changes == 0))
+        } else {
+            self.added_supports <= self.edit_commands
+                && self.defined_truth_changes <= self.added_supports
+        }
     }
 }
 
@@ -10293,6 +11550,13 @@ pub struct SemanticTransitionSession {
     device_components: TrackedCudaSlice<SemanticComponent>,
     // Private observer/checker results never enter the proposal codebooks.
     task: Option<(TaskEvaluationBinding, TrackedCudaSlice<u64>)>,
+    // A cold read can precede the final observed-source/authority import. The
+    // later binding must reproduce this exact executed task content.
+    cold_content: Option<(SemanticTaskContentIdentity, [crate::SemanticTruth; 3])>,
+    initial_prefill: Option<InitialPrefillStage>,
+    retained_initial_prefill: Option<RetainedInitialPrefillContent>,
+    #[cfg(feature = "semantic-policy")]
+    cold_world_root: Option<SemanticCompletedStepWitnessMaterial>,
     training_views: Option<Arc<SemanticTrainingViewArena>>,
     training_origins: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
     task_epoch: u64,
@@ -11097,6 +12361,7 @@ struct UnreleasedPublicationOwners {
     _training_origins: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
     _readers: BTreeMap<u64, PublishedReader>,
     _steps: BTreeMap<u64, StepContentStorage>,
+    _initial_prefill_content: Option<RetainedInitialPrefillContent>,
     _prepared_resources: Vec<Arc<dyn Send + Sync>>,
     _text_binding: Option<Arc<TextBindingStorage>>,
     #[cfg(feature = "semantic-policy")]
@@ -11132,6 +12397,7 @@ impl Drop for SemanticTransitionSession {
                     _readers: std::mem::take(&mut self.readers),
                     _events: std::mem::take(&mut self.release_events),
                     _steps: std::mem::take(&mut self.steps),
+                    _initial_prefill_content: self.retained_initial_prefill.take(),
                     _text_binding: self.text_binding.take(),
                     _prepared_resources: std::mem::take(&mut self.prepared_resources),
                     #[cfg(feature = "semantic-policy")]
@@ -11162,7 +12428,10 @@ impl SemanticTransitionSession {
     pub fn state_material_admission(
         bytes: &[u8],
     ) -> Result<SemanticAdmissionRecords, SemanticTransitionError> {
-        Ok(PublicationMaterial::decode(bytes)?.graph.records.clone())
+        PublicationMaterial::decode(bytes)?
+            .graph
+            .admission_records()
+            .map_err(SemanticTransitionError::Semantic)
     }
 
     /// Allocate every native step owner before the first capture begins.
@@ -12691,6 +13960,109 @@ impl SemanticTransitionSession {
         Ok(SemanticCompletedStepWitnessMaterial { identity, bytes })
     }
 
+    #[cfg(feature = "semantic-policy")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the original parent and completed action bindings must all be checked"
+    )]
+    fn completed_initial_prefill_material(
+        &mut self,
+        predecessor: SemanticPublishedIdentity,
+        semantic_root: Identity256,
+        prefix_extent: u64,
+        model_generation: u64,
+        task_identity: Identity256,
+        task_content: SemanticTaskContentIdentity,
+        owner: Identity256,
+    ) -> Result<Option<SemanticCompletedStepWitnessMaterial>, SemanticTransitionError> {
+        let Some(retained) = self.retained_initial_prefill.as_ref() else {
+            return Ok(None);
+        };
+        if retained.record.predecessor != predecessor {
+            return Ok(None);
+        }
+        let record = retained.record.clone();
+        if record.semantic_root != semantic_root
+            || record.model_generation != model_generation
+            || record.task_identity != task_identity
+            || record.task_content != task_content
+            || record.task_epoch != self.task_epoch
+            || record.task_identity != retained.task_identity
+            || record.task_epoch != retained.task_epoch
+            || record.model_generation != retained.model_generation
+            || record.tokens.is_empty()
+            || record.tokens.len() as u64 != prefix_extent
+            || record.mapping.len() != record.tokens.len()
+            || record.mapping.iter().enumerate().any(|(position, row)| {
+                row.source.is_empty() || row.logical_position != position as u64
+            })
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let model_seals = initial_prefill_seal_sources(&retained.model)?;
+        let output_seals = initial_prefill_seal_sources(&retained.output)?;
+        if model_seals.is_empty()
+            || output_seals.is_empty()
+            || model_seals
+                .iter()
+                .any(|(role, _, _, _)| !matches!(role, 0 | 18..=25))
+            || output_seals
+                .iter()
+                .any(|(role, _, _, _)| !matches!(role, 4..=13))
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"XLOG-INITIAL-PREFILL\0");
+        material_u64(&mut bytes, 1);
+        encode_publication_identity(&mut bytes, record.predecessor);
+        bytes.extend_from_slice(record.semantic_root.as_bytes());
+        material_u64(&mut bytes, record.model_generation);
+        bytes.extend_from_slice(record.task_identity.as_bytes());
+        material_u64(&mut bytes, record.task_epoch);
+        for identity in [
+            record.task_content.query,
+            record.task_content.theory_program,
+            record.task_content.result,
+        ] {
+            bytes.extend_from_slice(identity.as_bytes());
+        }
+        material_u64(&mut bytes, record.tokens.len() as u64);
+        for token in &record.tokens {
+            material_u64(&mut bytes, *token);
+        }
+        material_u64(&mut bytes, record.mapping.len() as u64);
+        for row in &record.mapping {
+            material_u64(&mut bytes, row.source.len() as u64);
+            bytes.extend_from_slice(row.source.as_bytes());
+            material_u64(&mut bytes, row.offset);
+            material_u64(&mut bytes, row.logical_position);
+        }
+        for seals in [model_seals, output_seals] {
+            material_u64(&mut bytes, seals.len() as u64);
+            for (role, index, cells, offset) in seals {
+                let digest = self.publication_read(cells.view())?;
+                if offset.checked_add(4).is_none_or(|end| end > digest.len()) {
+                    self.poisoned = true;
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                material_u64(&mut bytes, role);
+                material_u64(&mut bytes, index);
+                for word in &digest[offset..offset + 4] {
+                    material_u64(&mut bytes, *word);
+                }
+            }
+        }
+        Ok(Some(completed_action_child_material(
+            owner,
+            b"initial-prefill",
+            0,
+            &bytes,
+        )))
+    }
+
     /// Project one completed Proposal into typed action-law values and canonical
     /// byte-backed child materials. Private device structs never cross this API.
     #[cfg(feature = "semantic-policy")]
@@ -12716,6 +14088,32 @@ impl SemanticTransitionSession {
             .result
             .view();
         let result = self.publication_read(result_view)?[0];
+        let parent_header_view = self
+            .checked_prepared_step(step, false)?
+            .inputs
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .header
+            .view();
+        let parent_header = self.publication_read(parent_header_view)?[0];
+        if (SemanticPublishedIdentity {
+            instance: parent_header.instance,
+            word: parent_header.publication_word,
+            logical_digest: parent_header.logical_digest,
+            state_digest: parent_header.state_digest,
+        }) != binding.0
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let parent_semantic_digest = parent_header.semantic_digest;
+        let cold_extents = self.base_snapshot.extents();
+        let cold_world_root_matches = parent_header.semantic_extents
+            == [
+                u64::from(cold_extents.statements()),
+                u64::from(cold_extents.supports()),
+                u64::from(cold_extents.versions()),
+            ];
         let bank = usize::try_from(result.header.neural_bank)
             .ok()
             .filter(|&value| value < 2)
@@ -12757,9 +14155,28 @@ impl SemanticTransitionSession {
         let active_sets = self.publication_read(active_set_view)?;
         let pwl_cells = self.publication_read(pwl_cell_view)?;
         let selected_score_vjps = self.publication_read(selected_score_vjp_view)?;
+        let schema_generation = {
+            let admission = self
+                .graph
+                .admission()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            SemanticCompletedStepWitnessMaterial {
+                identity: admission.schema_generation(),
+                bytes: admission.schema_bytes().to_vec(),
+            }
+        };
         let catalogue = self.codebooks.binding;
         let batch_root = state.action_batch_root;
-        let (task_identity, task_content, expected_truth, goal, task_result) = {
+        let (
+            task_identity,
+            task_content,
+            expected_truth,
+            scoring,
+            editable_program,
+            goal,
+            priority_levels,
+            task_result,
+        ) = {
             let task = &self
                 .task
                 .as_ref()
@@ -12769,8 +14186,11 @@ impl SemanticTransitionSession {
                 task.identity(),
                 task.content_identity(),
                 task.expected_truth(),
+                task.spec().scoring,
+                task.spec().program.editable_program().is_some(),
                 task.goal_witness()
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                task.priority_levels().to_vec(),
                 task.completed_result_material(),
             )
         };
@@ -12812,6 +14232,17 @@ impl SemanticTransitionSession {
                                 || facts.eligible != 0
                         }
                 });
+        let invalid_task_scoring = !validate_completed_task_scoring(
+            scoring,
+            editable_program,
+            &priority_levels,
+            &state.task_evaluation.facts,
+            &state.work,
+            state.task_evaluation.lane_refusal,
+            state.task_evaluation.query_count,
+            state.task_evaluation.winner,
+            state.task_evaluation.return_value,
+        );
         if result.refusal != 0
             || result.advanced != 1
             || state.status != 0
@@ -12832,9 +14263,13 @@ impl SemanticTransitionSession {
             || state.catalogue_generation > u32::MAX as u64
             || state.catalogue_generation != catalogue.generation
             || state.catalogue_digest != catalogue.digest
+            || state.binding_digest != self.codebooks.binding.digest
+            || self.codebooks.words[10..14]
+                != identity_words(*schema_generation.identity.as_bytes())
             || state.task_evaluation.winner > 2
             || state.task_evaluation.query_count != expected_query_count
             || invalid_task_facts
+            || invalid_task_scoring
             || state.task_evaluation.facts[state.task_evaluation.winner as usize].eligible != 1
             || state
                 .task_evaluation
@@ -12891,6 +14326,15 @@ impl SemanticTransitionSession {
 
         let owner = self.prepared_completed_action_witnesses(step, consumer_streams)?;
         let owner_identity = owner.identity;
+        let initial_prefill = self.completed_initial_prefill_material(
+            binding.0,
+            parent_semantic_digest,
+            parent_header.prefix_extent,
+            state.model_generation as u64,
+            task_identity,
+            task_content,
+            owner_identity,
+        )?;
         let component_receipts_digest = publication_action_receipts_digest_bytes(
             &publication_abi_bytes(&self.codebooks.words),
             &receipts,
@@ -13112,6 +14556,59 @@ impl SemanticTransitionSession {
             }
         });
 
+        let admission = self
+            .graph
+            .admission()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let task_program = self
+            .task
+            .as_ref()
+            .and_then(|(task, _)| task.spec().program.editable_program())
+            .cloned();
+        if let Some(program) = task_program.as_ref() {
+            let edits = std::array::from_fn(|lane| lanes[lane].edit_actions);
+            if let Err(error) = validate_program_query_receipts(
+                program,
+                task_identity,
+                &self.codebooks,
+                &state,
+                &edits,
+            ) {
+                self.poisoned = true;
+                return Err(error);
+            }
+        }
+        let mut theory_deltas = Vec::new();
+        for (lane, lane_material) in lanes.iter().enumerate() {
+            for slot in 0..2 {
+                let begin = lane * 68 + 32 + slot * 18;
+                let projected = completed_theory_delta_for_slot(
+                    &self.codebooks,
+                    admission,
+                    task_program.as_ref(),
+                    task_identity,
+                    owner_identity,
+                    parent_semantic_digest,
+                    lane,
+                    slot,
+                    &lane_material.edit_actions[slot],
+                    (slot == 1).then_some(&lane_material.edit_actions[0]),
+                    &state.semantic_receipts[1 + lane * 3 + slot],
+                    &state.semantic_receipts[3 + lane * 3],
+                    &receipts[begin..begin + 18],
+                    state.task_evaluation.lane_refusal[lane],
+                );
+                match projected {
+                    Ok(Some(delta)) => theory_deltas.push(delta),
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.poisoned = true;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
         let base_truth = completed_task_truths(state.task_evaluation.facts[0])?;
         let lane_outcomes =
             std::array::from_fn(|lane| match state.task_evaluation.lane_refusal[lane] {
@@ -13127,7 +14624,7 @@ impl SemanticTransitionSession {
             });
         let mut ground_bytes = Vec::new();
         ground_bytes.extend_from_slice(b"XLOG-COMPLETED-TASK-GROUND\0");
-        material_u64(&mut ground_bytes, 1);
+        material_u64(&mut ground_bytes, 2);
         ground_bytes.extend_from_slice(task_identity.as_bytes());
         for identity in [
             task_content.query,
@@ -13146,6 +14643,19 @@ impl SemanticTransitionSession {
         }
         material_u64(&mut ground_bytes, goal.mandatory_link_count);
         material_u64(&mut ground_bytes, goal.constraint_count);
+        material_u64(&mut ground_bytes, priority_levels.len() as u64);
+        for level in &priority_levels {
+            material_u64(&mut ground_bytes, level.goals.len() as u64);
+            for goal in &level.goals {
+                for value in [
+                    u64::from(goal.query),
+                    u64::from(goal.target_truth),
+                    u64::from(goal.weight),
+                ] {
+                    material_u64(&mut ground_bytes, value);
+                }
+            }
+        }
         encode_publication_identity(&mut ground_bytes, binding.0);
         for truth in expected_truth {
             material_u64(&mut ground_bytes, truth as u64);
@@ -13174,9 +14684,18 @@ impl SemanticTransitionSession {
                 0,
                 &ground_bytes,
             ),
+            scoring_law: completed_action_child_material(
+                owner_identity,
+                b"task-scoring-law",
+                0,
+                &scoring.completed_law_bytes(task_identity, editable_program)?,
+            ),
+            scoring,
+            return_bound: scoring.return_bound(editable_program)?,
             task_identity,
             content: task_content,
             goal,
+            priority_levels,
             base: binding.0,
             expected_truth,
             facts: state.task_evaluation.facts,
@@ -13268,6 +14787,19 @@ impl SemanticTransitionSession {
         attempt_receipt.identity = result.attempt.receipt_digest;
         let projection = SemanticCompletedActionProjectionMaterial {
             owner,
+            initial_prefill,
+            world_root: self
+                .cold_world_root
+                .as_ref()
+                .filter(|material| {
+                    cold_world_root_matches && material.identity == parent_semantic_digest
+                })
+                .cloned(),
+            schema_generation,
+            action_law: SemanticActionCatalogue::current().completed_material(),
+            edit_codebook: self.codebooks.completed_material(),
+            roster: self.codebooks.completed_roster_material(),
+            predecessor_semantic_root_digest: parent_semantic_digest,
             predecessor: binding.0,
             successor,
             proposal: state.proposal,
@@ -13301,6 +14833,7 @@ impl SemanticTransitionSession {
             successor_logical_state: completed_logical_state_material(owner_identity, 1, successor),
             slot_zero_admission,
             lanes,
+            theory_deltas,
             components,
             task_ground,
             edit_solution,
@@ -15506,6 +17039,619 @@ impl SemanticTransitionSession {
         Ok(recorder)
     }
 
+    /// Reserve exactly one native prefill stage for the imported task. The
+    /// expected tokens come from its admitted source mapping, not a model-side
+    /// copy. This stage owns the device comparison input before any model call.
+    pub fn begin_initial_prefill(
+        &mut self,
+        layout: SemanticInitialSourceLayout,
+        model_generation: u64,
+    ) -> Result<SemanticInitialPrefillLease, SemanticTransitionError> {
+        self.ensure_rebindable()?;
+        if self.publication.is_some() || self.initial_prefill.is_some() {
+            return Err(publication_input_error(
+                "initial prefill requires one unpublished imported task",
+            ));
+        }
+        let task_identity = self
+            .task_evaluation_identity()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if model_generation == 0 || layout.prefill_tokens.is_empty() {
+            return Err(publication_input_error(
+                "initial prefill requires a model generation and nonempty committed prefix",
+            ));
+        }
+        if layout.prefill_tokens.len() != layout.prefix.len()
+            || layout.prefix.iter().enumerate().any(|(position, row)| {
+                row.token != layout.prefill_tokens[position]
+                    || row.logical_position != position as u64
+                    || row.kind != 1
+                    || row.provenance != 1
+                    || row.valid != 1
+                    || row.committed != 1
+            })
+        {
+            return Err(publication_input_error(
+                "initial prefill layout differs from the admitted ordered prefix",
+            ));
+        }
+        let expected_tokens = allocate_publication(&self.provider, layout.prefill_tokens.len())?;
+        let scope = Arc::new(());
+        self.initial_prefill = Some(InitialPrefillStage {
+            scope: Arc::clone(&scope),
+            task_identity,
+            task_epoch: self.task_epoch,
+            model_generation,
+            layout,
+            expected_tokens,
+            input: None,
+            model_content: None,
+            output_content: None,
+            captured_content: Vec::new(),
+            consumer_stream: None,
+        });
+        let stage = self
+            .initial_prefill
+            .as_mut()
+            .expect("stage installed before upload");
+        if let Err(error) = self
+            .provider
+            .htod_sync_copy_into_tracked(&stage.layout.prefill_tokens, &mut stage.expected_tokens)
+        {
+            self.poisoned = true;
+            return Err(runtime_error("initial prefill token upload", error));
+        }
+        Ok(SemanticInitialPrefillLease {
+            issuer: Arc::clone(&self.publication_issuer),
+            scope,
+        })
+    }
+
+    /// Compare the actual I64 tensor at the model's pre-hook against the
+    /// admitted prefix on device. The stream edge completes before the model
+    /// continues, and the original DLPack owner remains in this stage.
+    pub fn record_initial_prefill_input(
+        &mut self,
+        lease: &SemanticInitialPrefillLease,
+        input: SemanticTensorInput,
+        consumer_stream: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        dlpack_consumer_stream(consumer_stream)?;
+        let stage = self
+            .initial_prefill
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if !Arc::ptr_eq(&self.publication_issuer, &lease.issuer)
+            || !Arc::ptr_eq(&stage.scope, &lease.scope)
+            || self.publication.is_some()
+            || stage.task_epoch != self.task_epoch
+            || self.task_evaluation_identity() != Some(stage.task_identity)
+            || stage.model_content.is_none()
+            || stage.consumer_stream != Some(consumer_stream)
+            || stage.input.is_some()
+        {
+            return Err(publication_input_error(
+                "initial prefill input belongs to another or already-used task stage",
+            ));
+        }
+        validate_initial_prefill_input_layout(
+            &input.layout,
+            stage.layout.prefill_tokens.len() as u64,
+        )?;
+        if input.logical_begin != 0 || input.logical_end != stage.layout.prefill_tokens.len() as u64
+        {
+            return Err(publication_input_error(
+                "initial prefill input interval differs from the admitted prefix",
+            ));
+        }
+        let mut prepared = prepare_semantic_tensors(&self.provider, vec![input])?;
+        let input = prepared.pop().expect("one checked prefill input");
+        let actual_ptr = input.data;
+        self.initial_prefill.as_mut().expect("checked stage").input = Some(input);
+        self.initial_prefill
+            .as_mut()
+            .expect("checked stage")
+            .consumer_stream = Some(consumer_stream);
+        let result = (|| {
+            self.order_tensor_producer_inputs(consumer_stream)?;
+            let stage = self
+                .initial_prefill
+                .as_ref()
+                .expect("retained prefill stage");
+            let execute = self
+                .provider
+                .device()
+                .inner()
+                .get_func(
+                    "xlog_semantic_transition",
+                    "semantic_initial_prefill_input_guard",
+                )
+                .ok_or_else(|| {
+                    runtime_error("kernel lookup", "initial prefill input guard unavailable")
+                })?;
+            let mut recorder = self.domain.new_strict_recorder();
+            recorder.read(&stage.expected_tokens);
+            recorder.read(
+                stage
+                    .input
+                    .as_ref()
+                    .expect("retained prefill input")
+                    .source
+                    .as_ref()
+                    .ok_or_else(|| {
+                        publication_input_error(
+                            "initial prefill input has no original device storage",
+                        )
+                    })?,
+            );
+            let arguments = (
+                stage.expected_tokens.device_ptr_value(),
+                actual_ptr,
+                stage.layout.prefill_tokens.len() as u64,
+            );
+            enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+                // SAFETY: both original producer and expected-token allocations
+                // are retained by this stage; layout and stream were checked.
+                unsafe {
+                    execute.launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (1, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        arguments,
+                    )
+                }
+                .map_err(|error| XlogError::Kernel(error.to_string()))
+            })?;
+            self.stream
+                .synchronize()
+                .map_err(|error| runtime_error("initial prefill input verification", error))?;
+            self.order_content_consumers(consumer_stream)
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    /// Seal the original model roster before its prefill forward. The caller
+    /// supplies model tensors followed by their complete original backing
+    /// allocations, exactly as it will supply them to parent binding.
+    pub fn bind_initial_prefill_model_content(
+        &mut self,
+        lease: &SemanticInitialPrefillLease,
+        tensors: Vec<SemanticTensorInput>,
+        consumer_stream: u64,
+    ) -> Result<SemanticInitialPrefillContentWitness, SemanticTransitionError> {
+        self.capture_initial_prefill_roster(
+            lease,
+            tensors,
+            consumer_stream,
+            InitialPrefillCaptureKind::Model,
+        )?
+        .ok_or(SemanticTransitionError::ObservationMismatch)
+    }
+
+    /// Capture original pre-call, transient or saved tensors after the model
+    /// roster is sealed, before any dependent read may change their bytes.
+    /// Pre-call capture does not replace the actual input pre-hook.
+    pub fn capture_initial_prefill_tensor_content(
+        &mut self,
+        lease: &SemanticInitialPrefillLease,
+        tensors: Vec<SemanticTensorInput>,
+        consumer_stream: u64,
+    ) -> Result<SemanticInitialPrefillContentWitness, SemanticTransitionError> {
+        self.capture_initial_prefill_roster(
+            lease,
+            tensors,
+            consumer_stream,
+            InitialPrefillCaptureKind::Captured,
+        )?
+        .ok_or(SemanticTransitionError::ObservationMismatch)
+    }
+
+    /// Seal the original model outputs at the post-detach wrapper boundary.
+    /// Every prefill cache/state tensor later supplied to parent binding must
+    /// be this exact allocation, layout and logical interval.
+    pub fn record_initial_prefill_outputs(
+        &mut self,
+        lease: &SemanticInitialPrefillLease,
+        tensors: Vec<SemanticTensorInput>,
+        consumer_stream: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        self.capture_initial_prefill_roster(
+            lease,
+            tensors,
+            consumer_stream,
+            InitialPrefillCaptureKind::Outputs,
+        )?;
+        Ok(())
+    }
+
+    fn capture_initial_prefill_roster(
+        &mut self,
+        lease: &SemanticInitialPrefillLease,
+        tensors: Vec<SemanticTensorInput>,
+        consumer_stream: u64,
+        kind: InitialPrefillCaptureKind,
+    ) -> Result<Option<SemanticInitialPrefillContentWitness>, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        dlpack_consumer_stream(consumer_stream)?;
+        let stage = self
+            .initial_prefill
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if !Arc::ptr_eq(&self.publication_issuer, &lease.issuer)
+            || !Arc::ptr_eq(&stage.scope, &lease.scope)
+            || self.publication.is_some()
+            || stage.task_epoch != self.task_epoch
+            || self.task_evaluation_identity() != Some(stage.task_identity)
+            || stage
+                .consumer_stream
+                .is_some_and(|stream| stream != consumer_stream)
+            || match kind {
+                InitialPrefillCaptureKind::Model => {
+                    stage.model_content.is_some() || stage.input.is_some()
+                }
+                InitialPrefillCaptureKind::Outputs => {
+                    stage.model_content.is_none()
+                        || stage.input.is_none()
+                        || stage.output_content.is_some()
+                }
+                InitialPrefillCaptureKind::Captured => {
+                    stage.model_content.is_none() || stage.output_content.is_some()
+                }
+            }
+        {
+            return Err(publication_input_error(
+                "initial prefill roster belongs to another stage, stream or forward order",
+            ));
+        }
+        if tensors.is_empty()
+            || tensors.iter().any(|tensor| match kind {
+                InitialPrefillCaptureKind::Model => !matches!(tensor.layout.role, 0 | 18..=25),
+                InitialPrefillCaptureKind::Outputs => !matches!(tensor.layout.role, 4..=13),
+                InitialPrefillCaptureKind::Captured => false,
+            })
+        {
+            return Err(publication_input_error(
+                "initial prefill model or output roster has missing or foreign tensor roles",
+            ));
+        }
+        let prepared = prepare_semantic_tensors(&self.provider, tensors)?;
+        validate_content_coordinates(
+            prepared
+                .iter()
+                .map(|tensor| (tensor.layout.role, tensor.layout.index)),
+        )?;
+        let digests = prepared
+            .iter()
+            .map(|tensor| {
+                tensor_content_range(
+                    &tensor.layout,
+                    tensor.logical_begin,
+                    tensor.logical_end,
+                    tensor.source.as_ref().map_or(0, DeviceMemoryView::len),
+                )?;
+                Ok(CapturedTensorDigest::Tensor {
+                    cells: Arc::new(allocate_publication(&self.provider, 4)?),
+                    offset: 0,
+                    producer_sealed: false,
+                })
+            })
+            .collect::<Result<Vec<_>, SemanticTransitionError>>()?;
+        let stage = self
+            .initial_prefill
+            .as_mut()
+            .expect("checked prefill stage");
+        let content = TensorContentBuffers {
+            tensors: prepared,
+            seals: TensorContentSeals::Captured(digests),
+            verification_inputs: Vec::new(),
+        };
+        let slot = match kind {
+            InitialPrefillCaptureKind::Model => {
+                stage.model_content = Some(content);
+                Some(InitialPrefillContentSlot::Model)
+            }
+            InitialPrefillCaptureKind::Outputs => {
+                stage.output_content = Some(content);
+                None
+            }
+            InitialPrefillCaptureKind::Captured => {
+                let index = stage.captured_content.len();
+                stage.captured_content.push(content);
+                Some(InitialPrefillContentSlot::Captured(index))
+            }
+        };
+        stage.consumer_stream = Some(consumer_stream);
+        let witness = slot.map(|slot| SemanticInitialPrefillContentWitness {
+            issuer: Arc::clone(&self.publication_issuer),
+            scope: Arc::clone(&stage.scope),
+            task_identity: stage.task_identity,
+            task_epoch: stage.task_epoch,
+            model_generation: stage.model_generation,
+            slot,
+        });
+        let result = (|| {
+            self.order_tensor_producer_inputs(consumer_stream)?;
+            let stage = self
+                .initial_prefill
+                .as_ref()
+                .expect("retained prefill stage");
+            let content = match kind {
+                InitialPrefillCaptureKind::Model => stage
+                    .model_content
+                    .as_ref()
+                    .expect("retained model content"),
+                InitialPrefillCaptureKind::Outputs => stage
+                    .output_content
+                    .as_ref()
+                    .expect("retained output content"),
+                InitialPrefillCaptureKind::Captured => stage
+                    .captured_content
+                    .last()
+                    .expect("retained transient content"),
+            };
+            let execute = self
+                .provider
+                .device()
+                .inner()
+                .get_func(
+                    "xlog_semantic_transition",
+                    "semantic_tensor_content_witness",
+                )
+                .ok_or_else(|| {
+                    runtime_error("kernel lookup", "tensor content witness unavailable")
+                })?;
+            content.enqueue(&self.domain, &mut self.poisoned, &execute, false)?;
+            self.order_content_consumers(consumer_stream)
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result.map(|()| witness)
+    }
+
+    /// Check the same original prefill seal before a dependent model or saved
+    /// tensor read, including after the parent has consumed the one-use stage.
+    pub fn verify_initial_prefill_tensor_content(
+        &mut self,
+        lease: &SemanticInitialPrefillLease,
+        witness: &SemanticInitialPrefillContentWitness,
+        tensors: Vec<SemanticTensorInput>,
+        consumer_stream: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        let mut handoff = RetainedTensorAdmission {
+            inputs: Some(tensors),
+            stream: Arc::clone(self.provider.device().inner().stream()),
+            ready: false,
+        };
+        if self.is_poisoned() {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        dlpack_consumer_stream(consumer_stream)?;
+        let (scope, task_identity, task_epoch, model_generation, captured_count) =
+            if let Some(stage) = self.initial_prefill.as_ref() {
+                (
+                    &stage.scope,
+                    stage.task_identity,
+                    stage.task_epoch,
+                    stage.model_generation,
+                    stage.captured_content.len(),
+                )
+            } else if let Some(retained) = self.retained_initial_prefill.as_ref() {
+                (
+                    &retained.scope,
+                    retained.task_identity,
+                    retained.task_epoch,
+                    retained.model_generation,
+                    retained.captured.len(),
+                )
+            } else {
+                return Err(SemanticTransitionError::NotBound);
+            };
+        if !Arc::ptr_eq(&self.publication_issuer, &lease.issuer)
+            || !Arc::ptr_eq(scope, &lease.scope)
+            || self.task_epoch != task_epoch
+            || self.task_evaluation_identity() != Some(task_identity)
+            || !witness.matches(
+                &self.publication_issuer,
+                scope,
+                task_identity,
+                task_epoch,
+                model_generation,
+                captured_count,
+            )
+        {
+            return Err(publication_input_error(
+                "initial prefill content witness belongs to another task, stream or stage",
+            ));
+        }
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+            .map_err(|error| runtime_error("prefill content stream admission", error))?;
+        let prepared = prepare_semantic_tensors(
+            &self.provider,
+            handoff
+                .inputs
+                .take()
+                .expect("retained original prefill verification inputs"),
+        )?;
+        let content = if let Some(stage) = self.initial_prefill.as_mut() {
+            match witness.slot {
+                InitialPrefillContentSlot::Model => stage.model_content.as_mut(),
+                InitialPrefillContentSlot::Captured(index) => stage.captured_content.get_mut(index),
+            }
+        } else {
+            self.retained_initial_prefill
+                .as_mut()
+                .and_then(|retained| match witness.slot {
+                    InitialPrefillContentSlot::Model => Some(&mut retained.model),
+                    InitialPrefillContentSlot::Captured(index) => retained.captured.get_mut(index),
+                })
+        }
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let offset = content.verification_inputs.len();
+        content.verification_inputs.extend(prepared);
+        let actual = &content.verification_inputs[offset..];
+        if actual.len() != content.tensors.len()
+            || content
+                .tensors
+                .iter()
+                .zip(actual)
+                .any(|(expected, actual)| !same_tensor_content_owner(expected, actual))
+        {
+            return Err(publication_input_error(
+                "prefill content verification requires the original storage, layout and interval",
+            ));
+        }
+        let result = (|| {
+            self.order_tensor_producer_inputs(consumer_stream)?;
+            let content = if let Some(stage) = self.initial_prefill.as_ref() {
+                match witness.slot {
+                    InitialPrefillContentSlot::Model => stage.model_content.as_ref(),
+                    InitialPrefillContentSlot::Captured(index) => stage.captured_content.get(index),
+                }
+            } else {
+                self.retained_initial_prefill
+                    .as_ref()
+                    .and_then(|retained| match witness.slot {
+                        InitialPrefillContentSlot::Model => Some(&retained.model),
+                        InitialPrefillContentSlot::Captured(index) => retained.captured.get(index),
+                    })
+            }
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let execute = self
+                .provider
+                .device()
+                .inner()
+                .get_func(
+                    "xlog_semantic_transition",
+                    "semantic_tensor_content_witness",
+                )
+                .ok_or_else(|| {
+                    runtime_error("kernel lookup", "tensor content witness unavailable")
+                })?;
+            content.enqueue(&self.domain, &mut self.poisoned, &execute, true)?;
+            self.order_content_consumers(consumer_stream)
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    fn verify_initial_prefill_parent(
+        &mut self,
+        parent: &SemanticParentBinding,
+        tensors: &[PreparedSemanticTensor],
+        allocations: &[PreparedSemanticTensor],
+    ) -> Result<(), SemanticTransitionError> {
+        if parent.prefix.is_empty() {
+            if self.initial_prefill.is_some() {
+                return Err(publication_input_error(
+                    "an initial prefill stage cannot be bound to an empty prefix",
+                ));
+            }
+            return Ok(());
+        }
+        let stage = self.initial_prefill.as_ref().ok_or_else(|| {
+            publication_input_error(
+                "nonempty initial prefix requires its original model prefill stage",
+            )
+        })?;
+        let model = stage.model_content.as_ref().ok_or_else(|| {
+            publication_input_error("initial prefill has no original model-content witness")
+        })?;
+        let outputs = stage.output_content.as_ref().ok_or_else(|| {
+            publication_input_error("initial prefill has no original model-output witness")
+        })?;
+        let model_inputs = tensors
+            .iter()
+            .filter(|tensor| matches!(tensor.layout.role, 18..=25))
+            .chain(allocations);
+        let output_inputs = tensors
+            .iter()
+            .filter(|tensor| matches!(tensor.layout.role, 4..=13));
+        if self.publication.is_some()
+            || stage.task_epoch != self.task_epoch
+            || self.task_evaluation_identity() != Some(stage.task_identity)
+            || stage.task_epoch != parent.authority_generation
+            || stage.model_generation != parent.model_generation
+            || stage.input.is_none()
+            || stage.consumer_stream.is_none()
+            || stage.layout.ring_head != parent.ring_head
+            || !same_initial_source_rows(&stage.layout.source, &parent.source)
+            || !same_initial_source_rows(&stage.layout.prefix, &parent.prefix)
+            || parent.provenance_records != stage.layout.provenance_records
+            || parent
+                .records
+                .iter()
+                .filter(|record| record.role == SemanticStateRole::TokenProvenanceRecords)
+                .count()
+                != 1
+            || !parent.records.iter().any(|record| {
+                record.role == SemanticStateRole::TokenProvenanceRecords
+                    && record.index == 0
+                    && record.bytes == stage.layout.provenance_bytes
+                    && record.capacity_bytes == stage.layout.provenance_capacity_bytes
+            })
+            || model.tensors.len() != model_inputs.clone().count()
+            || !model
+                .tensors
+                .iter()
+                .zip(model_inputs)
+                .all(|(expected, actual)| same_tensor_content_owner(expected, actual))
+            || outputs.tensors.len() != output_inputs.clone().count()
+            || !outputs
+                .tensors
+                .iter()
+                .zip(output_inputs)
+                .all(|(expected, actual)| same_tensor_content_owner(expected, actual))
+        {
+            return Err(publication_input_error(
+                "initial parent changed its admitted source, model or original prefill outputs",
+            ));
+        }
+        let stream = stage.consumer_stream.expect("checked prefill stream");
+        let result = (|| {
+            self.order_tensor_producer_inputs(stream)?;
+            let stage = self
+                .initial_prefill
+                .as_ref()
+                .expect("retained prefill stage");
+            let execute = self
+                .provider
+                .device()
+                .inner()
+                .get_func(
+                    "xlog_semantic_transition",
+                    "semantic_tensor_content_witness",
+                )
+                .ok_or_else(|| {
+                    runtime_error("kernel lookup", "tensor content witness unavailable")
+                })?;
+            stage
+                .model_content
+                .as_ref()
+                .expect("checked model content")
+                .enqueue(&self.domain, &mut self.poisoned, &execute, true)?;
+            stage
+                .output_content
+                .as_ref()
+                .expect("checked output content")
+                .enqueue(&self.domain, &mut self.poisoned, &execute, true)?;
+            self.order_content_consumers(stream)
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
     /// Snapshot every supplied cold owner into fixed publication storage, then
     /// initialize and seal bank zero through the actual native command.
     pub fn bind_parent(
@@ -15526,7 +17672,8 @@ impl SemanticTransitionSession {
             std::mem::take(&mut parent.model_memory.views),
             &tensors,
         )?;
-        self.ensure_rebindable()?;
+        self.verify_initial_prefill_parent(&parent, &tensors, &allocations)?;
+        self.ensure_rebindable_with_prefill()?;
         if self.publication.is_some() {
             return Err(publication_input_error(
                 "this Session already owns a canonical publication instance",
@@ -15535,6 +17682,13 @@ impl SemanticTransitionSession {
         let task_identity = self
             .task_evaluation_identity()
             .ok_or(SemanticTransitionError::NotBound)?;
+        #[cfg(feature = "semantic-policy")]
+        let task_content = self
+            .task
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .0
+            .content_identity();
         if parent.authority_generation != self.task_epoch {
             return Err(publication_input_error(
                 "parent authority generation differs from the retained task import",
@@ -15814,6 +17968,39 @@ impl SemanticTransitionSession {
         );
         if result.is_err() {
             self.poisoned = true;
+        } else {
+            #[cfg(feature = "semantic-policy")]
+            let predecessor = *result.as_ref().expect("successful parent publication");
+            // Publication joins the original model and output snapshots. Only
+            // their one-use stage closes: the model and transient seals remain
+            // owned by this Session for late original-forward/autograd reads.
+            self.retained_initial_prefill =
+                self.initial_prefill
+                    .take()
+                    .map(|mut stage| RetainedInitialPrefillContent {
+                        scope: stage.scope,
+                        task_identity: stage.task_identity,
+                        task_epoch: stage.task_epoch,
+                        model_generation: stage.model_generation,
+                        model: stage.model_content.take().expect("verified model content"),
+                        #[cfg(feature = "semantic-policy")]
+                        output: stage
+                            .output_content
+                            .take()
+                            .expect("verified output content"),
+                        #[cfg(feature = "semantic-policy")]
+                        record: InitialPrefillRecord {
+                            predecessor,
+                            semantic_root: header.semantic_digest,
+                            task_identity,
+                            task_epoch: stage.task_epoch,
+                            task_content,
+                            model_generation: stage.model_generation,
+                            tokens: stage.layout.prefill_tokens,
+                            mapping: stage.layout.prefill_mapping,
+                        },
+                        captured: stage.captured_content,
+                    });
         }
         result
     }
@@ -15867,7 +18054,13 @@ impl SemanticTransitionSession {
                 .graph
                 .admission()
                 .ok_or(SemanticTransitionError::NotBound)?;
-            let codebooks = ActionCodebooks::derive(admission, self.graph.transition_arena()[1])?;
+            let codebooks = ActionCodebooks::derive(
+                admission,
+                self.graph.transition_arena()[1],
+                self.task
+                    .as_ref()
+                    .and_then(|(task, _)| task.spec.program.editable_program()),
+            )?;
             if codebooks.input_cells != self.codebooks.input_cells
                 || codebooks.words.len() != self.device_codebooks.len()
             {
@@ -16499,16 +18692,23 @@ impl SemanticTransitionSession {
         reader_token: u64,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
-        let consumer = dlpack_consumer_stream(consumer_stream)?;
-        self.stream
-            .context()
-            .bind_to_thread()
-            .map_err(|e| runtime_error("content context binding", e))?;
         self.steps
             .get_mut(&reader_token)
             .expect("validated content step")
             .consumer_streams
             .insert(consumer_stream);
+        self.order_tensor_producer_inputs(consumer_stream)
+    }
+
+    fn order_tensor_producer_inputs(
+        &mut self,
+        consumer_stream: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        let consumer = dlpack_consumer_stream(consumer_stream)?;
+        self.stream
+            .context()
+            .bind_to_thread()
+            .map_err(|e| runtime_error("content context binding", e))?;
         for source in [std::ptr::null_mut(), consumer] {
             let event = self
                 .stream
@@ -18945,6 +21145,15 @@ impl SemanticTransitionSession {
     /// Consumes the sole admitted semantic owner. The acquired base, accepted
     /// symbol bytes, descriptors and arena remain inseparable for capture/replay.
     pub fn from_hypergraph(graph: SemanticHypergraph) -> Result<Self, SemanticTransitionError> {
+        Self::from_hypergraph_with_program(graph, None)
+    }
+
+    /// Bind the source-derived edit grammar before allocating the resident
+    /// codebooks and policy buffers. The task observer is bound separately.
+    pub fn from_hypergraph_with_program(
+        graph: SemanticHypergraph,
+        program: Option<&crate::SemanticProgramAdmission>,
+    ) -> Result<Self, SemanticTransitionError> {
         let (provider, domain) = graph
             .transition_owner()
             .map_err(SemanticTransitionError::Semantic)?;
@@ -18962,7 +21171,7 @@ impl SemanticTransitionSession {
             .expect("transition owner validated admission");
         let root = admission.base();
         let base_snapshot = *admission.base_snapshot();
-        let codebooks = ActionCodebooks::derive(admission, graph.transition_arena()[1])?;
+        let codebooks = ActionCodebooks::derive(admission, graph.transition_arena()[1], program)?;
         let bytes = codebooks.input_cells * (size_of::<f32>() + size_of::<u8>())
             + SCRATCH_BYTES
             + OBSERVATION_BYTES
@@ -19011,6 +21220,11 @@ impl SemanticTransitionSession {
             device_codebooks,
             device_components,
             task: None,
+            cold_content: None,
+            initial_prefill: None,
+            retained_initial_prefill: None,
+            #[cfg(feature = "semantic-policy")]
+            cold_world_root: None,
             training_views: None,
             training_origins: None,
             task_epoch: 0,
@@ -19126,6 +21340,16 @@ impl SemanticTransitionSession {
             .checked_add(1)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         spec.validate_records(admission.records())?;
+        if spec
+            .program
+            .editable_program()
+            .map(ActionCodebooks::program_binding)
+            != self.codebooks.program_binding
+        {
+            return Err(publication_input_error(
+                "task editable program differs from the cold action grammar",
+            ));
+        }
         let observation = spec
             .program
             .observe(Arc::clone(&self.provider))
@@ -19133,6 +21357,32 @@ impl SemanticTransitionSession {
                 self.poisoned = true;
             })?;
         let binding = TaskEvaluationBinding::bind(admission, spec, observation)?;
+        if self
+            .cold_content
+            .is_some_and(|expected| binding.content() != expected)
+        {
+            self.poisoned = true;
+            return Err(publication_input_error(
+                "final task content differs from the executed cold admission",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        let cold_world_root = {
+            let material = self
+                .graph
+                .export_transition_root(self.root)
+                .map_err(SemanticTransitionError::Semantic)?;
+            if material.digest != *self.base_snapshot.digest().as_bytes() {
+                self.poisoned = true;
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            SemanticCompletedStepWitnessMaterial {
+                identity: Identity256::from_bytes(material.digest),
+                bytes: material
+                    .encode()
+                    .map_err(SemanticTransitionError::Semantic)?,
+            }
+        };
         let words = binding.words(self.graph.transition_arena()[1]);
         let mut reservation = self
             .provider
@@ -19147,6 +21397,10 @@ impl SemanticTransitionSession {
         self.captured = None;
         let identity = binding.identity();
         self.task = Some((binding, device));
+        #[cfg(feature = "semantic-policy")]
+        {
+            self.cold_world_root = Some(cold_world_root);
+        }
         let (_, device) = self.task.as_mut().expect("private task installed above");
         self.provider
             .htod_sync_copy_into_tracked(&words, device)
@@ -19169,6 +21423,50 @@ impl SemanticTransitionSession {
         self.validate_ranges()?;
         self.task_epoch = next_epoch;
         Ok(identity)
+    }
+
+    /// Execute the same native observer before the final task import so a
+    /// context admission can bind its original task content. This read grants
+    /// no use authority; final import must reproduce the same content exactly.
+    pub fn observe_cold_task_content(
+        &mut self,
+        statement_records: [u32; 3],
+        allowed_support_records: &[u32],
+        program: &dyn SemanticTaskProgram,
+    ) -> Result<(SemanticTaskContentIdentity, [crate::SemanticTruth; 3]), SemanticTransitionError>
+    {
+        self.ensure_rebindable()?;
+        if self.publication.is_some() || self.task.is_some() || self.cold_content.is_some() {
+            return Err(publication_input_error(
+                "cold task content can be observed only once before final import",
+            ));
+        }
+        let admission = self
+            .graph
+            .admission()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if program
+            .editable_program()
+            .map(ActionCodebooks::program_binding)
+            != self.codebooks.program_binding
+        {
+            return Err(publication_input_error(
+                "cold task observer differs from the admitted edit grammar",
+            ));
+        }
+        let observation = program
+            .observe(Arc::clone(&self.provider))
+            .inspect_err(|_| self.poisoned = true)?;
+        let content = TaskEvaluationBinding::cold_content(
+            admission,
+            statement_records,
+            allowed_support_records,
+            program.editable_program(),
+            observation,
+        )
+        .inspect_err(|_| self.poisoned = true)?;
+        self.cold_content = Some(content);
+        Ok(content)
     }
 
     /// Bind the controller's independently validated goal closure to the native
@@ -19257,6 +21555,22 @@ impl SemanticTransitionSession {
     /// task, excluding its controller authority and scoring policy.
     pub fn task_content(&self) -> Option<(SemanticTaskContentIdentity, [crate::SemanticTruth; 3])> {
         self.task.as_ref().map(|(binding, _)| binding.content())
+    }
+
+    /// Semantic root of the validated goal witness bound to the current task.
+    /// This is the same root retained in its completed task ground.
+    pub fn task_semantic_goal_root(&self) -> Option<Identity256> {
+        self.task
+            .as_ref()
+            .and_then(|(binding, _)| binding.goal_witness.map(|goal| goal.semantic_root))
+    }
+
+    /// Ordered priority levels from the same immutable native task binding
+    /// consumed by the device selector and later completed task ground.
+    pub fn task_priority_levels(&self) -> Option<&[SemanticTaskPriorityLevel]> {
+        self.task
+            .as_ref()
+            .map(|(binding, _)| binding.priority_levels())
     }
 
     /// Bind every admitted training view once while the task is still cold.
@@ -19354,7 +21668,7 @@ impl SemanticTransitionSession {
     ) -> Option<&SemanticActionDescriptor> {
         let entries = match field {
             2 => &self.codebooks.targets,
-            3..=6 => &self.codebooks.operands,
+            3..=10 => &self.codebooks.operands,
             11 => &self.codebooks.qualifiers,
             17 => &self.codebooks.leaves,
             _ => return None,
@@ -21387,6 +23701,7 @@ impl SemanticTransitionSession {
                         lanes: std::array::from_fn(|_| SemanticTransitionLane {
                             root: None,
                             task_refusal: None,
+                            program_rules: [None; 2],
                             edits: [Ok(None), Ok(None)],
                             work: SemanticTransitionWork::default(),
                         }),
@@ -21402,6 +23717,10 @@ impl SemanticTransitionSession {
                 .map_err(SemanticTransitionError::Semantic)?;
         }
         let binding = SemanticActionCatalogue::current().binding();
+        let editable_program = self
+            .task
+            .as_ref()
+            .is_some_and(|(task, _)| task.spec().program.editable_program().is_some());
         if state.status != 0
             || state.proposal != proposal
             || state.next_proposal != proposal + 1
@@ -21410,7 +23729,10 @@ impl SemanticTransitionSession {
             || state.catalogue_generation != binding.generation
             || state.catalogue_digest != binding.digest
             || state.binding_digest != self.binding().digest
-            || state.work.iter().any(|work| !work.is_valid())
+            || state
+                .work
+                .iter()
+                .any(|work| !work.is_valid(editable_program))
             || (published.is_none() && state.retired_roots_mask != 0)
             || state.retired_roots_mask & !3 != 0
             || !state.importance_weight.is_finite()
@@ -21467,6 +23789,54 @@ impl SemanticTransitionSession {
         } else {
             None
         };
+        let edit_choices: [[[u32; 18]; 2]; 2] = std::array::from_fn(|lane| {
+            std::array::from_fn(|slot| {
+                std::array::from_fn(|field| components[lane * 68 + 32 + slot * 18 + field].choice)
+            })
+        });
+        let mut program_rules = [[None; 2]; 2];
+        if let Some((task, _)) = &self.task {
+            if let Some(program) = task.spec().program.editable_program() {
+                if let Err(error) = validate_program_query_receipts(
+                    program,
+                    task.identity(),
+                    &self.codebooks,
+                    &state,
+                    &edit_choices,
+                ) {
+                    self.poisoned = true;
+                    return Err(error);
+                }
+                for lane in 0..2 {
+                    for slot in 0..2 {
+                        let choices = &edit_choices[lane][slot];
+                        let receipt = &state.semantic_receipts[1 + lane * 3 + slot];
+                        if choices[0] == 1 && choices[1] == 2 {
+                            let previous = (slot == 1).then_some(&edit_choices[lane][0]);
+                            match validated_rule_receipt(
+                                &self.codebooks,
+                                program,
+                                task.identity(),
+                                lane,
+                                slot,
+                                choices,
+                                previous,
+                                receipt,
+                            ) {
+                                Ok((decoded, _)) => program_rules[lane][slot] = Some(decoded.rule),
+                                Err(error) => {
+                                    self.poisoned = true;
+                                    return Err(error);
+                                }
+                            }
+                        } else if choices[0] == 1 || receipt[1] == 3 {
+                            self.poisoned = true;
+                            return Err(SemanticTransitionError::ObservationMismatch);
+                        }
+                    }
+                }
+            }
+        }
         let lanes = std::array::from_fn(|i| {
             let task_refusal = if task_evaluation.is_some() {
                 match state.task_evaluation.lane_refusal[i] {
@@ -21488,9 +23858,12 @@ impl SemanticTransitionSession {
                 }
             }
             let edits = std::array::from_fn(|j| {
-                let result = self
-                    .graph
-                    .observe_transition_edit(state.semantic_receipts[1 + i * 3 + j]);
+                let result = if program_rules[i][j].is_some() {
+                    Ok(None)
+                } else {
+                    self.graph
+                        .observe_transition_edit(state.semantic_receipts[1 + i * 3 + j])
+                };
                 if self.graph.ensure_not_poisoned().is_err() {
                     if let Err(error) = &result {
                         integrity_error.get_or_insert_with(|| error.clone());
@@ -21501,6 +23874,7 @@ impl SemanticTransitionSession {
             SemanticTransitionLane {
                 root,
                 task_refusal,
+                program_rules: program_rules[i],
                 edits,
                 work: state.work[i],
             }
@@ -21738,6 +24112,15 @@ impl SemanticTransitionSession {
     }
 
     fn ensure_rebindable(&self) -> Result<(), SemanticTransitionError> {
+        if self.initial_prefill.is_some() {
+            return Err(publication_input_error(
+                "an imported task's initial prefill stage cannot be rebound",
+            ));
+        }
+        self.ensure_rebindable_with_prefill()
+    }
+
+    fn ensure_rebindable_with_prefill(&self) -> Result<(), SemanticTransitionError> {
         self.ensure_quiescent()?;
         validate_rebinding_ownership(
             self.prepared_segment.as_ref(),
@@ -21908,6 +24291,10 @@ impl SemanticTransitionSession {
                 .task
                 .as_ref()
                 .map_or(0, |(_, device)| device.device_ptr_value()),
+            task_words: self
+                .task
+                .as_ref()
+                .map_or(0, |(_, device)| device.len() as u64),
             publication: PublicationCommand {
                 control: self
                     .publication
@@ -22327,6 +24714,7 @@ mod tests {
             policy: PolicyDescriptor::default(),
             backward: PolicyBackward::default(),
             task: 40,
+            task_words: 66,
             publication: PublicationCommand {
                 control: 48,
                 lease: 0,
@@ -23012,8 +25400,91 @@ mod tests {
                 added_supports,
                 defined_truth_changes,
             };
-            assert_eq!(work.is_valid(), valid, "{work:?}");
+            assert_eq!(work.is_valid(false), valid, "{work:?}");
         }
+    }
+
+    #[test]
+    fn editable_program_work_counts_materialized_facts_and_bounds_signed_return() {
+        let work = SemanticTransitionWork {
+            edit_commands: 2,
+            added_supports: crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64,
+            defined_truth_changes: 3,
+        };
+        assert!(!work.is_valid(false));
+        assert!(work.is_valid(true));
+        assert!(!SemanticTransitionWork {
+            added_supports: work.added_supports + 1,
+            ..work
+        }
+        .is_valid(true));
+        let scoring = SemanticTaskScoring {
+            correct_weight: 14,
+            all_correct_weight: 7,
+            work_weight: 1,
+            improvement_weight: 45,
+            refusal_weight: 15,
+            spent_weight: 1,
+        };
+        assert_eq!(scoring.return_bound(false).unwrap(), 2522);
+        assert_eq!(scoring.return_bound(true).unwrap(), 186799);
+    }
+
+    #[test]
+    #[cfg(feature = "semantic-policy")]
+    fn completed_scoring_accepts_program_materialization_cost() {
+        let scoring = SemanticTaskScoring {
+            correct_weight: 14,
+            all_correct_weight: 7,
+            work_weight: 1,
+            improvement_weight: 45,
+            refusal_weight: 15,
+            spent_weight: 1,
+        };
+        let work = SemanticTransitionWork {
+            edit_commands: 2,
+            added_supports: crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64,
+            defined_truth_changes: 3,
+        };
+        let facts = [
+            SemanticTaskFacts {
+                eligible: 1,
+                ..SemanticTaskFacts::default()
+            },
+            SemanticTaskFacts {
+                truth: [1; 3],
+                correct: [1; 3],
+                g: 3,
+                p: 1,
+                c: 4101,
+                v: -4052,
+                eligible: 1,
+            },
+            SemanticTaskFacts::default(),
+        ];
+        let work = [work, SemanticTransitionWork::default()];
+        assert!(validate_completed_task_scoring(
+            scoring,
+            true,
+            &[],
+            &facts,
+            &work,
+            [0, 1],
+            6,
+            1,
+            -182361,
+        ));
+        assert!(!validate_completed_task_scoring(
+            scoring,
+            false,
+            &[],
+            &facts,
+            &work,
+            [0, 1],
+            6,
+            1,
+            -182361,
+        ));
     }
 
     #[test]
@@ -24169,7 +26640,8 @@ mod text_parent_tests {
             provenance_record: 0,
         };
         let mut source = [SemanticTextSlot::default(); 32];
-        source[7] = slot(8, 1, 0);
+        source[0] = slot(7, 0, 0);
+        source[1] = slot(8, 1, 0);
         let model_owner = Arc::new(allocate_publication::<u8>(provider, 4).unwrap());
         upload_publication(provider, &18f32.to_le_bytes(), &model_owner).unwrap();
         let tensor = crate::dlpack::export_slice_managed_tensor(
@@ -24227,8 +26699,8 @@ mod text_parent_tests {
         let mut parent = SemanticParentBinding {
             recovered_instance: None,
             source,
-            prefix: vec![slot(7, 0, 1)],
-            ring_head: 7,
+            prefix: vec![],
+            ring_head: 2,
             provenance_records: 0,
             prefix_capacity: 64,
             feedback_capacity: 2,
@@ -24310,6 +26782,30 @@ mod text_parent_tests {
             )
             .unwrap();
         parent
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly authorized remote CUDA run"]
+    fn nonempty_initial_prefix_cannot_bind_without_its_prefill_stage() {
+        let (provider, domain) = publication_test_provider();
+        let mut session = publication_test_session(Arc::clone(&provider), &domain);
+        let mut parent = publication_test_parent(&provider);
+        parent.prefix.push(SemanticTextSlot {
+            token: 7,
+            logical_position: 0,
+            kind: 1,
+            provenance: 1,
+            valid: 1,
+            committed: 1,
+            ..SemanticTextSlot::default()
+        });
+        assert!(matches!(
+            session.bind_parent(parent),
+            Err(SemanticTransitionError::InvalidInput { .. })
+        ));
+        session
+            .bind_parent(publication_test_parent(&provider))
+            .unwrap();
     }
 
     fn publication_test_tensor_pair(
@@ -24539,7 +27035,7 @@ mod text_parent_tests {
         let (_, alias) = session.published_prefix(&old, 1).unwrap();
         publication_test_recompute(&mut session, &old, &provider);
         let mut current = session.acquire().unwrap();
-        assert_eq!(current.header.prefix_extent, 2);
+        assert_eq!(current.header.prefix_extent, old.header.prefix_extent + 1);
         assert_eq!(
             session
                 .read_published_record_bytes(&old, SemanticStateRole::PrefixSource)
@@ -28355,6 +30851,227 @@ mod text_parent_tests {
     }
 
     #[test]
+    fn initial_source_layout_preserves_admitted_tokens_across_prefix_and_ring() {
+        let sources = [SemanticObservedSource {
+            identity: "observation".into(),
+            tokens: (0..40).collect(),
+            origin: b"complete admitted observation and manifest".to_vec(),
+        }];
+        let mapping = (0..40)
+            .map(|position| SemanticSourceMapping {
+                source: "observation".into(),
+                offset: position,
+                logical_position: position,
+            })
+            .collect::<Vec<_>>();
+        let layout = initial_source_layout(
+            &sources,
+            &mapping,
+            b"complete task authority",
+            3,
+            72,
+            64,
+            3,
+            262144,
+            248000,
+        )
+        .unwrap();
+        assert_eq!(layout.prefill_tokens, (0..8).collect::<Vec<_>>());
+        assert_eq!(layout.prefix.len(), 8);
+        assert_eq!(layout.prefix[7].token, 7);
+        assert_eq!(layout.prefix[7].committed, 1);
+        assert_eq!(layout.source[0].token, 8);
+        assert_eq!(layout.source[0].logical_position, 8);
+        assert_eq!(layout.source[31].token, 39);
+        assert_eq!(layout.source[31].logical_position, 39);
+        assert_eq!(layout.source[31].committed, 0);
+        assert_eq!(layout.ring_head, 0);
+        assert_eq!(
+            validate_text_parent(&layout.source, 8, 64, 3, 262144, layout.ring_head, 40).unwrap(),
+            40
+        );
+    }
+
+    #[test]
+    fn short_admitted_source_needs_no_model_prefill_stage() {
+        let sources = [SemanticObservedSource {
+            identity: "observation".into(),
+            tokens: vec![7, 8],
+            origin: b"complete admitted observation".to_vec(),
+        }];
+        let mapping = (0..2)
+            .map(|position| SemanticSourceMapping {
+                source: "observation".into(),
+                offset: position,
+                logical_position: position,
+            })
+            .collect::<Vec<_>>();
+        let layout = initial_source_layout(
+            &sources,
+            &mapping,
+            b"complete task authority",
+            1,
+            64,
+            64,
+            2,
+            262144,
+            248000,
+        )
+        .unwrap();
+        assert!(layout.prefix.is_empty());
+        assert!(layout.prefill_tokens.is_empty());
+        assert_eq!(layout.source[0].token, 7);
+        assert_eq!(layout.source[1].token, 8);
+        assert_eq!(layout.ring_head, 2);
+        assert_eq!(
+            validate_text_parent(&layout.source, 0, 64, 2, 262144, 2, 2).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn initial_source_layout_rejects_uncovered_prefix_and_over_capacity() {
+        let sources = [SemanticObservedSource {
+            identity: "observation".into(),
+            tokens: (0..40).collect(),
+            origin: b"complete admitted observation and manifest".to_vec(),
+        }];
+        let mut mapping = (0..40)
+            .map(|position| SemanticSourceMapping {
+                source: "observation".into(),
+                offset: position,
+                logical_position: position,
+            })
+            .collect::<Vec<_>>();
+        assert!(initial_source_layout(
+            &sources,
+            &mapping,
+            b"complete task authority",
+            3,
+            72,
+            7,
+            3,
+            262144,
+            248000,
+        )
+        .is_err());
+        assert!(initial_source_layout(
+            &sources,
+            &mapping,
+            b"complete task authority",
+            3,
+            72,
+            8,
+            3,
+            262144,
+            248000,
+        )
+        .is_err());
+        mapping.remove(3);
+        assert!(initial_source_layout(
+            &sources,
+            &mapping,
+            b"complete task authority",
+            3,
+            72,
+            64,
+            3,
+            262144,
+            248000,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn initial_prefill_input_requires_the_exact_model_token_tensor_layout() {
+        let expected = SemanticTensorLayout {
+            role: 0,
+            index: 0,
+            element_bytes: 8,
+            scalar_type: 7,
+            rank: 2,
+            logical_axis: 1,
+            dimensions: [1, 8, 0, 0],
+            strides_bytes: [64, 8, 0, 0],
+        };
+        assert!(validate_initial_prefill_input_layout(&expected, 8).is_ok());
+        for changed in [
+            SemanticTensorLayout {
+                scalar_type: 3,
+                ..expected
+            },
+            SemanticTensorLayout {
+                dimensions: [1, 7, 0, 0],
+                ..expected
+            },
+            SemanticTensorLayout {
+                dimensions: [2, 8, 0, 0],
+                ..expected
+            },
+            SemanticTensorLayout {
+                strides_bytes: [64, 16, 0, 0],
+                ..expected
+            },
+        ] {
+            assert!(validate_initial_prefill_input_layout(&changed, 8).is_err());
+        }
+        assert!(validate_initial_prefill_input_layout(&expected, 0).is_err());
+    }
+
+    #[test]
+    fn initial_prefill_content_witness_rejects_foreign_or_stale_owners() {
+        let issuer = Arc::new(());
+        let scope = Arc::new(());
+        let identity = Identity256::from_bytes([7; 32]);
+        let witness = SemanticInitialPrefillContentWitness {
+            issuer: Arc::clone(&issuer),
+            scope: Arc::clone(&scope),
+            task_identity: identity,
+            task_epoch: 3,
+            model_generation: 5,
+            slot: InitialPrefillContentSlot::Captured(1),
+        };
+        assert!(witness.matches(&issuer, &scope, identity, 3, 5, 2));
+        assert!(!witness.matches(&Arc::new(()), &scope, identity, 3, 5, 2));
+        assert!(!witness.matches(&issuer, &Arc::new(()), identity, 3, 5, 2));
+        assert!(!witness.matches(&issuer, &scope, Identity256::from_bytes([8; 32]), 3, 5, 2,));
+        assert!(!witness.matches(&issuer, &scope, identity, 4, 5, 2));
+        assert!(!witness.matches(&issuer, &scope, identity, 3, 6, 2));
+        assert!(!witness.matches(&issuer, &scope, identity, 3, 5, 1));
+        let model = SemanticInitialPrefillContentWitness {
+            slot: InitialPrefillContentSlot::Model,
+            ..witness
+        };
+        assert!(model.matches(&issuer, &scope, identity, 3, 5, 0));
+    }
+
+    #[test]
+    fn initial_prefill_parent_can_add_only_native_source_ledger_indices() {
+        let expected = SemanticTextSlot {
+            token: 17,
+            logical_position: 3,
+            kind: 1,
+            provenance: 1,
+            valid: 1,
+            committed: 1,
+            ..SemanticTextSlot::default()
+        };
+        let actual = SemanticTextSlot {
+            provenance_record: 9,
+            ..expected
+        };
+        assert!(same_initial_source_rows(&[expected], &[actual]));
+        assert!(!same_initial_source_rows(
+            &[expected],
+            &[SemanticTextSlot {
+                token: 18,
+                ..actual
+            }],
+        ));
+        assert!(!same_initial_source_rows(&[expected], &[]));
+    }
+
+    #[test]
     fn cold_text_parent_derives_only_contiguous_acquired_filled_coverage() {
         let rows = source_rows();
         assert_eq!(
@@ -28473,6 +31190,7 @@ pub(crate) mod task_binding_tests {
                 refusal_weight: 15,
                 spent_weight: 1,
             },
+            priority_levels: Vec::new(),
             admissible_truth_masks: [7, 7, 7],
             actor_eligible: true,
         }
@@ -28562,6 +31280,80 @@ pub(crate) mod task_binding_tests {
                 crate::SemanticTruth::False,
                 crate::SemanticTruth::False,
             ]
+        );
+    }
+
+    #[test]
+    fn cold_content_matches_final_task_without_scoring_or_authority_inputs() {
+        let admission = crate::semantic_hypergraph::tests::admit_material_records(carry_records());
+        let cold = TaskEvaluationBinding::cold_content(
+            &admission,
+            [0, 1, 1],
+            &[0],
+            None,
+            arithmetic_observation(),
+        )
+        .unwrap();
+        let mut spec = task_spec([0, 1, 1], vec![0]);
+        let bound = TaskEvaluationBinding::bind(&admission, spec.clone(), arithmetic_observation())
+            .unwrap();
+        assert_eq!(cold, bound.content());
+
+        spec.scoring.correct_weight += 1;
+        spec.actor_eligible = false;
+        assert_eq!(
+            cold,
+            TaskEvaluationBinding::bind(&admission, spec, arithmetic_observation())
+                .unwrap()
+                .content(),
+        );
+
+        let mut changed = arithmetic_observation();
+        changed.result_bytes.push(0);
+        assert_ne!(
+            cold,
+            TaskEvaluationBinding::cold_content(&admission, [0, 1, 1], &[0], None, changed)
+                .unwrap(),
+        );
+
+        let mut changed_query = arithmetic_observation();
+        changed_query.input_bytes.push(0);
+        assert_ne!(
+            cold,
+            TaskEvaluationBinding::cold_content(&admission, [0, 1, 1], &[0], None, changed_query,)
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "semantic-policy")]
+    fn task_result_material_binds_native_observer_program_and_results() {
+        let admission = crate::semantic_hypergraph::tests::admit_material_records(carry_records());
+        let original_observation = arithmetic_observation();
+        let binding = TaskEvaluationBinding::bind(
+            &admission,
+            task_spec([0, 1, 1], vec![0]),
+            arithmetic_observation(),
+        )
+        .unwrap();
+        let material = binding.completed_result_material();
+        assert_eq!(
+            Sha256::digest(&material.bytes).as_slice(),
+            material.identity.as_bytes()
+        );
+        assert!(material
+            .bytes
+            .windows(original_observation.result_bytes.len())
+            .any(|part| part == original_observation.result_bytes));
+
+        let mut changed = original_observation;
+        changed.program_source.push(b' ');
+        let changed =
+            TaskEvaluationBinding::bind(&admission, task_spec([0, 1, 1], vec![0]), changed)
+                .unwrap();
+        assert_ne!(
+            changed.completed_result_material().identity,
+            material.identity
         );
     }
 
@@ -28676,6 +31468,120 @@ pub(crate) mod task_binding_tests {
     }
 
     #[test]
+    fn rule_codebook_covers_the_complete_admitted_binary_schema() {
+        use crate::semantic_hypergraph::tests::{admit_material_records, root_material_records};
+
+        let admission = admit_material_records(root_material_records());
+        let program = crate::SemanticProgramAdmission {
+            predicate_count: 5,
+            initial_facts: vec![],
+            initial_rules: vec![],
+            queries: [
+                crate::SemanticProgramFact {
+                    predicate: 4,
+                    first: 1,
+                    second: 3,
+                },
+                crate::SemanticProgramFact {
+                    predicate: 4,
+                    first: 1,
+                    second: 4,
+                },
+                crate::SemanticProgramFact {
+                    predicate: 4,
+                    first: 4,
+                    second: 3,
+                },
+            ],
+        };
+        let generic = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, Some(&program)).unwrap();
+        assert_eq!(books.targets[..generic.targets.len()], generic.targets);
+        assert_eq!(
+            books.targets[generic.targets.len()..]
+                .iter()
+                .filter_map(|descriptor| match descriptor {
+                    SemanticActionDescriptor::RulePredicate { predicate } => Some(*predicate),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            (0..5).collect::<Vec<_>>()
+        );
+        assert_eq!(books.qualifiers.len(), generic.qualifiers.len());
+        assert_eq!(books.leaves.len(), generic.leaves.len());
+        assert_eq!(books.operands[..generic.operands.len()], generic.operands);
+        assert_eq!(
+            books.operands[generic.operands.len()..]
+                .iter()
+                .filter_map(|descriptor| match descriptor {
+                    SemanticActionDescriptor::RulePredicate { predicate } => Some(*predicate),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            (0..5).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            books.operands[generic.operands.len()..]
+                .iter()
+                .filter_map(|descriptor| match descriptor {
+                    SemanticActionDescriptor::RuleVariable { index } => Some(*index),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            (0..4).collect::<Vec<_>>()
+        );
+        for field in 3..=10 {
+            assert_eq!(
+                books.components[32 + field].cardinality as usize,
+                books.operands.len() + 1
+            );
+        }
+        for field in 7..=10 {
+            assert_eq!(generic.components[32 + field].cardinality, 1);
+        }
+        assert_ne!(books.binding.digest, generic.binding.digest);
+
+        let mut changed_program = program.clone();
+        changed_program
+            .initial_facts
+            .push(crate::SemanticProgramFact {
+                predicate: 0,
+                first: 10,
+                second: 11,
+            });
+        let changed = ActionCodebooks::derive(&admission, 1, Some(&changed_program)).unwrap();
+        assert_ne!(books.binding.digest, changed.binding.digest);
+
+        let predicate = |index| generic.operands.len() as u32 + 1 + index;
+        let variable = |index| generic.operands.len() as u32 + 6 + index;
+        let mut choices = [0u32; 18];
+        choices[0] = 1;
+        choices[1] = 2;
+        choices[2] = generic.targets.len() as u32 + 5;
+        choices[3] = predicate(0);
+        choices[4] = predicate(1);
+        choices[5] = variable(0);
+        choices[6] = variable(2);
+        choices[7] = variable(0);
+        choices[8] = variable(1);
+        choices[9] = variable(1);
+        choices[10] = variable(2);
+        let decoded = books.decoded_rule_insertion(&program, &choices).unwrap();
+        assert_eq!(decoded.rule.head_predicate, 4);
+        assert_eq!(decoded.rule.head_variables, [0, 2]);
+        assert!(decoded.bytes.starts_with(b"XLOG-DECODED-RULE-INSERTION\0"));
+        choices[6] = variable(3);
+        assert!(books.decoded_rule_insertion(&program, &choices).is_err());
+        choices[6] = variable(2);
+        choices[3] = 1;
+        assert!(books.decoded_rule_insertion(&program, &choices).is_err());
+
+        let mut too_many_predicates = program;
+        too_many_predicates.predicate_count = 65_536;
+        assert!(ActionCodebooks::derive(&admission, 1, Some(&too_many_predicates)).is_err());
+    }
+
+    #[test]
     fn action_leaf_categories_preserve_equal_original_supports() {
         use crate::semantic_hypergraph::tests::{admit_material_records, root_material_records};
         let mut records = root_material_records();
@@ -28684,7 +31590,7 @@ pub(crate) mod task_binding_tests {
         records.supports.last_mut().unwrap().statement = 1;
         let original_count = records.supports.len();
         let admission = admit_material_records(records);
-        let books = ActionCodebooks::derive(&admission, 1).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
         assert_eq!(books.leaves.len(), original_count);
         assert_eq!(books.words[7], original_count as u64 + 1);
         let mut seen = BTreeSet::new();
@@ -28760,7 +31666,7 @@ pub(crate) mod task_binding_tests {
     fn policy_support_reserves_every_original_category_span() {
         use crate::semantic_hypergraph::tests::{admit_material_records, root_material_records};
         let admission = admit_material_records(root_material_records());
-        let books = ActionCodebooks::derive(&admission, 1).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
         let (spans, cells) = books.support_layout();
         assert_eq!(spans.len(), COMPONENT_COUNT);
         let mut cursor = 0;
@@ -28783,7 +31689,7 @@ pub(crate) mod task_binding_tests {
     fn action_codebooks_retain_typed_reconstruction_sources() {
         use crate::semantic_hypergraph::tests::{admit_material_records, root_material_records};
         let admission = admit_material_records(root_material_records());
-        let books = ActionCodebooks::derive(&admission, 1).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
         assert_eq!(
             books.words[4] - books.words[2],
             6 * books.words[3],
@@ -28821,6 +31727,664 @@ pub(crate) mod task_binding_tests {
         }
     }
 
+    #[cfg(feature = "semantic-policy")]
+    #[test]
+    fn completed_action_law_and_codebook_materials_match_native_bindings() {
+        use crate::semantic_hypergraph::tests::{admit_material_records, root_material_records};
+
+        let catalogue = SemanticActionCatalogue::current();
+        let law = catalogue.completed_material();
+        assert_eq!(law.identity, catalogue.binding().digest);
+        assert_eq!(law.bytes, catalogue.canonical_bytes());
+        assert_eq!(
+            Sha256::digest(&law.bytes).as_slice(),
+            law.identity.as_bytes()
+        );
+
+        let admission = admit_material_records(root_material_records());
+        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let codebook = books.completed_material();
+        assert_eq!(codebook.identity, books.binding.digest);
+        assert_eq!(codebook.bytes, publication_abi_bytes(&books.words));
+        assert_ne!(codebook.identity, law.identity);
+        assert_ne!(codebook.bytes, law.bytes);
+
+        let roster = books.completed_roster_material();
+        assert_eq!(
+            Sha256::digest(&roster.bytes).as_slice(),
+            roster.identity.as_bytes()
+        );
+        assert_eq!(
+            &roster.bytes[b"xlog.semantic-action-roster.v1\0".len()
+                ..b"xlog.semantic-action-roster.v1\0".len() + 32],
+            books.binding.digest.as_bytes()
+        );
+        assert_eq!(books.components.len(), COMPONENT_COUNT);
+        let roster_rows = &roster.bytes[b"xlog.semantic-action-roster.v1\0".len() + 32 + 8..];
+        assert_eq!(roster_rows.len(), COMPONENT_COUNT * 7 * 8);
+        for (row, component) in roster_rows.chunks_exact(7 * 8).zip(&books.components) {
+            let values: Vec<u64> = row
+                .chunks_exact(8)
+                .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+                .collect();
+            assert_eq!(
+                values,
+                [
+                    component.offset,
+                    component.ordinal as u64,
+                    component.lane as u64,
+                    component.slot as u64,
+                    component.field as u64,
+                    component.kind as u64,
+                    component.cardinality as u64,
+                ]
+            );
+        }
+        assert_ne!(roster.identity, codebook.identity);
+        let other_owner_books = ActionCodebooks::derive(&admission, 2, None).unwrap();
+        assert_ne!(
+            other_owner_books.completed_material().identity,
+            codebook.identity
+        );
+        assert_ne!(
+            other_owner_books.completed_roster_material().identity,
+            roster.identity
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "semantic-policy")]
+    fn decoded_support_insertion_matches_admitted_native_identity() {
+        use crate::semantic_hypergraph::tests::{
+            admit_material_records, reconstructed_material_statement, root_material_records,
+        };
+
+        let admission = admit_material_records(root_material_records());
+        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let mut choices = [0u32; 18];
+        choices[0] = 1;
+        choices[1] = 1;
+        choices[2] = 1;
+        choices[3] = 1;
+        choices[11] = 1;
+        choices[17] = 1;
+        let decoded = books
+            .decoded_support_insertion(&admission, &choices)
+            .unwrap()
+            .unwrap();
+        let statement =
+            reconstructed_material_statement(&admission, None, &decoded.reconstruction).unwrap();
+        assert_eq!(decoded.statement, statement.identity());
+        assert_eq!(
+            decoded.support,
+            admission
+                .support_event(decoded.source_event)
+                .unwrap()
+                .identity(decoded.statement)
+        );
+        assert!(decoded
+            .bytes
+            .starts_with(b"XLOG-DECODED-SUPPORT-INSERTION\0"));
+        choices[0] = 0;
+        assert!(books
+            .decoded_support_insertion(&admission, &choices)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "semantic-policy")]
+    fn completed_theory_delta_requires_an_attempted_native_insertion() {
+        use crate::semantic_hypergraph::tests::{admit_material_records, root_material_records};
+
+        let admission = admit_material_records(root_material_records());
+        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let mut choices = [0u32; 18];
+        choices[0] = 1;
+        choices[1] = 1;
+        choices[2] = 1;
+        choices[3] = 1;
+        choices[11] = 1;
+        choices[17] = 1;
+        let decoded = books
+            .decoded_support_insertion(&admission, &choices)
+            .unwrap()
+            .unwrap();
+        let owner = Identity256::from_bytes([3; 32]);
+        let predecessor = Identity256::from_bytes([4; 32]);
+        let mut hard_decode = [0u64; 42];
+        hard_decode[1] = 1;
+        hard_decode[20..24].copy_from_slice(&identity_words(*decoded.statement.as_bytes()));
+        hard_decode[24..28].copy_from_slice(&identity_words(*decoded.support.as_bytes()));
+        let admission_receipt = [0u64; 42];
+        let components = [SemanticTransitionReceipt::default(); 18];
+        let delta = completed_theory_delta_for_slot(
+            &books,
+            &admission,
+            None,
+            Identity256::from_bytes([0; 32]),
+            owner,
+            predecessor,
+            0,
+            0,
+            &choices,
+            None,
+            &hard_decode,
+            &admission_receipt,
+            &components,
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(delta.kind, "fact");
+        assert_eq!(delta.theory_generation, predecessor);
+        assert_eq!(delta.verdict, "accepted");
+        assert!(delta
+            .delta
+            .bytes
+            .windows(decoded.bytes.len())
+            .any(|part| part == decoded.bytes));
+        hard_decode[20] ^= 1;
+        assert!(completed_theory_delta_for_slot(
+            &books,
+            &admission,
+            None,
+            Identity256::from_bytes([0; 32]),
+            owner,
+            predecessor,
+            0,
+            0,
+            &choices,
+            None,
+            &hard_decode,
+            &admission_receipt,
+            &components,
+            0,
+        )
+        .is_err());
+        hard_decode[1] = 0;
+        assert!(completed_theory_delta_for_slot(
+            &books,
+            &admission,
+            None,
+            Identity256::from_bytes([0; 32]),
+            owner,
+            predecessor,
+            0,
+            0,
+            &choices,
+            None,
+            &hard_decode,
+            &admission_receipt,
+            &components,
+            1,
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "semantic-policy")]
+    fn decoded_rule_delta_seals_every_structural_field_and_prior_edit() {
+        use crate::semantic_hypergraph::tests::{admit_material_records, root_material_records};
+
+        let admission = admit_material_records(root_material_records());
+        let program = crate::SemanticProgramAdmission {
+            predicate_count: 3,
+            initial_facts: vec![],
+            initial_rules: vec![],
+            queries: [
+                crate::SemanticProgramFact {
+                    predicate: 2,
+                    first: 1,
+                    second: 3,
+                },
+                crate::SemanticProgramFact {
+                    predicate: 2,
+                    first: 1,
+                    second: 4,
+                },
+                crate::SemanticProgramFact {
+                    predicate: 2,
+                    first: 4,
+                    second: 3,
+                },
+            ],
+        };
+        let generic = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, Some(&program)).unwrap();
+        let predicate = |index| generic.operands.len() as u32 + 1 + index;
+        let variable = |index| generic.operands.len() as u32 + 4 + index;
+        let mut choices = [0u32; 18];
+        choices[0] = 1;
+        choices[1] = 2;
+        choices[2] = generic.targets.len() as u32 + 3;
+        choices[3] = predicate(0);
+        choices[4] = predicate(1);
+        choices[5] = variable(0);
+        choices[6] = variable(2);
+        choices[7] = variable(0);
+        choices[8] = variable(1);
+        choices[9] = variable(1);
+        choices[10] = variable(2);
+        let decoded = books.decoded_rule_insertion(&program, &choices).unwrap();
+        assert_eq!(decoded.rule.head_predicate, 2);
+        assert_eq!(decoded.rule.head_variables, [0, 2]);
+        let owner = Identity256::from_bytes([3; 32]);
+        let predecessor = Identity256::from_bytes([4; 32]);
+        let task = Identity256::from_bytes([9; 32]);
+        let mut hard_decode = [0u64; 42];
+        hard_decode[1] = 3;
+        hard_decode[2] = 1;
+        hard_decode[4..8].copy_from_slice(&identity_words(*task.as_bytes()));
+        hard_decode[8..12].copy_from_slice(&identity_words(*books.binding.digest.as_bytes()));
+        hard_decode[12..22].copy_from_slice(&semantic_program_rule_words(decoded.rule));
+        let admission_receipt = [0u64; 42];
+        let components = [SemanticTransitionReceipt::default(); 18];
+        let project = |receipt: &[u64; 42], slot, previous| {
+            completed_theory_delta_for_slot(
+                &books,
+                &admission,
+                Some(&program),
+                task,
+                owner,
+                predecessor,
+                0,
+                slot,
+                &choices,
+                previous,
+                receipt,
+                &admission_receipt,
+                &components,
+                0,
+            )
+        };
+        let delta = project(&hard_decode, 0, None).unwrap().unwrap();
+        assert_eq!(delta.kind, "rule");
+        assert_eq!(
+            delta.theory_generation,
+            ActionCodebooks::program_binding(&program)
+        );
+        for field in 12..22 {
+            let mut changed = hard_decode;
+            changed[field] ^= 1;
+            assert!(
+                project(&changed, 0, None).is_err(),
+                "unsealed rule field {field}"
+            );
+        }
+        let mut second = hard_decode;
+        second[3] = 1;
+        second[24] = 1;
+        second[25..35].copy_from_slice(&semantic_program_rule_words(decoded.rule));
+        let second_delta = project(&second, 1, Some(&choices)).unwrap().unwrap();
+        assert_ne!(second_delta.theory_generation, delta.theory_generation);
+        second[25] ^= 1;
+        assert!(project(&second, 1, Some(&choices)).is_err());
+        let mut invalid = choices;
+        invalid[6] = variable(3);
+        assert!(books.decoded_rule_insertion(&program, &invalid).is_err());
+        invalid = choices;
+        invalid[3] = 1;
+        assert!(books.decoded_rule_insertion(&program, &invalid).is_err());
+
+        let mut fact_choices = [0u32; 18];
+        fact_choices[0] = 1;
+        fact_choices[1] = 1;
+        fact_choices[2] = 1;
+        fact_choices[3] = 1;
+        fact_choices[11] = 1;
+        fact_choices[17] = 1;
+        let fact = books
+            .decoded_support_insertion(&admission, &fact_choices)
+            .unwrap()
+            .unwrap();
+        let mut fact_receipt = [0u64; 42];
+        fact_receipt[1] = 1;
+        fact_receipt[20..24].copy_from_slice(&identity_words(*fact.statement.as_bytes()));
+        fact_receipt[24..28].copy_from_slice(&identity_words(*fact.support.as_bytes()));
+        assert!(completed_theory_delta_for_slot(
+            &books,
+            &admission,
+            Some(&program),
+            task,
+            owner,
+            predecessor,
+            0,
+            0,
+            &fact_choices,
+            None,
+            &fact_receipt,
+            &admission_receipt,
+            &components,
+            0,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn program_query_receipts_bind_each_executed_query_to_the_program() {
+        use crate::semantic_hypergraph::tests::{admit_material_records, root_material_records};
+
+        let admission = admit_material_records(root_material_records());
+        let fact = crate::SemanticProgramFact {
+            predicate: 0,
+            first: 1,
+            second: 2,
+        };
+        let program = crate::SemanticProgramAdmission {
+            predicate_count: 1,
+            initial_facts: vec![fact],
+            initial_rules: vec![],
+            queries: [fact; 3],
+        };
+        let books = ActionCodebooks::derive(&admission, 1, Some(&program)).unwrap();
+        let task = Identity256::from_bytes([7; 32]);
+        let edits = [[[0u32; 18]; 2]; 2];
+        let mut state = DeviceState {
+            binding_digest: books.binding.digest,
+            ..DeviceState::default()
+        };
+        state.task_evaluation.query_count = 9;
+        for slot in 0..3 {
+            state.task_evaluation.facts[slot].truth = [1; 3];
+            for query in 0..3 {
+                let receipt = &mut state.task_evaluation.query_receipts[slot][query];
+                receipt[1] = 0x5850524f47515545;
+                receipt[2] = 1;
+                receipt[3] = slot as u64;
+                receipt[4] = query as u64;
+                receipt[5..9].copy_from_slice(&identity_words(*task.as_bytes()));
+                receipt[9..13].copy_from_slice(&identity_words(*books.binding.digest.as_bytes()));
+                receipt[34..37].copy_from_slice(&[0, 1, 2]);
+                receipt[38] = 1;
+                receipt[41] = 1;
+            }
+        }
+        assert!(validate_program_query_receipts(&program, task, &books, &state, &edits).is_ok());
+        state.task_evaluation.query_receipts[2][1][34] = 1;
+        assert!(validate_program_query_receipts(&program, task, &books, &state, &edits).is_err());
+        state.task_evaluation.query_receipts[2][1][34] = 0;
+        let mut fact_edit = edits;
+        fact_edit[0][0][0] = 1;
+        fact_edit[0][0][1] = 1;
+        assert!(
+            validate_program_query_receipts(&program, task, &books, &state, &fact_edit).is_err()
+        );
+
+        let generic = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let predicate = generic.operands.len() as u32 + 1;
+        let first = predicate + 1;
+        let second = first + 1;
+        let mut rule_choice = [0u32; 18];
+        rule_choice[0..11].copy_from_slice(&[
+            1,
+            2,
+            generic.targets.len() as u32 + 1,
+            predicate,
+            predicate,
+            first,
+            second,
+            first,
+            second,
+            first,
+            second,
+        ]);
+        let rule = books
+            .decoded_rule_insertion(&program, &rule_choice)
+            .unwrap()
+            .rule;
+        let mut rule_edits = edits;
+        rule_edits[0] = [rule_choice; 2];
+        for query in 0..3 {
+            let receipt = &mut state.task_evaluation.query_receipts[1][query];
+            receipt[13] = 2;
+            receipt[14..24].copy_from_slice(&semantic_program_rule_words(rule));
+            receipt[24..34].copy_from_slice(&semantic_program_rule_words(rule));
+            receipt[37] = 2;
+        }
+        state.work[0].edit_commands = 2;
+        assert!(
+            validate_program_query_receipts(&program, task, &books, &state, &rule_edits).is_ok()
+        );
+        state.task_evaluation.query_receipts[1][2][25] ^= 1;
+        assert!(
+            validate_program_query_receipts(&program, task, &books, &state, &rule_edits).is_err()
+        );
+
+        let mut hard_decode = [0u64; 42];
+        hard_decode[1] = 3;
+        hard_decode[2] = 1;
+        hard_decode[4..8].copy_from_slice(&identity_words(*task.as_bytes()));
+        hard_decode[8..12].copy_from_slice(&identity_words(*books.binding.digest.as_bytes()));
+        hard_decode[12..22].copy_from_slice(&semantic_program_rule_words(rule));
+        hard_decode[22] = 1;
+        assert_eq!(
+            validated_rule_receipt(
+                &books,
+                &program,
+                task,
+                0,
+                0,
+                &rule_choice,
+                None,
+                &hard_decode,
+            )
+            .unwrap()
+            .0
+            .rule,
+            rule
+        );
+        hard_decode[12] ^= 1;
+        assert!(validated_rule_receipt(
+            &books,
+            &program,
+            task,
+            0,
+            0,
+            &rule_choice,
+            None,
+            &hard_decode,
+        )
+        .is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "semantic-policy")]
+    fn completed_task_scoring_matches_native_work_and_selection() {
+        let scoring = task_spec([0, 1, 0], vec![]).scoring;
+        let facts = [
+            SemanticTaskFacts {
+                g: 1,
+                v: 14,
+                eligible: 1,
+                ..SemanticTaskFacts::default()
+            },
+            SemanticTaskFacts {
+                g: 2,
+                c: 3,
+                v: 25,
+                eligible: 1,
+                ..SemanticTaskFacts::default()
+            },
+            SemanticTaskFacts::default(),
+        ];
+        let work = [
+            SemanticTransitionWork {
+                edit_commands: 1,
+                added_supports: 1,
+                defined_truth_changes: 1,
+            },
+            SemanticTransitionWork::default(),
+        ];
+        assert!(validate_completed_task_scoring(
+            scoring,
+            false,
+            &[],
+            &facts,
+            &work,
+            [0, 1],
+            6,
+            1,
+            474,
+        ));
+        let mut changed = facts;
+        changed[1].c = 2;
+        assert!(!validate_completed_task_scoring(
+            scoring,
+            false,
+            &[],
+            &changed,
+            &work,
+            [0, 1],
+            6,
+            1,
+            474,
+        ));
+        changed = facts;
+        changed[1].v = 26;
+        assert!(!validate_completed_task_scoring(
+            scoring,
+            false,
+            &[],
+            &changed,
+            &work,
+            [0, 1],
+            6,
+            1,
+            474,
+        ));
+        assert!(!validate_completed_task_scoring(
+            scoring,
+            false,
+            &[],
+            &facts,
+            &work,
+            [0, 1],
+            6,
+            0,
+            474,
+        ));
+        assert!(!validate_completed_task_scoring(
+            scoring,
+            false,
+            &[],
+            &facts,
+            &work,
+            [0, 1],
+            6,
+            1,
+            475,
+        ));
+
+        let mut refused_after_first_edit = facts;
+        refused_after_first_edit[2].c = 3;
+        refused_after_first_edit[2].v = -3;
+        let partial_work = [work[0], work[0]];
+        assert!(validate_completed_task_scoring(
+            scoring,
+            false,
+            &[],
+            &refused_after_first_edit,
+            &partial_work,
+            [0, 1],
+            6,
+            1,
+            472,
+        ));
+
+        let mut tied = facts;
+        tied[1].g = 1;
+        tied[1].c = 0;
+        tied[1].v = 14;
+        assert!(validate_completed_task_scoring(
+            scoring,
+            false,
+            &[],
+            &tied,
+            &[SemanticTransitionWork::default(); 2],
+            [0, 1],
+            6,
+            0,
+            -21,
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "semantic-policy")]
+    fn task_priority_can_select_lower_value_and_negative_return() {
+        let scoring = task_spec([0, 1, 0], vec![]).scoring;
+        let priority_levels = [SemanticTaskPriorityLevel {
+            goals: vec![SemanticTaskPriorityGoal {
+                query: 0,
+                target_truth: 1,
+                weight: 1,
+            }],
+        }];
+        let facts = [
+            SemanticTaskFacts {
+                g: 2,
+                v: 28,
+                eligible: 1,
+                truth: [0, 1, 1],
+                ..SemanticTaskFacts::default()
+            },
+            SemanticTaskFacts {
+                g: 1,
+                c: 1,
+                v: 13,
+                eligible: 1,
+                truth: [1, 0, 0],
+                ..SemanticTaskFacts::default()
+            },
+            SemanticTaskFacts::default(),
+        ];
+        let work = [
+            SemanticTransitionWork {
+                edit_commands: 1,
+                ..SemanticTransitionWork::default()
+            },
+            SemanticTransitionWork::default(),
+        ];
+        let return_value = 45 * (13 - 28) - 3;
+        assert!(return_value < -44);
+        assert!(i64::from(return_value).abs() <= scoring.return_bound(false).unwrap());
+        assert!(validate_completed_task_scoring(
+            scoring,
+            false,
+            &priority_levels,
+            &facts,
+            &work,
+            [0, 0],
+            3,
+            1,
+            i64::from(return_value),
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "semantic-policy")]
+    fn completed_task_scoring_law_retains_coefficients_and_finite_bound() {
+        let scoring = task_spec([0, 1, 0], vec![]).scoring;
+        let task = Identity256::from_bytes([11; 32]);
+        let bytes = scoring.completed_law_bytes(task, false).unwrap();
+        let mut expected = b"XLOG-TASK-SCORING-LAW\0".to_vec();
+        expected.extend_from_slice(&1u64.to_le_bytes());
+        expected.extend_from_slice(task.as_bytes());
+        for weight in [14u64, 7, 1, 45, 15, 1] {
+            expected.extend_from_slice(&weight.to_le_bytes());
+        }
+        expected.extend_from_slice(&scoring.return_bound(false).unwrap().to_le_bytes());
+        assert_eq!(bytes, expected);
+        assert_eq!(scoring.return_bound(false).unwrap(), 2522);
+        let structural = scoring.completed_law_bytes(task, true).unwrap();
+        assert_eq!(scoring.return_bound(true).unwrap(), 186799);
+        assert_eq!(
+            structural[structural.len() - size_of::<i64>()..],
+            scoring.return_bound(true).unwrap().to_le_bytes()
+        );
+    }
+
     pub(crate) fn verify_native_decoded_reconstruction(
         executable: &std::path::Path,
         directory: &std::path::Path,
@@ -28832,7 +32396,7 @@ pub(crate) mod task_binding_tests {
         let mut records = root_material_records();
         records.supports.push(records.supports[0].clone());
         let admission = admit_material_records(records);
-        let books = ActionCodebooks::derive(&admission, 1).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
         let leaf = books
             .leaves
             .iter()

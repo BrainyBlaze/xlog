@@ -361,6 +361,8 @@ fn write_semantic_transition_catalogue(out_dir: &Path) {
         "NO_EDIT_NULL_MASK",
         "INSERT_SUPPORT_ACTIVE_MASK",
         "INSERT_SUPPORT_NULL_MASK",
+        "INSERT_RULE_ACTIVE_MASK",
+        "INSERT_RULE_NULL_MASK",
     ] {
         if name != "NULL_CATEGORY" {
             rust.push_str(&format!("const {name}: usize = {};\n", constants[name]));
@@ -535,6 +537,14 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         kernels_dir.join("semantic_feedback_encoding.cuh").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        kernels_dir.join("semantic_program.cuh").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        kernels_dir.join("semantic_rule_action.cuh").display()
     );
     println!(
         "cargo:rerun-if-changed={}",
