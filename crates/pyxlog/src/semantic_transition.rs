@@ -6533,6 +6533,14 @@ impl PySemanticCompletedActionProjection {
         completed_action_material(py, &self.inner.owner)
     }
     #[getter]
+    fn initial_prefill(&self, py: Python<'_>) -> PyResult<Option<Py<PySemanticCompletedMaterial>>> {
+        self.inner
+            .initial_prefill
+            .as_ref()
+            .map(|material| completed_action_material(py, material))
+            .transpose()
+    }
+    #[getter]
     fn world_root(&self, py: Python<'_>) -> PyResult<Option<Py<PySemanticCompletedMaterial>>> {
         self.inner
             .world_root

@@ -2445,6 +2445,11 @@ pub struct SemanticInitialSourceLayout {
     pub prefix: Vec<SemanticTextSlot>,
     pub prefill_tokens: Vec<u64>,
     pub ring_head: u64,
+    #[cfg(feature = "semantic-policy")]
+    prefill_mapping: Vec<SemanticSourceMapping>,
+    provenance_bytes: Vec<u8>,
+    provenance_capacity_bytes: usize,
+    provenance_records: u64,
 }
 
 /// One imported task's pre-parent model input. Its source and owner are fixed
@@ -2471,7 +2476,24 @@ struct RetainedInitialPrefillContent {
     task_epoch: u64,
     model_generation: u64,
     model: TensorContentBuffers,
+    #[cfg(feature = "semantic-policy")]
+    output: TensorContentBuffers,
+    #[cfg(feature = "semantic-policy")]
+    record: InitialPrefillRecord,
     captured: Vec<TensorContentBuffers>,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone)]
+struct InitialPrefillRecord {
+    predecessor: SemanticPublishedIdentity,
+    semantic_root: Identity256,
+    task_identity: Identity256,
+    task_epoch: u64,
+    task_content: SemanticTaskContentIdentity,
+    model_generation: u64,
+    tokens: Vec<u64>,
+    mapping: Vec<SemanticSourceMapping>,
 }
 
 /// Opaque handle to the single imported-task prefill stage. This is not a
@@ -2665,7 +2687,7 @@ pub fn initial_source_layout(
             ..SemanticTextSlot::default()
         };
     }
-    initial_source_ledger(
+    let (_, _, provenance) = initial_source_ledger(
         source,
         prefix.clone(),
         sources,
@@ -2674,6 +2696,14 @@ pub fn initial_source_layout(
         generation,
         provenance_capacity_records,
     )?;
+    #[cfg(feature = "semantic-policy")]
+    let mut prefill_mapping = mapping
+        .iter()
+        .filter(|entry| entry.logical_position < prefix_extent)
+        .cloned()
+        .collect::<Vec<_>>();
+    #[cfg(feature = "semantic-policy")]
+    prefill_mapping.sort_by_key(|entry| entry.logical_position);
     let ring_head = (source_extent - prefix_extent) % 32;
     validate_text_parent(
         &source,
@@ -2689,6 +2719,11 @@ pub fn initial_source_layout(
         prefix,
         prefill_tokens,
         ring_head,
+        #[cfg(feature = "semantic-policy")]
+        prefill_mapping,
+        provenance_bytes: provenance.bytes,
+        provenance_capacity_bytes: provenance.capacity_bytes,
+        provenance_records: mapping.len() as u64,
     })
 }
 
@@ -4484,6 +4519,9 @@ pub struct SemanticCompletedEditSolutionMaterial {
 #[cfg(feature = "semantic-policy")]
 pub struct SemanticCompletedActionProjectionMaterial {
     pub owner: SemanticCompletedStepWitnessMaterial,
+    /// Original cold parent prefill only; later and restored parents have no
+    /// stage-owned input/output witness to export.
+    pub initial_prefill: Option<SemanticCompletedStepWitnessMaterial>,
     /// Exact cold-exported predecessor root when its native digest still matches
     /// this Proposal's acquired parent. Later changed roots are not invented.
     pub world_root: Option<SemanticCompletedStepWitnessMaterial>,
@@ -9150,6 +9188,37 @@ impl TensorContentBuffers {
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "semantic-policy")]
+fn initial_prefill_seal_sources(
+    content: &TensorContentBuffers,
+) -> Result<Vec<(u64, u64, Arc<TrackedCudaSlice<u64>>, usize)>, SemanticTransitionError> {
+    let TensorContentSeals::Captured(digests) = &content.seals else {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    };
+    if content.tensors.len() != digests.len() {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
+    content
+        .tensors
+        .iter()
+        .zip(digests)
+        .map(|(tensor, digest)| {
+            let CapturedTensorDigest::Tensor { cells, offset, .. } = digest else {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            };
+            if offset.checked_add(4).is_none_or(|end| end > cells.len()) {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            Ok((
+                tensor.layout.role,
+                tensor.layout.index,
+                Arc::clone(cells),
+                *offset,
+            ))
+        })
+        .collect()
 }
 
 fn model_content_ranges(
@@ -13891,6 +13960,109 @@ impl SemanticTransitionSession {
         Ok(SemanticCompletedStepWitnessMaterial { identity, bytes })
     }
 
+    #[cfg(feature = "semantic-policy")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the original parent and completed action bindings must all be checked"
+    )]
+    fn completed_initial_prefill_material(
+        &mut self,
+        predecessor: SemanticPublishedIdentity,
+        semantic_root: Identity256,
+        prefix_extent: u64,
+        model_generation: u64,
+        task_identity: Identity256,
+        task_content: SemanticTaskContentIdentity,
+        owner: Identity256,
+    ) -> Result<Option<SemanticCompletedStepWitnessMaterial>, SemanticTransitionError> {
+        let Some(retained) = self.retained_initial_prefill.as_ref() else {
+            return Ok(None);
+        };
+        if retained.record.predecessor != predecessor {
+            return Ok(None);
+        }
+        let record = retained.record.clone();
+        if record.semantic_root != semantic_root
+            || record.model_generation != model_generation
+            || record.task_identity != task_identity
+            || record.task_content != task_content
+            || record.task_epoch != self.task_epoch
+            || record.task_identity != retained.task_identity
+            || record.task_epoch != retained.task_epoch
+            || record.model_generation != retained.model_generation
+            || record.tokens.is_empty()
+            || record.tokens.len() as u64 != prefix_extent
+            || record.mapping.len() != record.tokens.len()
+            || record.mapping.iter().enumerate().any(|(position, row)| {
+                row.source.is_empty() || row.logical_position != position as u64
+            })
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let model_seals = initial_prefill_seal_sources(&retained.model)?;
+        let output_seals = initial_prefill_seal_sources(&retained.output)?;
+        if model_seals.is_empty()
+            || output_seals.is_empty()
+            || model_seals
+                .iter()
+                .any(|(role, _, _, _)| !matches!(role, 0 | 18..=25))
+            || output_seals
+                .iter()
+                .any(|(role, _, _, _)| !matches!(role, 4..=13))
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"XLOG-INITIAL-PREFILL\0");
+        material_u64(&mut bytes, 1);
+        encode_publication_identity(&mut bytes, record.predecessor);
+        bytes.extend_from_slice(record.semantic_root.as_bytes());
+        material_u64(&mut bytes, record.model_generation);
+        bytes.extend_from_slice(record.task_identity.as_bytes());
+        material_u64(&mut bytes, record.task_epoch);
+        for identity in [
+            record.task_content.query,
+            record.task_content.theory_program,
+            record.task_content.result,
+        ] {
+            bytes.extend_from_slice(identity.as_bytes());
+        }
+        material_u64(&mut bytes, record.tokens.len() as u64);
+        for token in &record.tokens {
+            material_u64(&mut bytes, *token);
+        }
+        material_u64(&mut bytes, record.mapping.len() as u64);
+        for row in &record.mapping {
+            material_u64(&mut bytes, row.source.len() as u64);
+            bytes.extend_from_slice(row.source.as_bytes());
+            material_u64(&mut bytes, row.offset);
+            material_u64(&mut bytes, row.logical_position);
+        }
+        for seals in [model_seals, output_seals] {
+            material_u64(&mut bytes, seals.len() as u64);
+            for (role, index, cells, offset) in seals {
+                let digest = self.publication_read(cells.view())?;
+                if offset.checked_add(4).is_none_or(|end| end > digest.len()) {
+                    self.poisoned = true;
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                material_u64(&mut bytes, role);
+                material_u64(&mut bytes, index);
+                for word in &digest[offset..offset + 4] {
+                    material_u64(&mut bytes, *word);
+                }
+            }
+        }
+        Ok(Some(completed_action_child_material(
+            owner,
+            b"initial-prefill",
+            0,
+            &bytes,
+        )))
+    }
+
     /// Project one completed Proposal into typed action-law values and canonical
     /// byte-backed child materials. Private device structs never cross this API.
     #[cfg(feature = "semantic-policy")]
@@ -14154,6 +14326,15 @@ impl SemanticTransitionSession {
 
         let owner = self.prepared_completed_action_witnesses(step, consumer_streams)?;
         let owner_identity = owner.identity;
+        let initial_prefill = self.completed_initial_prefill_material(
+            binding.0,
+            parent_semantic_digest,
+            parent_header.prefix_extent,
+            state.model_generation as u64,
+            task_identity,
+            task_content,
+            owner_identity,
+        )?;
         let component_receipts_digest = publication_action_receipts_digest_bytes(
             &publication_abi_bytes(&self.codebooks.words),
             &receipts,
@@ -14606,6 +14787,7 @@ impl SemanticTransitionSession {
         attempt_receipt.identity = result.attempt.receipt_digest;
         let projection = SemanticCompletedActionProjectionMaterial {
             owner,
+            initial_prefill,
             world_root: self
                 .cold_world_root
                 .as_ref()
@@ -17404,6 +17586,19 @@ impl SemanticTransitionSession {
             || stage.layout.ring_head != parent.ring_head
             || !same_initial_source_rows(&stage.layout.source, &parent.source)
             || !same_initial_source_rows(&stage.layout.prefix, &parent.prefix)
+            || parent.provenance_records != stage.layout.provenance_records
+            || parent
+                .records
+                .iter()
+                .filter(|record| record.role == SemanticStateRole::TokenProvenanceRecords)
+                .count()
+                != 1
+            || !parent.records.iter().any(|record| {
+                record.role == SemanticStateRole::TokenProvenanceRecords
+                    && record.index == 0
+                    && record.bytes == stage.layout.provenance_bytes
+                    && record.capacity_bytes == stage.layout.provenance_capacity_bytes
+            })
             || model.tensors.len() != model_inputs.clone().count()
             || !model
                 .tensors
@@ -17487,6 +17682,13 @@ impl SemanticTransitionSession {
         let task_identity = self
             .task_evaluation_identity()
             .ok_or(SemanticTransitionError::NotBound)?;
+        #[cfg(feature = "semantic-policy")]
+        let task_content = self
+            .task
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .0
+            .content_identity();
         if parent.authority_generation != self.task_epoch {
             return Err(publication_input_error(
                 "parent authority generation differs from the retained task import",
@@ -17767,6 +17969,8 @@ impl SemanticTransitionSession {
         if result.is_err() {
             self.poisoned = true;
         } else {
+            #[cfg(feature = "semantic-policy")]
+            let predecessor = *result.as_ref().expect("successful parent publication");
             // Publication joins the original model and output snapshots. Only
             // their one-use stage closes: the model and transient seals remain
             // owned by this Session for late original-forward/autograd reads.
@@ -17779,6 +17983,22 @@ impl SemanticTransitionSession {
                         task_epoch: stage.task_epoch,
                         model_generation: stage.model_generation,
                         model: stage.model_content.take().expect("verified model content"),
+                        #[cfg(feature = "semantic-policy")]
+                        output: stage
+                            .output_content
+                            .take()
+                            .expect("verified output content"),
+                        #[cfg(feature = "semantic-policy")]
+                        record: InitialPrefillRecord {
+                            predecessor,
+                            semantic_root: header.semantic_digest,
+                            task_identity,
+                            task_epoch: stage.task_epoch,
+                            task_content,
+                            model_generation: stage.model_generation,
+                            tokens: stage.layout.prefill_tokens,
+                            mapping: stage.layout.prefill_mapping,
+                        },
                         captured: stage.captured_content,
                     });
         }

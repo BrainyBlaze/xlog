@@ -449,6 +449,31 @@ different root is acquired, it is `None` rather than a reconstructed predecessor
 predecessor publication header; it is distinct from the logical-state digest
 and from an application's source-text theory identity.
 
+`initial_prefill` is a completed-action child material for the original cold
+parent's nonempty model prefix. It is `None` for an empty prefix, a later
+predecessor, or a restored parent; none of those cases gains an inferred prefill
+witness. The native owner retains the prefill stage consumed by `bind_parent`,
+including its original model and output tensor seals. The material is bound to
+this completed action's `owner` and authenticates the same `predecessor`,
+semantic-root digest, model generation, task use, and three task-content
+identities. Its byte-backed interface is `identity`, `bytes`, and
+`bytes_sha256`; consumers must retain all three and reference the material
+from their durable episode record, not merely check it during live export.
+The child envelope uses `XLOG-COMPLETED-ACTION-CHILD\0`, version 1, owner
+identity, the length-prefixed `initial-prefill` kind, ordinal zero, and a
+length-prefixed payload. The payload is little-endian
+`XLOG-INITIAL-PREFILL\0`, version 1, the 104-byte predecessor publication
+identity (instance, word, logical digest, state digest), semantic-root digest,
+model generation, task-use identity and epoch, and query, theory-program, and
+result content identities. It then contains a token count and that many `u64`
+prefill tokens, a mapping count and that many `(UTF-8 source identity length,
+source identity bytes, token offset, logical position)` rows, followed by two
+tensor-seal groups: original model content and original output content. Each
+group has a count and `(role, index, four u64 digest words)` rows. Mapping rows
+are ordered by logical position, and the native parent join checks the full
+source-provenance ledger in addition to the original device input and tensor
+owners. This is a cold export; it adds no host transfer to the resident step.
+
 `theory_deltas` contains one entry for each actual native insertion attempt,
 ordered by learned lane then edit slot. No-edit choices and actions stopped
 before insertion produce no entry. A duplicate graph support attachment is
