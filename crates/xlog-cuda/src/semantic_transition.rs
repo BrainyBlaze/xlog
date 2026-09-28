@@ -10973,7 +10973,7 @@ mod task_state_contract {
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
         assert_eq!(size_of::<DeviceState>(), 7568);
-        assert_eq!(size_of::<Descriptor>(), 1008);
+        assert_eq!(size_of::<Descriptor>(), 1016);
     }
 
     #[test]
