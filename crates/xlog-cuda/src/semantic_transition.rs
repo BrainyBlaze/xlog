@@ -2508,6 +2508,203 @@ struct InitialPrefillRecord {
     mapping: Vec<SemanticSourceMapping>,
 }
 
+struct CheckpointInitialPrefill {
+    original: SemanticPublishedIdentity,
+    content: Vec<u8>,
+    recovery_referent: Option<Vec<u8>>,
+}
+
+impl CheckpointInitialPrefill {
+    const MAGIC: &'static [u8] = b"XLOG-CHECKPOINT-INITIAL-PREFILL\0";
+
+    fn encode_section(value: Option<&Self>) -> Result<Vec<u8>, SemanticTransitionError> {
+        let mut bytes = Self::MAGIC.to_vec();
+        material_u64(&mut bytes, 1);
+        if let Some(value) = value {
+            bytes.push(1);
+            encode_publication_identity(&mut bytes, value.original);
+            material_u64(
+                &mut bytes,
+                u64::try_from(value.content.len())
+                    .map_err(|_| publication_input_error("initial prefill exceeds u64"))?,
+            );
+            bytes.extend_from_slice(&value.content);
+        } else {
+            bytes.push(0);
+        }
+        Ok(bytes)
+    }
+
+    fn decode_section(bytes: &[u8]) -> Result<Option<Self>, SemanticTransitionError> {
+        let mut reader = SemanticMaterialReader::new(bytes);
+        if reader
+            .take(Self::MAGIC.len())
+            .map_err(SemanticTransitionError::Semantic)?
+            != Self::MAGIC
+            || reader.u64().map_err(SemanticTransitionError::Semantic)? != 1
+        {
+            return Err(publication_input_error(
+                "checkpoint initial prefill has another domain or version",
+            ));
+        }
+        let result = match reader.u8().map_err(SemanticTransitionError::Semantic)? {
+            0 => None,
+            1 => {
+                let original = decode_publication_identity(&mut reader)?;
+                let length =
+                    usize::try_from(reader.u64().map_err(SemanticTransitionError::Semantic)?)
+                        .map_err(|_| {
+                            publication_input_error("checkpoint initial prefill exceeds this host")
+                        })?;
+                let content = reader
+                    .take(length)
+                    .map_err(SemanticTransitionError::Semantic)?
+                    .to_vec();
+                if content.is_empty() {
+                    return Err(publication_input_error(
+                        "checkpoint initial prefill is empty",
+                    ));
+                }
+                Some(Self {
+                    original,
+                    content,
+                    recovery_referent: None,
+                })
+            }
+            _ => {
+                return Err(publication_input_error(
+                    "checkpoint initial prefill presence is invalid",
+                ))
+            }
+        };
+        reader.finish().map_err(SemanticTransitionError::Semantic)?;
+        Ok(result)
+    }
+
+    fn verify_content(
+        &self,
+        semantic_root: Identity256,
+        model_generation: u64,
+        task_identity: Identity256,
+        task_epoch: u64,
+        task_content: SemanticTaskContentIdentity,
+        prefix_extent: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        let mut reader = SemanticMaterialReader::new(&self.content);
+        let read_identity = |reader: &mut SemanticMaterialReader<'_>| {
+            reader
+                .take(32)
+                .map(|value| Identity256::from_bytes(value.try_into().unwrap()))
+                .map_err(SemanticTransitionError::Semantic)
+        };
+        if read_identity(&mut reader)? != semantic_root
+            || reader.u64().map_err(SemanticTransitionError::Semantic)? != model_generation
+            || read_identity(&mut reader)? != task_identity
+            || reader.u64().map_err(SemanticTransitionError::Semantic)? != task_epoch
+            || [
+                read_identity(&mut reader)?,
+                read_identity(&mut reader)?,
+                read_identity(&mut reader)?,
+            ] != [
+                task_content.query,
+                task_content.theory_program,
+                task_content.result,
+            ]
+        {
+            return Err(publication_input_error(
+                "checkpoint initial prefill differs from its native task or parent",
+            ));
+        }
+        let count = reader.u64().map_err(SemanticTransitionError::Semantic)?;
+        if count == 0 || count != prefix_extent {
+            return Err(publication_input_error(
+                "checkpoint initial prefill token extent differs",
+            ));
+        }
+        for _ in 0..count {
+            reader.u64().map_err(SemanticTransitionError::Semantic)?;
+        }
+        if reader.u64().map_err(SemanticTransitionError::Semantic)? != count {
+            return Err(publication_input_error(
+                "checkpoint initial prefill mapping extent differs",
+            ));
+        }
+        for position in 0..count {
+            let length = usize::try_from(reader.u64().map_err(SemanticTransitionError::Semantic)?)
+                .map_err(|_| {
+                    publication_input_error("initial prefill source name exceeds this host")
+                })?;
+            let source = reader
+                .take(length)
+                .map_err(SemanticTransitionError::Semantic)?;
+            if source.is_empty() || std::str::from_utf8(source).is_err() {
+                return Err(publication_input_error(
+                    "checkpoint initial prefill source name is invalid",
+                ));
+            }
+            reader.u64().map_err(SemanticTransitionError::Semantic)?;
+            if reader.u64().map_err(SemanticTransitionError::Semantic)? != position {
+                return Err(publication_input_error(
+                    "checkpoint initial prefill logical positions differ",
+                ));
+            }
+        }
+        for model in [true, false] {
+            let count = reader.u64().map_err(SemanticTransitionError::Semantic)?;
+            if count == 0 {
+                return Err(publication_input_error(
+                    "checkpoint initial prefill has an empty seal group",
+                ));
+            }
+            for _ in 0..count {
+                let role = reader.u64().map_err(SemanticTransitionError::Semantic)?;
+                if if model {
+                    !matches!(role, 0 | 18..=25)
+                } else {
+                    !matches!(role, 4..=13)
+                } {
+                    return Err(publication_input_error(
+                        "checkpoint initial prefill seal role is invalid",
+                    ));
+                }
+                reader.u64().map_err(SemanticTransitionError::Semantic)?;
+                reader.take(32).map_err(SemanticTransitionError::Semantic)?;
+            }
+        }
+        reader.finish().map_err(SemanticTransitionError::Semantic)?;
+        Ok(())
+    }
+
+    fn verify_recorded_content(
+        &self,
+        task_identity: Identity256,
+        task_epoch: u64,
+        task_content: SemanticTaskContentIdentity,
+    ) -> Result<(), SemanticTransitionError> {
+        let mut reader = SemanticMaterialReader::new(&self.content);
+        let semantic_root = Identity256::from_bytes(
+            reader
+                .take(32)
+                .map_err(SemanticTransitionError::Semantic)?
+                .try_into()
+                .unwrap(),
+        );
+        let model_generation = reader.u64().map_err(SemanticTransitionError::Semantic)?;
+        reader
+            .take(32 + 8 + 3 * 32)
+            .map_err(SemanticTransitionError::Semantic)?;
+        let prefix_extent = reader.u64().map_err(SemanticTransitionError::Semantic)?;
+        self.verify_content(
+            semantic_root,
+            model_generation,
+            task_identity,
+            task_epoch,
+            task_content,
+            prefix_extent,
+        )
+    }
+}
+
 /// Opaque handle to the single imported-task prefill stage. This is not a
 /// model-forward receipt; the actual input and outputs must be joined before
 /// the parent can be published.
@@ -5665,7 +5862,211 @@ pub struct SemanticReplayMaterial {
     kind: SemanticTransitionKind,
 }
 
+struct ReplayInitialPrefill {
+    original: SemanticPublishedIdentity,
+    content: Vec<u8>,
+    recovery_referent: Option<Vec<u8>>,
+}
+
 impl SemanticReplayMaterial {
+    fn read_initial_prefill_child(
+        &self,
+        bytes: &[u8],
+        expected_identity: Identity256,
+        expected_owner: Identity256,
+    ) -> Result<ReplayInitialPrefill, SemanticTransitionError> {
+        let mut reader = SemanticMaterialReader::new(bytes);
+        let magic = b"XLOG-COMPLETED-ACTION-CHILD\0";
+        if reader
+            .take(magic.len())
+            .map_err(SemanticTransitionError::Semantic)?
+            != magic
+            || reader.u64().map_err(SemanticTransitionError::Semantic)? != 1
+        {
+            return Err(publication_input_error(
+                "initial prefill child has another envelope",
+            ));
+        }
+        let owner = reader.take(32).map_err(SemanticTransitionError::Semantic)?;
+        if owner != expected_owner.as_bytes() {
+            return Err(publication_input_error(
+                "initial prefill child belongs to another action",
+            ));
+        }
+        let kind = b"initial-prefill";
+        if reader.u64().map_err(SemanticTransitionError::Semantic)? != kind.len() as u64
+            || reader
+                .take(kind.len())
+                .map_err(SemanticTransitionError::Semantic)?
+                != kind
+            || reader.u64().map_err(SemanticTransitionError::Semantic)? != 0
+        {
+            return Err(publication_input_error(
+                "initial prefill child has another kind or ordinal",
+            ));
+        }
+        let mut binding = b"xlog.completed-action-child.v1\0".to_vec();
+        binding.extend_from_slice(owner);
+        material_u64(&mut binding, kind.len() as u64);
+        binding.extend_from_slice(kind);
+        material_u64(&mut binding, 0);
+        if Identity256::from_bytes(Sha256::digest(binding).into()) != expected_identity {
+            return Err(publication_input_error(
+                "initial prefill child identity differs from its owner",
+            ));
+        }
+        let length = usize::try_from(reader.u64().map_err(SemanticTransitionError::Semantic)?)
+            .map_err(|_| publication_input_error("initial prefill child exceeds this host"))?;
+        let payload = reader
+            .take(length)
+            .map_err(SemanticTransitionError::Semantic)?;
+        reader.finish().map_err(SemanticTransitionError::Semantic)?;
+        let mut payload = SemanticMaterialReader::new(payload);
+        let magic = b"XLOG-INITIAL-PREFILL\0";
+        if payload
+            .take(magic.len())
+            .map_err(SemanticTransitionError::Semantic)?
+            != magic
+            || payload.u64().map_err(SemanticTransitionError::Semantic)? != 2
+        {
+            return Err(publication_input_error(
+                "initial prefill child has another body version",
+            ));
+        }
+        let original = decode_publication_identity(&mut payload)?;
+        let actual = decode_publication_identity(&mut payload)?;
+        let header = self.predecessor.bank.header;
+        if actual != self.predecessor_identity() {
+            return Err(publication_input_error(
+                "initial prefill child names another actual predecessor",
+            ));
+        }
+        let recovery_referent = match payload.u8().map_err(SemanticTransitionError::Semantic)? {
+            1 if original == actual => None,
+            2 if original != actual
+                && original.word == 0
+                && actual.word == 0
+                && original.instance != actual.instance
+                && header.recovered_instance == original.instance
+                && original.logical_digest == actual.logical_digest
+                && original.state_digest == actual.state_digest =>
+            {
+                let length =
+                    usize::try_from(payload.u64().map_err(SemanticTransitionError::Semantic)?)
+                        .map_err(|_| {
+                            publication_input_error("initial prefill referent exceeds this host")
+                        })?;
+                let referent = payload
+                    .take(length)
+                    .map_err(SemanticTransitionError::Semantic)?
+                    .to_vec();
+                if referent.is_empty() {
+                    return Err(publication_input_error(
+                        "recovered initial prefill has no source referent",
+                    ));
+                }
+                Some(referent)
+            }
+            _ => {
+                return Err(publication_input_error(
+                    "initial prefill recovery chain is invalid",
+                ))
+            }
+        };
+        let content = payload.take_rest().to_vec();
+        if content.is_empty() {
+            return Err(publication_input_error(
+                "initial prefill child has no original content",
+            ));
+        }
+        let mut tail = SemanticMaterialReader::new(&content);
+        tail.take(32 + 8 + 32)
+            .map_err(SemanticTransitionError::Semantic)?;
+        let task_epoch = tail.u64().map_err(SemanticTransitionError::Semantic)?;
+        let mut read_identity = || -> Result<Identity256, SemanticTransitionError> {
+            Ok(Identity256::from_bytes(
+                tail.take(32)
+                    .map_err(SemanticTransitionError::Semantic)?
+                    .try_into()
+                    .unwrap(),
+            ))
+        };
+        let task_content = SemanticTaskContentIdentity {
+            query: read_identity()?,
+            theory_program: read_identity()?,
+            result: read_identity()?,
+        };
+        CheckpointInitialPrefill {
+            original,
+            content: content.clone(),
+            recovery_referent: None,
+        }
+        .verify_content(
+            header.semantic_digest,
+            header.model_generation,
+            self.predecessor.contract.task_identity,
+            task_epoch,
+            task_content,
+            header.prefix_extent,
+        )?;
+        Ok(ReplayInitialPrefill {
+            original,
+            content,
+            recovery_referent,
+        })
+    }
+
+    /// Return a recovery source reference only after checking the native child
+    /// owner, its exact physical predecessor, and the restored-instance chain.
+    pub fn initial_prefill_recovery_referent(
+        &self,
+        child: &[u8],
+        child_identity: Identity256,
+        action_identity: Identity256,
+    ) -> Result<Option<Vec<u8>>, SemanticTransitionError> {
+        Ok(self
+            .read_initial_prefill_child(child, child_identity, action_identity)?
+            .recovery_referent)
+    }
+
+    /// The compact reference is useful only if the full original checkpoint
+    /// carries precisely the source publication and prefill bytes in this child.
+    pub fn verify_initial_prefill_checkpoint_source(
+        &self,
+        child: &[u8],
+        child_identity: Identity256,
+        action_identity: Identity256,
+        original_native: &[u8],
+        original_prefill_section: &[u8],
+        task_identity: Identity256,
+        task_epoch: u64,
+        task_content: SemanticTaskContentIdentity,
+    ) -> Result<(), SemanticTransitionError> {
+        let replay = self.read_initial_prefill_child(child, child_identity, action_identity)?;
+        if replay.recovery_referent.is_none()
+            || !SemanticTransitionSession::verify_checkpoint_initial_prefill_source(
+                original_prefill_section,
+                original_native,
+                task_identity,
+                task_epoch,
+                task_content,
+                true,
+            )?
+        {
+            return Err(publication_input_error(
+                "initial prefill recovery has no original checkpoint source",
+            ));
+        }
+        let original = CheckpointInitialPrefill::decode_section(original_prefill_section)?
+            .ok_or_else(|| publication_input_error("original checkpoint has no initial prefill"))?;
+        if replay.original != original.original || replay.content != original.content {
+            return Err(publication_input_error(
+                "recovered prefill differs from original checkpoint content",
+            ));
+        }
+        Ok(())
+    }
+
     /// Check the original coordinates and seals before any runtime relocation.
     pub fn decode(
         predecessor_bytes: &[u8],
@@ -11575,6 +11976,7 @@ pub struct SemanticTransitionSession {
     cold_content: Option<(SemanticTaskContentIdentity, [crate::SemanticTruth; 3])>,
     initial_prefill: Option<InitialPrefillStage>,
     retained_initial_prefill: Option<RetainedInitialPrefillContent>,
+    checkpoint_initial_prefill: Option<CheckpointInitialPrefill>,
     #[cfg(feature = "semantic-policy")]
     cold_world_root: Option<SemanticCompletedStepWitnessMaterial>,
     training_views: Option<Arc<SemanticTrainingViewArena>>,
@@ -14004,7 +14406,7 @@ impl SemanticTransitionSession {
         clippy::too_many_arguments,
         reason = "the original parent and completed action bindings must all be checked"
     )]
-    fn completed_initial_prefill_material(
+    fn original_initial_prefill_content(
         &mut self,
         predecessor: SemanticPublishedIdentity,
         semantic_root: Identity256,
@@ -14012,8 +14414,7 @@ impl SemanticTransitionSession {
         model_generation: u64,
         task_identity: Identity256,
         task_content: SemanticTaskContentIdentity,
-        owner: Identity256,
-    ) -> Result<Option<SemanticCompletedStepWitnessMaterial>, SemanticTransitionError> {
+    ) -> Result<Option<Vec<u8>>, SemanticTransitionError> {
         let Some(retained) = self.retained_initial_prefill.as_ref() else {
             return Ok(None);
         };
@@ -14054,9 +14455,6 @@ impl SemanticTransitionSession {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"XLOG-INITIAL-PREFILL\0");
-        material_u64(&mut bytes, 1);
-        encode_publication_identity(&mut bytes, record.predecessor);
         bytes.extend_from_slice(record.semantic_root.as_bytes());
         material_u64(&mut bytes, record.model_generation);
         bytes.extend_from_slice(record.task_identity.as_bytes());
@@ -14094,6 +14492,85 @@ impl SemanticTransitionSession {
                 }
             }
         }
+        Ok(Some(bytes))
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the original prefill and actual recovered predecessor have independent owners"
+    )]
+    fn completed_initial_prefill_material(
+        &mut self,
+        predecessor: SemanticPublishedIdentity,
+        recovered_instance: Identity256,
+        semantic_root: Identity256,
+        prefix_extent: u64,
+        model_generation: u64,
+        task_identity: Identity256,
+        task_content: SemanticTaskContentIdentity,
+        owner: Identity256,
+    ) -> Result<Option<SemanticCompletedStepWitnessMaterial>, SemanticTransitionError> {
+        let live_content = self.original_initial_prefill_content(
+            predecessor,
+            semantic_root,
+            prefix_extent,
+            model_generation,
+            task_identity,
+            task_content,
+        )?;
+        let (original, content, recovery_referent) =
+            if let Some(saved) = &self.checkpoint_initial_prefill {
+                if saved.original != predecessor {
+                    if saved.original.instance == predecessor.instance
+                        || predecessor.word != 0
+                        || recovered_instance != saved.original.instance
+                        || predecessor.logical_digest != saved.original.logical_digest
+                        || predecessor.state_digest != saved.original.state_digest
+                        || live_content.is_some()
+                    {
+                        self.poisoned = true;
+                        return Err(SemanticTransitionError::ObservationMismatch);
+                    }
+                    let referent = saved
+                        .recovery_referent
+                        .as_ref()
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                    (
+                        saved.original,
+                        saved.content.as_slice(),
+                        Some(referent.as_slice()),
+                    )
+                } else {
+                    if live_content.as_deref() != Some(saved.content.as_slice()) {
+                        self.poisoned = true;
+                        return Err(SemanticTransitionError::ObservationMismatch);
+                    }
+                    (saved.original, saved.content.as_slice(), None)
+                }
+            } else {
+                let Some(content) = live_content.as_deref() else {
+                    return Ok(None);
+                };
+                (predecessor, content, None)
+            };
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"XLOG-INITIAL-PREFILL\0");
+        material_u64(&mut bytes, 2);
+        encode_publication_identity(&mut bytes, original);
+        encode_publication_identity(&mut bytes, predecessor);
+        if let Some(referent) = recovery_referent {
+            bytes.push(2);
+            material_u64(
+                &mut bytes,
+                u64::try_from(referent.len())
+                    .map_err(|_| publication_input_error("checkpoint referent exceeds u64"))?,
+            );
+            bytes.extend_from_slice(referent);
+        } else {
+            bytes.push(1);
+        }
+        bytes.extend_from_slice(content);
         Ok(Some(completed_action_child_material(
             owner,
             b"initial-prefill",
@@ -14367,6 +14844,7 @@ impl SemanticTransitionSession {
         let owner_identity = owner.identity;
         let initial_prefill = self.completed_initial_prefill_material(
             binding.0,
+            parent_header.recovered_instance,
             parent_semantic_digest,
             parent_header.prefix_extent,
             state.model_generation as u64,
@@ -18235,6 +18713,141 @@ impl SemanticTransitionSession {
         self.published_identity(lease)
     }
 
+    /// Snapshot the original prefill while its model and output producers are
+    /// still owned. Later checkpoints reuse these exact seals, never a new
+    /// baseline from a post-action model or restored publication.
+    pub fn checkpoint_initial_prefill_material(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<(Vec<u8>, bool), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.checked_reader(lease)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(record) = self
+            .retained_initial_prefill
+            .as_ref()
+            .map(|retained| retained.record.clone())
+        {
+            let content = self
+                .original_initial_prefill_content(
+                    record.predecessor,
+                    record.semantic_root,
+                    record.tokens.len() as u64,
+                    record.model_generation,
+                    record.task_identity,
+                    record.task_content,
+                )?
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            if let Some(saved) = &self.checkpoint_initial_prefill {
+                if saved.original != record.predecessor || saved.content != content {
+                    self.poisoned = true;
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+            } else {
+                self.checkpoint_initial_prefill = Some(CheckpointInitialPrefill {
+                    original: record.predecessor,
+                    content,
+                    recovery_referent: None,
+                });
+            }
+        }
+        Ok((
+            CheckpointInitialPrefill::encode_section(self.checkpoint_initial_prefill.as_ref())?,
+            self.checkpoint_initial_prefill.is_some(),
+        ))
+    }
+
+    pub fn verify_checkpoint_initial_prefill_source(
+        section: &[u8],
+        native: &[u8],
+        task_identity: Identity256,
+        task_epoch: u64,
+        task_content: SemanticTaskContentIdentity,
+        require_original_publication: bool,
+    ) -> Result<bool, SemanticTransitionError> {
+        let Some(prefill) = CheckpointInitialPrefill::decode_section(section)? else {
+            return Ok(false);
+        };
+        let material = PublicationMaterial::decode(native)?;
+        let header = material.bank.header;
+        let original = SemanticPublishedIdentity {
+            instance: header.instance,
+            word: header.publication_word,
+            logical_digest: header.logical_digest,
+            state_digest: header.state_digest,
+        };
+        if material.contract.task_identity != task_identity
+            || prefill.original.word != 0
+            || (require_original_publication && prefill.original != original)
+        {
+            return Err(publication_input_error(
+                "checkpoint initial prefill names another original publication or task",
+            ));
+        }
+        if prefill.original == original {
+            prefill.verify_content(
+                header.semantic_digest,
+                header.model_generation,
+                task_identity,
+                task_epoch,
+                task_content,
+                header.prefix_extent,
+            )?;
+        } else {
+            prefill.verify_recorded_content(task_identity, task_epoch, task_content)?;
+        }
+        Ok(true)
+    }
+
+    /// Bind a restored pre-action publication to the exact original prefill
+    /// section and compact reference of the full checkpoint that carried it.
+    pub fn bind_restored_checkpoint_initial_prefill(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        native: &[u8],
+        section: &[u8],
+        referent: &[u8],
+    ) -> Result<(), SemanticTransitionError> {
+        if self.checkpoint_initial_prefill.is_some() || referent.is_empty() {
+            return Err(publication_input_error(
+                "restored initial prefill is already bound or has no source reference",
+            ));
+        }
+        self.verify_restored_state_material(lease, native)?;
+        let original_header = PublicationMaterial::decode(native)?.bank.header;
+        let original = SemanticPublishedIdentity {
+            instance: original_header.instance,
+            word: original_header.publication_word,
+            logical_digest: original_header.logical_digest,
+            state_digest: original_header.state_digest,
+        };
+        let mut prefill = CheckpointInitialPrefill::decode_section(section)?.ok_or_else(|| {
+            publication_input_error("pre-action checkpoint has no original initial prefill")
+        })?;
+        let task_identity = self
+            .task_evaluation_identity()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let (task_content, _) = self
+            .task_content()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if prefill.original != original {
+            return Err(publication_input_error(
+                "checkpoint prefill names another original publication",
+            ));
+        }
+        prefill.verify_content(
+            original_header.semantic_digest,
+            original_header.model_generation,
+            task_identity,
+            self.task_epoch,
+            task_content,
+            original_header.prefix_extent,
+        )?;
+        prefill.recovery_referent = Some(referent.to_vec());
+        self.checkpoint_initial_prefill = Some(prefill);
+        Ok(())
+    }
+
     fn initialize_publication(
         &mut self,
         bank: PublicationBank,
@@ -21262,6 +21875,7 @@ impl SemanticTransitionSession {
             cold_content: None,
             initial_prefill: None,
             retained_initial_prefill: None,
+            checkpoint_initial_prefill: None,
             #[cfg(feature = "semantic-policy")]
             cold_world_root: None,
             training_views: None,

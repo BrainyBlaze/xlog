@@ -296,6 +296,11 @@ impl<'a> SemanticMaterialReader<'a> {
         let len = self.count(1)?;
         self.take(len)
     }
+    pub(crate) fn take_rest(&mut self) -> &'a [u8] {
+        let value = self.remaining;
+        self.remaining = &[];
+        value
+    }
     pub(crate) fn finish(self) -> Result<(), SemanticHypergraphError> {
         if self.remaining.is_empty() {
             Ok(())
