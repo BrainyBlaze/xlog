@@ -269,11 +269,16 @@ original model wrapper boundary, call
 `stage.bind_model_content(tensors=..., model_allocations=..., consumer_stream=...)`
 before the forward and retain its model-content witness. The first rows
 are the exact role 18–25 model tensors, followed by role-zero backing allocations
-in the same order later passed to `bind_parent`. At the model's actual pre-hook,
-call `stage.record_input(token_tensor=..., consumer_stream=...)` on the contiguous
+in the same order later passed to `bind_parent`. After model binding and before
+the forward, `stage.capture_tensor_content(tensors=..., consumer_stream=...)`
+may seal the original pre-call boundary and execution inputs. Their witnesses
+may be verified immediately, but do not replace input registration or authorize
+the forward. At the model's actual pre-hook, call
+`stage.record_input(token_tensor=..., consumer_stream=...)` on the contiguous
 I64 `[1, len(prefill_tokens)]` tensor passed to the model. Native checks its
 admitted token values on device and completes that check before returning.
-During that one original forward, use `stage.capture_tensor_content(tensors=...,
+Verify the pre-call witnesses again before the first model embedding. During
+that one original forward, use `stage.capture_tensor_content(tensors=...,
 consumer_stream=...)` to seal each transient or autograd-saved roster at its
 original production point and retain the returned content witness. Before each
 dependent read, call `witness.verify(tensors=..., consumer_stream=...)` with the

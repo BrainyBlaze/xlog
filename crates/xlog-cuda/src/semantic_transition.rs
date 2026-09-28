@@ -17053,8 +17053,9 @@ impl SemanticTransitionSession {
         .ok_or(SemanticTransitionError::ObservationMismatch)
     }
 
-    /// Capture the original transient or saved tensor roster during this same
-    /// prefill forward, before any later dependent read may change its bytes.
+    /// Capture original pre-call, transient or saved tensors after the model
+    /// roster is sealed, before any dependent read may change their bytes.
+    /// Pre-call capture does not replace the actual input pre-hook.
     pub fn capture_initial_prefill_tensor_content(
         &mut self,
         lease: &SemanticInitialPrefillLease,
@@ -17113,10 +17114,13 @@ impl SemanticTransitionSession {
                 InitialPrefillCaptureKind::Model => {
                     stage.model_content.is_some() || stage.input.is_some()
                 }
-                InitialPrefillCaptureKind::Outputs | InitialPrefillCaptureKind::Captured => {
+                InitialPrefillCaptureKind::Outputs => {
                     stage.model_content.is_none()
                         || stage.input.is_none()
                         || stage.output_content.is_some()
+                }
+                InitialPrefillCaptureKind::Captured => {
+                    stage.model_content.is_none() || stage.output_content.is_some()
                 }
             }
         {

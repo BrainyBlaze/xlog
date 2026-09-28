@@ -5429,8 +5429,8 @@ impl PySemanticInitialPrefillStage {
         )
     }
 
-    /// Capture an original transient or autograd-saved tensor roster during
-    /// this prefill. Capture closes when record_outputs issues the receipt.
+    /// Capture original pre-call, transient or autograd-saved tensors after
+    /// model binding. Capture closes when record_outputs issues the receipt.
     #[pyo3(signature = (*, tensors, consumer_stream))]
     fn capture_tensor_content(
         slf: Py<Self>,
