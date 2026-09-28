@@ -1,7 +1,7 @@
 # Canonical encoding: non-comment lines, single spaces between tokens, LF terminator.
 # SHA-256 of that encoding is the catalogue identity, generated at build time.
 domain xlog.semantic-action-catalogue.v1
-generation 3
+generation 4
 constant TEXT_CARDINALITY 248077
 constant MASK_TOKEN 248078
 constant TEXT_NULL 0xffffffff
@@ -17,8 +17,10 @@ constant NO_EDIT_ACTIVE_MASK 0x00001
 constant NO_EDIT_NULL_MASK 0x3fffe
 constant INSERT_SUPPORT_ACTIVE_MASK 0x2087f
 constant INSERT_SUPPORT_NULL_MASK 0x1f780
+constant INSERT_RULE_ACTIVE_MASK 0x007ff
+constant INSERT_RULE_NULL_MASK 0x3f800
 field 0 action_class ACTION_CLASS 2
-field 1 opcode SEMANTIC_OPCODE 2
+field 1 opcode SEMANTIC_OPCODE 3
 field 2 target_handle PREDICATE_SCHEMA_DESCRIPTOR 1
 field 3 operand_0 TYPED_OPERAND_DESCRIPTOR 1
 field 4 operand_1 TYPED_OPERAND_DESCRIPTOR 1
@@ -39,9 +41,11 @@ action 0 NO_EDIT NO_EDIT_ACTIVE_MASK NO_EDIT_NULL_MASK
 action 1 APPLY OPCODE_SIGNATURE OPCODE_SIGNATURE
 opcode 0 NULL ONLY_UNDER_NO_EDIT
 opcode 1 INSERT_SUPPORT INSERT_SUPPORT_ACTIVE_MASK INSERT_SUPPORT_NULL_MASK
+opcode 2 INSERT_RULE INSERT_RULE_ACTIVE_MASK INSERT_RULE_NULL_MASK
 rule TARGET_ARITY_PREFIX target_arity_0_to_4 operand_i_non_NULL_iff_i_lt_arity
 rule QUALIFIER_EMPTY distinct_EMPTY_BUNDLE_non_NULL
 rule SUPPORT_EVENT PRO_or_CONTRA unit_presence provenance source context scope ABSTAIN_illegal
+rule INSERT_RULE positive_range_restricted_binary_head two_binary_body_atoms admitted_predicates four_variable_slots immutable_input_facts
 rule NULL entry_0 inactive_singleton still_consumes_Philox P_1 Q_1 mass_2pow63
 rule TEXT_ACTIVITY acquired_valid_MASK_and_retained_selected_bitmap original_ring_slot_and_logical_position
 rule MASK_SOURCE exact_MASK_TOKEN no_token_provenance not_an_ordinary_token

@@ -99,23 +99,40 @@ python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python \
 
 ### Semantic task binding
 
+`SemanticTransitionColdTask` executes its admitted observer once during
+construction and exposes `task_content` before final task import. This read
+returns `(query_identity, theory_program_identity, result_identity, truths)`
+with three 32-byte identities and three truth codes (`0=Neither`, `1=True`,
+`2=False`, `3=Both`). It carries no use authority. Final import executes the
+observer again and must reproduce the same identities and truths; a mismatch
+refuses the native session. Cold content observation does not run the model or
+prefill its cache.
+
 The semantic controller's `task_observation_roots` and `import_task` methods
-require five explicit keyword arguments in addition to their admission and
-authority inputs:
+share five explicit keyword arguments in addition to their admission and
+authority inputs. `import_task` also requires `task_priority_levels`:
 
 | Argument | Meaning |
 | --- | --- |
 | `task_program_source` | Complete authored XLOG source, including concrete input facts; imports and external relation inputs are not accepted by this adapter. |
 | `task_query_ordinals` | Three zero-based query ordinals, in admitted statement order; all queries must return zero-arity results. |
 | `task_scoring` | Six nonnegative `u32` coefficients in order: correct, all-correct, work, improvement, refusal, spent. |
+| `task_priority_levels` (`import_task` only) | Ordered tuple of levels; each level is a nonempty ordered tuple of `(query_ordinal, target_truth_code, weight)` goals. Truth codes are `0=Neither`, `1=True`, `2=False`, `3=Both`; weights are positive `u32`. At most three levels and three goals fit the three-query bank, and a query may occur only once. An explicit empty tuple is valid for tasks without a priority level. |
 | `admissible_truth_masks` | Three nonzero four-bit masks, one per query; bit `n` permits truth value `n`. |
 | `actor_eligible` | Required Boolean application decision, frozen into the task before any action draw; it is never inferred from the winner or result. |
 
 Import runs the authored program through XLOG's native GPU evaluator and derives
 expected Boolean answers from its completed results. There is no expected-answer
 argument or built-in task. Source, selected queries, observed results, scoring,
-masks, and actor eligibility become part of the task identity checked during
-restoration. See the
+ordered priorities, masks, and actor eligibility become part of the task identity
+checked during restoration. The imported `TaskUse.task_priority_levels()` returns
+the exact native order before Proposal; completed `task_ground.priority_levels`
+returns the same record after execution. For each goal the native truth match is
+normalized to zero or one. Selection compares weighted progress against the
+acquired base of the current step, level by level; forbidden truth statuses
+exclude a candidate before ranking. Predictive query agreement, lower measured
+cost, then lowest candidate index break remaining ties. The six scoring
+coefficients still measure work and return; they are not priority levels. See the
 [Rust task contract](/reference/rust#semantic-task-programs) for scoring and
 numerical-policy build requirements. These inputs replace the former implicit
 task; there is no legacy fallback.
@@ -235,6 +252,50 @@ The schema span and four output spans must be nonempty, disjoint and bounded by
 the actual record length. Digests occupy 32 raw bytes, and the generation is an
 eight-byte little-endian integer; no alignment is required. The layout is retained
 in the existing native runtime contract and publication material.
+
+For a fresh parent, `task_use.initial_source_layout(prefix_capacity=...,
+feedback_capacity=..., max_position=..., pad_token=...,
+provenance_capacity_records=...)` returns `(source, prefix, prefill_tokens,
+ring_head)`. The source and prefix contain the eight-field rows accepted by
+`bind_parent`; `prefill_tokens` is the exact ordered admitted portion preceding
+the 32-row active ring. The task's observed payload and source mapping, not a
+second caller token list, determine these rows. Missing tokens, invalid mapping,
+capacity and text geometry are rejected. Use `ring_head` in initial metadata.
+
+When `prefill_tokens` is nonempty, instead issue the one-use
+`task_use.begin_initial_prefill(...)` with the same geometry and the actual
+`model_generation`; its `source_layout()` supplies the same tuple. At the
+original model wrapper boundary, call
+`stage.bind_model_content(tensors=..., model_allocations=..., consumer_stream=...)`
+before the forward and retain its model-content witness. The first rows
+are the exact role 18–25 model tensors, followed by role-zero backing allocations
+in the same order later passed to `bind_parent`. At the model's actual pre-hook,
+call `stage.record_input(token_tensor=..., consumer_stream=...)` on the contiguous
+I64 `[1, len(prefill_tokens)]` tensor passed to the model. Native checks its
+admitted token values on device and completes that check before returning.
+During that one original forward, use `stage.capture_tensor_content(tensors=...,
+consumer_stream=...)` to seal each transient or autograd-saved roster at its
+original production point and retain the returned content witness. Before each
+dependent read, call `witness.verify(tensors=..., consumer_stream=...)` with the
+same original tensor storage, layout and interval and the actual dependent
+consumer stream; native events join it to the guard even when it differs from
+the prefill stream. The model witness verifies
+the complete pre-forward model roster; no witness may establish a new baseline
+after output recording. Execute the original model prefill once on that stream;
+at the final post-detach
+hook, call `stage.record_outputs(tensors=..., consumer_stream=...)` with all
+original cache, recurrent and accumulator tensors (roles 4–13). It returns a
+`SemanticInitialPrefillReceipt`. Pass that exact receipt as
+`prefill_receipt=...` to `controller.bind_parent` for the same task and Session,
+along with the original tensor and allocation rosters. The receipt is consumed
+once; a changed source, generation, tensor owner or sealed content is rejected.
+The native receipt authenticates the tensors observed at these wrapper hooks;
+it does not independently execute or audit the external model forward. A
+nonempty prefix cannot bind without it. An empty prefix needs no receipt. The
+one-use stage retires after the completed parent copy and publication join, but
+the Session retains the original model and transient seals for verification
+through the dependent backward reads. Retain the Python witnesses, stage,
+original producers and saved autograd graph until creator-thread cleanup.
 
 After sealing the numerical model ranges, native initialization computes
 `S_digest = SHA256(S)` and
@@ -358,9 +419,61 @@ segment. This typed cold projection returns the authenticated predecessor and
 successor, logical-state materials, proposal/stream/family/action-law/model
 coordinates, native winner and pre-draw actor eligibility, exact signed-return
 bits, the device-sealed batch receipt and root, the retained task-result material,
-and distinct action RNG base and successor materials. The projection does not
-manufacture an acquired-theory identity; that value remains an application-owned
-assembler input.
+and distinct action RNG base and successor materials. It exposes the native
+predecessor semantic-root digest but does not turn an application's source-text
+identity into that digest.
+
+`schema_generation` contains the exact retained admission-schema preimage;
+its SHA-256 is the native schema-generation identity. `action_law` is the
+generated catalogue's canonical declaration bytes with its
+SHA-256 catalogue identity. `edit_codebook` is the exact native codebook byte
+image used by this admission and completed action, with its admission-derived
+binding identity. `roster` is the canonical little-endian encoding of the 136
+actual components, including their admission-derived cardinalities and offsets;
+its bytes bind the codebook identity and hash to the roster identity. All four
+use the same byte-backed material interface as the other
+projection children (`identity`, `bytes`, and `bytes_sha256`). The codebook image
+is opaque: consumers bind its bytes and identity but must not decode private
+device offsets from it. Neither material claims that target, behavior, CDF,
+Philox, and hard-decode laws have separate native identities.
+`world_root` is the canonical native root export retained at cold task binding,
+with the root digest as its identity. It is present only when that digest still
+matches the completed Proposal's actual predecessor semantic root; after a
+different root is acquired, it is `None` rather than a reconstructed predecessor.
+`predecessor_semantic_root_digest` always names the root in the authenticated
+predecessor publication header; it is distinct from the logical-state digest
+and from an application's source-text theory identity.
+
+`theory_deltas` contains one entry for each actual native insertion attempt,
+ordered by learned lane then edit slot. No-edit choices and actions stopped
+before insertion produce no entry. A duplicate graph support attachment is
+still an attempted edit. Each entry has `delta` (canonical owner-bound decoded
+insertion bytes), `verdict` (`accepted` or `rejected` for the whole lane), and
+`evidence` (the native hard-decode, lane-admission, and selected component
+receipts). `lane` and `slot` retain the native source coordinates. A losing
+admitted lane remains `accepted`; a later lane refusal does not erase an
+insertion attempt.
+
+For an editable positive binary program, `INSERT_RULE` decodes one
+range-restricted rule with exactly two binary body atoms. Its `kind="rule"`
+delta binds all ten rule fields and any preceding rule edit in that lane;
+`theory_generation` binds the admitted program and preceding rule. The task's
+three queries are evaluated against the resulting program closure on device.
+Graph support insertion is not offered in this mode because it does not alter
+that program closure. For a graph-support edit, `kind="fact"` and
+`theory_generation` names the acquired predecessor semantic-root digest.
+Neither mode currently emits a forest delta. The invocation's `result` also
+contains `program_rules`: two lanes of two optional flat ten-field rule tuples,
+including attempted rules in a lane rejected by a hard constraint. These are
+distinct from graph-support edit results. Its `truths` and `correct` entries
+each contain three ordered triples: base, first candidate, and second
+candidate, with all three task queries in every triple.
+
+The current semantic engine generation is the catalogue generation, so
+`engine_generation` returns the same material as `action_law`. `observation`
+returns the same native four-valued task-result material as `result_material`;
+its bytes bind the observer query and program identities, actual result bytes,
+and three expected truth values. These aliases do not mint new identities.
 
 The projection's `task_ground` is the one typed semantic ground retained by the
 same completed Proposal owner. It binds acquired base `B`, ordered query identity
@@ -370,6 +483,26 @@ bound goal-authority closure. Its two ordered lane outcomes are tagged
 canonical native refusal kind. `task_ground.facts` retains all three ordered
 truth-code vectors together with native agreement, eligibility, value, and work
 facts; a refused lane's terminal tag remains authoritative.
+`task_ground.scoring_law` is a canonical native material bound to this
+completed owner and original task identity. Its six `scoring_weights` are, in
+order, correct-query, all-correct, measured-work, improvement, refusal, and
+spent-work coefficients. For each candidate, measured work is the count of
+actual edit commands plus added supports (new materialized facts for an editable
+program) plus defined-truth changes; candidate
+value is `correct_weight * correct_count + all_correct_weight *
+solves_expected_truths - work_weight * measured_work`. Eligible candidates are
+selected by ordered task-priority progress, then exact query agreement, then
+lower measured work, retaining the earlier slot on ties. Value measures the
+return; it does not override this selection order.
+The final return is `improvement_weight * (selected_value - base_value) -
+refusal_weight * refused_lanes - spent_weight * spent_work`, where spent work is
+the executed query count plus edit-command and defined-truth-change counts for
+discarded lanes. `return_bound` is the admitted symmetric signed bound for
+this task return, using the resident fact capacity for an editable program
+instead of the smaller graph-support cap. It is not a bound for an external
+training objective. Cold projection
+checks these equations against the retained native facts and work counters
+before exposing the material.
 
 Learned attempted requests are not duplicated in the ground. Read them from the
 same projection's lane `decoded_text_actions` and `decoded_edit_actions`. The
