@@ -272,6 +272,14 @@ impl TaskCheckpointBinding {
             && self.scoring_law == other.scoring_law
     }
 
+    fn same_cold_arena_content(self, other: Self) -> bool {
+        self.identity != other.identity
+            && self.epoch.checked_add(1) == Some(other.epoch)
+            && self.content == other.content
+            && self.goal == other.goal
+            && self.scoring_law == other.scoring_law
+    }
+
     fn encode(self) -> [u8; Self::BYTES] {
         let mut bytes = [0u8; Self::BYTES];
         bytes[..32].copy_from_slice(&self.identity);
@@ -5581,6 +5589,7 @@ enum TaskUsePhase {
         operation: Option<String>,
     },
     Segment(String),
+    ArenaPreparing(Box<TaskUsePhase>),
     Refused,
 }
 
@@ -5599,6 +5608,34 @@ struct TaskCheckpointSeed {
     replay_selection: ColdValue,
 }
 
+/// An arena admission may append sources and replay history, never reinterpret
+/// the selected task, its data scope, or a previously admitted record.
+fn require_retained_arena_authority(
+    selected: &[ColdValue],
+    candidate: &[ColdValue],
+) -> PyResult<()> {
+    if selected.len() != 10 || candidate.len() != 10 {
+        return Err(invalid("arena admission requires complete task authority"));
+    }
+    for index in [0, 1, 2, 5, 9] {
+        if selected[index] != candidate[index] {
+            return Err(invalid(
+                "arena admission changed the selected task or original data scope",
+            ));
+        }
+    }
+    for index in [3, 4] {
+        let original = selected[index].sequence()?;
+        let extended = candidate[index].sequence()?;
+        if !extended.starts_with(original) {
+            return Err(invalid(
+                "arena admission changed an original source, replay row or dependency",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CheckpointTaskPhase {
     Imported,
@@ -5607,7 +5644,11 @@ enum CheckpointTaskPhase {
 }
 
 fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> {
-    match &state.phase {
+    let phase = match &state.phase {
+        TaskUsePhase::ArenaPreparing(original) => original.as_ref(),
+        phase => phase,
+    };
+    match phase {
         TaskUsePhase::Imported => Ok(CheckpointTaskPhase::Imported),
         TaskUsePhase::InitialPrefillBound => Ok(CheckpointTaskPhase::InitialPrefillBound),
         TaskUsePhase::Segment(operation) => Ok(CheckpointTaskPhase::Segment(operation.clone())),
@@ -5840,6 +5881,26 @@ impl TaskIssuance {
 }
 
 impl TaskUseState {
+    fn begin_arena_preparation(&mut self) -> PyResult<()> {
+        checkpoint_task_phase(self)?;
+        self.phase = TaskUsePhase::ArenaPreparing(Box::new(self.phase.clone()));
+        Ok(())
+    }
+
+    fn finish_arena_preparation(&mut self) -> PyResult<()> {
+        let phase = std::mem::replace(&mut self.phase, TaskUsePhase::Refused);
+        match phase {
+            TaskUsePhase::ArenaPreparing(original) => {
+                self.phase = *original;
+                Ok(())
+            }
+            other => {
+                self.phase = other;
+                Err(invalid("task use has no cold arena preparation"))
+            }
+        }
+    }
+
     fn begin_initial_prefill(&mut self) -> PyResult<Arc<()>> {
         if !matches!(self.phase, TaskUsePhase::Imported) {
             return Err(invalid(
@@ -6005,6 +6066,7 @@ impl TaskUseState {
             | TaskUsePhase::InitialPrefillReady { .. }
             | TaskUsePhase::InitialPrefillBound
             | TaskUsePhase::Segment(_)
+            | TaskUsePhase::ArenaPreparing(_)
             | TaskUsePhase::Importing { reads: true, .. } => Ok(()),
             _ => Err(invalid(
                 "task use is not available outside its controlled import",
@@ -6050,6 +6112,14 @@ impl TaskUseState {
                 operation,
                 reads: true,
             } => operation,
+            TaskUsePhase::ArenaPreparing(original) => match original.as_ref() {
+                TaskUsePhase::Segment(operation) => operation,
+                _ => {
+                    return Err(invalid(
+                        "tensor content requires an admitted segment or controlled import",
+                    ))
+                }
+            },
             _ => {
                 return Err(invalid(
                     "tensor content requires an admitted segment or controlled import",
@@ -11876,6 +11946,501 @@ impl PySemanticTransitionController {
         Ok(task_use)
     }
 
+    /// Admit a larger training arena from this exact selected publication.
+    /// The source remains the sole execution owner while a fresh cold Session
+    /// reconstructs unchanged native material and the trusted model factory
+    /// verifies its own complete state. No candidate operation is public until
+    /// the source issuance is revoked and the candidate phase is opened.
+    #[pyo3(signature = (task_use, *, parent, consumer_streams, snapshot, snapshot_model_state, restore_model, replay_rows, training_objective, dependencies, publication_grants, inference_grants, training_grants, capacities, memory_bytes, max_material_bytes, max_total_material_bytes, max_evidence_bytes, refresh_snapshot))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "cold arena admission binds complete authority and model custody"
+    )]
+    fn admit_training_arena(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        consumer_streams: &Bound<'_, PyAny>,
+        snapshot: &Bound<'_, PyAny>,
+        snapshot_model_state: &Bound<'_, PyAny>,
+        restore_model: &Bound<'_, PyAny>,
+        replay_rows: &Bound<'_, PyAny>,
+        training_objective: &Bound<'_, PyAny>,
+        dependencies: &Bound<'_, PyAny>,
+        publication_grants: &Bound<'_, PyAny>,
+        inference_grants: &Bound<'_, PyAny>,
+        training_grants: &Bound<'_, PyAny>,
+        capacities: &Bound<'_, PyAny>,
+        memory_bytes: &Bound<'_, PyAny>,
+        max_material_bytes: &Bound<'_, PyAny>,
+        max_total_material_bytes: &Bound<'_, PyAny>,
+        max_evidence_bytes: &Bound<'_, PyAny>,
+        refresh_snapshot: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
+        self.session.borrow(py).require_creator()?;
+        self.require_issued(task_use)?;
+        parent.require_task(py, task_use)?;
+        if !snapshot_model_state.is_callable()
+            || !restore_model.is_callable()
+            || !refresh_snapshot.is_callable()
+        {
+            return Err(invalid(
+                "cold arena admission requires trusted model and authority callbacks",
+            ));
+        }
+        let selected_seed = task_use.checkpoint.clone();
+        let selected_phase = checkpoint_task_phase(&*task_use.state()?)?;
+        if !matches!(&selected_phase, CheckpointTaskPhase::Segment(operation) if operation == "inference")
+        {
+            return Err(invalid(
+                "training arena admission requires a selected published inference segment",
+            ));
+        }
+        let (source_capacities, admission_limits, device_ordinal, source_memory_bytes) = {
+            let source = self.session.borrow(py);
+            (
+                source.capacities,
+                source.admission_limits,
+                source.device_ordinal,
+                source.memory_bytes,
+            )
+        };
+        let mut budget = 16 * 1024 * 1024;
+        let [material_limit, total_material_limit, evidence_limit] = read_task_replay_limits(
+            max_material_bytes,
+            max_total_material_bytes,
+            max_evidence_bytes,
+            &mut budget,
+        )?;
+        let mut authority_values = selected_seed.authority.clone();
+        for (index, value) in [
+            (4, dependencies),
+            (6, publication_grants),
+            (7, inference_grants),
+            (8, training_grants),
+        ] {
+            authority_values[index] = ColdValue::read(value, &mut budget, 0)?;
+        }
+        authority_values[3] = read_replay_rows(
+            replay_rows,
+            &mut budget,
+            material_limit,
+            total_material_limit,
+            evidence_limit,
+        )?;
+        require_retained_arena_authority(&selected_seed.authority, &authority_values)?;
+        let mut authority = TaskAuthority::parse(&authority_values)?;
+        authority.bind_initial_sources(
+            &selected_seed.initial_sources,
+            &selected_seed.source_mapping,
+        )?;
+        let training_views = authority
+            .replay
+            .iter()
+            .map(ReplayRow::training_view_row)
+            .collect::<PyResult<Vec<_>>>()?;
+        let objective_value = ColdValue::read(training_objective, &mut budget, 0)?;
+        let objective = read_training_objective(&objective_value)?.ok_or_else(|| {
+            invalid("cold arena admission requires a complete training objective")
+        })?;
+        if training_views.is_empty() {
+            return Err(invalid(
+                "cold arena admission requires retained training rows",
+            ));
+        }
+        let capacity_values = ColdValue::read(capacities, &mut budget, 0)?;
+        let capacity_values = capacity_values.sequence()?;
+        if capacity_values.len() != 4 {
+            return Err(invalid(
+                "cold arena capacities require four exact native bounds",
+            ));
+        }
+        let mut candidate_capacities = [0u32; 4];
+        for (index, value) in capacity_values.iter().enumerate() {
+            candidate_capacities[index] = u32::try_from(value.unsigned()?)
+                .map_err(|_| invalid("cold arena capacity exceeds native domain"))?;
+        }
+        let candidate_capacities = (
+            candidate_capacities[0],
+            candidate_capacities[1],
+            candidate_capacities[2],
+            candidate_capacities[3],
+        );
+        for (old, new) in [
+            (source_capacities.0, candidate_capacities.0),
+            (source_capacities.1, candidate_capacities.1),
+            (source_capacities.2, candidate_capacities.2),
+            (source_capacities.3, candidate_capacities.3),
+        ] {
+            if new < old {
+                return Err(invalid(
+                    "cold arena admission cannot shrink native capacity",
+                ));
+            }
+        }
+        let candidate_memory_bytes = ColdValue::read(memory_bytes, &mut budget, 0)?.unsigned()?;
+        if candidate_memory_bytes < source_memory_bytes {
+            return Err(invalid(
+                "cold arena admission cannot shrink native memory budget",
+            ));
+        }
+        let initial_snapshot =
+            AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        initial_snapshot.newer_than(&task_use.state()?.snapshot)?;
+        let check_use =
+            |authority: &TaskAuthority, snapshot: &AuthoritySnapshot| match &selected_phase {
+                CheckpointTaskPhase::Imported | CheckpointTaskPhase::InitialPrefillBound => {
+                    authority.check_snapshot(snapshot).map(drop)
+                }
+                CheckpointTaskPhase::Segment(operation) => {
+                    authority.check_use(operation, snapshot, false)
+                }
+            };
+        check_use(&task_use.authority, &initial_snapshot)?;
+        check_use(&authority, &initial_snapshot)?;
+        task_use
+            .authority
+            .check_use("training", &initial_snapshot, false)?;
+        authority.check_use("training", &initial_snapshot, false)?;
+        {
+            let source = self.session.borrow(py);
+            let mut owner = source.owner()?;
+            task_use.require_current(&owner)?;
+            owner
+                .current_recompute_state_material(&*parent.lease()?)
+                .map_err(xlog_err)?;
+        }
+        task_use.state()?.begin_arena_preparation()?;
+
+        let mut source_checkpoint: Option<Vec<u8>> = None;
+        let mut candidate_session: Option<Py<PySemanticTransitionSession>> = None;
+        let verify_source = |checkpoint: &[u8]| -> PyResult<AuthoritySnapshot> {
+            let refreshed = refresh_snapshot.call0()?;
+            let mut budget = 16 * 1024 * 1024;
+            let current = AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut budget, 0)?)?;
+            current.newer_than(&initial_snapshot)?;
+            check_use(&task_use.authority, &current)?;
+            let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
+            {
+                let source = self.session.borrow(py);
+                let mut owner = source.owner()?;
+                task_use.require_current(&owner)?;
+                let lease = parent.lease()?;
+                if owner
+                    .current_recompute_state_material(&lease)
+                    .map_err(xlog_err)?
+                    != manifest.native
+                {
+                    return Err(invalid(
+                        "selected native state changed during cold arena preparation",
+                    ));
+                }
+            }
+            let model = snapshot_model_state.call0()?;
+            if !model.is_exact_instance_of::<PyBytes>()
+                || model.cast::<PyBytes>()?.as_bytes() != manifest.model
+            {
+                return Err(invalid(
+                    "selected model state changed during cold arena preparation",
+                ));
+            }
+            {
+                let source = self.session.borrow(py);
+                let mut owner = source.owner()?;
+                task_use.require_current(&owner)?;
+                if owner
+                    .published_state_material(&*parent.lease()?)
+                    .map_err(xlog_err)?
+                    != manifest.native
+                {
+                    return Err(invalid(
+                        "selected native state changed during model verification",
+                    ));
+                }
+            }
+            Ok(current)
+        };
+
+        let result = (|| -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
+            let checkpoint = self.save_checkpoint(
+                py,
+                task_use,
+                parent,
+                consumer_streams,
+                snapshot,
+                snapshot_model_state,
+            )?;
+            let checkpoint = checkpoint.bind(py).as_bytes().to_vec();
+            source_checkpoint = Some(checkpoint.clone());
+            let manifest = SemanticCheckpointManifest::decode(&checkpoint)?;
+            let (_, saved_snapshot, phase, saved_binding) =
+                TaskCheckpointSeed::decode(&manifest.task)?;
+            if saved_snapshot.canonical != initial_snapshot.canonical {
+                return Err(invalid(
+                    "cold arena checkpoint changed its source authority snapshot",
+                ));
+            }
+            if phase != selected_phase {
+                return Err(invalid("cold arena source phase changed during checkpoint"));
+            }
+            let _historical_initial_prefill =
+                SemanticTransitionSession::verify_checkpoint_initial_prefill_source(
+                    &manifest.initial_prefill,
+                    &manifest.native,
+                    Identity256::from_bytes(saved_binding.identity),
+                    saved_binding.epoch,
+                    saved_binding.content_identity(),
+                    phase == CheckpointTaskPhase::InitialPrefillBound,
+                )
+                .map_err(xlog_err)?;
+            let admission = SemanticTransitionSession::state_material_admission(&manifest.native)
+                .map_err(xlog_err)?;
+            let editable_source = cold_task::editable_source_from_admission(&admission)?;
+            if let Some(source) = &editable_source {
+                if selected_seed
+                    .evaluation
+                    .get(2)
+                    .ok_or_else(|| invalid("cold arena task evaluation is incomplete"))?
+                    .text()?
+                    != source.observer_source
+                {
+                    return Err(invalid(
+                        "cold arena observer differs from original admission",
+                    ));
+                }
+            }
+            let spec = task_evaluation_spec(
+                &selected_seed.evaluation,
+                task_use.authority.priority_levels.clone(),
+                editable_source.map(|source| source.program),
+            )?;
+            let (_, selected_material) =
+                decode_selected_replay(&authority.replay, &selected_seed.replay_selection)?;
+            let successor = Py::new(
+                py,
+                PySemanticTransitionSession::from_admission(
+                    admission,
+                    candidate_capacities,
+                    admission_limits,
+                    device_ordinal,
+                    candidate_memory_bytes,
+                )?,
+            )?;
+            candidate_session = Some(successor.clone_ref(py));
+            let native_binding = {
+                let session = successor.borrow(py);
+                let mut owner = session.owner()?;
+                let observations = owner
+                    .task_observation_roots(
+                        &spec,
+                        selected_material.as_ref().map(|binding| &binding.material),
+                    )
+                    .map_err(xlog_err)?;
+                let mut original_authority = TaskAuthority::parse(&selected_seed.authority)?;
+                original_authority.bind_initial_sources(
+                    &selected_seed.initial_sources,
+                    &selected_seed.source_mapping,
+                )?;
+                original_authority
+                    .bind_native_reads(&observations, &spec.allowed_support_records)?;
+                authority.bind_native_reads(&observations, &spec.allowed_support_records)?;
+                let original_goal_witness = original_authority.goal_witness(&observations);
+                let goal_witness = authority.goal_witness(&observations);
+                owner.bind_task_evaluation(spec).map_err(xlog_err)?;
+                owner
+                    .bind_task_goal_witness(original_goal_witness)
+                    .map_err(xlog_err)?;
+                owner
+                    .restore_state_material(&manifest.native)
+                    .map_err(xlog_err)?;
+                owner
+                    .rebind_restored_training_arena(
+                        &manifest.native,
+                        goal_witness,
+                        training_views,
+                        objective,
+                    )
+                    .map_err(xlog_err)?;
+                let binding = TaskCheckpointBinding::from_owner(&owner)?;
+                if !saved_binding.same_cold_arena_content(binding) {
+                    return Err(invalid("cold arena changed selected native task content"));
+                }
+                binding
+            };
+            let controller_identity = Arc::new(());
+            let controller = Py::new(
+                py,
+                PySemanticTransitionController {
+                    session: successor.clone_ref(py),
+                    identity: Arc::clone(&controller_identity),
+                },
+            )?;
+            let issuance = TaskIssuance::issue(Arc::clone(&successor.borrow(py).issuance))?;
+            let original_phase = match &phase {
+                CheckpointTaskPhase::Imported => TaskUsePhase::Imported,
+                CheckpointTaskPhase::InitialPrefillBound => TaskUsePhase::InitialPrefillBound,
+                CheckpointTaskPhase::Segment(operation) => TaskUsePhase::Segment(operation.clone()),
+            };
+            let candidate_task = Py::new(
+                py,
+                PySemanticTransitionTaskUse {
+                    session: successor.clone_ref(py),
+                    controller: controller_identity,
+                    issuance,
+                    importing: Arc::clone(&successor.borrow(py).importing),
+                    task_identity: native_binding.identity,
+                    task_epoch: native_binding.epoch,
+                    authority,
+                    checkpoint: TaskCheckpointSeed {
+                        authority: authority_values,
+                        evaluation: selected_seed.evaluation,
+                        training_objective: objective_value,
+                        initial_sources: selected_seed.initial_sources,
+                        source_mapping: selected_seed.source_mapping,
+                        replay_selection: selected_seed.replay_selection,
+                    },
+                    state: Mutex::new(TaskUseState {
+                        phase: TaskUsePhase::ArenaPreparing(Box::new(original_phase)),
+                        snapshot: initial_snapshot.clone(),
+                    }),
+                },
+            )?;
+            let candidate_parent = {
+                let issued = candidate_task.borrow(py);
+                let session = successor.borrow(py);
+                let mut owner = session.owner()?;
+                issued.require_current(&owner)?;
+                let lease = owner.acquire().map_err(xlog_err)?;
+                Py::new(
+                    py,
+                    PySemanticPublishedParent {
+                        session: successor.clone_ref(py),
+                        task_use: candidate_task.clone_ref(py),
+                        inner: Mutex::new(lease),
+                        continuation_producers: Mutex::new(Vec::new()),
+                    },
+                )?
+            };
+            let admitted_native = {
+                let acquired = candidate_parent.borrow(py);
+                let material = successor
+                    .borrow(py)
+                    .owner()?
+                    .published_state_material(&*acquired.lease()?)
+                    .map_err(xlog_err)?;
+                material
+            };
+            let model = restore_model
+                .call1((
+                    controller.clone_ref(py),
+                    candidate_task.clone_ref(py),
+                    candidate_parent.clone_ref(py),
+                    PyBytes::new(py, &manifest.model),
+                ))?
+                .unbind();
+            {
+                let issued = candidate_task.borrow(py);
+                let acquired = candidate_parent.borrow(py);
+                acquired.require_task(py, &issued)?;
+                let session = successor.borrow(py);
+                let mut owner = session.owner()?;
+                issued.require_current(&owner)?;
+                if checkpoint_task_phase(&*issued.state()?)? != phase {
+                    return Err(invalid(
+                        "cold arena candidate phase changed during model restore",
+                    ));
+                }
+                if owner
+                    .published_state_material(&*acquired.lease()?)
+                    .map_err(xlog_err)?
+                    != admitted_native
+                {
+                    return Err(invalid(
+                        "cold arena candidate native state changed during model restore",
+                    ));
+                }
+            }
+            let latest = verify_source(&checkpoint)?;
+            check_use(&candidate_task.borrow(py).authority, &latest)?;
+            task_use.authority.check_use("training", &latest, false)?;
+            candidate_task
+                .borrow(py)
+                .authority
+                .check_use("training", &latest, false)?;
+            {
+                let issued = candidate_task.borrow(py);
+                let mut state = issued.state()?;
+                if !matches!(state.phase, TaskUsePhase::ArenaPreparing(_)) {
+                    return Err(invalid("cold arena candidate escaped preparation"));
+                }
+                state.snapshot = latest;
+            }
+            let admitted = Py::new(
+                py,
+                PySemanticTransitionRestoredCheckpoint {
+                    session: successor,
+                    controller,
+                    task_use: candidate_task.clone_ref(py),
+                    parent: candidate_parent,
+                    model,
+                },
+            )?;
+            {
+                let source = self.session.borrow(py);
+                let issued = candidate_task.borrow(py);
+                let mut source_state = task_use.state()?;
+                let mut candidate_state = issued.state()?;
+                if !matches!(source_state.phase, TaskUsePhase::ArenaPreparing(_))
+                    || !matches!(candidate_state.phase, TaskUsePhase::ArenaPreparing(_))
+                {
+                    return Err(invalid("cold arena handoff lost its original preparation"));
+                }
+                let activated_phase = match &candidate_state.phase {
+                    TaskUsePhase::ArenaPreparing(original) => *original.clone(),
+                    _ => unreachable!("checked candidate preparation"),
+                };
+                TaskIssuance::issue(Arc::clone(&source.issuance))?;
+                source_state.phase = TaskUsePhase::Refused;
+                candidate_state.phase = activated_phase;
+            }
+            Ok(admitted)
+        })();
+        if result.is_err() {
+            if let Some(successor) = candidate_session {
+                if let Ok(mut owner) = successor.borrow(py).owner() {
+                    owner.abort();
+                }
+            }
+            let safe = match source_checkpoint.as_deref() {
+                Some(checkpoint) => verify_source(checkpoint).ok(),
+                None => (|| -> PyResult<AuthoritySnapshot> {
+                    let refreshed = refresh_snapshot.call0()?;
+                    let mut budget = 16 * 1024 * 1024;
+                    let current =
+                        AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut budget, 0)?)?;
+                    current.newer_than(&initial_snapshot)?;
+                    check_use(&task_use.authority, &current)?;
+                    task_use.authority.check_use("training", &current, false)?;
+                    let source = self.session.borrow(py);
+                    let owner = source.owner()?;
+                    task_use.require_current(&owner)?;
+                    Ok(current)
+                })()
+                .ok(),
+            };
+            if let Ok(mut state) = task_use.state() {
+                if let Some(snapshot) = safe {
+                    state.snapshot = snapshot;
+                    let _ = state.finish_arena_preparation();
+                } else {
+                    state.phase = TaskUsePhase::Refused;
+                }
+            }
+        }
+        result
+    }
+
     /// Seal the exact selected publication, task capsule and model state into one
     /// self-contained checkpoint blob. The serializer runs exactly once without
     /// a native or task-state mutex held. Native ownership and authority are
@@ -11891,7 +12456,10 @@ impl PySemanticTransitionController {
         snapshot_model_state: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyBytes>> {
         self.session.borrow(py).require_creator()?;
-        self.require_issued(task_use)?;
+        self.require_read_issued(task_use)?;
+        if !matches!(task_use.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
+            task_use.state()?.require_public_use()?;
+        }
         parent.require_task(py, task_use)?;
         if !snapshot_model_state.is_callable() {
             return Err(invalid(
@@ -14093,6 +14661,54 @@ mod tests {
     use std::ffi::CString;
     use std::sync::Arc;
     use xlog_cuda::{SemanticArgument, SemanticPolarity, SemanticRecordRole};
+
+    #[test]
+    fn cold_arena_binding_keeps_task_content_but_advances_authority() {
+        let source = super::TaskCheckpointBinding {
+            identity: [1; 32],
+            epoch: 7,
+            content: [[2; 32], [3; 32], [4; 32]],
+            goal: [5; 32],
+            scoring_law: [6; 32],
+        };
+        let candidate = super::TaskCheckpointBinding {
+            identity: [8; 32],
+            epoch: 8,
+            ..source
+        };
+        assert!(source.same_cold_arena_content(candidate));
+        assert!(!source.same_task_content(candidate));
+        assert!(
+            !source.same_cold_arena_content(super::TaskCheckpointBinding {
+                goal: [9; 32],
+                ..candidate
+            })
+        );
+        assert!(
+            !source.same_cold_arena_content(super::TaskCheckpointBinding {
+                content: [[9; 32], [3; 32], [4; 32]],
+                ..candidate
+            })
+        );
+        assert!(
+            !source.same_cold_arena_content(super::TaskCheckpointBinding {
+                scoring_law: [9; 32],
+                ..candidate
+            })
+        );
+        assert!(
+            !source.same_cold_arena_content(super::TaskCheckpointBinding {
+                epoch: 9,
+                ..candidate
+            })
+        );
+        assert!(
+            !source.same_cold_arena_content(super::TaskCheckpointBinding {
+                identity: source.identity,
+                ..candidate
+            })
+        );
+    }
 
     #[test]
     fn checkpoint_keeps_initial_prefill_distinct_from_imported_task() {
@@ -16708,6 +17324,46 @@ else:
         );
         assert!(state.revalidate_activation(&authority, revoked).is_err());
         assert!(matches!(state.phase, TaskUsePhase::Refused));
+    }
+
+    #[test]
+    fn cold_arena_preparation_retains_selected_phase_without_allowing_execution() {
+        use super::checkpoint_task_phase;
+
+        let (_, snapshot) = task_inputs("");
+        let mut state = TaskUseState {
+            phase: TaskUsePhase::Segment("inference".into()),
+            snapshot,
+        };
+        let selected = checkpoint_task_phase(&state).unwrap();
+        state.begin_arena_preparation().unwrap();
+        assert_eq!(checkpoint_task_phase(&state).unwrap(), selected);
+        assert!(state.require_read().is_ok());
+        assert!(state.require_public_use().is_err());
+        state.finish_arena_preparation().unwrap();
+        assert_eq!(checkpoint_task_phase(&state).unwrap(), selected);
+        assert!(state.require_public_use().is_ok());
+    }
+
+    #[test]
+    fn cold_arena_authority_preserves_original_scope_and_replay_rows() {
+        use super::require_retained_arena_authority;
+
+        let (selected, _) = task_inputs("");
+        let mut candidate = selected.clone();
+        assert!(require_retained_arena_authority(&selected, &candidate).is_ok());
+        let mut rows = candidate[3].sequence().unwrap().to_vec();
+        rows.push(rows[0].clone());
+        candidate[3] = ColdValue::Sequence(rows);
+        assert!(require_retained_arena_authority(&selected, &candidate).is_ok());
+        candidate[3] = ColdValue::Sequence(Vec::new());
+        assert!(require_retained_arena_authority(&selected, &candidate).is_err());
+        candidate = selected.clone();
+        candidate[1] = ColdValue::Sequence(Vec::new());
+        assert!(require_retained_arena_authority(&selected, &candidate).is_err());
+        candidate = selected.clone();
+        candidate[2] = ColdValue::Sequence(Vec::new());
+        assert!(require_retained_arena_authority(&selected, &candidate).is_err());
     }
 
     #[test]

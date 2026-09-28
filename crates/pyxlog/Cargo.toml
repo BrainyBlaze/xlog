@@ -11,7 +11,7 @@ publish = false
 [lib]
 name = "pyxlog"
 crate-type = ["cdylib"]
-test = false
+test = true
 doctest = false
 
 [dependencies]

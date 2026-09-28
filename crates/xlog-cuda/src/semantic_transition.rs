@@ -4329,6 +4329,7 @@ struct RawFeedbackRecord {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AttemptReceipt {
     abi: u64,
+    transition_kind: u64,
     instance: Identity256,
     base_word: u64,
     next_word: u64,
@@ -4566,7 +4567,7 @@ const _: () = assert!(size_of::<TensorLayoutTableHeader>() == 32);
 const _: () = assert!(size_of::<SemanticActiveRow>() == 32);
 const _: () = assert!(size_of::<CompletionCoverage>() == 360);
 const _: () = assert!(size_of::<RawFeedbackRecord>() == 384);
-const _: () = assert!(size_of::<AttemptReceipt>() == 344);
+const _: () = assert!(size_of::<AttemptReceipt>() == 352);
 const _: () = assert!(size_of::<IntentQueueHeader>() == 88);
 const _: () = assert!(size_of::<IntentEntry>() == 344);
 const _: () = assert!(size_of::<TokenProvenance>() == 184);
@@ -5712,7 +5713,7 @@ impl PublicationReplayEvidence {
             .iter()
             .find(|item| item.range.role == 33 && item.range.index == 0)
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
-        if attempt.abi != 1
+        if attempt.abi != 2
             || attempt.instance != self.successor.instance
             || attempt.base_word != base.publication_word
             || attempt.next_word != self.successor.word
@@ -5730,10 +5731,11 @@ impl PublicationReplayEvidence {
         }
         let no_draw =
             attempt.action_receipts_digest == Identity256::from_bytes(Sha256::digest([]).into());
-        match (base.terminal, no_draw) {
-            (0, false) => Ok(SemanticTransitionKind::Proposal),
-            (0, true) => Ok(SemanticTransitionKind::Recompute),
-            (1, true) => Ok(SemanticTransitionKind::Drain),
+        match (attempt.transition_kind, base.terminal, no_draw) {
+            (1, 0, false) => Ok(SemanticTransitionKind::Proposal),
+            (2, 0, true) => Ok(SemanticTransitionKind::Recompute),
+            (3, 1, true) => Ok(SemanticTransitionKind::Drain),
+            (4, 0, true) => Ok(SemanticTransitionKind::Update),
             _ => Err(publication_input_error(
                 "replay attempt cannot follow this predecessor's native terminal state",
             )),
@@ -6629,6 +6631,65 @@ impl PublicationMaterial {
             ));
         }
         Ok(material)
+    }
+
+    // A retained successor carries the native attempt which published it.
+    // This proves the selected publication has the recompute form without
+    // inventing an application-side completion flag or retaining an old GPU
+    // reader. Historical provenance still belongs to the trusted importer.
+    fn require_successful_recompute(&self) -> Result<(), SemanticTransitionError> {
+        let header = self.bank.header;
+        let next_word = (header.base_word >> 1)
+            .checked_add(1)
+            .filter(|epoch| *epoch <= u64::MAX >> 1)
+            .map(|epoch| (epoch << 1) | ((header.base_word & 1) ^ 1))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let successor = SemanticPublishedIdentity {
+            instance: header.instance,
+            word: header.publication_word,
+            logical_digest: header.logical_digest,
+            state_digest: header.state_digest,
+        };
+        let ranges = REPLAY_EVIDENCE_ROLES
+            .iter()
+            .map(|&role| {
+                self.ranges
+                    .iter()
+                    .find(|item| item.range.role == role && item.range.index == 0)
+                    .cloned()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let evidence = PublicationReplayEvidence { successor, ranges };
+        let attempt = evidence.range(33)?.attempt()?;
+        let coverage = self
+            .ranges
+            .iter()
+            .find(|item| item.range.role == 14 && item.range.index == 0)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if header.abi != 1
+            || header.publication_word != next_word
+            || header.terminal != 0
+            || attempt.abi != 2
+            || attempt.transition_kind != 2
+            || attempt.instance != header.instance
+            || attempt.base_word != header.base_word
+            || attempt.next_word != header.publication_word
+            || attempt.logical_digest != header.logical_digest
+            || attempt.action_receipts_digest != Identity256::from_bytes(Sha256::digest([]).into())
+            || attempt.coverage_digest != coverage.logical_record_digest()?
+            || attempt.replay_head_digest != evidence.range(27)?.logical_record_digest()?
+            || attempt.intent_head_digest != evidence.range(30)?.logical_record_digest()?
+            || attempt.acknowledgement_head_digest != evidence.range(32)?.logical_record_digest()?
+            || attempt.previous_attempt_digest == Identity256::default()
+            || attempt.receipt_digest != evidence.range(33)?.logical_record_digest()?
+            || evidence.state_digest()? != header.state_digest
+        {
+            return Err(publication_input_error(
+                "selected publication has no sealed successful recompute completion",
+            ));
+        }
+        Ok(())
     }
 
     // Match publication_descriptor_digest before any owner/slot relocation.
@@ -12188,7 +12249,8 @@ fn validate_prepared_completion(
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         if result.word != (epoch << 1) | ((lease.word ^ 1) & 1)
             || result.header.base_word != lease.word
-            || result.attempt.abi != 1
+            || result.attempt.abi != 2
+            || result.attempt.transition_kind != lease.transition_kind
             || result.attempt.instance != result.header.instance
             || result.attempt.base_word != lease.word
             || result.attempt.next_word != result.word
@@ -12751,7 +12813,8 @@ mod prepared_completion_tests {
                 ..parent
             },
             attempt: AttemptReceipt {
-                abi: 1,
+                abi: 2,
+                transition_kind: 1,
                 instance: parent.instance,
                 base_word: 2,
                 next_word: 5,
@@ -15283,6 +15346,7 @@ impl SemanticTransitionSession {
 
         let mut attempt_bytes = Vec::new();
         material_u64(&mut attempt_bytes, result.attempt.abi);
+        material_u64(&mut attempt_bytes, result.attempt.transition_kind);
         attempt_bytes.extend_from_slice(result.attempt.instance.as_bytes());
         material_u64(&mut attempt_bytes, result.attempt.base_word);
         material_u64(&mut attempt_bytes, result.attempt.next_word);
@@ -18481,7 +18545,7 @@ impl SemanticTransitionSession {
             &parent.terminal_tokens,
             &parent.role_counts,
             parent.rng,
-            false,
+            1,
         );
         if result.is_err() {
             self.poisoned = true;
@@ -18673,7 +18737,7 @@ impl SemanticTransitionSession {
                 &material.terminals,
                 &material.role_counts,
                 rng,
-                true,
+                4,
             )?;
             if restored.logical_digest != header.logical_digest
                 || restored.state_digest != header.state_digest
@@ -18681,6 +18745,208 @@ impl SemanticTransitionSession {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
             Ok(restored)
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    /// Admit a new immutable training arena after an exact cold restore, while
+    /// its Session is still private. The saved publication is the only source
+    /// of model, replay, receipt and optimizer bytes; only the live task
+    /// authority binding and its runtime contract are regenerated.
+    pub fn rebind_restored_training_arena(
+        &mut self,
+        source: &[u8],
+        witness: SemanticTaskGoalWitness,
+        rows: Vec<SemanticTrainingViewRow>,
+        objective: SemanticTrainingObjective,
+    ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        if self.poisoned
+            || self.captured.is_some()
+            || !self.readers.is_empty()
+            || self.training_views.is_some()
+            || self.task.is_none()
+            || self.publication.is_none()
+        {
+            return Err(publication_input_error(
+                "training arena transfer requires one private restored publication",
+            ));
+        }
+        let result = (|| {
+            let mut material = PublicationMaterial::decode(source)?;
+            material.require_successful_recompute()?;
+            let original = material.bank.header;
+            let restored = self.read_publication_header(0)?;
+            if restored.recovered_instance != original.instance
+                || restored.instance == original.instance
+                || restored.publication_word != 0
+                || restored.logical_digest != original.logical_digest
+                || restored.state_digest != original.state_digest
+                || self.task_epoch != original.authority_generation
+            {
+                return Err(publication_input_error(
+                    "training arena source is not the exact private cold restoration",
+                ));
+            }
+            let (task, _) = self
+                .task
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?;
+            let old_witness = task.goal_witness.ok_or(SemanticTransitionError::NotBound)?;
+            if task.identity() != material.contract.task_identity
+                || witness.semantic_root != old_witness.semantic_root
+                || witness.mandatory_link_count == 0
+                || witness.constraint_count == 0
+                || witness
+                    .authority_root
+                    .as_bytes()
+                    .iter()
+                    .all(|byte| *byte == 0)
+                || witness
+                    .mandatory_links_root
+                    .as_bytes()
+                    .iter()
+                    .all(|byte| *byte == 0)
+                || witness
+                    .constraints_root
+                    .as_bytes()
+                    .iter()
+                    .all(|byte| *byte == 0)
+            {
+                return Err(publication_input_error(
+                    "training arena transfer changed the original task content or semantic goal",
+                ));
+            }
+            let next_epoch = self
+                .task_epoch
+                .checked_add(1)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            let model_mode = material.model_numerical_mode()?.to_vec();
+            let (task, device) = self
+                .task
+                .as_mut()
+                .ok_or(SemanticTransitionError::NotBound)?;
+            task.goal_witness = Some(witness);
+            let task_identity = task.identity();
+            if task_identity == material.contract.task_identity {
+                return Err(publication_input_error(
+                    "training arena transfer requires a new current authority binding",
+                ));
+            }
+            let words = task.words(self.graph.transition_arena()[1]);
+            self.provider
+                .htod_sync_copy_into_tracked(&words, device)
+                .map_err(|error| runtime_error("training arena task owner upload", error))?;
+            self.training_views = Some(SemanticTrainingViewArena::allocate(
+                &self.provider,
+                &self.domain,
+                rows,
+                objective,
+                task_identity,
+                task.content().0,
+                task.content().1,
+            )?);
+            material.contract.task_identity = task_identity;
+            material.contract.authority_generation = next_epoch;
+            material.contract.semantic_owner = self.graph.transition_arena()[1];
+            let capacities = material
+                .ranges
+                .iter()
+                .filter(|item| item.range.role != 43)
+                .map(|item| (item.range.role, item.range.index, item.capacity))
+                .collect();
+            let runtime = initial_runtime_contract_record(
+                material.contract,
+                &material.role_counts,
+                &material.terminals,
+                &material.layouts,
+                capacities,
+                &model_mode,
+                &material.model_memory,
+            )?;
+            let runtime_range = material
+                .ranges
+                .iter_mut()
+                .find(|item| item.range.role == 43 && item.range.index == 0)
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            if runtime.bytes.len() > runtime_range.capacity {
+                return Err(publication_input_error(
+                    "training arena runtime contract exceeds its retained allocation",
+                ));
+            }
+            runtime_range.bytes = runtime.bytes;
+            let plans = material
+                .ranges
+                .into_iter()
+                .map(|item| PublicationAllocationPlan {
+                    role: item.range.role,
+                    index: item.range.index,
+                    capacity: item.capacity,
+                    length: item.bytes.len(),
+                    logical_begin: item.range.logical_begin,
+                    logical_end: item.range.logical_end,
+                    payload: if matches!(item.range.role, 18..=25) {
+                        PublicationPayload::Uncomputed
+                    } else {
+                        PublicationPayload::Metadata(item.bytes)
+                    },
+                })
+                .collect::<Vec<_>>();
+            let model_payloads = material
+                .model_allocations
+                .into_iter()
+                .map(PublicationPayload::Metadata)
+                .collect::<Vec<_>>();
+            let mut instance = [0u8; 32];
+            getrandom::fill(&mut instance)
+                .map_err(|error| runtime_error("training arena instance entropy", error))?;
+            let instance = Identity256::from_bytes(instance);
+            if instance == original.instance || instance == restored.instance {
+                return Err(publication_input_error(
+                    "training arena requires a fresh instance",
+                ));
+            }
+            let (storage, uploads) = PublicationStorage::allocate(
+                &self.provider,
+                &plans,
+                material.layouts,
+                material.model_memory,
+                &model_payloads,
+                material.contract,
+                &material.terminals,
+                instance,
+            )?;
+            let mut bank = material.bank;
+            bank.header.abi = 0;
+            bank.header.instance = instance;
+            bank.header.recovered_instance = original.instance;
+            bank.header.sealed_epoch = 0;
+            bank.header.base_word = 0;
+            bank.header.publication_word = 0;
+            bank.header.semantic_owner = material.contract.semantic_owner;
+            bank.header.semantic_slot = u64::from(self.root.slot());
+            bank.header.semantic_generation = self.root.generation();
+            bank.header.neural_bank = 0;
+            bank.header.authority_generation = next_epoch;
+            self.publication = Some(Arc::new(storage));
+            self.publication_uploads = uploads;
+            self.task_epoch = next_epoch;
+            let published = self.initialize_publication(
+                bank,
+                &material.terminals,
+                &material.role_counts,
+                original.rng_binding()?,
+                5,
+            )?;
+            if published.logical_digest == original.logical_digest
+                || published.state_digest == original.state_digest
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            Ok(published)
         })();
         if result.is_err() {
             self.poisoned = true;
@@ -18854,7 +19120,7 @@ impl SemanticTransitionSession {
         terminal_tokens: &[u64],
         role_counts: &[u64; 55],
         rng: SemanticRngBinding,
-        restored: bool,
+        operation: u64,
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
         let storage = Arc::clone(
             self.publication
@@ -19000,7 +19266,7 @@ impl SemanticTransitionSession {
             &storage.control,
         )?;
         self.upload_rng_state(self.binding(), rng)?;
-        self.publication_command(if restored { 4 } else { 1 }, None)?;
+        self.publication_command(operation, None)?;
         let control = self.publication_read(storage.control.view())?[0];
         if control.refusal != 0 {
             return Err(SemanticTransitionError::PublicationRefused {
@@ -19013,7 +19279,8 @@ impl SemanticTransitionSession {
             || header.publication_word != 0
             || control.word != 0
             || header.model_geometry_digest != bank.header.model_geometry_digest
-            || (restored && header.model_numerical_digest != bank.header.model_numerical_digest)
+            || (operation != 1
+                && header.model_numerical_digest != bank.header.model_numerical_digest)
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
@@ -19301,6 +19568,33 @@ impl SemanticTransitionSession {
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
         self.checked_reader(lease)?;
         Ok(lease.identity)
+    }
+
+    /// The selected parent must still be the current native publication, and
+    /// its own sealed attempt must be a successful recompute. A later publish
+    /// invalidates this admission source; a nonpublishing refusal does not.
+    pub fn current_recompute_state_material(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<Vec<u8>, SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        let storage = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let control = self.publication_read(storage.control.view())?[0];
+        if control.abi != 1
+            || control.instance != lease.identity.instance
+            || control.word != lease.identity.word
+        {
+            return Err(publication_input_error(
+                "selected recompute is no longer the current publication",
+            ));
+        }
+        let material = self.published_state_material(lease)?;
+        PublicationMaterial::decode(&material)?.require_successful_recompute()?;
+        Ok(material)
     }
 
     /// Complete ordered role/index roster from this acquired directory, not a
@@ -29742,7 +30036,8 @@ mod text_parent_tests {
                 .collect(),
         };
         let attempt = AttemptReceipt {
-            abi: 1,
+            abi: 2,
+            transition_kind: 2,
             instance: evidence.successor.instance,
             base_word: predecessor.bank.header.publication_word,
             next_word: evidence.successor.word,
@@ -29780,6 +30075,62 @@ mod text_parent_tests {
             item.range.digest = item.original_record_digest();
         }
         evidence.successor.state_digest = evidence.state_digest().unwrap();
+    }
+
+    #[test]
+    fn selected_recompute_requires_the_current_sealed_native_attempt() {
+        let (mut selected, mut evidence) = replay_material_sample();
+        let coverage_range = selected
+            .ranges
+            .iter_mut()
+            .find(|item| item.range.role == 14)
+            .unwrap();
+        coverage_range.bytes = publication_abi_bytes(&[CompletionCoverage::default()]);
+        coverage_range.capacity = coverage_range.bytes.len();
+        coverage_range.range.length_bytes = coverage_range.bytes.len() as u64;
+        coverage_range.range.digest = coverage_range.original_record_digest();
+        let coverage = coverage_range.logical_record_digest().unwrap();
+        let attempt_range = evidence.ranges.last_mut().unwrap();
+        let mut attempt = attempt_range.attempt().unwrap();
+        attempt.coverage_digest = coverage;
+        attempt_range.bytes = publication_abi_bytes(&[attempt]);
+        seal_replay_sample(&mut evidence);
+        let previous_word = selected.bank.header.publication_word;
+        selected.bank.header.base_word = previous_word;
+        selected.bank.header.publication_word = evidence.successor.word;
+        selected.bank.header.logical_digest = evidence.successor.logical_digest;
+        selected.bank.header.state_digest = evidence.successor.state_digest;
+        selected.bank.header.terminal = 0;
+        for replacement in &evidence.ranges {
+            let original = selected
+                .ranges
+                .iter_mut()
+                .find(|item| {
+                    (item.range.role, item.range.index)
+                        == (replacement.range.role, replacement.range.index)
+                })
+                .unwrap();
+            *original = replacement.clone();
+        }
+        assert!(selected.require_successful_recompute().is_ok());
+        let attempt_range = selected
+            .ranges
+            .iter_mut()
+            .find(|item| item.range.role == 33)
+            .unwrap();
+        let original_attempt = attempt_range.bytes.clone();
+        let mut update = attempt_range.attempt().unwrap();
+        update.transition_kind = 4;
+        attempt_range.bytes = publication_abi_bytes(&[update]);
+        assert!(selected.require_successful_recompute().is_err());
+        selected
+            .ranges
+            .iter_mut()
+            .find(|item| item.range.role == 33)
+            .unwrap()
+            .bytes = original_attempt;
+        selected.bank.header.publication_word += 2;
+        assert!(selected.require_successful_recompute().is_err());
     }
 
     #[test]
