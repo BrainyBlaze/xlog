@@ -2990,7 +2990,12 @@ impl ReplayRow {
             .unbind())
     }
 
+    #[cfg(test)]
     fn parse(value: &ColdValue) -> PyResult<Self> {
+        Self::parse_with_live(value, &[])
+    }
+
+    fn parse_with_live(value: &ColdValue, live: &[LiveAuthority]) -> PyResult<Self> {
         let fields = value.fields(5)?;
         let basis = fields[0].text()?;
         if !matches!(basis, "episode" | "anchor") {
@@ -3027,7 +3032,7 @@ impl ReplayRow {
         }
         if basis == "anchor" {
             let (source, group, task_content) =
-                validate_anchor_admission(identity, &record, evidence)?;
+                validate_anchor_admission(identity, &record, evidence, live)?;
             let transported = fields[3].fields(1)?;
             let material = ReplayMaterial::parse(&transported[0], &BTreeSet::new())?;
             if material.kind != "training-view"
@@ -3242,6 +3247,7 @@ fn validate_anchor_admission(
     identity: &[ColdValue],
     record: &ReplayJsonObject,
     evidence: &[u8],
+    live: &[LiveAuthority],
 ) -> PyResult<(
     String,
     ReplayAnchorGroup,
@@ -3260,7 +3266,7 @@ fn validate_anchor_admission(
         Some("symbolic") => ReplayAnchorGroup::Symbolic,
         _ => {
             return Err(invalid(
-                "corpus anchor requires the exact language or symbolic retention group",
+                "anchor requires the exact language or symbolic retention group",
             ));
         }
     };
@@ -3270,7 +3276,7 @@ fn validate_anchor_admission(
         || base_keys.iter().any(|key| !record.contains_key(*key))
         || record.contains_key("semantic_task") != has_task_content
     {
-        return Err(invalid("corpus anchor record field set differs"));
+        return Err(invalid("anchor record field set differs"));
     }
     let task_content = if has_task_content {
         let binding = replay_json_object(replay_json_field(record, "semantic_task")?)?;
@@ -3281,7 +3287,7 @@ fn validate_anchor_admission(
         ];
         if binding.len() != keys.len() || keys.iter().any(|key| !binding.contains_key(*key)) {
             return Err(invalid(
-                "symbolic corpus anchor requires exact query, theory/program and result identities",
+                "symbolic anchor requires exact query, theory/program and result identities",
             ));
         }
         let digest = |name: &str| {
@@ -3301,31 +3307,31 @@ fn validate_anchor_admission(
     };
     if view[2].text()? != "train" {
         return Err(invalid(
-            "corpus anchor requires its admitted train partition and original retention group",
+            "anchor requires its admitted train partition and original retention group",
         ));
     }
     let text = std::str::from_utf8(evidence)
-        .map_err(|_| invalid("corpus admission evidence is not UTF-8"))?;
+        .map_err(|_| invalid("anchor admission evidence is not UTF-8"))?;
     validate_replay_json_structure(text, 0)?;
     let parts: Vec<Box<serde_json::value::RawValue>> = serde_json::from_str(text)
-        .map_err(|_| invalid("corpus anchor admission evidence requires its canonical record"))?;
+        .map_err(|_| invalid("anchor admission evidence requires its canonical record"))?;
     let expected_evidence_fields = if has_task_content { 6 } else { 3 };
     if parts.len() != expected_evidence_fields
         || replay_json_value(parts[0].get())? != "dlm-new/corpus-anchor-admission/v1"
         || parts[1].get() != replay_identity_json(&view[0])?
     {
         return Err(invalid(
-            "corpus anchor admission differs from the original manifest",
+            "anchor admission differs from the original manifest",
         ));
     }
     let entry = replay_json_value(parts[2].get())?;
     let entry = entry
         .as_array()
         .filter(|entry| entry.len() == 10)
-        .ok_or_else(|| invalid("corpus anchor admission requires the complete manifest entry"))?;
+        .ok_or_else(|| invalid("anchor admission requires the complete manifest entry"))?;
     if entry[0] != view[1].text()? || entry[1] != "train" {
         return Err(invalid(
-            "corpus anchor admission names another example or partition",
+            "anchor admission names another example or partition",
         ));
     }
     for index in [2, 3, 4] {
@@ -3337,23 +3343,58 @@ fn validate_anchor_admission(
     }
     let provenance = entry[7]
         .as_array()
-        .filter(|parts| parts.len() == 11)
-        .ok_or_else(|| invalid("corpus anchor requires its complete original corpus provenance"))?;
+        .ok_or_else(|| invalid("anchor requires its complete original provenance"))?;
     let admission = entry[8]
         .as_array()
         .filter(|parts| parts.len() == 3)
-        .ok_or_else(|| invalid("corpus anchor requires its original admission decision"))?;
-    if provenance[0] != "corpus"
-        || admission[0] != "corpus"
-        || admission[2] != "corpus"
-        || !provenance[8]
-            .as_array()
-            .is_some_and(|uses| uses.iter().any(|use_| use_ == "training"))
-        || !admission[1]
-            .as_array()
-            .is_some_and(|splits| splits.iter().any(|split| split == "train"))
-    {
-        return Err(invalid("corpus anchor has no train-only corpus admission"));
+        .ok_or_else(|| invalid("anchor requires its original admission decision"))?;
+    let admits_train = admission[1]
+        .as_array()
+        .is_some_and(|splits| splits.iter().any(|split| split == "train"));
+    match provenance.first().and_then(serde_json::Value::as_str) {
+        Some("corpus") => {
+            if provenance.len() != 11
+                || admission[0] != "corpus"
+                || admission[2] != "corpus"
+                || !admits_train
+                || !provenance[8]
+                    .as_array()
+                    .is_some_and(|uses| uses.iter().any(|use_| use_ == "training"))
+            {
+                return Err(invalid("corpus anchor has no train-only corpus admission"));
+            }
+        }
+        Some("live") => {
+            if provenance.len() != 16
+                || admission[0] != "live"
+                || admission[2] != "cross-request"
+                || !admits_train
+                || !provenance[8].as_array().is_some_and(|uses| {
+                    uses.iter().any(|use_| use_ == "durable-slow-consolidation")
+                })
+                || provenance[13] != true
+                || provenance[14] != true
+            {
+                return Err(invalid("live anchor lacks durable train admission"));
+            }
+            let mut matched = false;
+            for authority in live {
+                if replay_json_value(&replay_identity_json(&authority.canonical)?)? == entry[7] {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return Err(invalid(
+                    "live anchor provenance differs from every bound live authority",
+                ));
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "anchor provenance has no admitted corpus or live branch",
+            ))
+        }
     }
     if let Some(binding) = task_content {
         for (part, expected) in
@@ -3400,43 +3441,21 @@ fn validate_replay_training_payload(
         .bytes
         .as_deref()
         .ok_or_else(|| invalid("training view requires its original bytes"))?;
-    let mut tag = [0u8; 32];
-    let schema = b"dlm-new/training-view/v1";
-    tag[..schema.len()].copy_from_slice(schema);
-    if bytes.len() < 136
-        || bytes[..32] != tag
-        || bytes[32..64] != *replay_digest_identity(identity[1].text()?)?.as_bytes()
+    let layout = xlog_cuda::validate_training_view_layout(bytes).map_err(xlog_err)?;
+    if bytes[32..64] != *replay_digest_identity(identity[1].text()?)?.as_bytes()
         || bytes[64..96] != *replay_digest_identity(source)?.as_bytes()
     {
         return Err(invalid(
             "training-view header differs from its original identity or source",
         ));
     }
-    let word = |offset: usize| {
-        u64::from_le_bytes(
-            bytes[offset..offset + 8]
-                .try_into()
-                .expect("bounded training-view word"),
-        )
-    };
-    let window = usize::try_from(word(96))
-        .map_err(|_| invalid("training-view window exceeds host address space"))?;
+    let window = layout.window;
     let length = identity[3].unsigned()?;
     let block = identity[4].unsigned()?;
-    let answer_start = word(128);
-    let expected = window
-        .checked_mul(68)
-        .and_then(|size| size.checked_add(136 + (window % 2) * 4));
-    if window == 0
-        || length == 0
-        || block == 0
-        || word(104) != length
-        || word(112) != block
-        || word(120) > length
-        || answer_start == 0
-        || answer_start > length
+    let answer_start = layout.answer_start;
+    if layout.source_length != length
+        || layout.block_size != block
         || (require_retention && answer_start == length)
-        || expected != Some(bytes.len())
         || length
             .checked_mul(2)
             .is_none_or(|extent| extent > window as u64)
@@ -3445,13 +3464,24 @@ fn validate_replay_training_payload(
             "training-view byte extent or dimensions differ from its original row",
         ));
     }
-    let padding = 136 + window * 20;
-    if bytes[padding..padding + (window % 2) * 4]
-        .iter()
-        .any(|&value| value != 0)
-    {
-        return Err(invalid("training-view alignment padding is not canonical"));
-    }
+    let token_ids = 264;
+    let mask_labels = token_ids + window * 8;
+    let mask_weights = mask_labels + window * 8;
+    let ar_labels = mask_weights + window * 4 + (window % 2) * 4;
+    let retention = ar_labels + window * 8;
+    let branch_labels = retention + window * 8;
+    let branch_ids = branch_labels + window * 8;
+    let source_slots = branch_ids + window * 8;
+    let positions = source_slots + window * 8;
+    let kinds = positions + window * 8;
+    let parents = kinds + window * 8;
+    let signed = |offset: usize| {
+        i64::from_le_bytes(
+            bytes[offset..offset + 8]
+                .try_into()
+                .expect("bounded training-view element"),
+        )
+    };
     let mut targets = BTreeSet::new();
     let mut previous = None;
     for target in identity[5].sequence()? {
@@ -3469,10 +3499,9 @@ fn validate_replay_training_payload(
         previous = Some(position);
         targets.insert(target[2].unsigned()? as usize);
     }
-    let retention = padding + (window % 2) * 4 + window * 8;
     for slot in 0..window {
-        let label = word(136 + window * 8 + slot * 8) as i64;
-        let offset = 136 + window * 16 + slot * 4;
+        let label = signed(mask_labels + slot * 8);
+        let offset = mask_weights + slot * 4;
         let weight = f32::from_le_bytes(
             bytes[offset..offset + 4]
                 .try_into()
@@ -3489,11 +3518,15 @@ fn validate_replay_training_payload(
                 "training-view MASK supervision contains an undeclared target",
             ));
         }
+        let autoregressive = signed(ar_labels + slot * 8);
+        if autoregressive < 0 && autoregressive != -100 {
+            return Err(invalid("training-view autoregressive label is not a token"));
+        }
         // Retention reads the original causal memory predictor, not the
         // permuted prediction stream or a newly drawn subset of MASK rows.
         let next = slot as u64 + 1;
         let expected_label = if next >= answer_start && next < length {
-            let token = word(136 + (slot + 1) * 8) as i64;
+            let token = signed(token_ids + (slot + 1) * 8);
             if token < 0 {
                 return Err(invalid("training-view retention target is not a token"));
             }
@@ -3501,9 +3534,171 @@ fn validate_replay_training_payload(
         } else {
             -100
         };
-        if word(retention + slot * 8) as i64 != expected_label {
+        if signed(retention + slot * 8) != expected_label {
             return Err(invalid(
                 "training-view retention labels differ from the original answer projection",
+            ));
+        }
+    }
+    let mut nodes_by_source_slot = vec![None; window];
+    for node in 0..window {
+        let source_slot = usize::try_from(signed(source_slots + node * 8))
+            .map_err(|_| invalid("training-view topology has a negative source slot"))?;
+        if source_slot >= window || nodes_by_source_slot[source_slot].replace(node).is_some() {
+            return Err(invalid(
+                "training-view topology source slots are not a permutation",
+            ));
+        }
+        let kind = signed(kinds + node * 8);
+        let position = signed(positions + node * 8);
+        let parent = signed(parents + node * 8);
+        if kind == 0 {
+            if position != 0 || parent != -2 {
+                return Err(invalid(
+                    "training-view inactive topology node is not canonical",
+                ));
+            }
+        } else if !matches!(kind, 2 | 4 | 5)
+            || position < 0
+            || position as u64 >= window as u64
+            || parent < -1
+            || parent >= window as i64
+            || parent == node as i64
+        {
+            return Err(invalid("training-view active topology node is invalid"));
+        }
+    }
+    let source_length = length as usize;
+    for node in 0..source_length {
+        let expected_parent = if node == 0 { -1 } else { node as i64 - 1 };
+        if signed(source_slots + node * 8) != node as i64
+            || signed(positions + node * 8) != node as i64
+            || signed(kinds + node * 8) != 4
+            || signed(parents + node * 8) != expected_parent
+        {
+            return Err(invalid(
+                "training-view memory topology differs from its source",
+            ));
+        }
+    }
+    let block_size = usize::try_from(block)
+        .map_err(|_| invalid("training-view block size exceeds host address space"))?;
+    let mut physical = source_length;
+    for block_start in (0..source_length).step_by(block_size) {
+        let block_end = block_start.saturating_add(block_size).min(source_length);
+        let first_in_block = physical;
+        for masked in [false, true] {
+            for position in block_start..block_end {
+                let source_slot = source_length + position;
+                if targets.contains(&source_slot) != masked {
+                    continue;
+                }
+                let expected_parent = if physical == first_in_block {
+                    if block_start == 0 {
+                        -1
+                    } else {
+                        block_start as i64 - 1
+                    }
+                } else {
+                    physical as i64 - 1
+                };
+                if signed(source_slots + physical * 8) != source_slot as i64
+                    || signed(positions + physical * 8) != position as i64
+                    || signed(kinds + physical * 8) != if masked { 2 } else { 5 }
+                    || signed(parents + physical * 8) != expected_parent
+                {
+                    return Err(invalid(
+                        "training-view prediction topology differs from its source",
+                    ));
+                }
+                physical += 1;
+            }
+        }
+    }
+    if physical != source_length * 2 {
+        return Err(invalid("training-view prediction topology is incomplete"));
+    }
+    if layout.branch_words[0] != 0 {
+        let shared_context_end = layout.branch_words[0] as usize;
+        for branch in 0..3 {
+            let offset = 1 + branch * 5;
+            let tail_begin = layout.branch_words[offset] as usize;
+            let answer_end = layout.branch_words[offset + 3] as usize;
+            for source_slot in tail_begin..answer_end {
+                let expected_parent = if source_slot == tail_begin {
+                    shared_context_end as i64 - 1
+                } else {
+                    physical as i64 - 1
+                };
+                let expected_position = shared_context_end + source_slot - tail_begin;
+                if signed(source_slots + physical * 8) != source_slot as i64
+                    || signed(positions + physical * 8) != expected_position as i64
+                    || signed(kinds + physical * 8) != 5
+                    || signed(parents + physical * 8) != expected_parent
+                {
+                    return Err(invalid(
+                        "training-view branch topology differs from its source",
+                    ));
+                }
+                physical += 1;
+            }
+        }
+    }
+    for node in physical..window {
+        if signed(source_slots + node * 8) != node as i64
+            || signed(positions + node * 8) != 0
+            || signed(kinds + node * 8) != 0
+            || signed(parents + node * 8) != -2
+        {
+            return Err(invalid(
+                "training-view inactive topology node is not canonical",
+            ));
+        }
+    }
+    let mut expected_branches = vec![None; window];
+    if layout.branch_words[0] != 0 {
+        for branch in 0..3 {
+            let offset = 1 + branch * 5;
+            let answer_begin = layout.branch_words[offset + 2];
+            let answer_end = layout.branch_words[offset + 3];
+            let logical_start = layout.branch_words[offset + 4];
+            for index in 0..(answer_end - answer_begin) {
+                let source_slot = (answer_begin + index) as usize;
+                let node =
+                    nodes_by_source_slot[source_slot].expect("validated source-slot permutation");
+                let parent = signed(parents + node * 8);
+                let answer_position = logical_start + index;
+                if signed(kinds + node * 8) != 5
+                    || signed(positions + node * 8) != answer_position as i64
+                    || parent < 0
+                    || signed(positions + parent as usize * 8) != answer_position as i64 - 1
+                {
+                    return Err(invalid(
+                        "training-view branch answer lacks its original causal parent",
+                    ));
+                }
+                let predictor = signed(source_slots + parent as usize * 8) as usize;
+                let token = signed(token_ids + source_slot * 8);
+                if token < 0
+                    || expected_branches[predictor]
+                        .replace((token, branch as i64))
+                        .is_some()
+                {
+                    return Err(invalid(
+                        "training-view branch target is absent or duplicated",
+                    ));
+                }
+            }
+        }
+    }
+    for (slot, expected) in expected_branches.into_iter().enumerate() {
+        let actual = (
+            signed(branch_labels + slot * 8),
+            signed(branch_ids + slot * 8),
+        );
+        if actual != expected.unwrap_or((-100, -1)) {
+            return Err(invalid(
+                "training-view branch supervision differs from its declared topology",
             ));
         }
     }
@@ -3787,6 +3982,32 @@ struct TaskAuthority {
     corpus_sources: BTreeSet<String>,
 }
 
+fn parse_live_authorities(value: &ColdValue, scope: &[String]) -> PyResult<Vec<LiveAuthority>> {
+    value
+        .sequence()?
+        .iter()
+        .map(|value| {
+            let fields = value.fields(2)?;
+            validate_live(&fields[0], scope)?;
+            Ok(LiveAuthority {
+                canonical: fields[0].clone(),
+                retention_micros: fields[1].signed()?,
+            })
+        })
+        .collect()
+}
+
+fn parse_replay_rows_with_live(
+    value: &ColdValue,
+    live: &[LiveAuthority],
+) -> PyResult<Vec<ReplayRow>> {
+    value
+        .sequence()?
+        .iter()
+        .map(|value| ReplayRow::parse_with_live(value, live))
+        .collect()
+}
+
 impl TaskAuthority {
     fn parse(values: &[ColdValue]) -> PyResult<Self> {
         if values.len() != 10 {
@@ -3796,18 +4017,7 @@ impl TaskAuthority {
         if scope.len() != 5 {
             return Err(invalid("task_scope must contain five explicit fields"));
         }
-        let live = values[2]
-            .sequence()?
-            .iter()
-            .map(|value| {
-                let fields = value.fields(2)?;
-                validate_live(&fields[0], &scope)?;
-                Ok(LiveAuthority {
-                    canonical: fields[0].clone(),
-                    retention_micros: fields[1].signed()?,
-                })
-            })
-            .collect::<PyResult<Vec<_>>>()?;
+        let live = parse_live_authorities(&values[2], &scope)?;
         let mut dependencies = Vec::new();
         for value in values[4].sequence()? {
             let fields = value.fields(7)?;
@@ -3853,17 +4063,14 @@ impl TaskAuthority {
                 .map(|value| ResolvedGrant::parse(value, training))
                 .collect::<PyResult<Vec<_>>>()
         };
+        let replay = parse_replay_rows_with_live(&values[3], &live)?;
         let result = Self {
             canonical: ColdValue::Sequence(values.to_vec()).canonical_bytes(),
             task_ref: values[0].text()?.to_owned(),
             priority_levels: task_priority_levels(&values[9])?,
             scope,
             live,
-            replay: values[3]
-                .sequence()?
-                .iter()
-                .map(ReplayRow::parse)
-                .collect::<PyResult<_>>()?,
+            replay,
             dependencies,
             feedback_roots: values[5].strings()?,
             publication: grants(&values[6], false)?,
@@ -10440,15 +10647,17 @@ impl PySemanticTransitionController {
     }
 
     /// Inspect cold native observation coverage before constructing the task's
-    /// authority graph. The replay transport, exact selection and byte limits
-    /// are identical to import_task; no replay is executed or restored here.
+    /// authority graph. The scope and live authorities are the same original
+    /// inputs later supplied to import_task; the replay transport, exact
+    /// selection and byte limits are also identical. No replay is executed or
+    /// restored here, and import_task independently checks current authority.
     /// Returns (root_digest, root_extents, query_records, contributors), where
     /// each contributor is (query_ordinal, original_target_or_None, original_support).
     /// These are original admission coordinates, not learned features, current
     /// device receipts or use grants. A derived target remains None even when
     /// its value equals an admitted query. import_task independently recomputes
     /// this coverage and requires original targets before issuing its TaskUse.
-    #[pyo3(signature = (*, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, actor_eligible, replay_rows, replay_selection, max_material_bytes, max_total_material_bytes, max_evidence_bytes))]
+    #[pyo3(signature = (*, task_scope, live_authorities, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, actor_eligible, replay_rows, replay_selection, max_material_bytes, max_total_material_bytes, max_evidence_bytes))]
     #[expect(
         clippy::too_many_arguments,
         reason = "observation coverage retains every independent task and replay input"
@@ -10456,6 +10665,8 @@ impl PySemanticTransitionController {
     fn task_observation_roots(
         &self,
         py: Python<'_>,
+        task_scope: &Bound<'_, PyAny>,
+        live_authorities: &Bound<'_, PyAny>,
         statement_records: &Bound<'_, PyAny>,
         allowed_support_records: &Bound<'_, PyAny>,
         task_program_source: &Bound<'_, PyAny>,
@@ -10471,6 +10682,12 @@ impl PySemanticTransitionController {
     ) -> PyResult<Py<PyTuple>> {
         self.session.borrow(py).require_creator()?;
         let mut budget = 16 * 1024 * 1024;
+        let scope = ColdValue::read(task_scope, &mut budget, 0)?.strings()?;
+        if scope.len() != 5 {
+            return Err(invalid("task_scope must contain five explicit fields"));
+        }
+        let live =
+            parse_live_authorities(&ColdValue::read(live_authorities, &mut budget, 0)?, &scope)?;
         let [material_limit, total_material_limit, evidence_limit] = read_task_replay_limits(
             max_material_bytes,
             max_total_material_bytes,
@@ -10494,11 +10711,7 @@ impl PySemanticTransitionController {
             total_material_limit,
             evidence_limit,
         )?;
-        let rows = rows
-            .sequence()?
-            .iter()
-            .map(ReplayRow::parse)
-            .collect::<PyResult<Vec<_>>>()?;
+        let rows = parse_replay_rows_with_live(&rows, &live)?;
         let (_, selected) =
             decode_selected_replay(&rows, &ColdValue::read(replay_selection, &mut budget, 0)?)?;
         let session = self.session.borrow(py);
@@ -13104,9 +13317,9 @@ fn parse_admission(
 mod tests {
     use super::{
         initial_source_parts, object_sequence, parse_admission, parse_text_slots, read_replay_rows,
-        select_replay_row, AuthoritySnapshot, ColdValue, FeedbackSchema, PredicateInput,
-        RecordInput, ReplayBasis, ReplayRow, SupportInput, TaskAuthority, TaskUsePhase,
-        TaskUseState,
+        replay_hash, select_replay_row, validate_replay_training_payload, AuthoritySnapshot,
+        ColdValue, FeedbackSchema, PredicateInput, RecordInput, ReplayBasis, ReplayRow,
+        SupportInput, TaskAuthority, TaskUsePhase, TaskUseState,
     };
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyTuple};
@@ -13851,13 +14064,15 @@ def replay_fixture(split='request-local-replay'):
             invocation['entry_boundary_identity'], invocation['numerical_realization_identity']]) if name == 'logits_identity' else None
         add(invocation[name], kind, reconstruction)
     add(hid('provenance'), 'provenance')
-    training = (b'dlm-new/training-view/v1'.ljust(32, b'\0') + bytes.fromhex(identity_digest)
+    training = (b'dlm-new/training-view/v2'.ljust(32, b'\0') + bytes.fromhex(identity_digest)
         + bytes.fromhex(invocation['source_tokens_identity']) + struct.pack('<5Q', 8, 4, 2, 0, 4)
+        + struct.pack('<16Q', *([0]*16))
         + struct.pack('<8q', *range(8)) + struct.pack('<8q', -100, -100, -100, -100, -100, 3, -100, -100)
         + struct.pack('<8f', 0, 0, 0, 0, 0, 1, 0, 0) + struct.pack('<8q', *([-100]*8))
         + struct.pack('<8q', *([-100]*8))
+        + struct.pack('<8q', *([-100]*8)) + struct.pack('<8q', *([-1]*8))
         + struct.pack('<8q', *range(8)) + struct.pack('<8q', 0, 1, 2, 3, 0, 1, 2, 3)
-        + struct.pack('<8q', 4, 4, 4, 4, 5, 2, 5, 5) + struct.pack('<8q', -1, 0, 1, 2, -1, 4, 5, 6))
+        + struct.pack('<8q', 4, 4, 4, 4, 5, 2, 5, 5) + struct.pack('<8q', -1, 0, 1, 2, -1, 4, 1, 6))
     materials.append((dict(identity=digest(training), kind='training-view',
         bytes_sha256=digest(training), reconstruction=None), training))
     envelope = dict(neural_generation=invocation['model_generation'], provenance_identity=hid('provenance'),
@@ -14001,6 +14216,185 @@ row[2] = canonical(episode)
                 "{mutation}"
             );
         }
+    }
+
+    const LIVE_ANCHOR_INPUT: &str = r#"
+digest = lambda value: hashlib.sha256(value).hexdigest()
+hid = lambda text: digest(text.encode())
+canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':'))
+names = ('data_manifest_hash', 'example_id', 'final_split', 'tokenizer_hash',
+         'tokenizer_revision', 'mask_policy_hash', 'training_seed', 'epoch_index', 'variant_index')
+envelope[8] = ['durable-slow-consolidation']
+envelope[13] = True
+envelope[14] = True
+episode = replay_fixture('train')
+view, view_digest, _, length, block, targets = episode[1]
+normalized = hid('normalized-record')
+reference, training = episode[3][-1]
+training = training[:64] + bytes.fromhex(normalized) + training[96:]
+training = bytearray(training)
+struct.pack_into('<Q', training, 128, 2)
+retention_offset = 264 + 8*8 + 8*8 + 8*4 + 8*8
+struct.pack_into('<q', training, retention_offset + 8, 2)
+struct.pack_into('<q', training, retention_offset + 16, 3)
+training = bytes(training)
+training_digest = digest(training)
+record = dict(example_id='sample', group='language', training_view=dict(zip(names, view)),
+              training_view_identity=training_digest)
+record['content_sha256'] = digest(canonical(['dlm-new/corpus-anchor/v1', record]).encode())
+entry = ['sample', 'train', hid('acquired'), hid('transformation'), normalized,
+         'decontamination', [], envelope, ['live', ['train', 'dev'], 'cross-request'], None]
+evidence = canonical(['dlm-new/corpus-anchor-admission/v1', view[0], entry]).encode()
+anchor = ('anchor', (view, view_digest, record['content_sha256'], length, block, targets),
+          canonical(record), ((dict(identity=training_digest, kind='training-view',
+                                   bytes_sha256=training_digest, reconstruction=None), training),), evidence)
+inputs = (*inputs[:3], (anchor,), *inputs[4:8],
+          (grant('training')+('durable-slow-consolidation',),), inputs[9])
+"#;
+
+    #[test]
+    fn live_anchor_requires_its_exact_current_durable_authority() {
+        let (values, snapshot) = task_inputs(LIVE_ANCHOR_INPUT);
+        let authority = TaskAuthority::parse(&values).unwrap();
+        authority.check_snapshot(&snapshot).unwrap();
+        authority.check_use("training", &snapshot, true).unwrap();
+        assert!(matches!(
+            authority.replay[0].basis,
+            ReplayBasis::CorpusAnchor { .. }
+        ));
+
+        for mutation in [
+            "entry[7] = [envelope[0], 'other-envelope', *envelope[2:]]",
+            "entry[8] = ['live', ['train'], 'request']",
+            "envelope[8] = ['current-request-fast-adaptation']",
+            "envelope[13] = False",
+            "envelope[14] = False",
+        ] {
+            let changed = format!(
+                "{LIVE_ANCHOR_INPUT}\n{mutation}\nevidence = canonical(['dlm-new/corpus-anchor-admission/v1', view[0], entry]).encode()\nanchor = (*anchor[:4], evidence)\ninputs = (*inputs[:3], (anchor,), *inputs[4:])"
+            );
+            let (values, _) = task_inputs(&changed);
+            assert!(TaskAuthority::parse(&values).is_err(), "{mutation}");
+        }
+    }
+
+    #[test]
+    fn training_view_rejects_legacy_schema_and_detached_v2_arrays() {
+        let rows = replay_transport("", 1 << 20, 1024).unwrap();
+        let row = ReplayRow::parse(&rows.sequence().unwrap()[0]).unwrap();
+        let identity = row.identity.fields(6).unwrap();
+        let source = replay_hash(b"source_tokens_identity");
+        let original = row
+            .materials
+            .iter()
+            .find(|material| material.kind == "training-view")
+            .unwrap();
+        for (name, mutate) in [
+            ("legacy schema", (0, 0_i64)),
+            ("orphan branch span", (144, 1)),
+            ("undeclared branch label", (552, 1)),
+            ("duplicate source slot", (688, 0)),
+            ("invalid topology parent", (912, 99)),
+            ("wrong prediction parent", (920, 5)),
+            ("missing MASK target", (368, -100)),
+            ("invented retention target", (488, 1)),
+        ] {
+            let mut bytes = original.bytes.as_deref().unwrap().to_vec();
+            if name == "legacy schema" {
+                bytes[..32].fill(0);
+                let tag = b"dlm-new/training-view/v1";
+                bytes[..tag.len()].copy_from_slice(tag);
+            } else {
+                bytes[mutate.0..mutate.0 + 8].copy_from_slice(&mutate.1.to_le_bytes());
+            }
+            let mut material = original.clone();
+            material.identity = replay_hash(&bytes);
+            material.bytes_sha256 = Some(material.identity.clone());
+            material.bytes = Some(Arc::from(bytes));
+            assert!(
+                validate_replay_training_payload(&material, identity, &source, false).is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn training_view_preserves_three_declared_branch_answers_and_inactive_rows() {
+        let rows = replay_transport("", 1 << 20, 1024).unwrap();
+        let row = ReplayRow::parse(&rows.sequence().unwrap()[0]).unwrap();
+        let identity = row.identity.fields(6).unwrap();
+        let source = replay_hash(b"source_tokens_identity");
+        let original = row
+            .materials
+            .iter()
+            .find(|material| material.kind == "training-view")
+            .unwrap();
+        let mut bytes = vec![0u8; 264];
+        bytes[..136].copy_from_slice(&original.bytes.as_deref().unwrap()[..136]);
+        bytes[96..104].copy_from_slice(&16u64.to_le_bytes());
+        let branches: [u64; 16] = [2, 8, 9, 9, 10, 3, 10, 11, 11, 12, 3, 12, 13, 13, 14, 3];
+        for (index, word) in branches.into_iter().enumerate() {
+            bytes[136 + index * 8..144 + index * 8].copy_from_slice(&word.to_le_bytes());
+        }
+        fn append(bytes: &mut Vec<u8>, values: &[i64]) {
+            for &value in values {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        append(
+            &mut bytes,
+            &[0, 1, 2, 3, 0, 1, 2, 3, 20, 21, 22, 23, 24, 25, 0, 0],
+        );
+        append(
+            &mut bytes,
+            &[
+                -100, -100, -100, -100, -100, 1, -100, -100, -100, -100, -100, -100, -100, -100,
+                -100, -100,
+            ],
+        );
+        for index in 0..16 {
+            bytes.extend_from_slice(&(if index == 5 { 1.0f32 } else { 0.0f32 }).to_le_bytes());
+        }
+        append(&mut bytes, &[-100; 16]);
+        append(&mut bytes, &[-100; 16]);
+        append(
+            &mut bytes,
+            &[
+                -100, -100, -100, -100, -100, -100, -100, -100, 21, -100, 23, -100, 25, -100, -100,
+                -100,
+            ],
+        );
+        append(
+            &mut bytes,
+            &[-1, -1, -1, -1, -1, -1, -1, -1, 0, -1, 1, -1, 2, -1, -1, -1],
+        );
+        append(&mut bytes, &(0..16).collect::<Vec<_>>());
+        append(
+            &mut bytes,
+            &[0, 1, 2, 3, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3, 0, 0],
+        );
+        append(
+            &mut bytes,
+            &[4, 4, 4, 4, 5, 2, 5, 5, 5, 5, 5, 5, 5, 5, 0, 0],
+        );
+        append(
+            &mut bytes,
+            &[-1, 0, 1, 2, -1, 4, 1, 6, 1, 8, 1, 10, 1, 12, -2, -2],
+        );
+        let mut material = original.clone();
+        material.identity = replay_hash(&bytes);
+        material.bytes_sha256 = Some(material.identity.clone());
+        material.bytes = Some(Arc::from(bytes));
+        validate_replay_training_payload(&material, identity, &source, false).unwrap();
+
+        let mut detached = material.clone();
+        let mut bytes = detached.bytes.as_deref().unwrap().to_vec();
+        let branch_parent = 264 + 16 * 76 + 9 * 8;
+        bytes[branch_parent..branch_parent + 8].copy_from_slice(&0i64.to_le_bytes());
+        detached.identity = replay_hash(&bytes);
+        detached.bytes_sha256 = Some(detached.identity.clone());
+        detached.bytes = Some(Arc::from(bytes));
+        assert!(validate_replay_training_payload(&detached, identity, &source, false).is_err());
     }
 
     #[test]
