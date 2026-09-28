@@ -127,7 +127,11 @@ argument or built-in task. Source, selected queries, observed results, scoring,
 ordered priorities, masks, and actor eligibility become part of the task identity
 checked during restoration. The imported `TaskUse.task_priority_levels()` returns
 the exact native order before Proposal; completed `task_ground.priority_levels`
-returns the same record after execution. For each goal the native truth match is
+returns the same record after execution. `TaskUse.semantic_goal_root()` returns
+the existing bound 32-byte native goal root after import and before Proposal;
+completed task ground retains that exact root. The read requires the creator
+thread and current issued task use, and does not recompute the goal or grant
+execution authority. For each goal the native truth match is
 normalized to zero or one. Selection compares weighted progress against the
 acquired base of the current step, level by level; forbidden truth statuses
 exclude a candidate before ranking. Predictive query agreement, lower measured

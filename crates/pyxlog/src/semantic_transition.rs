@@ -9657,6 +9657,21 @@ impl PySemanticTransitionTaskUse {
         Ok(task_content_read(py, (identity, truth)))
     }
 
+    /// Return the bound native semantic goal root before any Proposal. This
+    /// 32-byte root is the same one retained in completed task ground; reading
+    /// it neither recomputes the goal nor grants execution authority.
+    fn semantic_goal_root(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
+        self.session.borrow(py).require_creator()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        self.state()?.require_public_use()?;
+        let root = owner
+            .task_semantic_goal_root()
+            .ok_or_else(|| invalid("native task goal witness is absent"))?;
+        Ok(PyBytes::new(py, root.as_bytes()).unbind())
+    }
+
     /// Ordered task-local levels from the same native bank used by selection.
     /// Each level is an ordered tuple of (query ordinal, truth code, weight)
     /// goals. The truth-match score is zero or one; progress subtracts the

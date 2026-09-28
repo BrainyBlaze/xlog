@@ -21557,6 +21557,14 @@ impl SemanticTransitionSession {
         self.task.as_ref().map(|(binding, _)| binding.content())
     }
 
+    /// Semantic root of the validated goal witness bound to the current task.
+    /// This is the same root retained in its completed task ground.
+    pub fn task_semantic_goal_root(&self) -> Option<Identity256> {
+        self.task
+            .as_ref()
+            .and_then(|(binding, _)| binding.goal_witness.map(|goal| goal.semantic_root))
+    }
+
     /// Ordered priority levels from the same immutable native task binding
     /// consumed by the device selector and later completed task ground.
     pub fn task_priority_levels(&self) -> Option<&[SemanticTaskPriorityLevel]> {
