@@ -160,19 +160,32 @@ rewritten record is required.
 
 The transported material pairs retain the original ordered references and exact
 bytes (or an explicitly declared reconstruction). The training-view material
-contains the producer's 136-byte header, explicit answer boundary, MASK and
-autoregressive supervision, causal-memory retention labels and forest geometry.
-Its bytes, dimensions and target coordinates are bound to the original row.
+uses the producer's `training-view/v2` bytes; the older v1 layout is not
+accepted or converted. Its 264-byte header binds identity, source, dimensions,
+answer boundary and three declared branch spans (all zero without branches).
+The row then contains token IDs, MASK labels and weights, autoregressive and
+causal-memory retention labels, branch labels and IDs, and the forest's source
+slots, logical positions, kinds and parents. The original bytes, dimensions,
+target coordinates and branch supervision are checked before device selection.
 
 An episode requires authentic native execution evidence. An anchor instead
-retains its corpus admission evidence and retention group; it cannot be selected
-as native execution replay or confer actor credit. Its record contains exactly
-`example_id`, `group`, `training_view`, `training_view_identity` and
-`content_sha256`; corpus admission and training geometry do not carry an
-invocation's model generation. Neither carrier integrity nor
-corpus admission replaces the trusted application's fresh use permissions.
-Importing this carrier does not establish that device-side training, Update
-publication or restoration has completed.
+retains the original admission evidence and retention group; it cannot be
+selected as native execution replay or confer actor credit. Its record contains
+exactly `example_id`, `group`, `training_view`, `training_view_identity` and
+`content_sha256` (plus the three task-content identities for a symbolic anchor).
+An admitted live anchor must carry the exact envelope supplied in
+`live_authorities`, the train partition, the durable-slow-consolidation purpose,
+and both cross-request reuse and durable-checkpoint rights. The current snapshot
+checks expiry and revocation on import and subsequent use. Corpus and live
+anchors use the same row owner and wire domain; neither gains an invocation's
+model generation. Carrier integrity and admission do not replace the trusted
+application’s fresh use permissions. Importing a carrier does not establish that
+device-side training, Update publication or restoration has completed.
+
+`task_observation_roots` requires the same `task_scope` and `live_authorities`
+that will be passed to `import_task`. It binds a live anchor to that original
+authority before computing coverage; `import_task` still independently checks
+the current snapshot and use rights.
 
 During proposal replay, the native importer owns final use of its original
 policy invocation. It schedules native finalization before asking the Runtime to

@@ -31,6 +31,17 @@ const TRAINING_VIEW_ROW_BYTES: usize = 84;
 const PROPOSAL_TRANSITION: u64 = 1;
 pub const SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI: u64 = 3;
 
+/// Validated geometry of the bytes consumed by native training-view selection.
+#[derive(Clone, Copy, Debug)]
+pub struct SemanticTrainingViewLayout {
+    pub window: usize,
+    pub source_length: u64,
+    pub block_size: u64,
+    pub prefix_extent: u64,
+    pub answer_start: u64,
+    pub branch_words: [u64; 16],
+}
+
 /// Origin of one authentic replay training view.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1520,12 +1531,10 @@ fn canary_identity(
     Identity256::from_bytes(hasher.finalize().into())
 }
 
-fn validate_row(
-    ordinal: usize,
-    row: &SemanticTrainingViewRow,
-    raw_offset: usize,
-) -> Result<TrainingViewRowDescriptor, SemanticTransitionError> {
-    let bytes = &row.bytes;
+/// Check the original v2 byte layout before either cold admission or device allocation.
+pub fn validate_training_view_layout(
+    bytes: &[u8],
+) -> Result<SemanticTrainingViewLayout, SemanticTransitionError> {
     let mut schema = [0u8; 32];
     let tag = b"dlm-new/training-view/v2";
     schema[..tag.len()].copy_from_slice(tag);
@@ -1536,7 +1545,7 @@ fn validate_row(
         u64::from_le_bytes(
             bytes[offset..offset + 8]
                 .try_into()
-                .expect("bounded header"),
+                .expect("bounded training-view header"),
         )
     };
     let window = usize::try_from(word(96))
@@ -1552,15 +1561,15 @@ fn validate_row(
         || word(128) == 0
         || word(128) > word(104)
         || expected != Some(bytes.len())
-        || !raw_offset.is_multiple_of(8)
     {
         return Err(input_error(
             "training-view row has invalid extent or geometry",
         ));
     }
-    let shared_context_end = word(136);
+    let branch_words = std::array::from_fn(|index| word(136 + index * 8));
+    let shared_context_end = branch_words[0];
     if shared_context_end == 0 {
-        if (1..16).any(|index| word(136 + index * 8) != 0) {
+        if branch_words[1..].iter().any(|&value| value != 0) {
             return Err(input_error(
                 "training-view row has incomplete branch geometry",
             ));
@@ -1573,12 +1582,11 @@ fn validate_row(
             return Err(input_error("training-view row has invalid branch geometry"));
         }
         for branch in 0..3 {
-            let offset = 144 + branch * 40;
-            let tail_begin = word(offset);
-            let tail_end = word(offset + 8);
-            let answer_begin = word(offset + 16);
-            let answer_end = word(offset + 24);
-            let answer_start = word(offset + 32);
+            let offset = 1 + branch * 5;
+            let [tail_begin, tail_end, answer_begin, answer_end, answer_start] = branch_words
+                [offset..offset + 5]
+                .try_into()
+                .expect("bounded branch words");
             if tail_begin != next_begin
                 || tail_end <= tail_begin
                 || answer_begin != tail_end
@@ -1602,6 +1610,26 @@ fn validate_row(
         return Err(input_error(
             "training-view row has noncanonical alignment padding",
         ));
+    }
+    Ok(SemanticTrainingViewLayout {
+        window,
+        source_length: word(104),
+        block_size: word(112),
+        prefix_extent: word(120),
+        answer_start: word(128),
+        branch_words,
+    })
+}
+
+fn validate_row(
+    ordinal: usize,
+    row: &SemanticTrainingViewRow,
+    raw_offset: usize,
+) -> Result<TrainingViewRowDescriptor, SemanticTransitionError> {
+    let bytes = &row.bytes;
+    let layout = validate_training_view_layout(bytes)?;
+    if !raw_offset.is_multiple_of(8) {
+        return Err(input_error("training-view row has invalid raw alignment"));
     }
     let identity: [u8; 32] = bytes[32..64].try_into().expect("bounded identity");
     let source_identity: [u8; 32] = bytes[64..96].try_into().expect("bounded identity");
@@ -1634,11 +1662,12 @@ fn validate_row(
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
         raw_bytes: u64::try_from(bytes.len())
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
-        window: u64::try_from(window).map_err(|_| SemanticTransitionError::GenerationExhausted)?,
-        source_length: word(104),
-        block_size: word(112),
-        prefix_extent: word(120),
-        answer_start: word(128),
+        window: u64::try_from(layout.window)
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+        source_length: layout.source_length,
+        block_size: layout.block_size,
+        prefix_extent: layout.prefix_extent,
+        answer_start: layout.answer_start,
         identity: identity_words(Identity256::from_bytes(identity)),
         source_identity: identity_words(Identity256::from_bytes(source_identity)),
         content_identity: identity_words(row.content_identity),

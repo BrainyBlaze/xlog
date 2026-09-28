@@ -65,13 +65,14 @@ pub use semantic_hypergraph::{
 };
 pub use semantic_program::{SemanticProgramAdmission, SemanticProgramFact, SemanticProgramRule};
 pub use semantic_training_view::{
-    SemanticSelectedTrainingView, SemanticTrainingCanary, SemanticTrainingCanaryKind,
-    SemanticTrainingCanaryRecord, SemanticTrainingCanaryRefusalReason,
+    validate_training_view_layout, SemanticSelectedTrainingView, SemanticTrainingCanary,
+    SemanticTrainingCanaryKind, SemanticTrainingCanaryRecord, SemanticTrainingCanaryRefusalReason,
     SemanticTrainingCanaryRefusalRecord, SemanticTrainingObjective, SemanticTrainingObjectiveGroup,
     SemanticTrainingObjectiveGroupKind, SemanticTrainingObjectiveGroupRecord,
     SemanticTrainingObjectiveRecord, SemanticTrainingRosterRow, SemanticTrainingViewBasis,
-    SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
-    SemanticTrainingViewRow, SemanticTrainingViewSelection, SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI,
+    SemanticTrainingViewLayout, SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord,
+    SemanticTrainingViewPort, SemanticTrainingViewRow, SemanticTrainingViewSelection,
+    SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI,
 };
 pub use semantic_transition::{
     initial_source_layout, Identity256, SemanticActionCatalogue, SemanticActionDescriptor,
