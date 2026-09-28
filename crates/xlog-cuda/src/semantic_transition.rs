@@ -32073,8 +32073,10 @@ pub(crate) mod task_binding_tests {
         let books = ActionCodebooks::derive(&admission, 1, Some(&program)).unwrap();
         let task = Identity256::from_bytes([7; 32]);
         let edits = [[[0u32; 18]; 2]; 2];
-        let mut state = DeviceState::default();
-        state.binding_digest = books.binding.digest;
+        let mut state = DeviceState {
+            binding_digest: books.binding.digest,
+            ..DeviceState::default()
+        };
         state.task_evaluation.query_count = 9;
         for slot in 0..3 {
             state.task_evaluation.facts[slot].truth = [1; 3];
