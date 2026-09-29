@@ -6155,6 +6155,123 @@ struct PublicationMaterial {
     graph: SemanticRootMaterial,
 }
 
+/// Read-only delivery material from a sealed publication. Reading an
+/// intent neither proves that the checkpoint was durably committed nor grants
+/// authority to perform its external effect.
+pub struct SemanticOutputIntent {
+    pub stable_identity: Identity256,
+    pub effect: Vec<u8>,
+    pub payload: Vec<u8>,
+}
+
+pub fn output_intents_from_publication_material(
+    native_material: &[u8],
+) -> Result<Vec<SemanticOutputIntent>, SemanticTransitionError> {
+    let material = PublicationMaterial::decode(native_material)?;
+    let entries = material
+        .ranges
+        .iter()
+        .find(|item| (item.range.role, item.range.index) == (30, 0))
+        .ok_or_else(|| publication_input_error("checkpoint omits its native intent queue"))?;
+    let payload = material
+        .ranges
+        .iter()
+        .find(|item| (item.range.role, item.range.index) == (31, 0))
+        .ok_or_else(|| publication_input_error("checkpoint omits its native intent payload"))?;
+    if entries.bytes.len() < size_of::<IntentQueueHeader>() {
+        return Err(publication_input_error(
+            "checkpoint intent queue has no header",
+        ));
+    }
+    // SAFETY: the checked byte extent contains an all-bit-valid scalar ABI record.
+    let header =
+        unsafe { std::ptr::read_unaligned(entries.bytes.as_ptr().cast::<IntentQueueHeader>()) };
+    let entry_extent = usize::try_from(header.count)
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<IntentEntry>()))
+        .and_then(|bytes| bytes.checked_add(size_of::<IntentQueueHeader>()));
+    let capacity_extent = usize::try_from(header.capacity)
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<IntentEntry>()))
+        .and_then(|bytes| bytes.checked_add(size_of::<IntentQueueHeader>()));
+    if header.abi != 1
+        || header.count > header.capacity
+        || entry_extent != Some(entries.bytes.len())
+        || capacity_extent.is_none_or(|extent| extent != entries.capacity)
+        || header.payload_used_bytes != payload.bytes.len() as u64
+        || header.payload_capacity_bytes != payload.capacity as u64
+        || header.effect_offset_bytes != 0
+        || header.effect_length_bytes == 0
+        || header.effect_length_bytes > header.payload_used_bytes
+    {
+        return Err(publication_input_error(
+            "checkpoint intent queue has inconsistent extents",
+        ));
+    }
+    let effect_end = usize::try_from(header.effect_length_bytes)
+        .map_err(|_| publication_input_error("checkpoint intent effect overflows this host"))?;
+    let effect = &payload.bytes[..effect_end];
+    let effect_digest = Identity256::from_bytes(Sha256::digest(effect).into());
+    let mut cursor = effect_end;
+    let mut chain = Identity256::default();
+    let mut result = Vec::with_capacity(header.count as usize);
+    for ordinal in 0..header.count {
+        let offset = size_of::<IntentQueueHeader>() + ordinal as usize * size_of::<IntentEntry>();
+        // SAFETY: the exact entry extent was checked above; the ABI is scalar-only.
+        let entry = unsafe {
+            std::ptr::read_unaligned(entries.bytes[offset..].as_ptr().cast::<IntentEntry>())
+        };
+        let length = usize::try_from(entry.payload_len).map_err(|_| {
+            publication_input_error("checkpoint intent payload overflows this host")
+        })?;
+        let end = cursor
+            .checked_add(length)
+            .filter(|&end| end <= payload.bytes.len())
+            .ok_or_else(|| publication_input_error("checkpoint intent payload is incomplete"))?;
+        let content = &payload.bytes[cursor..end];
+        let mut identity = Sha256::new();
+        identity.update(0x786c6f67696e7431u64.to_le_bytes());
+        for part in [
+            entry.checkpoint_lineage,
+            entry.base_logical,
+            entry.effective_delta,
+            entry.result_logical,
+            entry.effect_digest,
+            entry.payload_digest,
+        ] {
+            identity.update(part.as_bytes());
+        }
+        let stable_identity = Identity256::from_bytes(identity.finalize().into());
+        let previous_chain = chain;
+        chain = publication_fold_digest(chain, 30, ordinal, stable_identity);
+        if entry.payload_offset != cursor as u64
+            || entry.payload_len < 8
+            || entry.effect_digest != effect_digest
+            || entry.payload_digest != Identity256::from_bytes(Sha256::digest(content).into())
+            || entry.previous_chain != previous_chain
+            || entry.chain != chain
+            || entry.stable_identity != stable_identity
+            || stable_identity == Identity256::default()
+        {
+            return Err(publication_input_error(
+                "checkpoint intent entry differs from its native chain",
+            ));
+        }
+        result.push(SemanticOutputIntent {
+            stable_identity,
+            effect: effect.to_vec(),
+            payload: content.to_vec(),
+        });
+        cursor = end;
+    }
+    if cursor != payload.bytes.len() || header.chain_head != chain {
+        return Err(publication_input_error(
+            "checkpoint intent chain does not cover its payload",
+        ));
+    }
+    Ok(result)
+}
+
 fn relocate_publication_codebooks(
     saved: &[u8],
     actual: &[u64],
@@ -31016,6 +31133,83 @@ mod text_parent_tests {
         assert!(initial_intent_records(effect, 0, 4096, 1024).is_err());
         assert!(initial_intent_records(effect, u64::MAX, 4096, 1024).is_err());
         assert!(initial_intent_records(effect, 2, effect.len() + 1023, 1024).is_err());
+    }
+
+    #[test]
+    fn checkpoint_intent_projection_rechecks_the_native_key_and_chain() {
+        let effect = b"record result";
+        let output = 1u64.to_le_bytes();
+        let mut material = publication_material_sample();
+        let mut entry = IntentEntry {
+            checkpoint_lineage: Identity256::from_bytes([1; 32]),
+            base_logical: Identity256::from_bytes([2; 32]),
+            effective_delta: Identity256::from_bytes([3; 32]),
+            result_logical: Identity256::from_bytes([4; 32]),
+            effect_digest: Identity256::from_bytes(Sha256::digest(effect).into()),
+            payload_digest: Identity256::from_bytes(Sha256::digest(output).into()),
+            payload_offset: effect.len() as u64,
+            payload_len: output.len() as u64,
+            ..IntentEntry::default()
+        };
+        let mut key = Sha256::new();
+        key.update(0x786c6f67696e7431u64.to_le_bytes());
+        for part in [
+            entry.checkpoint_lineage,
+            entry.base_logical,
+            entry.effective_delta,
+            entry.result_logical,
+            entry.effect_digest,
+            entry.payload_digest,
+        ] {
+            key.update(part.as_bytes());
+        }
+        entry.stable_identity = Identity256::from_bytes(key.finalize().into());
+        entry.chain = publication_fold_digest(Identity256::default(), 30, 0, entry.stable_identity);
+        let header = IntentQueueHeader {
+            abi: 1,
+            count: 1,
+            capacity: 2,
+            payload_used_bytes: (effect.len() + output.len()) as u64,
+            payload_capacity_bytes: 64,
+            effect_offset_bytes: 0,
+            effect_length_bytes: effect.len() as u64,
+            chain_head: entry.chain,
+        };
+        for range in &mut material.ranges {
+            match range.range.role {
+                30 => {
+                    range.bytes = publication_abi_bytes(&[header]);
+                    range.bytes.extend(publication_abi_bytes(&[entry]));
+                    range.capacity = size_of::<IntentQueueHeader>() + 2 * size_of::<IntentEntry>();
+                }
+                31 => {
+                    range.bytes = [effect.as_slice(), output.as_slice()].concat();
+                    range.capacity = 64;
+                }
+                _ => continue,
+            }
+            range.range.length_bytes = range.bytes.len() as u64;
+            range.range.digest = range.original_record_digest();
+        }
+        publication_material_sample_runtime(&mut material);
+        material.bank.header.descriptor_digest = material.original_descriptor_digest();
+        let encoded = material.encode().unwrap();
+        let projected = output_intents_from_publication_material(&encoded).unwrap();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].stable_identity, entry.stable_identity);
+        assert_eq!(projected[0].effect, effect);
+        assert_eq!(projected[0].payload, output);
+
+        let entry_range = material
+            .ranges
+            .iter_mut()
+            .find(|item| item.range.role == 30)
+            .unwrap();
+        let last = entry_range.bytes.last_mut().unwrap();
+        *last ^= 1;
+        entry_range.range.digest = entry_range.original_record_digest();
+        material.bank.header.descriptor_digest = material.original_descriptor_digest();
+        assert!(output_intents_from_publication_material(&material.encode().unwrap()).is_err());
     }
 
     #[test]

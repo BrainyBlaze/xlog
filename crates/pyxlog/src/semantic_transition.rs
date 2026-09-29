@@ -12047,6 +12047,36 @@ impl PySemanticTransitionController {
         Ok(PyBytes::new(py, &checkpoint).unbind())
     }
 
+    /// Decode native output intents from a complete checkpoint. This read-only
+    /// projection is not proof of durable commit or delivery authority.
+    fn checkpoint_output_intents(
+        &self,
+        py: Python<'_>,
+        checkpoint: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        if !checkpoint.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "checkpoint intent projection requires exact builtin bytes",
+            ));
+        }
+        let manifest =
+            SemanticCheckpointManifest::decode(checkpoint.cast::<PyBytes>()?.as_bytes())?;
+        let intents = xlog_cuda::output_intents_from_publication_material(&manifest.native)
+            .map_err(xlog_err)?;
+        let rows = intents
+            .iter()
+            .map(|intent| {
+                (
+                    PyBytes::new(py, intent.stable_identity.as_bytes()),
+                    PyBytes::new(py, &intent.effect),
+                    PyBytes::new(py, &intent.payload),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(PyTuple::new(py, rows)?.unbind())
+    }
+
     /// Export one genuinely held transition into the existing replay carrier.
     /// Returns (predecessor_identity, successor_identity, predecessor_material,
     /// provenance_material, publication_evidence). Identities have the same four
