@@ -323,20 +323,21 @@ struct CheckpointReferent {
     model_digest: [u8; 32],
     task: TaskCheckpointBinding,
     scope_digest: [u8; 32],
-    authority_digest: [u8; 32],
+    authority_root: [u8; 32],
     snapshot_digest: [u8; 32],
     phase: CheckpointTaskPhase,
 }
 
 impl CheckpointReferent {
     const MAGIC: &'static [u8] = b"XLOG-CHECKPOINT-REFERENT\0";
+    const VERSION: u32 = 2;
     const BYTES: usize =
         Self::MAGIC.len() + 4 + 32 + 8 + 104 + 32 + 8 + 32 + 32 + 8 + 3 * 32 + 5 * 32 + 1;
 
     fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(Self::BYTES);
         bytes.extend_from_slice(Self::MAGIC);
-        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&Self::VERSION.to_le_bytes());
         bytes.extend_from_slice(&self.checkpoint_digest);
         bytes.extend_from_slice(&self.checkpoint_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.publication);
@@ -352,7 +353,7 @@ impl CheckpointReferent {
             self.task.goal,
             self.task.scoring_law,
             self.scope_digest,
-            self.authority_digest,
+            self.authority_root,
             self.snapshot_digest,
         ] {
             bytes.extend_from_slice(&digest);
@@ -376,7 +377,7 @@ impl CheckpointReferent {
             *cursor += count;
             &bytes[start..*cursor]
         };
-        if take(&mut cursor, 4) != 1u32.to_le_bytes() {
+        if take(&mut cursor, 4) != Self::VERSION.to_le_bytes() {
             return Err(invalid("checkpoint referent has another version"));
         }
         let digest = |cursor: &mut usize| -> [u8; 32] {
@@ -411,7 +412,7 @@ impl CheckpointReferent {
         let goal = digest(&mut cursor);
         let scoring_law = digest(&mut cursor);
         let scope_digest = digest(&mut cursor);
-        let authority_digest = digest(&mut cursor);
+        let authority_root = digest(&mut cursor);
         let snapshot_digest = digest(&mut cursor);
         let phase = match take(&mut cursor, 1)[0] {
             1 => CheckpointTaskPhase::Imported,
@@ -433,7 +434,7 @@ impl CheckpointReferent {
                 scoring_law,
             },
             scope_digest,
-            authority_digest,
+            authority_root,
             snapshot_digest,
             phase,
         })
@@ -474,7 +475,7 @@ impl CheckpointReferent {
             model_digest: Sha256::digest(&manifest.model).into(),
             task,
             scope_digest: checkpoint_scope_digest(&authority.scope),
-            authority_digest: Sha256::digest(&authority.canonical).into(),
+            authority_root: *authority.authority_root().as_bytes(),
             snapshot_digest: Sha256::digest(&snapshot.canonical).into(),
             phase,
         })
@@ -1040,10 +1041,7 @@ impl PySemanticTransitionSession {
             PyBytes::new(py, &record.task.scoring_law),
         )?;
         fields.set_item("scope_sha256", PyBytes::new(py, &record.scope_digest))?;
-        fields.set_item(
-            "authority_sha256",
-            PyBytes::new(py, &record.authority_digest),
-        )?;
+        fields.set_item("authority_root", PyBytes::new(py, &record.authority_root))?;
         fields.set_item(
             "saved_snapshot_sha256",
             PyBytes::new(py, &record.snapshot_digest),
@@ -5330,6 +5328,14 @@ impl TaskAuthority {
         Ok(())
     }
 
+    fn authority_root(&self) -> Identity256 {
+        let mut authority = Sha256::new();
+        authority.update(b"xlog.task-authority.canonical.v1\0");
+        authority.update((self.canonical.len() as u64).to_le_bytes());
+        authority.update(&self.canonical);
+        Identity256::from_bytes(authority.finalize().into())
+    }
+
     fn goal_witness(
         &self,
         observations: &xlog_cuda::SemanticTaskObservationRoots,
@@ -5338,11 +5344,6 @@ impl TaskAuthority {
             hash.update((value.len() as u64).to_le_bytes());
             hash.update(value.as_bytes());
         }
-        let mut authority = Sha256::new();
-        authority.update(b"xlog.task-authority.canonical.v1\0");
-        authority.update((self.canonical.len() as u64).to_le_bytes());
-        authority.update(&self.canonical);
-
         let mut links = Sha256::new();
         links.update(b"xlog.task-authority.mandatory-links.v1\0");
         for node in &self.dependencies {
@@ -5417,7 +5418,7 @@ impl TaskAuthority {
         }
         SemanticTaskGoalWitness {
             semantic_root: observations.root_digest,
-            authority_root: Identity256::from_bytes(authority.finalize().into()),
+            authority_root: self.authority_root(),
             mandatory_links_root: Identity256::from_bytes(links.finalize().into()),
             constraints_root: Identity256::from_bytes(constraints.finalize().into()),
             mandatory_link_count: self.dependencies.len() as u64,
@@ -14222,7 +14223,7 @@ mod tests {
             model_digest: [10; 32],
             task: binding,
             scope_digest: [11; 32],
-            authority_digest: [12; 32],
+            authority_root: [12; 32],
             snapshot_digest: [13; 32],
             phase: super::CheckpointTaskPhase::InitialPrefillBound,
         };
