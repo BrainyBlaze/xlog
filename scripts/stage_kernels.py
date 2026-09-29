@@ -15,7 +15,9 @@ from pathlib import Path
 KERNEL_ARTIFACT_SUFFIXES = (".cubin", ".portable.ptx")
 
 
-def _discover_kernel_artifacts(out_dir: Path, portable_only: bool) -> list[Path]:
+def _discover_kernel_artifacts(
+    out_dir: Path, portable_only: bool, cubin_archs: set[str] | None
+) -> list[Path]:
     if not out_dir.exists():
         raise SystemExit(f"from-out-dir does not exist: {out_dir}")
     if not out_dir.is_dir():
@@ -27,6 +29,11 @@ def _discover_kernel_artifacts(out_dir: Path, portable_only: bool) -> list[Path]
         if path.is_file()
         and path.name.endswith(KERNEL_ARTIFACT_SUFFIXES)
         and (not portable_only or path.name.endswith(".portable.ptx"))
+        and (
+            cubin_archs is None
+            or path.name.endswith(".portable.ptx")
+            or any(path.name.endswith(f".{arch}.cubin") for arch in cubin_archs)
+        )
     ]
     return sorted(artifacts, key=lambda p: p.name)
 
@@ -52,9 +59,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--from-out-dir", required=True, type=Path)
     parser.add_argument("--to", required=True, type=Path)
     parser.add_argument("--portable-only", action="store_true")
+    parser.add_argument("--cubin-archs", help="comma-separated cubin architectures to stage")
     args = parser.parse_args(argv)
 
-    artifacts = _discover_kernel_artifacts(args.from_out_dir, args.portable_only)
+    cubin_archs = None
+    if args.cubin_archs is not None:
+        cubin_archs = {arch.strip() for arch in args.cubin_archs.split(",") if arch.strip()}
+        if any(
+            not arch.startswith("sm_") or not arch[3:].isdigit()
+            for arch in cubin_archs
+        ):
+            parser.error("--cubin-archs accepts only comma-separated sm_<number> values")
+    artifacts = _discover_kernel_artifacts(args.from_out_dir, args.portable_only, cubin_archs)
     if not artifacts:
         raise SystemExit(f"no kernel artifacts found in {args.from_out_dir}")
 

@@ -159,6 +159,8 @@ fi
 stage_args=(--from-out-dir "$kernel_out_dir" --to "$repo_root/$dest_dir")
 if [[ "${XLOG_NO_CUBIN:-}" == "1" ]]; then
   stage_args+=(--portable-only)
+else
+  stage_args+=(--cubin-archs "${XLOG_CUBIN_ARCHS:-sm_120}")
 fi
 python3 "$repo_root/scripts/stage_kernels.py" "${stage_args[@]}"
 
