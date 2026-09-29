@@ -2443,6 +2443,7 @@ pub struct SemanticParentBinding {
     pub intent_effect: Vec<u8>,
     pub intent_entry_capacity: u64,
     pub intent_payload_capacity_bytes: usize,
+    pub acknowledgement_payload_capacity_bytes: usize,
     pub model_generation: u64,
     /// Complete versioned numerical-mode contribution from the model owner.
     /// The Python binding uses exact canonical ColdValue metadata, not a digest
@@ -4321,6 +4322,16 @@ struct PublicationCommand {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+struct PublicationDeliveryInput {
+    lease: u64,
+    receipt: u64,
+    receipt_len: u64,
+    recipient_id: Identity256,
+    receipt_digest: Identity256,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
 struct PublicationLease {
     abi: u64,
     status: u64,
@@ -4410,6 +4421,27 @@ struct IntentEntry {
     payload_len: u64,
     audit_instance: Identity256,
     audit_epoch: u64,
+    previous_chain: Identity256,
+    chain: Identity256,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct AcknowledgementQueueHeader {
+    abi: u64,
+    count: u64,
+    capacity: u64,
+    payload_used_bytes: u64,
+    payload_capacity_bytes: u64,
+    chain_head: Identity256,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct AcknowledgementEntry {
+    stable_identity: Identity256,
+    receipt_digest: Identity256,
+    receipt_len: u64,
     previous_chain: Identity256,
     chain: Identity256,
 }
@@ -4571,6 +4603,9 @@ unsafe impl DeviceRepr for ModelUpdateEvidenceSource {}
 unsafe impl DeviceRepr for ModelForwardSealInput {}
 unsafe impl DeviceRepr for ModelForwardReceipt {}
 unsafe impl DeviceRepr for PublicationCommand {}
+unsafe impl DeviceRepr for PublicationDeliveryInput {}
+unsafe impl DeviceRepr for AcknowledgementQueueHeader {}
+unsafe impl DeviceRepr for AcknowledgementEntry {}
 unsafe impl DeviceRepr for PublicationLease {}
 unsafe impl DeviceRepr for SemanticTensorLayout {}
 // SAFETY: padding-free C records containing initialized u64 values only.
@@ -4600,6 +4635,7 @@ const _: () = assert!(size_of::<ModelForwardSealInput>() == 32);
 const _: () = assert!(size_of::<ModelForwardReceipt>() == 224);
 const _: () = assert!(size_of::<ModelForwardReceiptInputs>() == 128);
 const _: () = assert!(size_of::<PublicationCommand>() == 24);
+const _: () = assert!(size_of::<PublicationDeliveryInput>() == 88);
 const _: () = assert!(size_of::<PublicationLease>() == 88);
 const _: () = assert!(size_of::<SemanticTensorLayout>() == 112);
 const _: () = assert!(size_of::<TensorLayoutTableHeader>() == 32);
@@ -4608,6 +4644,8 @@ const _: () = assert!(size_of::<CompletionCoverage>() == 360);
 const _: () = assert!(size_of::<RawFeedbackRecord>() == 384);
 const _: () = assert!(size_of::<AttemptReceipt>() == 352);
 const _: () = assert!(size_of::<IntentQueueHeader>() == 88);
+const _: () = assert!(size_of::<AcknowledgementQueueHeader>() == 72);
+const _: () = assert!(size_of::<AcknowledgementEntry>() == 136);
 const _: () = assert!(size_of::<IntentEntry>() == 344);
 const _: () = assert!(size_of::<TokenProvenance>() == 184);
 
@@ -6232,6 +6270,95 @@ pub struct SemanticOutputIntent {
     pub payload: Vec<u8>,
 }
 
+fn acknowledgement_receipts(
+    bytes: &[u8],
+    capacity_bytes: usize,
+) -> Result<Vec<(Identity256, Vec<u8>)>, SemanticTransitionError> {
+    if bytes.len() < size_of::<AcknowledgementQueueHeader>() {
+        return Err(publication_input_error(
+            "acknowledgement queue has no native header",
+        ));
+    }
+    // SAFETY: the checked, padding-free header contains only integral fields.
+    let header = unsafe {
+        bytes
+            .as_ptr()
+            .cast::<AcknowledgementQueueHeader>()
+            .read_unaligned()
+    };
+    let declared_capacity = usize::try_from(header.capacity)
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<AcknowledgementEntry>()))
+        .and_then(|entries| {
+            usize::try_from(header.payload_capacity_bytes)
+                .ok()?
+                .checked_add(entries)
+        })
+        .and_then(|body| body.checked_add(size_of::<AcknowledgementQueueHeader>()));
+    if header.abi != 1
+        || header.count > header.capacity
+        || declared_capacity != Some(capacity_bytes)
+        || header.payload_used_bytes
+            != (bytes.len() - size_of::<AcknowledgementQueueHeader>()) as u64
+    {
+        return Err(publication_input_error(
+            "acknowledgement queue extent is inconsistent",
+        ));
+    }
+    let mut cursor = size_of::<AcknowledgementQueueHeader>();
+    let mut receipt_bytes = 0usize;
+    let mut chain = Identity256::default();
+    let mut seen = BTreeSet::new();
+    let mut result = Vec::with_capacity(header.count as usize);
+    for ordinal in 0..header.count {
+        let entry_end = cursor
+            .checked_add(size_of::<AcknowledgementEntry>())
+            .filter(|&end| end <= bytes.len())
+            .ok_or_else(|| publication_input_error("acknowledgement entry is incomplete"))?;
+        // SAFETY: the exact entry extent was checked above.
+        let entry = unsafe {
+            bytes[cursor..]
+                .as_ptr()
+                .cast::<AcknowledgementEntry>()
+                .read_unaligned()
+        };
+        let length = usize::try_from(entry.receipt_len)
+            .map_err(|_| publication_input_error("acknowledgement receipt overflows this host"))?;
+        let end = entry_end
+            .checked_add(length)
+            .filter(|&end| end <= bytes.len())
+            .ok_or_else(|| publication_input_error("acknowledgement receipt is incomplete"))?;
+        let receipt = &bytes[entry_end..end];
+        receipt_bytes = receipt_bytes
+            .checked_add(length)
+            .ok_or_else(|| publication_input_error("acknowledgement receipt extent overflows"))?;
+        let previous = chain;
+        chain = publication_fold_digest(chain, 32, ordinal, entry.stable_identity);
+        chain = publication_fold_digest(chain, 32, ordinal, entry.receipt_digest);
+        if entry.stable_identity == Identity256::default()
+            || !seen.insert(*entry.stable_identity.as_bytes())
+            || entry.previous_chain != previous
+            || entry.chain != chain
+            || entry.receipt_digest != Identity256::from_bytes(Sha256::digest(receipt).into())
+        {
+            return Err(publication_input_error(
+                "acknowledgement differs from its native chain",
+            ));
+        }
+        result.push((entry.stable_identity, receipt.to_vec()));
+        cursor = end;
+    }
+    if cursor != bytes.len()
+        || chain != header.chain_head
+        || receipt_bytes > header.payload_capacity_bytes as usize
+    {
+        return Err(publication_input_error(
+            "acknowledgement chain does not cover its receipts",
+        ));
+    }
+    Ok(result)
+}
+
 pub fn output_intents_from_publication_material(
     native_material: &[u8],
 ) -> Result<Vec<SemanticOutputIntent>, SemanticTransitionError> {
@@ -6246,6 +6373,73 @@ pub fn output_intents_from_publication_material(
         .iter()
         .find(|item| (item.range.role, item.range.index) == (31, 0))
         .ok_or_else(|| publication_input_error("checkpoint omits its native intent payload"))?;
+    output_intents_from_ranges(entries, payload)
+}
+
+/// Resolve the current undelivered set from both sealed native queues. The
+/// trusted receiver key authenticates every persisted acknowledgement before
+/// any intent is omitted from a restored delivery retry.
+pub fn pending_output_intents_from_publication_material(
+    native_material: &[u8],
+    recipient_id: Identity256,
+    verification_key: &[u8; 32],
+    expected_effect: &[u8],
+) -> Result<Vec<SemanticOutputIntent>, SemanticTransitionError> {
+    if recipient_id == Identity256::default() || verification_key.iter().all(|&byte| byte == 0) {
+        return Err(publication_input_error(
+            "pending intent projection requires the trusted receiver identity and key",
+        ));
+    }
+    let material = PublicationMaterial::decode(native_material)?;
+    let entries = material
+        .ranges
+        .iter()
+        .find(|item| (item.range.role, item.range.index) == (30, 0))
+        .ok_or_else(|| publication_input_error("checkpoint omits its native intent queue"))?;
+    let payload = material
+        .ranges
+        .iter()
+        .find(|item| (item.range.role, item.range.index) == (31, 0))
+        .ok_or_else(|| publication_input_error("checkpoint omits its native intent payload"))?;
+    let acknowledgements = material
+        .ranges
+        .iter()
+        .find(|item| (item.range.role, item.range.index) == (32, 0))
+        .ok_or_else(|| {
+            publication_input_error("checkpoint omits its native acknowledgement queue")
+        })?;
+    let intents = output_intents_from_ranges(entries, payload)?;
+    if expected_effect.is_empty()
+        || intents
+            .iter()
+            .any(|intent| intent.effect.as_slice() != expected_effect)
+    {
+        return Err(publication_input_error(
+            "checkpoint intent differs from the bound receiver effect",
+        ));
+    }
+    let receipts = acknowledgement_receipts(&acknowledgements.bytes, acknowledgements.capacity)?;
+    let mut acknowledged = BTreeSet::new();
+    for (identity, receipt) in receipts {
+        let intent = intents
+            .iter()
+            .find(|intent| intent.stable_identity == identity)
+            .ok_or_else(|| {
+                publication_input_error("checkpoint acknowledges an absent native intent")
+            })?;
+        verify_delivery_receipt(&receipt, intent, recipient_id, verification_key)?;
+        acknowledged.insert(*identity.as_bytes());
+    }
+    Ok(intents
+        .into_iter()
+        .filter(|intent| !acknowledged.contains(intent.stable_identity.as_bytes()))
+        .collect())
+}
+
+fn output_intents_from_ranges(
+    entries: &PublicationMaterialRange,
+    payload: &PublicationMaterialRange,
+) -> Result<Vec<SemanticOutputIntent>, SemanticTransitionError> {
     if entries.bytes.len() < size_of::<IntentQueueHeader>() {
         return Err(publication_input_error(
             "checkpoint intent queue has no header",
@@ -6338,6 +6532,174 @@ pub fn output_intents_from_publication_material(
         ));
     }
     Ok(result)
+}
+
+fn verify_delivery_receipt(
+    receipt: &[u8],
+    intent: &SemanticOutputIntent,
+    recipient_id: Identity256,
+    verification_key: &[u8; 32],
+) -> Result<Identity256, SemanticTransitionError> {
+    const RECEIPT_DOMAIN: &[u8] = b"xlog.delivery.receipt.v1\0";
+    const RECORD_DOMAIN: &[u8] = b"xlog.delivery.record.v1\0";
+    let body_len = RECEIPT_DOMAIN
+        .len()
+        .checked_add(32 + 32 + 8 + 8 + 32)
+        .and_then(|size| size.checked_add(intent.effect.len()))
+        .and_then(|size| size.checked_add(intent.payload.len()))
+        .ok_or_else(|| publication_input_error("delivery receipt extent overflows"))?;
+    if recipient_id == Identity256::default()
+        || body_len.checked_add(32) != Some(receipt.len())
+        || !receipt.starts_with(RECEIPT_DOMAIN)
+    {
+        return Err(publication_input_error(
+            "delivery receipt has another canonical extent or recipient",
+        ));
+    }
+    let mut cursor = RECEIPT_DOMAIN.len();
+    let identity_end = cursor + 32;
+    if receipt[cursor..identity_end] != intent.stable_identity.as_bytes()[..] {
+        return Err(publication_input_error(
+            "delivery receipt has another native intent identity",
+        ));
+    }
+    cursor = identity_end;
+    let recipient_end = cursor + 32;
+    if receipt[cursor..recipient_end] != recipient_id.as_bytes()[..] {
+        return Err(publication_input_error(
+            "delivery receipt has another trusted recipient",
+        ));
+    }
+    cursor = recipient_end;
+    let effect_length = u64::from_le_bytes(
+        receipt[cursor..cursor + 8]
+            .try_into()
+            .expect("fixed extent"),
+    );
+    cursor += 8;
+    if effect_length != intent.effect.len() as u64
+        || receipt[cursor..cursor + intent.effect.len()] != intent.effect[..]
+    {
+        return Err(publication_input_error(
+            "delivery receipt has another native effect",
+        ));
+    }
+    cursor += intent.effect.len();
+    let payload_length = u64::from_le_bytes(
+        receipt[cursor..cursor + 8]
+            .try_into()
+            .expect("fixed extent"),
+    );
+    cursor += 8;
+    if payload_length != intent.payload.len() as u64
+        || receipt[cursor..cursor + intent.payload.len()] != intent.payload[..]
+    {
+        return Err(publication_input_error(
+            "delivery receipt has another native payload",
+        ));
+    }
+    cursor += intent.payload.len();
+    let mut record = Sha256::new();
+    record.update(RECORD_DOMAIN);
+    record.update(&receipt[RECEIPT_DOMAIN.len()..cursor]);
+    let expected_record: [u8; 32] = record.finalize().into();
+    if receipt[cursor..cursor + 32] != expected_record {
+        return Err(publication_input_error(
+            "delivery receipt differs from its durable record digest",
+        ));
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for (index, &byte) in verification_key.iter().enumerate() {
+        ipad[index] ^= byte;
+        opad[index] ^= byte;
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(&receipt[..body_len]);
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner.finalize());
+    let expected_mac: [u8; 32] = outer.finalize().into();
+    let mut mismatch = 0u8;
+    for (actual, expected) in receipt[body_len..].iter().zip(expected_mac) {
+        mismatch |= *actual ^ expected;
+    }
+    if mismatch != 0 {
+        return Err(publication_input_error(
+            "delivery receipt MAC does not match the trusted receiver",
+        ));
+    }
+    Ok(Identity256::from_bytes(Sha256::digest(receipt).into()))
+}
+
+#[cfg(test)]
+mod delivery_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn exact_durable_receipt_binds_the_native_intent_and_receiver() {
+        let intent = SemanticOutputIntent {
+            stable_identity: Identity256::from_bytes([3; 32]),
+            effect: b"deliver".to_vec(),
+            payload: b"result".to_vec(),
+        };
+        let recipient = Identity256::from_bytes([5; 32]);
+        let key = [7; 32];
+        let mut receipt = b"xlog.delivery.receipt.v1\0".to_vec();
+        receipt.extend_from_slice(intent.stable_identity.as_bytes());
+        receipt.extend_from_slice(recipient.as_bytes());
+        receipt.extend_from_slice(&(intent.effect.len() as u64).to_le_bytes());
+        receipt.extend_from_slice(&intent.effect);
+        receipt.extend_from_slice(&(intent.payload.len() as u64).to_le_bytes());
+        receipt.extend_from_slice(&intent.payload);
+        let mut record = Sha256::new();
+        record.update(b"xlog.delivery.record.v1\0");
+        record.update(&receipt[b"xlog.delivery.receipt.v1\0".len()..]);
+        receipt.extend_from_slice(&record.finalize());
+        let mut ipad = [0x36u8; 64];
+        let mut opad = [0x5cu8; 64];
+        for (index, byte) in key.iter().enumerate() {
+            ipad[index] ^= byte;
+            opad[index] ^= byte;
+        }
+        let mut inner = Sha256::new();
+        inner.update(ipad);
+        inner.update(&receipt);
+        let mut outer = Sha256::new();
+        outer.update(opad);
+        outer.update(inner.finalize());
+        receipt.extend_from_slice(&outer.finalize());
+        assert_eq!(
+            receipt.len(),
+            169 + intent.effect.len() + intent.payload.len()
+        );
+        assert_eq!(
+            verify_delivery_receipt(&receipt, &intent, recipient, &key).unwrap(),
+            Identity256::from_bytes(Sha256::digest(&receipt).into())
+        );
+        assert!(verify_delivery_receipt(&receipt, &intent, recipient, &[8; 32]).is_err());
+        assert!(
+            verify_delivery_receipt(&receipt, &intent, Identity256::from_bytes([6; 32]), &key)
+                .is_err()
+        );
+        receipt[100] ^= 1;
+        assert!(verify_delivery_receipt(&receipt, &intent, recipient, &key).is_err());
+    }
+
+    #[test]
+    fn acknowledgement_reserve_covers_every_full_receipt() {
+        let required = 169 * 3 + 256 + 2 * 7;
+        assert!(initial_acknowledgement_record(3, required - 1, 256, 7).is_err());
+        let record = initial_acknowledgement_record(3, required, 256, 7).unwrap();
+        assert_eq!(
+            acknowledgement_receipts(&record.bytes, record.capacity_bytes)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(initial_acknowledgement_record(0, required, 256, 7).is_err());
+    }
 }
 
 fn relocate_publication_codebooks(
@@ -7043,6 +7405,37 @@ impl PublicationMaterial {
             return Err(publication_input_error(
                 "publication material has an undeclared tensor layout",
             ));
+        }
+        let acknowledgements = self
+            .ranges
+            .iter()
+            .find(|item| (item.range.role, item.range.index) == (32, 0))
+            .ok_or_else(|| {
+                publication_input_error("publication material omits its acknowledgement queue")
+            })?;
+        let receipts =
+            acknowledgement_receipts(&acknowledgements.bytes, acknowledgements.capacity)?;
+        if !receipts.is_empty() {
+            let entries = self
+                .ranges
+                .iter()
+                .find(|item| (item.range.role, item.range.index) == (30, 0))
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let payload = self
+                .ranges
+                .iter()
+                .find(|item| (item.range.role, item.range.index) == (31, 0))
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let intents = output_intents_from_ranges(entries, payload)?;
+            if receipts.iter().any(|(identity, _)| {
+                !intents
+                    .iter()
+                    .any(|intent| intent.stable_identity == *identity)
+            }) {
+                return Err(publication_input_error(
+                    "publication acknowledges an absent native intent",
+                ));
+            }
         }
         self.model_numerical_mode()?;
         Ok(())
@@ -10703,8 +11096,50 @@ fn initial_intent_records(
     ])
 }
 
+fn initial_acknowledgement_record(
+    entry_capacity: u64,
+    payload_capacity: usize,
+    intent_payload_capacity: usize,
+    effect_len: usize,
+) -> Result<SemanticStateRecord, SemanticTransitionError> {
+    let count = usize::try_from(entry_capacity).map_err(|_| {
+        publication_input_error("acknowledgement entry capacity overflows this host")
+    })?;
+    let required_receipts = count
+        .checked_mul(169)
+        .and_then(|bytes| bytes.checked_add(intent_payload_capacity))
+        .and_then(|bytes| bytes.checked_add(count.saturating_sub(1).checked_mul(effect_len)?))
+        .ok_or_else(|| {
+            publication_input_error("complete acknowledgement reserve overflows this host")
+        })?;
+    let capacity_bytes = usize::try_from(entry_capacity)
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<AcknowledgementEntry>()))
+        .and_then(|bytes| bytes.checked_add(payload_capacity))
+        .and_then(|bytes| bytes.checked_add(size_of::<AcknowledgementQueueHeader>()))
+        .ok_or_else(|| {
+            publication_input_error("acknowledgement capacity overflows its native allocation")
+        })?;
+    if entry_capacity == 0 || effect_len == 0 || payload_capacity < required_receipts {
+        return Err(publication_input_error("acknowledgement queue cannot retain every full receipt within its native intent bounds"));
+    }
+    Ok(SemanticStateRecord {
+        role: SemanticStateRole::Acknowledgements,
+        index: 0,
+        bytes: publication_abi_bytes(&[AcknowledgementQueueHeader {
+            abi: 1,
+            count: 0,
+            capacity: entry_capacity,
+            payload_used_bytes: 0,
+            payload_capacity_bytes: payload_capacity as u64,
+            chain_head: Identity256::default(),
+        }]),
+        capacity_bytes,
+    })
+}
+
 fn publication_mutable_role(role: u64) -> bool {
-    matches!(role, 3..=15 | 18..=25 | 30 | 33 | 39 | 44 | 51..=55)
+    matches!(role, 3..=15 | 18..=25 | 30 | 32 | 33 | 39 | 44 | 51..=55)
 }
 
 fn continuation_role(role: u64) -> bool {
@@ -10842,6 +11277,9 @@ fn validate_parent_records(
                     "intent queue does not resolve to its actual payload allocation",
                 ));
             }
+        }
+        if role == 32 {
+            acknowledgement_receipts(&record.bytes, record.capacity_bytes)?;
         }
     }
     for tensor in tensors {
@@ -18514,7 +18952,9 @@ impl SemanticTransitionSession {
             || parent.records.iter().any(|record| {
                 matches!(
                     record.role,
-                    SemanticStateRole::IntentEntries | SemanticStateRole::IntentPayload
+                    SemanticStateRole::IntentEntries
+                        | SemanticStateRole::IntentPayload
+                        | SemanticStateRole::Acknowledgements
                 )
             })
         {
@@ -18525,6 +18965,12 @@ impl SemanticTransitionSession {
             parent.intent_entry_capacity,
             parent.intent_payload_capacity_bytes,
             parent.final_intent_payload_bytes,
+        )?);
+        parent.records.push(initial_acknowledgement_record(
+            parent.intent_entry_capacity,
+            parent.acknowledgement_payload_capacity_bytes,
+            parent.intent_payload_capacity_bytes,
+            parent.intent_effect.len(),
         )?);
         validate_parent_records(&parent, &tensors)?;
         let mut layouts = BTreeMap::new();
@@ -20635,17 +21081,37 @@ impl SemanticTransitionSession {
         }
         self.guard_published_content(lease, &keys, consumer_stream)?;
 
-        let bank = (lease.identity.word & 1) as usize;
         let mut allocations = Vec::with_capacity(storage.model_slots.len());
-        for (&bytes, slots) in storage
+        for (allocation_index, (&bytes, slots)) in storage
             .model_memory
             .allocation_bytes
             .iter()
             .zip(&storage.model_slots)
+            .enumerate()
         {
+            let mut selected_slot = None;
+            for range in lease
+                .directory
+                .iter()
+                .filter(|range| matches!(range.role, 18..=25))
+            {
+                let (owner, _) = storage.model_memory.location(range.role, range.index)?;
+                if owner == allocation_index {
+                    if selected_slot
+                        .replace(range.storage_slot as usize)
+                        .is_some_and(|prior| prior != range.storage_slot as usize)
+                    {
+                        return Err(SemanticTransitionError::ObservationMismatch);
+                    }
+                }
+            }
+            let slot = selected_slot.unwrap_or(slots[(lease.identity.word & 1) as usize]);
+            if !slots.contains(&slot) {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
             let allocation = storage
                 .allocations
-                .get(slots[bank])
+                .get(slot)
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
             if allocation.len() as u64 != bytes {
                 return Err(SemanticTransitionError::ObservationMismatch);
@@ -20746,6 +21212,191 @@ impl SemanticTransitionSession {
         lease.header.rng_binding()
     }
 
+    fn read_published_control_record(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        role: u64,
+    ) -> Result<PublicationMaterialRange, SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        let range = *lease
+            .directory
+            .iter()
+            .find(|range| range.role == role && range.index == 0)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let storage = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let allocation = storage
+            .allocations
+            .get(range.storage_slot as usize)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let begin = usize::try_from(range.offset_bytes)
+            .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let end = usize::try_from(range.length_bytes)
+            .ok()
+            .and_then(|length| begin.checked_add(length))
+            .filter(|&end| end <= allocation.len())
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let bytes = self.publication_read(allocation.view().slice(begin..end))?;
+        let material = PublicationMaterialRange {
+            range,
+            capacity: allocation.len() - begin,
+            bytes,
+        };
+        if material.original_record_digest() != range.digest {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(material)
+    }
+
+    /// Verify a durable receiver receipt against the actual current FINAL
+    /// intent, then append it through the publication word's sole CAS. This is
+    /// cold external-effect control, not a model or semantic transition.
+    pub fn acknowledge_delivery(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        receipt: &[u8],
+        recipient_id: Identity256,
+        verification_key: &[u8; 32],
+        expected_effect: &[u8],
+    ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        if self.pending || self.admitted_transition.is_some() || self.continuation_base.is_some() {
+            return Err(publication_input_error(
+                "delivery acknowledgement cannot overlap a transition",
+            ));
+        }
+        if lease.header.terminal != 2
+            || receipt.len() < 169
+            || verification_key.iter().all(|&byte| byte == 0)
+        {
+            return Err(publication_input_error(
+                "delivery acknowledgement requires a FINAL parent and trusted receipt",
+            ));
+        }
+        let entries = self.read_published_control_record(lease, 30)?;
+        let payload = self.read_published_control_record(lease, 31)?;
+        let acknowledgements = self.read_published_control_record(lease, 32)?;
+        let intents = output_intents_from_ranges(&entries, &payload)?;
+        let acknowledged =
+            acknowledgement_receipts(&acknowledgements.bytes, acknowledgements.capacity)?;
+        let stable_identity =
+            Identity256::from_bytes(receipt[25..57].try_into().expect("checked receipt extent"));
+        let intent = intents
+            .iter()
+            .find(|intent| intent.stable_identity == stable_identity)
+            .ok_or_else(|| {
+                publication_input_error("delivery receipt has no native FINAL intent")
+            })?;
+        if expected_effect.is_empty() || intent.effect.as_slice() != expected_effect {
+            return Err(publication_input_error(
+                "native FINAL effect differs from the bound receiver",
+            ));
+        }
+        let receipt_digest =
+            verify_delivery_receipt(receipt, intent, recipient_id, verification_key)?;
+        let storage = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let current = self.publication_read(storage.control.view())?[0];
+        if current.instance != lease.identity.instance || current.word != lease.identity.word {
+            return Err(publication_input_error(
+                "delivery acknowledgement requires the current acquired FINAL parent",
+            ));
+        }
+        if let Some((_, previous)) = acknowledged
+            .iter()
+            .find(|(identity, _)| *identity == stable_identity)
+        {
+            if previous == receipt {
+                return Ok(lease.identity);
+            }
+            return Err(publication_input_error(
+                "native intent was acknowledged with a different receipt",
+            ));
+        }
+        if lease.header.fuel == 0 {
+            return Err(publication_input_error(
+                "FINAL parent has no reserved acknowledgement fuel",
+            ));
+        }
+        let receipt_device = allocate_publication::<u8>(&self.provider, receipt.len())?;
+        upload_publication(&self.provider, receipt, &receipt_device)?;
+        let input_device = allocate_publication::<PublicationDeliveryInput>(&self.provider, 1)?;
+        upload_publication(
+            &self.provider,
+            &[PublicationDeliveryInput {
+                lease: self.readers[&lease.token].device.device_ptr_value(),
+                receipt: receipt_device.device_ptr_value(),
+                receipt_len: receipt.len() as u64,
+                recipient_id,
+                receipt_digest,
+            }],
+            &input_device,
+        )?;
+        let mut descriptor = self.descriptor();
+        descriptor.publication = PublicationCommand {
+            control: storage.control.device_ptr_value(),
+            lease: input_device.device_ptr_value(),
+            operation: 6,
+        };
+        let mut recorder = self.kernel_recorder();
+        recorder.read(&receipt_device);
+        recorder.read(&input_device);
+        recorder.read(&self.readers[&lease.token].device);
+        let execute = self.execute.clone();
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |stream| {
+            // SAFETY: the strict recorder retains the acquired lease, exact
+            // receipt and command until the native CAS completes.
+            unsafe {
+                execute.launch_in(
+                    stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (descriptor,),
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })?;
+        wait_on_stream(
+            &self.stream,
+            &mut self.poisoned,
+            &mut self.stream_waits,
+            "delivery acknowledgement publication",
+            CudaStream::synchronize,
+        )?;
+        let control = self.publication_read(storage.control.view())?[0];
+        if control.refusal != 0 {
+            return Err(SemanticTransitionError::PublicationRefused {
+                status: control.refusal,
+            });
+        }
+        let header = self.read_publication_header((control.word & 1) as usize)?;
+        let expected_word = ((lease.identity.word >> 1) + 1) << 1 | ((lease.identity.word & 1) ^ 1);
+        if control.word != expected_word
+            || header.publication_word != control.word
+            || header.terminal != 2
+            || header.fuel + 1 != lease.header.fuel
+            || header.instance != lease.identity.instance
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(SemanticPublishedIdentity {
+            instance: header.instance,
+            word: header.publication_word,
+            logical_digest: header.logical_digest,
+            state_digest: header.state_digest,
+        })
+    }
+
     /// A FINAL acquired bank must contain its actual native terminal intent.
     /// This readiness check does not deliver an effect or issue use authority.
     pub fn admit_external_activation(
@@ -20756,6 +21407,11 @@ impl SemanticTransitionSession {
         if lease.header.terminal != 2 {
             return Err(publication_input_error(
                 "external activation requires a genuinely published FINAL parent",
+            ));
+        }
+        if lease.header.fuel == 0 {
+            return Err(publication_input_error(
+                "FINAL parent has no reserved fuel for durable delivery acknowledgement",
             ));
         }
         let storage = Arc::clone(
@@ -20838,6 +21494,21 @@ impl SemanticTransitionSession {
         {
             return Err(publication_input_error(
                 "terminal intent is not the actual final effect of this acquired publication",
+            ));
+        }
+        let current = self.publication_read(storage.control.view())?[0];
+        if current.instance != lease.identity.instance || current.word != lease.identity.word {
+            return Err(publication_input_error(
+                "external activation requires the current acquired FINAL parent",
+            ));
+        }
+        let acknowledgements = self.read_published_control_record(lease, 32)?;
+        if acknowledgement_receipts(&acknowledgements.bytes, acknowledgements.capacity)?
+            .iter()
+            .any(|(identity, _)| *identity == entry.stable_identity)
+        {
+            return Err(publication_input_error(
+                "terminal intent already has a durable delivery acknowledgement",
             ));
         }
         Ok(())
@@ -21118,8 +21789,28 @@ impl SemanticTransitionSession {
         };
         let mut ranges = Vec::with_capacity(lease.directory.len());
         let mut model_allocations = Vec::with_capacity(storage.model_slots.len());
-        for slots in &storage.model_slots {
-            let allocation = &storage.allocations[slots[(lease.identity.word & 1) as usize]];
+        for (allocation_index, slots) in storage.model_slots.iter().enumerate() {
+            let mut selected_slot = None;
+            for range in lease
+                .directory
+                .iter()
+                .filter(|range| matches!(range.role, 18..=25))
+            {
+                let (owner, _) = storage.model_memory.location(range.role, range.index)?;
+                if owner == allocation_index {
+                    if selected_slot
+                        .replace(range.storage_slot as usize)
+                        .is_some_and(|prior| prior != range.storage_slot as usize)
+                    {
+                        return Err(SemanticTransitionError::ObservationMismatch);
+                    }
+                }
+            }
+            let slot = selected_slot.unwrap_or(slots[(lease.identity.word & 1) as usize]);
+            if !slots.contains(&slot) {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            let allocation = &storage.allocations[slot];
             model_allocations.push(if allocation.is_empty() {
                 Vec::new()
             } else {
@@ -22088,7 +22779,10 @@ impl SemanticTransitionSession {
                 "final publication admits reads, not another transition",
             ));
         }
-        let reserve = if kind == SemanticTransitionKind::Proposal {
+        let reserve = if matches!(
+            kind,
+            SemanticTransitionKind::Proposal | SemanticTransitionKind::Drain
+        ) {
             2
         } else {
             1
@@ -28031,6 +28725,7 @@ mod text_parent_tests {
             intent_effect: b"record result".to_vec(),
             intent_entry_capacity: 4,
             intent_payload_capacity_bytes: 256,
+            acknowledgement_payload_capacity_bytes: 4096,
             model_generation: 1,
             policy_generation: 1,
             neural_generation: 1,

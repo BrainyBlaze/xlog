@@ -1259,6 +1259,7 @@ impl PySemanticTransitionSession {
                     phase: task_phase,
                     snapshot: current_snapshot,
                 }),
+                delivery: Mutex::new(None),
             },
         )?;
         let parent = {
@@ -2421,6 +2422,7 @@ fn parse_parent(
         "intent_effect",
         "intent_entry_capacity",
         "intent_payload_capacity_bytes",
+        "acknowledgement_payload_capacity_bytes",
         "model_generation",
         "model_numerical_mode",
         "model_contract_layout",
@@ -2586,6 +2588,12 @@ fn parse_parent(
             &mut budget,
         )?)
         .map_err(|_| invalid("intent payload capacity overflows"))?,
+        acknowledgement_payload_capacity_bytes: usize::try_from(metadata_integer(
+            metadata,
+            "acknowledgement_payload_capacity_bytes",
+            &mut budget,
+        )?)
+        .map_err(|_| invalid("acknowledgement payload capacity overflows"))?,
         model_generation: metadata_integer(metadata, "model_generation", &mut budget)?,
         model_numerical_mode,
         model_contract_layout,
@@ -6248,9 +6256,24 @@ pub(crate) struct PySemanticTransitionTaskUse {
     authority: TaskAuthority,
     checkpoint: TaskCheckpointSeed,
     state: Mutex<TaskUseState>,
+    delivery: Mutex<Option<DeliveryReceiverBinding>>,
+}
+
+#[derive(Clone)]
+struct DeliveryReceiverBinding {
+    recipient_id: Identity256,
+    verification_key: [u8; 32],
+    expected_effect: Vec<u8>,
 }
 
 impl PySemanticTransitionTaskUse {
+    fn delivery_binding(&self) -> PyResult<DeliveryReceiverBinding> {
+        self.delivery
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("delivery receiver binding mutex is poisoned"))?
+            .clone()
+            .ok_or_else(|| invalid("task use has no trusted delivery receiver binding"))
+    }
     fn state(&self) -> PyResult<MutexGuard<'_, TaskUseState>> {
         self.state
             .lock()
@@ -11968,6 +11991,7 @@ impl PySemanticTransitionController {
                     replay_selection,
                 },
                 state: Mutex::new(TaskUseState { phase, snapshot }),
+                delivery: Mutex::new(None),
             },
         )?;
         if let (Some(ordinal), Some(material), Some(kind)) =
@@ -12354,6 +12378,7 @@ impl PySemanticTransitionController {
                         phase: TaskUsePhase::ArenaPreparing(Box::new(original_phase)),
                         snapshot: initial_snapshot.clone(),
                     }),
+                    delivery: Mutex::new(None),
                 },
             )?;
             let candidate_parent = {
@@ -12658,6 +12683,59 @@ impl PySemanticTransitionController {
             SemanticCheckpointManifest::decode(checkpoint.cast::<PyBytes>()?.as_bytes())?;
         let intents = xlog_cuda::output_intents_from_publication_material(&manifest.native)
             .map_err(xlog_err)?;
+        let rows = intents
+            .iter()
+            .map(|intent| {
+                (
+                    PyBytes::new(py, intent.stable_identity.as_bytes()),
+                    PyBytes::new(py, &intent.effect),
+                    PyBytes::new(py, &intent.payload),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(PyTuple::new(py, rows)?.unbind())
+    }
+
+    /// Return only intents without a verified durable acknowledgement. Both
+    /// sealed native queues and the trusted receiver key are checked after
+    /// restoration; this projection itself does not perform delivery.
+    #[pyo3(signature = (task_use, checkpoint))]
+    fn checkpoint_pending_output_intents(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        checkpoint: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        self.require_issued(task_use)?;
+        if !checkpoint.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "pending intent projection requires exact checkpoint bytes",
+            ));
+        }
+        let binding = task_use.delivery_binding()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        task_use.require_current(&owner)?;
+        let current_binding = TaskCheckpointBinding::from_owner(&owner)?;
+        drop(owner);
+        let manifest =
+            SemanticCheckpointManifest::decode(checkpoint.cast::<PyBytes>()?.as_bytes())?;
+        let (seed, _, _, saved_binding) = TaskCheckpointSeed::decode(&manifest.task)?;
+        if !saved_binding.same_task_content(current_binding)
+            || seed.authority != task_use.checkpoint.authority
+        {
+            return Err(invalid(
+                "checkpoint pending intents belong to another task or live envelope",
+            ));
+        }
+        let intents = xlog_cuda::pending_output_intents_from_publication_material(
+            &manifest.native,
+            binding.recipient_id,
+            &binding.verification_key,
+            &binding.expected_effect,
+        )
+        .map_err(xlog_err)?;
         let rows = intents
             .iter()
             .map(|intent| {
@@ -13478,7 +13556,8 @@ impl PySemanticTransitionController {
     /// (None for this fresh initializer; recovery must preserve actual history), ring_head, provenance_capacity_records, prefix_capacity,
     /// feedback_capacity, max_position, pad_token, terminal_tokens,
     /// final_intent_payload_bytes, intent_effect (actual application bytes),
-    /// intent_entry_capacity, intent_payload_capacity_bytes, model_generation, policy_generation,
+    /// intent_entry_capacity, intent_payload_capacity_bytes,
+    /// acknowledgement_payload_capacity_bytes, model_generation, policy_generation,
     /// model_numerical_mode (complete, restorable producer-owned cold metadata),
     /// model_contract_layout (S_begin, S_bytes, S_digest_offset, generation_offset,
     /// N_offset, identity_offset), six u64 byte coordinates in record 44,
@@ -13656,6 +13735,107 @@ impl PySemanticTransitionController {
         owner
             .admit_external_activation(&*parent.lease()?)
             .map_err(xlog_err)
+    }
+
+    /// Bind one local receiver to this TaskUse before delivery. Only the
+    /// privileged application may source these exact bytes from its retained
+    /// live grant; the task document and checkpoint never carry the secret.
+    #[pyo3(signature = (task_use, *, recipient_id, verification_key, expected_effect))]
+    fn bind_delivery_receiver(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        recipient_id: &Bound<'_, PyAny>,
+        verification_key: &Bound<'_, PyAny>,
+        expected_effect: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.session.borrow(py).require_creator()?;
+        self.require_issued(task_use)?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        task_use.require_current(&owner)?;
+        drop(owner);
+        let recipient_id = identity_bytes(recipient_id)?;
+        if recipient_id == Identity256::default()
+            || !verification_key.is_exact_instance_of::<PyBytes>()
+            || !expected_effect.is_exact_instance_of::<PyBytes>()
+        {
+            return Err(invalid(
+                "trusted receiver requires exact nonzero identity, key and effect bytes",
+            ));
+        }
+        let verification_key: [u8; 32] = verification_key
+            .cast::<PyBytes>()?
+            .as_bytes()
+            .try_into()
+            .map_err(|_| invalid("delivery verification key must contain exactly 32 bytes"))?;
+        let expected_effect = expected_effect.cast::<PyBytes>()?.as_bytes().to_vec();
+        if verification_key.iter().all(|&byte| byte == 0) || expected_effect.is_empty() {
+            return Err(invalid("trusted receiver key and effect must be nonempty"));
+        }
+        let mut binding = task_use
+            .delivery
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("delivery receiver binding mutex is poisoned"))?;
+        if binding.is_some() {
+            return Err(invalid(
+                "task use already has its one delivery receiver binding",
+            ));
+        }
+        *binding = Some(DeliveryReceiverBinding {
+            recipient_id,
+            verification_key,
+            expected_effect,
+        });
+        Ok(())
+    }
+
+    /// Commit one durable receiver acknowledgement after FINAL. The key and
+    /// recipient come from the trusted local grant, never from task content.
+    /// A byte-identical retry returns the existing publication identity.
+    #[pyo3(signature = (task_use, *, parent, snapshot, receipt))]
+    fn acknowledge_delivery(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        snapshot: &Bound<'_, PyAny>,
+        receipt: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        self.require_issued(task_use)?;
+        parent.require_task(py, task_use)?;
+        if !receipt.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "delivery acknowledgement requires exact receipt bytes",
+            ));
+        }
+        let binding = task_use.delivery_binding()?;
+        let mut budget = 16 * 1024 * 1024;
+        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        task_use.require_current(&owner)?;
+        task_use
+            .state()?
+            .revalidate_activation(&task_use.authority, snapshot)?;
+        let identity = owner
+            .acknowledge_delivery(
+                &*parent.lease()?,
+                receipt.cast::<PyBytes>()?.as_bytes(),
+                binding.recipient_id,
+                &binding.verification_key,
+                &binding.expected_effect,
+            )
+            .map_err(xlog_err)?;
+        Ok((
+            PyBytes::new(py, identity.instance.as_bytes()),
+            identity.word,
+            PyBytes::new(py, identity.logical_digest.as_bytes()),
+            PyBytes::new(py, identity.state_digest.as_bytes()),
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 }
 

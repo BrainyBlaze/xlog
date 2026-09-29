@@ -198,6 +198,43 @@ publication, or substitute a backward call.
 
 ### Semantic runtime checkpoints
 
+The fresh parent's `acknowledgement_payload_capacity_bytes` reserves the full
+receipt bytes for every possible native intent. With `N = intent_entry_capacity`,
+`P = intent_payload_capacity_bytes`, and `E = len(intent_effect)`, it must be at
+least `169*N + P + (N-1)*E`. The native initializer checks this bound and owns
+the acknowledgement queue; callers cannot supply role 32 records. Proposal and
+Drain each reserve a continuation and a delivery-acknowledgement fuel unit.
+
+For an external effect, the trusted application binds its live receiver once
+with `controller.bind_delivery_receiver(task_use, recipient_id=bytes32,
+verification_key=bytes32, expected_effect=bytes)`. The key stays in the local
+rights store, not the checkpoint. After FINAL, the application saves a durable
+checkpoint, obtains its native intent, and sends its exact stable identity,
+effect and payload to the receiver. The receiver durably records those bytes
+before returning a receipt. The receipt is
+`b"xlog.delivery.receipt.v1\0" || stable_identity || recipient_id ||
+LE64(len(effect)) || effect || LE64(len(payload)) || payload || record_digest || mac`,
+where `record_digest` is SHA-256 of the same identity, recipient, length and
+content fields prefixed by `b"xlog.delivery.record.v1\0"`, and `mac` is
+HMAC-SHA256 of the receipt body under the bound key. Both domain terminators
+are single NUL bytes. A retry of the same stable identity must return the same
+stored receipt, without applying the effect again.
+
+`controller.acknowledge_delivery(task_use, parent=..., snapshot=...,
+receipt=...)` checks the fresh use rights and full receiver receipt against the
+actual FINAL intent, then appends it through the native publication CAS. It
+returns the new `(instance, word, logical_digest, state_digest)`; the caller
+must acquire that new parent and save a new checkpoint. The CAS does no model
+step and preserves the selected model allocation, text, theory, cache and RNG.
+The old parent cannot acknowledge again. After a cold restore, bind the same
+trusted receiver to the newly issued task use before invoking
+`controller.checkpoint_pending_output_intents(task_use, checkpoint)`. That
+projection verifies both sealed queues and every stored receipt MAC, returning
+only unacknowledged `(stable_identity, effect, payload)` rows. The older
+`checkpoint_output_intents(checkpoint)` remains an all-intents audit read, not
+a delivery queue. An exhausted FINAL parent cannot start an unacknowledged
+delivery; an already acknowledged terminal intent cannot be activated again.
+
 `SemanticTransitionController.save_checkpoint(task_use, *, parent,
 consumer_streams, snapshot, snapshot_model_state)` returns one sealed `bytes`
 value containing the selected native publication, the task capsule, the session

@@ -368,6 +368,9 @@ struct PendingContinuation {
     uint64_t model_update_admissibility,model_update_refusal;
 };
 struct PublicationCommand { uint64_t control,lease,operation; };
+struct PublicationDeliveryInput {
+    uint64_t lease,receipt,receipt_len,recipient_id[4],receipt_digest[4];
+};
 struct PublicationLease { uint64_t abi,status,instance[4],word,bank,epoch,active,transition_kind; };
 struct SemanticTrainingViewOriginRecord {
     uint64_t present,transition;
@@ -419,6 +422,12 @@ struct IntentEntry {
     uint64_t stable_identity[4],checkpoint_lineage[4],base_logical[4],effective_delta[4],result_logical[4];
     uint64_t effect_digest[4],payload_digest[4],payload_offset,payload_len,audit_instance[4],audit_epoch;
     uint64_t previous_chain[4],chain[4];
+};
+struct AcknowledgementQueueHeader {
+    uint64_t abi,count,capacity,payload_used_bytes,payload_capacity_bytes,chain_head[4];
+};
+struct AcknowledgementEntry {
+    uint64_t stable_identity[4],receipt_digest[4],receipt_len,previous_chain[4],chain[4];
 };
 struct PolicyField { uint64_t embeddings,biases; uint32_t cardinality; int32_t null_category; uint64_t retained_offset; };
 struct PolicyDescriptor {
@@ -615,6 +624,7 @@ static_assert(sizeof(TextRow)==16,"compact text row ABI");
 static_assert(sizeof(TextBinding)==24,"compact text binding ABI");
 static_assert(sizeof(ModelUpdateBinding)==32,"model update binding ABI");
 static_assert(sizeof(PublicationCommand)==24,"publication command ABI");
+static_assert(sizeof(PublicationDeliveryInput)==88,"publication delivery input ABI");
 static_assert(sizeof(PublicationLease)==88,"publication lease ABI");
 static_assert(sizeof(PublicationStepResult)==sizeof(PublicationHeader)+32+sizeof(AttemptReceipt),"publication step result ABI");
 static_assert(sizeof(PublicationTensorLayout)==112,"tensor layout ABI");
@@ -624,6 +634,8 @@ static_assert(sizeof(AttemptReceipt)==352,"attempt receipt ABI");
 static_assert(sizeof(TokenProvenanceRecord)==184,"token provenance ABI");
 static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
+static_assert(sizeof(AcknowledgementQueueHeader)==72,"acknowledgement queue ABI");
+static_assert(sizeof(AcknowledgementEntry)==136,"acknowledgement entry ABI");
 static_assert(sizeof(Descriptor)==1016,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 
@@ -802,7 +814,7 @@ __device__ uint64_t publication_header_eligibility(const PublicationControl& con
     if(bank.header.terminal>1)return 4;
     if(transition_kind<1 || transition_kind>4 ||
        (bank.header.terminal==1)!=(transition_kind==3))return 1;
-    return bank.header.fuel<(transition_kind==1 ? 2 : 1) ? 5 : 0;
+    return bank.header.fuel<((transition_kind==1 || transition_kind==3) ? 2 : 1) ? 5 : 0;
 }
 __device__ uint64_t publication_acquire(PublicationControl& control,PublicationLease& lease,
         uint64_t requested_kind=0,uint64_t expected_word=UINT64_MAX) {
@@ -1305,7 +1317,7 @@ __device__ uint64_t publication_validate_directory(const PublicationControl& con
     return 0;
 }
 __device__ bool publication_mutable_role(uint64_t role) {
-    return role==1 || role==2 || role==3 || (role>=4 && role<=15) || (role>=18 && role<=25) || role==30 || role==31 || role==33 || role==39 || role==44 ||
+    return role==1 || role==2 || role==3 || (role>=4 && role<=15) || (role>=18 && role<=25) || role==30 || role==31 || role==32 || role==33 || role==39 || role==44 ||
         (role>=51 && role<=55);
 }
 __device__ uint64_t publication_validate_storage(const PublicationControl& control) {
@@ -4199,7 +4211,7 @@ __device__ uint64_t publication_write_attempt(const PublicationControl& control,
     if(!target)return 1;
     auto* attempt=reinterpret_cast<AttemptReceipt*>(publication_range_bytes(control,*target));
     if(!attempt || target->length_bytes!=sizeof(AttemptReceipt))return 1;
-    if(transition_kind<1 || transition_kind>4)return 1;
+    if(transition_kind<1 || transition_kind>5)return 1;
     *attempt=AttemptReceipt{};attempt->abi=2;attempt->transition_kind=transition_kind;
     semantic_graph::copy_identity(attempt->instance,bank.header.instance);
     attempt->base_word=base.header.publication_word;attempt->next_word=bank.header.publication_word;
@@ -4299,6 +4311,142 @@ __device__ uint64_t publication_initialize(const Descriptor& descriptor,Publicat
         !publication_identity_equal(expected_state,bank.header.state_digest))){bank.header.abi=0;return 1;}
     return 0;
 }
+__device__ uint64_t publication_acknowledge(const Descriptor& descriptor,PublicationControl& control,
+        const PublicationDeliveryInput& input) {
+    if(!input.lease || !input.receipt || input.receipt_len<169 || !control.contract ||
+       !publication_compare_exchange(control.reader_gate,0,1))return 2;
+    uint64_t status=1;
+    do {
+        const auto& lease=*reinterpret_cast<const PublicationLease*>(input.lease);
+        const uint64_t word=publication_load(control.word);
+        const auto* base=publication_acquired_bank(control,lease);
+        if(!base || lease.word!=word || base->header.terminal!=2 || !base->header.fuel ||
+           control.reader_counts[(word&1)^1] || (word>>1)==(UINT64_MAX>>1) ||
+           publication_validate_selected_model(control,*base)) { status=3;break; }
+        const auto* old=reinterpret_cast<const PublicationRange*>(control.directories[word&1]);
+        auto* next_ranges=reinterpret_cast<PublicationRange*>(control.directories[(word&1)^1]);
+        if(!old || !next_ranges || publication_validate_intents(control,old,base->header.range_count))break;
+        const auto* intent_range=publication_find_range(old,base->header.range_count,30);
+        const auto* payload_range=publication_find_range(old,base->header.range_count,31);
+        const auto* prior_ack=publication_find_range(old,base->header.range_count,32);
+        auto* ack_target=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,32));
+        auto* attempt_target=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,33));
+        if(!intent_range || !payload_range || !prior_ack || !ack_target || !attempt_target ||
+           prior_ack->length_bytes<sizeof(AcknowledgementQueueHeader))break;
+        const PublicationRange ack_template=*ack_target,attempt_template=*attempt_target;
+        const auto* intents=reinterpret_cast<const IntentQueueHeader*>(publication_range_bytes(control,*intent_range));
+        const auto* payload=publication_range_bytes(control,*payload_range);
+        const auto* old_queue=reinterpret_cast<const AcknowledgementQueueHeader*>(publication_range_bytes(control,*prior_ack));
+        if(!intents || !payload || !old_queue || old_queue->abi!=1 ||
+           old_queue->count>old_queue->capacity || old_queue->count>=old_queue->capacity ||
+           old_queue->payload_used_bytes!=prior_ack->length_bytes-sizeof(AcknowledgementQueueHeader) ||
+           old_queue->capacity>(UINT64_MAX-sizeof(AcknowledgementQueueHeader))/sizeof(AcknowledgementEntry) ||
+           old_queue->payload_capacity_bytes>UINT64_MAX-sizeof(AcknowledgementQueueHeader)-
+               old_queue->capacity*sizeof(AcknowledgementEntry))break;
+        const auto* receipt=reinterpret_cast<const uint8_t*>(input.receipt);
+        const char domain[]="xlog.delivery.receipt.v1";
+        bool exact=true;
+        for(uint32_t i=0;i<sizeof(domain);++i)exact &= receipt[i]==uint8_t(domain[i]);
+        for(uint32_t i=0;i<32;++i)exact &= receipt[57+i]==reinterpret_cast<const uint8_t*>(input.recipient_id)[i];
+        if(!exact)break;
+        uint64_t effect_len=0;
+        for(uint32_t i=0;i<8;++i)effect_len|=uint64_t(receipt[89+i])<<(8*i);
+        if(effect_len!=intents->effect_length_bytes || effect_len>input.receipt_len-169)break;
+        const uint64_t payload_length_offset=97+effect_len;
+        uint64_t output_len=0;
+        for(uint32_t i=0;i<8;++i)output_len|=uint64_t(receipt[payload_length_offset+i])<<(8*i);
+        if(output_len>input.receipt_len-169-effect_len ||
+           input.receipt_len!=169+effect_len+output_len)break;
+        for(uint64_t i=0;i<effect_len;++i)if(receipt[97+i]!=payload[i]){exact=false;break;}
+        if(!exact)break;
+        const IntentEntry* selected=nullptr;
+        const auto* entries=reinterpret_cast<const IntentEntry*>(intents+1);
+        for(uint64_t i=0;i<intents->count;++i) {
+            const auto& entry=entries[i];
+            if(entry.payload_len!=output_len)continue;
+            bool same=true;
+            for(uint32_t b=0;b<32;++b)same &= receipt[25+b]==reinterpret_cast<const uint8_t*>(entry.stable_identity)[b];
+            if(same){selected=&entry;break;}
+        }
+        if(!selected || output_len>intents->payload_used_bytes ||
+           selected->payload_offset>intents->payload_used_bytes-output_len)break;
+        for(uint64_t i=0;i<output_len;++i)if(receipt[payload_length_offset+8+i]!=payload[selected->payload_offset+i]){
+            exact=false;break;
+        }
+        if(!exact)break;
+        uint64_t digest[4];semantic_graph::sha256(receipt,input.receipt_len,digest);
+        if(!publication_identity_equal(digest,input.receipt_digest))break;
+        const uint8_t* old_bytes=publication_range_bytes(control,*prior_ack);
+        uint64_t cursor=sizeof(AcknowledgementQueueHeader),chain[4]={},receipt_used=0;
+        for(uint64_t ordinal=0;ordinal<old_queue->count;++ordinal) {
+            if(cursor>prior_ack->length_bytes ||
+               prior_ack->length_bytes-cursor<sizeof(AcknowledgementEntry)) { exact=false;break; }
+            const auto* item=reinterpret_cast<const AcknowledgementEntry*>(old_bytes+cursor);
+            if(item->receipt_len>prior_ack->length_bytes-cursor-sizeof(AcknowledgementEntry) ||
+               !publication_identity_equal(item->previous_chain,chain)) { exact=false;break; }
+            uint64_t item_digest[4];
+            semantic_graph::sha256(old_bytes+cursor+sizeof(AcknowledgementEntry),item->receipt_len,item_digest);
+            if(!publication_identity_equal(item_digest,item->receipt_digest)) { exact=false;break; }
+            publication_fold(chain,32,ordinal,item->stable_identity);
+            publication_fold(chain,32,ordinal,item->receipt_digest);
+            if(!publication_identity_equal(chain,item->chain)) { exact=false;break; }
+            if(publication_identity_equal(item->stable_identity,selected->stable_identity)) {
+                status=publication_identity_equal(item->receipt_digest,digest) ? 7 : 1;
+                exact=false;break;
+            }
+            if(receipt_used>old_queue->payload_capacity_bytes ||
+               item->receipt_len>old_queue->payload_capacity_bytes-receipt_used) { exact=false;break; }
+            receipt_used+=item->receipt_len;
+            cursor+=sizeof(AcknowledgementEntry)+item->receipt_len;
+        }
+        if(!exact || cursor!=prior_ack->length_bytes || !publication_identity_equal(chain,old_queue->chain_head) ||
+           receipt_used>old_queue->payload_capacity_bytes ||
+           input.receipt_len>old_queue->payload_capacity_bytes-receipt_used)break;
+        const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
+        if(ack_template.storage_slot>=control.storage_count || attempt_template.storage_slot>=control.storage_count ||
+           ack_template.storage_slot==prior_ack->storage_slot ||
+           ack_template.storage_slot==attempt_template.storage_slot ||
+           input.receipt_len>UINT64_MAX-sizeof(AcknowledgementEntry) ||
+           cursor>storage[ack_template.storage_slot].bytes ||
+           sizeof(AcknowledgementEntry)+input.receipt_len>storage[ack_template.storage_slot].bytes-cursor)break;
+        for(uint64_t i=0;i<base->header.range_count;++i)next_ranges[i]=old[i];
+        auto* next_ack=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,32));
+        auto* next_attempt=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,33));
+        next_ack->storage_slot=ack_template.storage_slot;
+        next_attempt->storage_slot=attempt_template.storage_slot;
+        next_ack->length_bytes=cursor+sizeof(AcknowledgementEntry)+input.receipt_len;
+        next_ack->logical_begin=0;next_ack->logical_end=old_queue->count+1;
+        auto* next_bytes=publication_range_bytes(control,*next_ack);
+        if(!next_bytes)break;
+        publication_copy_bytes(next_bytes,old_bytes,cursor);
+        auto* queue=reinterpret_cast<AcknowledgementQueueHeader*>(next_bytes);
+        auto* added=reinterpret_cast<AcknowledgementEntry*>(next_bytes+cursor);
+        *added=AcknowledgementEntry{};
+        semantic_graph::copy_identity(added->stable_identity,selected->stable_identity);
+        semantic_graph::copy_identity(added->receipt_digest,digest);
+        added->receipt_len=input.receipt_len;
+        semantic_graph::copy_identity(added->previous_chain,chain);
+        publication_fold(chain,32,old_queue->count,added->stable_identity);
+        publication_fold(chain,32,old_queue->count,added->receipt_digest);
+        semantic_graph::copy_identity(added->chain,chain);
+        publication_copy_bytes(next_bytes+cursor+sizeof(AcknowledgementEntry),receipt,input.receipt_len);
+        ++queue->count;queue->payload_used_bytes+=sizeof(AcknowledgementEntry)+input.receipt_len;
+        semantic_graph::copy_identity(queue->chain_head,chain);
+        if(publication_range_digest(control,*next_ack,nullptr,next_ack->digest))break;
+        auto& next=*publication_bank(control,word^1);
+        next=*base;
+        next.header.sealed_epoch=(word>>1)+1;
+        next.header.base_word=word;
+        next.header.publication_word=(next.header.sealed_epoch<<1)|((word&1)^1);
+        --next.header.fuel;
+        if(publication_logical_digest(control,next) || publication_write_attempt(control,next,*base,5))break;
+        if(!next_attempt || publication_range_digest(control,*next_attempt,nullptr,next_attempt->digest) ||
+           publication_descriptor_digest(control,next))break;
+        status=publication_compare_exchange(control.word,word,next.header.publication_word) ? 0 : 3;
+    } while(false);
+    publication_store(control.reader_gate,0);
+    return status;
+}
 __device__ void publication_command(const Descriptor& descriptor) {
     if(!descriptor.publication.control)return;
     auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
@@ -4307,6 +4455,9 @@ __device__ void publication_command(const Descriptor& descriptor) {
        descriptor.publication.operation==5) {
         if(!publication_compare_exchange(control.reader_gate,0,1))status=2;
         else {status=publication_initialize(descriptor,control,descriptor.publication.operation);publication_store(control.reader_gate,0);}
+    } else if(descriptor.publication.operation==6 && descriptor.publication.lease) {
+        status=publication_acknowledge(descriptor,control,
+            *reinterpret_cast<const PublicationDeliveryInput*>(descriptor.publication.lease));
     } else if(descriptor.publication.lease) {
         auto& lease=*reinterpret_cast<PublicationLease*>(descriptor.publication.lease);
         if(descriptor.publication.operation==2)status=publication_acquire(control,lease);

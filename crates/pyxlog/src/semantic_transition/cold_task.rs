@@ -146,6 +146,7 @@ pub(crate) struct PySemanticTransitionFreshParent {
     intent_effect: Vec<u8>,
     intent_entry_capacity: u64,
     intent_payload_capacity_bytes: usize,
+    acknowledgement_payload_capacity_bytes: usize,
     generations: (u64, u64, u64, u64),
     training_cursor: u64,
     training_rng: [u64; 4],
@@ -186,6 +187,10 @@ impl PySemanticTransitionFreshParent {
         metadata.set_item(
             "intent_payload_capacity_bytes",
             self.intent_payload_capacity_bytes,
+        )?;
+        metadata.set_item(
+            "acknowledgement_payload_capacity_bytes",
+            self.acknowledgement_payload_capacity_bytes,
         )?;
         metadata.set_item("model_generation", self.generations.0)?;
         metadata.set_item("policy_generation", self.generations.1)?;
@@ -283,7 +288,7 @@ pub(crate) struct PySemanticTransitionColdTask {
 #[pymethods]
 impl PySemanticTransitionColdTask {
     #[new]
-    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng))]
+    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the cold producer receives independent native resource budgets"
@@ -307,6 +312,7 @@ impl PySemanticTransitionColdTask {
         intent_effect: &Bound<'_, PyAny>,
         intent_entry_capacity: u64,
         intent_payload_capacity_bytes: usize,
+        acknowledgement_payload_capacity_bytes: usize,
         authority_decisions_capacity_bytes: usize,
         generations: (u64, u64, u64, u64),
         training_cursor: u64,
@@ -331,6 +337,7 @@ impl PySemanticTransitionColdTask {
             &intent_effect,
             intent_entry_capacity,
             intent_payload_capacity_bytes,
+            acknowledgement_payload_capacity_bytes,
             authority_decisions_capacity_bytes,
             generations.0,
             rng,
@@ -388,6 +395,7 @@ impl PySemanticTransitionColdTask {
                 intent_effect,
                 intent_entry_capacity,
                 intent_payload_capacity_bytes,
+                acknowledgement_payload_capacity_bytes,
                 generations,
                 training_cursor,
                 training_rng,
@@ -546,6 +554,7 @@ fn validate_parent_geometry(
     intent_effect: &[u8],
     intent_entry_capacity: u64,
     intent_payload_capacity_bytes: usize,
+    acknowledgement_payload_capacity_bytes: usize,
     authority_decisions_capacity_bytes: usize,
     model_generation: u64,
     rng: (u64, u8, u32),
@@ -580,6 +589,7 @@ fn validate_parent_geometry(
         || (intent_effect.len() as u64)
             .checked_add(final_intent_payload_bytes)
             .is_none_or(|needed| needed > intent_payload_capacity_bytes as u64)
+        || acknowledgement_payload_capacity_bytes == 0
         || authority_decisions_capacity_bytes == 0
     {
         return Err(invalid(
@@ -778,7 +788,6 @@ fn fresh_records(
         fresh_record(26, "rng", task_digest, &rng_detail),
         fresh_record(27, "empty-replay-index", task_digest, &[]),
         fresh_record(28, "empty-replay-payload", task_digest, &[]),
-        fresh_record(32, "empty-acknowledgements", task_digest, &[]),
         fresh_record(34, "task-goal", task_digest, &generation_detail),
         fresh_record(35, "fresh-world-root", task_digest, &[]),
         fresh_record(36, "empty-edit-journal", task_digest, &[]),

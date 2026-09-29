@@ -76,10 +76,11 @@ pub use semantic_training_view::{
 };
 pub use semantic_transition::{
     initial_source_layout, output_intents_from_publication_material,
-    semantic_structural_cost_descriptor, Identity256, SemanticActionCatalogue,
-    SemanticActionDescriptor, SemanticActiveRow, SemanticActiveRows, SemanticCatalogueBinding,
-    SemanticCatalogueField, SemanticCatalogueSignature, SemanticCheckpointNativeProjection,
-    SemanticComponent, SemanticComponentInput, SemanticContinuationInput, SemanticFeedback,
+    pending_output_intents_from_publication_material, semantic_structural_cost_descriptor,
+    Identity256, SemanticActionCatalogue, SemanticActionDescriptor, SemanticActiveRow,
+    SemanticActiveRows, SemanticCatalogueBinding, SemanticCatalogueField,
+    SemanticCatalogueSignature, SemanticCheckpointNativeProjection, SemanticComponent,
+    SemanticComponentInput, SemanticContinuationInput, SemanticFeedback,
     SemanticFeedbackRecordMaterial, SemanticFeedbackSchema, SemanticGradientDeliveryBinding,
     SemanticInitialPrefillContentWitness, SemanticInitialPrefillLease, SemanticInitialSourceLayout,
     SemanticModelContext, SemanticModelContractLayout, SemanticModelForwardWitness,

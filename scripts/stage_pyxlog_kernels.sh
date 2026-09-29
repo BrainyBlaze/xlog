@@ -67,7 +67,7 @@ deps_dir = target_dir / "release" / "deps"
 if not deps_dir.is_dir():
     sys.exit(1)
 
-matches: list[str] = []
+matches: list[tuple[int, str]] = []
 for dep_info in sorted(deps_dir.glob("xlog_cuda-*.d")):
     for line in dep_info.read_text(encoding="utf-8", errors="replace").splitlines():
         marker = "# env-dep:OUT_DIR="
@@ -78,14 +78,16 @@ for dep_info in sorted(deps_dir.glob("xlog_cuda-*.d")):
         if (candidate.is_dir()
                 and any(candidate.glob("*.portable.ptx"))
                 and (candidate / "semantic_policy_selection.cuh").is_file() == require_policy):
-            matches.append(str(candidate))
+            matches.append((dep_info.stat().st_mtime_ns, str(candidate)))
         break
 
-unique_matches = sorted(dict.fromkeys(matches))
-if len(unique_matches) != 1:
+if not matches:
     sys.exit(1)
 
-print(unique_matches[0])
+matches.sort(reverse=True)
+if len(matches) > 1 and matches[0][0] == matches[1][0] and matches[0][1] != matches[1][1]:
+    sys.exit(1)
+print(matches[0][1])
 PY
 }
 
@@ -114,7 +116,7 @@ for out_dir in build_dir.glob("xlog-cuda-*/out"):
     if (out_dir / "semantic_policy_selection.cuh").is_file() != require_policy:
         continue
     try:
-        mtime = out_dir.stat().st_mtime_ns
+        mtime = max(path.stat().st_mtime_ns for path in out_dir.glob("*.portable.ptx"))
     except FileNotFoundError:
         continue
     candidates.append((mtime, out_dir))
@@ -154,8 +156,10 @@ if [[ -z "$kernel_out_dir" ]]; then
   kernel_out_dir="$(resolve_kernel_out_dir_from_build_tree "$target_dir")"
 fi
 
-python3 "$repo_root/scripts/stage_kernels.py" \
-  --from-out-dir "$kernel_out_dir" \
-  --to "$repo_root/$dest_dir"
+stage_args=(--from-out-dir "$kernel_out_dir" --to "$repo_root/$dest_dir")
+if [[ "${XLOG_NO_CUBIN:-}" == "1" ]]; then
+  stage_args+=(--portable-only)
+fi
+python3 "$repo_root/scripts/stage_kernels.py" "${stage_args[@]}"
 
 printf 'staged pyxlog kernels from %s into %s\n' "$kernel_out_dir" "$repo_root/$dest_dir"
