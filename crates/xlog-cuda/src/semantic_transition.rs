@@ -12041,9 +12041,9 @@ const _: () = assert!(size_of::<SemanticTaskFacts>() == 88);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3328);
 const _: () = assert!(size_of::<DeviceState>() == 7568);
 const _: () = assert!(size_of::<PolicyField>() == 32);
-const _: () = assert!(size_of::<PolicyDescriptor>() == 672);
+const _: () = assert!(size_of::<PolicyDescriptor>() == 680);
 const _: () = assert!(size_of::<PolicyBackward>() == 144);
-const _: () = assert!(size_of::<Descriptor>() == 1016);
+const _: () = assert!(size_of::<Descriptor>() == 1024);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
