@@ -9726,6 +9726,27 @@ impl PySemanticRetainedReplayMember {
     /// the original multi-root backward have finished using its model graph.
     /// The normal import authority refresh and reader release still run once.
     fn finish(&self, py: Python<'_>) -> PyResult<()> {
+        self.finish_retained_import(py, None)
+    }
+
+    /// Retire a retained original after its bound target Update completed as
+    /// skipped or refused. No group VJP is inferred from this terminal path.
+    fn finish_without_published_update(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+    ) -> PyResult<()> {
+        self.finish_retained_import(py, Some(update_step))
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+impl PySemanticRetainedReplayMember {
+    fn finish_retained_import(
+        &self,
+        py: Python<'_>,
+        unpublished_update: Option<Py<PySemanticPreparedStep>>,
+    ) -> PyResult<()> {
         if self.completed.load(Ordering::Acquire) {
             return Err(invalid("retained replay member has already finished"));
         }
@@ -9734,23 +9755,63 @@ impl PySemanticRetainedReplayMember {
                 .group_use
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("retained group use is poisoned"))?;
-            if use_state.banks != [true, true] || use_state.gradient_banks != [true, true] {
-                return Err(invalid("retained replay requires both Update banks and original physical gradient deliveries"));
+            if let Some(update) = &unpublished_update {
+                let target = &update.borrow(py).inner;
+                if !use_state
+                    .target
+                    .as_ref()
+                    .is_some_and(|bound| bound.same_handle(target))
+                    || use_state
+                        .update
+                        .as_ref()
+                        .is_some_and(|bound| !bound.is(update))
+                {
+                    return Err(invalid(
+                        "unpublished Update differs from the retained member's bound target",
+                    ));
+                }
+                for delivery in use_state.deliveries.iter().flatten() {
+                    let delivery = delivery.borrow(py);
+                    if delivery.activated_once.load(Ordering::Acquire)
+                        && delivery
+                            .handles
+                            .lock()
+                            .map_err(|_| {
+                                PyRuntimeError::new_err("group gradient-delivery owner is poisoned")
+                            })?
+                            .is_some()
+                    {
+                        return Err(invalid(
+                            "retained gradient delivery is still active during target completion",
+                        ));
+                    }
+                }
+                update.clone_ref(py)
+            } else {
+                if use_state.banks != [true, true] || use_state.gradient_banks != [true, true] {
+                    return Err(invalid("retained replay requires both Update banks and original physical gradient deliveries"));
+                }
+                use_state
+                    .update
+                    .as_ref()
+                    .ok_or_else(|| invalid("retained replay has no original Update owner"))?
+                    .clone_ref(py)
             }
-            use_state
-                .update
-                .as_ref()
-                .ok_or_else(|| invalid("retained replay has no original Update owner"))?
-                .clone_ref(py)
         };
         {
             let update = update.borrow(py);
             let target_session = update.session.borrow(py);
             target_session.require_creator()?;
-            target_session
-                .owner()?
-                .require_recorded_group_critic(&update.inner)
-                .map_err(xlog_err)?;
+            let target_owner = target_session.owner()?;
+            if unpublished_update.is_some() {
+                target_owner
+                    .require_completed_unpublished_group_update(&update.inner)
+                    .map_err(xlog_err)?;
+            } else {
+                target_owner
+                    .require_recorded_group_critic(&update.inner)
+                    .map_err(xlog_err)?;
+            }
         }
         let session = self.session.borrow(py);
         session.require_creator()?;
@@ -10123,10 +10184,11 @@ impl PySemanticPolicyInvocation {
     /// consumers (legacy default stream 1 is allowed; 0 and 2 are not). Native
     /// finalization joins that stream without a host wait and retires only this
     /// invocation's retained policy tape. It does not release the parent.
-    /// Published training invocations require ``backward`` or, after an in-graph
-    /// temporal Update VJP, ``finish_recorded_training``; refused training
-    /// invocations require ``finish_refusal``. Final use is one-shot, including
-    /// uncertain native failures.
+    /// Published training invocations require ``backward`` or, after a completed
+    /// group Update, ``finish_recorded_training`` for a consumed tape or
+    /// ``finish_unselected_recorded_training`` for an unselected tape. Refused
+    /// training invocations require ``finish_refusal``. Final use is one-shot,
+    /// including uncertain native failures.
     #[pyo3(signature = (*, consumer_stream))]
     fn finish_inference(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
@@ -10153,6 +10215,55 @@ impl PySemanticPolicyInvocation {
         py: Python<'_>,
         update_step: Py<PySemanticPreparedStep>,
         consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.finish_recorded_training_use(py, update_step, consumer_stream, false)
+    }
+
+    /// Finish a published local Proposal that was outside the exact frozen
+    /// actor/edit group. The completed, published Update must have recorded
+    /// both full-group critic reductions; this tape must have no Update VJP.
+    /// No synthetic gradient or second backward is produced.
+    #[pyo3(signature = (update_step, *, consumer_stream))]
+    fn finish_unselected_recorded_training(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.finish_recorded_training_use(py, update_step, consumer_stream, true)
+    }
+
+    /// Finish an actual native refusal from inference or training without a VJP.
+    ///
+    /// Enqueue final consumers on the explicit ``consumer_stream`` first.
+    /// Stream 1 is allowed; 0 and 2 are refused. Published outcomes are not
+    /// admitted here. This shares the one-shot final-use owner with ``backward``,
+    /// ``finish_recorded_training`` and ``finish_inference`` and retains the
+    /// parent for its later release.
+    #[pyo3(signature = (*, consumer_stream))]
+    fn finish_refusal(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.session.borrow(py).require_creator()?;
+        self.require_public_result(py)?;
+        if !matches!(
+            &self.outcome,
+            xlog_cuda::SemanticTransitionOutcome::Refused(_)
+        ) {
+            return Err(invalid(
+                "policy refusal completion requires an actual native refusal",
+            ));
+        }
+        self.finish_final_use(py, consumer_stream)
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+impl PySemanticPolicyInvocation {
+    fn finish_recorded_training_use(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+        consumer_stream: &Bound<'_, PyAny>,
+        unselected: bool,
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         self.require_public_result(py)?;
@@ -10195,41 +10306,23 @@ impl PySemanticPolicyInvocation {
                 "policy authority changed before recorded training completion",
             ));
         }
-        owner
-            .finish_recorded_training_policy_invocation(
+        let result = if unselected {
+            owner.finish_unselected_recorded_training_policy_invocation(
                 &policy_step.borrow(py).inner,
                 &update_step.borrow(py).inner,
                 self.rng,
                 consumer_stream,
             )
-            .map_err(xlog_err)
+        } else {
+            owner.finish_recorded_training_policy_invocation(
+                &policy_step.borrow(py).inner,
+                &update_step.borrow(py).inner,
+                self.rng,
+                consumer_stream,
+            )
+        };
+        result.map_err(xlog_err)
     }
-
-    /// Finish an actual native refusal from inference or training without a VJP.
-    ///
-    /// Enqueue final consumers on the explicit ``consumer_stream`` first.
-    /// Stream 1 is allowed; 0 and 2 are refused. Published outcomes are not
-    /// admitted here. This shares the one-shot final-use owner with ``backward``,
-    /// ``finish_recorded_training`` and ``finish_inference`` and retains the
-    /// parent for its later release.
-    #[pyo3(signature = (*, consumer_stream))]
-    fn finish_refusal(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.session.borrow(py).require_creator()?;
-        self.require_public_result(py)?;
-        if !matches!(
-            &self.outcome,
-            xlog_cuda::SemanticTransitionOutcome::Refused(_)
-        ) {
-            return Err(invalid(
-                "policy refusal completion requires an actual native refusal",
-            ));
-        }
-        self.finish_final_use(py, consumer_stream)
-    }
-}
-
-#[cfg(feature = "semantic-policy")]
-impl PySemanticPolicyInvocation {
     fn finish_final_use(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
         let expected = {
             let session = self.session.borrow(py);
@@ -18071,6 +18164,13 @@ for method in ('finish_inference', 'finish_refusal'):
     assert tuple(finish.parameters) == ('self', 'consumer_stream')
     assert finish.parameters['consumer_stream'].kind is inspect.Parameter.KEYWORD_ONLY
     assert finish.parameters['consumer_stream'].default is inspect.Parameter.empty
+for method in ('finish_recorded_training', 'finish_unselected_recorded_training'):
+    finish = inspect.signature(getattr(SemanticPolicyInvocation, method))
+    assert tuple(finish.parameters) == ('self', 'update_step', 'consumer_stream')
+    assert finish.parameters['consumer_stream'].kind is inspect.Parameter.KEYWORD_ONLY
+    assert finish.parameters['consumer_stream'].default is inspect.Parameter.empty
+finish = inspect.signature(SemanticRetainedReplayMember.finish_without_published_update)
+assert tuple(finish.parameters) == ('self', 'update_step')
 assert inspect.isgetsetdescriptor(SemanticPolicyInvocation.refusal)
 assert SemanticPolicyInvocation.refusal.__name__ == 'refusal'
 try:

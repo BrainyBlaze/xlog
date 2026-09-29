@@ -25511,6 +25511,37 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
+    /// Prove that a captured Update has completed without publication. A
+    /// retained source tape may then be retired without claiming a policy VJP.
+    #[cfg(feature = "semantic-policy")]
+    pub fn require_completed_unpublished_group_update(
+        &self,
+        update_step: &SemanticPreparedStep,
+    ) -> Result<(), SemanticTransitionError> {
+        if self.is_poisoned() {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        let step = self.checked_prepared_step(update_step, false)?;
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if !build.completed
+            || build.requested_kind(update_step, &self.publication_issuer)?
+                != SemanticTransitionKind::Update
+            || step
+                .prepared
+                .as_ref()
+                .expect("checked prepared owner")
+                .group_update_published
+        {
+            return Err(publication_input_error(
+                "retained replay requires a completed Update that did not publish",
+            ));
+        }
+        Ok(())
+    }
+
     /// Differentiate one independently restored original Proposal into this
     /// Update's graph. The child Session retains its published reader, tape,
     /// model outputs and original allocations through both captured banks.
@@ -25873,6 +25904,55 @@ impl SemanticTransitionSession {
         {
             return Err(publication_input_error(
                 "published training completion requires the exact Update VJP in both captured banks",
+            ));
+        }
+        self.finish_policy_tape(index, consumer_stream)
+    }
+
+    /// Retire a published local Proposal that did not contribute a VJP to the
+    /// complete frozen Update group. Both critic reductions prove that every
+    /// frozen actor and edit member was accounted for by its actual tape.
+    #[cfg(feature = "semantic-policy")]
+    pub fn finish_unselected_recorded_training_policy_invocation(
+        &mut self,
+        step: &SemanticPreparedStep,
+        update_step: &SemanticPreparedStep,
+        invocation: SemanticRngBinding,
+        consumer_stream: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_recorded_group_critic(update_step)?;
+        let index = self.checked_prepared_policy_tape(step, invocation)?;
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .expect("checked completed prepared segment");
+        if build.requested_kind(step, &self.publication_issuer)? != SemanticTransitionKind::Proposal
+            || build.requested_kind(update_step, &self.publication_issuer)?
+                != SemanticTransitionKind::Update
+        {
+            return Err(publication_input_error(
+                "unselected training completion requires its actual Proposal and Update steps",
+            ));
+        }
+        let proposal_ordinal = build
+            .tokens
+            .iter()
+            .position(|token| *token == step.token)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let update_ordinal = build
+            .tokens
+            .iter()
+            .position(|token| *token == update_step.token)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if proposal_ordinal >= update_ordinal
+            || self.policy_tapes[index].refusal.is_some()
+            || !self.policy_tapes[index]
+                .policy
+                .temporal_vjp_recorded
+                .is_empty()
+        {
+            return Err(publication_input_error(
+                "unselected training completion requires an earlier published Proposal with no recorded Update VJP",
             ));
         }
         self.finish_policy_tape(index, consumer_stream)
