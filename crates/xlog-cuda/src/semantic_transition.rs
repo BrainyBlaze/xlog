@@ -21502,13 +21502,19 @@ impl SemanticTransitionSession {
                 "external activation requires the current acquired FINAL parent",
             ));
         }
+        let entries = self.read_published_control_record(lease, 30)?;
+        let payload = self.read_published_control_record(lease, 31)?;
         let acknowledgements = self.read_published_control_record(lease, 32)?;
-        if acknowledgement_receipts(&acknowledgements.bytes, acknowledgements.capacity)?
-            .iter()
-            .any(|(identity, _)| *identity == entry.stable_identity)
-        {
+        let intents = output_intents_from_ranges(&entries, &payload)?;
+        let acknowledged =
+            acknowledgement_receipts(&acknowledgements.bytes, acknowledgements.capacity)?;
+        if intents.iter().all(|intent| {
+            acknowledged
+                .iter()
+                .any(|(identity, _)| *identity == intent.stable_identity)
+        }) {
             return Err(publication_input_error(
-                "terminal intent already has a durable delivery acknowledgement",
+                "FINAL publication has no unacknowledged delivery intent",
             ));
         }
         Ok(())
