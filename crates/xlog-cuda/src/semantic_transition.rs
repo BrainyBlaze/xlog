@@ -11966,6 +11966,7 @@ fn enqueue_policy_snapshots(
 struct PolicyReplacement {
     support: TrackedCudaSlice<u8>,
     receipts: TrackedCudaSlice<SemanticTransitionReceipt>,
+    state: TrackedCudaSlice<DeviceState>,
 }
 
 /// Original numerical inputs and receipts survive later publication and rebinding.
@@ -11979,6 +11980,9 @@ struct PolicyTape {
     support: TrackedCudaSlice<u8>,
     receipts: TrackedCudaSlice<SemanticTransitionReceipt>,
     prepared_bank: Option<usize>,
+    // Ordinary proposals keep the exact device state observed with this tape;
+    // later restored invocations may rebind the Session's working state.
+    origin_state: Option<TrackedCudaSlice<DeviceState>>,
     // Immutable cold catalogue allocations remain shared by their original
     // invocation tapes; no later binding overwrites their bytes.
     components: DeviceMemoryView<SemanticComponent>,
@@ -24300,6 +24304,7 @@ impl SemanticTransitionSession {
             support: branch.support.take().expect("checked original support"),
             receipts: branch.receipts.take().expect("checked original receipts"),
             prepared_bank: Some(bank),
+            origin_state: None,
             components: self.device_components.view(),
             codebooks: self.device_codebooks.view(),
         });
@@ -24366,6 +24371,7 @@ impl SemanticTransitionSession {
             replacement: Some(PolicyReplacement {
                 support: allocate_publication(&self.provider, self.codebooks.input_cells)?,
                 receipts: allocate_publication(&self.provider, COMPONENT_COUNT)?,
+                state: allocate_publication(&self.provider, 1)?,
             }),
             buffers: self.allocate_policy_buffers()?,
             tape_live: false,
@@ -25220,14 +25226,18 @@ impl SemanticTransitionSession {
         let step_aliases = Arc::clone(&self.steps[&original._witness.reader_token].aliases);
         let tape = &self.policy_tapes[tape_index];
         let policy = &tape.policy;
-        let state = tape.prepared_bank.map_or(&self.state, |bank| {
+        let state = if let Some(bank) = tape.prepared_bank {
             &self.steps[&original._witness.reader_token]
                 .prepared
                 .as_ref()
                 .expect("retained prepared policy step")
                 .branches[bank]
                 .state
-        });
+        } else {
+            tape.origin_state
+                .as_ref()
+                .expect("ordinary policy tape retains its original state")
+        };
         let PolicyVjpRecording {
             descriptor,
             recorder,
@@ -25458,10 +25468,13 @@ impl SemanticTransitionSession {
         } else {
             self.pending = false;
             #[cfg(feature = "semantic-policy")]
-            self.retain_policy_tape(match &result {
+            if let Err(error) = self.retain_policy_tape(match &result {
                 Ok(SemanticTransitionOutcome::Refused(refusal)) => Some(*refusal),
                 _ => None,
-            });
+            }) {
+                self.poisoned = true;
+                return Err(error);
+            }
             self.task_observed = self.task.is_some() && self.publication.is_none();
             if self.publication.is_some() {
                 self.continuation_base = None;
@@ -25473,10 +25486,36 @@ impl SemanticTransitionSession {
     }
 
     #[cfg(feature = "semantic-policy")]
-    fn retain_policy_tape(&mut self, refusal: Option<SemanticTransitionRefusal>) {
-        let Some(mut policy) = self.policy.take() else {
-            return;
+    fn retain_policy_tape(
+        &mut self,
+        refusal: Option<SemanticTransitionRefusal>,
+    ) -> Result<(), SemanticTransitionError> {
+        let Some(policy) = self.policy.as_ref() else {
+            return Ok(());
         };
+        let next_state = &policy
+            .replacement
+            .as_ref()
+            .expect("proposal reserved its next working banks")
+            .state;
+        let mut recorder = self.domain.new_strict_recorder();
+        recorder.read(&self.state);
+        recorder.write(next_state);
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            // SAFETY: the recorded source and reserved destination each hold
+            // exactly one DeviceState on the controller's ordered CUDA stream.
+            unsafe {
+                sys::cuMemcpyDtoDAsync_v2(
+                    next_state.device_ptr_value(),
+                    self.state.device_ptr_value(),
+                    size_of::<DeviceState>(),
+                    enqueue.stream().cu_stream(),
+                )
+            }
+            .result()
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })?;
+        let mut policy = self.policy.take().expect("checked original policy");
         let replacement = policy
             .replacement
             .take()
@@ -25494,9 +25533,11 @@ impl SemanticTransitionSession {
             support: std::mem::replace(&mut self.support, replacement.support),
             receipts: std::mem::replace(&mut self.receipts, replacement.receipts),
             prepared_bank: None,
+            origin_state: Some(std::mem::replace(&mut self.state, replacement.state)),
             components: self.device_components.view(),
             codebooks: self.device_codebooks.view(),
         });
+        Ok(())
     }
 
     fn observe_terminal(
