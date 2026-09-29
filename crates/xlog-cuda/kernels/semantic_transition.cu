@@ -497,7 +497,7 @@ struct ModelUpdateCanaryInputs {
 struct PolicyBackward {
     uint64_t cotangents,parameters,text,baselines,recurrent,scores,status,parameter_cells,text_cells;
     uint64_t selection,objective,objective_groups,objective_group_members,roster_rows,origin_candidate;
-    uint64_t origin_lease,origin_bank,mode;
+    uint64_t origin_lease,origin_bank,mode,member_ordinal,critic_term;
 };
 struct Descriptor {
     uint64_t logits,support,scratch,receipts,state,components,codebooks,arena[7];
@@ -602,7 +602,7 @@ static_assert(sizeof(ModelForwardSealInput)==32,"model forward seal ABI");
 static_assert(sizeof(ModelForwardReceipt)==224,"model forward receipt ABI");
 static_assert(sizeof(ModelForwardReceiptInputs)==128,"model forward receipt input ABI");
 static_assert(sizeof(ModelUpdateCanaryInputs)==280,"training canary input ABI");
-static_assert(sizeof(PolicyBackward)==144,"policy backward ABI");
+static_assert(sizeof(PolicyBackward)==160,"policy backward ABI");
 
 __device__ bool semantic_training_canary_refusal_valid(
         const SemanticTrainingCanaryRefusalRecord& refusal) {
@@ -658,7 +658,7 @@ static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
 static_assert(sizeof(AcknowledgementQueueHeader)==72,"acknowledgement queue ABI");
 static_assert(sizeof(AcknowledgementEntry)==136,"acknowledgement entry ABI");
-static_assert(sizeof(Descriptor)==1024,"launch ABI");
+static_assert(sizeof(Descriptor)==1040,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 
 __device__ uint64_t text_row_count(TextBinding binding) {
@@ -3815,7 +3815,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
         if(b.mode==0) {
             for(uint32_t i=0;i<COMPONENT_COUNT;++i)
                 if(!isfinite(coefficients[i]))*status=1;
-        } else if(b.mode==1) {
+        } else if(b.mode==1 || b.mode==2 || b.mode==3) {
             if(!b.selection || b.selection%alignof(SemanticTrainingViewSelection) ||
                !b.objective || b.objective%alignof(SemanticTrainingObjectiveRecord) ||
                !b.objective_groups || b.objective_groups%alignof(SemanticTrainingObjectiveGroupRecord) ||
@@ -3851,7 +3851,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     if(objective_coefficients[fixed_coefficients[i]]!=1.0f)*status=1;
                 if(!isfinite(evaluator_min) || !isfinite(evaluator_max) || evaluator_min>evaluator_max)*status=1;
                 uint64_t actor_groups=0,edit_groups=0,matching_edit_rows=0;
-                bool selected_member=false;
+                bool selected_member=false,group_member=false;
                 const SemanticTrainingRosterRow* matching_edit_row=nullptr;
                 for(uint64_t i=0;i<objective.group_count && !*status;++i) {
                     const auto group=groups[i];
@@ -3867,6 +3867,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                             const uint64_t ordinal=members[group.member_offset+member];
                             if(ordinal>=objective.row_count) {*status=1;break;}
                             selected_member |= ordinal==selection.ordinal;
+                            group_member |= b.mode==2 && ordinal==b.member_ordinal;
                         }
                     } else if(group.kind==4) {
                         ++edit_groups;
@@ -3876,10 +3877,12 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                             if(ordinal>=objective.row_count) {*status=1;break;}
                             const auto& row=roster[ordinal];
                             if(row.ordinal!=ordinal || row.basis!=1 || row.origin.present!=1 ||
-                               row.origin.transition!=1 || row.origin_candidate==UINT64_MAX) {
+                               row.origin.transition!=1 ||
+                               (b.mode==1 && row.origin_candidate==UINT64_MAX)) {
                                 *status=1;break;
                             }
-                            if(row.origin_candidate==b.origin_candidate) {
+                            if((b.mode==1 && row.origin_candidate==b.origin_candidate) ||
+                               ((b.mode==2 || b.mode==3) && ordinal==b.member_ordinal)) {
                                 ++matching_edit_rows;
                                 matching_edit_row=&row;
                             }
@@ -3887,6 +3890,11 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     }
                 }
                 if(actor_groups!=1 || edit_groups!=1 || !selected_member ||
+                   (b.mode==2 && (!group_member || b.member_ordinal>=objective.row_count ||
+                    !b.critic_term || b.critic_term%alignof(float) ||
+                    !publication_pointer_span(b.critic_term,sizeof(float),alignof(float)))) ||
+                   (b.mode==3 && (b.member_ordinal>=objective.row_count ||
+                    matching_edit_rows!=1)) ||
                    matching_edit_rows>1)*status=1;
                 const auto* origin_lease=reinterpret_cast<const PublicationLease*>(b.origin_lease);
                 if(!origin_lease || b.origin_bank>1 ||
@@ -3895,10 +3903,24 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     *status=1;
                 const auto* state=reinterpret_cast<const State*>(descriptor.state);
                 const bool owned=origin_lease && origin_lease->bank==b.origin_bank;
-                apply_actor=owned && b.origin_candidate==selection.origin_candidate;
+                apply_actor=owned && (b.mode==1
+                    ? b.origin_candidate==selection.origin_candidate
+                    : (b.mode==2 && group_member));
                 apply_edit=owned && matching_edit_rows==1;
                 apply_selected=apply_actor || apply_edit;
                 if((apply_actor || apply_edit) && (!state || state->status))*status=1;
+                if((b.mode==2 || b.mode==3) && (!owned || !state || state->status))*status=1;
+                if((b.mode==2 || b.mode==3) && !*status) {
+                    const auto& row=roster[b.member_ordinal];
+                    const auto& origin=row.origin;
+                    if(row.ordinal!=b.member_ordinal || row.basis!=1 ||
+                       origin.present!=1 || origin.transition!=1 ||
+                       row.origin_candidate!=b.origin_candidate ||
+                       state->model_generation!=origin.model_generation ||
+                       state->stream_serial!=origin.stream_serial ||
+                       state->family_id!=origin.family_id ||
+                       state->proposal!=origin.proposal)*status=1;
+                }
                 if(apply_edit && !*status) {
                     const auto& origin=matching_edit_row->origin;
                     if(state->model_generation!=origin.model_generation ||
@@ -3940,10 +3962,11 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     }
                 }
                 if(apply_actor && !*status) {
-                    if(!state || state->status || state->model_generation!=selection.origin.model_generation ||
-                       state->stream_serial!=selection.origin.stream_serial ||
-                       state->family_id!=selection.origin.family_id ||
-                       state->proposal!=selection.origin.proposal ||
+                    const auto& origin=b.mode==1 ? selection.origin : roster[b.member_ordinal].origin;
+                    if(!state || state->status || state->model_generation!=origin.model_generation ||
+                        state->stream_serial!=origin.stream_serial ||
+                        state->family_id!=origin.family_id ||
+                        state->proposal!=origin.proposal ||
                        !isfinite(state->importance_weight) || state->importance_weight<=0.0 ||
                        !selected_task_cost_matches(state,objective.cost_cap)) {
                         *status=1;
@@ -3966,6 +3989,20 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
             }
         } else {
             *status=1;
+        }
+        if(b.mode==2 && b.critic_term && b.critic_term%alignof(float)==0 && !*status) {
+            float raw=0.0f;
+            const auto* baseline=reinterpret_cast<const float*>(p.component_baselines);
+            for(uint32_t i=0;i<COMPONENT_COUNT;++i)
+                if(receipts[i].legal_count>1) {
+                    const float difference=__fsub_rn(baseline[i],reward_f32);
+                    raw=__fadd_rn(raw,__fmul_rn(difference,difference));
+                }
+            const auto* objective=reinterpret_cast<const SemanticTrainingObjectiveRecord*>(b.objective);
+            const float coefficient=__uint_as_float(uint32_t(objective->coefficient_bits[7]));
+            const float term=__fdiv_rn(__fmul_rn(coefficient,raw),__ull2float_rn(actor_denominator));
+            if(!isfinite(term))*status=3;
+            else *reinterpret_cast<float*>(b.critic_term)=term;
         }
     }
     __syncthreads();
@@ -4120,6 +4157,27 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
         if(!isfinite(text_gradients[i]))atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
     for(uint32_t i=threadIdx.x;i<COMPONENT_COUNT;i+=blockDim.x)
         if(!isfinite(baseline_gradients[i]))atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
+}
+#endif
+
+#ifdef XLOG_SEMANTIC_POLICY
+extern "C" __global__ void semantic_group_critic_reduce(
+    uint64_t terms_ptr,uint64_t total_ptr,uint64_t count) {
+    if(threadIdx.x || blockIdx.x)return;
+    if(!count || !terms_ptr || !total_ptr ||
+       terms_ptr%alignof(float) || total_ptr%alignof(float) ||
+       count>UINT64_MAX/sizeof(float) ||
+       !publication_pointer_span(terms_ptr,count*sizeof(float),alignof(float)) ||
+       !publication_pointer_span(total_ptr,sizeof(float),alignof(float)))
+        semantic_content_integrity_trap();
+    const auto* terms=reinterpret_cast<const float*>(terms_ptr);
+    float total=0.0f;
+    for(uint64_t ordinal=0;ordinal<count;++ordinal) {
+        if(!isfinite(terms[ordinal]))semantic_content_integrity_trap();
+        total=__fadd_rn(total,terms[ordinal]);
+    }
+    if(!isfinite(total))semantic_content_integrity_trap();
+    *reinterpret_cast<float*>(total_ptr)=total;
 }
 #endif
 

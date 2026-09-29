@@ -1288,6 +1288,8 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<semantic_transition::PySemanticModelForwardWitness>()?;
     #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticPolicyInvocation>()?;
+    #[cfg(feature = "semantic-policy")]
+    m.add_class::<semantic_transition::PySemanticRetainedReplayMember>()?;
     m.add_class::<relation_metadata::RelationEvidence>()?;
     m.add_class::<LogicQueryResult>()?;
     m.add_class::<LogicEvalResult>()?;

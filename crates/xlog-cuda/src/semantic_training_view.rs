@@ -281,7 +281,7 @@ impl SemanticTrainingCanaryRefusalRecord {
 unsafe impl DeviceRepr for SemanticTrainingCanaryRefusalRecord {}
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SemanticTrainingViewOriginRecord {
     pub present: u64,
     pub transition: u64,
@@ -443,6 +443,10 @@ struct SelectedTrainingViewStorage {
     logical_positions: TrackedCudaSlice<i64>,
     kinds: TrackedCudaSlice<i64>,
     parents: TrackedCudaSlice<i64>,
+    #[cfg(feature = "semantic-policy")]
+    critic_terms: TrackedCudaSlice<f32>,
+    #[cfg(feature = "semantic-policy")]
+    critic_total: TrackedCudaSlice<f32>,
 }
 
 /// Retained native result of device selection. The views are fixed-capacity
@@ -451,6 +455,17 @@ pub struct SemanticSelectedTrainingView {
     arena: Arc<SemanticTrainingViewArena>,
     _origin_candidates: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
     storage: SelectedTrainingViewStorage,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone, Copy)]
+pub(crate) struct FrozenPolicyGroupMember {
+    pub ordinal: u64,
+    pub identity: [u64; 4],
+    pub source_identity: [u64; 4],
+    pub bytes_identity: Identity256,
+    pub content_identity: [u64; 4],
+    pub origin: SemanticTrainingViewOriginRecord,
 }
 
 /// Fixed device port of the native-selected complete training roster.
@@ -517,6 +532,10 @@ impl SemanticSelectedTrainingView {
         account!(self.storage.logical_positions);
         account!(self.storage.kinds);
         account!(self.storage.parents);
+        #[cfg(feature = "semantic-policy")]
+        account!(self.storage.critic_terms);
+        #[cfg(feature = "semantic-policy")]
+        account!(self.storage.critic_total);
         allocations.into_iter().try_fold(0u64, |total, allocation| {
             total
                 .checked_add(allocation.allocation_bytes())
@@ -556,6 +575,78 @@ impl SemanticSelectedTrainingView {
     #[cfg(feature = "semantic-policy")]
     pub(crate) fn actor_group_member_count(&self) -> u64 {
         self.arena.actor_group_member_count
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn actor_group_members(&self) -> &[FrozenPolicyGroupMember] {
+        &self.arena.actor_group_members
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn edit_group_members(&self) -> &[FrozenPolicyGroupMember] {
+        &self.arena.edit_group_members
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn actor_group_member_index(
+        &self,
+        ordinal: u64,
+        row: &SemanticTrainingViewRow,
+    ) -> Result<usize, SemanticTransitionError> {
+        let descriptor = validate_row(
+            usize::try_from(ordinal)
+                .map_err(|_| input_error("actor group ordinal exceeds host address space"))?,
+            row,
+            0,
+        )?;
+        self.actor_group_members()
+            .iter()
+            .position(|member| {
+                member.ordinal == ordinal
+                    && member.identity == descriptor.identity
+                    && member.source_identity == descriptor.source_identity
+                    && member.bytes_identity == row.bytes_identity
+                    && member.content_identity == descriptor.content_identity
+                    && member.origin == descriptor.origin
+            })
+            .ok_or_else(|| input_error("original replay is not an exact frozen actor group member"))
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn edit_group_member_index(
+        &self,
+        ordinal: u64,
+        row: &SemanticTrainingViewRow,
+    ) -> Result<Option<usize>, SemanticTransitionError> {
+        let descriptor = validate_row(
+            usize::try_from(ordinal)
+                .map_err(|_| input_error("edit group ordinal exceeds host address space"))?,
+            row,
+            0,
+        )?;
+        Ok(self.edit_group_members().iter().position(|member| {
+            member.ordinal == ordinal
+                && member.identity == descriptor.identity
+                && member.source_identity == descriptor.source_identity
+                && member.bytes_identity == row.bytes_identity
+                && member.content_identity == descriptor.content_identity
+                && member.origin == descriptor.origin
+        }))
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn critic_term(&self, index: usize) -> DeviceMemoryView<f32> {
+        self.storage.critic_terms.slice(index..index + 1)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn critic_terms(&self) -> DeviceMemoryView<f32> {
+        self.storage.critic_terms.view()
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn critic_total(&self) -> DeviceMemoryView<f32> {
+        self.storage.critic_total.view()
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -902,6 +993,10 @@ pub(crate) struct SemanticTrainingViewArena {
     protected_members: TrackedCudaSlice<u64>,
     #[cfg(feature = "semantic-policy")]
     actor_group_member_count: u64,
+    #[cfg(feature = "semantic-policy")]
+    actor_group_members: Box<[FrozenPolicyGroupMember]>,
+    #[cfg(feature = "semantic-policy")]
+    edit_group_members: Box<[FrozenPolicyGroupMember]>,
     row_count: usize,
     capacity: usize,
 }
@@ -917,10 +1012,19 @@ impl SemanticTrainingViewArena {
             .checked_mul(self.row_count)
             .and_then(|cells| cells.checked_mul(TRAINING_VIEW_ROW_BYTES))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        size_of::<SemanticTrainingViewSelection>()
+        let bytes = size_of::<SemanticTrainingViewSelection>()
             .checked_add(roster_bytes)
             .and_then(|bytes| bytes.checked_add(port_bytes))
-            .ok_or(SemanticTransitionError::GenerationExhausted)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        #[cfg(feature = "semantic-policy")]
+        let bytes = bytes
+            .checked_add(
+                (self.actor_group_members.len() + 1)
+                    .checked_mul(size_of::<f32>())
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?,
+            )
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        Ok(bytes)
     }
 
     pub(crate) fn allocate_selection_reserved(
@@ -946,6 +1050,14 @@ impl SemanticTrainingViewArena {
             logical_positions: allocate_port(reservation, self.row_count, self.capacity)?,
             kinds: allocate_port(reservation, self.row_count, self.capacity)?,
             parents: allocate_port(reservation, self.row_count, self.capacity)?,
+            #[cfg(feature = "semantic-policy")]
+            critic_terms: reservation
+                .alloc::<f32>(self.actor_group_members.len())
+                .map_err(|error| runtime_error("group critic term allocation", error))?,
+            #[cfg(feature = "semantic-policy")]
+            critic_total: reservation
+                .alloc::<f32>(1)
+                .map_err(|error| runtime_error("group critic scalar allocation", error))?,
         };
         Ok(SemanticSelectedTrainingView {
             arena: Arc::clone(self),
@@ -982,9 +1094,13 @@ impl SemanticTrainingViewArena {
             .ok_or_else(|| runtime_error("training-view kernel lookup", "gather unavailable"))?;
         let mut raw = Vec::new();
         let mut descriptors = Vec::with_capacity(rows.len());
+        #[cfg(feature = "semantic-policy")]
+        let mut row_bytes_identities = Vec::with_capacity(rows.len());
         let mut capacity = 0usize;
         for (ordinal, row) in rows.into_iter().enumerate() {
             let descriptor = validate_row(ordinal, &row, raw.len())?;
+            #[cfg(feature = "semantic-policy")]
+            row_bytes_identities.push(row.bytes_identity);
             capacity = capacity.max(descriptor.window as usize);
             raw.extend_from_slice(&row.bytes);
             descriptors.push(descriptor);
@@ -1010,11 +1126,60 @@ impl SemanticTrainingViewArena {
             expected_truth,
         )?;
         #[cfg(feature = "semantic-policy")]
-        let actor_group_member_count = groups
+        let actor_group = groups
             .iter()
             .find(|group| group.kind == SemanticTrainingObjectiveGroupKind::ActorCriticCost as u64)
-            .ok_or_else(|| input_error("training objective has no actor-critic-cost group"))?
-            .member_count;
+            .ok_or_else(|| input_error("training objective has no actor-critic-cost group"))?;
+        #[cfg(feature = "semantic-policy")]
+        let actor_group_member_count = actor_group.member_count;
+        #[cfg(feature = "semantic-policy")]
+        let actor_group_members = {
+            let start = usize::try_from(actor_group.member_offset)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+            let count = usize::try_from(actor_group.member_count)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+            group_members[start..start + count]
+                .iter()
+                .map(|&ordinal| {
+                    let row = &descriptors[ordinal as usize];
+                    FrozenPolicyGroupMember {
+                        ordinal,
+                        identity: row.identity,
+                        source_identity: row.source_identity,
+                        bytes_identity: row_bytes_identities[ordinal as usize],
+                        content_identity: row.content_identity,
+                        origin: row.origin,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        };
+        #[cfg(feature = "semantic-policy")]
+        let edit_group_members = {
+            let group = groups
+                .iter()
+                .find(|group| group.kind == SemanticTrainingObjectiveGroupKind::Edit as u64)
+                .ok_or_else(|| input_error("training objective has no supervised-edit group"))?;
+            let start = usize::try_from(group.member_offset)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+            let count = usize::try_from(group.member_count)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+            group_members[start..start + count]
+                .iter()
+                .map(|&ordinal| {
+                    let row = &descriptors[ordinal as usize];
+                    FrozenPolicyGroupMember {
+                        ordinal,
+                        identity: row.identity,
+                        source_identity: row.source_identity,
+                        bytes_identity: row_bytes_identities[ordinal as usize],
+                        content_identity: row.content_identity,
+                        origin: row.origin,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        };
         let bytes = descriptors
             .len()
             .checked_mul(size_of::<TrainingViewRowDescriptor>())
@@ -1114,6 +1279,10 @@ impl SemanticTrainingViewArena {
             protected_members: device_protected_members,
             #[cfg(feature = "semantic-policy")]
             actor_group_member_count,
+            #[cfg(feature = "semantic-policy")]
+            actor_group_members,
+            #[cfg(feature = "semantic-policy")]
+            edit_group_members,
             row_count: descriptors.len(),
             capacity,
         }))
