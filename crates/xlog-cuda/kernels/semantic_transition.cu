@@ -398,7 +398,7 @@ struct CompletionCoverage {
     uint64_t value_digest[4],edit_digest[4],receipt_digest[4];
 };
 struct AttemptReceipt {
-    uint64_t abi,instance[4],base_word,next_word,logical_digest[4],action_receipts_digest[4];
+    uint64_t abi,transition_kind,instance[4],base_word,next_word,logical_digest[4],action_receipts_digest[4];
     uint64_t semantic_receipts_digest[4],coverage_digest[4],replay_head_digest[4],intent_head_digest[4];
     uint64_t acknowledgement_head_digest[4],previous_attempt_digest[4],receipt_digest[4];
 };
@@ -620,7 +620,7 @@ static_assert(sizeof(PublicationStepResult)==sizeof(PublicationHeader)+32+sizeof
 static_assert(sizeof(PublicationTensorLayout)==112,"tensor layout ABI");
 static_assert(sizeof(RawFeedbackRecord)==384,"raw feedback ABI");
 static_assert(sizeof(CompletionCoverage)==360,"completion coverage ABI");
-static_assert(sizeof(AttemptReceipt)==344,"attempt receipt ABI");
+static_assert(sizeof(AttemptReceipt)==352,"attempt receipt ABI");
 static_assert(sizeof(TokenProvenanceRecord)==184,"token provenance ABI");
 static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
@@ -4165,18 +4165,19 @@ __device__ uint64_t publication_write_coverage(const PublicationControl& control
     return publication_logical_range_digest(control,*range,nullptr,coverage->receipt_digest);
 }
 __device__ uint64_t publication_write_attempt(const PublicationControl& control,PublicationBank& bank,
-        const PublicationBank& base,bool drain=false) {
+        const PublicationBank& base,uint64_t transition_kind) {
     auto* ranges=reinterpret_cast<PublicationRange*>(control.directories[bank.header.publication_word&1]);
     const auto* previous=reinterpret_cast<const PublicationRange*>(control.directories[base.header.publication_word&1]);
     const auto* target=publication_find_range(ranges,bank.header.range_count,33);
     if(!target)return 1;
     auto* attempt=reinterpret_cast<AttemptReceipt*>(publication_range_bytes(control,*target));
     if(!attempt || target->length_bytes!=sizeof(AttemptReceipt))return 1;
-    *attempt=AttemptReceipt{};attempt->abi=1;
+    if(transition_kind<1 || transition_kind>4)return 1;
+    *attempt=AttemptReceipt{};attempt->abi=2;attempt->transition_kind=transition_kind;
     semantic_graph::copy_identity(attempt->instance,bank.header.instance);
     attempt->base_word=base.header.publication_word;attempt->next_word=bank.header.publication_word;
     semantic_graph::copy_identity(attempt->logical_digest,bank.header.logical_digest);
-    if(drain) {
+    if(transition_kind!=1) {
         if(publication_action_digest(control,bank,bank.receipts,0,
                 attempt->action_receipts_digest))return 1;
     } else {
@@ -4197,7 +4198,8 @@ __device__ uint64_t publication_write_attempt(const PublicationControl& control,
     }
     return publication_logical_range_digest(control,*target,nullptr,attempt->receipt_digest);
 }
-__device__ uint64_t publication_initialize(const Descriptor& descriptor,PublicationControl& control,bool restored=false) {
+__device__ uint64_t publication_initialize(const Descriptor& descriptor,PublicationControl& control,uint64_t operation) {
+    const bool restored=operation!=1;
     if(control.abi!=1 || control.word || control.reader_counts[0] || control.reader_counts[1] ||
        !control.contract || !control.banks[0] || !control.banks[1] || control.banks[0]==control.banks[1] ||
        !control.directories[0] || !control.directories[1] || !descriptor.task || !descriptor.state ||
@@ -4264,7 +4266,9 @@ __device__ uint64_t publication_initialize(const Descriptor& descriptor,Publicat
     bank.header.abi=1;
     if(publication_seal_ranges(control,bank,nullptr,restored) || publication_logical_digest(control,bank) ||
        publication_descriptor_digest(control,bank)){bank.header.abi=0;return 1;}
-    if(restored && (!publication_identity_equal(expected_logical,bank.header.logical_digest) ||
+    // Exact restore requires the saved roots. A private structural transfer
+    // instead seals new current roots after preserving historical ranges.
+    if(operation==4 && (!publication_identity_equal(expected_logical,bank.header.logical_digest) ||
         !publication_identity_equal(expected_state,bank.header.state_digest))){bank.header.abi=0;return 1;}
     return 0;
 }
@@ -4272,9 +4276,10 @@ __device__ void publication_command(const Descriptor& descriptor) {
     if(!descriptor.publication.control)return;
     auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
     uint64_t status=1;
-    if(descriptor.publication.operation==1 || descriptor.publication.operation==4) {
+    if(descriptor.publication.operation==1 || descriptor.publication.operation==4 ||
+       descriptor.publication.operation==5) {
         if(!publication_compare_exchange(control.reader_gate,0,1))status=2;
-        else {status=publication_initialize(descriptor,control,descriptor.publication.operation==4);publication_store(control.reader_gate,0);}
+        else {status=publication_initialize(descriptor,control,descriptor.publication.operation);publication_store(control.reader_gate,0);}
     } else if(descriptor.publication.lease) {
         auto& lease=*reinterpret_cast<PublicationLease*>(descriptor.publication.lease);
         if(descriptor.publication.operation==2)status=publication_acquire(control,lease);
@@ -4541,7 +4546,7 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
        publication_write_coverage(control,contract,next,drain ? nullptr : &pending) || publication_seal_ranges(control,next,&base) ||
        publication_logical_digest(control,next))return 1;
     if(drain && publication_append_final_intent(control,base,next))return 1;
-    if(publication_write_attempt(control,next,base,no_draw))return 1;
+    if(publication_write_attempt(control,next,base,pending.transition_kind))return 1;
     auto* attempt=const_cast<PublicationRange*>(publication_find_range(ranges,next.header.range_count,33));
     if(!attempt || publication_range_digest(control,*attempt,nullptr,attempt->digest) ||
        publication_descriptor_digest(control,next))return 1;

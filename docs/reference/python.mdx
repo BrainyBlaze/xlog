@@ -220,6 +220,25 @@ must return its reconstructed semantic runtime. The frozen
 `task_use`, `parent`, and returned `model` through read-only properties; none is a
 replacement or second acquisition.
 
+`SemanticTransitionController.admit_training_arena(task_use, *, parent,
+consumer_streams, snapshot, snapshot_model_state, restore_model, replay_rows,
+training_objective, dependencies, publication_grants, inference_grants,
+training_grants, capacities, memory_bytes, max_material_bytes,
+max_total_material_bytes, max_evidence_bytes, refresh_snapshot)` performs a
+cold structural transfer from the selected, successfully recomputed inference
+publication. The source must already hold valid inference and training rights,
+and `replay_rows` must retain its existing rows. The method quiesces and seals
+the complete native/task/model checkpoint, restores it into a private session,
+then binds the larger training arena and current authority there. It preserves
+the saved model and historical native records; the new authority binding and
+publication have new identities and digests. `restore_model` has the same
+four-argument factory contract as ordinary restore. After that factory returns,
+`refresh_snapshot()` must return a newer authorized snapshot. Only after both
+sessions pass revalidation does the method revoke the source task use and return
+the single runnable `SemanticTransitionRestoredCheckpoint`. A preparation
+failure leaves the source runnable only when it can still be revalidated; it
+never grants execution to the unfinished candidate.
+
 For actor replay, retain the complete original pre-action checkpoint with its
 application owner and call `SemanticTransitionSession.checkpoint_referent(checkpoint)`
 to obtain the compact native record. Store the exact record bytes as the episode's
