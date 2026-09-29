@@ -10310,9 +10310,10 @@ impl PySemanticPolicyInvocation {
     }
 
     /// Finish a published local Proposal that was outside the exact frozen
-    /// actor/edit group. The completed, published Update must have recorded
-    /// both full-group critic reductions; this tape must have no Update VJP.
-    /// No synthetic gradient or second backward is produced.
+    /// actor/edit group. A completed, published Update must have recorded both
+    /// full-group critic reductions; a completed Update that did not publish
+    /// also permits terminal use without claiming a policy VJP. This tape must
+    /// have no Update VJP. No synthetic gradient or second backward is produced.
     #[pyo3(signature = (update_step, *, consumer_stream))]
     fn finish_unselected_recorded_training(
         &self,

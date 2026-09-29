@@ -25946,7 +25946,17 @@ impl SemanticTransitionSession {
         invocation: SemanticRngBinding,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
-        self.require_recorded_group_critic(update_step)?;
+        let update_published = self
+            .checked_prepared_step(update_step, false)?
+            .prepared
+            .as_ref()
+            .expect("checked prepared owner")
+            .group_update_published;
+        if update_published {
+            self.require_recorded_group_critic(update_step)?;
+        } else {
+            self.require_completed_unpublished_group_update(update_step)?;
+        }
         let index = self.checked_prepared_policy_tape(step, invocation)?;
         let build = self
             .prepared_segment
