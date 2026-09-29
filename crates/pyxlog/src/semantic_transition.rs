@@ -7886,14 +7886,28 @@ pub(crate) struct PySemanticGradientDelivery {
     deferred_hooks: Mutex<Option<Vec<GradientHookEntry>>>,
     activated_once: AtomicBool,
     restore_on_finish: bool,
-    restores: Mutex<Vec<(Py<PyAny>, Py<PyAny>, bool)>>,
+    restores: Mutex<Vec<(Py<PyAny>, Py<PyAny>, Py<PyAny>)>>,
 }
 
 struct GradientHookEntry {
     node: Py<PyAny>,
     effective: Py<PyAny>,
     gradient: Py<PyAny>,
+    original_grad: Py<PyAny>,
     callback: Py<PySemanticGradientDeliveryHook>,
+}
+
+fn swap_group_leaf_gradient(
+    effective: &Bound<'_, PyAny>,
+    expected: &Bound<'_, PyAny>,
+    replacement: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    if !effective.getattr("grad")?.is(expected) {
+        return Err(invalid(
+            "original leaf gradient changed outside group capture",
+        ));
+    }
+    effective.setattr("grad", replacement)
 }
 
 #[pymethods]
@@ -7961,17 +7975,15 @@ impl PySemanticGradientDelivery {
                         "original physical AccumulateGrad edge changed before capture",
                     ));
                 }
-                let current = effective.getattr("grad")?;
-                if !current.is_none() && !current.is(entry.gradient.bind(py)) {
-                    return Err(invalid(
-                        "original leaf still owns another bank's gradient slot",
-                    ));
-                }
-                effective.setattr("grad", entry.gradient.bind(py))?;
+                swap_group_leaf_gradient(
+                    effective,
+                    entry.original_grad.bind(py),
+                    entry.gradient.bind(py),
+                )?;
                 attached.push((
                     entry.effective.clone_ref(py),
                     entry.gradient.clone_ref(py),
-                    current.is_none(),
+                    entry.original_grad.clone_ref(py),
                 ));
                 handles.push(
                     node.call_method1("register_hook", (entry.callback.clone_ref(py),))?
@@ -7984,10 +7996,12 @@ impl PySemanticGradientDelivery {
             for handle in handles.drain(..).rev() {
                 let _ = handle.bind(py).call_method0("remove");
             }
-            for (effective, _, restore_none) in attached.into_iter().rev() {
-                if restore_none {
-                    let _ = effective.bind(py).setattr("grad", py.None());
-                }
+            for (effective, gradient, original_grad) in attached.into_iter().rev() {
+                let _ = swap_group_leaf_gradient(
+                    effective.bind(py),
+                    gradient.bind(py),
+                    original_grad.bind(py),
+                );
             }
             return Err(error);
         }
@@ -8036,27 +8050,14 @@ impl PySemanticGradientDelivery {
                 .restores
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("group gradient restoration is poisoned"))?;
-            for (effective, gradient, restore_none) in restores.drain(..) {
-                if restore_none {
-                    let effective = effective.bind(py);
-                    match effective.getattr("grad") {
-                        Ok(current) if current.is(gradient.bind(py)) => {
-                            if let Err(error) = effective.setattr("grad", py.None()) {
-                                if failure.is_none() {
-                                    failure = Some(error);
-                                }
-                            }
-                        }
-                        Ok(_) => {
-                            if failure.is_none() {
-                                failure = Some(invalid("original leaf lost its canonical group gradient before restoration"));
-                            }
-                        }
-                        Err(error) => {
-                            if failure.is_none() {
-                                failure = Some(error);
-                            }
-                        }
+            for (effective, gradient, original_grad) in restores.drain(..) {
+                if let Err(error) = swap_group_leaf_gradient(
+                    effective.bind(py),
+                    gradient.bind(py),
+                    original_grad.bind(py),
+                ) {
+                    if failure.is_none() {
+                        failure = Some(error);
                     }
                 }
             }
@@ -8653,6 +8654,7 @@ impl PySemanticPreparedStep {
             gradient: Py<PyAny>,
             presence: Py<PyAny>,
             restore_none: bool,
+            original_grad: Py<PyAny>,
         }
         let mut hook_leaves = Vec::new();
         let mut gradients = Vec::new();
@@ -8692,7 +8694,7 @@ impl PySemanticPreparedStep {
                 ));
             }
             let current = effective.getattr("grad")?;
-            if !current.is_none() && !current.is(gradient.bind(py)) {
+            if group_member.is_none() && !current.is_none() && !current.is(gradient.bind(py)) {
                 return Err(invalid(
                     "the physical leaf already owns a different gradient allocation",
                 ));
@@ -8704,6 +8706,7 @@ impl PySemanticPreparedStep {
                 gradient,
                 presence,
                 restore_none: current.is_none(),
+                original_grad: current.unbind(),
             });
         }
 
@@ -8728,6 +8731,7 @@ impl PySemanticPreparedStep {
                     node: leaf.node.clone_ref(py),
                     effective: leaf.effective.clone_ref(py),
                     gradient: leaf.gradient.clone_ref(py),
+                    original_grad: leaf.original_grad.clone_ref(py),
                     callback: callback.clone_ref(py),
                 })
                 .collect::<Vec<_>>()
@@ -15652,6 +15656,32 @@ mod tests {
     use std::ffi::CString;
     use std::sync::Arc;
     use xlog_cuda::{SemanticArgument, SemanticPolarity, SemanticRecordRole};
+
+    #[test]
+    fn historical_group_gradient_restores_existing_leaf_slot() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let effective = py.import("types")?.getattr("SimpleNamespace")?.call0()?;
+            let original = PyDict::new(py);
+            let target = PyDict::new(py);
+            let unrelated = PyDict::new(py);
+            effective.setattr("grad", &original)?;
+
+            super::swap_group_leaf_gradient(&effective, original.as_any(), target.as_any())?;
+            assert!(effective.getattr("grad")?.is(target.as_any()));
+            assert!(super::swap_group_leaf_gradient(
+                &effective,
+                unrelated.as_any(),
+                original.as_any(),
+            )
+            .is_err());
+            assert!(effective.getattr("grad")?.is(target.as_any()));
+            super::swap_group_leaf_gradient(&effective, target.as_any(), original.as_any())?;
+            assert!(effective.getattr("grad")?.is(original.as_any()));
+            Ok(())
+        })
+        .unwrap();
+    }
 
     #[test]
     fn cold_arena_binding_keeps_task_content_but_advances_authority() {
