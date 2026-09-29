@@ -10391,9 +10391,19 @@ fn tensor_content_range(
 fn validate_content_coordinates(
     coordinates: impl Iterator<Item = (u64, u64)>,
 ) -> Result<(), SemanticTransitionError> {
+    validate_content_coordinates_after(coordinates, 0)
+}
+
+fn validate_content_coordinates_after(
+    coordinates: impl Iterator<Item = (u64, u64)>,
+    private_prefix: usize,
+) -> Result<(), SemanticTransitionError> {
     let mut distinct = BTreeSet::new();
     for (ordinal, (role, index)) in coordinates.enumerate() {
-        if (role == 0 && index != ordinal as u64)
+        if (role == 0
+            && ordinal
+                .checked_sub(private_prefix)
+                .is_none_or(|allocation| index != allocation as u64))
             || (role != 0 && SemanticStateRole::from_code(role).is_none())
             || !distinct.insert((role, index))
         {
@@ -18581,34 +18591,13 @@ impl SemanticTransitionSession {
             ));
         }
         let prepared = prepare_semantic_tensors(&self.provider, tensors)?;
-        validate_content_coordinates(
-            prepared
-                .iter()
-                .map(|tensor| (tensor.layout.role, tensor.layout.index)),
-        )?;
-        let digests = prepared
-            .iter()
-            .map(|tensor| {
-                tensor_content_range(
-                    &tensor.layout,
-                    tensor.logical_begin,
-                    tensor.logical_end,
-                    tensor.source.as_ref().map_or(0, DeviceMemoryView::len),
-                )?;
-                Ok(CapturedTensorDigest::Tensor {
-                    cells: Arc::new(allocate_publication(&self.provider, 4)?),
-                    offset: 0,
-                    producer_sealed: false,
-                })
-            })
-            .collect::<Result<Vec<_>, SemanticTransitionError>>()?;
         let stage = self
             .initial_prefill
             .as_mut()
             .expect("checked prefill stage");
         let content = TensorContentBuffers {
             tensors: prepared,
-            seals: TensorContentSeals::Captured(digests),
+            seals: TensorContentSeals::Captured(Vec::new()),
             verification_inputs: Vec::new(),
         };
         let slot = match kind {
@@ -18637,6 +18626,78 @@ impl SemanticTransitionSession {
         });
         let result = (|| {
             self.order_tensor_producer_inputs(consumer_stream)?;
+            let stage = self
+                .initial_prefill
+                .as_ref()
+                .expect("retained prefill stage");
+            let content = match kind {
+                InitialPrefillCaptureKind::Model => stage
+                    .model_content
+                    .as_ref()
+                    .expect("retained model content"),
+                InitialPrefillCaptureKind::Outputs => stage
+                    .output_content
+                    .as_ref()
+                    .expect("retained output content"),
+                InitialPrefillCaptureKind::Captured => stage
+                    .captured_content
+                    .last()
+                    .expect("retained transient content"),
+            };
+            // Model views precede their backing allocations. Role-zero indices
+            // name allocation ordinals, unlike private capture positions.
+            let private_prefix = if matches!(kind, InitialPrefillCaptureKind::Model) {
+                content
+                    .tensors
+                    .iter()
+                    .filter(|tensor| tensor.layout.role != 0)
+                    .count()
+            } else {
+                0
+            };
+            validate_content_coordinates_after(
+                content
+                    .tensors
+                    .iter()
+                    .map(|tensor| (tensor.layout.role, tensor.layout.index)),
+                private_prefix,
+            )?;
+            let digests = content
+                .tensors
+                .iter()
+                .map(|tensor| {
+                    tensor_content_range(
+                        &tensor.layout,
+                        tensor.logical_begin,
+                        tensor.logical_end,
+                        tensor.source.as_ref().map_or(0, DeviceMemoryView::len),
+                    )?;
+                    Ok(CapturedTensorDigest::Tensor {
+                        cells: Arc::new(allocate_publication(&self.provider, 4)?),
+                        offset: 0,
+                        producer_sealed: false,
+                    })
+                })
+                .collect::<Result<Vec<_>, SemanticTransitionError>>()?;
+            let stage = self
+                .initial_prefill
+                .as_mut()
+                .expect("retained prefill stage");
+            let content = match kind {
+                InitialPrefillCaptureKind::Model => stage
+                    .model_content
+                    .as_mut()
+                    .expect("retained model content"),
+                InitialPrefillCaptureKind::Outputs => stage
+                    .output_content
+                    .as_mut()
+                    .expect("retained output content"),
+                InitialPrefillCaptureKind::Captured => stage
+                    .captured_content
+                    .last_mut()
+                    .expect("retained transient content"),
+            };
+            content.seals = TensorContentSeals::Captured(digests);
             let stage = self
                 .initial_prefill
                 .as_ref()
