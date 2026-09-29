@@ -25542,6 +25542,32 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
+    /// Prove that the target executable and every prepared step owner have
+    /// retired. A retained source graph cannot be released merely because the
+    /// target's one-shot launch completed: the executable still holds its
+    /// captured pointers until full segment retirement.
+    #[cfg(feature = "semantic-policy")]
+    pub fn require_retired_prepared_step(
+        &self,
+        step: &SemanticPreparedStep,
+    ) -> Result<(), SemanticTransitionError> {
+        if self.is_poisoned() {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        if !Arc::ptr_eq(&step.issuer, &self.publication_issuer)
+            || self.prepared_segment.is_some()
+            || self.captured.is_some()
+            || self.pending
+            || !self.prepared_resources.is_empty()
+            || self.steps.contains_key(&step.token)
+        {
+            return Err(publication_input_error(
+                "retained source requires completed retirement of its target segment",
+            ));
+        }
+        Ok(())
+    }
+
     /// Differentiate one independently restored original Proposal into this
     /// Update's graph. The child Session retains its published reader, tape,
     /// model outputs and original allocations through both captured banks.

@@ -9580,9 +9580,17 @@ pub(crate) struct PySemanticRetainedReplayMember {
 struct RetainedGroupUse {
     update: Option<Py<PySemanticPreparedStep>>,
     target: Option<SemanticPreparedStep>,
+    completion: Option<RetainedTargetCompletion>,
     banks: [bool; 2],
     gradient_banks: [bool; 2],
     deliveries: [Option<Py<PySemanticGradientDelivery>>; 2],
+}
+
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetainedTargetCompletion {
+    Published,
+    Unpublished,
 }
 
 impl Drop for PySemanticRetainedReplayMember {
@@ -9722,15 +9730,30 @@ impl PySemanticRetainedReplayMember {
             .unbind())
     }
 
-    /// Retire the retained original only after both captured Update banks and
-    /// the original multi-root backward have finished using its model graph.
-    /// The normal import authority refresh and reader release still run once.
+    /// Record completed execution of the published target Update. This does
+    /// not release the source: its allocations remain alive until the target
+    /// executable and all of its step owners have retired.
+    fn confirm_published_target(&self, py: Python<'_>) -> PyResult<()> {
+        self.confirm_target_completion(py, None)
+    }
+
+    /// Record completed execution of a skipped or refused target Update.
+    /// No group VJP is inferred from this terminal outcome.
+    fn confirm_unpublished_target(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+    ) -> PyResult<()> {
+        self.confirm_target_completion(py, Some(update_step))
+    }
+
+    /// Retire the retained original after target segment retirement. The
+    /// normal import authority refresh and reader release still run once.
     fn finish(&self, py: Python<'_>) -> PyResult<()> {
         self.finish_retained_import(py, None)
     }
 
-    /// Retire a retained original after its bound target Update completed as
-    /// skipped or refused. No group VJP is inferred from this terminal path.
+    /// Retire a retained original after its nonpublishing target has retired.
     fn finish_without_published_update(
         &self,
         py: Python<'_>,
@@ -9742,6 +9765,91 @@ impl PySemanticRetainedReplayMember {
 
 #[cfg(feature = "semantic-policy")]
 impl PySemanticRetainedReplayMember {
+    fn confirm_target_completion(
+        &self,
+        py: Python<'_>,
+        unpublished_update: Option<Py<PySemanticPreparedStep>>,
+    ) -> PyResult<()> {
+        if self.completed.load(Ordering::Acquire) {
+            return Err(invalid("retained replay member has already finished"));
+        }
+        let mut use_state = self
+            .group_use
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("retained group use is poisoned"))?;
+        if use_state.completion.is_some() {
+            return Err(invalid(
+                "retained target completion has already been confirmed",
+            ));
+        }
+        let (update, completion) = if let Some(update) = unpublished_update {
+            let changed_target = {
+                let target = update.borrow(py);
+                use_state
+                    .target
+                    .as_ref()
+                    .is_some_and(|bound| !bound.same_handle(&target.inner))
+            };
+            if changed_target
+                || use_state
+                    .update
+                    .as_ref()
+                    .is_some_and(|bound| !bound.is(&update))
+            {
+                return Err(invalid(
+                    "unpublished Update differs from the retained member's bound target",
+                ));
+            }
+            (update, RetainedTargetCompletion::Unpublished)
+        } else {
+            if use_state.banks != [true, true] || use_state.gradient_banks != [true, true] {
+                return Err(invalid("retained replay requires both Update banks and original physical gradient deliveries"));
+            }
+            (
+                use_state
+                    .update
+                    .as_ref()
+                    .ok_or_else(|| invalid("retained replay has no original Update owner"))?
+                    .clone_ref(py),
+                RetainedTargetCompletion::Published,
+            )
+        };
+        for delivery in use_state.deliveries.iter().flatten() {
+            let delivery = delivery.borrow(py);
+            if delivery.activated_once.load(Ordering::Acquire)
+                && delivery
+                    .handles
+                    .lock()
+                    .map_err(|_| {
+                        PyRuntimeError::new_err("group gradient-delivery owner is poisoned")
+                    })?
+                    .is_some()
+            {
+                return Err(invalid(
+                    "retained gradient delivery is still active during target completion",
+                ));
+            }
+        }
+        {
+            let update = update.borrow(py);
+            let target_session = update.session.borrow(py);
+            target_session.require_creator()?;
+            let target_owner = target_session.owner()?;
+            match completion {
+                RetainedTargetCompletion::Published => target_owner
+                    .require_recorded_group_critic(&update.inner)
+                    .map_err(xlog_err)?,
+                RetainedTargetCompletion::Unpublished => target_owner
+                    .require_completed_unpublished_group_update(&update.inner)
+                    .map_err(xlog_err)?,
+            }
+            use_state.target = Some(update.inner.clone());
+        }
+        use_state.update = Some(update);
+        use_state.completion = Some(completion);
+        Ok(())
+    }
+
     fn finish_retained_import(
         &self,
         py: Python<'_>,
@@ -9755,63 +9863,38 @@ impl PySemanticRetainedReplayMember {
                 .group_use
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("retained group use is poisoned"))?;
-            if let Some(update) = &unpublished_update {
-                let target = &update.borrow(py).inner;
-                if !use_state
-                    .target
-                    .as_ref()
-                    .is_some_and(|bound| bound.same_handle(target))
-                    || use_state
-                        .update
-                        .as_ref()
-                        .is_some_and(|bound| !bound.is(update))
-                {
-                    return Err(invalid(
-                        "unpublished Update differs from the retained member's bound target",
-                    ));
-                }
-                for delivery in use_state.deliveries.iter().flatten() {
-                    let delivery = delivery.borrow(py);
-                    if delivery.activated_once.load(Ordering::Acquire)
-                        && delivery
-                            .handles
-                            .lock()
-                            .map_err(|_| {
-                                PyRuntimeError::new_err("group gradient-delivery owner is poisoned")
-                            })?
-                            .is_some()
-                    {
-                        return Err(invalid(
-                            "retained gradient delivery is still active during target completion",
-                        ));
-                    }
-                }
-                update.clone_ref(py)
+            let expected_completion = if unpublished_update.is_some() {
+                RetainedTargetCompletion::Unpublished
             } else {
-                if use_state.banks != [true, true] || use_state.gradient_banks != [true, true] {
-                    return Err(invalid("retained replay requires both Update banks and original physical gradient deliveries"));
-                }
-                use_state
-                    .update
-                    .as_ref()
-                    .ok_or_else(|| invalid("retained replay has no original Update owner"))?
-                    .clone_ref(py)
+                RetainedTargetCompletion::Published
+            };
+            if use_state.completion != Some(expected_completion) {
+                return Err(invalid(
+                    "retained target completion must be confirmed before source retirement",
+                ));
             }
+            let update = use_state
+                .update
+                .as_ref()
+                .ok_or_else(|| invalid("retained replay has no original Update owner"))?;
+            if unpublished_update
+                .as_ref()
+                .is_some_and(|given| !given.is(update))
+            {
+                return Err(invalid(
+                    "unpublished Update differs from the confirmed target",
+                ));
+            }
+            update.clone_ref(py)
         };
         {
             let update = update.borrow(py);
             let target_session = update.session.borrow(py);
             target_session.require_creator()?;
             let target_owner = target_session.owner()?;
-            if unpublished_update.is_some() {
-                target_owner
-                    .require_completed_unpublished_group_update(&update.inner)
-                    .map_err(xlog_err)?;
-            } else {
-                target_owner
-                    .require_recorded_group_critic(&update.inner)
-                    .map_err(xlog_err)?;
-            }
+            target_owner
+                .require_retired_prepared_step(&update.inner)
+                .map_err(xlog_err)?;
         }
         let session = self.session.borrow(py);
         session.require_creator()?;
@@ -9862,6 +9945,13 @@ impl PySemanticRetainedReplayMember {
         );
         if result.is_ok() {
             import.committed = true;
+            let mut use_state = self
+                .group_use
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            use_state.update = None;
+            use_state.target = None;
+            use_state.deliveries = std::array::from_fn(|_| None);
             self.completed.store(true, Ordering::Release);
         } else if let Ok(mut state) = issued.state() {
             state.phase = TaskUsePhase::Refused;
@@ -14928,6 +15018,7 @@ impl PySemanticTransitionController {
                                 group_use: Mutex::new(RetainedGroupUse {
                                     update: None,
                                     target: None,
+                                    completion: None,
                                     banks: [false; 2],
                                     gradient_banks: [false; 2],
                                     deliveries: std::array::from_fn(|_| None),
@@ -18171,6 +18262,8 @@ for method in ('finish_recorded_training', 'finish_unselected_recorded_training'
     assert finish.parameters['consumer_stream'].default is inspect.Parameter.empty
 finish = inspect.signature(SemanticRetainedReplayMember.finish_without_published_update)
 assert tuple(finish.parameters) == ('self', 'update_step')
+assert tuple(inspect.signature(SemanticRetainedReplayMember.confirm_published_target).parameters) == ('self',)
+assert tuple(inspect.signature(SemanticRetainedReplayMember.confirm_unpublished_target).parameters) == ('self', 'update_step')
 assert inspect.isgetsetdescriptor(SemanticPolicyInvocation.refusal)
 assert SemanticPolicyInvocation.refusal.__name__ == 'refusal'
 try:
