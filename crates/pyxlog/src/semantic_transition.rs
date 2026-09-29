@@ -12490,7 +12490,7 @@ impl PySemanticTransitionController {
     /// position or substitute new tensors.
     /// XLOG computes every canary measurement, resource tally and refusal on device.
     /// ``bank`` identifies the recorded branch that owns these original outputs.
-    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, baseline_forward, candidate_forward, allocation_witness, consumer_stream))]
+    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, slab_backing, slab_bytes, baseline_forward, candidate_forward, allocation_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "prepared update binding retains model geometry and numerical admissibility"
@@ -12506,6 +12506,8 @@ impl PySemanticTransitionController {
         model_storages: &Bound<'_, PyAny>,
         model_views: &Bound<'_, PyAny>,
         numerical_admissibility: &Bound<'_, PyAny>,
+        slab_backing: &Bound<'_, PyAny>,
+        slab_bytes: &Bound<'_, PyAny>,
         baseline_forward: &PySemanticModelForwardWitness,
         candidate_forward: &PySemanticModelForwardWitness,
         allocation_witness: &PySemanticTensorContentWitness,
@@ -12519,6 +12521,12 @@ impl PySemanticTransitionController {
         let parent = ContentStepRef::Prepared(step);
         let mut budget = 16 * 1024 * 1024;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let slab_bytes = ColdValue::read(slab_bytes, &mut budget, 0)?.unsigned()?;
+        if slab_bytes == 0 || slab_bytes > i64::MAX as u64 {
+            return Err(invalid(
+                "model update slab has no supported exact byte extent",
+            ));
+        }
         let storages = parse_model_storages(model_storages, &mut budget)?;
         let views = parse_model_views(model_views, &mut budget)?;
         let expected = {
@@ -12600,6 +12608,29 @@ impl PySemanticTransitionController {
             logical_end: 0,
             native_allocation: None,
         };
+        validate_producer_device_guarded(slab_backing, device, &check)?;
+        producer_owners.0.push(slab_backing.clone().unbind());
+        let slab_backing = SemanticTensorInput {
+            tensor: crate::dlpack_from_py_for_stream_guarded(
+                slab_backing,
+                i64::try_from(stream)
+                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
+                &check,
+            )?,
+            layout: SemanticTensorLayout {
+                role: 0,
+                index: 0,
+                element_bytes: 1,
+                scalar_type: 1,
+                rank: 1,
+                logical_axis: u64::MAX,
+                dimensions: [slab_bytes, 0, 0, 0],
+                strides_bytes: [1, 0, 0, 0],
+            },
+            logical_begin: 0,
+            logical_end: 0,
+            native_allocation: None,
+        };
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         let state = self.continuation_state(py, task_use, parent, &owner, None)?;
@@ -12620,6 +12651,7 @@ impl PySemanticTransitionController {
                 },
                 tensor_handoff.into_native(),
                 numerical_admissibility,
+                slab_backing,
                 &baseline_forward.inner,
                 &candidate_forward.inner,
                 &allocation_witness.inner,

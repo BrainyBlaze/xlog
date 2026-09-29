@@ -8720,6 +8720,7 @@ struct BoundModelUpdate {
     admissibility: PreparedSemanticTensor,
     baseline_logits: PreparedSemanticTensor,
     candidate_logits: PreparedSemanticTensor,
+    _slab_backing: PreparedSemanticTensor,
     #[cfg(feature = "semantic-policy")]
     accounted_reserved_bytes: u64,
     #[cfg(feature = "semantic-policy")]
@@ -9544,27 +9545,35 @@ fn cuda_backing_allocation(
 
 #[cfg(feature = "semantic-policy")]
 fn accounted_tensor_allocations(
-    tensors: &[PreparedSemanticTensor],
+    tensors: &[&PreparedSemanticTensor],
+    slab: &PreparedSemanticTensor,
 ) -> Result<u64, SemanticTransitionError> {
-    let mut allocations = BTreeMap::new();
+    let slab_bytes = tensor_layout_bytes(&slab.layout)?;
+    let slab_end = slab
+        .data
+        .checked_add(slab_bytes as u64)
+        .ok_or(SemanticTransitionError::GenerationExhausted)?;
+    let (slab_base, slab_allocation_bytes) = cuda_backing_allocation(slab.data, slab_bytes)?;
     for tensor in tensors {
         let bytes = tensor_layout_bytes(&tensor.layout)?;
         if bytes == 0 {
             continue;
         }
         let (base, allocation_bytes) = cuda_backing_allocation(tensor.data, bytes)?;
-        if allocations
-            .insert(base, allocation_bytes)
-            .is_some_and(|previous| previous != allocation_bytes)
+        if tensor.data < slab.data
+            || tensor
+                .data
+                .checked_add(bytes as u64)
+                .is_none_or(|end| end > slab_end)
+            || base != slab_base
+            || allocation_bytes != slab_allocation_bytes
         {
-            return Err(SemanticTransitionError::ObservationMismatch);
+            return Err(publication_input_error(
+                "update output or logits differ from the original slab backing allocation",
+            ));
         }
     }
-    allocations.values().try_fold(0u64, |total, bytes| {
-        total
-            .checked_add(*bytes)
-            .ok_or(SemanticTransitionError::GenerationExhausted)
-    })
+    Ok(slab_allocation_bytes)
 }
 
 fn same_tensor_content_owner(
@@ -16506,6 +16515,7 @@ impl SemanticTransitionSession {
         mut model_memory: SemanticModelMemory,
         mut tensors: Vec<SemanticTensorInput>,
         admissibility: SemanticTensorInput,
+        slab_backing: SemanticTensorInput,
         baseline_forward: &SemanticModelForwardWitness,
         candidate_forward: &SemanticModelForwardWitness,
         witness: &SemanticTensorContentWitness,
@@ -16793,13 +16803,34 @@ impl SemanticTransitionSession {
             })
             .collect::<Vec<_>>();
         let retained_allocations = allocations.to_vec();
+        let mut slab = prepare_semantic_tensors(&self.provider, vec![slab_backing])?;
+        let slab = slab
+            .pop()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if slab.layout.role != 0
+            || slab.layout.index != 0
+            || slab.layout.scalar_type != 1
+            || slab.layout.element_bytes != 1
+            || slab.layout.rank != 1
+            || slab.layout.logical_axis != u64::MAX
+            || slab.layout.dimensions[0] == 0
+            || slab.layout.dimensions[1..] != [0, 0, 0]
+            || slab.layout.strides_bytes != [1, 0, 0, 0]
+            || slab.logical_begin != 0
+            || slab.logical_end != 0
+        {
+            return Err(publication_input_error(
+                "update slab must be its original contiguous CUDA UInt8 allocation",
+            ));
+        }
         #[cfg(feature = "semantic-policy")]
-        let accounted_reserved_bytes = accounted_tensor_allocations(outputs)?
-            .checked_add(accounted_tensor_allocations(&[
-                baseline_logits.clone(),
-                candidate_logits.clone(),
-            ])?)
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let accounted_reserved_bytes = accounted_tensor_allocations(
+            &outputs
+                .iter()
+                .chain([&baseline_logits, &candidate_logits])
+                .collect::<Vec<_>>(),
+            &slab,
+        )?;
         #[cfg(feature = "semantic-policy")]
         let copy_bytes = values.iter().try_fold(0u64, |total, binding| {
             total
@@ -16837,6 +16868,7 @@ impl SemanticTransitionSession {
             admissibility: admissibility.clone(),
             baseline_logits,
             candidate_logits,
+            _slab_backing: slab,
             #[cfg(feature = "semantic-policy")]
             accounted_reserved_bytes,
             #[cfg(feature = "semantic-policy")]
