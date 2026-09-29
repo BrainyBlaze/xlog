@@ -19,6 +19,8 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyList, PyString, PyTuple};
 use sha2::{Digest, Sha256};
 use xlog_core::{RelId, ScalarType, Schema};
 use xlog_cuda::memory::DeviceAllocationProvenance;
+#[cfg(feature = "semantic-policy")]
+use xlog_cuda::SemanticSegmentColdCapacity;
 use xlog_cuda::{
     DlpackManagedTensor, Identity256, SemanticAdmissionLimits, SemanticAdmissionRecords,
     SemanticArgument, SemanticContinuationInput, SemanticGradientDeliveryBinding,
@@ -11655,18 +11657,24 @@ impl PySemanticTransitionController {
     /// update outputs through this controller. Device admission selects exactly
     /// one retained branch; no branch aliases the other's primal or tape owners.
     /// Python receives neither the graph nor authority to report its completion.
-    /// transitions is a nonempty exact tuple of "proposal" or "recompute" modes;
-    /// its length fixes the bound and each mode is retained before any callback.
+    /// transitions is a nonempty exact tuple of requested modes; its length fixes
+    /// the bound. Native claims the frozen per-step content and work capacities,
+    /// the producer slab, and every later external CUDA allocation upper bound
+    /// before the first producer callback.
     /// Device DRAIN_REQUIRED overrides either nominal mode. Recompute binds the
     /// original model continuation without a policy or backward obligation.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, transitions, producer))]
+    #[pyo3(signature = (task_use, *, transitions, producer, tensor_content_capacity, model_work_capacity, segment_capacity_bytes, other_external_cuda_bytes))]
     fn build_segment(
         &self,
         py: Python<'_>,
         task_use: Py<PySemanticTransitionTaskUse>,
         transitions: &Bound<'_, PyAny>,
         producer: Py<PyAny>,
+        tensor_content_capacity: &Bound<'_, PyAny>,
+        model_work_capacity: &Bound<'_, PyAny>,
+        segment_capacity_bytes: &Bound<'_, PyAny>,
+        other_external_cuda_bytes: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let session = self.session.borrow(py);
         session.require_creator()?;
@@ -11676,6 +11684,24 @@ impl PySemanticTransitionController {
             return Err(invalid("segment task belongs to another Session"));
         }
         let transitions = prepared_transitions(transitions)?;
+        let cold_capacity = SemanticSegmentColdCapacity {
+            tensor_content_capacity: usize::try_from(
+                ColdValue::read(tensor_content_capacity, &mut 128, 0)?.unsigned()?,
+            )
+            .map_err(|_| invalid("tensor content capacity exceeds native address space"))?,
+            model_work_capacity: usize::try_from(
+                ColdValue::read(model_work_capacity, &mut 128, 0)?.unsigned()?,
+            )
+            .map_err(|_| invalid("model work capacity exceeds native address space"))?,
+            segment_capacity_bytes: u64::try_from(
+                ColdValue::read(segment_capacity_bytes, &mut 128, 0)?.unsigned()?,
+            )
+            .map_err(|_| invalid("segment slab capacity exceeds native byte range"))?,
+            other_external_cuda_bytes: u64::try_from(
+                ColdValue::read(other_external_cuda_bytes, &mut 128, 0)?.unsigned()?,
+            )
+            .map_err(|_| invalid("external CUDA upper bound exceeds native byte range"))?,
+        };
         if session.importing.load(Ordering::Acquire)
             || session.retiring.load(Ordering::Acquire)
             || session.recording.swap(true, Ordering::AcqRel)
@@ -11702,7 +11728,9 @@ impl PySemanticTransitionController {
             }
             let mut state = issued.state()?;
             let scope = state.begin_build()?;
-            let handles = owner.prepare_segment_steps(transitions).map_err(xlog_err)?;
+            let handles = owner
+                .prepare_segment_steps(transitions, cold_capacity)
+                .map_err(xlog_err)?;
             let stream = owner.prepared_stream(&handles[0]).map_err(xlog_err)?;
             (scope, state.snapshot.canonical.clone(), handles, stream)
         };

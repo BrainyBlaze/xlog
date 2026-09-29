@@ -424,11 +424,23 @@ require their connected runtime implementation and full GPU evidence.
 
 ### Original model work recording
 
+`controller.build_segment` requires the frozen `tensor_content_capacity`,
+`model_work_capacity`, `segment_capacity_bytes`, and
+`other_external_cuda_bytes` alongside the transition schedule and producer.
+The last two values bound the producer's CUDA slab and all later external
+CUDA allocation classes, respectively. Native claims these declared classes
+before calling `prepare_segment` and retains that claim through segment
+retirement; it does not treat the claim as physical VRAM allocation. Numerical
+domain payload and scratch are not included in this interface yet, so this
+claim alone does not admit a complete numerical execution or prove peak fit.
+
 The prepared producer records logical work on its original `SemanticPreparedStep`.
-Call `step.reserve_model_work(capacity)` during `prepare_segment`, before capture.
-The positive capacity bounds event occurrences, including every saved tensor.
-Native reserves the device budget before allocating the host roster and device
-buffer. It does not run the model to discover a capacity.
+Call `step.reserve_tensor_content(tensor_content_capacity)` and
+`step.reserve_model_work(model_work_capacity)` during `prepare_segment`, before
+capture. Each positive capacity must exactly match its frozen segment value.
+Native allocates both buffers from the retained segment claim, not separate
+late reservations. The work capacity bounds event occurrences, including every
+saved tensor; native does not run the model to discover a capacity.
 
 During the original `enqueue_step`, call
 `step.record_model_work(kind, dimensions)` for each executed operator occurrence.

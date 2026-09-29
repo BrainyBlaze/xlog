@@ -8987,6 +8987,8 @@ struct PreparedSegmentState {
     scope: Arc<()>,
     tokens: Vec<u64>,
     transitions: Vec<SemanticTransitionKind>,
+    cold_capacity: SemanticSegmentColdCapacity,
+    cold_reservation: Option<GpuMemoryReservation>,
     next: usize,
     active: bool,
     finished: bool,
@@ -9007,6 +9009,7 @@ impl PreparedSegmentState {
         issuer: Arc<()>,
         tokens: Vec<u64>,
         transitions: impl ExactSizeIterator<Item = SemanticTransitionKind> + Clone,
+        cold_capacity: SemanticSegmentColdCapacity,
     ) -> Result<Self, SemanticTransitionError> {
         if tokens.is_empty()
             || tokens.contains(&0)
@@ -9023,11 +9026,14 @@ impl PreparedSegmentState {
             .try_reserve_exact(transitions.len())
             .map_err(|error| runtime_error("prepared schedule reservation", error))?;
         owned.extend(transitions);
+        cold_capacity.external_floor()?;
         Ok(Self {
             issuer,
             scope: Arc::new(()),
             tokens,
             transitions: owned,
+            cold_capacity,
+            cold_reservation: None,
             next: 0,
             active: false,
             finished: false,
@@ -12867,6 +12873,60 @@ fn prepared_segment_allocation_bytes(
         .ok_or(SemanticTransitionError::GenerationExhausted)
 }
 
+/// Frozen bounds for the content, work, and external allocations currently
+/// admitted during prepared-segment construction. Numerical-domain buffers
+/// require their own native-derived extension before the full peak is claimed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticSegmentColdCapacity {
+    pub tensor_content_capacity: usize,
+    pub model_work_capacity: usize,
+    pub segment_capacity_bytes: u64,
+    pub other_external_cuda_bytes: u64,
+}
+
+impl SemanticSegmentColdCapacity {
+    fn external_floor(self) -> Result<u64, SemanticTransitionError> {
+        if self.tensor_content_capacity == 0
+            || self.model_work_capacity == 0
+            || self.segment_capacity_bytes == 0
+        {
+            return Err(publication_input_error(
+                "prepared segment requires positive frozen native capacities and external slab bytes",
+            ));
+        }
+        self.segment_capacity_bytes
+            .checked_add(self.other_external_cuda_bytes)
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    }
+
+    fn content_cells(self) -> Result<usize, SemanticTransitionError> {
+        self.tensor_content_capacity
+            .checked_mul(4)
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    }
+
+    fn content_bytes(self) -> Result<u64, SemanticTransitionError> {
+        self.content_cells()?
+            .checked_mul(size_of::<u64>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    }
+
+    fn model_work_bytes(self) -> Result<u64, SemanticTransitionError> {
+        self.model_work_capacity
+            .checked_mul(size_of::<ModelWorkEvent>() + 3 * size_of::<u64>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    }
+
+    fn late_native_bytes(self, steps: usize) -> Result<u64, SemanticTransitionError> {
+        self.content_bytes()?
+            .checked_add(self.model_work_bytes()?)
+            .and_then(|bytes| bytes.checked_mul(u64::try_from(steps).ok()?))
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    }
+}
+
 #[cfg(feature = "semantic-policy")]
 fn policy_buffer_bytes(
     layout: &SemanticPolicyLayout,
@@ -13477,6 +13537,12 @@ mod prepared_completion_tests {
             Arc::clone(&issuer),
             vec![1],
             std::iter::once(SemanticTransitionKind::Proposal),
+            SemanticSegmentColdCapacity {
+                tensor_content_capacity: 1,
+                model_work_capacity: 1,
+                segment_capacity_bytes: 1,
+                other_external_cuda_bytes: 0,
+            },
         )
         .unwrap();
         assert!(validate_rebinding_ownership(None, false).is_ok());
@@ -13498,6 +13564,12 @@ mod prepared_completion_tests {
             Arc::clone(&issuer),
             vec![1],
             std::iter::once(SemanticTransitionKind::Proposal),
+            SemanticSegmentColdCapacity {
+                tensor_content_capacity: 1,
+                model_work_capacity: 1,
+                segment_capacity_bytes: 1,
+                other_external_cuda_bytes: 0,
+            },
         )
         .unwrap();
         assert!(build.submit().is_err());
@@ -13578,6 +13650,7 @@ struct UnreleasedPublicationOwners {
     _steps: BTreeMap<u64, StepContentStorage>,
     _initial_prefill_content: Option<RetainedInitialPrefillContent>,
     _prepared_resources: Vec<Arc<dyn Send + Sync>>,
+    _prepared_segment: Option<PreparedSegmentState>,
     _text_binding: Option<Arc<TextBindingStorage>>,
     #[cfg(feature = "semantic-policy")]
     _policy: Option<PolicyStorage>,
@@ -13599,7 +13672,13 @@ impl Drop for SemanticTransitionSession {
     fn drop(&mut self) {
         // Captured work retires before either the semantic owner or its banks.
         drop(self.captured.take());
-        if !self.readers.is_empty() || !self.steps.is_empty() {
+        if !self.readers.is_empty()
+            || !self.steps.is_empty()
+            || self
+                .prepared_segment
+                .as_ref()
+                .is_some_and(|build| (build.capturing || build.submitted) && !build.completed)
+        {
             if let Some(publication) = self.publication.take() {
                 // SAFETY: graph is taken exactly once here and its normal
                 // destructor is disabled by ManuallyDrop in Session storage.
@@ -13615,6 +13694,7 @@ impl Drop for SemanticTransitionSession {
                     _initial_prefill_content: self.retained_initial_prefill.take(),
                     _text_binding: self.text_binding.take(),
                     _prepared_resources: std::mem::take(&mut self.prepared_resources),
+                    _prepared_segment: self.prepared_segment.take(),
                     #[cfg(feature = "semantic-policy")]
                     _policy: self.policy.take(),
                     #[cfg(feature = "semantic-policy")]
@@ -13674,8 +13754,10 @@ impl SemanticTransitionSession {
     pub fn prepare_segment_steps(
         &mut self,
         transitions: impl ExactSizeIterator<Item = SemanticTransitionKind> + Clone,
+        cold_capacity: SemanticSegmentColdCapacity,
     ) -> Result<Vec<SemanticPreparedStep>, SemanticTransitionError> {
         self.ensure_rebindable()?;
+        let external_floor = cold_capacity.external_floor()?;
         let transitions = transitions.collect::<Vec<_>>();
         if transitions.is_empty() || transitions.contains(&SemanticTransitionKind::Drain) {
             return Err(publication_input_error(
@@ -13785,7 +13867,7 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let update_binding_bytes = u64::try_from(update_binding_bytes)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
-        let bytes =
+        let base_bytes =
             prepared_segment_allocation_bytes(step_bytes, transition_bound, training_origin_bytes)?
                 .checked_add(
                     u64::try_from(training_view_bytes)
@@ -13793,7 +13875,12 @@ impl SemanticTransitionSession {
                 )
                 .and_then(|bytes| bytes.checked_add(update_binding_bytes))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        // Claim the actual local and runtime budgets before any T-sized host
+        let late_native_bytes = cold_capacity.late_native_bytes(transition_bound)?;
+        let bytes = base_bytes
+            .checked_add(late_native_bytes)
+            .and_then(|bytes| bytes.checked_add(external_floor))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        // Claim the declared local and runtime budgets before any T-sized host
         // collection or native allocation. Every fixed bank consumes this claim.
         let mut reservation = self
             .provider
@@ -13822,6 +13909,7 @@ impl SemanticTransitionSession {
             Arc::clone(&self.publication_issuer),
             tokens,
             transitions.iter().copied(),
+            cold_capacity,
         )?;
         let handles = build.handles()?;
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
@@ -14141,16 +14229,25 @@ impl SemanticTransitionSession {
                 )?;
                 inputs.initialize(&self.provider)?;
             }
-            if reservation.remaining_bytes() != 0 {
+            if reservation.remaining_bytes() != bytes - base_bytes {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
             self.training_origins = training_origins;
             Ok(handles)
         })();
-        if result.is_err() {
-            self.poisoned = true;
+        match result {
+            Ok(handles) => {
+                self.prepared_segment
+                    .as_mut()
+                    .expect("installed prepared segment")
+                    .cold_reservation = Some(reservation);
+                Ok(handles)
+            }
+            Err(error) => {
+                self.poisoned = true;
+                Err(error)
+            }
         }
-        result
     }
 
     fn checked_prepared_step(
@@ -14243,10 +14340,31 @@ impl SemanticTransitionSession {
                 "original content capacity is reserved once per fixed step",
             ));
         }
-        let cells = tensor_capacity
-            .checked_mul(4)
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let digest = Arc::new(allocate_publication(&self.provider, cells)?);
+        let build = self.prepared_segment.as_mut().expect("checked build");
+        if tensor_capacity != build.cold_capacity.tensor_content_capacity {
+            return Err(publication_input_error(
+                "content capacity differs from the frozen segment claim",
+            ));
+        }
+        let cells = build.cold_capacity.content_cells()?;
+        let bytes = build.cold_capacity.content_bytes()?;
+        let floor = build.cold_capacity.external_floor()?;
+        let reservation = build
+            .cold_reservation
+            .as_mut()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if reservation
+            .remaining_bytes()
+            .checked_sub(bytes)
+            .is_none_or(|remaining| remaining < floor)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let digest = Arc::new(
+            reservation
+                .alloc::<u64>(cells)
+                .map_err(|error| runtime_error("original content allocation", error))?,
+        );
         self.steps
             .get_mut(&step.token)
             .expect("checked fixed step")
@@ -14276,18 +14394,16 @@ impl SemanticTransitionSession {
                 "original model work capacity is reserved once per step",
             ));
         }
+        let build = self.prepared_segment.as_ref().expect("checked build");
+        if event_capacity != build.cold_capacity.model_work_capacity {
+            return Err(publication_input_error(
+                "model work capacity differs from the frozen segment claim",
+            ));
+        }
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("model work reservation stream admission", error))?;
-        let bytes = event_capacity
-            .checked_mul(size_of::<ModelWorkEvent>() + 3 * size_of::<u64>())
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let bytes =
-            u64::try_from(bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?;
-        let mut reservation = self
-            .provider
-            .memory()
-            .reserve_bytes(bytes)
-            .map_err(|error| runtime_error("original model work reservation", error))?;
+        let bytes = build.cold_capacity.model_work_bytes()?;
+        let floor = build.cold_capacity.external_floor()?;
         let recording = ModelWorkRecording::new(event_capacity).map_err(publication_input_error)?;
         let reset = self
             .provider
@@ -14295,12 +14411,29 @@ impl SemanticTransitionSession {
             .inner()
             .get_func("xlog_semantic_transition", "semantic_model_work_reset")
             .ok_or_else(|| runtime_error("kernel lookup", "model work reset unavailable"))?;
-        let device = reservation
-            .alloc(event_capacity)
-            .map_err(|error| runtime_error("original model work allocation", error))?;
-        let actual = reservation
-            .alloc(event_capacity * 3)
-            .map_err(|error| runtime_error("original device work allocation", error))?;
+        let (device, actual) = {
+            let reservation = self
+                .prepared_segment
+                .as_mut()
+                .expect("checked build")
+                .cold_reservation
+                .as_mut()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            if reservation
+                .remaining_bytes()
+                .checked_sub(bytes)
+                .is_none_or(|remaining| remaining < floor)
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            let device = reservation
+                .alloc(event_capacity)
+                .map_err(|error| runtime_error("original model work allocation", error))?;
+            let actual = reservation
+                .alloc(event_capacity * 3)
+                .map_err(|error| runtime_error("original device work allocation", error))?;
+            (device, actual)
+        };
         let work = PreparedModelWork {
             recording,
             device,
@@ -16476,6 +16609,24 @@ impl SemanticTransitionSession {
         if build.capturing || build.finished {
             return Err(publication_input_error(
                 "prepared segment construction already began",
+            ));
+        }
+        let external_floor = build.cold_capacity.external_floor()?;
+        if build
+            .cold_reservation
+            .as_ref()
+            .is_none_or(|reservation| reservation.remaining_bytes() != external_floor)
+            || build.tokens.iter().any(|token| {
+                self.steps
+                    .get(token)
+                    .and_then(|step| step.prepared.as_ref())
+                    .is_none_or(|prepared| {
+                        prepared.digests.is_none() || prepared.model_work.is_none()
+                    })
+            })
+        {
+            return Err(publication_input_error(
+                "prepared segment lacks its complete frozen native cold allocation roster",
             ));
         }
         // Keep the actual pool/model allocations beyond graph retirement for
@@ -27846,6 +27997,13 @@ mod tests {
         assert_ne!(first.receipts, second.receipts);
     }
 
+    const COLD_CAPACITY: SemanticSegmentColdCapacity = SemanticSegmentColdCapacity {
+        tensor_content_capacity: 1,
+        model_work_capacity: 1,
+        segment_capacity_bytes: 1,
+        other_external_cuda_bytes: 0,
+    };
+
     #[test]
     fn prepared_schedule_preserves_each_requested_mode_until_recording() {
         let issuer = Arc::new(());
@@ -27854,9 +28012,13 @@ mod tests {
             SemanticTransitionKind::Recompute,
             SemanticTransitionKind::Proposal,
         ];
-        let mut build =
-            PreparedSegmentState::new(Arc::clone(&issuer), vec![4, 5, 6], schedule.into_iter())
-                .unwrap();
+        let mut build = PreparedSegmentState::new(
+            Arc::clone(&issuer),
+            vec![4, 5, 6],
+            schedule.into_iter(),
+            COLD_CAPACITY,
+        )
+        .unwrap();
         let steps = build.handles().unwrap();
         assert!(build.enter(&steps[1], &issuer).is_err());
         for (step, expected) in steps.iter().zip(schedule) {
@@ -27868,13 +28030,18 @@ mod tests {
         build.submit().unwrap();
         assert!(build.submit().is_err());
         assert!(build.requested_kind(&steps[0], &Arc::new(())).is_err());
-        assert!(
-            PreparedSegmentState::new(Arc::clone(&issuer), vec![9], schedule.into_iter()).is_err()
-        );
+        assert!(PreparedSegmentState::new(
+            Arc::clone(&issuer),
+            vec![9],
+            schedule.into_iter(),
+            COLD_CAPACITY
+        )
+        .is_err());
         assert!(PreparedSegmentState::new(
             issuer,
             vec![9],
-            std::iter::once(SemanticTransitionKind::Drain)
+            std::iter::once(SemanticTransitionKind::Drain),
+            COLD_CAPACITY,
         )
         .is_err());
     }
@@ -27890,6 +28057,7 @@ mod tests {
                 SemanticTransitionKind::Proposal,
             ]
             .into_iter(),
+            COLD_CAPACITY,
         )
         .unwrap();
         let steps = build.handles().unwrap();
@@ -27906,7 +28074,10 @@ mod tests {
         build.leave(&steps[1], &issuer).unwrap();
         build.finish().unwrap();
         assert!(build.check(&steps[0], &issuer, false).is_err());
-        assert!(PreparedSegmentState::new(issuer, Vec::new(), std::iter::empty()).is_err());
+        assert!(
+            PreparedSegmentState::new(issuer, Vec::new(), std::iter::empty(), COLD_CAPACITY)
+                .is_err()
+        );
     }
     use super::*;
     use xlog_core::MemoryBudget;
