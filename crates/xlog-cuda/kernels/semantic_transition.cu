@@ -432,7 +432,7 @@ struct AcknowledgementEntry {
 struct PolicyField { uint64_t embeddings,biases; uint32_t cardinality; int32_t null_category; uint64_t retained_offset; };
 struct PolicyDescriptor {
     uint64_t z,recurrence,positions,hidden,scores,recurrent,retained_scores,retained_score_stride;
-    uint64_t final_masks,active_sets,pwl_cells,selected_score_vjps;
+    uint64_t final_masks,active_sets,pwl_cells,selected_score_vjps,component_baselines;
     PolicyField fields[18];
 };
 struct SemanticTrainingViewSelection {
@@ -540,6 +540,28 @@ __device__ bool task_program_bank(const uint64_t* task,uint64_t word_count,
     return true;
 }
 
+// Bound the complete selected return across every reachable prefix, before
+// any draw, using the admitted scoring law and structural work capacities.
+__device__ bool task_critic_admissible(const uint64_t* task,const TaskProgramBank& bank,
+        const PolicyDescriptor& policy) {
+    constexpr uint64_t limit=uint64_t(1)<<59;
+    if(!policy.component_baselines || policy.component_baselines%alignof(float))return false;
+    for(uint32_t i=25;i<=30;++i)if(task[i]>UINT32_MAX)return false;
+    const uint64_t cost_cap=bank.editable ? 2+PROGRAM_FACT_CAPACITY+3 : 6;
+    const uint64_t spent_cap=bank.editable ? 19 : 17;
+    const uint64_t value_span=3*task[25]+task[26]+cost_cap*task[27];
+    uint64_t remaining=limit;
+    if(task[28] && value_span>remaining/task[28])return false;
+    remaining-=value_span*task[28];
+    if(task[29]>remaining/2)return false;
+    remaining-=2*task[29];
+    if(task[30]>remaining/spent_cap)return false;
+    const auto* baselines=reinterpret_cast<const float*>(policy.component_baselines);
+    for(uint32_t i=0;i<COMPONENT_COUNT;++i)
+        if(!isfinite(baselines[i]) || fabsf(baselines[i])>float(limit))return false;
+    return true;
+}
+
 __device__ void retain_policy_cell(const PolicyDescriptor& policy,const Component& component,
         const Receipt& receipt,float maximum,U192 g,U192 active_sum,bool singleton) {
     if(!policy.z)return;
@@ -566,7 +588,7 @@ static_assert(sizeof(PolicySelectedScoreVjp)==96,"selected-score VJP ABI");
 static_assert(sizeof(ActionBatchReceipt)==504,"action batch receipt ABI");
 static_assert(sizeof(State)==7568,"state ABI");
 static_assert(sizeof(PolicyField)==32,"policy field ABI");
-static_assert(sizeof(PolicyDescriptor)==672,"policy ABI");
+static_assert(sizeof(PolicyDescriptor)==680,"policy ABI");
 static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origin ABI");
 static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
 static_assert(sizeof(SemanticTrainingObjectiveRecord)==280,"training objective ABI");
@@ -636,7 +658,7 @@ static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
 static_assert(sizeof(AcknowledgementQueueHeader)==72,"acknowledgement queue ABI");
 static_assert(sizeof(AcknowledgementEntry)==136,"acknowledgement entry ABI");
-static_assert(sizeof(Descriptor)==1016,"launch ABI");
+static_assert(sizeof(Descriptor)==1024,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 
 __device__ uint64_t text_row_count(TextBinding binding) {
@@ -4985,6 +5007,8 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 failed=1;state->status=7;
             }
         } else program_bank=TaskProgramBank{};
+        const bool critic_admissible=!task || !descriptor.policy.z ||
+            (task && !failed && task_critic_admissible(task,program_bank,descriptor.policy));
         if(!failed && descriptor.publication.control) {
             auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
             if(!control.continuation) { semantic_content_integrity_trap();return; }
@@ -5007,6 +5031,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             }
             uint64_t training_status=0;
             uint8_t original_numerical=numerical;
+            if(transition_kind==1)numerical &= critic_admissible;
             const SemanticTrainingCanaryRefusalRecord* update_refusal=nullptr;
             if(pending.transition_kind==4) {
                 if(!pending.training_selection || pending.training_selection%alignof(uint64_t) ||
@@ -5072,6 +5097,9 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                     !original_numerical ? 5 :
                     (update_refusal && update_refusal->reason) ? 15 : 5;
             }
+        }
+        if(!failed && !descriptor.publication.control && !critic_admissible) {
+            failed=1;state->status=5;
         }
         input_bank_admitted=!failed && transition_kind==1;
     }

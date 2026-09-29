@@ -11519,6 +11519,7 @@ struct PolicyDescriptor {
     active_sets: u64,
     pwl_cells: u64,
     selected_score_vjps: u64,
+    component_baselines: u64,
     fields: [PolicyField; 18],
 }
 
@@ -26287,6 +26288,7 @@ impl SemanticTransitionSession {
             active_sets: policy.active_sets.device_ptr_value(),
             pwl_cells: policy.pwl_cells.device_ptr_value(),
             selected_score_vjps: policy.selected_score_vjps.device_ptr_value(),
+            component_baselines: policy.component_baselines.device_ptr_value(),
             fields,
         }
     }
@@ -26328,6 +26330,7 @@ impl SemanticTransitionSession {
                     &policy.scores,
                     &policy.retained_scores,
                     &policy.recurrent,
+                    &policy.component_baselines,
                 ] {
                     if !buffer.is_empty() {
                         ranges.push((buffer.device_ptr_value(), (buffer.len() * 4) as u64));
@@ -26413,6 +26416,7 @@ impl SemanticTransitionSession {
         #[cfg(feature = "semantic-policy")]
         if let Some(policy) = io.policy {
             recorder.read(&policy.parameters);
+            recorder.read(&policy.component_baselines);
             recorder.write(&policy.hidden);
             recorder.write(&policy.scores);
             recorder.write(&policy.retained_scores);
