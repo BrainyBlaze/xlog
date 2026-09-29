@@ -554,6 +554,11 @@ impl SemanticSelectedTrainingView {
     }
 
     #[cfg(feature = "semantic-policy")]
+    pub(crate) fn actor_group_member_count(&self) -> u64 {
+        self.arena.actor_group_member_count
+    }
+
+    #[cfg(feature = "semantic-policy")]
     pub(crate) fn canaries(&self) -> DeviceMemoryView<SemanticTrainingCanaryRecord> {
         self.arena.canaries.view()
     }
@@ -895,6 +900,8 @@ pub(crate) struct SemanticTrainingViewArena {
     canaries: TrackedCudaSlice<SemanticTrainingCanaryRecord>,
     #[cfg(feature = "semantic-policy")]
     protected_members: TrackedCudaSlice<u64>,
+    #[cfg(feature = "semantic-policy")]
+    actor_group_member_count: u64,
     row_count: usize,
     capacity: usize,
 }
@@ -1002,6 +1009,12 @@ impl SemanticTrainingViewArena {
             task_content,
             expected_truth,
         )?;
+        #[cfg(feature = "semantic-policy")]
+        let actor_group_member_count = groups
+            .iter()
+            .find(|group| group.kind == SemanticTrainingObjectiveGroupKind::ActorCriticCost as u64)
+            .ok_or_else(|| input_error("training objective has no actor-critic-cost group"))?
+            .member_count;
         let bytes = descriptors
             .len()
             .checked_mul(size_of::<TrainingViewRowDescriptor>())
@@ -1099,6 +1112,8 @@ impl SemanticTrainingViewArena {
             canaries: device_canaries,
             #[cfg(feature = "semantic-policy")]
             protected_members: device_protected_members,
+            #[cfg(feature = "semantic-policy")]
+            actor_group_member_count,
             row_count: descriptors.len(),
             capacity,
         }))

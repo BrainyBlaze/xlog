@@ -25137,7 +25137,12 @@ impl SemanticTransitionSession {
         };
         let task = match input {
             PolicyVjpInput::External(_) => None,
-            PolicyVjpInput::UpdateObjective { .. } => {
+            PolicyVjpInput::UpdateObjective { training, .. } => {
+                if training.actor_group_member_count() != 1 {
+                    return Err(publication_input_error(
+                        "single-proposal policy backward cannot represent the complete actor group",
+                    ));
+                }
                 let (binding, device) = self.task.as_ref().ok_or_else(|| {
                     publication_input_error(
                         "Update policy backward requires the bound semantic task ground",
