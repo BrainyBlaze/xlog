@@ -121,6 +121,45 @@ pub struct SemanticTaskScoring {
     pub spent_weight: u32,
 }
 
+/// Task-independent unit and finite cap for native structural work. The unit
+/// names the versioned counting law and the resident program mode, not the
+/// authority, task identity, or outcome of a sampled candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticStructuralCostDescriptor {
+    pub unit: Identity256,
+    pub cap: u64,
+}
+
+/// The only structural-cost law accepted by a cold training objective.
+pub fn semantic_structural_cost_descriptor(
+    editable_program: bool,
+) -> SemanticStructuralCostDescriptor {
+    let (support_cap, truth_change_cap) = if editable_program {
+        (
+            crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64,
+            3u64,
+        )
+    } else {
+        (2u64, 2u64)
+    };
+    let cap = 2 + support_cap + truth_change_cap;
+    let mut hash = Sha256::new();
+    hash.update(b"xlog.semantic.structural-cost.v1\0");
+    for word in [
+        u64::from(editable_program),
+        2,
+        support_cap,
+        truth_change_cap,
+        cap,
+    ] {
+        hash.update(word.to_le_bytes());
+    }
+    SemanticStructuralCostDescriptor {
+        unit: Identity256::from_bytes(hash.finalize().into()),
+        cap,
+    }
+}
+
 /// One normalized truth-match objective within an ordered task priority level.
 /// The native query result contributes one when it equals `target_truth`, zero
 /// otherwise; candidate progress subtracts the acquired base's contribution.
@@ -155,11 +194,7 @@ impl SemanticTaskScoring {
         // change all three query truths. The graph-only path retains its smaller
         // support-attachment cap. Priority selection need not maximize value,
         // so both signs of selected-minus-base value must fit.
-        let max_cost = if editable_program {
-            2 + crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u128 + 3
-        } else {
-            6
-        };
+        let max_cost = u128::from(semantic_structural_cost_descriptor(editable_program).cap);
         let max_spent = if editable_program { 19 } else { 17 };
         let value_span = 3 * u128::from(self.correct_weight)
             + u128::from(self.all_correct_weight)
@@ -183,8 +218,11 @@ impl SemanticTaskScoring {
         editable_program: bool,
     ) -> Result<Vec<u8>, SemanticTransitionError> {
         let mut bytes = b"XLOG-TASK-SCORING-LAW\0".to_vec();
-        material_u64(&mut bytes, 1);
+        material_u64(&mut bytes, 2);
         bytes.extend_from_slice(task_identity.as_bytes());
+        let structural_cost = semantic_structural_cost_descriptor(editable_program);
+        bytes.extend_from_slice(structural_cost.unit.as_bytes());
+        material_u64(&mut bytes, structural_cost.cap);
         for weight in self.words() {
             material_u64(&mut bytes, weight);
         }
@@ -200,7 +238,7 @@ fn checkpoint_scoring_law_identity(
 ) -> Result<Identity256, SemanticTransitionError> {
     let law = scoring.completed_law_bytes(task_identity, editable_program)?;
     let mut hash = Sha256::new();
-    hash.update(b"xlog.semantic.checkpoint.scoring-law.v1\0");
+    hash.update(b"xlog.semantic.checkpoint.scoring-law.v2\0");
     hash.update((law.len() as u64).to_le_bytes());
     hash.update(law);
     Ok(Identity256::from_bytes(hash.finalize().into()))
@@ -225,7 +263,8 @@ fn validate_completed_task_scoring(
     if scoring.validate(editable_program).is_err()
         || query_count > 9
         || winner > 2
-        || lane_refusal.iter().any(|&refusal| refusal > 2)
+        || lane_refusal.iter().any(|&refusal| refusal > 4)
+        || (!editable_program && lane_refusal.iter().any(|&refusal| refusal >= 3))
         || work.iter().any(|work| !work.is_valid(editable_program))
         || facts
             .iter()
@@ -238,7 +277,7 @@ fn validate_completed_task_scoring(
             0
         } else {
             let work = work[slot - 1];
-            work.edit_commands + work.added_supports + work.defined_truth_changes
+            work.raw_structural_cost()
         };
         let value = i128::from(scoring.correct_weight) * i128::from(facts.g)
             + i128::from(scoring.all_correct_weight) * i128::from(facts.p)
@@ -4707,6 +4746,7 @@ pub struct SemanticCompletedTaskGroundMaterial {
     pub scoring_law: SemanticCompletedStepWitnessMaterial,
     pub scoring: SemanticTaskScoring,
     pub return_bound: i64,
+    pub structural_cost: SemanticStructuralCostDescriptor,
     pub task_identity: Identity256,
     pub content: SemanticTaskContentIdentity,
     pub goal: SemanticTaskGoalWitness,
@@ -5204,7 +5244,7 @@ fn completed_theory_delta_for_slot(
         || component_receipts.len() != 18
         || hard_decode[0] != 0
         || hard_decode[1] > 3
-        || lane_refusal > 2
+        || lane_refusal > 4
     {
         return Err(SemanticTransitionError::ObservationMismatch);
     }
@@ -5331,8 +5371,15 @@ fn validate_program_query_receipts(
     edits: &[[[u32; 18]; 2]; 2],
 ) -> Result<(), SemanticTransitionError> {
     let mismatch = || SemanticTransitionError::ObservationMismatch;
+    let expected_queries = 3 + state
+        .task_evaluation
+        .lane_refusal
+        .iter()
+        .filter(|&&refusal| refusal != 3 && refusal != 4)
+        .count() as u64
+        * 3;
     if state.binding_digest != codebooks.binding.digest
-        || state.task_evaluation.query_count != 9
+        || state.task_evaluation.query_count != expected_queries
         || state.task_evaluation.lane_refusal.contains(&1)
     {
         return Err(mismatch());
@@ -5356,6 +5403,25 @@ fn validate_program_query_receipts(
             if slot == 0 { &[] } else { &inserted[slot - 1] };
         let receipts = &state.task_evaluation.query_receipts[slot];
         let facts = &state.task_evaluation.facts[slot];
+        if slot != 0 && matches!(state.task_evaluation.lane_refusal[slot - 1], 3 | 4) {
+            let work = state.work[slot - 1];
+            if rules.is_empty()
+                || receipts
+                    .iter()
+                    .any(|receipt| receipt.iter().any(|&word| word != 0))
+                || facts.truth != [0; 3]
+                || facts.correct != [0; 3]
+                || facts.g != 0
+                || facts.p != 0
+                || facts.eligible != 0
+                || work.edit_commands != rules.len() as u64
+                || work.added_supports != 0
+                || work.defined_truth_changes != 0
+            {
+                return Err(mismatch());
+            }
+            continue;
+        }
         let metrics = &receipts[0][37..40];
         if metrics[1] > crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64
             || metrics[2] > metrics[1]
@@ -11928,6 +11994,8 @@ pub struct SemanticTransitionObservation {
 pub enum SemanticTaskRefusal {
     Scope,
     HardConstraint,
+    FactCapacity,
+    FuelExhausted,
 }
 
 impl SemanticTaskRefusal {
@@ -11935,6 +12003,8 @@ impl SemanticTaskRefusal {
         match self {
             Self::Scope => "task-scope",
             Self::HardConstraint => "hard-constraint",
+            Self::FactCapacity => "fact-capacity",
+            Self::FuelExhausted => "fuel-exhausted",
         }
     }
 }
@@ -11983,6 +12053,10 @@ pub struct SemanticTransitionWork {
 }
 
 impl SemanticTransitionWork {
+    fn raw_structural_cost(self) -> u64 {
+        self.edit_commands + self.added_supports + self.defined_truth_changes
+    }
+
     fn is_valid(self, editable_program: bool) -> bool {
         if self.edit_commands > 2 {
             return false;
@@ -15255,6 +15329,8 @@ impl SemanticTransitionSession {
                     0 => None,
                     1 => Some(SemanticTaskRefusal::Scope.canonical_kind()),
                     2 => Some(SemanticTaskRefusal::HardConstraint.canonical_kind()),
+                    3 => Some(SemanticTaskRefusal::FactCapacity.canonical_kind()),
+                    4 => Some(SemanticTaskRefusal::FuelExhausted.canonical_kind()),
                     _ => unreachable!("validated lane refusal code"),
                 },
                 admission: lane_admissions[lane].clone(),
@@ -15326,11 +15402,20 @@ impl SemanticTransitionSession {
                 2 => SemanticCompletedLaneOutcomeMaterial::Refused(
                     SemanticTaskRefusal::HardConstraint,
                 ),
+                3 => {
+                    SemanticCompletedLaneOutcomeMaterial::Refused(SemanticTaskRefusal::FactCapacity)
+                }
+                4 => SemanticCompletedLaneOutcomeMaterial::Refused(
+                    SemanticTaskRefusal::FuelExhausted,
+                ),
                 _ => unreachable!("validated lane refusal code"),
             });
         let mut ground_bytes = Vec::new();
         ground_bytes.extend_from_slice(b"XLOG-COMPLETED-TASK-GROUND\0");
-        material_u64(&mut ground_bytes, 2);
+        material_u64(&mut ground_bytes, 3);
+        let structural_cost = semantic_structural_cost_descriptor(editable_program);
+        ground_bytes.extend_from_slice(structural_cost.unit.as_bytes());
+        material_u64(&mut ground_bytes, structural_cost.cap);
         ground_bytes.extend_from_slice(task_identity.as_bytes());
         for identity in [
             task_content.query,
@@ -15398,6 +15483,7 @@ impl SemanticTransitionSession {
             ),
             scoring,
             return_bound: scoring.return_bound(editable_program)?,
+            structural_cost,
             task_identity,
             content: task_content,
             goal,
@@ -18922,6 +19008,15 @@ impl SemanticTransitionSession {
         {
             return Err(publication_input_error(
                 "training arena transfer requires one private restored publication",
+            ));
+        }
+        let structural_cost = self
+            .task_structural_cost_descriptor()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if objective.cost_unit != structural_cost.unit || objective.cost_cap != structural_cost.cap
+        {
+            return Err(publication_input_error(
+                "training objective structural cost differs from the bound native task",
             ));
         }
         let result = (|| {
@@ -22669,6 +22764,14 @@ impl SemanticTransitionSession {
             .transpose()
     }
 
+    /// Structural cost law of the bound task. It is independent of this task's
+    /// identity and can be projected before any action draw.
+    fn task_structural_cost_descriptor(&self) -> Option<SemanticStructuralCostDescriptor> {
+        self.task.as_ref().map(|(binding, _)| {
+            semantic_structural_cost_descriptor(binding.spec.program.editable_program().is_some())
+        })
+    }
+
     /// Semantic root of the validated goal witness bound to the current task.
     /// This is the same root retained in its completed task ground.
     pub fn task_semantic_goal_root(&self) -> Option<Identity256> {
@@ -22696,6 +22799,15 @@ impl SemanticTransitionSession {
         if self.publication.is_some() || self.training_views.is_some() || self.task.is_none() {
             return Err(publication_input_error(
                 "training-view arena requires one cold task binding and cannot be replaced",
+            ));
+        }
+        let structural_cost = self
+            .task_structural_cost_descriptor()
+            .expect("checked cold task binding");
+        if objective.cost_unit != structural_cost.unit || objective.cost_cap != structural_cost.cap
+        {
+            return Err(publication_input_error(
+                "training objective structural cost differs from the bound native task",
             ));
         }
         let task_identity = self
@@ -24887,7 +24999,9 @@ impl SemanticTransitionSession {
                 || !task.query_count.is_multiple_of(3)
                 || task.winner > 2
                 || task.facts[task.winner as usize].eligible != 1
-                || task.lane_refusal.iter().any(|&code| code > 2)
+                || task.lane_refusal.iter().any(|&code| code > 4)
+                || (binding.spec.program.editable_program().is_none()
+                    && task.lane_refusal.iter().any(|&code| code >= 3))
             {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
@@ -24954,6 +25068,8 @@ impl SemanticTransitionSession {
                 match state.task_evaluation.lane_refusal[i] {
                     1 => Some(SemanticTaskRefusal::Scope),
                     2 => Some(SemanticTaskRefusal::HardConstraint),
+                    3 => Some(SemanticTaskRefusal::FactCapacity),
+                    4 => Some(SemanticTaskRefusal::FuelExhausted),
                     _ => None,
                 }
             } else {
@@ -26540,6 +26656,98 @@ mod tests {
         };
         assert_eq!(scoring.return_bound(false).unwrap(), 2522);
         assert_eq!(scoring.return_bound(true).unwrap(), 186799);
+    }
+
+    #[test]
+    fn structural_cost_law_tracks_program_mode_without_task_identity() {
+        let graph = semantic_structural_cost_descriptor(false);
+        let editable = semantic_structural_cost_descriptor(true);
+        assert_eq!(graph.cap, 6);
+        assert_eq!(editable.cap, 4101);
+        assert_ne!(graph.unit, editable.unit);
+        assert_ne!(graph.unit, Identity256::default());
+        assert_eq!(graph, semantic_structural_cost_descriptor(false));
+        assert_eq!(editable, semantic_structural_cost_descriptor(true));
+        let maximum = SemanticTransitionWork {
+            edit_commands: 2,
+            added_supports: 4096,
+            defined_truth_changes: 3,
+        };
+        assert_eq!(maximum.raw_structural_cost(), editable.cap);
+        assert_eq!(SemanticTransitionWork::default().raw_structural_cost(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "semantic-policy")]
+    fn candidate_resource_refusals_preserve_the_completed_base() {
+        let scoring = SemanticTaskScoring {
+            correct_weight: 0,
+            all_correct_weight: 0,
+            work_weight: 1,
+            improvement_weight: 0,
+            refusal_weight: 1,
+            spent_weight: 0,
+        };
+        let facts = [
+            SemanticTaskFacts {
+                eligible: 1,
+                ..SemanticTaskFacts::default()
+            },
+            SemanticTaskFacts {
+                c: 1,
+                v: -1,
+                ..SemanticTaskFacts::default()
+            },
+            SemanticTaskFacts::default(),
+        ];
+        let work = [
+            SemanticTransitionWork {
+                edit_commands: 1,
+                ..SemanticTransitionWork::default()
+            },
+            SemanticTransitionWork::default(),
+        ];
+        assert!(validate_completed_task_scoring(
+            scoring,
+            true,
+            &[],
+            &facts,
+            &work,
+            [3, 4],
+            3,
+            0,
+            -2,
+        ));
+        assert!(!validate_completed_task_scoring(
+            scoring,
+            true,
+            &[],
+            &facts,
+            &work,
+            [3, 5],
+            3,
+            0,
+            -2,
+        ));
+        assert!(!validate_completed_task_scoring(
+            scoring,
+            false,
+            &[],
+            &facts,
+            &work,
+            [3, 4],
+            3,
+            0,
+            -2,
+        ));
+        assert_eq!(
+            SemanticTaskRefusal::FactCapacity.canonical_kind(),
+            "fact-capacity"
+        );
+        assert_eq!(
+            SemanticTaskRefusal::FuelExhausted.canonical_kind(),
+            "fuel-exhausted"
+        );
     }
 
     #[test]
@@ -33630,8 +33838,11 @@ pub(crate) mod task_binding_tests {
         let task = Identity256::from_bytes([11; 32]);
         let bytes = scoring.completed_law_bytes(task, false).unwrap();
         let mut expected = b"XLOG-TASK-SCORING-LAW\0".to_vec();
-        expected.extend_from_slice(&1u64.to_le_bytes());
+        expected.extend_from_slice(&2u64.to_le_bytes());
         expected.extend_from_slice(task.as_bytes());
+        let cost = semantic_structural_cost_descriptor(false);
+        expected.extend_from_slice(cost.unit.as_bytes());
+        expected.extend_from_slice(&cost.cap.to_le_bytes());
         for weight in [14u64, 7, 1, 45, 15, 1] {
             expected.extend_from_slice(&weight.to_le_bytes());
         }
@@ -33658,6 +33869,10 @@ pub(crate) mod task_binding_tests {
         };
         let task = Identity256::from_bytes([11; 32]);
         let baseline = checkpoint_scoring_law_identity(scoring, task, false).unwrap();
+        assert_ne!(
+            baseline,
+            checkpoint_scoring_law_identity(scoring, task, true).unwrap()
+        );
         let mut changed = scoring;
         changed.correct_weight += 1;
         assert_ne!(

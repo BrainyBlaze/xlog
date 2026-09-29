@@ -7411,6 +7411,15 @@ impl PySemanticCompletedTaskGround {
         self.inner.return_bound
     }
     #[getter]
+    fn structural_cost_descriptor(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let descriptor = self.inner.structural_cost;
+        Ok(
+            (PyBytes::new(py, descriptor.unit.as_bytes()), descriptor.cap)
+                .into_pyobject(py)?
+                .unbind(),
+        )
+    }
+    #[getter]
     fn task_identity(&self, py: Python<'_>) -> Py<PyBytes> {
         PyBytes::new(py, self.inner.task_identity.as_bytes()).unbind()
     }
@@ -10802,6 +10811,21 @@ impl PySemanticTransitionController {
         })
     }
 
+    /// Versioned (unit identity, maximum raw cost) of this Session's native
+    /// program mode, available before import_task freezes its objective.
+    #[getter]
+    fn structural_cost_descriptor(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let descriptor =
+            xlog_cuda::semantic_structural_cost_descriptor(session.editable_program.is_some());
+        Ok(
+            (PyBytes::new(py, descriptor.unit.as_bytes()), descriptor.cap)
+                .into_pyobject(py)?
+                .unbind(),
+        )
+    }
+
     /// Record one fixed bounded segment without submitting it. The original
     /// producer prepares cold storage on consumer_stream and returns an owner
     /// with memory_scope, enqueue_step(step, bank), and finish_segment() methods.
@@ -11577,7 +11601,9 @@ impl PySemanticTransitionController {
     /// ``training_objective`` is None only when replay_rows is empty. Otherwise it
     /// is ``(evaluator_f64_bits, coefficient_f32_bits, cost, truth_tokens, groups,
     /// canaries)``. The evaluator pair and nine coefficient words are exact IEEE
-    /// bit patterns. Cost is ``(unit_identity, positive_cap)``. Each group is
+    /// bit patterns. Cost is the exact ``(unit_identity, positive_cap)`` from
+    /// this controller's pre-import structural_cost_descriptor property; the
+    /// native bound task checks both fields. Each group is
     /// ``(kind, positive_denominator, strictly_increasing_row_ordinals)`` and the
     /// complete mandatory group roster must cover every row. ``truth_tokens`` maps
     /// neither, true, false and both to four distinct vocabulary ids. Each canary
@@ -14973,9 +14999,18 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let ground = py.get_type::<super::PySemanticCompletedTaskGround>();
-            for field in ["scoring_law", "scoring_weights", "return_bound"] {
+            for field in [
+                "scoring_law",
+                "scoring_weights",
+                "return_bound",
+                "structural_cost_descriptor",
+            ] {
                 assert!(ground.hasattr(field).unwrap(), "{field}");
             }
+            assert!(py
+                .get_type::<super::PySemanticTransitionController>()
+                .hasattr("structural_cost_descriptor")
+                .unwrap());
         });
     }
 

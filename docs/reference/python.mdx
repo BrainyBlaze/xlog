@@ -579,9 +579,14 @@ bound goal-authority closure. Its two ordered lane outcomes are tagged
 canonical native refusal kind. `task_ground.facts` retains all three ordered
 truth-code vectors together with native agreement, eligibility, value, and work
 facts; a refused lane's terminal tag remains authoritative.
+Candidate program-closure exhaustion is typed as `fact-capacity` or
+`fuel-exhausted`; it does not discard the completed base or turn a native
+infrastructure failure into a task refusal.
+
 `task_ground.scoring_law` is a canonical native material bound to this
-completed owner and original task identity. Its six `scoring_weights` are, in
-order, correct-query, all-correct, measured-work, improvement, refusal, and
+completed owner, original task identity, and versioned structural-cost law.
+Its six `scoring_weights` are, in order, correct-query, all-correct,
+measured-work, improvement, refusal, and
 spent-work coefficients. For each candidate, measured work is the count of
 actual edit commands plus added supports (new materialized facts for an editable
 program) plus defined-truth changes; candidate
@@ -599,6 +604,17 @@ instead of the smaller graph-support cap. It is not a bound for an external
 training objective. Cold projection
 checks these equations against the retained native facts and work counters
 before exposing the material.
+
+`controller.structural_cost_descriptor` returns `(unit_identity_bytes, cap)`
+before `import_task`: the native versioned structural-work law for this
+Session's graph-only or editable-program mode. The graph-only cap is 6; the
+editable-program cap is 4101, including at most 4096 new materialized facts.
+The unit is independent of task identity and sampled outcomes. Use
+`unit_identity_bytes.hex()` and `cap` as the objective's cost pair. Native cold
+binding rejects any different pair for the actual bound task. The completed
+`task_ground.structural_cost_descriptor` exposes the same pair for checking the
+terminal ground; slot-zero work is zero, while candidate raw work is exactly
+`edit_commands + added_supports + defined_truth_changes`.
 
 Learned attempted requests are not duplicated in the ground. Read them from the
 same projection's lane `decoded_text_actions` and `decoded_edit_actions`. The

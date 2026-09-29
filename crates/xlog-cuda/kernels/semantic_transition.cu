@@ -274,7 +274,7 @@ struct TaskFacts {
     uint64_t eligible;
 };
 struct TaskEvaluation {
-    uint64_t lane_refusal[2]; // 0 accepted, 1 scope, 2 hard constraint.
+    uint64_t lane_refusal[2]; // 0 accepted, 1 scope, 2 hard constraint, 3 fact cap, 4 fuel.
     semantic_graph::Receipt query_receipts[3][3];
     uint64_t query_count,winner;
     int64_t return_value;
@@ -3499,6 +3499,19 @@ __device__ void task_cost(State* state,uint32_t slot,const uint64_t* task) {
     facts.v=int64_t(task[25]*facts.g+task[26]*facts.p)-int64_t(task[27]*facts.c);
 }
 
+__device__ bool selected_task_cost_matches(const State* state,uint64_t cap) {
+    if(!state || state->task_evaluation.winner>=3)return false;
+    const uint64_t winner=state->task_evaluation.winner;
+    uint64_t measured=0;
+    if(winner) {
+        const auto& work=state->work[winner-1];
+        if(work.edit_commands>2 || work.added_supports>cap ||
+           work.defined_truth_changes>3)return false;
+        measured=work.edit_commands+work.added_supports+work.defined_truth_changes;
+    }
+    return measured<=cap && state->task_evaluation.facts[winner].c==measured;
+}
+
 __device__ bool task_queries(const Descriptor& d,const uint64_t* task,uint32_t slot,
         const semantic_graph::ResidentHandle* root,
         const semantic_graph::Receipt* candidate,State* state) {
@@ -3528,11 +3541,18 @@ __device__ bool task_queries(const Descriptor& d,const uint64_t* task,uint32_t s
     return valid;
 }
 
-__device__ bool task_program_queries(const Descriptor& descriptor,const uint64_t* task,
+enum class TaskProgramQueryOutcome : uint32_t {
+    Ok,
+    FactCapacity,
+    FuelExhausted,
+    Failure,
+};
+
+__device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descriptor,const uint64_t* task,
         const TaskProgramBank& bank,uint32_t slot,const semantic_program::Rule* inserted,
         uint32_t inserted_count,uint32_t baseline_derived,State* state,
         uint32_t* derived_count) {
-    if(!bank.editable || inserted_count>2 || !derived_count)return false;
+    if(!bank.editable || inserted_count>2 || !derived_count)return TaskProgramQueryOutcome::Failure;
     auto* scratch=reinterpret_cast<uint8_t*>(descriptor.scratch)+PROGRAM_SCRATCH_OFFSET;
     auto* input=reinterpret_cast<semantic_program::Fact*>(scratch);
     auto* rules=reinterpret_cast<semantic_program::Rule*>(input+PROGRAM_FACT_CAPACITY);
@@ -3544,8 +3564,14 @@ __device__ bool task_program_queries(const Descriptor& descriptor,const uint64_t
     semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::TableSlot,
         evaluation.closure.charged_pairs);
     execution_work_merge_native(state->execution_work,work);
-    if(evaluation.closure.status!=semantic_program::Status::Ok ||
-       state->execution_work.overflow)return false;
+    if(state->execution_work.overflow)return TaskProgramQueryOutcome::Failure;
+    if(evaluation.closure.status!=semantic_program::Status::Ok) {
+        if(slot && evaluation.closure.status==semantic_program::Status::FactCapacity)
+            return TaskProgramQueryOutcome::FactCapacity;
+        if(slot && evaluation.closure.status==semantic_program::Status::FuelExhausted)
+            return TaskProgramQueryOutcome::FuelExhausted;
+        return TaskProgramQueryOutcome::Failure;
+    }
     work=semantic_graph::NativeWorkTally{};
     *derived_count=evaluation.closure.derived_count;
     auto& facts=state->task_evaluation.facts[slot];
@@ -3591,9 +3617,11 @@ __device__ bool task_program_queries(const Descriptor& descriptor,const uint64_t
         facts.correct[query]=evaluation.truth[query]==task[18+query];
     }
     execution_work_merge_native(state->execution_work,work);
-    if(state->execution_work.overflow)return false;
+    if(state->execution_work.overflow)return TaskProgramQueryOutcome::Failure;
     if(slot) {
-        if(*derived_count<baseline_derived)return false;
+        // Candidate rules only extend the same initial fact/rule bank; a
+        // successful least-fixpoint closure cannot remove baseline facts.
+        if(*derived_count<baseline_derived)return TaskProgramQueryOutcome::Failure;
         auto& lane_work=state->work[slot-1];
         lane_work.added_supports=*derived_count-baseline_derived;
         for(uint32_t query=0;query<3;++query)
@@ -3604,7 +3632,7 @@ __device__ bool task_program_queries(const Descriptor& descriptor,const uint64_t
     facts.p=facts.correct[0] && facts.correct[1] && facts.correct[2];
     facts.eligible=hard;
     task_cost(state,slot,task);
-    return true;
+    return TaskProgramQueryOutcome::Ok;
 }
 
 __device__ void program_rule_receipt(semantic_graph::Receipt* receipt,const uint64_t* task,
@@ -3883,8 +3911,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                        state->family_id!=selection.origin.family_id ||
                        state->proposal!=selection.origin.proposal ||
                        !isfinite(state->importance_weight) || state->importance_weight<=0.0 ||
-                       state->task_evaluation.winner>=3 ||
-                       state->task_evaluation.facts[state->task_evaluation.winner].c>objective.cost_cap) {
+                       !selected_task_cost_matches(state,objective.cost_cap)) {
                         *status=1;
                     } else {
                         reward=__ll2double_rn((long long)state->task_evaluation.return_value);
@@ -5016,7 +5043,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             state->execution_work.active_candidate=1;
             if(!(program_bank.editable
                 ? task_program_queries(descriptor,task,program_bank,0,nullptr,0,0,
-                    state,&baseline_derived)
+                    state,&baseline_derived)==TaskProgramQueryOutcome::Ok
                 : task_queries(descriptor,task,0,&base,nullptr,state))) {
                 failed=1;state->status=9;
             } else if(!state->task_evaluation.facts[0].eligible) {
@@ -5268,15 +5295,25 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 if(task) {
                     if(state->task_evaluation.lane_refusal[lane]) {
                         task_cost(state,lane+1,task);admission=semantic_graph::kResidentDiscardAdmission;
-                    } else if(!(program_bank.editable
-                        ? task_program_queries(descriptor,task,program_bank,lane+1,
-                            inserted_rules[lane],inserted_counts[lane],baseline_derived,state,
-                            &candidate_derived[lane])
-                        : task_queries(descriptor,task,lane+1,nullptr,&candidate,state))) {
-                        failed=1;state->status=9;
-                    } else if(!state->task_evaluation.facts[lane+1].eligible) {
-                        state->task_evaluation.lane_refusal[lane]=2;
-                        admission=semantic_graph::kResidentDiscardAdmission;
+                    } else {
+                        const auto query=program_bank.editable
+                            ? task_program_queries(descriptor,task,program_bank,lane+1,
+                                inserted_rules[lane],inserted_counts[lane],baseline_derived,state,
+                                &candidate_derived[lane])
+                            : (task_queries(descriptor,task,lane+1,nullptr,&candidate,state)
+                                ? TaskProgramQueryOutcome::Ok : TaskProgramQueryOutcome::Failure);
+                        if(query==TaskProgramQueryOutcome::Failure) {
+                            failed=1;state->status=9;
+                        } else if(query==TaskProgramQueryOutcome::FactCapacity ||
+                                  query==TaskProgramQueryOutcome::FuelExhausted) {
+                            state->task_evaluation.lane_refusal[lane]=
+                                query==TaskProgramQueryOutcome::FactCapacity ? 3 : 4;
+                            task_cost(state,lane+1,task);
+                            admission=semantic_graph::kResidentDiscardAdmission;
+                        } else if(!state->task_evaluation.facts[lane+1].eligible) {
+                            state->task_evaluation.lane_refusal[lane]=2;
+                            admission=semantic_graph::kResidentDiscardAdmission;
+                        }
                     }
                 }
                 if(!failed) {
