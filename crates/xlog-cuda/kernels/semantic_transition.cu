@@ -995,6 +995,7 @@ struct PublicationTensorBytes {
     const uint8_t* bytes;
     const PublicationTensorLayout* layout;
     const ActiveRow* active_rows;
+    bool dense;
     uint64_t dimensions[4],prefix[16];
     __device__ uint64_t offset(uint64_t cell) const {
         uint64_t result=0;
@@ -1008,7 +1009,8 @@ struct PublicationTensorBytes {
     __device__ uint8_t operator[](uint64_t index) const {
         if(index<sizeof(prefix))return reinterpret_cast<const uint8_t*>(prefix)[index];
         index-=sizeof(prefix);
-        return layout ? bytes[offset(index/layout->element_bytes)+index%layout->element_bytes] : bytes[index];
+        return !layout || dense ? bytes[index] :
+            bytes[offset(index/layout->element_bytes)+index%layout->element_bytes];
     }
 };
 // Publication seals and transient witnesses traverse the same logical bytes.
@@ -1018,7 +1020,7 @@ __device__ uint64_t publication_content_view(const uint8_t* data,uint64_t length
     const uint64_t pointer=reinterpret_cast<uint64_t>(data);
     if(range.logical_end<range.logical_begin || range.length_bytes!=length ||
        (length && !data) || pointer>UINT64_MAX-length)return 1;
-    view->bytes=data;view->layout=layout;view->active_rows=nullptr;
+    view->bytes=data;view->layout=layout;view->active_rows=nullptr;view->dense=false;
     for(uint32_t i=0;i<16;++i)view->prefix[i]=0;
     view->prefix[0]=0x786c6f6772616e31ULL;view->prefix[1]=range.role;view->prefix[2]=range.index;
     view->prefix[3]=range.logical_begin;view->prefix[4]=range.logical_end;
@@ -1062,6 +1064,15 @@ __device__ uint64_t publication_content_view(const uint8_t* data,uint64_t length
            !semantic_graph::checked_add(span,extent,&span))return 1;
     }
     uint64_t cells=empty ? 0 : 1,last=0;
+    // Only a physically packed logical view can bypass per-byte coordinate
+    // decoding. Singleton axes may have arbitrary strides; mapped rows cannot.
+    uint64_t dense_stride=layout->element_bytes;
+    view->dense=true;
+    for(int i=int(layout->rank)-1;i>=0;--i) {
+        const uint64_t dimension=view->dimensions[i];
+        if(dimension>1 && layout->strides_bytes[i]!=dense_stride)view->dense=false;
+        if(!semantic_graph::checked_mul(dense_stride,dimension,&dense_stride))return 1;
+    }
     for(uint32_t i=0;!empty && i<layout->rank;++i) {
         const uint64_t dimension=view->dimensions[i];
         if(!semantic_graph::checked_mul(cells,dimension,&cells))return 1;
@@ -1106,6 +1117,7 @@ __device__ uint64_t publication_tensor_view(const PublicationControl& control,co
             if(active_table->rows[row].physical_row>=layout->dimensions[layout->logical_axis] ||
                (row && active_table->rows[row-1].physical_row>=active_table->rows[row].physical_row))return 1;
         view->active_rows=active_table->rows;
+        view->dense=false;
         if(*content_bytes) {
             uint64_t last=0;
             for(uint64_t axis=0;axis<layout->rank;++axis) {
