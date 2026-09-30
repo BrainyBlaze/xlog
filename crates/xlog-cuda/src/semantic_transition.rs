@@ -9771,7 +9771,6 @@ struct ModelContentSeals {
 }
 
 struct PreparedModelContentSeals {
-    #[cfg(feature = "semantic-policy")]
     bank: usize,
     #[cfg(feature = "semantic-policy")]
     storage: Arc<PublicationStorage>,
@@ -9854,6 +9853,34 @@ impl ModelContentSeals {
         provider: &CudaKernelProvider,
         plan: &ModelContentCopyPlan,
     ) -> Result<Self, SemanticTransitionError> {
+        Self::with_allocations(
+            provider,
+            allocate_publication(provider, plan.directory_offsets.len())?,
+            allocate_publication(provider, plan.contract_span.len())?,
+        )
+    }
+
+    fn allocate_reserved(
+        provider: &CudaKernelProvider,
+        plan: &ModelContentCopyPlan,
+        reservation: &mut GpuMemoryReservation,
+    ) -> Result<Self, SemanticTransitionError> {
+        Self::with_allocations(
+            provider,
+            reservation
+                .alloc(plan.directory_offsets.len())
+                .map_err(|error| runtime_error("prepared model seal range allocation", error))?,
+            reservation
+                .alloc(plan.contract_span.len())
+                .map_err(|error| runtime_error("prepared model contract allocation", error))?,
+        )
+    }
+
+    fn with_allocations(
+        provider: &CudaKernelProvider,
+        ranges: TrackedCudaSlice<PublicationRange>,
+        contract: TrackedCudaSlice<u8>,
+    ) -> Result<Self, SemanticTransitionError> {
         let guard = provider
             .device()
             .inner()
@@ -9865,8 +9892,8 @@ impl ModelContentSeals {
                 runtime_error("kernel lookup", "retained model contract guard unavailable")
             })?;
         Ok(Self {
-            ranges: allocate_publication(provider, plan.directory_offsets.len())?,
-            contract: allocate_publication(provider, plan.contract_span.len())?,
+            ranges,
+            contract,
             guard,
             prepared: None,
         })
@@ -13875,9 +13902,51 @@ impl SemanticTransitionSession {
                 )
                 .and_then(|bytes| bytes.checked_add(update_binding_bytes))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        // Each model-bearing prepared branch binds the complete roster once. Its
+        // ranges, contract snapshot, and roster are native cold allocations,
+        // even though the live producer addresses arrive after this claim.
+        let publication_allocation_bytes = storage
+            .allocations
+            .iter()
+            .map(TrackedCudaSlice::len)
+            .collect::<Vec<_>>();
+        let model_content_bytes = storage
+            .bank_templates
+            .iter()
+            .try_fold(0u64, |total, directory| {
+                if !directory.iter().any(|range| range.role == 18) {
+                    return Ok(total);
+                }
+                let ranges = directory
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, range)| matches!(range.role, 18..=20).then_some(index))
+                    .collect::<Vec<_>>();
+                let plan =
+                    model_content_copy_plan(directory, &ranges, &publication_allocation_bytes)?;
+                let bytes = plan
+                    .directory_offsets
+                    .len()
+                    .checked_mul(size_of::<PublicationRange>())
+                    .and_then(|bytes| bytes.checked_add(plan.contract_span.len()))
+                    .and_then(|bytes| {
+                        ranges
+                            .len()
+                            .checked_mul(2 * size_of::<u64>())
+                            .and_then(|roster| bytes.checked_add(roster))
+                    })
+                    .and_then(|bytes| u64::try_from(bytes).ok())
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?;
+                total
+                    .checked_add(bytes)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)
+            })?
+            .checked_mul(bound)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let late_native_bytes = cold_capacity.late_native_bytes(transition_bound)?;
         let bytes = base_bytes
-            .checked_add(late_native_bytes)
+            .checked_add(model_content_bytes)
+            .and_then(|bytes| bytes.checked_add(late_native_bytes))
             .and_then(|bytes| bytes.checked_add(external_floor))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
@@ -16702,6 +16771,17 @@ impl SemanticTransitionSession {
                 "prepared model content bank must be zero or one",
             ));
         }
+        if self.steps[&step.token].content.iter().any(|content| {
+            matches!(
+                &content.seals,
+                TensorContentSeals::Model(seals)
+                    if seals.prepared.as_ref().is_some_and(|prepared| prepared.bank == bank)
+            )
+        }) {
+            return Err(publication_input_error(
+                "prepared model content binds once per original branch bank",
+            ));
+        }
         let storage = Arc::clone(self.publication.as_ref().expect("prepared publication"));
         let original = prepare_semantic_tensors(&self.provider, tensors)?;
         let directory = &storage.bank_templates[bank];
@@ -16726,12 +16806,32 @@ impl SemanticTransitionSession {
                 .map(TrackedCudaSlice::len)
                 .collect::<Vec<_>>(),
         )?;
-        let mut seals = ModelContentSeals::allocate(&self.provider, &plan)?;
         let values = original
             .iter()
             .flat_map(|tensor| [tensor.layout.role, tensor.layout.index])
             .collect::<Vec<_>>();
-        let roster = allocate_publication(&self.provider, values.len())?;
+        let provider = Arc::clone(&self.provider);
+        let allocated = (|| {
+            let reservation = self
+                .prepared_segment
+                .as_mut()
+                .expect("checked prepared segment")
+                .cold_reservation
+                .as_mut()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let seals = ModelContentSeals::allocate_reserved(&provider, &plan, reservation)?;
+            let roster = reservation
+                .alloc::<u64>(values.len())
+                .map_err(|error| runtime_error("prepared model roster allocation", error))?;
+            Ok::<_, SemanticTransitionError>((seals, roster))
+        })();
+        let (mut seals, roster) = match allocated {
+            Ok(allocated) => allocated,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+        };
         #[cfg(feature = "semantic-policy")]
         let execute = self
             .provider
@@ -16752,7 +16852,6 @@ impl SemanticTransitionSession {
             .reader
             .view();
         seals.prepared = Some(PreparedModelContentSeals {
-            #[cfg(feature = "semantic-policy")]
             bank,
             #[cfg(feature = "semantic-policy")]
             storage,
