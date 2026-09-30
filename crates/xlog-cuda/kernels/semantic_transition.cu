@@ -323,6 +323,7 @@ struct ContinuationInputs {
     uint64_t active_rows,active_row_count,numerical_admissibility,transition_kind,authority_bytes;
     uint64_t training_selection,model_update_bindings,model_update_binding_count,model_update_admissibility;
     uint64_t model_update_refusal;
+    uint64_t numerical_blocks,physical_blocks,model_schema_digest[4],model_identity[4];
 };
 struct PublicationStorageEntry { uint64_t pointer,bytes,generation; };
 struct PublicationRange {
@@ -366,6 +367,7 @@ struct PendingContinuation {
     TextBinding text;
     uint64_t numerical_admissibility,training_selection,model_update_bindings,model_update_binding_count;
     uint64_t model_update_admissibility,model_update_refusal;
+    uint64_t numerical_blocks,physical_blocks,model_schema_digest[4],model_identity[4];
 };
 struct PublicationCommand { uint64_t control,lease,operation; };
 struct PublicationDeliveryInput {
@@ -640,8 +642,8 @@ static_assert(sizeof(PublicationControl)==144,"publication control ABI");
 static_assert(sizeof(PublicationBank)==50360,"publication bank ABI");
 static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
 static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
-static_assert(sizeof(PendingContinuation)==256,"pending continuation ABI");
-static_assert(sizeof(ContinuationInputs)==104,"continuation input ABI");
+static_assert(sizeof(PendingContinuation)==336,"pending continuation ABI");
+static_assert(sizeof(ContinuationInputs)==184,"continuation input ABI");
 static_assert(sizeof(TextRow)==16,"compact text row ABI");
 static_assert(sizeof(TextBinding)==24,"compact text binding ABI");
 static_assert(sizeof(ModelUpdateBinding)==32,"model update binding ABI");
@@ -929,6 +931,27 @@ __device__ const PublicationRange* publication_find_range(const PublicationRange
         uint64_t role,uint64_t index=0) {
     for(uint64_t i=0;i<count;++i)if(ranges[i].role==role && ranges[i].index==index)return &ranges[i];
     return nullptr;
+}
+__device__ bool publication_model_block_identity(const PublicationControl& control,
+        const PublicationBank& bank,const PublicationContract& contract,
+        const uint64_t* schema_digest,const uint64_t* identity) {
+    if(!control.directories[bank.header.publication_word&1])return false;
+    const auto* ranges=reinterpret_cast<const PublicationRange*>(
+        control.directories[bank.header.publication_word&1]);
+    const auto* model=publication_find_range(ranges,bank.header.range_count,44);
+    if(!model || !model->length_bytes)return false;
+    const auto* bytes=publication_range_bytes(control,*model);
+    const auto& layout=contract.model_contract_layout;
+    if(!bytes || layout.schema_digest_offset>model->length_bytes ||
+       32>model->length_bytes-layout.schema_digest_offset ||
+       layout.identity_offset>model->length_bytes ||
+       32>model->length_bytes-layout.identity_offset)return false;
+    const auto* schema_bytes=reinterpret_cast<const uint8_t*>(schema_digest);
+    const auto* identity_bytes=reinterpret_cast<const uint8_t*>(identity);
+    for(uint32_t i=0;i<32;++i)
+        if(bytes[layout.schema_digest_offset+i]!=schema_bytes[i] ||
+           bytes[layout.identity_offset+i]!=identity_bytes[i])return false;
+    return true;
 }
 struct TensorLayoutTableView {
     const TensorLayoutTableHeader* header;
@@ -1619,6 +1642,21 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
     if(active_count>capacity)return 1;
     auto* ranges=reinterpret_cast<PublicationRange*>(pending.ranges);
     const auto* bank_ranges=reinterpret_cast<const PublicationRange*>(control.directories[lease.bank]);
+    // Cold binding requires this slot for a versioned physical roster; other
+    // model schemas retain their separate ordinary numerical predicate.
+    if(inputs.transition_kind==1 && inputs.numerical_blocks) {
+        uint64_t block_bytes=0;
+        if(!inputs.physical_blocks ||
+           inputs.numerical_blocks%alignof(double) ||
+           !semantic_graph::checked_mul(inputs.physical_blocks,6*sizeof(double),&block_bytes) ||
+           inputs.numerical_blocks>UINT64_MAX-block_bytes ||
+           !publication_model_block_identity(control,base,contract,
+               inputs.model_schema_digest,inputs.model_identity))return 1;
+    } else if(inputs.numerical_blocks || inputs.physical_blocks ||
+              inputs.model_schema_digest[0] || inputs.model_schema_digest[1] ||
+              inputs.model_schema_digest[2] || inputs.model_schema_digest[3] ||
+              inputs.model_identity[0] || inputs.model_identity[1] ||
+              inputs.model_identity[2] || inputs.model_identity[3])return 1;
     const auto* prefix=publication_find_range(bank_ranges,base.header.range_count,3);
     if(!prefix || prefix->length_bytes!=32 || !publication_range_bytes(control,*prefix))return 1;
     auto* authority=const_cast<PublicationRange*>(publication_find_range(ranges,pending.range_count,39));
@@ -1656,6 +1694,10 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
         reinterpret_cast<const uint64_t*>(publication_range_bytes(control,*prefix)));
     pending.text=inputs.text;
     pending.numerical_admissibility=inputs.transition_kind==3 ? 0 : inputs.numerical_admissibility;
+    pending.numerical_blocks=inputs.numerical_blocks;
+    pending.physical_blocks=inputs.physical_blocks;
+    semantic_graph::copy_identity(pending.model_schema_digest,inputs.model_schema_digest);
+    semantic_graph::copy_identity(pending.model_identity,inputs.model_identity);
     pending.training_selection=inputs.transition_kind==4 ? inputs.training_selection : 0;
     pending.model_update_bindings=inputs.transition_kind==4 ? inputs.model_update_bindings : 0;
     pending.model_update_binding_count=inputs.transition_kind==4 ? inputs.model_update_binding_count : 0;
@@ -2235,6 +2277,12 @@ extern "C" __global__ void semantic_publication_prepare_drain(uint64_t control_p
     pending.transition_kind=3;
     pending.text={};
     pending.numerical_admissibility=0;
+    pending.numerical_blocks=0;
+    pending.physical_blocks=0;
+    for(uint32_t i=0;i<4;++i) {
+        pending.model_schema_digest[i]=0;
+        pending.model_identity[i]=0;
+    }
     pending.training_selection=0;
     pending.model_update_bindings=0;
     pending.model_update_binding_count=0;
@@ -5102,6 +5150,40 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             uint64_t training_status=0;
             uint8_t original_numerical=numerical;
             if(transition_kind==1)numerical &= critic_admissible;
+            if(transition_kind==1 && pending.numerical_blocks) {
+                if(!descriptor.publication.lease || !control.contract ||
+                   !pending.physical_blocks ||
+                   pending.numerical_blocks%alignof(double)) {
+                    semantic_content_integrity_trap();return;
+                }
+                const auto& lease=*reinterpret_cast<const PublicationLease*>(descriptor.publication.lease);
+                const auto* selected=publication_acquired_bank(control,lease);
+                const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
+                if(!selected || publication_validate_selected_model(control,*selected) ||
+                   !publication_model_block_identity(control,*selected,contract,
+                       pending.model_schema_digest,pending.model_identity) ||
+                   selected->header.model_generation!=pending.model_generation) {
+                    semantic_content_integrity_trap();return;
+                }
+                const auto* blocks=reinterpret_cast<const double*>(pending.numerical_blocks);
+                for(uint64_t block=0;block<pending.physical_blocks;++block)
+                    for(uint32_t area=0;area<2;++area) {
+                        const uint64_t offset=(block*2+area)*3;
+                        const double budget=blocks[offset];
+                        const double ordinary=blocks[offset+1];
+                        const double underflow=blocks[offset+2];
+                        if(!isfinite(budget) || !isfinite(ordinary) || !isfinite(underflow) ||
+                           budget<0.0 || ordinary<0.0 || underflow<0.0 ||
+                           (budget==0.0 ? ordinary!=0.0 : __dmul_ru(100.0,ordinary)>budget))
+                            numerical=0;
+                    }
+            } else if(pending.numerical_blocks || pending.physical_blocks ||
+                      pending.model_schema_digest[0] || pending.model_schema_digest[1] ||
+                      pending.model_schema_digest[2] || pending.model_schema_digest[3] ||
+                      pending.model_identity[0] || pending.model_identity[1] ||
+                      pending.model_identity[2] || pending.model_identity[3]) {
+                semantic_content_integrity_trap();return;
+            }
             const SemanticTrainingCanaryRefusalRecord* update_refusal=nullptr;
             if(pending.transition_kind==4) {
                 if(!pending.training_selection || pending.training_selection%alignof(uint64_t) ||

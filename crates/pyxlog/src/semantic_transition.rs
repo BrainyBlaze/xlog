@@ -12577,11 +12577,14 @@ impl PySemanticTransitionController {
     /// restore_invocation(task_use, restored_parent, full_row, transition) returns
     /// (original_model_output, continuation_arguments), where the second tuple
     /// is (text_rows, text_row_count, selected_text, active_rows, active_row_count,
-    /// numerical_admissibility, tensors, producer_witness, consumer_stream).
-    /// The six services are original CUDA DLPack producers; the witness is the
-    /// original transient capture for this restored parent and exact roster.
+    /// numerical_admissibility, tensors, producer_witness, consumer_stream) for
+    /// a non-drawing transition. A proposal with a sealed physical roster inserts original numerical_blocks,
+    /// model_schema_digest and model_identity before tensors. Its seventh CUDA
+    /// service is FP64[N,2,3], covered by the same transient witness; the two
+    /// identities are bytes from the original sealed model contract.
     /// For a proposal, pack_policy(task_use, restored_parent, original_model_output)
-    /// returns (binding, text_logits, parameters, product_support), computed by
+    /// returns (binding, text_logits, parameters, product_support,
+    /// component_baselines), computed by
     /// the same Runtime after the genuine continuation has been bound. For
     /// recompute/drain pack_policy must be None; no policy draw is synthesized.
     /// These callbacks receive genuine task-bound readers only within a dynamic
@@ -13925,21 +13928,26 @@ impl PySemanticTransitionController {
 
     /// Retain the actual original-forward outputs for this acquired parent.
     /// ``tensors`` uses the typed tensor layout from cold parent import. The
-    /// six service arguments are contiguous CUDA DLPack producers: text_rows
+    /// six base service arguments are contiguous CUDA DLPack producers: text_rows
     /// U64[32,2], text_row_count U64[1], selected_text Bool8[32], active_rows
     /// U64[A,4], active_row_count U64[1], and numerical_admissibility Bool8[1].
     /// Selection is indexed by original source slot. Active rows contain
     /// (physical_row, source_slot, logical_position, kind), with FILLED=1,
     /// MASK=2 and FEEDBACK=3; invalid feedback slots leave physical gaps.
     /// The original transient ``producer_witness`` captures model tensors in
-    /// their original order followed by these six services at role 0 indices
-    /// N through N+5. Model-content witnesses cannot substitute for this capture.
+    /// their original order followed by these services at role 0 indices
+    /// N through N+5. A model with a sealed physical-parameter roster must
+    /// also supply FP64[N_physical,2,3] numerical_blocks for Proposal/replay,
+    /// at index N+6, and the original schema digest and model identity. Both
+    /// actor-reference and full-objective rows contain B, ordinary and U;
+    /// Update has no pre-draw block tensor. Model-content witnesses cannot
+    /// substitute for this capture.
     /// ``consumer_stream`` is explicit (or legacy stream 1); 0 and 2 are refused.
     /// Native validation checks the acquired source, prefix, services and
     /// generations before pending ranges enter the sole publication CAS. A
     /// prepared parent requires ``bank`` and retains a distinct continuation for
     /// each recorded branch; published parents reject it.
-    #[pyo3(signature = (task_use, *, parent, text_rows, text_row_count, selected_text, active_rows, active_row_count, numerical_admissibility, tensors, producer_witness, consumer_stream, bank=None))]
+    #[pyo3(signature = (task_use, *, parent, text_rows, text_row_count, selected_text, active_rows, active_row_count, numerical_admissibility, tensors, producer_witness, consumer_stream, bank=None, numerical_blocks=None, model_schema_digest=None, model_identity=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "continuation binding retains each typed producer and its witness"
@@ -13959,6 +13967,9 @@ impl PySemanticTransitionController {
         producer_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
         bank: Option<usize>,
+        numerical_blocks: Option<&Bound<'_, PyAny>>,
+        model_schema_digest: Option<&Bound<'_, PyAny>>,
+        model_identity: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         self.require_read_issued(task_use)?;
@@ -13985,6 +13996,9 @@ impl PySemanticTransitionController {
                     consumer_stream,
                     None,
                     None,
+                    numerical_blocks,
+                    model_schema_digest,
+                    model_identity,
                 )
             }
             ContentStepOwner::Prepared(step) => {
@@ -14005,6 +14019,9 @@ impl PySemanticTransitionController {
                     consumer_stream,
                     Some(bank),
                     None,
+                    numerical_blocks,
+                    model_schema_digest,
+                    model_identity,
                 )
             }
         }
@@ -14978,11 +14995,26 @@ impl PySemanticTransitionController {
             // Retain the original output even without the policy feature.
             let _original_output = restored[0].clone().unbind();
             let arguments = object_sequence(&restored[1], &mut budget)?;
-            if arguments.len() != 9 {
-                return Err(invalid("original continuation requires six CUDA services, tensors, its captured producer witness and consumer stream"));
-            }
+            let (blocks, schema, identity, tensors_index, witness_index, stream_index) = if kind
+                == SemanticTransitionKind::Proposal
+                && arguments.len() == 12
+            {
+                (
+                    Some(&arguments[6]),
+                    Some(&arguments[7]),
+                    Some(&arguments[8]),
+                    9,
+                    10,
+                    11,
+                )
+            } else {
+                if arguments.len() != 9 {
+                    return Err(invalid("continuation requires six CUDA services, or seven proposal services with sealed model identities, followed by tensors, its captured producer witness and consumer stream"));
+                }
+                (None, None, None, 6, 7, 8)
+            };
             let producer_witness =
-                arguments[7].extract::<PyRef<'_, PySemanticTensorContentWitness>>()?;
+                arguments[witness_index].extract::<PyRef<'_, PySemanticTensorContentWitness>>()?;
             self.bind_continuation_in_execution(
                 py,
                 &issued,
@@ -14993,11 +15025,14 @@ impl PySemanticTransitionController {
                 &arguments[3],
                 &arguments[4],
                 &arguments[5],
-                &arguments[6],
+                &arguments[tensors_index],
                 &producer_witness,
-                &arguments[8],
+                &arguments[stream_index],
                 None,
                 Some(import),
+                blocks,
+                schema,
+                identity,
             )?;
             if kind == SemanticTransitionKind::Proposal {
                 #[cfg(feature = "semantic-policy")]
@@ -15300,6 +15335,9 @@ impl PySemanticTransitionController {
         consumer_stream: &Bound<'_, PyAny>,
         prepared_bank: Option<usize>,
         import: Option<&ColdImportGuard<'_>>,
+        numerical_blocks: Option<&Bound<'_, PyAny>>,
+        model_schema_digest: Option<&Bound<'_, PyAny>>,
+        model_identity: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         match parent {
             ContentStepRef::Published(_) if prepared_bank.is_some() => {
@@ -15337,7 +15375,9 @@ impl PySemanticTransitionController {
             }
             Ok(())
         };
-        let services = [
+        let model_schema_digest = model_schema_digest.map(identity_bytes).transpose()?;
+        let model_identity = model_identity.map(identity_bytes).transpose()?;
+        let mut services = vec![
             text_rows,
             text_row_count,
             selected_text,
@@ -15345,6 +15385,7 @@ impl PySemanticTransitionController {
             active_row_count,
             numerical_admissibility,
         ];
+        services.extend(numerical_blocks);
         // Retain the original Python producers independently of mutable input
         // rows. Native code retains the captured witness without a Python cycle.
         // Any failed callback leaves these original autograd owners quarantined.
@@ -15359,7 +15400,7 @@ impl PySemanticTransitionController {
             .0
             .extend(services.iter().map(|value| (*value).clone().unbind()));
         let device = self.session.borrow(py).device_ordinal;
-        for producer in services {
+        for producer in &services {
             validate_continuation_producer_guarded(producer, device, &check)?;
         }
         let ParsedTensorInputs {
@@ -15368,7 +15409,7 @@ impl PySemanticTransitionController {
         } = parse_tensor_inputs_guarded(tensors, &mut budget, device, consumer_stream, &check)?;
         producer_owners.0.extend(producers);
         let mut service_handoff = TensorHandoff(Vec::with_capacity(services.len()));
-        for producer in services {
+        for producer in &services {
             service_handoff
                 .0
                 .push(crate::dlpack_from_py_for_stream_guarded(
@@ -15398,9 +15439,15 @@ impl PySemanticTransitionController {
                 .to_vec(),
             None => state.snapshot.canonical.clone(),
         };
+        let mut service_tensors = service_handoff.into_native();
+        let numerical_blocks = if services.len() == 7 {
+            service_tensors.pop()
+        } else {
+            None
+        };
         let [text_rows, text_row_count, selected_text, active_rows,
-            active_row_count, numerical_admissibility]: [_; 6] = service_handoff
-                .into_native().try_into()
+            active_row_count, numerical_admissibility]: [_; 6] = service_tensors
+                .try_into()
                 .unwrap_or_else(|_| unreachable!("exact continuation service producer roster"));
         let input = SemanticContinuationInput {
             text_rows,
@@ -15409,6 +15456,9 @@ impl PySemanticTransitionController {
             active_rows,
             active_row_count,
             numerical_admissibility,
+            numerical_blocks,
+            model_schema_digest,
+            model_identity,
             tensors: tensors.into_native(),
             authority_decisions,
         };
@@ -18180,13 +18230,17 @@ continuation = inspect.signature(SemanticTransitionController.bind_continuation)
 assert tuple(continuation.parameters) == (
     'self', 'task_use', 'parent', 'text_rows', 'text_row_count', 'selected_text',
     'active_rows', 'active_row_count', 'numerical_admissibility', 'tensors',
-    'producer_witness', 'consumer_stream', 'bank')
-for name in tuple(continuation.parameters)[2:-1]:
+    'producer_witness', 'consumer_stream', 'bank', 'numerical_blocks',
+    'model_schema_digest', 'model_identity')
+for name in tuple(continuation.parameters)[2:12]:
     parameter = continuation.parameters[name]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is inspect.Parameter.empty
 assert continuation.parameters['bank'].kind is inspect.Parameter.KEYWORD_ONLY
 assert continuation.parameters['bank'].default is None
+for name in ('numerical_blocks', 'model_schema_digest', 'model_identity'):
+    assert continuation.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+    assert continuation.parameters[name].default is None
 assert hasattr(SemanticTensorContentWitness, 'verify')
 for name in ('digest', 'pointer', 'status', 'identity', 'tensors', 'parent'):
     assert not hasattr(SemanticTensorContentWitness, name), name

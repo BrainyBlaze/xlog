@@ -3182,15 +3182,26 @@ pub struct SemanticContinuationInput {
     pub active_row_count: DlpackManagedTensor,
     /// Original Bool8[1] ordinary numerical admission predicate.
     pub numerical_admissibility: DlpackManagedTensor,
+    /// Original pre-draw FP64[N,2,3] block bounds. Only proposals draw.
+    pub numerical_blocks: Option<DlpackManagedTensor>,
+    /// Original sealed model-contract schema digest for this block roster.
+    pub model_schema_digest: Option<Identity256>,
+    /// Original sealed model-contract identity for this generation.
+    pub model_identity: Option<Identity256>,
 }
 
 fn continuation_service_layouts(
     first_index: usize,
     capacity: u64,
-) -> Result<[SemanticTensorLayout; 6], SemanticTransitionError> {
+    physical_blocks: Option<usize>,
+) -> Result<Vec<SemanticTensorLayout>, SemanticTransitionError> {
     let first_index = u64::try_from(first_index)
         .ok()
-        .filter(|index| index.checked_add(5).is_some())
+        .filter(|index| {
+            index
+                .checked_add(if physical_blocks.is_some() { 6 } else { 5 })
+                .is_some()
+        })
         .ok_or_else(|| publication_input_error("continuation service roster overflow"))?;
     if capacity < 34 {
         return Err(publication_input_error(
@@ -3209,14 +3220,66 @@ fn continuation_service_layouts(
             strides_bytes: [0; 4],
         })
     };
-    Ok([
+    let mut layouts = vec![
         layout(0, 3, 8, 2, [32, 2, 0, 0])?,
         layout(1, 3, 8, 1, [1, 0, 0, 0])?,
         layout(2, 8, 1, 1, [32, 0, 0, 0])?,
         layout(3, 3, 8, 2, [capacity, 4, 0, 0])?,
         layout(4, 3, 8, 1, [1, 0, 0, 0])?,
         layout(5, 8, 1, 1, [1, 0, 0, 0])?,
-    ])
+    ];
+    if let Some(blocks) = physical_blocks {
+        layouts.push(layout(6, 9, 8, 3, [blocks as u64, 2, 3, 0])?);
+    }
+    Ok(layouts)
+}
+
+/// Derive the ordered, unique physical parameter owners from the same sealed
+/// schema bytes that the model contract hashes. Other model schema formats
+/// remain valid, but cannot claim this block-bound admission contract.
+fn model_physical_parameter_roster(
+    record: &[u8],
+    layout: SemanticModelContractLayout,
+) -> Result<Option<Vec<String>>, SemanticTransitionError> {
+    layout.validate(record.len() as u64)?;
+    let begin = layout.schema_begin as usize;
+    let end = begin + layout.schema_bytes as usize;
+    let Ok(schema) = serde_json::from_slice::<serde_json::Value>(&record[begin..end]) else {
+        return Ok(None);
+    };
+    if schema
+        .get("counter_encoding")
+        .and_then(serde_json::Value::as_str)
+        != Some("u32-hex8")
+    {
+        return Ok(None);
+    }
+    let model = schema
+        .get("model")
+        .ok_or_else(|| publication_input_error("versioned model schema lacks its model owner"))?;
+    let physical = model
+        .get("physical")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| publication_input_error("model schema lacks its physical owner roster"))?;
+    let mut names = Vec::new();
+    for (name, entry) in physical {
+        match entry.get("kind").and_then(serde_json::Value::as_str) {
+            Some("parameter") => names.push(name.clone()),
+            Some("buffer") => {}
+            _ => {
+                return Err(publication_input_error(
+                    "model physical roster has an unknown owner kind",
+                ))
+            }
+        }
+    }
+    if names.is_empty() {
+        return Err(publication_input_error(
+            "model physical roster has no parameter owners",
+        ));
+    }
+    names.sort_unstable();
+    Ok(Some(names))
 }
 
 /// Identity of one packed active-cache row in its original forward. Kinds are
@@ -3258,7 +3321,11 @@ struct TextBinding {
 }
 
 struct TextBindingStorage {
-    inputs: [PreparedSemanticTensor; 6],
+    inputs: Vec<PreparedSemanticTensor>,
+    numerical_block_snapshot: Option<Arc<TrackedCudaSlice<f64>>>,
+    physical_blocks: u64,
+    model_schema_digest: Identity256,
+    model_identity: Identity256,
     _witness: SemanticTensorContentWitness,
     consumer_stream: u64,
     parent: TextBindingParent,
@@ -3299,6 +3366,9 @@ impl TextBindingStorage {
                 recorder.read(source);
             }
         }
+        if let Some(snapshot) = &self.numerical_block_snapshot {
+            recorder.read(snapshot.as_ref());
+        }
     }
 
     fn continuation_inputs(
@@ -3313,6 +3383,13 @@ impl TextBindingStorage {
             active_rows: self.inputs[3].data,
             active_row_count: self.inputs[4].data,
             numerical_admissibility: self.inputs[5].data,
+            numerical_blocks: self
+                .numerical_block_snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.device_ptr_value()),
+            physical_blocks: self.physical_blocks,
+            model_schema_digest: self.model_schema_digest,
+            model_identity: self.model_identity,
             transition_kind: kind.code(),
             authority_bytes,
             training_selection,
@@ -3322,6 +3399,44 @@ impl TextBindingStorage {
             model_update_refusal: model_update.refusal,
         }
     }
+}
+
+fn enqueue_numerical_block_snapshot(
+    domain: &ResidentExecutionDomain,
+    poisoned: &mut bool,
+    original: &PreparedSemanticTensor,
+    destination: &TrackedCudaSlice<f64>,
+) -> Result<(), SemanticTransitionError> {
+    let source = original
+        .source
+        .as_ref()
+        .ok_or_else(|| publication_input_error("original block bounds have no device storage"))?;
+    let bytes = destination
+        .len()
+        .checked_mul(size_of::<f64>())
+        .ok_or(SemanticTransitionError::GenerationExhausted)?;
+    if source.len() != bytes {
+        return Err(publication_input_error(
+            "original block bounds differ from the frozen native capacity",
+        ));
+    }
+    let mut recorder = domain.new_strict_recorder();
+    recorder.read(source);
+    recorder.write(destination);
+    enqueue_recorded(domain, poisoned, recorder, |enqueue| {
+        // SAFETY: the original typed witness established the exact contiguous
+        // FP64 span and the destination is a disjoint native-owned allocation.
+        unsafe {
+            sys::cuMemcpyDtoDAsync_v2(
+                destination.device_ptr_value(),
+                *source.device_ptr(),
+                bytes,
+                enqueue.stream().cu_stream(),
+            )
+        }
+        .result()
+        .map_err(|error| XlogError::Kernel(format!("block bound snapshot: {error}")))
+    })
 }
 
 /// Actual device-validated publication identity. This identifies content and
@@ -4220,6 +4335,10 @@ struct PendingContinuation {
     model_update_binding_count: u64,
     model_update_admissibility: u64,
     model_update_refusal: u64,
+    numerical_blocks: u64,
+    physical_blocks: u64,
+    model_schema_digest: Identity256,
+    model_identity: Identity256,
 }
 
 #[repr(C)]
@@ -4236,6 +4355,10 @@ struct ContinuationInputs {
     model_update_binding_count: u64,
     model_update_admissibility: u64,
     model_update_refusal: u64,
+    numerical_blocks: u64,
+    physical_blocks: u64,
+    model_schema_digest: Identity256,
+    model_identity: Identity256,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -7455,6 +7578,7 @@ struct PublicationStorage {
     continuation_directory: TrackedCudaSlice<PublicationRange>,
     allocations: Vec<TrackedCudaSlice<u8>>,
     model_memory: ModelMemoryGeometry,
+    physical_parameter_roster: Option<Vec<String>>,
     model_slots: Vec<[usize; 2]>,
     bank_templates: [Vec<PublicationRange>; 2],
     continuation_templates: Vec<PublicationRange>,
@@ -7514,6 +7638,36 @@ fn accounted_tracked_bytes(
 }
 
 impl PublicationStorage {
+    fn continuation_block_contract(
+        &self,
+        kind: SemanticTransitionKind,
+        input: &SemanticContinuationInput,
+    ) -> Result<(Option<usize>, Identity256, Identity256), SemanticTransitionError> {
+        let expected = if kind == SemanticTransitionKind::Proposal {
+            self.physical_parameter_roster.as_ref().map(Vec::len)
+        } else {
+            None
+        };
+        if input.numerical_blocks.is_some() != expected.is_some()
+            || input.model_schema_digest.is_some() != expected.is_some()
+            || input.model_identity.is_some() != expected.is_some()
+        {
+            return Err(publication_input_error(
+                "proposal block bounds require the exact original model roster and identities",
+            ));
+        }
+        let schema = input.model_schema_digest.unwrap_or_default();
+        let identity = input.model_identity.unwrap_or_default();
+        if expected.is_some()
+            && (schema == Identity256::default() || identity == Identity256::default())
+        {
+            return Err(publication_input_error(
+                "proposal block bounds require nonzero original model identities",
+            ));
+        }
+        Ok((expected, schema, identity))
+    }
+
     #[cfg(feature = "semantic-policy")]
     fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
         let mut allocations = Vec::new();
@@ -7613,6 +7767,16 @@ impl PublicationStorage {
                 "model backing upload roster differs from its complete memory map",
             ));
         }
+        let physical_parameter_roster = plans
+            .iter()
+            .find(|plan| (plan.role, plan.index) == (44, 0))
+            .and_then(|plan| match &plan.payload {
+                PublicationPayload::Metadata(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .map(|record| model_physical_parameter_roster(record, contract.model_contract_layout))
+            .transpose()?
+            .flatten();
         let mut model_slots = Vec::new();
         for (&bytes, payload) in model_memory.allocation_bytes.iter().zip(model_payloads) {
             let mut slots = [0; 2];
@@ -7741,6 +7905,7 @@ impl PublicationStorage {
                 )?,
                 allocations,
                 model_memory,
+                physical_parameter_roster,
                 model_slots,
                 bank_templates,
                 continuation_templates,
@@ -9206,6 +9371,7 @@ struct PreparedStepStorage {
 struct PreparedBranchStorage {
     model_update: Option<PreparedModelUpdate>,
     continuation: Option<PreparedContinuation>,
+    numerical_block_snapshot: Option<Arc<TrackedCudaSlice<f64>>>,
     #[cfg(feature = "semantic-policy")]
     policy_buffers: Option<PolicyBuffers>,
     #[cfg(feature = "semantic-policy")]
@@ -12147,8 +12313,8 @@ content_kernel_parameter!(PublicationRange);
 content_kernel_parameter!(SemanticTensorLayout);
 content_kernel_parameter!(ContinuationInputs);
 
-const _: () = assert!(size_of::<PendingContinuation>() == 256);
-const _: () = assert!(size_of::<ContinuationInputs>() == 104);
+const _: () = assert!(size_of::<PendingContinuation>() == 336);
+const _: () = assert!(size_of::<ContinuationInputs>() == 184);
 const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 296);
 const _: () = assert!(size_of::<SemanticTaskFacts>() == 88);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3328);
@@ -13835,14 +14001,23 @@ impl SemanticTransitionSession {
             storage.contract_value.feedback_capacity,
             descriptor.arena[4],
         )?;
+        let block_bytes = storage
+            .physical_parameter_roster
+            .as_ref()
+            .map_or(Some(0usize), |roster| {
+                roster.len().checked_mul(6 * size_of::<f64>())
+            })
+            .and_then(|bytes| bytes.checked_mul(2))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
         #[cfg(not(feature = "semantic-policy"))]
-        let policy_bytes = 0;
+        let policy_bytes = block_bytes;
         #[cfg(feature = "semantic-policy")]
         let policy_bytes = policy_buffer_bytes(&self.policy_layout()?, self.codebooks.input_cells)?
             .checked_add(self.codebooks.input_cells)
             .and_then(|n| n.checked_add(COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>()))
             .and_then(|n| n.checked_add(size_of::<DeviceState>()))
             .and_then(|n| n.checked_mul(2))
+            .and_then(|n| n.checked_add(block_bytes))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let step_bytes = prepared_step_allocation_bytes(
             PreparedStepInputs::allocation_bytes(&input_plans)?,
@@ -14178,6 +14353,25 @@ impl SemanticTransitionSession {
                     feedback_plan,
                     &mut reservation,
                 )?;
+                let mut allocate_block_slot = || -> Result<_, SemanticTransitionError> {
+                    storage
+                        .physical_parameter_roster
+                        .as_ref()
+                        .map(|roster| {
+                            let cells = roster
+                                .len()
+                                .checked_mul(6)
+                                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+                            reservation
+                                .alloc::<f64>(cells)
+                                .map(Arc::new)
+                                .map_err(|error| {
+                                    runtime_error("prepared block bound allocation", error)
+                                })
+                        })
+                        .transpose()
+                };
+                let [blocks_zero, blocks_one] = [allocate_block_slot()?, allocate_block_slot()?];
                 #[cfg(feature = "semantic-policy")]
                 let [branch_zero, branch_one] = [
                     self.prepare_step_policy_storage(&mut reservation)?,
@@ -14192,6 +14386,7 @@ impl SemanticTransitionSession {
                     PreparedBranchStorage {
                         model_update: model_update_zero,
                         continuation: None,
+                        numerical_block_snapshot: blocks_zero,
                         #[cfg(feature = "semantic-policy")]
                         policy_buffers: Some(policy_buffers_zero),
                         #[cfg(feature = "semantic-policy")]
@@ -14210,6 +14405,7 @@ impl SemanticTransitionSession {
                     PreparedBranchStorage {
                         model_update: model_update_one,
                         continuation: None,
+                        numerical_block_snapshot: blocks_one,
                         #[cfg(feature = "semantic-policy")]
                         policy_buffers: Some(policy_buffers_one),
                         #[cfg(feature = "semantic-policy")]
@@ -17297,7 +17493,11 @@ impl SemanticTransitionSession {
             .feedback_capacity
             .checked_add(32)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let service_layouts = continuation_service_layouts(tensor_count, capacity)?;
+        let kind = self.prepared_transition_kind(step)?;
+        let (physical_blocks, model_schema_digest, model_identity) =
+            storage.continuation_block_contract(kind, &continuation)?;
+        let service_layouts =
+            continuation_service_layouts(tensor_count, capacity, physical_blocks)?;
         let SemanticContinuationInput {
             mut tensors,
             authority_decisions,
@@ -17307,42 +17507,78 @@ impl SemanticTransitionSession {
             active_rows,
             active_row_count,
             numerical_admissibility,
+            numerical_blocks,
+            model_schema_digest: _,
+            model_identity: _,
         } = continuation;
         if authority_decisions.is_empty() {
             return Err(publication_input_error(
                 "continuation requires its original authority snapshot geometry",
             ));
         }
+        let mut services = vec![
+            text_rows,
+            text_row_count,
+            selected_text,
+            active_rows,
+            active_row_count,
+            numerical_admissibility,
+        ];
+        services.extend(numerical_blocks);
         tensors.extend(
-            [
-                text_rows,
-                text_row_count,
-                selected_text,
-                active_rows,
-                active_row_count,
-                numerical_admissibility,
-            ]
-            .into_iter()
-            .zip(service_layouts)
-            .map(|(tensor, layout)| SemanticTensorInput {
-                tensor,
-                layout,
-                logical_begin: 0,
-                logical_end: 0,
-                native_allocation: None,
-            }),
+            services
+                .into_iter()
+                .zip(service_layouts)
+                .map(|(tensor, layout)| SemanticTensorInput {
+                    tensor,
+                    layout,
+                    logical_begin: 0,
+                    logical_end: 0,
+                    native_allocation: None,
+                }),
         );
         self.verify_prepared_tensor_content(step, witness, tensors, consumer_stream)?;
+        let numerical_block_snapshot = if physical_blocks.is_some() {
+            let original =
+                self.steps[&step.token].content[witness.index].tensors[tensor_count + 6].clone();
+            let snapshot = Arc::clone(
+                self.steps[&step.token]
+                    .prepared
+                    .as_ref()
+                    .expect("prepared owner")
+                    .branches[bank]
+                    .numerical_block_snapshot
+                    .as_ref()
+                    .ok_or_else(|| {
+                        publication_input_error(
+                            "prepared block bounds lack their reserved native slot",
+                        )
+                    })?,
+            );
+            enqueue_numerical_block_snapshot(
+                &self.domain,
+                &mut self.poisoned,
+                &original,
+                &snapshot,
+            )?;
+            Some(snapshot)
+        } else {
+            None
+        };
         let owner = &self.steps[&step.token];
         let original = &owner.content[witness.index].tensors;
-        let services: [PreparedSemanticTensor; 6] =
-            original[tensor_count..].to_vec().try_into().map_err(|_| {
-                publication_input_error(
-                    "continuation witness has the wrong original service roster",
-                )
-            })?;
+        let services = original[tensor_count..].to_vec();
+        if services.len() != 6 + usize::from(physical_blocks.is_some()) {
+            return Err(publication_input_error(
+                "continuation witness has the wrong original service roster",
+            ));
+        }
         let binding = Arc::new(TextBindingStorage {
             inputs: services,
+            numerical_block_snapshot,
+            physical_blocks: physical_blocks.unwrap_or(0) as u64,
+            model_schema_digest,
+            model_identity,
             _witness: witness.clone(),
             consumer_stream,
             parent: TextBindingParent::Prepared(Arc::clone(
@@ -23440,7 +23676,10 @@ impl SemanticTransitionSession {
             .feedback_capacity
             .checked_add(32)
             .ok_or_else(|| publication_input_error("continuation active capacity overflow"))?;
-        let service_layouts = continuation_service_layouts(tensor_count, active_capacity)?;
+        let (physical_blocks, model_schema_digest, model_identity) =
+            storage.continuation_block_contract(kind, continuation)?;
+        let service_layouts =
+            continuation_service_layouts(tensor_count, active_capacity, physical_blocks)?;
         if continuation.authority_decisions.is_empty() {
             return Err(publication_input_error(
                 "continuation lacks its actual fresh authority decision snapshot",
@@ -23461,38 +23700,64 @@ impl SemanticTransitionSession {
             active_rows,
             active_row_count,
             numerical_admissibility,
+            numerical_blocks,
+            model_schema_digest: _,
+            model_identity: _,
         } = continuation;
+        let mut services = vec![
+            text_rows,
+            text_row_count,
+            selected_text,
+            active_rows,
+            active_row_count,
+            numerical_admissibility,
+        ];
+        services.extend(numerical_blocks);
         tensors.extend(
-            [
-                text_rows,
-                text_row_count,
-                selected_text,
-                active_rows,
-                active_row_count,
-                numerical_admissibility,
-            ]
-            .into_iter()
-            .zip(service_layouts)
-            .map(|(tensor, layout)| SemanticTensorInput {
-                layout,
-                logical_begin: 0,
-                logical_end: 0,
-                tensor,
-                native_allocation: None,
-            }),
+            services
+                .into_iter()
+                .zip(service_layouts)
+                .map(|(tensor, layout)| SemanticTensorInput {
+                    layout,
+                    logical_begin: 0,
+                    logical_end: 0,
+                    tensor,
+                    native_allocation: None,
+                }),
         );
         // Verify the same roster against its original private digest. This is
         // an event-ordered device guard, not a new capture or a host value read.
         self.verify_tensor_content(lease, witness, tensors, consumer_stream)?;
+        let numerical_block_snapshot = if let Some(blocks) = physical_blocks {
+            let original =
+                self.steps[&lease.token].content[witness.index].tensors[tensor_count + 6].clone();
+            let cells = blocks
+                .checked_mul(6)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            let snapshot = Arc::new(allocate_publication::<f64>(&self.provider, cells)?);
+            enqueue_numerical_block_snapshot(
+                &self.domain,
+                &mut self.poisoned,
+                &original,
+                &snapshot,
+            )?;
+            Some(snapshot)
+        } else {
+            None
+        };
         let original = &self.steps[&lease.token].content[witness.index].tensors;
-        let services: [PreparedSemanticTensor; 6] =
-            original[tensor_count..].to_vec().try_into().map_err(|_| {
-                publication_input_error(
-                    "continuation witness has the wrong original service roster",
-                )
-            })?;
+        let services = original[tensor_count..].to_vec();
+        if services.len() != 6 + usize::from(physical_blocks.is_some()) {
+            return Err(publication_input_error(
+                "continuation witness has the wrong original service roster",
+            ));
+        }
         let text_binding = Arc::new(TextBindingStorage {
             inputs: services,
+            numerical_block_snapshot,
+            physical_blocks: physical_blocks.unwrap_or(0) as u64,
+            model_schema_digest,
+            model_identity,
             _witness: witness.clone(),
             consumer_stream,
             parent: TextBindingParent::Published {
@@ -30418,7 +30683,7 @@ mod text_parent_tests {
             publication_abi_bytes(&[active_count]),
             vec![numerical_admissibility],
         ];
-        let layouts = continuation_service_layouts(tensors.len(), capacity).unwrap();
+        let layouts = continuation_service_layouts(tensors.len(), capacity, None).unwrap();
         let mut services = Vec::new();
         for (layout, bytes) in layouts.into_iter().zip(service_bytes) {
             let (original, witnessed) = publication_test_tensor_pair(provider, layout, &bytes);
@@ -30438,6 +30703,9 @@ mod text_parent_tests {
                 active_rows,
                 active_row_count,
                 numerical_admissibility,
+                numerical_blocks: None,
+                model_schema_digest: None,
+                model_identity: None,
             },
             witness,
         )
@@ -33747,7 +34015,7 @@ mod text_parent_tests {
 
     #[test]
     fn continuation_services_preserve_original_device_roster_and_capacity() {
-        let layouts = continuation_service_layouts(9, 66).unwrap();
+        let layouts = continuation_service_layouts(9, 66, None).unwrap();
         let expected = [
             (3, 8, [32, 2, 0, 0]),
             (3, 8, [1, 0, 0, 0]),
@@ -33769,8 +34037,41 @@ mod text_parent_tests {
             let range = tensor_content_range(layout, 0, 0, bytes).unwrap();
             assert_eq!(range.index, layout.index);
         }
-        assert!(continuation_service_layouts(usize::MAX, 66).is_err());
-        assert!(continuation_service_layouts(0, 0).is_err());
+        assert!(continuation_service_layouts(usize::MAX, 66, None).is_err());
+        assert!(continuation_service_layouts(0, 0, None).is_err());
+        let proposal = continuation_service_layouts(9, 66, Some(2)).unwrap();
+        assert_eq!(proposal.len(), 7);
+        assert_eq!(proposal[6].index, 15);
+        assert_eq!(proposal[6].scalar_type, 9);
+        assert_eq!(proposal[6].element_bytes, 8);
+        assert_eq!(proposal[6].dimensions, [2, 2, 3, 0]);
+        assert_eq!(tensor_layout_bytes(&proposal[6]).unwrap(), 96);
+    }
+
+    #[test]
+    fn block_roster_comes_from_the_original_model_contract_schema() {
+        let schema = br#"{"counter_encoding":"u32-hex8","model":{"physical":{"head":{"kind":"parameter"},"state":{"kind":"buffer"},"trunk":{"kind":"parameter"}}}}"#;
+        let mut record = vec![0u8; 104];
+        record.extend_from_slice(schema);
+        let layout = SemanticModelContractLayout {
+            schema_begin: 104,
+            schema_bytes: schema.len() as u64,
+            schema_digest_offset: 0,
+            generation_offset: 32,
+            numerical_digest_offset: 40,
+            identity_offset: 72,
+        };
+        assert_eq!(
+            model_physical_parameter_roster(&record, layout).unwrap(),
+            Some(vec!["head".into(), "trunk".into()])
+        );
+        let mut invalid = record;
+        let location = invalid
+            .windows(6)
+            .position(|window| window == b"buffer")
+            .unwrap();
+        invalid[location..location + 6].copy_from_slice(b"broken");
+        assert!(model_physical_parameter_roster(&invalid, layout).is_err());
     }
 
     #[test]
