@@ -11650,7 +11650,8 @@ impl PySemanticTransitionController {
 
     /// Record one fixed bounded segment without submitting it. The original
     /// producer prepares cold storage on consumer_stream and returns an owner
-    /// with memory_scope, enqueue_step(step, bank), and finish_segment() methods.
+    /// with memory_scope, prepare_unpublished_successors(),
+    /// enqueue_step(step, bank), and finish_segment() methods.
     /// memory_scope spans allocation/recording through EndCapture/instantiate;
     /// enqueue_step records both fixed bank branches per slot and returns None.
     /// Each bank binds its own original model witness, continuation, policy and
@@ -11796,6 +11797,17 @@ impl PySemanticTransitionController {
             Ok(entered)
         })?;
         let recorded = (|| -> PyResult<()> {
+            let prepare_successors =
+                recording_callback(check, || prepared.getattr("prepare_unpublished_successors"))?;
+            recording_callback(check, || {
+                let value = prepare_successors.call0()?;
+                if !value.is_none() {
+                    return Err(invalid(
+                        "prepare_unpublished_successors must return None, not a host result",
+                    ));
+                }
+                Ok(())
+            })?;
             let external: Arc<dyn Send + Sync> = resources.clone();
             let (mut capture, capture_stream) = {
                 let mut owner = session.owner()?;

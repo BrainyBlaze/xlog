@@ -436,6 +436,13 @@ Numerical domain payload and scratch are not included in this interface yet,
 so this claim alone does not admit a complete numerical execution.
 
 The prepared producer records logical work on its original `SemanticPreparedStep`.
+After the original `memory_scope.__enter__` succeeds and before graph capture,
+the builder calls `prepared.prepare_unpublished_successors()` exactly once on
+the creator thread. It must return `None` and create every unpublished Update
+successor and its retained learning inputs inside that same private allocation
+scope; preparing them before the scope would put their backing outside the
+required slab. A callback failure exits the scope through the original cleanup
+path and aborts the segment; the builder never retries it.
 Call `step.reserve_tensor_content(tensor_content_capacity)` and
 `step.reserve_model_work(model_work_capacity)` during `prepare_segment`, before
 capture. Each positive capacity must exactly match its frozen segment value.
