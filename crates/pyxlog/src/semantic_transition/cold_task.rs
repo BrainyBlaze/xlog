@@ -435,20 +435,27 @@ impl PySemanticTransitionColdTask {
 
     #[getter]
     fn session(&self, py: Python<'_>) -> PyResult<Py<PySemanticTransitionSession>> {
-        self.session.borrow(py).require_creator()?;
+        self.session.borrow(py).owner()?;
         Ok(self.session.clone_ref(py))
     }
 
     #[getter]
     fn controller(&self, py: Python<'_>) -> PyResult<Py<PySemanticTransitionController>> {
-        self.session.borrow(py).require_creator()?;
+        self.session.borrow(py).owner()?;
         Ok(self.controller.clone_ref(py))
     }
 
     #[getter]
     fn parent(&self, py: Python<'_>) -> PyResult<Py<PySemanticTransitionFreshParent>> {
-        self.session.borrow(py).require_creator()?;
+        self.session.borrow(py).owner()?;
         Ok(self.parent.clone_ref(py))
+    }
+
+    /// Terminally release this observed-only fresh CUDA Session before a
+    /// restored Session is allocated. Immutable task content and statement
+    /// ordinals remain readable; saved Session/controller aliases cannot run.
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        self.session.borrow(py).release_observed_cold()
     }
 
     /// Return content observed by the native cold task before final import.

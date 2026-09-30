@@ -101,7 +101,7 @@ fn task_content_read(
 /// on workers. Only a retained content witness may verify from a worker thread.
 #[pyclass(name = "SemanticTransitionSession", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticTransitionSession {
-    inner: Mutex<SemanticTransitionSession>,
+    inner: Mutex<Option<SemanticTransitionSession>>,
     editable_program: Option<Arc<SemanticProgramAdmission>>,
     editable_observer_source: Option<String>,
     importing: Arc<AtomicBool>,
@@ -116,12 +116,28 @@ pub(crate) struct PySemanticTransitionSession {
     memory_bytes: u64,
 }
 
+struct SemanticSessionGuard<'a>(MutexGuard<'a, Option<SemanticTransitionSession>>);
+
+impl std::ops::Deref for SemanticSessionGuard<'_> {
+    type Target = SemanticTransitionSession;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("checked live semantic session")
+    }
+}
+
+impl std::ops::DerefMut for SemanticSessionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("checked live semantic session")
+    }
+}
+
 impl PySemanticTransitionSession {
     fn require_creator(&self) -> PyResult<()> {
         require_creator_thread(self.owner_thread)
     }
 
-    fn owner(&self) -> PyResult<MutexGuard<'_, SemanticTransitionSession>> {
+    fn owner(&self) -> PyResult<SemanticSessionGuard<'_>> {
         self.require_creator()?;
         if !self.recording.load(Ordering::Acquire) {
             drain_export_owners();
@@ -131,10 +147,39 @@ impl PySemanticTransitionSession {
 
     // Only content verification enters this lock from an autograd worker.
     // Do not drain creator-owned Python references or run callbacks here.
-    fn witness_owner(&self) -> PyResult<MutexGuard<'_, SemanticTransitionSession>> {
-        self.inner
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("native semantic session owner mutex is poisoned"))
+    fn witness_owner(&self) -> PyResult<SemanticSessionGuard<'_>> {
+        let owner = self.inner.lock().map_err(|_| {
+            PyRuntimeError::new_err("native semantic session owner mutex is poisoned")
+        })?;
+        if owner.is_none() {
+            return Err(invalid("native semantic session was terminally released"));
+        }
+        Ok(SemanticSessionGuard(owner))
+    }
+
+    fn release_observed_cold(&self) -> PyResult<()> {
+        self.require_creator()?;
+        if self.importing.load(Ordering::Acquire)
+            || self.recording.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
+            || self.issuance.load(Ordering::Acquire) != 0
+        {
+            return Err(invalid("fresh cold release requires an unused Session"));
+        }
+        let owner = {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|_| invalid("native semantic session owner mutex is poisoned"))?;
+            let live = guard
+                .as_mut()
+                .ok_or_else(|| invalid("fresh cold Session was already released"))?;
+            live.join_observed_cold_release().map_err(xlog_err)?;
+            guard.take().expect("checked live fresh cold Session")
+        };
+        owner.finish_observed_cold_release().map_err(xlog_err)?;
+        drain_export_owners();
+        Ok(())
     }
 
     fn from_admission(
@@ -186,7 +231,7 @@ impl PySemanticTransitionSession {
         )
         .map_err(xlog_err)?;
         Ok(Self {
-            inner: Mutex::new(session),
+            inner: Mutex::new(Some(session)),
             editable_program: editable_source
                 .as_ref()
                 .map(|source| Arc::clone(&source.program)),
@@ -1635,11 +1680,15 @@ impl Drop for PreparedBuildGuard<'_> {
             if let Ok(mut state) = self.task_use.state() {
                 state.phase = TaskUsePhase::Refused;
             }
-            self.session
+            if let Some(owner) = self
+                .session
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .abort();
+                .as_mut()
+            {
+                owner.abort();
+            }
         }
         self.session.recording.store(false, Ordering::Release);
     }
@@ -6686,7 +6735,9 @@ impl Drop for ColdImportGuard<'_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !self.committed {
-            owner.abort();
+            if let Some(owner) = owner.as_mut() {
+                owner.abort();
+            }
         }
         if !self.deferred {
             self.session.importing.store(false, Ordering::Release);
@@ -9602,11 +9653,14 @@ impl Drop for PySemanticRetainedReplayMember {
         }
         let _ = Python::try_attach(|py| {
             let session = self.session.borrow(py);
-            session
+            if let Some(owner) = session
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .abort();
+                .as_mut()
+            {
+                owner.abort();
+            }
             session.importing.store(false, Ordering::Release);
             if let Ok(mut state) = self.task_use.borrow(py).state() {
                 state.phase = TaskUsePhase::Refused;
@@ -12081,10 +12135,7 @@ impl PySemanticTransitionController {
         };
         let shared = &*session;
         let outcomes = py.detach(|| {
-            let mut owner = shared
-                .inner
-                .lock()
-                .map_err(|_| invalid("native semantic session owner mutex is poisoned"))?;
+            let mut owner = shared.witness_owner()?;
             owner.complete_prepared_segment().map_err(xlog_err)
         })?;
         let check = || -> PyResult<()> {
@@ -15929,8 +15980,31 @@ mod tests {
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyTuple};
     use std::ffi::CString;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
+    use std::sync::Mutex;
     use xlog_cuda::{SemanticArgument, SemanticPolarity, SemanticRecordRole};
+
+    #[test]
+    fn released_cold_session_rejects_saved_session_aliases() {
+        let session = super::PySemanticTransitionSession {
+            inner: Mutex::new(None),
+            editable_program: None,
+            editable_observer_source: None,
+            importing: Arc::new(AtomicBool::new(false)),
+            recording: AtomicBool::new(false),
+            retiring: AtomicBool::new(false),
+            prepared_segment: Mutex::new(None),
+            issuance: Arc::new(AtomicU64::new(0)),
+            owner_thread: std::thread::current().id(),
+            device_ordinal: 0,
+            capacities: (0, 0, 0, 0),
+            admission_limits: (0, 0, 0, 0),
+            memory_bytes: 0,
+        };
+        assert!(session.owner().is_err());
+        assert!(session.release_observed_cold().is_err());
+    }
 
     #[test]
     fn historical_group_gradient_restores_existing_leaf_slot() {
@@ -19337,6 +19411,7 @@ for change in cases:
 assert 'SemanticTransitionController' in globals(), 'native controller is missing'
 assert 'SemanticTransitionTaskUse' in globals(), 'native task-use handle is missing'
 assert hasattr(SemanticTransitionColdTask, 'task_content'), 'cold content read is missing'
+assert hasattr(SemanticTransitionColdTask, 'close'), 'fresh cold terminal release is missing'
 for invalid in (None, object(), {}, 1):
     try:
         SemanticTransitionController(invalid)

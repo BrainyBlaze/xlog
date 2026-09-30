@@ -24010,6 +24010,60 @@ impl SemanticTransitionSession {
         self.poisoned = true;
     }
 
+    /// Join the actual cold observer before its fresh, unpublished Session is
+    /// removed from the Python owner. A failed wait keeps every allocation in
+    /// that owner and prohibits a restored Session from overlapping it.
+    pub fn join_observed_cold_release(&mut self) -> Result<(), SemanticTransitionError> {
+        if self.is_poisoned()
+            || self.cold_content.is_none()
+            || self.task.is_some()
+            || self.task_epoch != 0
+            || self.task_observed
+            || self.publication.is_some()
+            || self.captured.is_some()
+            || !self.readers.is_empty()
+            || !self.steps.is_empty()
+            || self.prepared_segment.is_some()
+            || self.initial_prefill.is_some()
+            || self.retained_initial_prefill.is_some()
+            || self.checkpoint_initial_prefill.is_some()
+        {
+            return Err(publication_input_error(
+                "cold release requires the observed, unpublished fresh task",
+            ));
+        }
+        let result = self
+            .stream
+            .context()
+            .bind_to_thread()
+            .and_then(|_| self.stream.context().synchronize());
+        if let Err(error) = result {
+            self.poisoned = true;
+            return Err(runtime_error("fresh cold observer completion", error));
+        }
+        Ok(())
+    }
+
+    /// Destroy the joined cold owner outside the Python Session mutex, then
+    /// complete the allocator's real pending deallocations before returning.
+    pub fn finish_observed_cold_release(self) -> Result<(), SemanticTransitionError> {
+        let memory = Arc::clone(self.provider.memory());
+        drop(self);
+        memory
+            .reap_pending_deallocations()
+            .map_err(|error| runtime_error("fresh cold allocation retirement", error))?;
+        if memory.allocated_bytes() != 0
+            || memory
+                .runtime()
+                .is_some_and(|runtime| runtime.bytes_outstanding() != 0)
+        {
+            return Err(publication_input_error(
+                "fresh cold allocation owners remain after retirement",
+            ));
+        }
+        Ok(())
+    }
+
     /// Inspect the actual cold root, or a decoded replay predecessor, through
     /// the retained native admission before importing its task authority.
     /// The selected replay is not restored here, and these records establish
