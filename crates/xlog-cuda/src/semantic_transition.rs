@@ -25146,9 +25146,10 @@ impl SemanticTransitionSession {
         Ok((buffers, support, receipts, state))
     }
 
-    /// Retain the original policy producers in their already reserved native
-    /// branch. This may precede continuation binding; neither binding creates a
-    /// draw, and execution requires both owners on this same branch.
+    /// Retain and snapshot the original policy producers in their already
+    /// reserved native branch. The snapshots are available before continuation
+    /// binding on the same bank execution retains. Neither binding creates a
+    /// draw; execution requires both original owners.
     #[cfg(feature = "semantic-policy")]
     #[expect(
         clippy::too_many_arguments,
@@ -25224,6 +25225,17 @@ impl SemanticTransitionSession {
         }
         branch.policy_sources = sources;
         branch.policy_witness = Some(witness.clone());
+        let sources = policy_source_views(&branch.policy_sources)?;
+        enqueue_policy_snapshots(
+            &self.domain,
+            &mut self.poisoned,
+            branch
+                .policy_buffers
+                .as_ref()
+                .expect("checked original cold policy bank"),
+            branch.support.as_ref().expect("original support bank"),
+            &sources,
+        )?;
         self.attach_prepared_policy_continuation(step, bank)
     }
 
@@ -25342,16 +25354,6 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .expect("retained original step");
             let branch = &prepared.branches[bank];
-            if let Some(policy) = &branch.policy {
-                let sources = policy_source_views(&branch.policy_sources)?;
-                enqueue_policy_snapshots(
-                    &self.domain,
-                    &mut self.poisoned,
-                    &policy.buffers,
-                    branch.support.as_ref().expect("original support bank"),
-                    &sources,
-                )?;
-            }
             branch
                 .continuation
                 .as_ref()
