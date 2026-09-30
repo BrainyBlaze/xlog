@@ -432,11 +432,181 @@ struct AcknowledgementEntry {
     uint64_t stable_identity[4],receipt_digest[4],receipt_len,previous_chain[4],chain[4];
 };
 struct PolicyField { uint64_t embeddings,biases; uint32_t cardinality; int32_t null_category; uint64_t retained_offset; };
+struct PolicyNumericalDescriptor {
+    uint64_t parameter_errors,baseline_errors,parameter_domains,text_domains,baseline_domains;
+    uint64_t hidden_errors,score_errors,recurrent_errors,parameter_cells;
+};
 struct PolicyDescriptor {
     uint64_t z,recurrence,positions,hidden,scores,recurrent,retained_scores,retained_score_stride;
     uint64_t final_masks,active_sets,pwl_cells,selected_score_vjps,component_baselines;
     PolicyField fields[18];
+    PolicyNumericalDescriptor numerical;
 };
+#ifdef XLOG_SEMANTIC_POLICY
+__device__ const model_policy::ErrorEnvelope* policy_parameter_errors(
+        const PolicyDescriptor& policy,uint64_t values) {
+    return values ? reinterpret_cast<const model_policy::ErrorEnvelope*>(
+        policy.numerical.parameter_errors)+(values-policy.z)/sizeof(float) : nullptr;
+}
+__device__ model_policy::FieldErrorView policy_field_errors(
+        const PolicyDescriptor& policy,const PolicyField& field) {
+    return {policy_parameter_errors(policy,field.embeddings),
+            policy_parameter_errors(policy,field.biases)};
+}
+__device__ void policy_readout_hidden(const PolicyDescriptor& policy,
+        uint32_t lane,uint32_t slot,uint32_t step,uint32_t field) {
+    const auto* recurrent_errors=reinterpret_cast<const model_policy::ErrorEnvelope*>(
+        policy.numerical.recurrent_errors)+(lane*37+step)*128;
+    const model_policy::ReadoutHiddenErrors errors{
+        policy_parameter_errors(policy,policy.z)+(lane*2+slot)*128,
+        recurrent_errors,policy_parameter_errors(policy,policy.positions)+field*128,
+        reinterpret_cast<model_policy::ErrorEnvelope*>(policy.numerical.hidden_errors)};
+    model_policy::readout_hidden(reinterpret_cast<const float*>(policy.z)+(lane*2+slot)*128,
+        reinterpret_cast<const float*>(policy.recurrent)+(lane*37+step)*128,
+        reinterpret_cast<const float*>(policy.positions)+field*128,
+        reinterpret_cast<float*>(policy.hidden),threadIdx.x,blockDim.x,&errors);
+}
+__device__ void policy_readout_scores(const PolicyDescriptor& policy,uint32_t field_index) {
+    const auto field=policy.fields[field_index];
+    const model_policy::FieldView values{reinterpret_cast<const float*>(field.embeddings),
+        reinterpret_cast<const float*>(field.biases),field.cardinality,field.null_category};
+    const model_policy::ReadoutScoreErrors errors{
+        reinterpret_cast<const model_policy::ErrorEnvelope*>(policy.numerical.hidden_errors),
+        policy_field_errors(policy,field),
+        reinterpret_cast<model_policy::ErrorEnvelope*>(policy.numerical.score_errors)};
+    model_policy::readout_scores(reinterpret_cast<const float*>(policy.hidden),values,
+        reinterpret_cast<float*>(policy.scores),threadIdx.x,blockDim.x,&errors);
+}
+__device__ bool policy_error_finite(model_policy::ErrorEnvelope error) {
+    return model_policy::finite_bound(error.ordinary) && model_policy::finite_bound(error.underflow);
+}
+__device__ bool policy_domain_covers(float value,model_policy::ErrorEnvelope error,
+        model_policy::DomainValue domain) {
+    return isfinite(value) && policy_error_finite(error) &&
+        model_policy::finite_domain(domain) && domain.magnitude>=fabs(double(value)) &&
+        domain.error.ordinary>=error.ordinary && domain.error.underflow>=error.underflow;
+}
+
+// Native rational coefficients execute in RN64 before the original RN32
+// cotangent narrowing. Keep their two absolute-error components separate;
+// these are evaluated scalar bounds, not actor-reference tags or preflight I.
+struct PolicyBoundedScalar {
+    double value;
+    model_policy::ErrorEnvelope error;
+};
+__device__ model_policy::ErrorEnvelope policy_round_error(
+        double lower,double upper,double unit,double tiny,double allowance) {
+    if(!isfinite(lower) || !isfinite(upper))return {INFINITY,INFINITY};
+    if(lower==upper)return {0.0,0.0};
+    const double magnitude=fmax(fabs(lower),fabs(upper));
+    // Directed neighbors determine whether the exact result is tiny, even
+    // when RN crosses the smallest-normal boundary.
+    if(magnitude<=tiny)return {0.0,allowance};
+    return {model_policy::upper_multiply(unit,magnitude),0.0};
+}
+__device__ model_policy::ErrorEnvelope policy_error_add(
+        model_policy::ErrorEnvelope a,model_policy::ErrorEnvelope b) {
+    return {model_policy::upper_add(a.ordinary,b.ordinary),
+            model_policy::upper_add(a.underflow,b.underflow)};
+}
+__device__ PolicyBoundedScalar policy_scalar_negate(PolicyBoundedScalar a) {
+    return {-a.value,a.error};
+}
+__device__ PolicyBoundedScalar policy_scalar_add(PolicyBoundedScalar a,PolicyBoundedScalar b) {
+    const auto local=policy_round_error(__dadd_rd(a.value,b.value),__dadd_ru(a.value,b.value),
+        0x1p-53,0x1p-1022,0x1p-1074);
+    return {__dadd_rn(a.value,b.value),policy_error_add(policy_error_add(a.error,b.error),local)};
+}
+__device__ PolicyBoundedScalar policy_scalar_multiply(PolicyBoundedScalar a,PolicyBoundedScalar b) {
+    const double aa=fabs(a.value),bb=fabs(b.value);
+    const auto local=policy_round_error(__dmul_rd(a.value,b.value),__dmul_ru(a.value,b.value),
+        0x1p-53,0x1p-1022,0x1p-1074);
+    const auto& x=a.error;const auto& y=b.error;
+    const double ordinary=model_policy::upper_add(
+        model_policy::upper_add(model_policy::upper_multiply(aa,y.ordinary),
+                                model_policy::upper_multiply(bb,x.ordinary)),
+        model_policy::upper_multiply(x.ordinary,y.ordinary));
+    const double underflow=model_policy::upper_add(
+        model_policy::upper_add(model_policy::upper_multiply(aa,y.underflow),
+                                model_policy::upper_multiply(bb,x.underflow)),
+        model_policy::upper_add(
+            model_policy::upper_add(model_policy::upper_multiply(x.ordinary,y.underflow),
+                                    model_policy::upper_multiply(x.underflow,y.ordinary)),
+            model_policy::upper_multiply(x.underflow,y.underflow)));
+    return {__dmul_rn(a.value,b.value),policy_error_add({ordinary,underflow},local)};
+}
+__device__ model_policy::ErrorEnvelope policy_quotient_error(
+        PolicyBoundedScalar a,PolicyBoundedScalar b,model_policy::ErrorEnvelope local) {
+    const double lower=__dsub_rd(fabs(b.value),model_policy::upper_add(b.error.ordinary,b.error.underflow));
+    if(!(lower>0.0) || !isfinite(a.value) || !isfinite(b.value))return {INFINITY,INFINITY};
+    const double quotient=__ddiv_ru(fabs(a.value),fabs(b.value));
+    return policy_error_add({
+        __ddiv_ru(model_policy::upper_add(a.error.ordinary,
+            model_policy::upper_multiply(quotient,b.error.ordinary)),lower),
+        __ddiv_ru(model_policy::upper_add(a.error.underflow,
+            model_policy::upper_multiply(quotient,b.error.underflow)),lower)},local);
+}
+__device__ PolicyBoundedScalar policy_scalar_divide(PolicyBoundedScalar a,PolicyBoundedScalar b) {
+    const auto local=policy_round_error(__ddiv_rd(a.value,b.value),__ddiv_ru(a.value,b.value),
+        0x1p-53,0x1p-1022,0x1p-1074);
+    return {__ddiv_rn(a.value,b.value),policy_quotient_error(a,b,local)};
+}
+__device__ PolicyBoundedScalar policy_u192_bound(U192 value) {
+    int limb=2;while(limb>=0 && !value.w[limb])--limb;
+    const double rounded=u192_to_double_rn(value);
+    if(limb<0)return {rounded,{0.0,0.0}};
+    const unsigned top=unsigned(limb)*64+63-__clzll(value.w[limb]);
+    if(top<=52)return {rounded,{0.0,0.0}};
+    const unsigned discarded=top-52,word=discarded/64,shift=discarded%64;
+    uint64_t tail=shift ? value.w[word]&((uint64_t(1)<<shift)-1) : 0;
+    for(unsigned i=0;i<word;++i)tail|=value.w[i];
+    return {rounded,{tail ? ldexp(1.0,int(top)-53) : 0.0,0.0}};
+}
+__device__ PolicyBoundedScalar policy_uint64_bound(uint64_t value) {
+    return policy_u192_bound(U192{{value,0,0}});
+}
+__device__ PolicyBoundedScalar policy_int64_bound(int64_t value) {
+    const uint64_t magnitude=value<0 ? uint64_t(-(value+1))+1 : uint64_t(value);
+    const auto bound=policy_uint64_bound(magnitude);
+    return value<0 ? policy_scalar_negate(bound) : bound;
+}
+__device__ model_policy::BoundedValue policy_uint64_float_bound(uint64_t value) {
+    const float rounded=__ull2float_rn(value);
+    if(!value)return {rounded,{0.0,0.0}};
+    const unsigned top=63-__clzll(value);
+    if(top<=23)return {rounded,{0.0,0.0}};
+    const unsigned discarded=top-23;
+    const bool inexact=(value&((uint64_t(1)<<discarded)-1))!=0;
+    return {rounded,{inexact ? ldexp(1.0,int(top)-24) : 0.0,0.0}};
+}
+__device__ model_policy::BoundedValue policy_int64_float_bound(int64_t value) {
+    const uint64_t magnitude=value<0 ? uint64_t(-(value+1))+1 : uint64_t(value);
+    const auto bound=policy_uint64_float_bound(magnitude);
+    return value<0 ? model_policy::bounded_negate(bound) : bound;
+}
+__device__ model_policy::BoundedValue policy_scalar_narrow(PolicyBoundedScalar input) {
+    const float value=__double2float_rn(input.value);
+    const auto local=policy_round_error(double(__double2float_rd(input.value)),
+        double(__double2float_ru(input.value)),0x1p-24,0x1p-126,0x1p-150);
+    return {value,policy_error_add(input.error,local)};
+}
+__device__ model_policy::BoundedValue policy_float_divide(
+        model_policy::BoundedValue a,model_policy::BoundedValue b) {
+    const auto local=policy_round_error(double(__fdiv_rd(a.value,b.value)),
+        double(__fdiv_ru(a.value,b.value)),0x1p-24,0x1p-126,0x1p-150);
+    return {__fdiv_rn(a.value,b.value),policy_quotient_error(
+        {double(a.value),a.error},{double(b.value),b.error},local)};
+}
+__device__ PolicyBoundedScalar policy_importance_bound(const Receipt* receipts) {
+    PolicyBoundedScalar weight{1.0,{0.0,0.0}};
+    for(uint32_t ordinal=0;ordinal<COMPONENT_COUNT;++ordinal) {
+        const auto& receipt=receipts[ordinal];
+        weight=policy_scalar_multiply(weight,policy_scalar_divide(
+            policy_u192_bound(receipt.p),policy_u192_bound(receipt.factor_denominator)));
+    }
+    return weight;
+}
+#endif
 struct SemanticTrainingViewSelection {
     uint64_t status,row_count,capacity,ordinal,basis,window,source_length,block_size,prefix_extent,answer_start;
     uint64_t identity[4],source_identity[4],content_identity[4];
@@ -496,10 +666,16 @@ struct ModelUpdateCanaryInputs {
     uint64_t accounted_reserved_bytes,copy_bytes,admissibility_source,results;
     uint64_t admissibility_destination,refusal_destination;
 };
+struct PolicyAdjointNumericalDescriptor {
+    uint64_t parameter_errors,text_errors,baseline_errors;
+    uint64_t parameter_domains,text_domains,baseline_domains;
+    uint64_t recurrent_errors,score_errors,coefficient_errors;
+};
 struct PolicyBackward {
     uint64_t cotangents,parameters,text,baselines,recurrent,scores,status,parameter_cells,text_cells;
     uint64_t selection,objective,objective_groups,objective_group_members,roster_rows,origin_candidate;
     uint64_t origin_lease,origin_bank,mode,member_ordinal,critic_term;
+    PolicyAdjointNumericalDescriptor numerical;
 };
 struct Descriptor {
     uint64_t logits,support,scratch,receipts,state,components,codebooks,arena[7];
@@ -590,7 +766,7 @@ static_assert(sizeof(PolicySelectedScoreVjp)==96,"selected-score VJP ABI");
 static_assert(sizeof(ActionBatchReceipt)==504,"action batch receipt ABI");
 static_assert(sizeof(State)==7568,"state ABI");
 static_assert(sizeof(PolicyField)==32,"policy field ABI");
-static_assert(sizeof(PolicyDescriptor)==680,"policy ABI");
+static_assert(sizeof(PolicyNumericalDescriptor)==72 && sizeof(PolicyDescriptor)==752,"policy ABI");
 static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origin ABI");
 static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
 static_assert(sizeof(SemanticTrainingObjectiveRecord)==280,"training objective ABI");
@@ -604,7 +780,8 @@ static_assert(sizeof(ModelForwardSealInput)==32,"model forward seal ABI");
 static_assert(sizeof(ModelForwardReceipt)==224,"model forward receipt ABI");
 static_assert(sizeof(ModelForwardReceiptInputs)==128,"model forward receipt input ABI");
 static_assert(sizeof(ModelUpdateCanaryInputs)==280,"training canary input ABI");
-static_assert(sizeof(PolicyBackward)==160,"policy backward ABI");
+static_assert(sizeof(PolicyAdjointNumericalDescriptor)==72,"policy adjoint numerical ABI");
+static_assert(sizeof(PolicyBackward)==232,"policy backward ABI");
 
 __device__ bool semantic_training_canary_refusal_valid(
         const SemanticTrainingCanaryRefusalRecord& refusal) {
@@ -660,7 +837,7 @@ static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
 static_assert(sizeof(AcknowledgementQueueHeader)==72,"acknowledgement queue ABI");
 static_assert(sizeof(AcknowledgementEntry)==136,"acknowledgement entry ABI");
-static_assert(sizeof(Descriptor)==1040,"launch ABI");
+static_assert(sizeof(Descriptor)==1184,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 
 __device__ uint64_t text_row_count(TextBinding binding) {
@@ -3837,6 +4014,10 @@ __device__ bool semantic_policy_identity_present(const uint64_t identity[4]) {
 
 // Late differentiation reads the original receipt and tape. It never enters
 // semantic admission, generates random words, or writes forward state.
+// The selected-score reference is anchored at the actual canonical FP32
+// scores and saved piecewise cell, including structural readouts. Primal
+// envelopes still enter the ideal neural Jacobian; they do not move that
+// score anchor or select a different active set on idealized scores.
 __device__ void semantic_policy_backward(const Descriptor& descriptor) {
     const auto p=descriptor.policy;
     const auto b=descriptor.backward;
@@ -3846,6 +4027,12 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
     auto text_gradients=reinterpret_cast<float*>(b.text);
     auto baseline_gradients=reinterpret_cast<float*>(b.baselines);
     auto recurrent_gradients=reinterpret_cast<float*>(b.recurrent);
+    auto parameter_errors=reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.parameter_errors);
+    auto text_errors=reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.text_errors);
+    auto baseline_errors=reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.baseline_errors);
+    auto recurrent_errors=reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.recurrent_errors);
+    auto coefficient_errors=reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.coefficient_errors);
+    const auto* original_baseline_errors=reinterpret_cast<const model_policy::ErrorEnvelope*>(p.numerical.baseline_errors);
     auto components=reinterpret_cast<const Component*>(descriptor.components);
     auto receipts=reinterpret_cast<const Receipt*>(descriptor.receipts);
     auto support=reinterpret_cast<const uint8_t*>(descriptor.support);
@@ -3857,7 +4044,9 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
     __shared__ uint64_t actor_denominator,edit_denominator;
     __shared__ float maximum,reward_f32,critic_scale;
     __shared__ U192 threshold;
-    __shared__ double scale,reward,actor_scale,edit_scale,cost_scale;
+    __shared__ double reward,actor_scale,edit_scale,cost_scale;
+    __shared__ PolicyBoundedScalar bounded_scale,bounded_reward,bounded_actor_scale,bounded_edit_scale,bounded_cost_scale;
+    __shared__ model_policy::BoundedValue bounded_reward_f32,bounded_critic_scale;
     if(threadIdx.x==0) {
         *status=0;
         backward_program_bank=TaskProgramBank{};
@@ -3872,6 +4061,8 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
         actor_denominator=edit_denominator=0;
         reward=actor_scale=edit_scale=cost_scale=0.0;
         reward_f32=critic_scale=0.0f;
+        bounded_scale=bounded_reward=bounded_actor_scale=bounded_edit_scale=bounded_cost_scale={0.0,{0.0,0.0}};
+        bounded_reward_f32=bounded_critic_scale={0.0f,{0.0,0.0}};
         if(b.mode==0) {
             for(uint32_t i=0;i<COMPONENT_COUNT;++i)
                 if(!isfinite(coefficients[i]))*status=1;
@@ -4016,8 +4207,9 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                             }
                             if(edit_lane==UINT32_MAX)*status=1;
                         }
-                        edit_scale=__ddiv_rn(double(objective_coefficients[3]),
-                            __ull2double_rn(edit_denominator));
+                        bounded_edit_scale=policy_scalar_divide({double(objective_coefficients[3]),{0.0,0.0}},
+                            policy_uint64_bound(edit_denominator));
+                        edit_scale=bounded_edit_scale.value;
                         if(!isfinite(edit_scale))*status=1;
                     }
                 }
@@ -4031,18 +4223,26 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                        !selected_task_cost_matches(state,objective.cost_cap)) {
                         *status=1;
                     } else {
-                        reward=__ll2double_rn((long long)state->task_evaluation.return_value);
-                        reward_f32=__ll2float_rn((long long)state->task_evaluation.return_value);
+                        bounded_reward=policy_int64_bound((int64_t)state->task_evaluation.return_value);
+                        bounded_reward_f32=policy_int64_float_bound((int64_t)state->task_evaluation.return_value);
+                        reward=bounded_reward.value;
+                        reward_f32=bounded_reward_f32.value;
                         if(reward<evaluator_min || reward>evaluator_max || !isfinite(reward))*status=1;
-                        const double denominator=__ull2double_rn(actor_denominator);
-                        const double weight=state->importance_weight;
-                        const double cost=__ddiv_rn(
-                            __ull2double_rn(state->task_evaluation.facts[state->task_evaluation.winner].c),
-                            __ull2double_rn(objective.cost_cap));
-                        actor_scale=__ddiv_rn(__dmul_rn(double(objective_coefficients[6]),weight),denominator);
-                        cost_scale=__ddiv_rn(__dmul_rn(__dmul_rn(double(objective_coefficients[8]),weight),cost),denominator);
-                        critic_scale=__fdiv_rn(__fmul_rn(2.0f,objective_coefficients[7]),
-                            __ull2float_rn(actor_denominator));
+                        const auto denominator=policy_uint64_bound(actor_denominator);
+                        const auto weight=policy_importance_bound(receipts);
+                        if(weight.value!=state->importance_weight)*status=1;
+                        const auto cost=policy_scalar_divide(
+                            policy_uint64_bound(state->task_evaluation.facts[state->task_evaluation.winner].c),
+                            policy_uint64_bound(objective.cost_cap));
+                        bounded_actor_scale=policy_scalar_divide(policy_scalar_multiply(
+                            {double(objective_coefficients[6]),{0.0,0.0}},weight),denominator);
+                        bounded_cost_scale=policy_scalar_divide(policy_scalar_multiply(policy_scalar_multiply(
+                            {double(objective_coefficients[8]),{0.0,0.0}},weight),cost),denominator);
+                        bounded_critic_scale=policy_float_divide(model_policy::bounded_multiply(
+                            {2.0f,{0.0,0.0}},{objective_coefficients[7],{0.0,0.0}}),
+                            policy_uint64_float_bound(actor_denominator));
+                        actor_scale=bounded_actor_scale.value;cost_scale=bounded_cost_scale.value;
+                        critic_scale=bounded_critic_scale.value;
                         if(!isfinite(actor_scale) || !isfinite(cost_scale) || !isfinite(critic_scale))*status=1;
                     }
                 }
@@ -4067,31 +4267,50 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
     }
     __syncthreads();
     if(*status)return;
-    for(uint64_t i=threadIdx.x;i<b.parameter_cells;i+=blockDim.x)gradients[i]=0.0f;
-    for(uint64_t i=threadIdx.x;i<b.text_cells;i+=blockDim.x)text_gradients[i]=0.0f;
-    for(uint32_t i=threadIdx.x;i<2*37*128;i+=blockDim.x)recurrent_gradients[i]=0.0f;
+    for(uint64_t i=threadIdx.x;i<b.parameter_cells;i+=blockDim.x) {
+        gradients[i]=0.0f;parameter_errors[i]={0.0,0.0};
+        reinterpret_cast<model_policy::DomainValue*>(b.numerical.parameter_domains)[i]={0.0,{0.0,0.0}};
+    }
+    for(uint64_t i=threadIdx.x;i<b.text_cells;i+=blockDim.x) {
+        text_gradients[i]=0.0f;text_errors[i]={0.0,0.0};
+        reinterpret_cast<model_policy::DomainValue*>(b.numerical.text_domains)[i]={0.0,{0.0,0.0}};
+    }
+    for(uint32_t i=threadIdx.x;i<2*37*128;i+=blockDim.x) {
+        recurrent_gradients[i]=0.0f;recurrent_errors[i]={0.0,0.0};
+    }
     for(uint32_t i=threadIdx.x;i<COMPONENT_COUNT;i+=blockDim.x) {
+        baseline_errors[i]={0.0,0.0};coefficient_errors[i]={0.0,0.0};
+        reinterpret_cast<model_policy::DomainValue*>(b.numerical.baseline_domains)[i]={0.0,{0.0,0.0}};
         if(b.mode==0) {
             baseline_gradients[i]=0.0f;
         } else {
             const float baseline=baseline_gradients[i];
             coefficients[i]=0.0;
             baseline_gradients[i]=0.0f;
-            if(apply_selected) {
+                if(apply_selected) {
+                PolicyBoundedScalar coefficient{0.0,{0.0,0.0}};
                 if(apply_edit && i>=edit_lane*68+32 && i<edit_lane*68+68)
-                    coefficients[i]=-edit_scale;
+                    coefficient=policy_scalar_negate(bounded_edit_scale);
                 if(apply_actor) {
-                    const float difference=__fsub_rn(baseline,reward_f32);
+                    const auto bounded_baseline=model_policy::BoundedValue{baseline,original_baseline_errors[i]};
+                    const auto bounded_difference=model_policy::bounded_add(bounded_baseline,
+                        model_policy::bounded_negate(bounded_reward_f32));
+                    const float difference=bounded_difference.value;
                     const float raw_square=__fmul_rn(difference,difference);
-                    const double advantage=__dsub_rn(reward,double(baseline));
-                    coefficients[i]=__dadd_rn(coefficients[i],
-                        __dadd_rn(-__dmul_rn(actor_scale,advantage),cost_scale));
-                    if(receipts[i].legal_count>1)
-                        baseline_gradients[i]=__fmul_rn(critic_scale,difference);
+                    const auto advantage=policy_scalar_add(bounded_reward,
+                        policy_scalar_negate({double(baseline),original_baseline_errors[i]}));
+                    coefficient=policy_scalar_add(coefficient,policy_scalar_add(policy_scalar_negate(
+                        policy_scalar_multiply(bounded_actor_scale,advantage)),bounded_cost_scale));
+                    if(receipts[i].legal_count>1) {
+                        const auto gradient=model_policy::bounded_multiply(bounded_critic_scale,bounded_difference);
+                        baseline_gradients[i]=gradient.value;baseline_errors[i]=gradient.error;
+                    }
                     if(!isfinite(baseline) || !isfinite(raw_square) ||
-                       !isfinite(coefficients[i]) || !isfinite(baseline_gradients[i]))
+                       !isfinite(coefficient.value) || !policy_error_finite(coefficient.error) ||
+                       !isfinite(baseline_gradients[i]) || !policy_error_finite(baseline_errors[i]))
                         atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
                 }
+                coefficients[i]=coefficient.value;coefficient_errors[i]=coefficient.error;
             }
         }
     }
@@ -4129,6 +4348,8 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
         const float* row=structural ? nullptr : reinterpret_cast<const float*>(descriptor.logits)+text_index*TEXT_CARDINALITY;
         float* score_gradients=structural ? reinterpret_cast<float*>(b.scores)
             : text_gradients+text_index*TEXT_CARDINALITY;
+        auto* score_errors=structural ? reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.score_errors)
+            : text_errors+text_index*TEXT_CARDINALITY;
         model_policy::FieldView field={};
         model_policy::FieldAdjoint field_gradients={};
         if(structural) {
@@ -4139,18 +4360,15 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                 f.biases ? gradients+(f.biases-p.z)/4 : nullptr};
             if(threadIdx.x==0)for(uint32_t j=0;j<18;++j)
                 choices[j]=j<c.field ? receipts[ordinal-c.field+j].choice : 0;
-            model_policy::readout_hidden(reinterpret_cast<const float*>(p.z)+(lane*2+c.slot)*128,
-                reinterpret_cast<const float*>(p.recurrent)+(lane*37+step)*128,
-                reinterpret_cast<const float*>(p.positions)+c.field*128,
-                reinterpret_cast<float*>(p.hidden),threadIdx.x,blockDim.x);
+            policy_readout_hidden(p,lane,c.slot,step,c.field);
             __syncthreads();
-            model_policy::readout_scores(reinterpret_cast<const float*>(p.hidden),field,
-                reinterpret_cast<float*>(p.scores),threadIdx.x,blockDim.x);
+            policy_readout_scores(p,c.field);
             __syncthreads();
             row=reinterpret_cast<const float*>(p.scores);
         }
         if(threadIdx.x==0) {
-            legal_count=0;active_count=0;selected_active=0;maximum=-INFINITY;scale=0.0;
+            legal_count=0;active_count=0;selected_active=0;maximum=-INFINITY;
+            bounded_scale={0.0,{0.0,0.0}};
             for(uint32_t j=0;j<c.cardinality;++j)
                 if(support[c.offset+j] && legal_category(c,j,books,components,support,
                     32+(edit/2)*68+(edit%2)*18,backward_program_bank,viable,choices,
@@ -4173,8 +4391,11 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     threshold=add(sub(receipt.p,floor),multiply(distance_scaled(maximum,row[receipt.choice]),receipt.active_count));
                     // Active membership stays exact U192. Round its numerator
                     // once before the FP64 cotangent arithmetic.
-                    const double divisor=ldexp(u192_to_double_rn(receipt.p),-149);
-                    scale=__ddiv_rn(coefficients[ordinal],divisor);
+                    auto divisor=policy_u192_bound(receipt.p);
+                    divisor.value=ldexp(divisor.value,-149);
+                    divisor.error.ordinary=ldexp(divisor.error.ordinary,-149);
+                    bounded_scale=policy_scalar_divide(
+                        {coefficients[ordinal],coefficient_errors[ordinal]},divisor);
                 }
             }
         }
@@ -4187,10 +4408,15 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     actions[edit][0],actions[edit][1],actions[edit][2])
                 && compare(multiply(distance_scaled(maximum,row[j]),receipt.active_count),threshold)<0;
             if(active)atomicAdd(&active_count,1U);
-            const float contribution=active ? __double2float_rn(__dmul_rn(scale,
-                j==receipt.choice ? double(receipt.active_count-1) : -1.0)) : 0.0f;
-            if(structural)score_gradients[j]=contribution;
-            else score_gradients[j]=__fadd_rn(score_gradients[j],contribution);
+            const auto contribution=active ? policy_scalar_narrow(policy_scalar_multiply(bounded_scale,
+                {j==receipt.choice ? double(receipt.active_count-1) : -1.0,{0.0,0.0}}))
+                : model_policy::BoundedValue{0.0f,{0.0,0.0}};
+            if(structural) {
+                score_gradients[j]=contribution.value;score_errors[j]=contribution.error;
+            } else {
+                model_policy::store(model_policy::bounded_add(
+                    {score_gradients[j],score_errors[j]},contribution),score_gradients,score_errors,j);
+            }
         }
         __syncthreads();
         if(threadIdx.x==0 && selected_active && active_count!=receipt.active_count)*status=2;
@@ -4198,25 +4424,47 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
         if(*status)return;
         if(structural) {
             float* position_gradient=gradients+(p.positions-p.z)/4+c.field*128;
+            auto* position_error=parameter_errors+(p.positions-p.z)/4+c.field*128;
+            const auto f=p.fields[c.field];
+            const model_policy::FieldErrorAdjoint field_error_adjoint{
+                f.embeddings ? parameter_errors+(f.embeddings-p.z)/4 : nullptr,
+                f.biases ? parameter_errors+(f.biases-p.z)/4 : nullptr};
+            const auto* forward_recurrent_errors=reinterpret_cast<const model_policy::ErrorEnvelope*>(p.numerical.recurrent_errors);
+            const model_policy::AdvanceVjpErrors advance_errors{
+                forward_recurrent_errors+(lane*37+step)*128,policy_parameter_errors(p,p.recurrence),
+                forward_recurrent_errors+(lane*37+step+1)*128,policy_field_errors(p,f),
+                recurrent_errors+(lane*37+step+1)*128,recurrent_errors+(lane*37+step)*128,
+                parameter_errors+(p.recurrence-p.z)/4,position_error,field_error_adjoint};
             model_policy::advance_vjp(reinterpret_cast<const float*>(p.recurrent)+(lane*37+step)*128,
                 reinterpret_cast<const float*>(p.recurrence),
                 reinterpret_cast<const float*>(p.recurrent)+(lane*37+step+1)*128,
                 field,receipt.choice,recurrent_gradients+(lane*37+step+1)*128,
                 recurrent_gradients+(lane*37+step)*128,gradients+(p.recurrence-p.z)/4,
-                position_gradient,field_gradients,threadIdx.x,blockDim.x);
+                position_gradient,field_gradients,threadIdx.x,blockDim.x,&advance_errors);
             __syncthreads();
+            const model_policy::ReadoutVjpErrors readout_errors{
+                reinterpret_cast<const model_policy::ErrorEnvelope*>(p.numerical.hidden_errors),
+                policy_field_errors(p,f),score_errors,parameter_errors+(lane*2+c.slot)*128,
+                recurrent_errors+(lane*37+step)*128,position_error,field_error_adjoint};
             model_policy::readout_vjp(reinterpret_cast<const float*>(p.hidden),field,score_gradients,
                 gradients+(lane*2+c.slot)*128,recurrent_gradients+(lane*37+step)*128,
-                position_gradient,field_gradients,threadIdx.x,blockDim.x);
+                position_gradient,field_gradients,threadIdx.x,blockDim.x,&readout_errors);
             __syncthreads();
         }
     }
-    for(uint64_t i=threadIdx.x;i<b.parameter_cells;i+=blockDim.x)
-        if(!isfinite(gradients[i]))atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
-    for(uint64_t i=threadIdx.x;i<b.text_cells;i+=blockDim.x)
-        if(!isfinite(text_gradients[i]))atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
-    for(uint32_t i=threadIdx.x;i<COMPONENT_COUNT;i+=blockDim.x)
-        if(!isfinite(baseline_gradients[i]))atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
+    for(uint32_t root=0;root<3;++root) {
+        const auto* values=root==0 ? gradients : root==1 ? text_gradients : baseline_gradients;
+        const auto* errors=root==0 ? parameter_errors : root==1 ? text_errors : baseline_errors;
+        const uint64_t count=root==0 ? b.parameter_cells : root==1 ? b.text_cells : COMPONENT_COUNT;
+        auto* domains=reinterpret_cast<model_policy::DomainValue*>(root==0 ? b.numerical.parameter_domains
+            : root==1 ? b.numerical.text_domains : b.numerical.baseline_domains);
+        for(uint64_t i=threadIdx.x;i<count;i+=blockDim.x) {
+            const model_policy::DomainValue domain{fabs(double(values[i])),errors[i]};
+            if(!isfinite(values[i]) || !model_policy::finite_domain(domain))
+                atomicExch(reinterpret_cast<unsigned long long*>(status),3ULL);
+            domains[i]=domain;
+        }
+    }
 }
 #endif
 
@@ -5329,6 +5577,12 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             semantic_graph::charge_native(&sampler_work,semantic_graph::NativeWorkEvent::Category,1);
             uint8_t value=support[c.offset+i];
             if(value && active_text && !isfinite(logits[offset+i]))atomicOr(&invalid,2U);
+#ifdef XLOG_SEMANTIC_POLICY
+            if(value && active_text && descriptor.policy.z && !policy_domain_covers(
+                    logits[offset+i],{0.0,0.0},
+                    reinterpret_cast<const model_policy::DomainValue*>(descriptor.policy.numerical.text_domains)[offset+i]))
+                atomicOr(&invalid,2U);
+#endif
         }
         if(threadIdx.x==0 && active_text) {
             bool present=false;
@@ -5342,6 +5596,29 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
 #ifdef XLOG_SEMANTIC_POLICY
     if(descriptor.policy.z) {
         const auto p=descriptor.policy;
+        const auto n=p.numerical;
+        const auto* parameter_errors=reinterpret_cast<const model_policy::ErrorEnvelope*>(n.parameter_errors);
+        const auto* parameter_domains=reinterpret_cast<const model_policy::DomainValue*>(n.parameter_domains);
+        const auto* baseline_errors=reinterpret_cast<const model_policy::ErrorEnvelope*>(n.baseline_errors);
+        const auto* baseline_domains=reinterpret_cast<const model_policy::DomainValue*>(n.baseline_domains);
+        const auto* text_domains=reinterpret_cast<const model_policy::DomainValue*>(n.text_domains);
+        for(uint64_t i=threadIdx.x;i<n.parameter_cells;i+=blockDim.x) {
+            semantic_graph::charge_native(&sampler_work,semantic_graph::NativeWorkEvent::Category,1);
+            if(!policy_domain_covers(reinterpret_cast<const float*>(p.z)[i],parameter_errors[i],parameter_domains[i]))
+                atomicOr(&invalid,2U);
+        }
+        for(uint32_t i=threadIdx.x;i<COMPONENT_COUNT;i+=blockDim.x) {
+            semantic_graph::charge_native(&sampler_work,semantic_graph::NativeWorkEvent::Category,1);
+            if(!policy_domain_covers(reinterpret_cast<const float*>(p.component_baselines)[i],
+                    baseline_errors[i],baseline_domains[i]))atomicOr(&invalid,2U);
+        }
+        // Validate the numerical storage without reading inactive TEXT primal
+        // rows. Active score coverage was checked with the original mapping
+        // above; its canonical FP32 score anchor has no neural input error.
+        for(uint64_t i=threadIdx.x;i<32ULL*TEXT_CARDINALITY;i+=blockDim.x) {
+            semantic_graph::charge_native(&sampler_work,semantic_graph::NativeWorkEvent::Category,1);
+            if(!model_policy::finite_domain(text_domains[i]))atomicOr(&invalid,2U);
+        }
         for(uint32_t i=threadIdx.x;i<4*128;i+=blockDim.x)
             if(!isfinite(reinterpret_cast<const float*>(p.z)[i]))atomicOr(&invalid,2U);
         for(uint32_t i=threadIdx.x;i<128*128;i+=blockDim.x)
@@ -5392,9 +5669,13 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         // Initial states and every successor have separate addresses. No advance
         // aliases its input and the second slot continues the first slot's tape.
         auto tape = reinterpret_cast<float*>(descriptor.policy.recurrent);
+        auto errors = reinterpret_cast<model_policy::ErrorEnvelope*>(descriptor.policy.numerical.recurrent_errors);
         for (uint32_t lane=0;lane<2;++lane)
             for (uint32_t d=threadIdx.x;d<model_policy::width;d+=blockDim.x)
-                tape[lane*37*model_policy::width+d]=0.0f;
+                {
+                    tape[lane*37*model_policy::width+d]=0.0f;
+                    errors[lane*37*model_policy::width+d]={0.0,0.0};
+                }
     }
     __syncthreads();
 #endif
@@ -5466,21 +5747,18 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             model_policy::FieldView field={reinterpret_cast<const float*>(f.embeddings),
                 reinterpret_cast<const float*>(f.biases),f.cardinality,f.null_category};
             const uint32_t step=component.slot*18+component.field;
-            model_policy::readout_hidden(
-                reinterpret_cast<const float*>(p.z)+(lane*2+component.slot)*128,
-                reinterpret_cast<const float*>(p.recurrent)+(lane*37+step)*128,
-                reinterpret_cast<const float*>(p.positions)+component.field*128,
-                reinterpret_cast<float*>(p.hidden),threadIdx.x,blockDim.x);
+            policy_readout_hidden(p,lane,component.slot,step,component.field);
             __syncthreads();
-            model_policy::readout_scores(reinterpret_cast<const float*>(p.hidden),field,
-                reinterpret_cast<float*>(p.scores),threadIdx.x,blockDim.x);
+            policy_readout_scores(p,component.field);
             __syncthreads();
             row=reinterpret_cast<const float*>(p.scores);
             float* retained=reinterpret_cast<float*>(p.retained_scores)
                 +(lane*2+component.slot)*p.retained_score_stride+f.retained_offset;
             for(uint32_t i=threadIdx.x;i<component.cardinality;i+=blockDim.x) {
                 retained[i]=row[i];
-                if(!isfinite(row[i]))atomicExch(&invalid,1U);
+                if(!isfinite(row[i]) || !policy_error_finite(
+                        reinterpret_cast<const model_policy::ErrorEnvelope*>(p.numerical.score_errors)[i]))
+                    atomicExch(&invalid,1U);
             }
             __syncthreads();
         }
@@ -5663,13 +5941,23 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             model_policy::FieldView field={reinterpret_cast<const float*>(f.embeddings),
                 reinterpret_cast<const float*>(f.biases),f.cardinality,f.null_category};
             const uint32_t step=component.slot*18+component.field;
+            const model_policy::AdvanceErrors errors{
+                reinterpret_cast<const model_policy::ErrorEnvelope*>(p.numerical.recurrent_errors)+(lane*37+step)*128,
+                policy_parameter_errors(p,p.recurrence),
+                policy_parameter_errors(p,p.positions)+component.field*128,
+                policy_field_errors(p,f),
+                reinterpret_cast<model_policy::ErrorEnvelope*>(p.numerical.recurrent_errors)+(lane*37+step+1)*128};
             model_policy::advance(
                 reinterpret_cast<const float*>(p.recurrent)+(lane*37+step)*128,
                 reinterpret_cast<const float*>(p.recurrence),
                 reinterpret_cast<const float*>(p.positions)+component.field*128,
                 field,receipts[ordinal].choice,
                 reinterpret_cast<float*>(p.recurrent)+(lane*37+step+1)*128,
-                threadIdx.x,blockDim.x);
+                threadIdx.x,blockDim.x,&errors);
+            for(uint32_t d=threadIdx.x;d<128;d+=blockDim.x)
+                if(!policy_error_finite(errors.successor[d])) {
+                    atomicExch(&failed,1U);atomicExch(reinterpret_cast<unsigned long long*>(&state->status),5ULL);
+                }
         }
         __syncthreads();
 #endif

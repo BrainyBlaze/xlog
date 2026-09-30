@@ -8162,13 +8162,13 @@ impl PySemanticPreparedStep {
 #[cfg(feature = "semantic-policy")]
 struct PreparedPolicyInputs {
     model_output: Py<PyAny>,
-    inputs: [Py<PyAny>; 4],
+    inputs: [Py<PyAny>; 9],
     invocation_issued: bool,
 }
 
 #[cfg(feature = "semantic-policy")]
 impl PreparedPolicyInputs {
-    fn issue_originals(&mut self, py: Python<'_>) -> PyResult<(Py<PyAny>, [Py<PyAny>; 4])> {
+    fn issue_originals(&mut self, py: Python<'_>) -> PyResult<(Py<PyAny>, [Py<PyAny>; 9])> {
         if self.invocation_issued {
             return Err(invalid("prepared policy invocation was already issued"));
         }
@@ -8925,25 +8925,27 @@ impl PySemanticPreparedStep {
                 consumer_stream,
             )
             .map_err(xlog_err)?;
-        let [parameters, text, baselines] = gradients.into_dlpack().map_err(xlog_err)?;
-        let parameters =
-            retain_export_owner(parameters, self.session.clone_ref(py), session.owner_thread)?;
-        let text = retain_export_owner(text, self.session.clone_ref(py), session.owner_thread)?;
-        let baselines =
-            retain_export_owner(baselines, self.session.clone_ref(py), session.owner_thread)?;
-        Ok((
-            crate::dlpack_capsule_from_tensor(py, parameters)?,
-            crate::dlpack_capsule_from_tensor(py, text)?,
-            crate::dlpack_capsule_from_tensor(py, baselines)?,
-        )
-            .into_pyobject(py)?
-            .unbind())
+        let capsules = gradients
+            .into_dlpack()
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|tensor| {
+                let tensor =
+                    retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
     }
 
     /// Return parameter, full MASK and baseline adjoints for this exact
     /// prepared Proposal's frozen actor or edit row in a recording Update bank.
     /// Native membership determines the numerical path; the caller cannot
     /// reclassify a row or omit the other required group members.
+    /// Nine capsules are returned: the three FP32 adjoints, then their three
+    /// FP64 ordinary/underflow envelopes, then their three FP64
+    /// magnitude/ordinary/underflow bounds. These are selected late outputs,
+    /// not the paired actor/full domains required before a draw.
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (update_step, bank, member_ordinal, *, consumer_stream))]
     fn group_update_vjp(
@@ -8993,19 +8995,17 @@ impl PySemanticPreparedStep {
                 consumer_stream,
             )
             .map_err(xlog_err)?;
-        let [parameters, text, baselines] = gradients.into_dlpack().map_err(xlog_err)?;
-        let parameters =
-            retain_export_owner(parameters, self.session.clone_ref(py), session.owner_thread)?;
-        let text = retain_export_owner(text, self.session.clone_ref(py), session.owner_thread)?;
-        let baselines =
-            retain_export_owner(baselines, self.session.clone_ref(py), session.owner_thread)?;
-        Ok((
-            crate::dlpack_capsule_from_tensor(py, parameters)?,
-            crate::dlpack_capsule_from_tensor(py, text)?,
-            crate::dlpack_capsule_from_tensor(py, baselines)?,
-        )
-            .into_pyobject(py)?
-            .unbind())
+        let capsules = gradients
+            .into_dlpack()
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|tensor| {
+                let tensor =
+                    retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
     }
 
     /// Record the native group reduction after all frozen actor and edit rows
@@ -9596,7 +9596,7 @@ pub(crate) struct PySemanticPolicyInvocation {
     _task_use: Py<PySemanticTransitionTaskUse>,
     _parent: ContentStepOwner,
     _model_output: Py<PyAny>,
-    _inputs: [Py<PyAny>; 4],
+    _inputs: [Py<PyAny>; 9],
     rng: SemanticRngBinding,
     outcome: xlog_cuda::SemanticTransitionOutcome,
     training: bool,
@@ -9754,22 +9754,19 @@ impl PySemanticRetainedReplayMember {
                 stream,
             )
             .map_err(xlog_err)?;
-        let [parameters, text, baselines] = gradients.into_dlpack().map_err(xlog_err)?;
-        let parameters = retain_export_owner(
-            parameters,
-            self.session.clone_ref(py),
-            source_session.owner_thread,
-        )?;
-        let text = retain_export_owner(
-            text,
-            self.session.clone_ref(py),
-            source_session.owner_thread,
-        )?;
-        let baselines = retain_export_owner(
-            baselines,
-            self.session.clone_ref(py),
-            source_session.owner_thread,
-        )?;
+        let capsules = gradients
+            .into_dlpack()
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|tensor| {
+                let tensor = retain_export_owner(
+                    tensor,
+                    self.session.clone_ref(py),
+                    source_session.owner_thread,
+                )?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
         use_state.banks[bank] = true;
         if use_state.update.is_none() {
             use_state.update = Some(update_step.clone_ref(py));
@@ -9777,13 +9774,7 @@ impl PySemanticRetainedReplayMember {
         if use_state.target.is_none() {
             use_state.target = Some(update.inner.clone());
         }
-        Ok((
-            crate::dlpack_capsule_from_tensor(py, parameters)?,
-            crate::dlpack_capsule_from_tensor(py, text)?,
-            crate::dlpack_capsule_from_tensor(py, baselines)?,
-        )
-            .into_pyobject(py)?
-            .unbind())
+        Ok(PyTuple::new(py, capsules)?.unbind())
     }
 
     /// Record completed execution of the published target Update. This does
@@ -10149,8 +10140,10 @@ impl PySemanticPolicyInvocation {
     }
 
     /// Supply the original loss's contiguous FP64[136] selected-score
-    /// cotangents. Returns real FP32 parameter and full MASK adjoint capsules,
-    /// in that order, to be applied to the retained original graph. No model
+    /// cotangents. Returns FP32 parameter, full MASK and zero baseline adjoints,
+    /// followed by their three FP64 error envelopes and three FP64 selected
+    /// magnitude/error bounds. Only the first three are autograd cotangents.
+    /// They are applied to the retained original graph. No model
     /// getter, second forward, Python selected-score or new primal leaf is used.
     /// Adjoint consumers enqueue on ``consumer_stream`` after this returns;
     /// readiness is ordered by the native producer event without a host wait.
@@ -10224,9 +10217,8 @@ impl PySemanticPolicyInvocation {
             ),
         }
         .map_err(xlog_err)?;
-        let [parameters, text] = gradients.into_dlpack().map_err(xlog_err)?;
         // The actual parent also owns the original continuation producers and
-        // Session. Both capsule owners preserve them through late consumers,
+        // Session. All capsule owners preserve them through late consumers,
         // with final Python decrefs deferred to the creating thread.
         let export_owner = || -> PublishedExportOwner {
             match &self._parent {
@@ -10234,14 +10226,16 @@ impl PySemanticPolicyInvocation {
                 ContentStepOwner::Prepared(step) => step.clone_ref(py).into(),
             }
         };
-        let parameters = retain_export_owner(parameters, export_owner(), session.owner_thread)?;
-        let text = retain_export_owner(text, export_owner(), session.owner_thread)?;
-        Ok((
-            crate::dlpack_capsule_from_tensor(py, parameters)?,
-            crate::dlpack_capsule_from_tensor(py, text)?,
-        )
-            .into_pyobject(py)?
-            .unbind())
+        let capsules = gradients
+            .into_dlpack()
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|tensor| {
+                let tensor = retain_export_owner(tensor, export_owner(), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
     }
 
     /// Consume this prepared proposal's exact retained tape against the
@@ -10251,8 +10245,10 @@ impl PySemanticPolicyInvocation {
     /// unselected invocations graph-connected zeros; Python never reads the
     /// selected ordinal, reconstructs selected scores, or runs a second primal.
     ///
-    /// Returns FP32 parameter, full MASK and component-baseline adjoint
-    /// capsules, in that order. This is a single-use handoff, including
+    /// Returns FP32 parameter, full MASK and component-baseline adjoints,
+    /// then their three FP64 ordinary/underflow envelopes and three FP64
+    /// selected magnitude/ordinary/underflow bounds. Only the first three
+    /// capsules are autograd cotangents. This is a single-use handoff, including
     /// uncertain native failures.
     #[pyo3(signature = (update_step, *, consumer_stream))]
     fn backward_selected(
@@ -10310,18 +10306,17 @@ impl PySemanticPolicyInvocation {
                 consumer_stream,
             )
             .map_err(xlog_err)?;
-        let [parameters, text, baselines] = gradients.into_dlpack().map_err(xlog_err)?;
         let export_owner = || policy_step.clone_ref(py);
-        let parameters = retain_export_owner(parameters, export_owner(), session.owner_thread)?;
-        let text = retain_export_owner(text, export_owner(), session.owner_thread)?;
-        let baselines = retain_export_owner(baselines, export_owner(), session.owner_thread)?;
-        Ok((
-            crate::dlpack_capsule_from_tensor(py, parameters)?,
-            crate::dlpack_capsule_from_tensor(py, text)?,
-            crate::dlpack_capsule_from_tensor(py, baselines)?,
-        )
-            .into_pyobject(py)?
-            .unbind())
+        let capsules = gradients
+            .into_dlpack()
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|tensor| {
+                let tensor = retain_export_owner(tensor, export_owner(), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
     }
 
     /// Finish the original published or refused inference use after consumers are enqueued.
@@ -14269,7 +14264,9 @@ impl PySemanticTransitionController {
 
     /// Bind the original policy producers while this genuine step is recording.
     /// The combined transient witness covers text logits, product support,
-    /// parameters and the model-issued component baselines in that exact order.
+    /// parameters, model-issued baselines, parameter/baseline errors, and
+    /// parameter/text/baseline domains in that exact order. Numerical arrays
+    /// are original CUDA FP64 views, not reconstructed metadata.
     /// This records no host publication or RNG identity and returns no invocation;
     /// only actual completed execution can expose the original result and its
     /// retained late-backward tape. ``bank`` identifies the recorded branch whose
@@ -14277,7 +14274,7 @@ impl PySemanticTransitionController {
     /// Policy producers may bind before the original continuation. The native
     /// branch joins both bindings before any transition can execute.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, step, bank, binding, model_output, text_logits, product_support, parameters, component_baselines, producer_witness, consumer_stream))]
+    #[pyo3(signature = (task_use, *, step, bank, binding, model_output, text_logits, product_support, parameters, component_baselines, parameter_errors, baseline_errors, parameter_domains, text_domains, baseline_domains, producer_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "parent binding retains complete publication and model ownership"
@@ -14294,6 +14291,11 @@ impl PySemanticTransitionController {
         product_support: Py<PyAny>,
         parameters: Py<PyAny>,
         component_baselines: Py<PyAny>,
+        parameter_errors: Py<PyAny>,
+        baseline_errors: Py<PyAny>,
+        parameter_domains: Py<PyAny>,
+        text_domains: Py<PyAny>,
+        baseline_domains: Py<PyAny>,
         producer_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
@@ -14338,6 +14340,11 @@ impl PySemanticTransitionController {
             product_support,
             parameters,
             component_baselines,
+            parameter_errors,
+            baseline_errors,
+            parameter_domains,
+            text_domains,
+            baseline_domains,
         ];
         let device = self.session.borrow(py).device_ordinal;
         let mut handoff = TensorHandoff(Vec::with_capacity(inputs.len()));
@@ -14373,7 +14380,8 @@ impl PySemanticTransitionController {
                 "prepared policy authority changed during producer handoff",
             ));
         }
-        let [text, support, parameters, component_baselines]: [_; 4] = handoff
+        let [text, support, parameters, component_baselines, parameter_errors,
+            baseline_errors, parameter_domains, text_domains, baseline_domains]: [_; 9] = handoff
             .into_native()
             .try_into()
             .unwrap_or_else(|_| unreachable!("exact policy producer roster"));
@@ -14386,6 +14394,13 @@ impl PySemanticTransitionController {
                 support,
                 parameters,
                 component_baselines,
+                [
+                    parameter_errors,
+                    baseline_errors,
+                    parameter_domains,
+                    text_domains,
+                    baseline_domains,
+                ],
                 &producer_witness.inner,
                 stream,
             )
@@ -14410,14 +14425,15 @@ impl PySemanticTransitionController {
 
     /// Snapshot one original full-MASK policy, execute all draws and the sole device
     /// publication, and retain its late tape. ``binding`` is the exact pair
-    /// returned with the packing layout. Inputs are contiguous one-dimensional
-    /// F32[32,V], Bool8[support_cells], FP32[parameter_cells] and
-    /// FP32[1,136], respectively.
+    /// returned with the packing layout. The original contiguous CUDA inputs
+    /// are F32[32,V], Bool8[support_cells], FP32[P], FP32[1,136], followed by
+    /// FP64 envelopes [P,2], [1,136,2] and domains [P,3], [32,V,3], [1,136,3].
+    /// Their common witness uses that exact order on ``consumer_stream``.
     /// ``model_output`` is the caller-authenticated original output, retained
     /// without invoking a getter; rows/selected bits come only from the already
     /// admitted continuation. Acquire of the result remains explicit.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, parent, binding, model_output, text_logits, product_support, parameters, component_baselines))]
+    #[pyo3(signature = (task_use, *, parent, binding, model_output, text_logits, product_support, parameters, component_baselines, parameter_errors, baseline_errors, parameter_domains, text_domains, baseline_domains, producer_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "replay import carries independent material and lifecycle callbacks"
@@ -14433,6 +14449,13 @@ impl PySemanticTransitionController {
         product_support: Py<PyAny>,
         parameters: Py<PyAny>,
         component_baselines: Py<PyAny>,
+        parameter_errors: Py<PyAny>,
+        baseline_errors: Py<PyAny>,
+        parameter_domains: Py<PyAny>,
+        text_domains: Py<PyAny>,
+        baseline_domains: Py<PyAny>,
+        producer_witness: &PySemanticTensorContentWitness,
+        consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<PySemanticPolicyInvocation> {
         self.session.borrow(py).require_creator()?;
         self.require_issued(&task_use.borrow(py))?;
@@ -14446,6 +14469,13 @@ impl PySemanticTransitionController {
             product_support,
             parameters,
             component_baselines,
+            parameter_errors,
+            baseline_errors,
+            parameter_domains,
+            text_domains,
+            baseline_domains,
+            producer_witness,
+            consumer_stream,
             None,
         )
     }
@@ -15100,9 +15130,11 @@ impl PySemanticTransitionController {
                     };
                     self.check_import_callback(py, &issued, &acquired, import, &expected)?;
                     let policy = object_sequence(&policy, &mut budget)?;
-                    if policy.len() != 5 {
-                        return Err(invalid("Runtime replay policy requires binding, logits, parameters, actual product support and component baselines"));
+                    if policy.len() != 11 {
+                        return Err(invalid("Runtime replay policy requires binding, text, parameters, product support, baselines, five original numerical views and their common witness"));
                     }
+                    let policy_witness =
+                        policy[10].extract::<PyRef<'_, PySemanticTensorContentWitness>>()?;
                     let invocation = self.execute_policy_in_execution(
                         py,
                         task_use.clone_ref(py),
@@ -15113,6 +15145,13 @@ impl PySemanticTransitionController {
                         policy[3].clone().unbind(),
                         policy[2].clone().unbind(),
                         policy[4].clone().unbind(),
+                        policy[5].clone().unbind(),
+                        policy[6].clone().unbind(),
+                        policy[7].clone().unbind(),
+                        policy[8].clone().unbind(),
+                        policy[9].clone().unbind(),
+                        &policy_witness,
+                        &arguments[stream_index],
                         Some(import),
                     )?;
                     // Keep the complete original invocation in existing failure
@@ -15693,11 +15732,21 @@ impl PySemanticTransitionController {
         product_support: Py<PyAny>,
         parameters: Py<PyAny>,
         component_baselines: Py<PyAny>,
+        parameter_errors: Py<PyAny>,
+        baseline_errors: Py<PyAny>,
+        parameter_domains: Py<PyAny>,
+        text_domains: Py<PyAny>,
+        baseline_domains: Py<PyAny>,
+        producer_witness: &PySemanticTensorContentWitness,
+        consumer_stream: &Bound<'_, PyAny>,
         import: Option<&ColdImportGuard<'_>>,
     ) -> PyResult<PySemanticPolicyInvocation> {
         let issued = task_use.borrow(py);
         let acquired = parent.borrow(py);
         let mut budget = 16 * 1024 * 1024;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let producer_stream = i64::try_from(stream)
+            .map_err(|_| invalid("consumer stream exceeds the DLPack signed stream range"))?;
         let fields = object_sequence(binding, &mut budget)?;
         if fields.len() != 2 {
             return Err(invalid(
@@ -15730,12 +15779,22 @@ impl PySemanticTransitionController {
             product_support,
             parameters,
             component_baselines,
+            parameter_errors,
+            baseline_errors,
+            parameter_domains,
+            text_domains,
+            baseline_domains,
         ];
         let device = self.session.borrow(py).device_ordinal;
         let check = || {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
             let state = self.execution_state(py, &issued, &acquired, &owner, import)?;
+            self.require_continuation_witness(
+                py,
+                ContentStepRef::Published(&acquired),
+                producer_witness,
+            )?;
             if Self::execution_binding(&state, import.is_some())? != expected
                 || owner
                     .continuation_rng(&*acquired.lease()?)
@@ -15753,7 +15812,7 @@ impl PySemanticTransitionController {
         for input in &inputs {
             handoff.0.push(crate::dlpack_from_py_for_stream_guarded(
                 input.bind(py),
-                1,
+                producer_stream,
                 &check,
             )?);
         }
@@ -15768,12 +15827,35 @@ impl PySemanticTransitionController {
         {
             return Err(invalid("policy invocation changed during producer handoff"));
         }
-        let [text, support, parameters, component_baselines]: [_; 4] = handoff
+        self.require_continuation_witness(
+            py,
+            ContentStepRef::Published(&acquired),
+            producer_witness,
+        )?;
+        let [text, support, parameters, component_baselines, parameter_errors,
+            baseline_errors, parameter_domains, text_domains, baseline_domains]: [_; 9] = handoff
             .into_native()
             .try_into()
             .unwrap_or_else(|_| unreachable!("exact policy producer roster"));
         owner
-            .bind_policy_dlpack(binding, rng, text, support, parameters, component_baselines)
+            .bind_policy_dlpack(
+                &*acquired.lease()?,
+                binding,
+                rng,
+                text,
+                support,
+                parameters,
+                component_baselines,
+                [
+                    parameter_errors,
+                    baseline_errors,
+                    parameter_domains,
+                    text_domains,
+                    baseline_domains,
+                ],
+                &producer_witness.inner,
+                stream,
+            )
             .map_err(xlog_err)?;
         owner.capture().map_err(xlog_err)?;
         owner.launch().map_err(xlog_err)?;

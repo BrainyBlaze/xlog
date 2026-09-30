@@ -11751,6 +11751,21 @@ struct PolicyDescriptor {
     selected_score_vjps: u64,
     component_baselines: u64,
     fields: [PolicyField; 18],
+    numerical: PolicyNumericalDescriptor,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PolicyNumericalDescriptor {
+    parameter_errors: u64,
+    baseline_errors: u64,
+    parameter_domains: u64,
+    text_domains: u64,
+    baseline_domains: u64,
+    hidden_errors: u64,
+    score_errors: u64,
+    recurrent_errors: u64,
+    parameter_cells: u64,
 }
 
 #[repr(C)]
@@ -11776,6 +11791,21 @@ struct PolicyBackward {
     mode: u64,
     member_ordinal: u64,
     critic_term: u64,
+    numerical: PolicyAdjointNumericalDescriptor,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PolicyAdjointNumericalDescriptor {
+    parameter_errors: u64,
+    text_errors: u64,
+    baseline_errors: u64,
+    parameter_domains: u64,
+    text_domains: u64,
+    baseline_domains: u64,
+    recurrent_errors: u64,
+    score_errors: u64,
+    coefficient_errors: u64,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -11847,6 +11877,8 @@ pub struct SemanticPolicyGradients {
     pub layout: SemanticPolicyLayout,
     pub parameters: TrackedCudaSlice<f32>,
     pub text_logits: TrackedCudaSlice<f32>,
+    pub component_baselines: TrackedCudaSlice<f32>,
+    numerical: Arc<PolicyAdjointNumerical>,
     provider: Arc<CudaKernelProvider>,
     step_aliases: Arc<()>,
     publication: Arc<PublicationStorage>,
@@ -11857,38 +11889,28 @@ pub struct SemanticPolicyGradients {
 
 #[cfg(feature = "semantic-policy")]
 impl SemanticPolicyGradients {
-    /// Export the original parameter and full MASK adjoints, in that order.
+    /// Export parameter, full MASK and baseline adjoints, then their three
+    /// FP64 error envelopes and three selected magnitude/error bounds.
+    /// Baseline adjoints are exact zeros for externally supplied score roots.
     /// Backward already ordered the caller's explicit consumer stream after the
     /// device error guard. Final step release joins that consumer's last use.
-    pub fn into_dlpack(self) -> Result<[DlpackManagedTensor; 2], SemanticTransitionError> {
-        let layouts = policy_producer_layouts(self.support_cells, self.layout.parameter_cells)?;
+    pub fn into_dlpack(self) -> Result<[DlpackManagedTensor; 9], SemanticTransitionError> {
         let retained_owner: Arc<dyn Send + Sync> = self.vjp_workspace;
-        let export = |values: TrackedCudaSlice<f32>, layout: SemanticTensorLayout| {
-            let rank = layout.rank as usize;
-            let shape = layout.dimensions[..rank]
-                .iter()
-                .map(|&value| value as i64)
-                .collect();
-            let strides = layout.strides_bytes[..rank]
-                .iter()
-                .map(|&value| (value / layout.element_bytes) as i64)
-                .collect();
-            export_owned_allocation(
-                values.into_bytes().view(),
-                shape,
-                strides,
-                (2, 32),
-                self.provider.device().ordinal() as i32,
-                Arc::clone(&self.step_aliases),
-                Arc::clone(&self.publication),
-                Some(Arc::clone(&self.continuation)),
-                Some(Arc::clone(&retained_owner)),
-            )
-        };
-        Ok([
-            export(self.parameters, layouts[2]),
-            export(self.text_logits, layouts[0]),
-        ])
+        export_policy_gradients(
+            [
+                self.parameters.into_bytes().view(),
+                self.text_logits.into_bytes().view(),
+                self.component_baselines.into_bytes().view(),
+            ],
+            &self.numerical,
+            self.support_cells,
+            self.layout.parameter_cells,
+            self.provider.device().ordinal() as i32,
+            self.step_aliases,
+            self.publication,
+            self.continuation,
+            retained_owner,
+        )
     }
 }
 
@@ -11904,6 +11926,7 @@ pub struct SemanticSelectedPolicyGradients {
     pub parameters: TrackedCudaSlice<f32>,
     pub text_logits: TrackedCudaSlice<f32>,
     pub component_baselines: TrackedCudaSlice<f32>,
+    numerical: Arc<PolicyAdjointNumerical>,
     provider: Arc<CudaKernelProvider>,
     step_aliases: Arc<()>,
     publication: Arc<PublicationStorage>,
@@ -11959,36 +11982,23 @@ impl SemanticPreparedGroupCritic {
 
 #[cfg(feature = "semantic-policy")]
 impl SemanticPreparedPolicyGradients {
-    pub fn into_dlpack(self) -> Result<[DlpackManagedTensor; 3], SemanticTransitionError> {
-        let layouts = policy_producer_layouts(self.support_cells, self.layout.parameter_cells)?;
-        let retained_owner: Arc<dyn Send + Sync> = self.owner;
-        let export = |values: DeviceMemoryView<f32>, layout: SemanticTensorLayout| {
-            let rank = layout.rank as usize;
-            let shape = layout.dimensions[..rank]
-                .iter()
-                .map(|&value| value as i64)
-                .collect();
-            let strides = layout.strides_bytes[..rank]
-                .iter()
-                .map(|&value| (value / layout.element_bytes) as i64)
-                .collect();
-            export_owned_allocation(
-                unsafe { values.cast::<u8>() }.expect("F32 temporal adjoint byte view"),
-                shape,
-                strides,
-                (2, 32),
-                self.provider.device().ordinal() as i32,
-                Arc::clone(&self.step_aliases),
-                Arc::clone(&self.publication),
-                Some(Arc::clone(&self.continuation)),
-                Some(Arc::clone(&retained_owner)),
-            )
-        };
-        Ok([
-            export(self.parameters, layouts[2]),
-            export(self.text_logits, layouts[0]),
-            export(self.component_baselines, layouts[3]),
-        ])
+    pub fn into_dlpack(self) -> Result<[DlpackManagedTensor; 9], SemanticTransitionError> {
+        let retained_owner: Arc<dyn Send + Sync> = self.owner.clone();
+        let values = [self.parameters, self.text_logits, self.component_baselines].map(|view| {
+            // SAFETY: retained original FP32 adjoints have their exact byte span.
+            unsafe { view.cast::<u8>() }.expect("FP32 policy adjoint byte view")
+        });
+        export_policy_gradients(
+            values,
+            &self.owner.numerical,
+            self.support_cells,
+            self.layout.parameter_cells,
+            self.provider.device().ordinal() as i32,
+            self.step_aliases,
+            self.publication,
+            self.continuation,
+            retained_owner,
+        )
     }
 }
 
@@ -11997,37 +12007,90 @@ impl SemanticSelectedPolicyGradients {
     /// Export parameter, full MASK and component-baseline adjoints, in that
     /// order. The baseline result is the direct critic root for the retained
     /// original model graph; actor and cost share the exact policy tape.
-    pub fn into_dlpack(self) -> Result<[DlpackManagedTensor; 3], SemanticTransitionError> {
-        let layouts = policy_producer_layouts(self.support_cells, self.layout.parameter_cells)?;
+    pub fn into_dlpack(self) -> Result<[DlpackManagedTensor; 9], SemanticTransitionError> {
         let retained_owner: Arc<dyn Send + Sync> = self.vjp_workspace;
-        let export = |values: TrackedCudaSlice<f32>, layout: SemanticTensorLayout| {
-            let rank = layout.rank as usize;
-            let shape = layout.dimensions[..rank]
-                .iter()
-                .map(|&value| value as i64)
-                .collect();
-            let strides = layout.strides_bytes[..rank]
-                .iter()
-                .map(|&value| (value / layout.element_bytes) as i64)
-                .collect();
-            export_owned_allocation(
-                values.into_bytes().view(),
-                shape,
-                strides,
-                (2, 32),
-                self.provider.device().ordinal() as i32,
-                Arc::clone(&self.step_aliases),
-                Arc::clone(&self.publication),
-                Some(Arc::clone(&self.continuation)),
-                Some(Arc::clone(&retained_owner)),
-            )
-        };
-        Ok([
-            export(self.parameters, layouts[2]),
-            export(self.text_logits, layouts[0]),
-            export(self.component_baselines, layouts[3]),
-        ])
+        export_policy_gradients(
+            [
+                self.parameters.into_bytes().view(),
+                self.text_logits.into_bytes().view(),
+                self.component_baselines.into_bytes().view(),
+            ],
+            &self.numerical,
+            self.support_cells,
+            self.layout.parameter_cells,
+            self.provider.device().ordinal() as i32,
+            self.step_aliases,
+            self.publication,
+            self.continuation,
+            retained_owner,
+        )
     }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "all exports retain one original native tape and its final-use owners"
+)]
+fn export_policy_gradients(
+    values: [DeviceMemoryView<u8>; 3],
+    numerical: &PolicyAdjointNumerical,
+    support_cells: usize,
+    parameter_cells: usize,
+    device: i32,
+    step_aliases: Arc<()>,
+    publication: Arc<PublicationStorage>,
+    continuation: Arc<TextBindingStorage>,
+    owner: Arc<dyn Send + Sync>,
+) -> Result<[DlpackManagedTensor; 9], SemanticTransitionError> {
+    let original = policy_numerical_producer_layouts(support_cells, parameter_cells)?;
+    let mut text_error = original[7];
+    text_error.dimensions[2] = 2;
+    text_error.strides_bytes = [0; 4];
+    let text_error = canonical_tensor_layout(text_error)?;
+    let layouts = [
+        original[2],
+        original[0],
+        original[3],
+        original[4],
+        text_error,
+        original[5],
+        original[6],
+        original[7],
+        original[8],
+    ];
+    let numerical_views = numerical.roots.iter().map(|buffer| {
+        // SAFETY: numerical roots are retained aligned FP64 storage.
+        unsafe { buffer.view().cast::<u8>() }.expect("FP64 policy numerical byte view")
+    });
+    let tensors = values
+        .into_iter()
+        .chain(numerical_views)
+        .zip(layouts)
+        .map(|(view, layout)| {
+            let rank = layout.rank as usize;
+            export_owned_allocation(
+                view,
+                layout.dimensions[..rank]
+                    .iter()
+                    .map(|&n| n as i64)
+                    .collect(),
+                layout.strides_bytes[..rank]
+                    .iter()
+                    .map(|&n| (n / layout.element_bytes) as i64)
+                    .collect(),
+                (2, (layout.element_bytes * 8) as u8),
+                device,
+                Arc::clone(&step_aliases),
+                Arc::clone(&publication),
+                Some(Arc::clone(&continuation)),
+                Some(Arc::clone(&owner)),
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(tensors
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("nine original policy gradient exports")))
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -12056,6 +12119,85 @@ fn policy_producer_layouts(
 }
 
 #[cfg(feature = "semantic-policy")]
+fn policy_numerical_producer_layouts(
+    support_cells: usize,
+    parameter_cells: usize,
+) -> Result<[SemanticTensorLayout; 9], SemanticTransitionError> {
+    let values = policy_producer_layouts(support_cells, parameter_cells)?;
+    let layout = |index, rank, dimensions| {
+        canonical_tensor_layout(SemanticTensorLayout {
+            role: 0,
+            index,
+            scalar_type: 9,
+            element_bytes: 8,
+            rank,
+            dimensions,
+            logical_axis: u64::MAX,
+            strides_bytes: [0; 4],
+        })
+    };
+    Ok([
+        values[0],
+        values[1],
+        values[2],
+        values[3],
+        layout(4, 2, [parameter_cells as u64, 2, 0, 0])?,
+        layout(5, 3, [1, COMPONENT_COUNT as u64, 2, 0])?,
+        layout(6, 2, [parameter_cells as u64, 3, 0, 0])?,
+        layout(7, 3, [32, TEXT_CARDINALITY as u64, 3, 0])?,
+        layout(8, 3, [1, COMPONENT_COUNT as u64, 3, 0])?,
+    ])
+}
+
+#[cfg(feature = "semantic-policy")]
+struct PolicyNumericalBuffers {
+    parameter_errors: TrackedCudaSlice<f64>,
+    baseline_errors: TrackedCudaSlice<f64>,
+    parameter_domains: TrackedCudaSlice<f64>,
+    text_domains: TrackedCudaSlice<f64>,
+    baseline_domains: TrackedCudaSlice<f64>,
+    hidden_errors: TrackedCudaSlice<f64>,
+    score_errors: TrackedCudaSlice<f64>,
+    recurrent_errors: TrackedCudaSlice<f64>,
+}
+
+#[cfg(feature = "semantic-policy")]
+impl PolicyNumericalBuffers {
+    fn buffers(&self) -> [&TrackedCudaSlice<f64>; 8] {
+        [
+            &self.parameter_errors,
+            &self.baseline_errors,
+            &self.parameter_domains,
+            &self.text_domains,
+            &self.baseline_domains,
+            &self.hidden_errors,
+            &self.score_errors,
+            &self.recurrent_errors,
+        ]
+    }
+
+    fn record(&self, recorder: &mut LaunchRecorder) {
+        for buffer in self.buffers() {
+            recorder.read_write(buffer);
+        }
+    }
+
+    fn descriptor(&self, parameter_cells: usize) -> PolicyNumericalDescriptor {
+        PolicyNumericalDescriptor {
+            parameter_errors: self.parameter_errors.device_ptr_value(),
+            baseline_errors: self.baseline_errors.device_ptr_value(),
+            parameter_domains: self.parameter_domains.device_ptr_value(),
+            text_domains: self.text_domains.device_ptr_value(),
+            baseline_domains: self.baseline_domains.device_ptr_value(),
+            hidden_errors: self.hidden_errors.device_ptr_value(),
+            score_errors: self.score_errors.device_ptr_value(),
+            recurrent_errors: self.recurrent_errors.device_ptr_value(),
+            parameter_cells: parameter_cells as u64,
+        }
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
 struct PolicyBuffers {
     layout: SemanticPolicyLayout,
     parameters: TrackedCudaSlice<f32>,
@@ -12069,6 +12211,7 @@ struct PolicyBuffers {
     recurrent: TrackedCudaSlice<f32>,
     text_logits: TrackedCudaSlice<f32>,
     component_baselines: TrackedCudaSlice<f32>,
+    numerical: PolicyNumericalBuffers,
     adjoints: Option<PolicyAdjointBuffers>,
     temporal_adjoints: Arc<PolicyAdjointBuffers>,
 }
@@ -12084,6 +12227,47 @@ struct PolicyAdjointBuffers {
     scores: TrackedCudaSlice<f32>,
     coefficients: TrackedCudaSlice<f64>,
     status: TrackedCudaSlice<u64>,
+    numerical: Arc<PolicyAdjointNumerical>,
+}
+
+#[cfg(feature = "semantic-policy")]
+struct PolicyAdjointNumerical {
+    roots: [TrackedCudaSlice<f64>; 6],
+    recurrent_errors: TrackedCudaSlice<f64>,
+    score_errors: TrackedCudaSlice<f64>,
+    coefficient_errors: TrackedCudaSlice<f64>,
+}
+
+#[cfg(feature = "semantic-policy")]
+impl PolicyAdjointNumerical {
+    fn buffers(&self) -> [&TrackedCudaSlice<f64>; 9] {
+        [
+            &self.roots[0],
+            &self.roots[1],
+            &self.roots[2],
+            &self.roots[3],
+            &self.roots[4],
+            &self.roots[5],
+            &self.recurrent_errors,
+            &self.score_errors,
+            &self.coefficient_errors,
+        ]
+    }
+
+    fn descriptor(&self) -> PolicyAdjointNumericalDescriptor {
+        let pointers = self.buffers().map(TrackedCudaSlice::device_ptr_value);
+        PolicyAdjointNumericalDescriptor {
+            parameter_errors: pointers[0],
+            text_errors: pointers[1],
+            baseline_errors: pointers[2],
+            parameter_domains: pointers[3],
+            text_domains: pointers[4],
+            baseline_domains: pointers[5],
+            recurrent_errors: pointers[6],
+            score_errors: pointers[7],
+            coefficient_errors: pointers[8],
+        }
+    }
 }
 
 /// Every allocation referenced by a recorded policy VJP but not exported as an
@@ -12097,12 +12281,14 @@ struct PolicyVjpWorkspace {
     coefficients: TrackedCudaSlice<f64>,
     _status: TrackedCudaSlice<u64>,
     score_cotangents: Option<DeviceMemoryView<f64>>,
+    _numerical: Arc<PolicyAdjointNumerical>,
 }
 
 #[cfg(feature = "semantic-policy")]
 struct PolicyStorage {
     buffers: PolicyBuffers,
     text_binding: Arc<TextBindingStorage>,
+    _policy_witness: Option<SemanticTensorContentWitness>,
     replacement: Option<PolicyReplacement>,
     tape_live: bool,
     temporal_vjp_recorded: BTreeSet<(u64, usize)>,
@@ -12122,13 +12308,14 @@ struct PolicyProducerViews {
     product_support: DeviceMemoryView<u8>,
     parameters: DeviceMemoryView<f32>,
     component_baselines: DeviceMemoryView<f32>,
+    numerical: [DeviceMemoryView<f64>; 5],
 }
 
 #[cfg(feature = "semantic-policy")]
 fn policy_source_views(
     originals: &[PreparedSemanticTensor],
 ) -> Result<PolicyProducerViews, SemanticTransitionError> {
-    if originals.len() != 4 {
+    if originals.len() != 9 {
         return Err(publication_input_error(
             "policy requires its complete original producer roster",
         ));
@@ -12153,11 +12340,21 @@ fn policy_source_views(
     let component_baselines = unsafe { source(3)?.cast::<f32>() }.ok_or_else(|| {
         publication_input_error("original component baselines are not aligned F32 storage")
     })?;
+    let mut numerical = Vec::with_capacity(5);
+    for index in 4..9 {
+        // SAFETY: the original F64 layout/witness proves alignment and extent.
+        numerical.push(unsafe { source(index)?.cast::<f64>() }.ok_or_else(|| {
+            publication_input_error("original policy numerical view is not aligned F64 storage")
+        })?);
+    }
     Ok(PolicyProducerViews {
         text_logits,
         product_support: source(1)?,
         parameters,
         component_baselines,
+        numerical: numerical
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("five numerical producers")),
     })
 }
 
@@ -12178,6 +12375,16 @@ fn enqueue_policy_snapshots(
             "original policy producers differ from their fixed native capacities",
         ));
     }
+    let numerical_destinations = &buffers.numerical.buffers()[..5];
+    if numerical_destinations
+        .iter()
+        .zip(&original.numerical)
+        .any(|(destination, source)| destination.len() != source.len())
+    {
+        return Err(publication_input_error(
+            "original numerical policy capacities differ",
+        ));
+    }
     let mut recorder = domain.new_strict_recorder();
     recorder.read(&original.text_logits);
     recorder.read(&original.product_support);
@@ -12187,6 +12394,10 @@ fn enqueue_policy_snapshots(
     recorder.write(support);
     recorder.write(&buffers.parameters);
     recorder.write(&buffers.component_baselines);
+    for (destination, source) in numerical_destinations.iter().zip(&original.numerical) {
+        recorder.read(source);
+        recorder.write(*destination);
+    }
     enqueue_recorded(domain, poisoned, recorder, |enqueue| {
         for (destination, source, bytes) in [
             (
@@ -12214,6 +12425,19 @@ fn enqueue_policy_snapshots(
             // distinct retained destination; this performs only device copies.
             unsafe {
                 sys::cuMemcpyDtoDAsync_v2(destination, source, bytes, enqueue.stream().cu_stream())
+            }
+            .result()
+            .map_err(|error| XlogError::Kernel(error.to_string()))?;
+        }
+        for (destination, source) in numerical_destinations.iter().zip(&original.numerical) {
+            // SAFETY: matching F64 original/retained extents are disjoint.
+            unsafe {
+                sys::cuMemcpyDtoDAsync_v2(
+                    destination.device_ptr_value(),
+                    *source.device_ptr(),
+                    source.len() * 8,
+                    enqueue.stream().cu_stream(),
+                )
             }
             .result()
             .map_err(|error| XlogError::Kernel(error.to_string()))?;
@@ -12320,9 +12544,9 @@ const _: () = assert!(size_of::<SemanticTaskFacts>() == 88);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3328);
 const _: () = assert!(size_of::<DeviceState>() == 7568);
 const _: () = assert!(size_of::<PolicyField>() == 32);
-const _: () = assert!(size_of::<PolicyDescriptor>() == 680);
-const _: () = assert!(size_of::<PolicyBackward>() == 160);
-const _: () = assert!(size_of::<Descriptor>() == 1040);
+const _: () = assert!(size_of::<PolicyDescriptor>() == 752);
+const _: () = assert!(size_of::<PolicyBackward>() == 232);
+const _: () = assert!(size_of::<Descriptor>() == 1184);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -13146,6 +13370,38 @@ fn policy_buffer_bytes(
     let adjoint_cells = adjoint_cells
         .checked_mul(2)
         .ok_or(SemanticTransitionError::GenerationExhausted)?;
+    let numerical_cells = [
+        (layout.parameter_cells, 5usize),
+        (COMPONENT_COUNT, 5),
+        (32 * TEXT_CARDINALITY, 3),
+        (128, 2),
+        (layout.score_cells(), 2),
+        (layout.recurrent_cells(), 2),
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, (cells, width)| {
+        cells
+            .checked_mul(width)
+            .and_then(|cells| total.checked_add(cells))
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    })?;
+    let adjoint_numerical_cells = differentiable_cells
+        .checked_add(COMPONENT_COUNT)
+        .and_then(|cells| cells.checked_mul(2))
+        .and_then(|cells| {
+            layout
+                .parameter_cells
+                .checked_add(32 * TEXT_CARDINALITY)
+                .and_then(|roots| roots.checked_add(COMPONENT_COUNT))
+                .and_then(|roots| roots.checked_mul(3))
+                .and_then(|roots| cells.checked_add(roots))
+        })
+        .and_then(|cells| cells.checked_add(2 * COMPONENT_COUNT))
+        .and_then(|cells| cells.checked_mul(2))
+        .ok_or(SemanticTransitionError::GenerationExhausted)?;
+    let numerical_cells = numerical_cells
+        .checked_add(adjoint_numerical_cells)
+        .ok_or(SemanticTransitionError::GenerationExhausted)?;
     primal_cells
         // Each differentiable primal bank has a dedicated adjoint bank. Only the
         // forward hidden vector is shared scratch. A second retained adjoint bank
@@ -13157,6 +13413,11 @@ fn policy_buffer_bytes(
         .and_then(|cells| cells.checked_mul(size_of::<f32>()))
         .and_then(|bytes| bytes.checked_add(2 * COMPONENT_COUNT * size_of::<f64>()))
         .and_then(|bytes| bytes.checked_add(2 * size_of::<u64>()))
+        .and_then(|bytes| {
+            numerical_cells
+                .checked_mul(8)
+                .and_then(|extra| bytes.checked_add(extra))
+        })
         .and_then(|bytes| bytes.checked_add(COMPONENT_COUNT * size_of::<SemanticPolicyPwlCell>()))
         .and_then(|bytes| {
             bytes.checked_add(COMPONENT_COUNT * size_of::<SemanticPolicySelectedScoreVjp>())
@@ -19024,6 +19285,7 @@ impl SemanticTransitionSession {
                             .ok_or(SemanticTransitionError::ObservationMismatch)?,
                     );
                     if let Some(policy) = &branch.policy {
+                        policy.numerical.record(&mut recorder);
                         for buffer in [
                             &policy.parameters,
                             &policy.hidden,
@@ -24594,7 +24856,14 @@ impl SemanticTransitionSession {
     /// Parameters use `policy_layout()`. Source allocations must be tracked in
     /// this execution domain; the recorder joins their producer streams before
     /// copying. No caller-owned parameter buffer is used by subsequent replay.
+    /// The five original FP64 arrays, in order, are parameter/baseline
+    /// ordinary-underflow envelopes followed by parameter/text/baseline
+    /// magnitude-ordinary-underflow domains. They share the same snapshot.
     #[cfg(feature = "semantic-policy")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all nine original policy operands share one snapshot"
+    )]
     pub fn bind_policy(
         &mut self,
         binding: SemanticCatalogueBinding,
@@ -24603,6 +24872,7 @@ impl SemanticTransitionSession {
         product_support: &TrackedCudaSlice<u8>,
         parameters: &TrackedCudaSlice<f32>,
         component_baselines: &TrackedCudaSlice<f32>,
+        numerical: [&TrackedCudaSlice<f64>; 5],
     ) -> Result<(), SemanticTransitionError> {
         self.bind_policy_views(
             binding,
@@ -24611,6 +24881,8 @@ impl SemanticTransitionSession {
             product_support.view(),
             parameters.view(),
             component_baselines.view(),
+            numerical.map(TrackedCudaSlice::view),
+            None,
         )
     }
 
@@ -24619,40 +24891,58 @@ impl SemanticTransitionSession {
     /// All tensors are contiguous CUDA storage on this session's device:
     /// F32 `[32, text_cardinality()]`, Bool8 `[policy_support_layout().1]`,
     /// F32 `[policy_layout().parameter_cells]`, and FP32 `[1, 136]` component
-    /// baselines. Both lanes share the original
+    /// baselines, followed by FP64 envelopes `[P,2]`, `[1,136,2]` and FP64
+    /// domains `[P,3]`, `[32,V,3]`, `[1,136,3]`, where P is the parameter
+    /// extent and V is the text vocabulary. One original content witness
+    /// authenticates all nine operands in that order. Both lanes share the original
     /// mapped MASK rows; unused capacity is not a categorical factor.
     /// Support contains only active TEXT and the structural rows in roster order;
     /// inactive TEXT has no address. The roster itself still has 136 factors.
     ///
-    /// The canonical importer completes the producer handoff on the provider's
-    /// legacy-default stream before this session's recorded device-to-device
-    /// snapshot. It uploads only bounded row-count metadata, not tensor values.
+    /// The canonical importer joins the explicit original consumer stream and
+    /// checks the acquired parent's witness before the recorded device-to-device
+    /// snapshot. No tensor value is read or reconstructed on the host.
     /// The caller must meet `DlpackManagedTensor::from_raw`'s producer-readiness
     /// and external-access contract; these handles confer no task/use authority.
     /// Original model/autograd owners remain the caller's separate responsibility.
     #[cfg(feature = "semantic-policy")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the complete original witness and operand owners are explicit"
+    )]
     pub fn bind_policy_dlpack(
         &mut self,
+        lease: &SemanticPublishedLease,
         binding: SemanticCatalogueBinding,
         rng: SemanticRngBinding,
         text_logits: DlpackManagedTensor,
         product_support: DlpackManagedTensor,
         parameters: DlpackManagedTensor,
         component_baselines: DlpackManagedTensor,
+        numerical: [DlpackManagedTensor; 5],
+        witness: &SemanticTensorContentWitness,
+        consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
         // Own all actual producers before the first fallible binding/shape check.
         // A failed handoff retains the entire set through canonical retirement.
         let mut handoff = RetainedTensorAdmission {
-            inputs: Some(vec![
-                text_logits,
-                product_support,
-                parameters,
-                component_baselines,
-            ]),
+            inputs: Some(
+                vec![
+                    text_logits,
+                    product_support,
+                    parameters,
+                    component_baselines,
+                ]
+                .into_iter()
+                .chain(numerical)
+                .collect(),
+            ),
             stream: Arc::clone(self.provider.device().inner().stream()),
             ready: false,
         };
         self.ensure_rebindable()?;
+        self.checked_reader(lease)?;
+        self.checked_content_witness(lease, witness)?;
         if binding != self.binding() {
             return Err(SemanticTransitionError::CatalogueMismatch);
         }
@@ -24662,7 +24952,8 @@ impl SemanticTransitionSession {
             });
         }
         let layout = self.policy_layout()?;
-        let layouts = policy_producer_layouts(self.codebooks.input_cells, layout.parameter_cells)?;
+        let layouts =
+            policy_numerical_producer_layouts(self.codebooks.input_cells, layout.parameter_cells)?;
         // Preserve the actual rank-two MASK matrix and each producer owner.
         // The typed importer validates original metadata; no column adapter,
         // compacted rows or replacement managed tensor is manufactured.
@@ -24680,45 +24971,18 @@ impl SemanticTransitionSession {
                 native_allocation: None,
             })
             .collect();
-        let views = prepare_semantic_tensors(&self.provider, inputs)?
-            .into_iter()
-            .map(|input| {
-                input
-                    .source
-                    .ok_or_else(|| publication_input_error("policy producer storage is empty"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let [text_logits, product_support, parameters, component_baselines]: [_; 4] = views
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("exact policy producer roster"));
-        // SAFETY: the original typed metadata establishes F32 representation,
-        // alignment and exact extents. Casts retain the foreign allocation.
-        let text_logits = unsafe { text_logits.cast::<f32>() }.ok_or_else(|| {
-            SemanticTransitionError::InvalidInput {
-                detail: "policy text DLPack span is not aligned F32 storage".into(),
-            }
-        })?;
-        // SAFETY: the same exact F32 admission holds for the parameter column.
-        let parameters = unsafe { parameters.cast::<f32>() }.ok_or_else(|| {
-            SemanticTransitionError::InvalidInput {
-                detail: "policy parameter DLPack span is not aligned F32 storage".into(),
-            }
-        })?;
-        // SAFETY: the fourth original producer has exact contiguous
-        // FP32[1, COMPONENT_COUNT] metadata from policy_producer_layouts.
-        let component_baselines =
-            unsafe { component_baselines.cast::<f32>() }.ok_or_else(|| {
-                SemanticTransitionError::InvalidInput {
-                    detail: "component baseline DLPack span is not aligned F32 storage".into(),
-                }
-            })?;
+        self.verify_tensor_content(lease, witness, inputs, consumer_stream)?;
+        let original =
+            policy_source_views(&self.steps[&lease.token].content[witness.index].tensors)?;
         self.bind_policy_views(
             binding,
             rng,
-            text_logits,
-            product_support,
-            parameters,
-            component_baselines,
+            original.text_logits,
+            original.product_support,
+            original.parameters,
+            original.component_baselines,
+            original.numerical,
+            Some(witness.clone()),
         )
     }
 
@@ -24747,7 +25011,36 @@ impl SemanticTransitionSession {
             .alloc::<SemanticPolicySelectedScoreVjp>(COMPONENT_COUNT)
             .map_err(|error| runtime_error("retained selected-score VJP allocation", error))?;
         let mut allocate_adjoints = || {
+            let mut allocate_numerical = |cells: usize| {
+                reservation
+                    .alloc::<f64>(cells)
+                    .map_err(|error| runtime_error("policy adjoint numerical allocation", error))
+            };
+            let numerical = Arc::new(PolicyAdjointNumerical {
+                roots: [
+                    allocate_numerical(
+                        layout
+                            .parameter_cells
+                            .checked_mul(2)
+                            .ok_or(SemanticTransitionError::GenerationExhausted)?,
+                    )?,
+                    allocate_numerical(text_cells * 2)?,
+                    allocate_numerical(COMPONENT_COUNT * 2)?,
+                    allocate_numerical(
+                        layout
+                            .parameter_cells
+                            .checked_mul(3)
+                            .ok_or(SemanticTransitionError::GenerationExhausted)?,
+                    )?,
+                    allocate_numerical(text_cells * 3)?,
+                    allocate_numerical(COMPONENT_COUNT * 3)?,
+                ],
+                recurrent_errors: allocate_numerical(layout.recurrent_cells() * 2)?,
+                score_errors: allocate_numerical(layout.score_cells() * 2)?,
+                coefficient_errors: allocate_numerical(COMPONENT_COUNT * 2)?,
+            });
             Ok::<_, SemanticTransitionError>(PolicyAdjointBuffers {
+                numerical,
                 parameters: reservation
                     .alloc::<f32>(layout.parameter_cells)
                     .map_err(|error| runtime_error("parameter adjoint allocation", error))?,
@@ -24773,7 +25066,33 @@ impl SemanticTransitionSession {
         };
         let adjoints = allocate_adjoints()?;
         let temporal_adjoints = Arc::new(allocate_adjoints()?);
+        let mut allocate_numerical = |cells: usize| {
+            reservation
+                .alloc::<f64>(cells)
+                .map_err(|error| runtime_error("policy numerical allocation", error))
+        };
+        let numerical = PolicyNumericalBuffers {
+            parameter_errors: allocate_numerical(
+                layout
+                    .parameter_cells
+                    .checked_mul(2)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?,
+            )?,
+            baseline_errors: allocate_numerical(COMPONENT_COUNT * 2)?,
+            parameter_domains: allocate_numerical(
+                layout
+                    .parameter_cells
+                    .checked_mul(3)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?,
+            )?,
+            text_domains: allocate_numerical(text_cells * 3)?,
+            baseline_domains: allocate_numerical(COMPONENT_COUNT * 3)?,
+            hidden_errors: allocate_numerical(128 * 2)?,
+            score_errors: allocate_numerical(layout.score_cells() * 2)?,
+            recurrent_errors: allocate_numerical(layout.recurrent_cells() * 2)?,
+        };
         Ok(PolicyBuffers {
+            numerical,
             parameters: reservation
                 .alloc::<f32>(layout.parameter_cells)
                 .map_err(|error| runtime_error("policy parameter allocation", error))?,
@@ -24844,6 +25163,7 @@ impl SemanticTransitionSession {
         product_support: DlpackManagedTensor,
         parameters: DlpackManagedTensor,
         component_baselines: DlpackManagedTensor,
+        numerical: [DlpackManagedTensor; 5],
         witness: &SemanticTensorContentWitness,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
@@ -24861,7 +25181,7 @@ impl SemanticTransitionSession {
         if binding != self.binding() {
             return Err(SemanticTransitionError::CatalogueMismatch);
         }
-        let layouts = policy_producer_layouts(
+        let layouts = policy_numerical_producer_layouts(
             self.codebooks.input_cells,
             self.policy_layout()?.parameter_cells,
         )?;
@@ -24872,6 +25192,7 @@ impl SemanticTransitionSession {
             component_baselines,
         ]
         .into_iter()
+        .chain(numerical)
         .zip(layouts)
         .map(|(tensor, layout)| SemanticTensorInput {
             layout,
@@ -24941,6 +25262,7 @@ impl SemanticTransitionSession {
         branch.policy = Some(PolicyStorage {
             buffers,
             text_binding,
+            _policy_witness: branch.policy_witness.clone(),
             replacement: None,
             tape_live: false,
             temporal_vjp_recorded: BTreeSet::new(),
@@ -25226,6 +25548,10 @@ impl SemanticTransitionSession {
     }
 
     #[cfg(feature = "semantic-policy")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one original policy snapshot carries all values and numerical owners"
+    )]
     fn bind_policy_views(
         &mut self,
         binding: SemanticCatalogueBinding,
@@ -25234,6 +25560,8 @@ impl SemanticTransitionSession {
         product_support: DeviceMemoryView<u8>,
         parameters: DeviceMemoryView<f32>,
         component_baselines: DeviceMemoryView<f32>,
+        numerical: [DeviceMemoryView<f64>; 5],
+        policy_witness: Option<SemanticTensorContentWitness>,
     ) -> Result<(), SemanticTransitionError> {
         self.ensure_rebindable()?;
         if binding != self.binding() {
@@ -25279,6 +25607,7 @@ impl SemanticTransitionSession {
             });
         }
         let policy = PolicyStorage {
+            _policy_witness: policy_witness,
             // Reserve the next working banks before the proposal may publish.
             // Successful observation moves, rather than overwrites, all exact
             // original buffers into its late tape without fallible allocation.
@@ -25314,6 +25643,7 @@ impl SemanticTransitionSession {
                 product_support,
                 parameters,
                 component_baselines,
+                numerical,
             },
         )?;
         if let Err(error) = self.order_content_consumers(original.consumer_stream) {
@@ -25593,6 +25923,7 @@ impl SemanticTransitionSession {
             scores,
             coefficients,
             status,
+            numerical,
         } = self.policy_tapes[tape_index]
             .policy
             .buffers
@@ -25600,6 +25931,7 @@ impl SemanticTransitionSession {
             .take()
             .expect("checked original adjoint banks");
         let vjp_workspace = Arc::new(PolicyVjpWorkspace {
+            _numerical: Arc::clone(&numerical),
             _component_baselines: None,
             _recurrent: recurrent,
             _scores: scores,
@@ -25637,6 +25969,7 @@ impl SemanticTransitionSession {
         }
         self.policy_tapes.remove(tape_index);
         Ok(SemanticSelectedPolicyGradients {
+            numerical,
             binding,
             invocation,
             layout,
@@ -26686,6 +27019,7 @@ impl SemanticTransitionSession {
             scores,
             coefficients,
             status,
+            numerical,
         } = adjoints;
         let io = TransitionKernelIo {
             logits: &policy.text_logits,
@@ -26801,6 +27135,7 @@ impl SemanticTransitionSession {
             ),
         };
         descriptor.backward = PolicyBackward {
+            numerical: numerical.descriptor(),
             cotangents: coefficients.device_ptr_value(),
             parameters: parameters.device_ptr_value(),
             text: text_logits.device_ptr_value(),
@@ -26832,6 +27167,7 @@ impl SemanticTransitionSession {
         recorder.read(&policy.recurrent);
         recorder.read(&policy.text_logits);
         recorder.read(&policy.component_baselines);
+        policy.numerical.record(&mut recorder);
         policy.text_binding.record(&mut recorder);
         match input {
             PolicyVjpInput::External(score_cotangents) => {
@@ -26879,6 +27215,9 @@ impl SemanticTransitionSession {
         }
         recorder.write(coefficients);
         recorder.write(status);
+        for buffer in numerical.buffers() {
+            recorder.write(buffer);
+        }
         Ok(PolicyVjpRecording {
             descriptor,
             recorder,
@@ -26962,6 +27301,7 @@ impl SemanticTransitionSession {
             scores,
             coefficients,
             status,
+            numerical,
         } = self.policy_tapes[tape_index]
             .policy
             .buffers
@@ -26969,7 +27309,8 @@ impl SemanticTransitionSession {
             .take()
             .expect("checked original adjoint banks");
         let vjp_workspace = Arc::new(PolicyVjpWorkspace {
-            _component_baselines: Some(component_baselines),
+            _component_baselines: None,
+            _numerical: Arc::clone(&numerical),
             _recurrent: recurrent,
             _scores: scores,
             coefficients,
@@ -26979,10 +27320,12 @@ impl SemanticTransitionSession {
         // A capsule can be deleted before its consumer finishes. The original
         // step keeps the actual outputs until its final consumer-stream join,
         // without keeping a witness (which would create a release cycle).
-        let output_views = [&parameters, &text_logits].into_iter().map(|buffer| {
-            // SAFETY: F32 storage has an exact, aligned byte representation.
-            unsafe { buffer.view().cast::<u8>() }.expect("F32 adjoint byte view")
-        });
+        let output_views = [&parameters, &text_logits, &component_baselines]
+            .into_iter()
+            .map(|buffer| {
+                // SAFETY: F32 storage has an exact, aligned byte representation.
+                unsafe { buffer.view().cast::<u8>() }.expect("F32 adjoint byte view")
+            });
         let step_owner = self
             .steps
             .get_mut(&original._witness.reader_token)
@@ -27007,6 +27350,8 @@ impl SemanticTransitionSession {
         }
         self.policy_tapes.remove(tape_index);
         Ok(SemanticPolicyGradients {
+            component_baselines,
+            numerical,
             binding,
             invocation,
             layout,
@@ -28023,6 +28368,7 @@ impl SemanticTransitionSession {
             selected_score_vjps: policy.selected_score_vjps.device_ptr_value(),
             component_baselines: policy.component_baselines.device_ptr_value(),
             fields,
+            numerical: policy.numerical.descriptor(policy.layout.parameter_cells),
         }
     }
 
@@ -28057,6 +28403,9 @@ impl SemanticTransitionSession {
         #[cfg(feature = "semantic-policy")]
         {
             if let Some(policy) = io.policy {
+                for buffer in policy.numerical.buffers() {
+                    ranges.push((buffer.device_ptr_value(), (buffer.len() * 8) as u64));
+                }
                 for buffer in [
                     &policy.parameters,
                     &policy.hidden,
@@ -28148,6 +28497,7 @@ impl SemanticTransitionSession {
         }
         #[cfg(feature = "semantic-policy")]
         if let Some(policy) = io.policy {
+            policy.numerical.record(&mut recorder);
             recorder.read(&policy.parameters);
             recorder.read(&policy.component_baselines);
             recorder.write(&policy.hidden);
