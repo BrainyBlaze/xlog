@@ -13880,6 +13880,21 @@ impl SemanticTransitionSession {
             .checked_add(late_native_bytes)
             .and_then(|bytes| bytes.checked_add(external_floor))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+            .map_err(|error| runtime_error("segment preparation stream admission", error))?;
+        let mut free_bytes = 0usize;
+        let mut total_bytes = 0usize;
+        // SAFETY: the stream admission binds this Session's CUDA context and
+        // excludes managed capture while the driver writes both host scalars.
+        unsafe { sys::cuMemGetInfo_v2(&mut free_bytes, &mut total_bytes) }
+            .result()
+            .map_err(|error| runtime_error("prepared segment physical memory snapshot", error))?;
+        if u128::from(bytes) > free_bytes as u128 {
+            return Err(runtime_error(
+                "prepared segment physical memory admission",
+                format!("declared cold claim {bytes} bytes exceeds {free_bytes} free CUDA bytes"),
+            ));
+        }
         // Claim the declared local and runtime budgets before any T-sized host
         // collection or native allocation. Every fixed bank consumes this claim.
         let mut reservation = self
@@ -13912,8 +13927,6 @@ impl SemanticTransitionSession {
             cold_capacity,
         )?;
         let handles = build.handles()?;
-        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
-            .map_err(|error| runtime_error("segment preparation stream admission", error))?;
         let kernel = |name| {
             self.provider
                 .device()

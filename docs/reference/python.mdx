@@ -428,11 +428,12 @@ require their connected runtime implementation and full GPU evidence.
 `model_work_capacity`, `segment_capacity_bytes`, and
 `other_external_cuda_bytes` alongside the transition schedule and producer.
 The last two values bound the producer's CUDA slab and all later external
-CUDA allocation classes, respectively. Native claims these declared classes
-before calling `prepare_segment` and retains that claim through segment
-retirement; it does not treat the claim as physical VRAM allocation. Numerical
-domain payload and scratch are not included in this interface yet, so this
-claim alone does not admit a complete numerical execution or prove peak fit.
+CUDA allocation classes, respectively. Native compares their combined declared
+claim with free CUDA memory before the first segment allocation, then retains
+the logical reservation through segment retirement. The snapshot is a necessary
+cold refusal check, not proof that later allocations or the full peak fit.
+Numerical domain payload and scratch are not included in this interface yet,
+so this claim alone does not admit a complete numerical execution.
 
 The prepared producer records logical work on its original `SemanticPreparedStep`.
 Call `step.reserve_tensor_content(tensor_content_capacity)` and
