@@ -14477,6 +14477,7 @@ impl PySemanticTransitionController {
             producer_witness,
             consumer_stream,
             None,
+            || Ok(()),
         )
     }
 
@@ -15098,25 +15099,27 @@ impl PySemanticTransitionController {
             };
             let producer_witness =
                 arguments[witness_index].extract::<PyRef<'_, PySemanticTensorContentWitness>>()?;
-            self.bind_continuation_in_execution(
-                py,
-                &issued,
-                ContentStepRef::Published(&acquired),
-                &arguments[0],
-                &arguments[1],
-                &arguments[2],
-                &arguments[3],
-                &arguments[4],
-                &arguments[5],
-                &arguments[tensors_index],
-                &producer_witness,
-                &arguments[stream_index],
-                None,
-                Some(import),
-                blocks,
-                schema,
-                identity,
-            )?;
+            let bind_continuation = || {
+                self.bind_continuation_in_execution(
+                    py,
+                    &issued,
+                    ContentStepRef::Published(&acquired),
+                    &arguments[0],
+                    &arguments[1],
+                    &arguments[2],
+                    &arguments[3],
+                    &arguments[4],
+                    &arguments[5],
+                    &arguments[tensors_index],
+                    &producer_witness,
+                    &arguments[stream_index],
+                    None,
+                    Some(import),
+                    blocks,
+                    schema,
+                    identity,
+                )
+            };
             if kind == SemanticTransitionKind::Proposal {
                 #[cfg(feature = "semantic-policy")]
                 {
@@ -15153,6 +15156,7 @@ impl PySemanticTransitionController {
                         &policy_witness,
                         &arguments[stream_index],
                         Some(import),
+                        bind_continuation,
                     )?;
                     // Keep the complete original invocation in existing failure
                     // custody until native final use succeeds. Import replay
@@ -15226,6 +15230,7 @@ impl PySemanticTransitionController {
                 #[cfg(not(feature = "semantic-policy"))]
                 return Err(invalid("proposal replay requires a semantic-policy build"));
             } else {
+                bind_continuation()?;
                 self.execute_continuation_in_execution(py, &issued, &acquired, Some(import))?;
                 self.verify_import_successor(py, &issued, &acquired, &material, import)?;
             }
@@ -15740,6 +15745,7 @@ impl PySemanticTransitionController {
         producer_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
         import: Option<&ColdImportGuard<'_>>,
+        bind_continuation: impl FnOnce() -> PyResult<()>,
     ) -> PyResult<PySemanticPolicyInvocation> {
         let issued = task_use.borrow(py);
         let acquired = parent.borrow(py);
@@ -15766,13 +15772,17 @@ impl PySemanticTransitionController {
             }
             let expected = Self::execution_binding(&state, import.is_some())?;
             let training = expected.0 == "training";
-            (
+            let rng = owner
+                .admitted_policy_rng(&*acquired.lease()?)
+                .map_err(xlog_err)?;
+            if import.is_none() {
+                // Public execution still requires an already bound continuation;
+                // only the canonical importer owns the two-stage replay handoff.
                 owner
                     .continuation_rng(&*acquired.lease()?)
-                    .map_err(xlog_err)?,
-                expected,
-                training,
-            )
+                    .map_err(xlog_err)?;
+            }
+            (rng, expected, training)
         };
         let inputs = [
             text_logits,
@@ -15786,6 +15796,21 @@ impl PySemanticTransitionController {
             baseline_domains,
         ];
         let device = self.session.borrow(py).device_ordinal;
+        // Retain the actual graph and Python producer owners through both
+        // native binding stages, including an uncertain continuation failure.
+        let mut original_owners = TensorHandoff(vec![
+            model_output.clone_ref(py),
+            producer_witness._inputs.clone_ref(py),
+        ]);
+        original_owners
+            .0
+            .extend(inputs.iter().map(|input| input.clone_ref(py)));
+        original_owners.0.extend(
+            producer_witness
+                ._producers
+                .iter()
+                .map(|input| input.clone_ref(py)),
+        );
         let check = || {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
@@ -15797,7 +15822,7 @@ impl PySemanticTransitionController {
             )?;
             if Self::execution_binding(&state, import.is_some())? != expected
                 || owner
-                    .continuation_rng(&*acquired.lease()?)
+                    .admitted_policy_rng(&*acquired.lease()?)
                     .map_err(xlog_err)?
                     != rng
             {
@@ -15821,7 +15846,7 @@ impl PySemanticTransitionController {
         let state = self.execution_state(py, &issued, &acquired, &owner, import)?;
         if Self::execution_binding(&state, import.is_some())? != expected
             || owner
-                .continuation_rng(&*acquired.lease()?)
+                .admitted_policy_rng(&*acquired.lease()?)
                 .map_err(xlog_err)?
                 != rng
         {
@@ -15857,9 +15882,30 @@ impl PySemanticTransitionController {
                 stream,
             )
             .map_err(xlog_err)?;
+        // Replay joins the continuation only after all nine original operands
+        // have their private device snapshots. Release native locks before its
+        // guarded Python producer handoffs; failure retains those native banks.
+        drop(state);
+        drop(owner);
+        drop(session);
+        bind_continuation()?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        let state = self.execution_state(py, &issued, &acquired, &owner, import)?;
+        if Self::execution_binding(&state, import.is_some())? != expected
+            || owner
+                .continuation_rng(&*acquired.lease()?)
+                .map_err(xlog_err)?
+                != rng
+        {
+            return Err(invalid(
+                "policy invocation changed while binding its continuation",
+            ));
+        }
         owner.capture().map_err(xlog_err)?;
         owner.launch().map_err(xlog_err)?;
         let outcome = owner.observe(rng.proposal).map_err(xlog_err)?;
+        drop(original_owners.into_native());
         drop(state);
         drop(acquired);
         drop(issued);

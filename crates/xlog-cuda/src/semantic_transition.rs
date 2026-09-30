@@ -12294,6 +12294,16 @@ struct PolicyStorage {
     temporal_vjp_recorded: BTreeSet<(u64, usize)>,
 }
 
+/// Original policy snapshots awaiting the same parent's continuation. This
+/// owner is not executable and survives failed continuation handoffs.
+#[cfg(feature = "semantic-policy")]
+struct PendingPolicyStorage {
+    buffers: PolicyBuffers,
+    replacement: PolicyReplacement,
+    witness: Option<(SemanticTensorContentWitness, u64)>,
+    invocation: SemanticRngBinding,
+}
+
 #[cfg(feature = "semantic-policy")]
 impl std::ops::Deref for PolicyStorage {
     type Target = PolicyBuffers;
@@ -13210,6 +13220,8 @@ pub struct SemanticTransitionSession {
     #[cfg(feature = "semantic-policy")]
     policy: Option<PolicyStorage>,
     #[cfg(feature = "semantic-policy")]
+    pending_policy: Option<PendingPolicyStorage>,
+    #[cfg(feature = "semantic-policy")]
     policy_tapes: Vec<PolicyTape>,
     rng: Option<SemanticRngBinding>,
     next_proposal: u64,
@@ -14110,6 +14122,8 @@ struct UnreleasedPublicationOwners {
     #[cfg(feature = "semantic-policy")]
     _policy: Option<PolicyStorage>,
     #[cfg(feature = "semantic-policy")]
+    _pending_policy: Option<PendingPolicyStorage>,
+    #[cfg(feature = "semantic-policy")]
     _policy_tapes: Vec<PolicyTape>,
     _events: Vec<cudarc::driver::CudaEvent>,
     _uploads: Vec<(usize, PublicationPayload)>,
@@ -14152,6 +14166,8 @@ impl Drop for SemanticTransitionSession {
                     _prepared_segment: self.prepared_segment.take(),
                     #[cfg(feature = "semantic-policy")]
                     _policy: self.policy.take(),
+                    #[cfg(feature = "semantic-policy")]
+                    _pending_policy: self.pending_policy.take(),
                     #[cfg(feature = "semantic-policy")]
                     _policy_tapes: std::mem::take(&mut self.policy_tapes),
                     _uploads: std::mem::take(&mut self.publication_uploads),
@@ -22287,6 +22303,28 @@ impl SemanticTransitionSession {
         lease.header.rng_binding()
     }
 
+    /// Original coordinates for policy snapshot admission, before continuation
+    /// binding. This does not authorize capture, execution or a draw.
+    #[cfg(feature = "semantic-policy")]
+    pub fn admitted_policy_rng(
+        &self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<SemanticRngBinding, SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        if self.admitted_transition
+            != Some((
+                lease.token,
+                lease.identity.word,
+                SemanticTransitionKind::Proposal,
+            ))
+        {
+            return Err(publication_input_error(
+                "policy snapshot requires this exact acquired reader's admitted proposal",
+            ));
+        }
+        lease.header.rng_binding()
+    }
+
     fn read_published_control_record(
         &mut self,
         lease: &SemanticPublishedLease,
@@ -24082,6 +24120,10 @@ impl SemanticTransitionSession {
         }
         self.publication_uploads.clear();
         self.continuation_base = Some(base_word);
+        #[cfg(feature = "semantic-policy")]
+        if kind == SemanticTransitionKind::Proposal {
+            self.attach_policy_continuation()?;
+        }
         if kind != SemanticTransitionKind::Proposal {
             let rng = self.continuation_rng(lease)?;
             self.captured = None;
@@ -24246,6 +24288,8 @@ impl SemanticTransitionSession {
             execute,
             #[cfg(feature = "semantic-policy")]
             policy: None,
+            #[cfg(feature = "semantic-policy")]
+            pending_policy: None,
             #[cfg(feature = "semantic-policy")]
             policy_tapes: Vec::new(),
             rng: None,
@@ -24807,6 +24851,12 @@ impl SemanticTransitionSession {
             .flat_map(|r| r.product_support.iter().copied())
             .collect();
         #[cfg(feature = "semantic-policy")]
+        if self.pending_policy.is_some() {
+            return Err(publication_input_error(
+                "original policy snapshots cannot be replaced by raw inputs",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
         if self.policy.is_some() {
             self.captured = None;
             self.policy = None;
@@ -24894,7 +24944,9 @@ impl SemanticTransitionSession {
     /// baselines, followed by FP64 envelopes `[P,2]`, `[1,136,2]` and FP64
     /// domains `[P,3]`, `[32,V,3]`, `[1,136,3]`, where P is the parameter
     /// extent and V is the text vocabulary. One original content witness
-    /// authenticates all nine operands in that order. Both lanes share the original
+    /// authenticates all nine operands in that order. The snapshots may precede
+    /// continuation binding; capture remains unavailable until both stages join.
+    /// Both lanes share the original
     /// mapped MASK rows; unused capacity is not a categorical factor.
     /// Support contains only active TEXT and the structural rows in roster order;
     /// inactive TEXT has no address. The roster itself still has 136 factors.
@@ -24943,6 +24995,11 @@ impl SemanticTransitionSession {
         self.ensure_rebindable()?;
         self.checked_reader(lease)?;
         self.checked_content_witness(lease, witness)?;
+        if rng != self.admitted_policy_rng(lease)? {
+            return Err(publication_input_error(
+                "policy invocation differs from its actual acquired parent",
+            ));
+        }
         if binding != self.binding() {
             return Err(SemanticTransitionError::CatalogueMismatch);
         }
@@ -24982,7 +25039,7 @@ impl SemanticTransitionSession {
             original.parameters,
             original.component_baselines,
             original.numerical,
-            Some(witness.clone()),
+            Some((witness.clone(), consumer_stream)),
         )
     }
 
@@ -25563,27 +25620,35 @@ impl SemanticTransitionSession {
         parameters: DeviceMemoryView<f32>,
         component_baselines: DeviceMemoryView<f32>,
         numerical: [DeviceMemoryView<f64>; 5],
-        policy_witness: Option<SemanticTensorContentWitness>,
+        policy_witness: Option<(SemanticTensorContentWitness, u64)>,
     ) -> Result<(), SemanticTransitionError> {
         self.ensure_rebindable()?;
         if binding != self.binding() {
             return Err(SemanticTransitionError::CatalogueMismatch);
         }
         let layout = self.policy_layout()?;
-        let text_binding = Arc::clone(
-            self.text_binding
-                .as_ref()
-                .filter(|_| self.continuation_base.is_some())
-                .ok_or_else(|| {
-                    publication_input_error(
-                        "policy inputs require an admitted original model continuation",
-                    )
-                })?,
-        );
-        if rng != text_binding.published_parent()?.1.rng_binding()? {
+        if self.pending_policy.is_some() {
             return Err(publication_input_error(
-                "policy invocation differs from its actual acquired parent",
+                "policy already owns its original snapshots",
             ));
+        }
+        match (self.text_binding.as_ref(), policy_witness.as_ref()) {
+            (Some(binding), _) if self.continuation_base.is_some() => {
+                if rng != binding.published_parent()?.1.rng_binding()? {
+                    return Err(publication_input_error(
+                        "policy invocation differs from its actual acquired parent",
+                    ));
+                }
+            }
+            (None, Some((witness, _)))
+                if self.admitted_transition.is_some_and(|(token, _, kind)| {
+                    token == witness.reader_token && kind == SemanticTransitionKind::Proposal
+                }) => {}
+            _ => {
+                return Err(publication_input_error(
+                    "policy snapshots require their original parent witness or continuation",
+                ));
+            }
         }
         let text_cells = 32 * TEXT_CARDINALITY;
         let support_cells = self.codebooks.input_cells;
@@ -25608,31 +25673,26 @@ impl SemanticTransitionSession {
                         .into(),
             });
         }
-        let policy = PolicyStorage {
-            _policy_witness: policy_witness,
+        let policy = PendingPolicyStorage {
+            witness: policy_witness,
             // Reserve the next working banks before the proposal may publish.
             // Successful observation moves, rather than overwrites, all exact
             // original buffers into its late tape without fallible allocation.
-            replacement: Some(PolicyReplacement {
+            replacement: PolicyReplacement {
                 support: allocate_publication(&self.provider, self.codebooks.input_cells)?,
                 receipts: allocate_publication(&self.provider, COMPONENT_COUNT)?,
                 state: allocate_publication(&self.provider, 1)?,
-            }),
+            },
             buffers: self.allocate_policy_buffers()?,
-            tape_live: false,
-            temporal_vjp_recorded: BTreeSet::new(),
-            text_binding,
+            invocation: rng,
         };
         // Changing captured pointer arguments invalidates the old executable.
         // All previous work is quiescent and no unconsumed tape can reach here.
         self.captured = None;
         self.rng = None;
-        self.policy = Some(policy);
-        self.validate_ranges()?;
-        let original = Arc::clone(&self.policy.as_ref().expect("installed policy").text_binding);
-        self.guard_continuation_content(&original)?;
+        self.pending_policy = Some(policy);
         let policy = self
-            .policy
+            .pending_policy
             .as_ref()
             .expect("policy storage installed above");
         enqueue_policy_snapshots(
@@ -25648,6 +25708,60 @@ impl SemanticTransitionSession {
                 numerical,
             },
         )?;
+        let consumer_stream = policy.witness.as_ref().map(|(_, stream)| *stream);
+        if let Some(stream) = consumer_stream {
+            if let Err(error) = self.order_content_consumers(stream) {
+                self.poisoned = true;
+                return Err(error);
+            }
+        }
+        self.attach_policy_continuation()
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn attach_policy_continuation(&mut self) -> Result<(), SemanticTransitionError> {
+        let Some(snapshot) = self.pending_policy.as_ref() else {
+            return Ok(());
+        };
+        let Some(original) = self
+            .text_binding
+            .as_ref()
+            .filter(|_| self.continuation_base.is_some())
+            .map(Arc::clone)
+        else {
+            return Ok(());
+        };
+        let rng = snapshot.invocation;
+        if rng != original.published_parent()?.1.rng_binding()?
+            || snapshot
+                .witness
+                .as_ref()
+                .is_some_and(|(witness, _)| witness.reader_token != original._witness.reader_token)
+        {
+            return Err(publication_input_error(
+                "policy snapshots and continuation belong to different original parents",
+            ));
+        }
+        // Callback-owned originals may have changed since the early snapshot.
+        // Recheck their original seal without overwriting any snapshot bytes.
+        let witness = snapshot.witness.clone();
+        if let Some((witness, stream)) = &witness {
+            self.enqueue_content_witness(witness, *stream, true)?;
+        }
+        self.guard_continuation_content(&original)?;
+        let snapshot = self
+            .pending_policy
+            .take()
+            .expect("checked original policy snapshots");
+        self.policy = Some(PolicyStorage {
+            buffers: snapshot.buffers,
+            replacement: Some(snapshot.replacement),
+            _policy_witness: witness.map(|(witness, _)| witness),
+            text_binding: Arc::clone(&original),
+            tape_live: false,
+            temporal_vjp_recorded: BTreeSet::new(),
+        });
+        self.validate_ranges()?;
         if let Err(error) = self.order_content_consumers(original.consumer_stream) {
             self.poisoned = true;
             return Err(error);

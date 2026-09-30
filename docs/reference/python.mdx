@@ -188,9 +188,16 @@ authority before computing coverage; `import_task` still independently checks
 the current snapshot and use rights.
 
 During proposal replay, the native importer owns final use of its original
-policy invocation. It schedules native finalization before asking the Runtime to
-retire its temporary aliases; reader retirement then joins the named consumer
-streams. Full predecessor and successor comparisons remain required. The Runtime
+policy invocation. It consumes the original policy pack and snapshots all nine
+CUDA operands before binding the same parent's continuation. Native retains
+these pending banks and the original witness, joins the supplied consumer stream,
+and rechecks the original seals at continuation binding without replacing the
+snapshots. Pending snapshots cannot execute or draw until that join succeeds.
+This ordering does not supply a uniform numerical certificate or replace the
+required pre-draw admission. The importer schedules native finalization before
+asking the Runtime to retire its temporary aliases; reader retirement then joins
+the named consumer streams. Full predecessor and successor comparisons remain
+required. The Runtime
 cleanup callback must not call public policy finish or backward methods during
 import. A failed final-use call quarantines the original invocation, and uncertain
 completion prevents reader release. Import does not retry final use, repeat
