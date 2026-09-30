@@ -36,9 +36,9 @@ use crate::semantic_training_view::SemanticTrainingCanaryRefusalReason;
 use crate::semantic_training_view::{
     frozen_training_coefficients, SemanticSelectedTrainingView,
     SemanticTrainingCanaryRefusalRecord, SemanticTrainingCanaryResultRecord,
-    SemanticTrainingObjective, SemanticTrainingViewArena, SemanticTrainingViewOrigin,
-    SemanticTrainingViewOriginRecord, SemanticTrainingViewPort, SemanticTrainingViewRow,
-    SemanticTrainingViewSelection,
+    SemanticTrainingDomain, SemanticTrainingObjective, SemanticTrainingViewArena,
+    SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
+    SemanticTrainingViewRow, SemanticTrainingViewSelection,
 };
 use crate::{
     CudaFunction, CudaKernelProvider, CudaStream, DeviceRepr, LaunchAsync, LaunchConfig,
@@ -287,9 +287,10 @@ fn checkpoint_scoring_law_identity(
     scoring: SemanticTaskScoring,
     task_content: SemanticTaskContentIdentity,
     objective_law: SemanticTaskObjectiveLaw,
+    training_domain: Option<&SemanticTrainingDomain>,
 ) -> Identity256 {
     let mut hash = Sha256::new();
-    hash.update(b"xlog.semantic.checkpoint.scoring-law.v3\0");
+    hash.update(b"xlog.semantic.checkpoint.scoring-law.v4\0");
     // Arena transfer advances authority, not the task's content or evaluator.
     // The checkpoint binds that authority separately from this immutable law.
     for identity in [
@@ -309,6 +310,10 @@ fn checkpoint_scoring_law_identity(
     hash.update(objective_law.evaluator_max.to_bits().to_le_bytes());
     for coefficient in objective_law.coefficients {
         hash.update(coefficient.to_bits().to_le_bytes());
+    }
+    hash.update([u8::from(training_domain.is_some())]);
+    if let Some(domain) = training_domain {
+        hash.update(domain.identity().as_bytes());
     }
     Identity256::from_bytes(hash.finalize().into())
 }
@@ -433,6 +438,10 @@ pub struct SemanticTaskEvaluationSpec {
     /// Application-owned ex-ante decision that this episode may contribute an
     /// actor term. It is frozen with the task before any action draw.
     pub actor_eligible: bool,
+    /// Original sealed inputs and complete loader geometry, fixed before draw.
+    /// None denotes a task with no prospective training arena, not a fallback
+    /// domain: subsequent training admission requires an original Some binding.
+    pub training_domain: Option<SemanticTrainingDomain>,
 }
 
 /// Owner-validated cold read coverage for a task's queried semantic heads.
@@ -476,6 +485,9 @@ impl SemanticTaskEvaluationSpec {
         };
         self.scoring
             .validate(self.program.editable_program().is_some())?;
+        if let Some(domain) = &self.training_domain {
+            domain.validate()?;
+        }
         if self.priority_levels.len() > 3 {
             return Err(invalid("task priorities exceed the three-query bank"));
         }
@@ -770,9 +782,9 @@ impl TaskEvaluationBinding {
     pub(crate) fn identity(&self) -> Identity256 {
         let mut hash = Sha256::new();
         hash.update(if self.spec.program.editable_program().is_some() {
-            b"xlog.semantic.task-evaluation.v10\0".as_slice()
+            b"xlog.semantic.task-evaluation.v12\0".as_slice()
         } else {
-            b"xlog.semantic.task-evaluation.v9\0".as_slice()
+            b"xlog.semantic.task-evaluation.v11\0".as_slice()
         });
         hash.update(self.admission_identity.as_bytes());
         hash.update(self.schema_generation.as_bytes());
@@ -809,6 +821,10 @@ impl TaskEvaluationBinding {
         }
         hash.update(self.objective_law.structural_cost.unit.as_bytes());
         hash.update(self.objective_law.structural_cost.cap.to_le_bytes());
+        hash.update([u8::from(self.spec.training_domain.is_some())]);
+        if let Some(domain) = &self.spec.training_domain {
+            hash.update(domain.identity().as_bytes());
+        }
         hash.update(b"xlog.semantic.task-priorities.v1\0");
         hash.update((self.spec.priority_levels.len() as u64).to_le_bytes());
         for level in &self.spec.priority_levels {
@@ -20738,6 +20754,11 @@ impl SemanticTransitionSession {
                 &self.domain,
                 rows,
                 objective,
+                task.spec.training_domain.as_ref().ok_or_else(|| {
+                    publication_input_error(
+                        "training arena transfer requires the original pre-action input domain",
+                    )
+                })?,
                 task_identity,
                 task.content().0,
                 task.content().1,
@@ -24772,6 +24793,7 @@ impl SemanticTransitionSession {
                 binding.spec.scoring,
                 binding.content_identity(),
                 binding.objective_law,
+                binding.spec.training_domain.as_ref(),
             )
         }))
     }
@@ -24780,6 +24802,13 @@ impl SemanticTransitionSession {
     /// no selected denominators or actor-eligibility grant. No device read occurs.
     pub fn task_objective_law(&self) -> Option<SemanticTaskObjectiveLaw> {
         self.task.as_ref().map(|(binding, _)| binding.objective_law)
+    }
+
+    /// Immutable pre-action input domain. No device read or use grant occurs.
+    pub fn task_training_domain(&self) -> Option<&SemanticTrainingDomain> {
+        self.task
+            .as_ref()
+            .and_then(|(binding, _)| binding.spec.training_domain.as_ref())
     }
 
     /// Semantic root of the validated goal witness bound to the current task.
@@ -24831,6 +24860,11 @@ impl SemanticTransitionSession {
             &self.domain,
             rows,
             objective,
+            self.task_training_domain().ok_or_else(|| {
+                publication_input_error(
+                    "training arena requires its original pre-action input domain",
+                )
+            })?,
             task_identity,
             task_content,
             expected_truth,
@@ -35761,6 +35795,7 @@ pub(crate) mod task_binding_tests {
             priority_levels: Vec::new(),
             admissible_truth_masks: [7, 7, 7],
             actor_eligible: true,
+            training_domain: None,
         }
     }
 
@@ -36971,17 +37006,31 @@ pub(crate) mod task_binding_tests {
             theory_program: Identity256::from_bytes([12; 32]),
             result: Identity256::from_bytes([13; 32]),
         };
-        let baseline =
-            checkpoint_scoring_law_identity(scoring, task, scoring.objective_law(false).unwrap());
+        let baseline = checkpoint_scoring_law_identity(
+            scoring,
+            task,
+            scoring.objective_law(false).unwrap(),
+            None,
+        );
         assert_ne!(
             baseline,
-            checkpoint_scoring_law_identity(scoring, task, scoring.objective_law(true).unwrap())
+            checkpoint_scoring_law_identity(
+                scoring,
+                task,
+                scoring.objective_law(true).unwrap(),
+                None
+            )
         );
         let mut changed = scoring;
         changed.correct_weight += 1;
         assert_ne!(
             baseline,
-            checkpoint_scoring_law_identity(changed, task, changed.objective_law(false).unwrap())
+            checkpoint_scoring_law_identity(
+                changed,
+                task,
+                changed.objective_law(false).unwrap(),
+                None
+            )
         );
     }
 

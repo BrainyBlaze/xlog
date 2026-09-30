@@ -63,12 +63,107 @@ pub struct SemanticTrainingViewOrigin {
     pub model_numerical_digest: Identity256,
 }
 
+/// Exact sealed input identity and its four admission caps, in source order:
+/// entries, total keys, records per input, bytes per record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticTrainingManifest {
+    pub identity: Identity256,
+    pub caps: [u64; 4],
+}
+
+/// Prospective training domain fixed before any action, not a selected roster
+/// or a numerical certificate. The application supplies the original sealed
+/// manifests and complete loader geometry; native admission retains them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticTrainingDomain {
+    /// Strictly increasing by identity; no duplicate manifest or omitted cap.
+    pub manifests: Vec<SemanticTrainingManifest>,
+    pub window: u64,
+    pub pad_id: u64,
+    pub mask_id: u64,
+    pub block_size: u64,
+    pub batch_size: u64,
+    pub mask_permille: u64,
+    /// Canonical nonnegative decimal, preserving arbitrary-width source seeds.
+    pub training_seed: String,
+    pub mask_policy: Identity256,
+}
+
+impl SemanticTrainingDomain {
+    pub(crate) fn validate(&self) -> Result<(), SemanticTransitionError> {
+        let seed = self.training_seed.as_bytes();
+        if self.manifests.is_empty()
+            || self.manifests.iter().any(|manifest| {
+                manifest.identity == Identity256::default() || manifest.caps.contains(&0)
+            })
+            || self
+                .manifests
+                .windows(2)
+                .any(|pair| pair[0].identity.as_bytes() >= pair[1].identity.as_bytes())
+            || self.window == 0
+            || self.block_size == 0
+            || self.batch_size == 0
+            || !(1..=1000).contains(&self.mask_permille)
+            || self.mask_policy == Identity256::default()
+            || !(seed == b"0"
+                || (matches!(seed.first(), Some(b'1'..=b'9'))
+                    && seed.iter().all(u8::is_ascii_digit)))
+        {
+            return Err(input_error(
+                "training domain requires exact manifests and loader geometry",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Each original episodes/anchors input is independently bounded by this
+    /// minimum. It is not derived from arena storage or byte capacities.
+    pub fn record_limit(&self) -> u64 {
+        self.manifests
+            .iter()
+            .map(|manifest| manifest.caps[2])
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Cold metadata identity retained by task/checkpoint ownership, not a grant.
+    pub fn identity(&self) -> Identity256 {
+        let mut hash = Sha256::new();
+        hash.update(b"xlog.semantic.training-domain.v1\0");
+        hash.update((self.manifests.len() as u64).to_le_bytes());
+        for manifest in &self.manifests {
+            hash.update(manifest.identity.as_bytes());
+            for cap in manifest.caps {
+                hash.update(cap.to_le_bytes());
+            }
+        }
+        for word in [
+            self.window,
+            self.pad_id,
+            self.mask_id,
+            self.block_size,
+            self.batch_size,
+            self.mask_permille,
+        ] {
+            hash.update(word.to_le_bytes());
+        }
+        hash.update((self.training_seed.len() as u64).to_le_bytes());
+        hash.update(self.training_seed.as_bytes());
+        hash.update(self.mask_policy.as_bytes());
+        Identity256::from_bytes(hash.finalize().into())
+    }
+}
+
 /// One already-admitted training view retained for cold device selection.
 pub struct SemanticTrainingViewRow {
     pub basis: SemanticTrainingViewBasis,
     pub identity: Identity256,
     pub bytes_identity: Identity256,
     pub content_identity: Identity256,
+    /// Original record's training-view identity, validated by its cold owner.
+    pub data_manifest: Identity256,
+    pub mask_policy: Identity256,
+    pub training_seed: String,
     /// Present only for a symbolic corpus anchor. The three identities must
     /// equal the native task content executed during this cold binding.
     pub task_content: Option<SemanticTaskContentIdentity>,
@@ -607,6 +702,7 @@ impl SemanticSelectedTrainingView {
                 .map_err(|_| input_error("actor group ordinal exceeds host address space"))?,
             row,
             0,
+            &self.arena.training_domain,
         )?;
         self.actor_group_members()
             .iter()
@@ -632,6 +728,7 @@ impl SemanticSelectedTrainingView {
                 .map_err(|_| input_error("edit group ordinal exceeds host address space"))?,
             row,
             0,
+            &self.arena.training_domain,
         )?;
         Ok(self.edit_group_members().iter().position(|member| {
             member.ordinal == ordinal
@@ -988,6 +1085,8 @@ impl SemanticSelectedTrainingView {
 
 /// Immutable cold roster used by the native Update selector.
 pub(crate) struct SemanticTrainingViewArena {
+    #[cfg(feature = "semantic-policy")]
+    training_domain: SemanticTrainingDomain,
     provider: Arc<CudaKernelProvider>,
     domain: ResidentExecutionDomain,
     select: CudaFunction,
@@ -1075,11 +1174,16 @@ impl SemanticTrainingViewArena {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "arena retains the task, numerical law and original input domain"
+    )]
     pub(crate) fn allocate(
         provider: &Arc<CudaKernelProvider>,
         domain: &ResidentExecutionDomain,
         rows: Vec<SemanticTrainingViewRow>,
         objective: SemanticTrainingObjective,
+        training_domain: &SemanticTrainingDomain,
         task_identity: Identity256,
         task_content: SemanticTaskContentIdentity,
         expected_truth: [SemanticTruth; 3],
@@ -1090,6 +1194,27 @@ impl SemanticTrainingViewArena {
             return Err(input_error(
                 "training-view arena requires at least one admitted row",
             ));
+        }
+        training_domain.validate()?;
+        let record_limit = training_domain.record_limit();
+        let mut episode_count = 0u64;
+        let mut anchor_count = 0u64;
+        let mut content_identities = std::collections::BTreeSet::new();
+        for row in &rows {
+            let count = if row.basis == SemanticTrainingViewBasis::Episode {
+                &mut episode_count
+            } else {
+                &mut anchor_count
+            };
+            *count = count
+                .checked_add(1)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            if *count > record_limit || !content_identities.insert(*row.content_identity.as_bytes())
+            {
+                return Err(input_error(
+                    "training rows exceed the original input bound or repeat content",
+                ));
+            }
         }
         let select = provider
             .device()
@@ -1107,7 +1232,7 @@ impl SemanticTrainingViewArena {
         let mut row_bytes_identities = Vec::with_capacity(rows.len());
         let mut capacity = 0usize;
         for (ordinal, row) in rows.into_iter().enumerate() {
-            let descriptor = validate_row(ordinal, &row, raw.len())?;
+            let descriptor = validate_row(ordinal, &row, raw.len(), training_domain)?;
             #[cfg(feature = "semantic-policy")]
             row_bytes_identities.push(row.bytes_identity);
             capacity = capacity.max(descriptor.window as usize);
@@ -1123,6 +1248,7 @@ impl SemanticTrainingViewArena {
             task_identity,
             task_content,
             expected_truth,
+            record_limit,
         )?;
         #[cfg(not(feature = "semantic-policy"))]
         let (objective, groups, group_members, canaries, _) = validate_objective(
@@ -1133,6 +1259,7 @@ impl SemanticTrainingViewArena {
             task_identity,
             task_content,
             expected_truth,
+            record_limit,
         )?;
         #[cfg(feature = "semantic-policy")]
         let actor_group = groups
@@ -1274,6 +1401,8 @@ impl SemanticTrainingViewArena {
             .htod_sync_copy_into_tracked(&protected_members, &mut device_protected_members)
             .map_err(|error| runtime_error("protected retention member upload", error))?;
         Ok(Arc::new(Self {
+            #[cfg(feature = "semantic-policy")]
+            training_domain: training_domain.clone(),
             provider: Arc::clone(provider),
             domain: domain.clone(),
             select,
@@ -1336,6 +1465,10 @@ fn allocate_port<T: DeviceRepr>(
         .map_err(|error| runtime_error("selected training-view port allocation", error))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "objective admission checks task, truth and original input bound"
+)]
 fn validate_objective(
     objective: SemanticTrainingObjective,
     rows: &[TrainingViewRowDescriptor],
@@ -1344,6 +1477,7 @@ fn validate_objective(
     task_identity: Identity256,
     task_content: SemanticTaskContentIdentity,
     expected_truth: [SemanticTruth; 3],
+    record_limit: u64,
 ) -> Result<ValidatedTrainingObjective, SemanticTransitionError> {
     if objective.groups.len() != 8 || objective.canaries.len() != 5 {
         return Err(input_error(
@@ -1397,6 +1531,7 @@ fn validate_objective(
         let index = group.kind as usize - 1;
         if seen_groups[index]
             || group.row_ordinals.is_empty()
+            || group.denominator > record_limit
             || group.denominator
                 != u64::try_from(group.row_ordinals.len())
                     .map_err(|_| SemanticTransitionError::GenerationExhausted)?
@@ -1429,10 +1564,12 @@ fn validate_objective(
                 }
                 _ => None,
             };
-            if expected_anchor.is_some_and(|basis| row.basis != basis as u64)
-                || (policy_group
-                    && (row.basis != SemanticTrainingViewBasis::Episode as u64
-                        || row.origin.transition != PROPOSAL_TRANSITION))
+            if expected_anchor.map_or(
+                row.basis != SemanticTrainingViewBasis::Episode as u64,
+                |basis| row.basis != basis as u64,
+            ) || (policy_group
+                && (row.basis != SemanticTrainingViewBasis::Episode as u64
+                    || row.origin.transition != PROPOSAL_TRANSITION))
             {
                 return Err(input_error(
                     "training objective group refers to an incompatible replay basis",
@@ -1809,9 +1946,46 @@ fn validate_row(
     ordinal: usize,
     row: &SemanticTrainingViewRow,
     raw_offset: usize,
+    training_domain: &SemanticTrainingDomain,
 ) -> Result<TrainingViewRowDescriptor, SemanticTransitionError> {
     let bytes = &row.bytes;
     let layout = validate_training_view_layout(bytes)?;
+    if layout.window as u64 != training_domain.window
+        || layout.block_size != training_domain.block_size
+        || layout
+            .source_length
+            .checked_mul(2)
+            .is_none_or(|extent| extent > training_domain.window)
+        || row.mask_policy != training_domain.mask_policy
+        || row.training_seed != training_domain.training_seed
+        || training_domain
+            .manifests
+            .binary_search_by(|manifest| {
+                manifest
+                    .identity
+                    .as_bytes()
+                    .cmp(row.data_manifest.as_bytes())
+            })
+            .is_err()
+    {
+        return Err(input_error(
+            "training view lies outside its original manifest or loader domain",
+        ));
+    }
+    let kinds_offset = TRAINING_VIEW_HEADER_BYTES + layout.window * 68 + (layout.window % 2) * 4;
+    for slot in 0..layout.window {
+        let token_offset = TRAINING_VIEW_HEADER_BYTES + slot * 8;
+        let kind_offset = kinds_offset + slot * 8;
+        let token = i64::from_le_bytes(bytes[token_offset..token_offset + 8].try_into().unwrap());
+        let kind = i64::from_le_bytes(bytes[kind_offset..kind_offset + 8].try_into().unwrap());
+        if (kind == 0 && u64::try_from(token).ok() != Some(training_domain.pad_id))
+            || (kind == 2 && u64::try_from(token).ok() != Some(training_domain.mask_id))
+        {
+            return Err(input_error(
+                "training view changed the original padding or mask token",
+            ));
+        }
+    }
     if !raw_offset.is_multiple_of(8) {
         return Err(input_error("training-view row has invalid raw alignment"));
     }

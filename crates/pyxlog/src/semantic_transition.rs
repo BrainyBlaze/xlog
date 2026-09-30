@@ -31,10 +31,11 @@ use xlog_cuda::{
     SemanticRngBinding, SemanticSourceMapping, SemanticStateRecord, SemanticStateRole,
     SemanticSupportRecord, SemanticTaskContentIdentity, SemanticTaskGoalWitness,
     SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout, SemanticTextSlot,
-    SemanticTrainingCanary, SemanticTrainingCanaryKind, SemanticTrainingObjective,
-    SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind, SemanticTrainingViewBasis,
-    SemanticTrainingViewPort, SemanticTrainingViewRow, SemanticTransitionKind,
-    SemanticTransitionSession, SemanticTruth, SemanticTypedRecord,
+    SemanticTrainingCanary, SemanticTrainingCanaryKind, SemanticTrainingDomain,
+    SemanticTrainingManifest, SemanticTrainingObjective, SemanticTrainingObjectiveGroup,
+    SemanticTrainingObjectiveGroupKind, SemanticTrainingViewBasis, SemanticTrainingViewPort,
+    SemanticTrainingViewRow, SemanticTransitionKind, SemanticTransitionSession, SemanticTruth,
+    SemanticTypedRecord,
 };
 use xlog_cuda::{
     SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
@@ -1130,13 +1131,14 @@ impl PySemanticTransitionSession {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, referent=None))]
+    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, referent=None))]
     fn restore_checkpoint(
         py: Python<'_>,
         checkpoint: &Bound<'_, PyAny>,
         device_ordinal: usize,
         snapshot: &Bound<'_, PyAny>,
         restore_model: &Bound<'_, PyAny>,
+        training_domain: &Bound<'_, PyAny>,
         referent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
         if !checkpoint.is_exact_instance_of::<PyBytes>() {
@@ -1161,6 +1163,12 @@ impl PySemanticTransitionSession {
         let config = SemanticCheckpointSessionConfig::decode(&manifest.session)?;
         let (seed, saved_snapshot, phase, saved_binding) =
             TaskCheckpointSeed::decode(&manifest.task)?;
+        let mut domain_budget = 16 * 1024 * 1024;
+        if ColdValue::read(training_domain, &mut domain_budget, 0)? != seed.training_domain {
+            return Err(invalid(
+                "checkpoint restore changed the original training input domain",
+            ));
+        }
         let has_initial_prefill =
             SemanticTransitionSession::verify_checkpoint_initial_prefill_source(
                 &manifest.initial_prefill,
@@ -1206,6 +1214,7 @@ impl PySemanticTransitionSession {
             &seed.evaluation,
             authority.priority_levels.clone(),
             editable_program.clone(),
+            &seed.training_domain,
         )?;
         let (_, selected_material) =
             decode_selected_replay(&authority.replay, &seed.replay_selection)?;
@@ -3425,6 +3434,44 @@ enum ReplayAnchorGroup {
     Symbolic,
 }
 
+/// Lossless projection of the data owner's sealed manifest set and LoaderConfig.
+/// No roster or denominator is selected by this cold transport.
+fn read_training_domain(value: &ColdValue) -> PyResult<Option<SemanticTrainingDomain>> {
+    if *value == ColdValue::None {
+        return Ok(None);
+    }
+    let fields = value.fields(2)?;
+    let manifests = fields[0]
+        .sequence()?
+        .iter()
+        .map(|manifest| {
+            let manifest = manifest.fields(2)?;
+            Ok(SemanticTrainingManifest {
+                identity: replay_digest_identity(manifest[0].text()?)?,
+                caps: unsigned_array(&manifest[1])?,
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let loader = fields[1].fields(5)?;
+    let batch = unsigned_array::<4>(&loader[0])?;
+    let ColdValue::Integer(training_seed) = &loader[3] else {
+        return Err(invalid(
+            "training domain seed requires an exact nonnegative integer",
+        ));
+    };
+    Ok(Some(SemanticTrainingDomain {
+        manifests,
+        window: batch[0],
+        pad_id: batch[1],
+        mask_id: batch[2],
+        block_size: batch[3],
+        batch_size: loader[1].unsigned()?,
+        mask_permille: loader[2].unsigned()?,
+        training_seed: training_seed.clone(),
+        mask_policy: replay_digest_identity(loader[4].text()?)?,
+    }))
+}
+
 fn read_training_objective(value: &ColdValue) -> PyResult<Option<SemanticTrainingObjective>> {
     if *value == ColdValue::None {
         return Ok(None);
@@ -3644,6 +3691,10 @@ impl ReplayRow {
             .as_deref()
             .ok_or_else(|| invalid("training view has no original bytes"))?;
         let identity = self.identity.fields(6)?;
+        let view = identity[0].fields(9)?;
+        let ColdValue::Integer(training_seed) = &view[6] else {
+            return Err(invalid("training view seed is not its original integer"));
+        };
         let origin = match &self.basis {
             ReplayBasis::Episode { .. } => Some(
                 self.native_replay()?
@@ -3677,6 +3728,9 @@ impl ReplayRow {
                     .ok_or_else(|| invalid("training view has no original byte identity"))?,
             )?,
             content_identity: replay_digest_identity(identity[2].text()?)?,
+            data_manifest: replay_digest_identity(view[0].text()?)?,
+            mask_policy: replay_digest_identity(view[5].text()?)?,
+            training_seed: training_seed.clone(),
             task_content,
             origin,
             bytes: bytes.to_vec(),
@@ -4590,7 +4644,7 @@ fn read_task_evaluation_spec(
     )?;
     // Observation coverage precedes task authority; priorities do not affect
     // its queried root set and are bound by import_task instead.
-    task_evaluation_spec(&values, Vec::new(), None)
+    task_evaluation_spec(&values, Vec::new(), None, &ColdValue::None)
 }
 
 #[expect(
@@ -4625,6 +4679,7 @@ fn task_evaluation_spec(
     values: &[ColdValue],
     priority_levels: Vec<xlog_cuda::SemanticTaskPriorityLevel>,
     editable_program: Option<Arc<SemanticProgramAdmission>>,
+    training_domain: &ColdValue,
 ) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
     if values.len() != 7 {
         return Err(invalid("incorrect task evaluation input count"));
@@ -4698,6 +4753,7 @@ fn task_evaluation_spec(
         priority_levels,
         admissible_truth_masks,
         actor_eligible,
+        training_domain: read_training_domain(training_domain)?,
     })
 }
 
@@ -5686,6 +5742,7 @@ struct TaskCheckpointSeed {
     authority: Vec<ColdValue>,
     evaluation: Vec<ColdValue>,
     training_objective: ColdValue,
+    training_domain: ColdValue,
     initial_sources: ColdValue,
     source_mapping: ColdValue,
     replay_selection: ColdValue,
@@ -5767,6 +5824,7 @@ impl TaskCheckpointSeed {
             ColdValue::Text(phase.to_owned()),
             operation,
             ColdValue::Bytes(Arc::from(binding.encode())),
+            self.training_domain.clone(),
         ])))
     }
 
@@ -5779,7 +5837,7 @@ impl TaskCheckpointSeed {
         TaskCheckpointBinding,
     )> {
         let value = checkpoint_cold_value(bytes)?;
-        let fields = value.fields(10)?;
+        let fields = value.fields(11)?;
         let phase = match fields[7].text()? {
             "imported" if fields[8] == ColdValue::None => CheckpointTaskPhase::Imported,
             "initial-prefill-bound" if fields[8] == ColdValue::None => {
@@ -5796,6 +5854,7 @@ impl TaskCheckpointSeed {
                 authority: fields[0].sequence()?.to_vec(),
                 evaluation: fields[1].sequence()?.to_vec(),
                 training_objective: fields[2].clone(),
+                training_domain: fields[10].clone(),
                 initial_sources: fields[3].clone(),
                 source_mapping: fields[4].clone(),
                 replay_selection: fields[5].clone(),
@@ -5837,7 +5896,7 @@ fn checkpoint_cold_value_bytes(value: &ColdValue) -> Vec<u8> {
         }
     }
     let mut bytes = b"XLOG-CHECKPOINT-TASK\0".to_vec();
-    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&3u32.to_le_bytes());
     append(value, &mut bytes);
     bytes
 }
@@ -5916,7 +5975,7 @@ fn checkpoint_cold_value(bytes: &[u8]) -> PyResult<ColdValue> {
 
     let mut remaining = bytes;
     if take(&mut remaining, 21)? != b"XLOG-CHECKPOINT-TASK\0"
-        || u32::from_le_bytes(take(&mut remaining, 4)?.try_into().unwrap()) != 2
+        || u32::from_le_bytes(take(&mut remaining, 4)?.try_into().unwrap()) != 3
     {
         return Err(invalid(
             "checkpoint task capsule has another domain or version",
@@ -11610,6 +11669,24 @@ impl PySemanticTransitionTaskUse {
             .unbind())
     }
 
+    /// Return ``(domain_identity_bytes, original_domain_projection)`` from the
+    /// retained native owner. None means no prospective training was bound.
+    /// This is metadata custody, not a roster, grant or numerical certificate.
+    fn task_training_domain(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.session.borrow(py).require_creator()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        let Some(domain) = owner.task_training_domain() else {
+            return Ok(py.None());
+        };
+        let projection = self.checkpoint.training_domain.python_value(py)?;
+        Ok((PyBytes::new(py, domain.identity().as_bytes()), projection)
+            .into_pyobject(py)?
+            .into_any()
+            .unbind())
+    }
+
     /// Return the bound native semantic goal root before any Proposal. This
     /// 32-byte root is the same one retained in completed task ground; reading
     /// it neither recomputes the goal nor grants execution authority.
@@ -12541,6 +12618,15 @@ impl PySemanticTransitionController {
     /// refusal, spent) unsigned weights. ``admissible_truth_masks`` supplies three
     /// bit masks over (neither, true, false, both), in that bit order.
     ///
+    /// ``training_domain`` is the original ``(manifests, loader)`` projection:
+    /// manifests are sorted ``(sha256_hex, (entries, keys, records, bytes))``
+    /// rows, and loader is ``((window, pad_id, mask_id, block_size), batch_size,
+    /// mask_permille, training_seed, mask_policy_sha256_hex)``. The application
+    /// must extract it from validated sealed inputs before the first action;
+    /// native binding does not authenticate external manifest ownership. None
+    /// explicitly means no prospective training arena and cannot be expanded
+    /// into one during later admission. It grants no actor eligibility.
+    ///
     /// ``training_objective`` is None only when replay_rows is empty. Otherwise it
     /// is ``(evaluator_f64_bits, coefficient_f32_bits, cost, truth_tokens, groups,
     /// canaries)``. The evaluator pair and nine coefficient words are exact IEEE
@@ -12681,7 +12767,7 @@ impl PySemanticTransitionController {
     /// Only then does this same TaskUse become Imported. Any failed import
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
-    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, live_authorities, replay_rows, training_objective, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
+    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, live_authorities, replay_rows, training_objective, training_domain, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
     #[expect(
         clippy::too_many_arguments,
         reason = "task import binds the complete authority, replay, and callback contract"
@@ -12702,6 +12788,7 @@ impl PySemanticTransitionController {
         live_authorities: &Bound<'_, PyAny>,
         replay_rows: &Bound<'_, PyAny>,
         training_objective: &Bound<'_, PyAny>,
+        training_domain: &Bound<'_, PyAny>,
         max_material_bytes: &Bound<'_, PyAny>,
         max_total_material_bytes: &Bound<'_, PyAny>,
         max_evidence_bytes: &Bound<'_, PyAny>,
@@ -12769,6 +12856,7 @@ impl PySemanticTransitionController {
             .map(ReplayRow::training_view_row)
             .collect::<PyResult<Vec<_>>>()?;
         let training_objective_value = ColdValue::read(training_objective, &mut budget, 0)?;
+        let training_domain_value = ColdValue::read(training_domain, &mut budget, 0)?;
         let training_objective = read_training_objective(&training_objective_value)?;
         if training_views.is_empty() != training_objective.is_none() {
             return Err(invalid(
@@ -12799,6 +12887,7 @@ impl PySemanticTransitionController {
             &evaluation,
             authority.priority_levels.clone(),
             session.editable_program.clone(),
+            &training_domain_value,
         )?;
         let checkpoint_referents = resolve_replay_checkpoint_referents(
             py,
@@ -12920,6 +13009,7 @@ impl PySemanticTransitionController {
                     authority: values,
                     evaluation,
                     training_objective: training_objective_value,
+                    training_domain: training_domain_value,
                     initial_sources,
                     source_mapping,
                     replay_selection,
@@ -12970,7 +13060,7 @@ impl PySemanticTransitionController {
     /// reconstructs unchanged native material and the trusted model factory
     /// verifies its own complete state. No candidate operation is public until
     /// the source issuance is revoked and the candidate phase is opened.
-    #[pyo3(signature = (task_use, *, parent, consumer_streams, snapshot, snapshot_model_state, restore_model, replay_rows, training_objective, dependencies, publication_grants, inference_grants, training_grants, capacities, memory_bytes, max_material_bytes, max_total_material_bytes, max_evidence_bytes, refresh_snapshot))]
+    #[pyo3(signature = (task_use, *, parent, consumer_streams, snapshot, snapshot_model_state, restore_model, replay_rows, training_objective, training_domain, dependencies, publication_grants, inference_grants, training_grants, capacities, memory_bytes, max_material_bytes, max_total_material_bytes, max_evidence_bytes, refresh_snapshot))]
     #[expect(
         clippy::too_many_arguments,
         reason = "cold arena admission binds complete authority and model custody"
@@ -12986,6 +13076,7 @@ impl PySemanticTransitionController {
         restore_model: &Bound<'_, PyAny>,
         replay_rows: &Bound<'_, PyAny>,
         training_objective: &Bound<'_, PyAny>,
+        training_domain: &Bound<'_, PyAny>,
         dependencies: &Bound<'_, PyAny>,
         publication_grants: &Bound<'_, PyAny>,
         inference_grants: &Bound<'_, PyAny>,
@@ -13032,6 +13123,13 @@ impl PySemanticTransitionController {
             max_evidence_bytes,
             &mut budget,
         )?;
+        let candidate_domain = ColdValue::read(training_domain, &mut budget, 0)?;
+        if candidate_domain == ColdValue::None || candidate_domain != selected_seed.training_domain
+        {
+            return Err(invalid(
+                "arena admission changed or omitted the original pre-action training domain",
+            ));
+        }
         let mut authority_values = selected_seed.authority.clone();
         for (index, value) in [
             (4, dependencies),
@@ -13233,6 +13331,7 @@ impl PySemanticTransitionController {
                 &selected_seed.evaluation,
                 task_use.authority.priority_levels.clone(),
                 editable_source.map(|source| source.program),
+                &selected_seed.training_domain,
             )?;
             let (_, selected_material) =
                 decode_selected_replay(&authority.replay, &selected_seed.replay_selection)?;
@@ -13315,6 +13414,7 @@ impl PySemanticTransitionController {
                         authority: authority_values,
                         evaluation: selected_seed.evaluation,
                         training_objective: objective_value,
+                        training_domain: selected_seed.training_domain,
                         initial_sources: selected_seed.initial_sources,
                         source_mapping: selected_seed.source_mapping,
                         replay_selection: selected_seed.replay_selection,
@@ -16268,6 +16368,7 @@ mod tests {
             authority: Vec::new(),
             evaluation: Vec::new(),
             training_objective: ColdValue::None,
+            training_domain: ColdValue::None,
             initial_sources: ColdValue::None,
             source_mapping: ColdValue::None,
             replay_selection: ColdValue::None,

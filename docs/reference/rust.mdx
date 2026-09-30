@@ -118,6 +118,20 @@ scoring identities bind the exact interval and coefficient bits. Both initial
 training-arena admission and post-restore arena transfer reject a different law;
 training-group membership does not choose or refit it. This law alone does not
 bound future group geometry or certify physical model gradients.
+`SemanticTaskEvaluationSpec::training_domain` additionally retains
+`SemanticTrainingDomain`: the hash-sorted sealed manifest identities and all four
+caps, the original window/padding/mask/block geometry, batch size, mask permille,
+arbitrary-width decimal training seed, and mask-policy identity. Native binding
+validates and retains this domain before actions. `None` explicitly denotes no
+prospective arena; training admission cannot invent a domain afterwards.
+`task_training_domain()` reads the same retained owner without a device transfer.
+The task and checkpoint scoring identities seal the entire domain. Initial and
+restored arena admission check the real rows against its manifest/seed/mask and
+packed geometry, separate episode/anchor record bounds, and each group's actual
+nonempty member count. The record bound is the minimum original records-per-input
+cap, never a storage or byte capacity. The application remains responsible for
+validating the sealed manifests and their hash/cap association. This domain binds
+future geometry but does not establish a uniform physical numerical certificate.
 The scoring identity binds immutable content independently of task-use authority,
 so a cold arena transfer can advance authority while retaining the evaluator.
 Restoration re-executes the observer and checks this identity. Observer failures

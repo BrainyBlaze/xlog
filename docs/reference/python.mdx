@@ -274,10 +274,13 @@ publication before sealing the result. The callback must return exact builtin
 `bytes`; failure or concurrent mutation returns no checkpoint.
 
 `SemanticTransitionSession.restore_checkpoint(checkpoint, *, device_ordinal,
-snapshot, restore_model)` validates every section and the retained authority before
-allocating a fresh, never-reused native owner. `snapshot` must be newer than the
-snapshot sealed into the checkpoint. After restoring the selected native bank, the
-session creates one controller and task use, acquires their parent once, and invokes
+snapshot, restore_model, training_domain)` validates every section and the retained
+authority before allocating a fresh, never-reused native owner. `snapshot` must be newer than the
+snapshot sealed into the checkpoint. The application must project its original
+sealed input set and loader again into `training_domain`; it must exactly match
+the saved task capsule before allocation or any model callback. After restoring
+the selected native bank, the session creates one controller and task use,
+acquires their parent once, and invokes
 the trusted factory exactly once as
 `restore_model(controller, task_use, parent, exact_model_bytes)`. The application
 must return its reconstructed semantic runtime. The frozen
@@ -303,9 +306,52 @@ scope, including the private arena's model-restore callback.
 Task identity now binds this frozen numerical law; older task identities are
 not accepted as restoration matches.
 
+`import_task`, `restore_checkpoint`, and `admit_training_arena` require the
+`training_domain` keyword. For prospective training, pass this exact primitive
+projection before the first Proposal, including when `replay_rows` is empty:
+
+```text
+(
+    ((manifest_hash, (max_entries, max_total_keys,
+                      max_records_per_input, max_record_bytes)), ...),
+    ((window, pad_id, mask_id, block_size), batch_size, mask_permille,
+     training_seed, mask_policy_hash),
+)
+```
+
+The manifest rows must be a nonempty, strictly hash-sorted, duplicate-free
+projection of the original sealed set, with each hash's own four caps. All hashes
+are lowercase SHA256 hex strings. Caps and loader counters/token IDs use exact
+nonnegative `u64` values (positive caps, window, block size and batch size;
+`1 <= mask_permille <= 1000`). The nonnegative integer seed is arbitrary-width
+and remains lossless. The trusted application validates the manifests and their
+cap/hash association; native code retains that projection, not an independent
+authentication of external data ownership. `None` explicitly binds no prospective
+training arena and cannot acquire one through later admission.
+
+The native task/checkpoint identities retain the entire domain. Its record
+bound is `R = min(max_records_per_input)` over the same manifests. Initial and
+restored arenas require at most `R` distinct episode rows and at most `R` distinct
+anchor rows, and every mandatory group keeps its actual, nonempty, nonrepeated
+membership and exact denominator in `[1,R]`. Regular task groups use episodes;
+retention groups use their corresponding anchor basis. Every packed view must
+name one of those manifests and retain the seed, mask-policy identity, window,
+block size and padding/mask tokens; its source extent must satisfy `2*L <= W`.
+The existing packed-view parser bounds branch geometry and target arrays by `W`.
+Byte caps and arena storage capacities are never substituted for `R`.
+
+`task_use.task_training_domain()` returns
+`(domain_identity_bytes, original_domain_projection)` in the same immutable read
+scope as `task_objective_law()`, or `None` for a task without prospective training.
+This is metadata custody, not a selected future denominator, actor grant or
+uniform physical numerical certificate. Task capsules now use version 3;
+version 2 capsules and older task/scoring identities cannot restore under the
+new binding. Restore and late arena admission require exact original-domain
+equality; changed manifests, caps or loader fields cannot enlarge it.
+
 `SemanticTransitionController.admit_training_arena(task_use, *, parent,
 consumer_streams, snapshot, snapshot_model_state, restore_model, replay_rows,
-training_objective, dependencies, publication_grants, inference_grants,
+training_objective, training_domain, dependencies, publication_grants, inference_grants,
 training_grants, capacities, memory_bytes, max_material_bytes,
 max_total_material_bytes, max_evidence_bytes, refresh_snapshot)` performs a
 cold structural transfer from the selected, successfully recomputed inference
@@ -335,8 +381,9 @@ the complete checkpoint. The owner must check a retrieved
 source with `verify_checkpoint_referent(record, checkpoint)`; `restore_checkpoint`
 accepts `referent=record` and performs that same exact check before allocating a
 new owner.
-The complete checkpoint and its task capsule use version 2; version 1 sources
-are not accepted by this referent contract.
+The complete checkpoint and compact referent retain version 2; the embedded task
+capsule uses version 3 to retain the original training domain. Older task capsules
+and version 1 checkpoint/referent sources are not accepted by this contract.
 
 When importing actor replay, pass one `resolve_checkpoint(digest_bytes,
 item_limit) -> bytes` callback plus `max_checkpoint_bytes` and
