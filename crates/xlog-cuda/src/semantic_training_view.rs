@@ -145,6 +145,15 @@ pub struct SemanticTrainingObjective {
     pub canaries: Vec<SemanticTrainingCanary>,
 }
 
+/// One coefficient law shared by cold task admission and full arena validation.
+pub(crate) fn frozen_training_coefficients(evaluator_min: f64, evaluator_max: f64) -> [f32; 9] {
+    let return_scale = evaluator_min.abs().max(evaluator_max.abs()).max(1.0);
+    let mut coefficients = [1.0f32; 9];
+    coefficients[6] = (1.0 / return_scale) as f32;
+    coefficients[7] = (1.0 / (return_scale * return_scale)) as f32;
+    coefficients
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SemanticTrainingObjectiveRecord {
@@ -1447,18 +1456,9 @@ fn validate_objective(
             "training objective must cover every mandatory group and replay row",
         ));
     }
-    let return_scale = objective
-        .evaluator_min
-        .abs()
-        .max(objective.evaluator_max.abs())
-        .max(1.0);
-    let actor_coefficient = (1.0 / return_scale) as f32;
-    let critic_coefficient = (1.0 / (return_scale * return_scale)) as f32;
-    if [0, 1, 2, 3, 4, 5, 8]
-        .into_iter()
-        .any(|index| objective.coefficients[index].to_bits() != 1.0f32.to_bits())
-        || objective.coefficients[6].to_bits() != actor_coefficient.to_bits()
-        || objective.coefficients[7].to_bits() != critic_coefficient.to_bits()
+    if objective.coefficients.map(f32::to_bits)
+        != frozen_training_coefficients(objective.evaluator_min, objective.evaluator_max)
+            .map(f32::to_bits)
     {
         return Err(input_error(
             "training coefficients differ from the frozen primary and evaluator-scaled law",

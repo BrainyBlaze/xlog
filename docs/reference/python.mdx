@@ -285,6 +285,24 @@ must return its reconstructed semantic runtime. The frozen
 `task_use`, `parent`, and returned `model` through read-only properties; none is a
 replacement or second acquisition.
 
+`task_use.task_objective_law()` returns
+`(scoring_law_identity, (evaluator_min_bits, evaluator_max_bits),
+coefficient_bits, (cost_unit_identity, cost_cap))` before any Proposal and after
+cold restore. Identities are 32-byte values; the evaluator endpoints are exact
+FP64 bit patterns and the nine coefficients are exact FP32 bit patterns. The
+native task freezes the proven signed return interval with outward rounding,
+then sets the first six and ninth coefficients to one, the actor coefficient
+to `RN32(1/M)` and the critic coefficient to `RN32(1/(M*M))`, where
+`M = max(1, abs(R_min), abs(R_max))` in FP64. Training arenas must retain these
+same bits and structural-cost law. Reading them grants no actor eligibility,
+selects no future denominator, and does not certify the full physical pullback.
+The scoring-law identity binds immutable task content, not the authority binding
+that a cold arena transfer must advance. Content, goal and authority checks
+remain separate. The projection follows the existing immutable TaskUse read
+scope, including the private arena's model-restore callback.
+Task identity now binds this frozen numerical law; older task identities are
+not accepted as restoration matches.
+
 `SemanticTransitionController.admit_training_arena(task_use, *, parent,
 consumer_streams, snapshot, snapshot_model_state, restore_model, replay_rows,
 training_objective, dependencies, publication_grants, inference_grants,

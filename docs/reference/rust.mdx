@@ -111,6 +111,15 @@ Each nonzero four-bit mask permits truth value `n` through bit `n`.
 Task identity binds the exact program source, query mapping, observed result
 bytes, expected truths, scoring, ordered priorities, masks, and admitted record
 selections.
+Cold binding also freezes `SemanticTaskObjectiveLaw`: the native scoring law's
+full signed return bound, its outward-rounded FP64 interval, the nine FP32
+objective coefficients, and the structural-cost unit/cap. The task and checkpoint
+scoring identities bind the exact interval and coefficient bits. Both initial
+training-arena admission and post-restore arena transfer reject a different law;
+training-group membership does not choose or refit it. This law alone does not
+bound future group geometry or certify physical model gradients.
+The scoring identity binds immutable content independently of task-use authority,
+so a cold arena transfer can advance authority while retaining the evaluator.
 Restoration re-executes the observer and checks this identity. Observer failures
 poison the session; previous bindings cannot be reused after such a failure.
 Cold observer reads are outside the resident transition loop, and must not be

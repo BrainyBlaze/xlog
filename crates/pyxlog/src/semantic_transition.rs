@@ -11581,6 +11581,35 @@ impl PySemanticTransitionTaskUse {
         Ok(task_content_read(py, (identity, truth)))
     }
 
+    /// Project the native law frozen at cold task binding, before any Proposal.
+    /// Returns ``(scoring_identity, evaluator_f64_bits, coefficient_f32_bits,
+    /// (cost_unit_identity, cost_cap))``. This does not create training groups,
+    /// grant actor eligibility or establish a physical numerical certificate.
+    fn task_objective_law(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        let law = owner
+            .task_objective_law()
+            .ok_or_else(|| invalid("native task objective law is absent"))?;
+        let identity = owner
+            .task_scoring_law_identity()
+            .map_err(xlog_err)?
+            .ok_or_else(|| invalid("native task scoring law is absent"))?;
+        Ok((
+            PyBytes::new(py, identity.as_bytes()),
+            (law.evaluator_min.to_bits(), law.evaluator_max.to_bits()),
+            PyTuple::new(py, law.coefficients.map(f32::to_bits))?,
+            (
+                PyBytes::new(py, law.structural_cost.unit.as_bytes()),
+                law.structural_cost.cap,
+            ),
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+
     /// Return the bound native semantic goal root before any Proposal. This
     /// 32-byte root is the same one retained in completed task ground; reading
     /// it neither recomputes the goal nor grants execution authority.
@@ -12517,7 +12546,9 @@ impl PySemanticTransitionController {
     /// canaries)``. The evaluator pair and nine coefficient words are exact IEEE
     /// bit patterns. Cost is the exact ``(unit_identity, positive_cap)`` from
     /// this controller's pre-import structural_cost_descriptor property; the
-    /// native bound task checks both fields. Each group is
+    /// native bound task checks both fields. Evaluator and coefficient bits must
+    /// equal its pre-action ``task_objective_law()`` projection as well; a later
+    /// arena cannot choose another interval or refit the coefficients. Each group is
     /// ``(kind, positive_denominator, strictly_increasing_row_ordinals)`` and the
     /// complete mandatory group roster must cover every row. ``truth_tokens`` maps
     /// neither, true, false and both to four distinct vocabulary ids. Each canary

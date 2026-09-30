@@ -34,10 +34,11 @@ use crate::semantic_hypergraph::{
 #[cfg(feature = "semantic-policy")]
 use crate::semantic_training_view::SemanticTrainingCanaryRefusalReason;
 use crate::semantic_training_view::{
-    SemanticSelectedTrainingView, SemanticTrainingCanaryRefusalRecord,
-    SemanticTrainingCanaryResultRecord, SemanticTrainingObjective, SemanticTrainingViewArena,
-    SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
-    SemanticTrainingViewRow, SemanticTrainingViewSelection,
+    frozen_training_coefficients, SemanticSelectedTrainingView,
+    SemanticTrainingCanaryRefusalRecord, SemanticTrainingCanaryResultRecord,
+    SemanticTrainingObjective, SemanticTrainingViewArena, SemanticTrainingViewOrigin,
+    SemanticTrainingViewOriginRecord, SemanticTrainingViewPort, SemanticTrainingViewRow,
+    SemanticTrainingViewSelection,
 };
 use crate::{
     CudaFunction, CudaKernelProvider, CudaStream, DeviceRepr, LaunchAsync, LaunchConfig,
@@ -130,6 +131,36 @@ pub struct SemanticStructuralCostDescriptor {
     pub cap: u64,
 }
 
+/// Evaluator interval and objective coefficients frozen by the native task
+/// before actions, independently of any future training-group membership.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SemanticTaskObjectiveLaw {
+    pub return_bound: i64,
+    pub evaluator_min: f64,
+    pub evaluator_max: f64,
+    pub coefficients: [f32; 9],
+    pub structural_cost: SemanticStructuralCostDescriptor,
+}
+
+impl SemanticTaskObjectiveLaw {
+    fn require_objective(
+        self,
+        objective: &SemanticTrainingObjective,
+    ) -> Result<(), SemanticTransitionError> {
+        if objective.evaluator_min.to_bits() != self.evaluator_min.to_bits()
+            || objective.evaluator_max.to_bits() != self.evaluator_max.to_bits()
+            || objective.coefficients.map(f32::to_bits) != self.coefficients.map(f32::to_bits)
+            || objective.cost_unit != self.structural_cost.unit
+            || objective.cost_cap != self.structural_cost.cap
+        {
+            return Err(publication_input_error(
+                "training objective differs from the evaluator, coefficients or cost law frozen before actions",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The only structural-cost law accepted by a cold training objective.
 pub fn semantic_structural_cost_descriptor(
     editable_program: bool,
@@ -212,6 +243,27 @@ impl SemanticTaskScoring {
         self.return_bound(editable_program).map(|_| ())
     }
 
+    fn objective_law(
+        self,
+        editable_program: bool,
+    ) -> Result<SemanticTaskObjectiveLaw, SemanticTransitionError> {
+        let return_bound = self.return_bound(editable_program)?;
+        let mut evaluator_max = return_bound as f64;
+        // The integer return bound may exceed exact FP64 integer precision.
+        // Never narrow the proven interval when rounding its upper endpoint.
+        if (evaluator_max as u128) < return_bound as u128 {
+            evaluator_max = f64::from_bits(evaluator_max.to_bits() + 1);
+        }
+        let evaluator_min = -evaluator_max;
+        Ok(SemanticTaskObjectiveLaw {
+            return_bound,
+            evaluator_min,
+            evaluator_max,
+            coefficients: frozen_training_coefficients(evaluator_min, evaluator_max),
+            structural_cost: semantic_structural_cost_descriptor(editable_program),
+        })
+    }
+
     fn completed_law_bytes(
         self,
         task_identity: Identity256,
@@ -233,15 +285,32 @@ impl SemanticTaskScoring {
 
 fn checkpoint_scoring_law_identity(
     scoring: SemanticTaskScoring,
-    task_identity: Identity256,
-    editable_program: bool,
-) -> Result<Identity256, SemanticTransitionError> {
-    let law = scoring.completed_law_bytes(task_identity, editable_program)?;
+    task_content: SemanticTaskContentIdentity,
+    objective_law: SemanticTaskObjectiveLaw,
+) -> Identity256 {
     let mut hash = Sha256::new();
-    hash.update(b"xlog.semantic.checkpoint.scoring-law.v2\0");
-    hash.update((law.len() as u64).to_le_bytes());
-    hash.update(law);
-    Ok(Identity256::from_bytes(hash.finalize().into()))
+    hash.update(b"xlog.semantic.checkpoint.scoring-law.v3\0");
+    // Arena transfer advances authority, not the task's content or evaluator.
+    // The checkpoint binds that authority separately from this immutable law.
+    for identity in [
+        task_content.query,
+        task_content.theory_program,
+        task_content.result,
+    ] {
+        hash.update(identity.as_bytes());
+    }
+    for weight in scoring.words() {
+        hash.update(weight.to_le_bytes());
+    }
+    hash.update(objective_law.return_bound.to_le_bytes());
+    hash.update(objective_law.structural_cost.unit.as_bytes());
+    hash.update(objective_law.structural_cost.cap.to_le_bytes());
+    hash.update(objective_law.evaluator_min.to_bits().to_le_bytes());
+    hash.update(objective_law.evaluator_max.to_bits().to_le_bytes());
+    for coefficient in objective_law.coefficients {
+        hash.update(coefficient.to_bits().to_le_bytes());
+    }
+    Identity256::from_bytes(hash.finalize().into())
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -534,6 +603,7 @@ pub(crate) struct TaskEvaluationBinding {
     allowed_supports: Vec<(u32, [u8; 32])>,
     observation: SemanticTaskObservation,
     goal_witness: Option<SemanticTaskGoalWitness>,
+    objective_law: SemanticTaskObjectiveLaw,
 }
 
 type TaskContentSelection = (
@@ -681,6 +751,9 @@ impl TaskEvaluationBinding {
                 "native task observer omitted source or result custody",
             ));
         }
+        let objective_law = spec
+            .scoring
+            .objective_law(spec.program.editable_program().is_some())?;
         Ok(Self {
             admission_identity: admission.identity(),
             schema_generation: admission.schema_generation(),
@@ -690,15 +763,16 @@ impl TaskEvaluationBinding {
             allowed_supports,
             observation,
             goal_witness: None,
+            objective_law,
         })
     }
 
     pub(crate) fn identity(&self) -> Identity256 {
         let mut hash = Sha256::new();
         hash.update(if self.spec.program.editable_program().is_some() {
-            b"xlog.semantic.task-evaluation.v8\0".as_slice()
+            b"xlog.semantic.task-evaluation.v10\0".as_slice()
         } else {
-            b"xlog.semantic.task-evaluation.v7\0".as_slice()
+            b"xlog.semantic.task-evaluation.v9\0".as_slice()
         });
         hash.update(self.admission_identity.as_bytes());
         hash.update(self.schema_generation.as_bytes());
@@ -726,6 +800,15 @@ impl TaskEvaluationBinding {
         for weight in self.spec.scoring.words() {
             hash.update(weight.to_le_bytes());
         }
+        // Checkpoint task/scoring identities retain these cold numerical bits.
+        // Restore must reproduce them before an arena or publication is usable.
+        hash.update(self.objective_law.evaluator_min.to_bits().to_le_bytes());
+        hash.update(self.objective_law.evaluator_max.to_bits().to_le_bytes());
+        for coefficient in self.objective_law.coefficients {
+            hash.update(coefficient.to_bits().to_le_bytes());
+        }
+        hash.update(self.objective_law.structural_cost.unit.as_bytes());
+        hash.update(self.objective_law.structural_cost.cap.to_le_bytes());
         hash.update(b"xlog.semantic.task-priorities.v1\0");
         hash.update((self.spec.priority_levels.len() as u64).to_le_bytes());
         for level in &self.spec.priority_levels {
@@ -16217,6 +16300,7 @@ impl SemanticTransitionSession {
             expected_truth,
             scoring,
             editable_program,
+            objective_law,
             goal,
             priority_levels,
             task_result,
@@ -16232,6 +16316,7 @@ impl SemanticTransitionSession {
                 task.expected_truth(),
                 task.spec().scoring,
                 task.spec().program.editable_program().is_some(),
+                task.objective_law,
                 task.goal_witness()
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
                 task.priority_levels().to_vec(),
@@ -16678,7 +16763,7 @@ impl SemanticTransitionSession {
         let mut ground_bytes = Vec::new();
         ground_bytes.extend_from_slice(b"XLOG-COMPLETED-TASK-GROUND\0");
         material_u64(&mut ground_bytes, 3);
-        let structural_cost = semantic_structural_cost_descriptor(editable_program);
+        let structural_cost = objective_law.structural_cost;
         ground_bytes.extend_from_slice(structural_cost.unit.as_bytes());
         material_u64(&mut ground_bytes, structural_cost.cap);
         ground_bytes.extend_from_slice(task_identity.as_bytes());
@@ -16747,7 +16832,7 @@ impl SemanticTransitionSession {
                 &scoring.completed_law_bytes(task_identity, editable_program)?,
             ),
             scoring,
-            return_bound: scoring.return_bound(editable_program)?,
+            return_bound: objective_law.return_bound,
             structural_cost,
             task_identity,
             content: task_content,
@@ -20580,15 +20665,9 @@ impl SemanticTransitionSession {
                 "training arena transfer requires one private restored publication",
             ));
         }
-        let structural_cost = self
-            .task_structural_cost_descriptor()
-            .ok_or(SemanticTransitionError::NotBound)?;
-        if objective.cost_unit != structural_cost.unit || objective.cost_cap != structural_cost.cap
-        {
-            return Err(publication_input_error(
-                "training objective structural cost differs from the bound native task",
-            ));
-        }
+        self.task_objective_law()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .require_objective(&objective)?;
         let result = (|| {
             let mut material = PublicationMaterial::decode(source)?;
             material.require_successful_recompute()?;
@@ -24688,24 +24767,19 @@ impl SemanticTransitionSession {
     pub fn task_scoring_law_identity(
         &self,
     ) -> Result<Option<Identity256>, SemanticTransitionError> {
-        self.task
-            .as_ref()
-            .map(|(binding, _)| {
-                checkpoint_scoring_law_identity(
-                    binding.spec.scoring,
-                    binding.identity(),
-                    binding.spec.program.editable_program().is_some(),
-                )
-            })
-            .transpose()
+        Ok(self.task.as_ref().map(|(binding, _)| {
+            checkpoint_scoring_law_identity(
+                binding.spec.scoring,
+                binding.content_identity(),
+                binding.objective_law,
+            )
+        }))
     }
 
-    /// Structural cost law of the bound task. It is independent of this task's
-    /// identity and can be projected before any action draw.
-    fn task_structural_cost_descriptor(&self) -> Option<SemanticStructuralCostDescriptor> {
-        self.task.as_ref().map(|(binding, _)| {
-            semantic_structural_cost_descriptor(binding.spec.program.editable_program().is_some())
-        })
+    /// The same cold law used by arena admission and checkpoint identity, with
+    /// no selected denominators or actor-eligibility grant. No device read occurs.
+    pub fn task_objective_law(&self) -> Option<SemanticTaskObjectiveLaw> {
+        self.task.as_ref().map(|(binding, _)| binding.objective_law)
     }
 
     /// Semantic root of the validated goal witness bound to the current task.
@@ -24737,15 +24811,9 @@ impl SemanticTransitionSession {
                 "training-view arena requires one cold task binding and cannot be replaced",
             ));
         }
-        let structural_cost = self
-            .task_structural_cost_descriptor()
-            .expect("checked cold task binding");
-        if objective.cost_unit != structural_cost.unit || objective.cost_cap != structural_cost.cap
-        {
-            return Err(publication_input_error(
-                "training objective structural cost differs from the bound native task",
-            ));
-        }
+        self.task_objective_law()
+            .expect("checked cold task binding")
+            .require_objective(&objective)?;
         let task_identity = self
             .task
             .as_ref()
@@ -36898,17 +36966,22 @@ pub(crate) mod task_binding_tests {
             refusal_weight: 15,
             spent_weight: 1,
         };
-        let task = Identity256::from_bytes([11; 32]);
-        let baseline = checkpoint_scoring_law_identity(scoring, task, false).unwrap();
+        let task = SemanticTaskContentIdentity {
+            query: Identity256::from_bytes([11; 32]),
+            theory_program: Identity256::from_bytes([12; 32]),
+            result: Identity256::from_bytes([13; 32]),
+        };
+        let baseline =
+            checkpoint_scoring_law_identity(scoring, task, scoring.objective_law(false).unwrap());
         assert_ne!(
             baseline,
-            checkpoint_scoring_law_identity(scoring, task, true).unwrap()
+            checkpoint_scoring_law_identity(scoring, task, scoring.objective_law(true).unwrap())
         );
         let mut changed = scoring;
         changed.correct_weight += 1;
         assert_ne!(
             baseline,
-            checkpoint_scoring_law_identity(changed, task, false).unwrap()
+            checkpoint_scoring_law_identity(changed, task, changed.objective_law(false).unwrap())
         );
     }
 
