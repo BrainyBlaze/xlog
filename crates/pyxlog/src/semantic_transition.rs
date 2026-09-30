@@ -14274,6 +14274,8 @@ impl PySemanticTransitionController {
     /// only actual completed execution can expose the original result and its
     /// retained late-backward tape. ``bank`` identifies the recorded branch whose
     /// original numerical producers remain owned until native result selection.
+    /// Policy producers may bind before the original continuation. The native
+    /// branch joins both bindings before any transition can execute.
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (task_use, *, step, bank, binding, model_output, text_logits, product_support, parameters, component_baselines, producer_witness, consumer_stream))]
     #[expect(

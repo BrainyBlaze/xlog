@@ -17658,6 +17658,8 @@ impl SemanticTransitionSession {
             .expect("prepared owner")
             .branches[bank]
             .continuation = Some(continuation);
+        #[cfg(feature = "semantic-policy")]
+        self.attach_prepared_policy_continuation(step, bank)?;
         Ok(())
     }
 
@@ -24825,8 +24827,9 @@ impl SemanticTransitionSession {
         Ok((buffers, support, receipts, state))
     }
 
-    /// Retain the original policy producers and bind their already reserved
-    /// native banks. No host publication identity or policy draw is created.
+    /// Retain the original policy producers in their already reserved native
+    /// branch. This may precede continuation binding; neither binding creates a
+    /// draw, and execution requires both owners on this same branch.
     #[cfg(feature = "semantic-policy")]
     #[expect(
         clippy::too_many_arguments,
@@ -24893,17 +24896,40 @@ impl SemanticTransitionSession {
                 "prepared policy already owns its original invocation",
             ));
         }
-        let text_binding = Arc::clone(
-            &branch
-                .continuation
-                .as_ref()
-                .ok_or_else(|| {
-                    publication_input_error(
-                        "prepared policy requires its original model continuation",
-                    )
-                })?
-                .text_binding,
-        );
+        if branch.policy_buffers.is_none() {
+            return Err(publication_input_error(
+                "prepared policy has no unused cold allocation",
+            ));
+        }
+        branch.policy_sources = sources;
+        branch.policy_witness = Some(witness.clone());
+        self.attach_prepared_policy_continuation(step, bank)
+    }
+
+    /// Join two independently admitted stages without allocating or replacing
+    /// either original producer. Before the join, sources and cold banks remain
+    /// owned by the branch and cannot be executed as a policy tape.
+    #[cfg(feature = "semantic-policy")]
+    fn attach_prepared_policy_continuation(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+    ) -> Result<(), SemanticTransitionError> {
+        let branch = &mut self
+            .steps
+            .get_mut(&step.token)
+            .expect("checked original step")
+            .prepared
+            .as_mut()
+            .expect("prepared policy owner")
+            .branches[bank];
+        if branch.policy.is_some() || branch.policy_sources.is_empty() {
+            return Ok(());
+        }
+        let Some(continuation) = branch.continuation.as_ref() else {
+            return Ok(());
+        };
+        let text_binding = Arc::clone(&continuation.text_binding);
         if text_binding._witness.reader_token != step.token {
             return Err(publication_input_error(
                 "prepared policy and continuation belong to different original steps",
@@ -24912,8 +24938,6 @@ impl SemanticTransitionSession {
         let buffers = branch.policy_buffers.take().ok_or_else(|| {
             publication_input_error("prepared policy has no unused cold allocation")
         })?;
-        branch.policy_sources = sources;
-        branch.policy_witness = Some(witness.clone());
         branch.policy = Some(PolicyStorage {
             buffers,
             text_binding,
