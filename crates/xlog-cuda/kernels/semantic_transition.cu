@@ -4287,7 +4287,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
             const float baseline=baseline_gradients[i];
             coefficients[i]=0.0;
             baseline_gradients[i]=0.0f;
-                if(apply_selected) {
+            if(apply_selected) {
                 PolicyBoundedScalar coefficient{0.0,{0.0,0.0}};
                 if(apply_edit && i>=edit_lane*68+32 && i<edit_lane*68+68)
                     coefficient=policy_scalar_negate(bounded_edit_scale);
@@ -4297,8 +4297,11 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                         model_policy::bounded_negate(bounded_reward_f32));
                     const float difference=bounded_difference.value;
                     const float raw_square=__fmul_rn(difference,difference);
+                    // The actor reference fixes the original FP32 baseline
+                    // snapshot exactly. Its live model envelope belongs to the
+                    // critic difference above, not this detached coefficient.
                     const auto advantage=policy_scalar_add(bounded_reward,
-                        policy_scalar_negate({double(baseline),original_baseline_errors[i]}));
+                        policy_scalar_negate({double(baseline),{0.0,0.0}}));
                     coefficient=policy_scalar_add(coefficient,policy_scalar_add(policy_scalar_negate(
                         policy_scalar_multiply(bounded_actor_scale,advantage)),bounded_cost_scale));
                     if(receipts[i].legal_count>1) {
