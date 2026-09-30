@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- *(cuda, python)* [**breaking**] consume supplied numerical policy ABI 4 with independently derived ideal primal bounds and coherent actor/full cotangent labels. Original domains now have four fields; late domains use contiguous actor/full `[2,...,4]` layout while retaining nine outputs. This source change does not establish uniform pre-draw certification or GPU qualification.
 - *(gpu)* [**breaking**] bind reusable materialized stores and retained session runtimes to the exact compiled `LogicProgram`. Cached evaluation and relation-delta cache parameters now use the opaque `LogicMaterializedStore` returned by `evaluate_with_relation_store_and_cache` or `evaluate_with_session_runtime`; use `as_relation_store` for read-only result inspection. Raw `RelationStore` values remain supported as authoritative input stores but can no longer be supplied as trusted derived caches.
 - *(runtime)* expose actual WCOJ-family fallback executions by attempted route, separately from pipeline-error declines.
 - *(configuration)* apply one strict boolean parser to production environment switches in runtime, build, diagnostics, benchmarks, solver tracing, and Python bindings.

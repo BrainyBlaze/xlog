@@ -203,6 +203,27 @@ import. A failed final-use call quarantines the original invocation, and uncerta
 completion prevents reader release. Import does not retry final use, repeat
 publication, or substitute a backward call.
 
+The original nine policy operands are CUDA FP32 text logits `[32,V]`, Bool8
+product support, FP32 packed parameters `[P]`, FP32 component baselines
+`[1,136]`, FP64 pointwise errors `[P,2]` and `[1,136,2]`, then FP64 domains
+`[P,4]`, `[32,V,4]` and `[1,136,4]`. Errors use `(O,U)` order; domains use
+`(M,O,U,I)` order. `I` bounds the ideal formula independently of actual magnitude
+and error radii. Domain O/U cover the allowed domain; they do not replace the
+pointwise errors. Supply the baseline's independent ideal bound from its
+original producer, with the same parent, step/bank, physical model roster,
+generation and consumer stream as the witnessed policy pack. The actor keeps
+the frozen original FP32 baseline exact; the critic retains its live envelope.
+
+Late policy differentiation returns nine capsules: three actual FP32 parameter,
+text and baseline cotangents, three full FP64 error arrays with trailing extent
+2, then contiguous FP64 domains `[2,P,4]`, `[2,32,V,4]` and `[2,1,136,4]`.
+The first axis is actor/full; each entry is `(M,O,U,I)`. Full errors and
+D.full.O/U come from the same result. Only the first three capsules enter the
+original GraphTask. These selected-tape bounds do not certify every allowed
+support or prefix before a draw, or the subsequent physical model accumulation.
+This replaces the former three-field layouts; existing compiled artifacts are
+not compatible with the new shapes.
+
 ### Semantic runtime checkpoints
 
 The fresh parent's `acknowledgement_payload_capacity_bytes` reserves the full

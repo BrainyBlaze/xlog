@@ -849,7 +849,7 @@ mod semantic_policy_build_tests {
                     true,
                 ),
                 (
-                    fixture.replace("abi_version = 3", "abi_version = 2"),
+                    fixture.replace("abi_version = 4", "abi_version = 3"),
                     "supplied_policy::numeric",
                     false,
                 ),

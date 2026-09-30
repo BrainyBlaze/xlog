@@ -11766,6 +11766,8 @@ struct PolicyNumericalDescriptor {
     score_errors: u64,
     recurrent_errors: u64,
     parameter_cells: u64,
+    parameter_envelopes: u64,
+    baseline_envelopes: u64,
 }
 
 #[repr(C)]
@@ -11806,6 +11808,9 @@ struct PolicyAdjointNumericalDescriptor {
     recurrent_errors: u64,
     score_errors: u64,
     coefficient_errors: u64,
+    parameter_cotangents: u64,
+    text_cotangents: u64,
+    baseline_cotangents: u64,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -12048,6 +12053,16 @@ fn export_policy_gradients(
     text_error.dimensions[2] = 2;
     text_error.strides_bytes = [0; 4];
     let text_error = canonical_tensor_layout(text_error)?;
+    // Native labels are interleaved per coordinate. The kernel explicitly
+    // packs actor then full into these contiguous region-major exports.
+    let cotangent_domain = |mut layout: SemanticTensorLayout| {
+        let rank = layout.rank as usize;
+        layout.dimensions.copy_within(0..rank, 1);
+        layout.dimensions[0] = 2;
+        layout.rank += 1;
+        layout.strides_bytes = [0; 4];
+        canonical_tensor_layout(layout)
+    };
     let layouts = [
         original[2],
         original[0],
@@ -12055,9 +12070,9 @@ fn export_policy_gradients(
         original[4],
         text_error,
         original[5],
-        original[6],
-        original[7],
-        original[8],
+        cotangent_domain(original[6])?,
+        cotangent_domain(original[7])?,
+        cotangent_domain(original[8])?,
     ];
     let numerical_views = numerical.roots.iter().map(|buffer| {
         // SAFETY: numerical roots are retained aligned FP64 storage.
@@ -12143,9 +12158,9 @@ fn policy_numerical_producer_layouts(
         values[3],
         layout(4, 2, [parameter_cells as u64, 2, 0, 0])?,
         layout(5, 3, [1, COMPONENT_COUNT as u64, 2, 0])?,
-        layout(6, 2, [parameter_cells as u64, 3, 0, 0])?,
-        layout(7, 3, [32, TEXT_CARDINALITY as u64, 3, 0])?,
-        layout(8, 3, [1, COMPONENT_COUNT as u64, 3, 0])?,
+        layout(6, 2, [parameter_cells as u64, 4, 0, 0])?,
+        layout(7, 3, [32, TEXT_CARDINALITY as u64, 4, 0])?,
+        layout(8, 3, [1, COMPONENT_COUNT as u64, 4, 0])?,
     ])
 }
 
@@ -12159,11 +12174,13 @@ struct PolicyNumericalBuffers {
     hidden_errors: TrackedCudaSlice<f64>,
     score_errors: TrackedCudaSlice<f64>,
     recurrent_errors: TrackedCudaSlice<f64>,
+    parameter_envelopes: TrackedCudaSlice<f64>,
+    baseline_envelopes: TrackedCudaSlice<f64>,
 }
 
 #[cfg(feature = "semantic-policy")]
 impl PolicyNumericalBuffers {
-    fn buffers(&self) -> [&TrackedCudaSlice<f64>; 8] {
+    fn buffers(&self) -> [&TrackedCudaSlice<f64>; 10] {
         [
             &self.parameter_errors,
             &self.baseline_errors,
@@ -12173,6 +12190,8 @@ impl PolicyNumericalBuffers {
             &self.hidden_errors,
             &self.score_errors,
             &self.recurrent_errors,
+            &self.parameter_envelopes,
+            &self.baseline_envelopes,
         ]
     }
 
@@ -12193,6 +12212,8 @@ impl PolicyNumericalBuffers {
             score_errors: self.score_errors.device_ptr_value(),
             recurrent_errors: self.recurrent_errors.device_ptr_value(),
             parameter_cells: parameter_cells as u64,
+            parameter_envelopes: self.parameter_envelopes.device_ptr_value(),
+            baseline_envelopes: self.baseline_envelopes.device_ptr_value(),
         }
     }
 }
@@ -12236,11 +12257,12 @@ struct PolicyAdjointNumerical {
     recurrent_errors: TrackedCudaSlice<f64>,
     score_errors: TrackedCudaSlice<f64>,
     coefficient_errors: TrackedCudaSlice<f64>,
+    root_cotangents: [TrackedCudaSlice<f64>; 3],
 }
 
 #[cfg(feature = "semantic-policy")]
 impl PolicyAdjointNumerical {
-    fn buffers(&self) -> [&TrackedCudaSlice<f64>; 9] {
+    fn buffers(&self) -> [&TrackedCudaSlice<f64>; 12] {
         [
             &self.roots[0],
             &self.roots[1],
@@ -12251,6 +12273,9 @@ impl PolicyAdjointNumerical {
             &self.recurrent_errors,
             &self.score_errors,
             &self.coefficient_errors,
+            &self.root_cotangents[0],
+            &self.root_cotangents[1],
+            &self.root_cotangents[2],
         ]
     }
 
@@ -12266,6 +12291,9 @@ impl PolicyAdjointNumerical {
             recurrent_errors: pointers[6],
             score_errors: pointers[7],
             coefficient_errors: pointers[8],
+            parameter_cotangents: pointers[9],
+            text_cotangents: pointers[10],
+            baseline_cotangents: pointers[11],
         }
     }
 }
@@ -12554,9 +12582,11 @@ const _: () = assert!(size_of::<SemanticTaskFacts>() == 88);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3328);
 const _: () = assert!(size_of::<DeviceState>() == 7568);
 const _: () = assert!(size_of::<PolicyField>() == 32);
-const _: () = assert!(size_of::<PolicyDescriptor>() == 752);
-const _: () = assert!(size_of::<PolicyBackward>() == 232);
-const _: () = assert!(size_of::<Descriptor>() == 1184);
+const _: () = assert!(size_of::<PolicyNumericalDescriptor>() == 88);
+const _: () = assert!(size_of::<PolicyAdjointNumericalDescriptor>() == 96);
+const _: () = assert!(size_of::<PolicyDescriptor>() == 768);
+const _: () = assert!(size_of::<PolicyBackward>() == 256);
+const _: () = assert!(size_of::<Descriptor>() == 1224);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -12599,7 +12629,7 @@ mod task_state_contract {
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
         assert_eq!(size_of::<DeviceState>(), 7568);
-        assert_eq!(size_of::<Descriptor>(), 1040);
+        assert_eq!(size_of::<Descriptor>(), 1224);
     }
 
     #[test]
@@ -13383,12 +13413,13 @@ fn policy_buffer_bytes(
         .checked_mul(2)
         .ok_or(SemanticTransitionError::GenerationExhausted)?;
     let numerical_cells = [
-        (layout.parameter_cells, 5usize),
-        (COMPONENT_COUNT, 5),
-        (32 * TEXT_CARDINALITY, 3),
-        (128, 2),
-        (layout.score_cells(), 2),
-        (layout.recurrent_cells(), 2),
+        // Original E/D plus explicitly assembled primal envelopes.
+        (layout.parameter_cells, 9usize),
+        (COMPONENT_COUNT, 9),
+        (32 * TEXT_CARDINALITY, 4),
+        (128, 3),
+        (layout.score_cells(), 3),
+        (layout.recurrent_cells(), 3),
     ]
     .into_iter()
     .try_fold(0usize, |total, (cells, width)| {
@@ -13399,16 +13430,18 @@ fn policy_buffer_bytes(
     })?;
     let adjoint_numerical_cells = differentiable_cells
         .checked_add(COMPONENT_COUNT)
-        .and_then(|cells| cells.checked_mul(2))
+        .and_then(|cells| cells.checked_mul(8))
         .and_then(|cells| {
             layout
                 .parameter_cells
                 .checked_add(32 * TEXT_CARDINALITY)
                 .and_then(|roots| roots.checked_add(COMPONENT_COUNT))
-                .and_then(|roots| roots.checked_mul(3))
+                // In addition to the internal coherent labels above, export
+                // full E (two doubles) and actor/full D (eight doubles).
+                .and_then(|roots| roots.checked_mul(10))
                 .and_then(|roots| cells.checked_add(roots))
         })
-        .and_then(|cells| cells.checked_add(2 * COMPONENT_COUNT))
+        .and_then(|cells| cells.checked_add(8 * COMPONENT_COUNT))
         .and_then(|cells| cells.checked_mul(2))
         .ok_or(SemanticTransitionError::GenerationExhausted)?;
     let numerical_cells = numerical_cells
@@ -24908,7 +24941,8 @@ impl SemanticTransitionSession {
     /// copying. No caller-owned parameter buffer is used by subsequent replay.
     /// The five original FP64 arrays, in order, are parameter/baseline
     /// ordinary-underflow envelopes followed by parameter/text/baseline
-    /// magnitude-ordinary-underflow domains. They share the same snapshot.
+    /// magnitude-ordinary-underflow-independent-ideal domains. They share the
+    /// same snapshot; pointwise E is not replaced by domain O/U.
     #[cfg(feature = "semantic-policy")]
     #[expect(
         clippy::too_many_arguments,
@@ -24942,8 +24976,10 @@ impl SemanticTransitionSession {
     /// F32 `[32, text_cardinality()]`, Bool8 `[policy_support_layout().1]`,
     /// F32 `[policy_layout().parameter_cells]`, and FP32 `[1, 136]` component
     /// baselines, followed by FP64 envelopes `[P,2]`, `[1,136,2]` and FP64
-    /// domains `[P,3]`, `[32,V,3]`, `[1,136,3]`, where P is the parameter
-    /// extent and V is the text vocabulary. One original content witness
+    /// domains `[P,4]`, `[32,V,4]`, `[1,136,4]` in `(M,O,U,I)` order, where P
+    /// is the parameter extent and V is the text vocabulary. Pointwise E is
+    /// distinct from domain O/U; I is independently derived on the ideal
+    /// formula, never M+O+U. One original content witness
     /// authenticates all nine operands in that order. The snapshots may precede
     /// continuation binding; capture remains unavailable until both stages join.
     /// Both lanes share the original
@@ -25086,15 +25122,25 @@ impl SemanticTransitionSession {
                     allocate_numerical(
                         layout
                             .parameter_cells
-                            .checked_mul(3)
+                            .checked_mul(8)
                             .ok_or(SemanticTransitionError::GenerationExhausted)?,
                     )?,
-                    allocate_numerical(text_cells * 3)?,
-                    allocate_numerical(COMPONENT_COUNT * 3)?,
+                    allocate_numerical(text_cells * 8)?,
+                    allocate_numerical(COMPONENT_COUNT * 8)?,
                 ],
-                recurrent_errors: allocate_numerical(layout.recurrent_cells() * 2)?,
-                score_errors: allocate_numerical(layout.score_cells() * 2)?,
-                coefficient_errors: allocate_numerical(COMPONENT_COUNT * 2)?,
+                recurrent_errors: allocate_numerical(layout.recurrent_cells() * 8)?,
+                score_errors: allocate_numerical(layout.score_cells() * 8)?,
+                coefficient_errors: allocate_numerical(COMPONENT_COUNT * 8)?,
+                root_cotangents: [
+                    allocate_numerical(
+                        layout
+                            .parameter_cells
+                            .checked_mul(8)
+                            .ok_or(SemanticTransitionError::GenerationExhausted)?,
+                    )?,
+                    allocate_numerical(text_cells * 8)?,
+                    allocate_numerical(COMPONENT_COUNT * 8)?,
+                ],
             });
             Ok::<_, SemanticTransitionError>(PolicyAdjointBuffers {
                 numerical,
@@ -25139,14 +25185,21 @@ impl SemanticTransitionSession {
             parameter_domains: allocate_numerical(
                 layout
                     .parameter_cells
+                    .checked_mul(4)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?,
+            )?,
+            text_domains: allocate_numerical(text_cells * 4)?,
+            baseline_domains: allocate_numerical(COMPONENT_COUNT * 4)?,
+            hidden_errors: allocate_numerical(128 * 3)?,
+            score_errors: allocate_numerical(layout.score_cells() * 3)?,
+            recurrent_errors: allocate_numerical(layout.recurrent_cells() * 3)?,
+            parameter_envelopes: allocate_numerical(
+                layout
+                    .parameter_cells
                     .checked_mul(3)
                     .ok_or(SemanticTransitionError::GenerationExhausted)?,
             )?,
-            text_domains: allocate_numerical(text_cells * 3)?,
-            baseline_domains: allocate_numerical(COMPONENT_COUNT * 3)?,
-            hidden_errors: allocate_numerical(128 * 2)?,
-            score_errors: allocate_numerical(layout.score_cells() * 2)?,
-            recurrent_errors: allocate_numerical(layout.recurrent_cells() * 2)?,
+            baseline_envelopes: allocate_numerical(COMPONENT_COUNT * 3)?,
         };
         Ok(PolicyBuffers {
             numerical,

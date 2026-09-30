@@ -10141,8 +10141,10 @@ impl PySemanticPolicyInvocation {
 
     /// Supply the original loss's contiguous FP64[136] selected-score
     /// cotangents. Returns FP32 parameter, full MASK and zero baseline adjoints,
-    /// followed by their three FP64 error envelopes and three FP64 selected
-    /// magnitude/error bounds. Only the first three are autograd cotangents.
+    /// followed by their three full FP64 E[...,2] error envelopes and three
+    /// contiguous FP64 D[2,...,4] bounds in actor/full and (M,O,U,I) order.
+    /// Explicit external coefficients seed only full, not an actor source.
+    /// Only the first three are autograd cotangents.
     /// They are applied to the retained original graph. No model
     /// getter, second forward, Python selected-score or new primal leaf is used.
     /// Adjoint consumers enqueue on ``consumer_stream`` after this returns;
@@ -10246,8 +10248,10 @@ impl PySemanticPolicyInvocation {
     /// selected ordinal, reconstructs selected scores, or runs a second primal.
     ///
     /// Returns FP32 parameter, full MASK and component-baseline adjoints,
-    /// then their three FP64 ordinary/underflow envelopes and three FP64
-    /// selected magnitude/ordinary/underflow bounds. Only the first three
+    /// then their three full FP64 E[...,2] ordinary/underflow envelopes and
+    /// three contiguous FP64 D[2,...,4] bounds in actor/full and (M,O,U,I)
+    /// order. E and D.full.O/U come from the same coherent result. These are
+    /// selected-tape bounds, not pre-draw support/prefix coverage. Only the first three
     /// capsules are autograd cotangents. This is a single-use handoff, including
     /// uncertain native failures.
     #[pyo3(signature = (update_step, *, consumer_stream))]
@@ -14266,7 +14270,8 @@ impl PySemanticTransitionController {
     /// The combined transient witness covers text logits, product support,
     /// parameters, model-issued baselines, parameter/baseline errors, and
     /// parameter/text/baseline domains in that exact order. Numerical arrays
-    /// are original CUDA FP64 views, not reconstructed metadata.
+    /// are original CUDA FP64 views: pointwise E[...,2]=(O,U) and preliminary
+    /// D[...,4]=(M,O,U,I). I is independently derived on the ideal formula.
     /// This records no host publication or RNG identity and returns no invocation;
     /// only actual completed execution can expose the original result and its
     /// retained late-backward tape. ``bank`` identifies the recorded branch whose
@@ -14427,7 +14432,8 @@ impl PySemanticTransitionController {
     /// publication, and retain its late tape. ``binding`` is the exact pair
     /// returned with the packing layout. The original contiguous CUDA inputs
     /// are F32[32,V], Bool8[support_cells], FP32[P], FP32[1,136], followed by
-    /// FP64 envelopes [P,2], [1,136,2] and domains [P,3], [32,V,3], [1,136,3].
+    /// FP64 envelopes [P,2], [1,136,2] and domains [P,4], [32,V,4], [1,136,4]
+    /// in (M,O,U,I) order. Pointwise E differs from preliminary D.O/U.
     /// Their common witness uses that exact order on ``consumer_stream``.
     /// ``model_output`` is the caller-authenticated original output, retained
     /// without invoking a getter; rows/selected bits come only from the already

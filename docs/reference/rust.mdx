@@ -135,12 +135,21 @@ The `semantic-policy` Cargo feature requires all three build inputs:
   `policy_provider::numeric`.
 
 There is no default producer or digest. The build stages the verified header
-bytes and checks numerical ABI version 1: FP32 vectors of width 128, 18 fields,
-the field and adjoint layouts, and the forward and derivative operation
-signatures. These are explicit supported-ABI constraints, not support for an
+bytes and checks numerical ABI version 4: FP32 vectors of width 128, 18 fields,
+the field and adjoint layouts, and the five forward/derivative operations and
+their domain transfers. `PrimalEnvelope` has 24-byte stride: ordinary and
+underflow errors followed by an independent ideal magnitude. `DomainValue`
+has 32-byte stride in `(M,O,U,I)` order: actual magnitude, ordinary error,
+underflow error and independent ideal magnitude. `CoherentCotangent` has
+64-byte stride and carries actor/full labels alongside one actual FP32
+cotangent. Both labels use the rounding case of that full operation; the actor
+label is real-valued, not a second FP32 backward.
+
+These are explicit supported-ABI constraints, not support for an
 arbitrary model architecture. The selected header digest and namespace are
 included in restoration compatibility identity. Integrity and ABI checks do
-not establish numerical correctness or GPU equivalence.
+not establish numerical correctness or GPU equivalence. Older header versions
+and three-field domains are rejected, not converted.
 
 ## Breaking changes
 
