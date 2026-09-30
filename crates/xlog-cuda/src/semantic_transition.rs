@@ -26489,7 +26489,8 @@ impl SemanticTransitionSession {
 
     /// Close one captured Update bank only after every frozen actor-group row
     /// contributed its original policy VJP. The device reduction reads those
-    /// member terms in the admitted group order and produces one FP32[1] scalar.
+    /// normalized member terms in the admitted group order, then applies the
+    /// original frozen coefficient once and produces one FP32[1] scalar.
     #[cfg(feature = "semantic-policy")]
     pub fn record_prepared_group_critic(
         &mut self,
@@ -26556,6 +26557,7 @@ impl SemanticTransitionSession {
         }
         let terms = training.critic_terms();
         let total = training.critic_total();
+        let objective = training.objective();
         let count = u64::try_from(training.actor_group_members().len())
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
         let reduce = self
@@ -26566,6 +26568,7 @@ impl SemanticTransitionSession {
             .ok_or_else(|| publication_input_error("group critic reducer is unavailable"))?;
         let mut recorder = self.domain.new_strict_recorder();
         recorder.read(&terms);
+        recorder.read(&objective);
         recorder.write(&total);
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
             // SAFETY: strict recording retains the exact group allocation and
@@ -26579,7 +26582,12 @@ impl SemanticTransitionSession {
                             block_dim: (1, 1, 1),
                             shared_mem_bytes: 0,
                         },
-                        (*terms.device_ptr(), *total.device_ptr(), count),
+                        (
+                            *terms.device_ptr(),
+                            *total.device_ptr(),
+                            count,
+                            *objective.device_ptr(),
+                        ),
                     )
                     .map_err(|error| XlogError::Kernel(format!("group critic reduction: {error}")))
             }

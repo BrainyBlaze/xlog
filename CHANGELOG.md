@@ -14,6 +14,7 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- *(cuda)* preserve the native critic's ordered episode normalization and group reduction before applying its frozen coefficient once; retain the corresponding reverse-order cotangent arithmetic and original objective owner.
 - *(runtime)* encode each resident-route certificate node from its local fields once, avoiding repeated recursive plan formatting for deep unary plans while preserving exact expression constants and route identity.
 - *(runtime)* preserve nullary schemas when initializing mutually recursive predicates.
 - *(runtime)* serialize execution statistics through a JSON encoder so diagnostic text and operation names are escaped correctly.

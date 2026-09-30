@@ -4320,10 +4320,13 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                             weight),denominator);
                         bounded_cost_scale=policy_scalar_divide(policy_scalar_multiply(policy_scalar_multiply(
                             policy_exact_scalar(double(objective_coefficients[8])),weight),cost),denominator);
-                        bounded_critic_scale=policy_float_divide(model_policy::bounded_multiply(
-                            {2.0f,{0.0,0.0},2.0},
-                            {objective_coefficients[7],{0.0,0.0},double(objective_coefficients[7])}),
-                            policy_uint64_float_bound(actor_denominator),denominator.ideal_minimum);
+                        // Reverse the original outer coefficient and episode
+                        // normalization before the square's analytic adjoint.
+                        // Moving 2 across the RN32 division can change the result.
+                        bounded_critic_scale=model_policy::bounded_multiply(policy_float_divide(
+                            {objective_coefficients[7],{0.0,0.0},double(objective_coefficients[7])},
+                            policy_uint64_float_bound(actor_denominator),denominator.ideal_minimum),
+                            {2.0f,{0.0,0.0},2.0});
                         actor_scale=bounded_actor_scale.value;cost_scale=bounded_cost_scale.value;
                         critic_scale=bounded_critic_scale.value;
                         if(!isfinite(actor_scale) || !isfinite(cost_scale) || !isfinite(critic_scale))*status=1;
@@ -4341,9 +4344,9 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     const float difference=__fsub_rn(baseline[i],reward_f32);
                     raw=__fadd_rn(raw,__fmul_rn(difference,difference));
                 }
-            const auto* objective=reinterpret_cast<const SemanticTrainingObjectiveRecord*>(b.objective);
-            const float coefficient=__uint_as_float(uint32_t(objective->coefficient_bits[7]));
-            const float term=__fdiv_rn(__fmul_rn(coefficient,raw),__ull2float_rn(actor_denominator));
+            // Keep the raw episode sum representable, then normalize it.
+            // The frozen coefficient belongs after the ordered group sum.
+            const float term=__fdiv_rn(raw,__ull2float_rn(actor_denominator));
             if(!isfinite(term))*status=3;
             else *reinterpret_cast<float*>(b.critic_term)=term;
         }
@@ -4567,13 +4570,21 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
 
 #ifdef XLOG_SEMANTIC_POLICY
 extern "C" __global__ void semantic_group_critic_reduce(
-    uint64_t terms_ptr,uint64_t total_ptr,uint64_t count) {
+    uint64_t terms_ptr,uint64_t total_ptr,uint64_t count,uint64_t objective_ptr) {
     if(threadIdx.x || blockIdx.x)return;
     if(!count || !terms_ptr || !total_ptr ||
        terms_ptr%alignof(float) || total_ptr%alignof(float) ||
        count>UINT64_MAX/sizeof(float) ||
        !publication_pointer_span(terms_ptr,count*sizeof(float),alignof(float)) ||
-       !publication_pointer_span(total_ptr,sizeof(float),alignof(float)))
+       !publication_pointer_span(total_ptr,sizeof(float),alignof(float)) ||
+       !publication_pointer_span(objective_ptr,sizeof(SemanticTrainingObjectiveRecord),
+           alignof(SemanticTrainingObjectiveRecord)))
+        semantic_content_integrity_trap();
+    const auto& objective=*reinterpret_cast<const SemanticTrainingObjectiveRecord*>(objective_ptr);
+    const float coefficient=__uint_as_float(uint32_t(objective.coefficient_bits[7]));
+    if(objective.evaluator_abi!=3 || objective.group_count!=8 ||
+       !semantic_policy_identity_present(objective.identity) ||
+       (objective.coefficient_bits[7]>>32) || !isfinite(coefficient) || coefficient<=0.0f)
         semantic_content_integrity_trap();
     const auto* terms=reinterpret_cast<const float*>(terms_ptr);
     float total=0.0f;
@@ -4581,6 +4592,7 @@ extern "C" __global__ void semantic_group_critic_reduce(
         if(!isfinite(terms[ordinal]))semantic_content_integrity_trap();
         total=__fadd_rn(total,terms[ordinal]);
     }
+    total=__fmul_rn(coefficient,total);
     if(!isfinite(total))semantic_content_integrity_trap();
     *reinterpret_cast<float*>(total_ptr)=total;
 }

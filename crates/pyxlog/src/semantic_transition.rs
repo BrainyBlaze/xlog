@@ -9010,7 +9010,9 @@ impl PySemanticPreparedStep {
 
     /// Record the native group reduction after all frozen actor and edit rows
     /// have contributed once in this Update bank. Returns one FP32[1] DLPack
-    /// scalar whose numerical value is native, not a host reconstructed loss.
+    /// scalar: raw episode sums are normalized, summed in the admitted order,
+    /// then multiplied by the original frozen critic coefficient once. Its
+    /// numerical value is native, not a host reconstructed loss.
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (bank, *, consumer_stream))]
     fn group_critic_scalar(
