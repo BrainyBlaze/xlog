@@ -3434,7 +3434,7 @@ fn tensor_layout_bytes(layout: &SemanticTensorLayout) -> Result<usize, SemanticT
     if layout.rank > 4
         || !matches!(
             (layout.scalar_type, layout.element_bytes),
-            (1, 1) | (2, 4) | (3, 8) | (4, 2) | (5, 2) | (6, 4) | (7, 8) | (8, 1)
+            (1, 1) | (2, 4) | (3, 8) | (4, 2) | (5, 2) | (6, 4) | (7, 8) | (8, 1) | (9, 8)
         )
         || (layout.logical_axis != u64::MAX && layout.logical_axis >= layout.rank)
         || layout.dimensions[layout.rank as usize..]
@@ -3773,6 +3773,7 @@ fn validate_tensor_metadata(
         6 => (crate::dlpack::K_DLFLOAT, 32),
         7 => (0, 64), // Signed token indices are not unsigned storage aliases.
         8 => (6, 8),  // DLPack's distinct Boolean code.
+        9 => (crate::dlpack::K_DLFLOAT, 64),
         _ => return Err(invalid()),
     };
     let rank = actual.shape.len();
@@ -14871,6 +14872,7 @@ impl SemanticTransitionSession {
             6 => (2, 32),
             7 => (0, 64),
             8 => (6, 8),
+            9 => (2, 64),
             _ => return Err(SemanticTransitionError::ObservationMismatch),
         };
         self.export_prepared_view(step, view, shape, strides, dtype, consumer_stream)
@@ -22888,6 +22890,7 @@ impl SemanticTransitionSession {
             6 => (2, 32),
             7 => (0, 64),
             8 => (6, 8),
+            9 => (2, 64),
             _ => return Err(SemanticTransitionError::ObservationMismatch),
         };
         self.export_publication_tensor_view(
@@ -29744,6 +29747,15 @@ mod text_parent_tests {
     fn tensor_content_range_accepts_private_operands_without_publication_roles() {
         for (scalar_type, element_bytes, dtype) in [
             (
+                9,
+                8,
+                crate::dlpack::DLDataType {
+                    code: crate::dlpack::K_DLFLOAT,
+                    bits: 64,
+                    lanes: 1,
+                },
+            ),
+            (
                 7,
                 8,
                 crate::dlpack::DLDataType {
@@ -33991,6 +34003,7 @@ mod text_parent_tests {
             (6, 4, 2),
             (7, 8, 0),
             (8, 1, 6),
+            (9, 8, 2),
         ] {
             let layout = SemanticTensorLayout {
                 role: 18,

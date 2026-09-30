@@ -13752,7 +13752,7 @@ impl PySemanticTransitionController {
 
     /// Capture the current bytes of real original tensors for this same parent.
     /// ``tensors`` uses the original typed layout/interval/producer rows accepted
-    /// by bind_parent, including I64=7 and Bool8=8. Original Python producers and
+    /// by bind_parent, including I64=7, Bool8=8 and F64=9. Original Python producers and
     /// their autograd objects remain retained independently of mutable input rows.
     /// Role 0 is the private transient namespace, never a publication role.
     /// Its index is the operand's ordinal in the complete supplied roster,
@@ -14444,7 +14444,7 @@ impl PySemanticTransitionController {
     /// ``tensors`` rows are ``(layout, logical_begin, logical_end, producer)``.
     /// A layout is ``(role, index, element_bytes, scalar_type, rank, logical_axis,
     /// dimensions[4], strides_bytes[4])``. Scalar codes are U8=1/U32=2/U64=3/
-    /// F16=4/BF16=5/F32=6/I64=7/Bool8=8. The original DLPack dtype and layout must agree;
+    /// F16=4/BF16=5/F32=6/I64=7/Bool8=8/F64=9. The original DLPack dtype and layout must agree;
     /// no numerical conversion or detached replacement leaf is performed.
     /// ``model_allocations`` uses the same tensor-input rows with complete U8
     /// backing vectors, role zero and index equal to allocation ordinal.
