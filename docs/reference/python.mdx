@@ -431,7 +431,11 @@ The last two values bound the producer's CUDA slab and all later external
 CUDA allocation classes, respectively. Native compares their combined declared
 claim with free CUDA memory before the first segment allocation, then retains
 the logical reservation through segment retirement. The snapshot is a necessary
-cold refusal check, not proof that later allocations or the full peak fit.
+cold refusal check. The instantiated graph is uploaded and completion-fenced on
+the original stream before installation; upload failure refuses the segment
+before draw. CUDA may later remap graph memory, so this does not establish a
+permanent graph-memory upper bound, bound external-library allocations, or prove
+that the full peak fits.
 Numerical domain payload and scratch are not included in this interface yet,
 so this claim alone does not admit a complete numerical execution.
 

@@ -18516,6 +18516,12 @@ impl SemanticTransitionSession {
                 }
             }
         }
+        executable
+            .as_ref()
+            .expect("checked authentic executable")
+            .graph
+            .upload_cold(&self.stream)
+            .map_err(|error| runtime_error("prepared graph cold upload", error))?;
         // Failure leaves the actual graph in the caller's owner. No graph
         // destructor or driver completion can run under its Session mutex.
         self.captured = Some(
