@@ -430,11 +430,11 @@ def test_cuda_and_publish_wheels_run_the_two_build_reproducibility_gate() -> Non
 
 def test_every_ci_maturin_install_uses_the_canonical_exact_constraint() -> None:
     constraint = (ROOT / MATURIN_CONSTRAINT).read_text(encoding="utf-8").strip()
-    assert constraint == "maturin==1.14.1"
+    assert constraint == "maturin==1.15.0"
     pyproject = (ROOT / "crates" / "pyxlog" / "pyproject.toml").read_text(
         encoding="utf-8"
     )
-    assert 'requires = ["maturin==1.14.1"]' in pyproject
+    assert 'requires = ["maturin==1.15.0"]' in pyproject
 
     install_commands: list[str] = []
     for workflow_name in ("ci.yml", "cuda-ci.yml", "python-publish.yml"):
