@@ -12812,6 +12812,8 @@ content_kernel_parameter!(PublicationRange);
 content_kernel_parameter!(SemanticTensorLayout);
 content_kernel_parameter!(ContinuationInputs);
 content_kernel_parameter!(PolicyDescriptor);
+#[cfg(feature = "semantic-policy")]
+content_kernel_parameter!(PolicyUniformDescriptor);
 
 const _: () = assert!(size_of::<PendingContinuation>() == 336);
 const _: () = assert!(size_of::<ContinuationInputs>() == 184);
