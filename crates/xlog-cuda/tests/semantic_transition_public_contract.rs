@@ -6,6 +6,52 @@ use xlog_cuda::{
 };
 
 #[test]
+fn positive_binary_materialization_uses_the_transition_kernel_source() {
+    // Host execution of the same bounded evaluator included by the CUDA kernel;
+    // this is not evidence of a device launch or public episode completion.
+    let directory = std::env::temp_dir().join(format!(
+        "xlog-semantic-program-{}-{:016x}",
+        std::process::id(),
+        u64::from_ne_bytes({
+            let mut nonce = [0u8; 8];
+            getrandom::fill(&mut nonce).unwrap();
+            nonce
+        })
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    struct Output(std::path::PathBuf);
+    impl Drop for Output {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0.join("materialization-test"));
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+    let output = Output(directory);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let compile =
+        std::process::Command::new(std::env::var_os("CXX").unwrap_or_else(|| "c++".into()))
+            .args(["-std=c++17", "-Wall", "-Wextra", "-Werror"])
+            .arg(root.join("tests/semantic_program_materialization.cpp"))
+            .arg("-o")
+            .arg(output.0.join("materialization-test"))
+            .output()
+            .expect("C++ compiler required for native semantic program contract");
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let execution = std::process::Command::new(output.0.join("materialization-test"))
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
 fn feedback_coordinates_use_the_cuda_producers_shared_encoder() {
     // Compile and execute the exact host/device coordinate helper used by the
     // production kernel. This is CPU evidence, not a CUDA launch or lease test.
@@ -1361,8 +1407,10 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
             refusal_weight: 15,
             spent_weight: 1,
         },
+        priority_levels: vec![],
         admissible_truth_masks: [7, 7, 7],
         actor_eligible: true,
+        training_domain: None,
     };
     #[derive(Debug)]
     struct FailingProgram;
@@ -1858,16 +1906,19 @@ fn public_catalogue_has_one_canonical_identity_and_exact_roster() {
     assert_eq!(
         digest,
         [
-            0x45, 0x7e, 0x09, 0xcc, 0x05, 0x11, 0x82, 0x61, 0x08, 0x7d, 0x20, 0xf0, 0x95, 0xa0,
-            0x8c, 0xbf, 0x65, 0xc8, 0xf9, 0x40, 0x65, 0x63, 0xc2, 0xa6, 0x04, 0x00, 0x53, 0x26,
-            0xc0, 0x0d, 0xf8, 0xf0
+            0xaf, 0xf7, 0xd1, 0x0a, 0x14, 0xb5, 0x66, 0x99, 0x65, 0xf0, 0x07, 0xf9, 0x34, 0xe8,
+            0x7e, 0xc0, 0x8a, 0xee, 0xf7, 0x36, 0x62, 0x32, 0x6a, 0xcf, 0x20, 0xd1, 0x16, 0x24,
+            0xc2, 0x4a, 0x39, 0xd2
         ]
     );
-    assert_eq!(catalogue.binding().generation, 3);
-    assert!(normalized.starts_with("domain xlog.semantic-action-catalogue.v1\ngeneration 3\n"));
+    assert_eq!(catalogue.binding().generation, 4);
+    assert!(normalized.starts_with("domain xlog.semantic-action-catalogue.v1\ngeneration 4\n"));
     assert_eq!(catalogue.text_cardinality(), 248077);
     assert_eq!(catalogue.scratch_bytes(), 24 * 1024 * 1024);
-    assert_eq!(catalogue.field_masks(), [(1, 0x3fffe), (0x2087f, 0x1f780)]);
+    assert_eq!(
+        catalogue.field_masks(),
+        [(1, 0x3fffe), (0x2087f, 0x1f780), (0x007ff, 0x3f800)]
+    );
     assert_eq!(catalogue.fields().len(), 18);
     let names: Vec<_> = catalogue.fields().iter().map(|f| f.name).collect();
     assert_eq!(
@@ -1895,7 +1946,16 @@ fn public_catalogue_has_one_canonical_identity_and_exact_roster() {
     );
     for (i, field) in catalogue.fields().iter().enumerate() {
         assert_eq!(field.ordinal as usize, i);
-        assert_eq!(field.cardinality, if i < 2 { 2 } else { 1 });
+        assert_eq!(
+            field.cardinality,
+            if i == 0 {
+                2
+            } else if i == 1 {
+                3
+            } else {
+                1
+            }
+        );
         assert!(!field.role.is_empty());
     }
     assert_eq!(
@@ -1918,6 +1978,12 @@ fn public_catalogue_has_one_canonical_identity_and_exact_roster() {
                 1,
                 "INSERT_SUPPORT",
                 "INSERT_SUPPORT_ACTIVE_MASK INSERT_SUPPORT_NULL_MASK"
+            ),
+            (
+                "opcode",
+                2,
+                "INSERT_RULE",
+                "INSERT_RULE_ACTIVE_MASK INSERT_RULE_NULL_MASK"
             )
         ]
     );
@@ -1954,7 +2020,7 @@ fn public_catalogue_has_one_canonical_identity_and_exact_roster() {
     assert_ne!(identity, xlog_cuda::Identity256::from_bytes(reversed));
     // Byte order, generation, domain, and logical field order all bind identity.
     for changed in [
-        normalized.replacen("generation 3", "generation 4", 1),
+        normalized.replacen("generation 4", "generation 5", 1),
         normalized.replacen("catalogue.v1", "catalogue.v2", 1),
         normalized.replacen("field 3 operand_0", "field 3 operand_1", 1),
     ] {

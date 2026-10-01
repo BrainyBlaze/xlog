@@ -8,7 +8,7 @@
 
 //! Python ownership of the canonical admitted semantic session and cold policy layout.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::ThreadId;
@@ -19,18 +19,23 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyList, PyString, PyTuple};
 use sha2::{Digest, Sha256};
 use xlog_core::{RelId, ScalarType, Schema};
 use xlog_cuda::memory::DeviceAllocationProvenance;
+#[cfg(feature = "semantic-policy")]
+use xlog_cuda::SemanticSegmentColdCapacity;
 use xlog_cuda::{
     DlpackManagedTensor, Identity256, SemanticAdmissionLimits, SemanticAdmissionRecords,
     SemanticArgument, SemanticContinuationInput, SemanticGradientDeliveryBinding,
-    SemanticHypergraphCapacities, SemanticModelForwardWitness, SemanticObservedSource,
-    SemanticParentBinding, SemanticPolarity, SemanticPredicateRecord, SemanticPreparedStep,
-    SemanticPublishedLease, SemanticRecordRole, SemanticRngBinding, SemanticSourceMapping,
-    SemanticStateRecord, SemanticStateRole, SemanticSupportRecord, SemanticTaskContentIdentity,
-    SemanticTaskGoalWitness, SemanticTensorContentWitness, SemanticTensorInput,
-    SemanticTensorLayout, SemanticTextSlot, SemanticTrainingCanary, SemanticTrainingCanaryKind,
-    SemanticTrainingObjective, SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind,
-    SemanticTrainingViewBasis, SemanticTrainingViewPort, SemanticTrainingViewRow,
-    SemanticTransitionKind, SemanticTransitionSession, SemanticTruth, SemanticTypedRecord,
+    SemanticHypergraphCapacities, SemanticInitialPrefillContentWitness,
+    SemanticInitialPrefillLease, SemanticInitialSourceLayout, SemanticModelForwardWitness,
+    SemanticObservedSource, SemanticParentBinding, SemanticPolarity, SemanticPredicateRecord,
+    SemanticPreparedStep, SemanticProgramAdmission, SemanticPublishedLease, SemanticRecordRole,
+    SemanticRngBinding, SemanticSourceMapping, SemanticStateRecord, SemanticStateRole,
+    SemanticSupportRecord, SemanticTaskContentIdentity, SemanticTaskGoalWitness,
+    SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout, SemanticTextSlot,
+    SemanticTrainingCanary, SemanticTrainingCanaryKind, SemanticTrainingDomain,
+    SemanticTrainingManifest, SemanticTrainingObjective, SemanticTrainingObjectiveGroup,
+    SemanticTrainingObjectiveGroupKind, SemanticTrainingViewBasis, SemanticTrainingViewPort,
+    SemanticTrainingViewRow, SemanticTransitionKind, SemanticTransitionSession, SemanticTruth,
+    SemanticTypedRecord,
 };
 use xlog_cuda::{
     SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
@@ -46,6 +51,24 @@ type PredicateInput = (u32, String, Vec<(String, u8, String)>, Vec<usize>);
 type RecordInput = (u32, Vec<(u8, Py<PyAny>)>, Vec<u32>);
 type SupportInput = (u32, String, u32, u32, u32, u32);
 type TaskContentRead = (Py<PyBytes>, Py<PyBytes>, Py<PyBytes>, (u8, u8, u8));
+
+fn task_content_read(
+    py: Python<'_>,
+    (identity, truth): (SemanticTaskContentIdentity, [SemanticTruth; 3]),
+) -> TaskContentRead {
+    let [first, second, third] = truth.map(|truth| match truth {
+        SemanticTruth::Neither => 0,
+        SemanticTruth::True => 1,
+        SemanticTruth::False => 2,
+        SemanticTruth::Both => 3,
+    });
+    (
+        PyBytes::new(py, identity.query.as_bytes()).unbind(),
+        PyBytes::new(py, identity.theory_program.as_bytes()).unbind(),
+        PyBytes::new(py, identity.result.as_bytes()).unbind(),
+        (first, second, third),
+    )
+}
 
 /// Own one admitted native semantic session and its acquired policy codebooks.
 ///
@@ -79,7 +102,9 @@ type TaskContentRead = (Py<PyBytes>, Py<PyBytes>, Py<PyBytes>, (u8, u8, u8));
 /// on workers. Only a retained content witness may verify from a worker thread.
 #[pyclass(name = "SemanticTransitionSession", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticTransitionSession {
-    inner: Mutex<SemanticTransitionSession>,
+    inner: Mutex<Option<SemanticTransitionSession>>,
+    editable_program: Option<Arc<SemanticProgramAdmission>>,
+    editable_observer_source: Option<String>,
     importing: Arc<AtomicBool>,
     recording: AtomicBool,
     retiring: AtomicBool,
@@ -92,12 +117,28 @@ pub(crate) struct PySemanticTransitionSession {
     memory_bytes: u64,
 }
 
+struct SemanticSessionGuard<'a>(MutexGuard<'a, Option<SemanticTransitionSession>>);
+
+impl std::ops::Deref for SemanticSessionGuard<'_> {
+    type Target = SemanticTransitionSession;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("checked live semantic session")
+    }
+}
+
+impl std::ops::DerefMut for SemanticSessionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("checked live semantic session")
+    }
+}
+
 impl PySemanticTransitionSession {
     fn require_creator(&self) -> PyResult<()> {
         require_creator_thread(self.owner_thread)
     }
 
-    fn owner(&self) -> PyResult<MutexGuard<'_, SemanticTransitionSession>> {
+    fn owner(&self) -> PyResult<SemanticSessionGuard<'_>> {
         self.require_creator()?;
         if !self.recording.load(Ordering::Acquire) {
             drain_export_owners();
@@ -107,10 +148,39 @@ impl PySemanticTransitionSession {
 
     // Only content verification enters this lock from an autograd worker.
     // Do not drain creator-owned Python references or run callbacks here.
-    fn witness_owner(&self) -> PyResult<MutexGuard<'_, SemanticTransitionSession>> {
-        self.inner
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("native semantic session owner mutex is poisoned"))
+    fn witness_owner(&self) -> PyResult<SemanticSessionGuard<'_>> {
+        let owner = self.inner.lock().map_err(|_| {
+            PyRuntimeError::new_err("native semantic session owner mutex is poisoned")
+        })?;
+        if owner.is_none() {
+            return Err(invalid("native semantic session was terminally released"));
+        }
+        Ok(SemanticSessionGuard(owner))
+    }
+
+    fn release_observed_cold(&self) -> PyResult<()> {
+        self.require_creator()?;
+        if self.importing.load(Ordering::Acquire)
+            || self.recording.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
+            || self.issuance.load(Ordering::Acquire) != 0
+        {
+            return Err(invalid("fresh cold release requires an unused Session"));
+        }
+        let owner = {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|_| invalid("native semantic session owner mutex is poisoned"))?;
+            let live = guard
+                .as_mut()
+                .ok_or_else(|| invalid("fresh cold Session was already released"))?;
+            live.join_observed_cold_release().map_err(xlog_err)?;
+            guard.take().expect("checked live fresh cold Session")
+        };
+        owner.finish_observed_cold_release().map_err(xlog_err)?;
+        drain_export_owners();
+        Ok(())
     }
 
     fn from_admission(
@@ -120,6 +190,7 @@ impl PySemanticTransitionSession {
         device_ordinal: usize,
         memory_bytes: u64,
     ) -> PyResult<Self> {
+        let editable_source = cold_task::editable_source_from_admission(&records)?;
         let native_capacities = SemanticHypergraphCapacities::try_new(
             capacities.0,
             capacities.1,
@@ -153,9 +224,19 @@ impl PySemanticTransitionSession {
         graph
             .admit_records(graph.empty_root(), records, limits)
             .map_err(xlog_err)?;
-        let session = SemanticTransitionSession::from_hypergraph(graph).map_err(xlog_err)?;
+        let session = SemanticTransitionSession::from_hypergraph_with_program(
+            graph,
+            editable_source
+                .as_ref()
+                .map(|source| source.program.as_ref()),
+        )
+        .map_err(xlog_err)?;
         Ok(Self {
-            inner: Mutex::new(session),
+            inner: Mutex::new(Some(session)),
+            editable_program: editable_source
+                .as_ref()
+                .map(|source| Arc::clone(&source.program)),
+            editable_observer_source: editable_source.map(|source| source.observer_source),
             importing: Arc::new(AtomicBool::new(false)),
             recording: AtomicBool::new(false),
             retiring: AtomicBool::new(false),
@@ -175,16 +256,536 @@ struct SemanticCheckpointManifest {
     model: Vec<u8>,
     task: Vec<u8>,
     session: Vec<u8>,
+    initial_prefill: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TaskCheckpointBinding {
+    identity: [u8; 32],
+    epoch: u64,
+    content: [[u8; 32]; 3],
+    goal: [u8; 32],
+    scoring_law: [u8; 32],
+}
+
+impl TaskCheckpointBinding {
+    const BYTES: usize = 32 + 8 + 3 * 32 + 32 + 32;
+
+    fn content_identity(self) -> SemanticTaskContentIdentity {
+        SemanticTaskContentIdentity {
+            query: Identity256::from_bytes(self.content[0]),
+            theory_program: Identity256::from_bytes(self.content[1]),
+            result: Identity256::from_bytes(self.content[2]),
+        }
+    }
+
+    fn from_owner(owner: &SemanticTransitionSession) -> PyResult<Self> {
+        let identity = *owner
+            .task_evaluation_identity()
+            .ok_or_else(|| invalid("checkpoint has no native task binding"))?
+            .as_bytes();
+        let epoch = owner.task_evaluation_epoch();
+        if epoch == 0 {
+            return Err(invalid("checkpoint has no native task epoch"));
+        }
+        let (content, _) = owner
+            .task_content()
+            .ok_or_else(|| invalid("checkpoint has no native task content"))?;
+        let goal = *owner
+            .task_semantic_goal_root()
+            .ok_or_else(|| invalid("checkpoint has no semantic task goal"))?
+            .as_bytes();
+        let scoring_law = *owner
+            .task_scoring_law_identity()
+            .map_err(xlog_err)?
+            .ok_or_else(|| invalid("checkpoint has no native scoring law"))?
+            .as_bytes();
+        Ok(Self {
+            identity,
+            epoch,
+            content: [
+                *content.query.as_bytes(),
+                *content.theory_program.as_bytes(),
+                *content.result.as_bytes(),
+            ],
+            goal,
+            scoring_law,
+        })
+    }
+
+    fn same_task_content(self, other: Self) -> bool {
+        self.identity == other.identity
+            && self.content == other.content
+            && self.goal == other.goal
+            && self.scoring_law == other.scoring_law
+    }
+
+    fn same_cold_arena_content(self, other: Self) -> bool {
+        self.identity != other.identity
+            && self.epoch.checked_add(1) == Some(other.epoch)
+            && self.content == other.content
+            && self.goal == other.goal
+            && self.scoring_law == other.scoring_law
+    }
+
+    fn encode(self) -> [u8; Self::BYTES] {
+        let mut bytes = [0u8; Self::BYTES];
+        bytes[..32].copy_from_slice(&self.identity);
+        bytes[32..40].copy_from_slice(&self.epoch.to_le_bytes());
+        let mut offset = 40;
+        for digest in self
+            .content
+            .into_iter()
+            .chain([self.goal, self.scoring_law])
+        {
+            bytes[offset..offset + 32].copy_from_slice(&digest);
+            offset += 32;
+        }
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> PyResult<Self> {
+        if bytes.len() != Self::BYTES {
+            return Err(invalid("checkpoint native task binding has another extent"));
+        }
+        let identity = bytes[..32].try_into().unwrap();
+        let epoch = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+        let mut offset = 40;
+        let mut next = || {
+            let digest = bytes[offset..offset + 32].try_into().unwrap();
+            offset += 32;
+            digest
+        };
+        if epoch == 0 {
+            return Err(invalid("checkpoint native task epoch is absent"));
+        }
+        Ok(Self {
+            identity,
+            epoch,
+            content: [next(), next(), next()],
+            goal: next(),
+            scoring_law: next(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CheckpointReferent {
+    checkpoint_digest: [u8; 32],
+    checkpoint_bytes: u64,
+    publication: [u8; 104],
+    semantic_root: [u8; 32],
+    model_generation: u64,
+    model_digest: [u8; 32],
+    task: TaskCheckpointBinding,
+    scope_digest: [u8; 32],
+    authority_root: [u8; 32],
+    snapshot_digest: [u8; 32],
+    phase: CheckpointTaskPhase,
+}
+
+impl CheckpointReferent {
+    const MAGIC: &'static [u8] = b"XLOG-CHECKPOINT-REFERENT\0";
+    const VERSION: u32 = 2;
+    const BYTES: usize =
+        Self::MAGIC.len() + 4 + 32 + 8 + 104 + 32 + 8 + 32 + 32 + 8 + 3 * 32 + 5 * 32 + 1;
+
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(Self::BYTES);
+        bytes.extend_from_slice(Self::MAGIC);
+        bytes.extend_from_slice(&Self::VERSION.to_le_bytes());
+        bytes.extend_from_slice(&self.checkpoint_digest);
+        bytes.extend_from_slice(&self.checkpoint_bytes.to_le_bytes());
+        bytes.extend_from_slice(&self.publication);
+        bytes.extend_from_slice(&self.semantic_root);
+        bytes.extend_from_slice(&self.model_generation.to_le_bytes());
+        bytes.extend_from_slice(&self.model_digest);
+        bytes.extend_from_slice(&self.task.identity);
+        bytes.extend_from_slice(&self.task.epoch.to_le_bytes());
+        for digest in &self.task.content {
+            bytes.extend_from_slice(digest);
+        }
+        for digest in [
+            self.task.goal,
+            self.task.scoring_law,
+            self.scope_digest,
+            self.authority_root,
+            self.snapshot_digest,
+        ] {
+            bytes.extend_from_slice(&digest);
+        }
+        bytes.push(match self.phase {
+            CheckpointTaskPhase::Imported => 1,
+            CheckpointTaskPhase::InitialPrefillBound => 2,
+            CheckpointTaskPhase::Segment(_) => unreachable!("referents require a pre-action phase"),
+        });
+        debug_assert_eq!(bytes.len(), Self::BYTES);
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> PyResult<Self> {
+        if bytes.len() != Self::BYTES || !bytes.starts_with(Self::MAGIC) {
+            return Err(invalid("checkpoint referent has another extent or domain"));
+        }
+        let mut cursor = Self::MAGIC.len();
+        let take = |cursor: &mut usize, count: usize| {
+            let start = *cursor;
+            *cursor += count;
+            &bytes[start..*cursor]
+        };
+        if take(&mut cursor, 4) != Self::VERSION.to_le_bytes() {
+            return Err(invalid("checkpoint referent has another version"));
+        }
+        let digest = |cursor: &mut usize| -> [u8; 32] {
+            take(cursor, 32).try_into().expect("fixed referent extent")
+        };
+        let checkpoint_digest = digest(&mut cursor);
+        let checkpoint_bytes = u64::from_le_bytes(
+            take(&mut cursor, 8)
+                .try_into()
+                .expect("fixed referent extent"),
+        );
+        if checkpoint_bytes == 0 {
+            return Err(invalid("checkpoint referent has an empty source"));
+        }
+        let publication = take(&mut cursor, 104)
+            .try_into()
+            .expect("fixed referent extent");
+        let semantic_root = digest(&mut cursor);
+        let model_generation = u64::from_le_bytes(
+            take(&mut cursor, 8)
+                .try_into()
+                .expect("fixed referent extent"),
+        );
+        let model_digest = digest(&mut cursor);
+        let identity = digest(&mut cursor);
+        let epoch = u64::from_le_bytes(
+            take(&mut cursor, 8)
+                .try_into()
+                .expect("fixed referent extent"),
+        );
+        let content = std::array::from_fn(|_| digest(&mut cursor));
+        let goal = digest(&mut cursor);
+        let scoring_law = digest(&mut cursor);
+        let scope_digest = digest(&mut cursor);
+        let authority_root = digest(&mut cursor);
+        let snapshot_digest = digest(&mut cursor);
+        let phase = match take(&mut cursor, 1)[0] {
+            1 => CheckpointTaskPhase::Imported,
+            2 => CheckpointTaskPhase::InitialPrefillBound,
+            _ => return Err(invalid("checkpoint referent phase is invalid")),
+        };
+        Ok(Self {
+            checkpoint_digest,
+            checkpoint_bytes,
+            publication,
+            semantic_root,
+            model_generation,
+            model_digest,
+            task: TaskCheckpointBinding {
+                identity,
+                epoch,
+                content,
+                goal,
+                scoring_law,
+            },
+            scope_digest,
+            authority_root,
+            snapshot_digest,
+            phase,
+        })
+    }
+
+    fn from_checkpoint(bytes: &[u8]) -> PyResult<Self> {
+        let manifest = SemanticCheckpointManifest::decode(bytes)?;
+        let (seed, snapshot, phase, task) = TaskCheckpointSeed::decode(&manifest.task)?;
+        if phase != CheckpointTaskPhase::InitialPrefillBound {
+            return Err(invalid(
+                "checkpoint referent requires an original initial-prefill-bound task phase",
+            ));
+        }
+        let authority = TaskAuthority::parse(&seed.authority)?;
+        let native = SemanticTransitionSession::state_material_projection(&manifest.native)
+            .map_err(xlog_err)?;
+        if !SemanticTransitionSession::verify_checkpoint_initial_prefill_source(
+            &manifest.initial_prefill,
+            &manifest.native,
+            Identity256::from_bytes(task.identity),
+            task.epoch,
+            task.content_identity(),
+            true,
+        )
+        .map_err(xlog_err)?
+        {
+            return Err(invalid(
+                "checkpoint referent has no original initial prefill",
+            ));
+        }
+        Ok(Self {
+            checkpoint_digest: Sha256::digest(bytes).into(),
+            checkpoint_bytes: u64::try_from(bytes.len())
+                .map_err(|_| invalid("checkpoint source exceeds u64"))?,
+            publication: checkpoint_publication_bytes(native.publication),
+            semantic_root: *native.semantic_root.as_bytes(),
+            model_generation: native.model_generation,
+            model_digest: Sha256::digest(&manifest.model).into(),
+            task,
+            scope_digest: checkpoint_scope_digest(&authority.scope),
+            authority_root: *authority.authority_root().as_bytes(),
+            snapshot_digest: Sha256::digest(&snapshot.canonical).into(),
+            phase,
+        })
+    }
+
+    fn verify_source(&self, bytes: &[u8]) -> PyResult<()> {
+        if u64::try_from(bytes.len()).ok() != Some(self.checkpoint_bytes)
+            || Sha256::digest(bytes).as_slice() != self.checkpoint_digest
+            || Self::from_checkpoint(bytes)? != *self
+        {
+            return Err(invalid(
+                "checkpoint referent differs from its retained complete source",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn checkpoint_scope_digest(scope: &[String]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"xlog.semantic.checkpoint.scope.v1\0");
+    digest.update((scope.len() as u64).to_le_bytes());
+    for item in scope {
+        digest.update((item.len() as u64).to_le_bytes());
+        digest.update(item.as_bytes());
+    }
+    digest.finalize().into()
+}
+
+fn checkpoint_publication_bytes(identity: xlog_cuda::SemanticPublishedIdentity) -> [u8; 104] {
+    let mut bytes = [0u8; 104];
+    bytes[..32].copy_from_slice(identity.instance.as_bytes());
+    bytes[32..40].copy_from_slice(&identity.word.to_le_bytes());
+    bytes[40..72].copy_from_slice(identity.logical_digest.as_bytes());
+    bytes[72..].copy_from_slice(identity.state_digest.as_bytes());
+    bytes
+}
+
+fn check_checkpoint_referent_limits(
+    referents: &[CheckpointReferent],
+    max_checkpoint_bytes: usize,
+    max_total_checkpoint_bytes: usize,
+) -> PyResult<()> {
+    let mut unique = BTreeMap::new();
+    let mut total = 0usize;
+    for referent in referents {
+        let length = usize::try_from(referent.checkpoint_bytes)
+            .map_err(|_| invalid("checkpoint source exceeds host address space"))?;
+        if length == 0 || length > max_checkpoint_bytes {
+            return Err(invalid("checkpoint source exceeds its item limit"));
+        }
+        if let Some(previous) = unique.insert(referent.checkpoint_digest, referent) {
+            if previous != referent {
+                return Err(invalid("one checkpoint digest names different referents"));
+            }
+        } else {
+            total = total
+                .checked_add(length)
+                .ok_or_else(|| invalid("checkpoint source aggregate overflows this host"))?;
+            if total > max_total_checkpoint_bytes {
+                return Err(invalid("checkpoint sources exceed their aggregate limit"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn refresh_checkpoint_authority(
+    authority: &TaskAuthority,
+    snapshot: &mut AuthoritySnapshot,
+    refresh_snapshot: &Bound<'_, PyAny>,
+    operation: &str,
+    actor_row: bool,
+) -> PyResult<()> {
+    let refreshed = refresh_snapshot.call0()?;
+    let mut budget = 16 * 1024 * 1024;
+    let refreshed = AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut budget, 0)?)?;
+    refreshed.newer_than(snapshot)?;
+    if actor_row {
+        authority.check_use("training", &refreshed, true)?;
+    }
+    authority.check_use(operation, &refreshed, true)?;
+    *snapshot = refreshed;
+    Ok(())
+}
+
+fn resolve_replay_checkpoint_referents(
+    py: Python<'_>,
+    authority: &TaskAuthority,
+    snapshot: &mut AuthoritySnapshot,
+    resolve_checkpoint: Option<&Bound<'_, PyAny>>,
+    refresh_snapshot: &Bound<'_, PyAny>,
+    max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
+    max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<CheckpointReferent>> {
+    let mut uses = Vec::new();
+    for (ordinal, row) in authority.replay.iter().enumerate() {
+        if let Some(referent) = row.checkpoint_referent()? {
+            uses.push((ordinal, false, referent));
+        }
+        if let Some(referent) = row.recovered_prefill_referent()? {
+            uses.push((ordinal, true, referent));
+        }
+    }
+    let referents = uses
+        .iter()
+        .map(|(_, _, referent)| referent.clone())
+        .collect::<Vec<_>>();
+    if referents.is_empty() {
+        if resolve_checkpoint.is_some()
+            || max_checkpoint_bytes.is_some()
+            || max_total_checkpoint_bytes.is_some()
+        {
+            return Err(invalid(
+                "replay without checkpoint referents must not supply a source resolver",
+            ));
+        }
+        return Ok(referents);
+    }
+    let resolver = resolve_checkpoint
+        .filter(|callback| callback.is_callable())
+        .ok_or_else(|| invalid("replay requires one checkpoint source resolver"))?;
+    if !refresh_snapshot.is_callable() {
+        return Err(invalid(
+            "replay requires the original current-authority refresh callback",
+        ));
+    }
+    let mut budget = 16 * 1024 * 1024;
+    let limit = |value: Option<&Bound<'_, PyAny>>, name: &str, budget: &mut usize| {
+        usize::try_from(
+            ColdValue::read(
+                value.ok_or_else(|| invalid(&format!("replay requires {name}")))?,
+                budget,
+                0,
+            )?
+            .unsigned()?,
+        )
+        .map_err(|_| invalid(&format!("{name} exceeds host address space")))
+    };
+    let item_limit = limit(max_checkpoint_bytes, "max_checkpoint_bytes", &mut budget)?;
+    let total_limit = limit(
+        max_total_checkpoint_bytes,
+        "max_total_checkpoint_bytes",
+        &mut budget,
+    )?;
+    check_checkpoint_referent_limits(&referents, item_limit, total_limit)?;
+    let mut verified = BTreeMap::<[u8; 32], Vec<u8>>::new();
+    for (ordinal, recovered_prefill, referent) in &uses {
+        let row = &authority.replay[*ordinal];
+        let native = row.native_replay()?;
+        let operation = if *recovered_prefill {
+            if native.material.transition_kind() == SemanticTransitionKind::Update {
+                "training"
+            } else {
+                "inference"
+            }
+        } else {
+            "training"
+        };
+        let actor_row = row.checkpoint_referent()?.is_some();
+        if actor_row {
+            authority.check_use("training", snapshot, true)?;
+        }
+        authority.check_use(operation, snapshot, true)?;
+        if referent.scope_digest != checkpoint_scope_digest(&authority.scope) {
+            return Err(invalid("replay checkpoint refers to another task scope"));
+        }
+        let predecessor = native.material.predecessor_identity();
+        if !*recovered_prefill
+            && referent.publication != checkpoint_publication_bytes(predecessor)
+            && row.recovered_prefill_referent()?.as_ref() != Some(referent)
+        {
+            return Err(invalid(
+                "actor checkpoint publication differs from the verified episode predecessor",
+            ));
+        }
+        match verified.entry(referent.checkpoint_digest) {
+            Entry::Vacant(entry) => {
+                let source =
+                    resolver.call1((PyBytes::new(py, &referent.checkpoint_digest), item_limit))?;
+                if !source.is_exact_instance_of::<PyBytes>() {
+                    return Err(invalid(
+                        "checkpoint source resolver must return exact builtin bytes",
+                    ));
+                }
+                let source = source.cast::<PyBytes>()?.as_bytes();
+                if source.len() > item_limit {
+                    return Err(invalid("resolved checkpoint exceeds its item limit"));
+                }
+                referent.verify_source(source)?;
+                entry.insert(source.to_vec());
+                refresh_checkpoint_authority(
+                    authority,
+                    snapshot,
+                    refresh_snapshot,
+                    operation,
+                    actor_row,
+                )?;
+            }
+            Entry::Occupied(entry) => referent.verify_source(entry.get())?,
+        }
+        if *recovered_prefill {
+            let source = verified
+                .get(&referent.checkpoint_digest)
+                .expect("resolved source remains owned");
+            let manifest = SemanticCheckpointManifest::decode(source)?;
+            let (_, _, phase, binding) = TaskCheckpointSeed::decode(&manifest.task)?;
+            if phase != CheckpointTaskPhase::InitialPrefillBound {
+                return Err(invalid(
+                    "recovered prefill source is not an original pre-action checkpoint",
+                ));
+            }
+            let child = row
+                .materials
+                .iter()
+                .find(|item| item.kind == "initial-prefill")
+                .expect("recovered prefill has its original child");
+            native
+                .material
+                .verify_initial_prefill_checkpoint_source(
+                    (
+                        child
+                            .bytes
+                            .as_deref()
+                            .expect("recovered prefill has original bytes"),
+                        replay_digest_identity(&child.identity)?,
+                    ),
+                    row.action_identity()?,
+                    (&manifest.native, &manifest.initial_prefill),
+                    Identity256::from_bytes(binding.identity),
+                    binding.epoch,
+                    binding.content_identity(),
+                )
+                .map_err(xlog_err)?;
+        }
+    }
+    Ok(referents)
 }
 
 impl SemanticCheckpointManifest {
     const MAGIC: &'static [u8] = b"XLOG-SEMANTIC-CHECKPOINT\0";
-    const SECTION_COUNT: usize = 4;
+    const SECTION_COUNT: usize = 5;
+    const VERSION: u32 = 3;
 
     fn encode(self) -> PyResult<Vec<u8>> {
-        let sections = [self.native, self.model, self.task, self.session];
+        let sections = [
+            self.native,
+            self.model,
+            self.task,
+            self.session,
+            self.initial_prefill,
+        ];
         let mut bytes = Self::MAGIC.to_vec();
-        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&Self::VERSION.to_le_bytes());
         for section in &sections {
             bytes
                 .len()
@@ -218,7 +819,7 @@ impl SemanticCheckpointManifest {
                 bytes[Self::MAGIC.len()..header]
                     .try_into()
                     .expect("checkpoint version extent"),
-            ) != 1
+            ) != Self::VERSION
         {
             return Err(invalid("checkpoint has another domain or version"));
         }
@@ -276,12 +877,13 @@ impl SemanticCheckpointManifest {
             sections[index] = section.to_vec();
             payload = rest;
         }
-        let [native, model, task, session] = sections;
+        let [native, model, task, session, initial_prefill] = sections;
         Ok(Self {
             native,
             model,
             task,
             session,
+            initial_prefill,
         })
     }
 }
@@ -433,14 +1035,109 @@ impl PySemanticTransitionSession {
     /// owner. The trusted model factory is called exactly once with the exact
     /// controller, task use, acquired parent and model bytes retained by the
     /// returned carrier. The checkpoint itself grants no current authority.
+    /// Project the compact replay material from one complete original checkpoint.
     #[staticmethod]
-    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model))]
+    fn checkpoint_referent<'py>(
+        py: Python<'py>,
+        checkpoint: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        if !checkpoint.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "checkpoint referent requires exact builtin checkpoint bytes",
+            ));
+        }
+        let record = CheckpointReferent::from_checkpoint(checkpoint.cast::<PyBytes>()?.as_bytes())?;
+        Ok(PyBytes::new(py, &record.encode()))
+    }
+
+    /// Decode the one native record for data-kit assembly without a second parser.
+    #[staticmethod]
+    fn inspect_checkpoint_referent<'py>(
+        py: Python<'py>,
+        referent: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if !referent.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "checkpoint referent inspection requires exact builtin bytes",
+            ));
+        }
+        let record = CheckpointReferent::decode(referent.cast::<PyBytes>()?.as_bytes())?;
+        let fields = PyDict::new(py);
+        fields.set_item(
+            "checkpoint_sha256",
+            PyBytes::new(py, &record.checkpoint_digest),
+        )?;
+        fields.set_item("checkpoint_bytes", record.checkpoint_bytes)?;
+        fields.set_item(
+            "publication_identity",
+            PyBytes::new(py, &record.publication),
+        )?;
+        fields.set_item("semantic_root", PyBytes::new(py, &record.semantic_root))?;
+        fields.set_item("model_generation", record.model_generation)?;
+        fields.set_item("model_state_sha256", PyBytes::new(py, &record.model_digest))?;
+        fields.set_item("task_identity", PyBytes::new(py, &record.task.identity))?;
+        fields.set_item("task_epoch", record.task.epoch)?;
+        fields.set_item(
+            "query_content_identity",
+            PyBytes::new(py, &record.task.content[0]),
+        )?;
+        fields.set_item(
+            "theory_program_content_identity",
+            PyBytes::new(py, &record.task.content[1]),
+        )?;
+        fields.set_item(
+            "result_content_identity",
+            PyBytes::new(py, &record.task.content[2]),
+        )?;
+        fields.set_item("semantic_goal_root", PyBytes::new(py, &record.task.goal))?;
+        fields.set_item(
+            "scoring_law_identity",
+            PyBytes::new(py, &record.task.scoring_law),
+        )?;
+        fields.set_item("scope_sha256", PyBytes::new(py, &record.scope_digest))?;
+        fields.set_item("authority_root", PyBytes::new(py, &record.authority_root))?;
+        fields.set_item(
+            "saved_snapshot_sha256",
+            PyBytes::new(py, &record.snapshot_digest),
+        )?;
+        fields.set_item(
+            "phase",
+            match record.phase {
+                CheckpointTaskPhase::Imported => "imported",
+                CheckpointTaskPhase::InitialPrefillBound => "initial-prefill-bound",
+                CheckpointTaskPhase::Segment(_) => unreachable!("decoded referent is pre-action"),
+            },
+        )?;
+        Ok(fields)
+    }
+
+    /// Validate a retained full checkpoint against every field of its compact record.
+    #[staticmethod]
+    fn verify_checkpoint_referent(
+        referent: &Bound<'_, PyAny>,
+        checkpoint: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        if !referent.is_exact_instance_of::<PyBytes>()
+            || !checkpoint.is_exact_instance_of::<PyBytes>()
+        {
+            return Err(invalid(
+                "checkpoint verification requires exact builtin source and referent bytes",
+            ));
+        }
+        CheckpointReferent::decode(referent.cast::<PyBytes>()?.as_bytes())?
+            .verify_source(checkpoint.cast::<PyBytes>()?.as_bytes())
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, referent=None))]
     fn restore_checkpoint(
         py: Python<'_>,
         checkpoint: &Bound<'_, PyAny>,
         device_ordinal: usize,
         snapshot: &Bound<'_, PyAny>,
         restore_model: &Bound<'_, PyAny>,
+        training_domain: &Bound<'_, PyAny>,
+        referent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
         if !checkpoint.is_exact_instance_of::<PyBytes>() {
             return Err(invalid("checkpoint restore requires exact builtin bytes"));
@@ -451,12 +1148,72 @@ impl PySemanticTransitionSession {
             ));
         }
         let checkpoint = checkpoint.cast::<PyBytes>()?.as_bytes();
+        if let Some(referent) = referent {
+            if !referent.is_exact_instance_of::<PyBytes>() {
+                return Err(invalid(
+                    "checkpoint restore referent requires exact builtin bytes",
+                ));
+            }
+            CheckpointReferent::decode(referent.cast::<PyBytes>()?.as_bytes())?
+                .verify_source(checkpoint)?;
+        }
         let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
         let config = SemanticCheckpointSessionConfig::decode(&manifest.session)?;
-        let (seed, saved_snapshot, phase) = TaskCheckpointSeed::decode(&manifest.task)?;
+        let (seed, saved_snapshot, phase, saved_binding) =
+            TaskCheckpointSeed::decode(&manifest.task)?;
+        let mut domain_budget = 16 * 1024 * 1024;
+        if ColdValue::read(training_domain, &mut domain_budget, 0)? != seed.training_domain {
+            return Err(invalid(
+                "checkpoint restore changed the original training input domain",
+            ));
+        }
+        let has_initial_prefill =
+            SemanticTransitionSession::verify_checkpoint_initial_prefill_source(
+                &manifest.initial_prefill,
+                &manifest.native,
+                Identity256::from_bytes(saved_binding.identity),
+                saved_binding.epoch,
+                saved_binding.content_identity(),
+                phase == CheckpointTaskPhase::InitialPrefillBound,
+            )
+            .map_err(xlog_err)?;
+        if has_initial_prefill != (phase == CheckpointTaskPhase::InitialPrefillBound)
+            && !matches!(phase, CheckpointTaskPhase::Segment(_))
+        {
+            return Err(invalid(
+                "checkpoint initial prefill differs from its task phase",
+            ));
+        }
+        let original_referent = if phase == CheckpointTaskPhase::InitialPrefillBound {
+            Some(CheckpointReferent::from_checkpoint(checkpoint)?.encode())
+        } else {
+            None
+        };
         let mut authority = TaskAuthority::parse(&seed.authority)?;
         authority.bind_initial_sources(&seed.initial_sources, &seed.source_mapping)?;
-        let spec = task_evaluation_spec(&seed.evaluation)?;
+        let admission = SemanticTransitionSession::state_material_admission(&manifest.native)
+            .map_err(xlog_err)?;
+        let editable_source = cold_task::editable_source_from_admission(&admission)?;
+        if let Some(source) = &editable_source {
+            if seed
+                .evaluation
+                .get(2)
+                .ok_or_else(|| invalid("checkpoint task evaluation is incomplete"))?
+                .text()?
+                != source.observer_source
+            {
+                return Err(invalid(
+                    "checkpoint observer source differs from its admission",
+                ));
+            }
+        }
+        let editable_program = editable_source.map(|source| source.program);
+        let spec = task_evaluation_spec(
+            &seed.evaluation,
+            authority.priority_levels.clone(),
+            editable_program.clone(),
+            &seed.training_domain,
+        )?;
         let (_, selected_material) =
             decode_selected_replay(&authority.replay, &seed.replay_selection)?;
         let training_views = authority
@@ -475,26 +1232,24 @@ impl PySemanticTransitionSession {
             AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
         current_snapshot.newer_than(&saved_snapshot)?;
         let validate_authority = |snapshot: &AuthoritySnapshot| match &phase {
-            CheckpointTaskPhase::Imported => authority.check_snapshot(snapshot).map(drop),
+            CheckpointTaskPhase::Imported | CheckpointTaskPhase::InitialPrefillBound => {
+                authority.check_snapshot(snapshot).map(drop)
+            }
             CheckpointTaskPhase::Segment(operation) => {
                 authority.check_use(operation, snapshot, false)
             }
         };
         validate_authority(&saved_snapshot)?;
         validate_authority(&current_snapshot)?;
-        let admission = SemanticTransitionSession::state_material_admission(&manifest.native)
-            .map_err(xlog_err)?;
-        let session = Py::new(
-            py,
-            Self::from_admission(
-                admission,
-                config.capacities,
-                config.admission_limits,
-                device_ordinal,
-                config.memory_bytes,
-            )?,
+        let restored_session = Self::from_admission(
+            admission,
+            config.capacities,
+            config.admission_limits,
+            device_ordinal,
+            config.memory_bytes,
         )?;
-        let native_binding = (|| -> PyResult<([u8; 32], u64)> {
+        let session = Py::new(py, restored_session)?;
+        let native_binding = (|| -> PyResult<TaskCheckpointBinding> {
             let restored = session.borrow(py);
             let mut owner = restored.owner()?;
             let observations = owner
@@ -517,13 +1272,13 @@ impl PySemanticTransitionSession {
             owner
                 .restore_state_material(&manifest.native)
                 .map_err(xlog_err)?;
-            Ok((
-                *owner
-                    .task_evaluation_identity()
-                    .ok_or_else(|| invalid("checkpoint restore lost its native task binding"))?
-                    .as_bytes(),
-                owner.task_evaluation_epoch(),
-            ))
+            let native_binding = TaskCheckpointBinding::from_owner(&owner)?;
+            if !saved_binding.same_task_content(native_binding) {
+                return Err(invalid(
+                    "checkpoint restore changed its original native task content or scoring law",
+                ));
+            }
+            Ok(native_binding)
         })()?;
         let controller_identity = Arc::new(());
         let controller = Py::new(
@@ -539,6 +1294,7 @@ impl PySemanticTransitionSession {
         };
         let task_phase = match &phase {
             CheckpointTaskPhase::Imported => TaskUsePhase::Imported,
+            CheckpointTaskPhase::InitialPrefillBound => TaskUsePhase::InitialPrefillBound,
             CheckpointTaskPhase::Segment(operation) => TaskUsePhase::Segment(operation.clone()),
         };
         let restored_snapshot = current_snapshot.canonical.clone();
@@ -549,14 +1305,15 @@ impl PySemanticTransitionSession {
                 controller: controller_identity,
                 issuance,
                 importing: Arc::clone(&session.borrow(py).importing),
-                task_identity: native_binding.0,
-                task_epoch: native_binding.1,
+                task_identity: native_binding.identity,
+                task_epoch: native_binding.epoch,
                 authority,
                 checkpoint: seed,
                 state: Mutex::new(TaskUseState {
                     phase: task_phase,
                     snapshot: current_snapshot,
                 }),
+                delivery: Mutex::new(None),
             },
         )?;
         let parent = {
@@ -614,6 +1371,16 @@ impl PySemanticTransitionSession {
             owner
                 .verify_restored_state_material(&*acquired.lease()?, &manifest.native)
                 .map_err(xlog_err)?;
+            if let Some(referent) = &original_referent {
+                owner
+                    .bind_restored_checkpoint_initial_prefill(
+                        &*acquired.lease()?,
+                        &manifest.native,
+                        &manifest.initial_prefill,
+                        referent,
+                    )
+                    .map_err(xlog_err)?;
+            }
             Ok(())
         })();
         if let Err(error) = verified {
@@ -920,11 +1687,15 @@ impl Drop for PreparedBuildGuard<'_> {
             if let Ok(mut state) = self.task_use.state() {
                 state.phase = TaskUsePhase::Refused;
             }
-            self.session
+            if let Some(owner) = self
+                .session
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .abort();
+                .as_mut()
+            {
+                owner.abort();
+            }
         }
         self.session.recording.store(false, Ordering::Release);
     }
@@ -1709,6 +2480,7 @@ fn parse_parent(
         "intent_effect",
         "intent_entry_capacity",
         "intent_payload_capacity_bytes",
+        "acknowledgement_payload_capacity_bytes",
         "model_generation",
         "model_numerical_mode",
         "model_contract_layout",
@@ -1874,6 +2646,12 @@ fn parse_parent(
             &mut budget,
         )?)
         .map_err(|_| invalid("intent payload capacity overflows"))?,
+        acknowledgement_payload_capacity_bytes: usize::try_from(metadata_integer(
+            metadata,
+            "acknowledgement_payload_capacity_bytes",
+            &mut budget,
+        )?)
+        .map_err(|_| invalid("acknowledgement payload capacity overflows"))?,
         model_generation: metadata_integer(metadata, "model_generation", &mut budget)?,
         model_numerical_mode,
         model_contract_layout,
@@ -1908,6 +2686,31 @@ fn parse_parent(
     // Only after all scalar/control input checks may a real producer callback
     // execute. The caller rechecks the unchanged task and phase after handoff.
     Ok(parent)
+}
+
+fn text_slot_fields(slot: &SemanticTextSlot) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+    (
+        slot.token,
+        slot.logical_position,
+        slot.kind,
+        slot.provenance,
+        slot.valid,
+        slot.committed,
+        slot.recomputed,
+        slot.provenance_record,
+    )
+}
+
+fn initial_source_parts(
+    py: Python<'_>,
+    layout: SemanticInitialSourceLayout,
+) -> PyResult<Py<PyTuple>> {
+    let source = PyTuple::new(py, layout.source.iter().map(text_slot_fields))?;
+    let prefix = PyTuple::new(py, layout.prefix.iter().map(text_slot_fields))?;
+    let prefill_tokens = PyTuple::new(py, &layout.prefill_tokens)?;
+    Ok((source, prefix, prefill_tokens, layout.ring_head)
+        .into_pyobject(py)?
+        .unbind())
 }
 
 fn sorted_references(value: &ColdValue) -> PyResult<Vec<String>> {
@@ -2522,6 +3325,8 @@ impl ReplayMaterial {
             kind.as_str(),
             "entry-boundary"
                 | "source-tokens"
+                | "task-ground"
+                | "initial-prefill"
                 | "topology"
                 | "cache"
                 | "feedback"
@@ -2540,6 +3345,7 @@ impl ReplayMaterial {
                 | "vjp"
                 | "receipt"
                 | "theory-delta"
+                | "edit-solution"
                 | "evidence"
                 | "theory-state"
                 | "logical-state"
@@ -2553,6 +3359,7 @@ impl ReplayMaterial {
                 | "observation"
                 | "environment"
                 | "provenance"
+                | "filter"
                 | "downstream-snapshot"
                 | "estimator-bound"
                 | "training-view"
@@ -2623,6 +3430,44 @@ enum ReplayBasis {
 enum ReplayAnchorGroup {
     Language,
     Symbolic,
+}
+
+/// Lossless projection of the data owner's sealed manifest set and LoaderConfig.
+/// No roster or denominator is selected by this cold transport.
+fn read_training_domain(value: &ColdValue) -> PyResult<Option<SemanticTrainingDomain>> {
+    if *value == ColdValue::None {
+        return Ok(None);
+    }
+    let fields = value.fields(2)?;
+    let manifests = fields[0]
+        .sequence()?
+        .iter()
+        .map(|manifest| {
+            let manifest = manifest.fields(2)?;
+            Ok(SemanticTrainingManifest {
+                identity: replay_digest_identity(manifest[0].text()?)?,
+                caps: unsigned_array(&manifest[1])?,
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let loader = fields[1].fields(5)?;
+    let batch = unsigned_array::<4>(&loader[0])?;
+    let ColdValue::Integer(training_seed) = &loader[3] else {
+        return Err(invalid(
+            "training domain seed requires an exact nonnegative integer",
+        ));
+    };
+    Ok(Some(SemanticTrainingDomain {
+        manifests,
+        window: batch[0],
+        pad_id: batch[1],
+        mask_id: batch[2],
+        block_size: batch[3],
+        batch_size: loader[1].unsigned()?,
+        mask_permille: loader[2].unsigned()?,
+        training_seed: training_seed.clone(),
+        mask_policy: replay_digest_identity(loader[4].text()?)?,
+    }))
 }
 
 fn read_training_objective(value: &ColdValue) -> PyResult<Option<SemanticTrainingObjective>> {
@@ -2745,6 +3590,87 @@ struct NativeReplayBinding {
 }
 
 impl ReplayRow {
+    fn action_identity(&self) -> PyResult<Identity256> {
+        let mut actions = self.materials.iter().filter(|item| item.kind == "action");
+        let action = actions
+            .next()
+            .ok_or_else(|| invalid("replay episode has no action owner"))?;
+        if actions.next().is_some() {
+            return Err(invalid("replay episode has more than one action owner"));
+        }
+        replay_digest_identity(&action.identity)
+    }
+
+    fn recovered_prefill_referent(&self) -> PyResult<Option<CheckpointReferent>> {
+        if !matches!(self.basis, ReplayBasis::Episode { .. }) {
+            return Ok(None);
+        }
+        let mut children = self
+            .materials
+            .iter()
+            .filter(|item| item.kind == "initial-prefill");
+        let Some(child) = children.next() else {
+            return Ok(None);
+        };
+        if children.next().is_some() {
+            return Err(invalid(
+                "replay episode has more than one initial prefill child",
+            ));
+        }
+        let bytes = child
+            .bytes
+            .as_deref()
+            .ok_or_else(|| invalid("initial prefill child has no original bytes"))?;
+        let identity = replay_digest_identity(&child.identity)?;
+        self.native_replay()?
+            .material
+            .initial_prefill_recovery_referent(bytes, identity, self.action_identity()?)
+            .map_err(xlog_err)?
+            .as_deref()
+            .map(CheckpointReferent::decode)
+            .transpose()
+    }
+
+    fn checkpoint_referent(&self) -> PyResult<Option<CheckpointReferent>> {
+        if !matches!(self.basis, ReplayBasis::Episode { .. }) {
+            return Ok(None);
+        }
+        let envelope = replay_json_object(replay_json_field(&self.record, "envelope")?)?;
+        let actor = replay_json_value(replay_json_field(&envelope, "actor_eligible")?)?
+            .as_bool()
+            .ok_or_else(|| invalid("replay actor eligibility is not a boolean"))?;
+        let snapshot = replay_json_value(replay_json_field(
+            &envelope,
+            "downstream_snapshot_identity",
+        )?)?;
+        let snapshots = self
+            .materials
+            .iter()
+            .filter(|material| material.kind == "downstream-snapshot")
+            .collect::<Vec<_>>();
+        if !actor {
+            if !snapshot.is_null() || !snapshots.is_empty() {
+                return Err(invalid(
+                    "non-actor replay must not contain a checkpoint referent",
+                ));
+            }
+            return Ok(None);
+        }
+        let identity = snapshot
+            .as_str()
+            .ok_or_else(|| invalid("actor replay has no checkpoint referent identity"))?;
+        if snapshots.len() != 1 || snapshots[0].identity != identity {
+            return Err(invalid(
+                "actor replay checkpoint referent differs from its original material",
+            ));
+        }
+        let bytes = snapshots[0]
+            .bytes
+            .as_deref()
+            .ok_or_else(|| invalid("actor replay checkpoint referent bytes are absent"))?;
+        CheckpointReferent::decode(bytes).map(Some)
+    }
+
     fn training_view_row(&self) -> PyResult<SemanticTrainingViewRow> {
         let mut materials = self
             .materials
@@ -2763,6 +3689,10 @@ impl ReplayRow {
             .as_deref()
             .ok_or_else(|| invalid("training view has no original bytes"))?;
         let identity = self.identity.fields(6)?;
+        let view = identity[0].fields(9)?;
+        let ColdValue::Integer(training_seed) = &view[6] else {
+            return Err(invalid("training view seed is not its original integer"));
+        };
         let origin = match &self.basis {
             ReplayBasis::Episode { .. } => Some(
                 self.native_replay()?
@@ -2796,6 +3726,9 @@ impl ReplayRow {
                     .ok_or_else(|| invalid("training view has no original byte identity"))?,
             )?,
             content_identity: replay_digest_identity(identity[2].text()?)?,
+            data_manifest: replay_digest_identity(view[0].text()?)?,
+            mask_policy: replay_digest_identity(view[5].text()?)?,
+            training_seed: training_seed.clone(),
             task_content,
             origin,
             bytes: bytes.to_vec(),
@@ -2915,7 +3848,12 @@ impl ReplayRow {
             .unbind())
     }
 
+    #[cfg(test)]
     fn parse(value: &ColdValue) -> PyResult<Self> {
+        Self::parse_with_live(value, &[])
+    }
+
+    fn parse_with_live(value: &ColdValue, live: &[LiveAuthority]) -> PyResult<Self> {
         let fields = value.fields(5)?;
         let basis = fields[0].text()?;
         if !matches!(basis, "episode" | "anchor") {
@@ -2952,7 +3890,7 @@ impl ReplayRow {
         }
         if basis == "anchor" {
             let (source, group, task_content) =
-                validate_anchor_admission(identity, &record, evidence)?;
+                validate_anchor_admission(identity, &record, evidence, live)?;
             let transported = fields[3].fields(1)?;
             let material = ReplayMaterial::parse(&transported[0], &BTreeSet::new())?;
             if material.kind != "training-view"
@@ -3092,7 +4030,7 @@ impl ReplayRow {
                 .ok_or_else(|| invalid("replay source identity is not a digest"))?,
             false,
         )?;
-        Ok(Self {
+        let row = Self {
             basis: ReplayBasis::Episode {
                 execution: replay_json_value(replay_json_field(&envelope, "execution_materials")?)?,
             },
@@ -3101,7 +4039,9 @@ impl ReplayRow {
             record,
             materials,
             evidence: Arc::clone(evidence),
-        })
+        };
+        row.checkpoint_referent()?;
+        Ok(row)
     }
 }
 
@@ -3167,6 +4107,7 @@ fn validate_anchor_admission(
     identity: &[ColdValue],
     record: &ReplayJsonObject,
     evidence: &[u8],
+    live: &[LiveAuthority],
 ) -> PyResult<(
     String,
     ReplayAnchorGroup,
@@ -3185,7 +4126,7 @@ fn validate_anchor_admission(
         Some("symbolic") => ReplayAnchorGroup::Symbolic,
         _ => {
             return Err(invalid(
-                "corpus anchor requires the exact language or symbolic retention group",
+                "anchor requires the exact language or symbolic retention group",
             ));
         }
     };
@@ -3195,7 +4136,7 @@ fn validate_anchor_admission(
         || base_keys.iter().any(|key| !record.contains_key(*key))
         || record.contains_key("semantic_task") != has_task_content
     {
-        return Err(invalid("corpus anchor record field set differs"));
+        return Err(invalid("anchor record field set differs"));
     }
     let task_content = if has_task_content {
         let binding = replay_json_object(replay_json_field(record, "semantic_task")?)?;
@@ -3206,7 +4147,7 @@ fn validate_anchor_admission(
         ];
         if binding.len() != keys.len() || keys.iter().any(|key| !binding.contains_key(*key)) {
             return Err(invalid(
-                "symbolic corpus anchor requires exact query, theory/program and result identities",
+                "symbolic anchor requires exact query, theory/program and result identities",
             ));
         }
         let digest = |name: &str| {
@@ -3226,31 +4167,31 @@ fn validate_anchor_admission(
     };
     if view[2].text()? != "train" {
         return Err(invalid(
-            "corpus anchor requires its admitted train partition and original retention group",
+            "anchor requires its admitted train partition and original retention group",
         ));
     }
     let text = std::str::from_utf8(evidence)
-        .map_err(|_| invalid("corpus admission evidence is not UTF-8"))?;
+        .map_err(|_| invalid("anchor admission evidence is not UTF-8"))?;
     validate_replay_json_structure(text, 0)?;
     let parts: Vec<Box<serde_json::value::RawValue>> = serde_json::from_str(text)
-        .map_err(|_| invalid("corpus anchor admission evidence requires its canonical record"))?;
+        .map_err(|_| invalid("anchor admission evidence requires its canonical record"))?;
     let expected_evidence_fields = if has_task_content { 6 } else { 3 };
     if parts.len() != expected_evidence_fields
         || replay_json_value(parts[0].get())? != "dlm-new/corpus-anchor-admission/v1"
         || parts[1].get() != replay_identity_json(&view[0])?
     {
         return Err(invalid(
-            "corpus anchor admission differs from the original manifest",
+            "anchor admission differs from the original manifest",
         ));
     }
     let entry = replay_json_value(parts[2].get())?;
     let entry = entry
         .as_array()
         .filter(|entry| entry.len() == 10)
-        .ok_or_else(|| invalid("corpus anchor admission requires the complete manifest entry"))?;
+        .ok_or_else(|| invalid("anchor admission requires the complete manifest entry"))?;
     if entry[0] != view[1].text()? || entry[1] != "train" {
         return Err(invalid(
-            "corpus anchor admission names another example or partition",
+            "anchor admission names another example or partition",
         ));
     }
     for index in [2, 3, 4] {
@@ -3262,23 +4203,58 @@ fn validate_anchor_admission(
     }
     let provenance = entry[7]
         .as_array()
-        .filter(|parts| parts.len() == 11)
-        .ok_or_else(|| invalid("corpus anchor requires its complete original corpus provenance"))?;
+        .ok_or_else(|| invalid("anchor requires its complete original provenance"))?;
     let admission = entry[8]
         .as_array()
         .filter(|parts| parts.len() == 3)
-        .ok_or_else(|| invalid("corpus anchor requires its original admission decision"))?;
-    if provenance[0] != "corpus"
-        || admission[0] != "corpus"
-        || admission[2] != "corpus"
-        || !provenance[8]
-            .as_array()
-            .is_some_and(|uses| uses.iter().any(|use_| use_ == "training"))
-        || !admission[1]
-            .as_array()
-            .is_some_and(|splits| splits.iter().any(|split| split == "train"))
-    {
-        return Err(invalid("corpus anchor has no train-only corpus admission"));
+        .ok_or_else(|| invalid("anchor requires its original admission decision"))?;
+    let admits_train = admission[1]
+        .as_array()
+        .is_some_and(|splits| splits.iter().any(|split| split == "train"));
+    match provenance.first().and_then(serde_json::Value::as_str) {
+        Some("corpus") => {
+            if provenance.len() != 11
+                || admission[0] != "corpus"
+                || admission[2] != "corpus"
+                || !admits_train
+                || !provenance[8]
+                    .as_array()
+                    .is_some_and(|uses| uses.iter().any(|use_| use_ == "training"))
+            {
+                return Err(invalid("corpus anchor has no train-only corpus admission"));
+            }
+        }
+        Some("live") => {
+            if provenance.len() != 16
+                || admission[0] != "live"
+                || admission[2] != "cross-request"
+                || !admits_train
+                || !provenance[8].as_array().is_some_and(|uses| {
+                    uses.iter().any(|use_| use_ == "durable-slow-consolidation")
+                })
+                || provenance[13] != true
+                || provenance[14] != true
+            {
+                return Err(invalid("live anchor lacks durable train admission"));
+            }
+            let mut matched = false;
+            for authority in live {
+                if replay_json_value(&replay_identity_json(&authority.canonical)?)? == entry[7] {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return Err(invalid(
+                    "live anchor provenance differs from every bound live authority",
+                ));
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "anchor provenance has no admitted corpus or live branch",
+            ))
+        }
     }
     if let Some(binding) = task_content {
         for (part, expected) in
@@ -3325,43 +4301,21 @@ fn validate_replay_training_payload(
         .bytes
         .as_deref()
         .ok_or_else(|| invalid("training view requires its original bytes"))?;
-    let mut tag = [0u8; 32];
-    let schema = b"dlm-new/training-view/v1";
-    tag[..schema.len()].copy_from_slice(schema);
-    if bytes.len() < 136
-        || bytes[..32] != tag
-        || bytes[32..64] != *replay_digest_identity(identity[1].text()?)?.as_bytes()
+    let layout = xlog_cuda::validate_training_view_layout(bytes).map_err(xlog_err)?;
+    if bytes[32..64] != *replay_digest_identity(identity[1].text()?)?.as_bytes()
         || bytes[64..96] != *replay_digest_identity(source)?.as_bytes()
     {
         return Err(invalid(
             "training-view header differs from its original identity or source",
         ));
     }
-    let word = |offset: usize| {
-        u64::from_le_bytes(
-            bytes[offset..offset + 8]
-                .try_into()
-                .expect("bounded training-view word"),
-        )
-    };
-    let window = usize::try_from(word(96))
-        .map_err(|_| invalid("training-view window exceeds host address space"))?;
+    let window = layout.window;
     let length = identity[3].unsigned()?;
     let block = identity[4].unsigned()?;
-    let answer_start = word(128);
-    let expected = window
-        .checked_mul(68)
-        .and_then(|size| size.checked_add(136 + (window % 2) * 4));
-    if window == 0
-        || length == 0
-        || block == 0
-        || word(104) != length
-        || word(112) != block
-        || word(120) > length
-        || answer_start == 0
-        || answer_start > length
+    let answer_start = layout.answer_start;
+    if layout.source_length != length
+        || layout.block_size != block
         || (require_retention && answer_start == length)
-        || expected != Some(bytes.len())
         || length
             .checked_mul(2)
             .is_none_or(|extent| extent > window as u64)
@@ -3370,13 +4324,24 @@ fn validate_replay_training_payload(
             "training-view byte extent or dimensions differ from its original row",
         ));
     }
-    let padding = 136 + window * 20;
-    if bytes[padding..padding + (window % 2) * 4]
-        .iter()
-        .any(|&value| value != 0)
-    {
-        return Err(invalid("training-view alignment padding is not canonical"));
-    }
+    let token_ids = 264;
+    let mask_labels = token_ids + window * 8;
+    let mask_weights = mask_labels + window * 8;
+    let ar_labels = mask_weights + window * 4 + (window % 2) * 4;
+    let retention = ar_labels + window * 8;
+    let branch_labels = retention + window * 8;
+    let branch_ids = branch_labels + window * 8;
+    let source_slots = branch_ids + window * 8;
+    let positions = source_slots + window * 8;
+    let kinds = positions + window * 8;
+    let parents = kinds + window * 8;
+    let signed = |offset: usize| {
+        i64::from_le_bytes(
+            bytes[offset..offset + 8]
+                .try_into()
+                .expect("bounded training-view element"),
+        )
+    };
     let mut targets = BTreeSet::new();
     let mut previous = None;
     for target in identity[5].sequence()? {
@@ -3394,10 +4359,9 @@ fn validate_replay_training_payload(
         previous = Some(position);
         targets.insert(target[2].unsigned()? as usize);
     }
-    let retention = padding + (window % 2) * 4 + window * 8;
     for slot in 0..window {
-        let label = word(136 + window * 8 + slot * 8) as i64;
-        let offset = 136 + window * 16 + slot * 4;
+        let label = signed(mask_labels + slot * 8);
+        let offset = mask_weights + slot * 4;
         let weight = f32::from_le_bytes(
             bytes[offset..offset + 4]
                 .try_into()
@@ -3414,11 +4378,15 @@ fn validate_replay_training_payload(
                 "training-view MASK supervision contains an undeclared target",
             ));
         }
+        let autoregressive = signed(ar_labels + slot * 8);
+        if autoregressive < 0 && autoregressive != -100 {
+            return Err(invalid("training-view autoregressive label is not a token"));
+        }
         // Retention reads the original causal memory predictor, not the
         // permuted prediction stream or a newly drawn subset of MASK rows.
         let next = slot as u64 + 1;
         let expected_label = if next >= answer_start && next < length {
-            let token = word(136 + (slot + 1) * 8) as i64;
+            let token = signed(token_ids + (slot + 1) * 8);
             if token < 0 {
                 return Err(invalid("training-view retention target is not a token"));
             }
@@ -3426,9 +4394,171 @@ fn validate_replay_training_payload(
         } else {
             -100
         };
-        if word(retention + slot * 8) as i64 != expected_label {
+        if signed(retention + slot * 8) != expected_label {
             return Err(invalid(
                 "training-view retention labels differ from the original answer projection",
+            ));
+        }
+    }
+    let mut nodes_by_source_slot = vec![None; window];
+    for node in 0..window {
+        let source_slot = usize::try_from(signed(source_slots + node * 8))
+            .map_err(|_| invalid("training-view topology has a negative source slot"))?;
+        if source_slot >= window || nodes_by_source_slot[source_slot].replace(node).is_some() {
+            return Err(invalid(
+                "training-view topology source slots are not a permutation",
+            ));
+        }
+        let kind = signed(kinds + node * 8);
+        let position = signed(positions + node * 8);
+        let parent = signed(parents + node * 8);
+        if kind == 0 {
+            if position != 0 || parent != -2 {
+                return Err(invalid(
+                    "training-view inactive topology node is not canonical",
+                ));
+            }
+        } else if !matches!(kind, 2 | 4 | 5)
+            || position < 0
+            || position as u64 >= window as u64
+            || parent < -1
+            || parent >= window as i64
+            || parent == node as i64
+        {
+            return Err(invalid("training-view active topology node is invalid"));
+        }
+    }
+    let source_length = length as usize;
+    for node in 0..source_length {
+        let expected_parent = if node == 0 { -1 } else { node as i64 - 1 };
+        if signed(source_slots + node * 8) != node as i64
+            || signed(positions + node * 8) != node as i64
+            || signed(kinds + node * 8) != 4
+            || signed(parents + node * 8) != expected_parent
+        {
+            return Err(invalid(
+                "training-view memory topology differs from its source",
+            ));
+        }
+    }
+    let block_size = usize::try_from(block)
+        .map_err(|_| invalid("training-view block size exceeds host address space"))?;
+    let mut physical = source_length;
+    for block_start in (0..source_length).step_by(block_size) {
+        let block_end = block_start.saturating_add(block_size).min(source_length);
+        let first_in_block = physical;
+        for masked in [false, true] {
+            for position in block_start..block_end {
+                let source_slot = source_length + position;
+                if targets.contains(&source_slot) != masked {
+                    continue;
+                }
+                let expected_parent = if physical == first_in_block {
+                    if block_start == 0 {
+                        -1
+                    } else {
+                        block_start as i64 - 1
+                    }
+                } else {
+                    physical as i64 - 1
+                };
+                if signed(source_slots + physical * 8) != source_slot as i64
+                    || signed(positions + physical * 8) != position as i64
+                    || signed(kinds + physical * 8) != if masked { 2 } else { 5 }
+                    || signed(parents + physical * 8) != expected_parent
+                {
+                    return Err(invalid(
+                        "training-view prediction topology differs from its source",
+                    ));
+                }
+                physical += 1;
+            }
+        }
+    }
+    if physical != source_length * 2 {
+        return Err(invalid("training-view prediction topology is incomplete"));
+    }
+    if layout.branch_words[0] != 0 {
+        let shared_context_end = layout.branch_words[0] as usize;
+        for branch in 0..3 {
+            let offset = 1 + branch * 5;
+            let tail_begin = layout.branch_words[offset] as usize;
+            let answer_end = layout.branch_words[offset + 3] as usize;
+            for source_slot in tail_begin..answer_end {
+                let expected_parent = if source_slot == tail_begin {
+                    shared_context_end as i64 - 1
+                } else {
+                    physical as i64 - 1
+                };
+                let expected_position = shared_context_end + source_slot - tail_begin;
+                if signed(source_slots + physical * 8) != source_slot as i64
+                    || signed(positions + physical * 8) != expected_position as i64
+                    || signed(kinds + physical * 8) != 5
+                    || signed(parents + physical * 8) != expected_parent
+                {
+                    return Err(invalid(
+                        "training-view branch topology differs from its source",
+                    ));
+                }
+                physical += 1;
+            }
+        }
+    }
+    for node in physical..window {
+        if signed(source_slots + node * 8) != node as i64
+            || signed(positions + node * 8) != 0
+            || signed(kinds + node * 8) != 0
+            || signed(parents + node * 8) != -2
+        {
+            return Err(invalid(
+                "training-view inactive topology node is not canonical",
+            ));
+        }
+    }
+    let mut expected_branches = vec![None; window];
+    if layout.branch_words[0] != 0 {
+        for branch in 0..3 {
+            let offset = 1 + branch * 5;
+            let answer_begin = layout.branch_words[offset + 2];
+            let answer_end = layout.branch_words[offset + 3];
+            let logical_start = layout.branch_words[offset + 4];
+            for index in 0..(answer_end - answer_begin) {
+                let source_slot = (answer_begin + index) as usize;
+                let node =
+                    nodes_by_source_slot[source_slot].expect("validated source-slot permutation");
+                let parent = signed(parents + node * 8);
+                let answer_position = logical_start + index;
+                if signed(kinds + node * 8) != 5
+                    || signed(positions + node * 8) != answer_position as i64
+                    || parent < 0
+                    || signed(positions + parent as usize * 8) != answer_position as i64 - 1
+                {
+                    return Err(invalid(
+                        "training-view branch answer lacks its original causal parent",
+                    ));
+                }
+                let predictor = signed(source_slots + parent as usize * 8) as usize;
+                let token = signed(token_ids + source_slot * 8);
+                if token < 0
+                    || expected_branches[predictor]
+                        .replace((token, branch as i64))
+                        .is_some()
+                {
+                    return Err(invalid(
+                        "training-view branch target is absent or duplicated",
+                    ));
+                }
+            }
+        }
+    }
+    for (slot, expected) in expected_branches.into_iter().enumerate() {
+        let actual = (
+            signed(branch_labels + slot * 8),
+            signed(branch_ids + slot * 8),
+        );
+        if actual != expected.unwrap_or((-100, -1)) {
+            return Err(invalid(
+                "training-view branch supervision differs from its declared topology",
             ));
         }
     }
@@ -3510,7 +4640,9 @@ fn read_task_evaluation_spec(
         actor_eligible,
         budget,
     )?;
-    task_evaluation_spec(&values)
+    // Observation coverage precedes task authority; priorities do not affect
+    // its queried root set and are bound by import_task instead.
+    task_evaluation_spec(&values, Vec::new(), None, &ColdValue::None)
 }
 
 #[expect(
@@ -3541,7 +4673,12 @@ fn read_task_evaluation_values(
     .collect()
 }
 
-fn task_evaluation_spec(values: &[ColdValue]) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
+fn task_evaluation_spec(
+    values: &[ColdValue],
+    priority_levels: Vec<xlog_cuda::SemanticTaskPriorityLevel>,
+    editable_program: Option<Arc<SemanticProgramAdmission>>,
+    training_domain: &ColdValue,
+) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
     if values.len() != 7 {
         return Err(invalid("incorrect task evaluation input count"));
     }
@@ -3573,6 +4710,12 @@ fn task_evaluation_spec(values: &[ColdValue]) -> PyResult<xlog_cuda::SemanticTas
         query_ordinal(&queries[1])?,
         query_ordinal(&queries[2])?,
     ];
+    if editable_program.is_some() && (statement_records != [0, 1, 2] || query_ordinals != [0, 1, 2])
+    {
+        return Err(invalid(
+            "editable task requires the original statement and observer query order",
+        ));
+    }
     let scoring = &values[4];
     let scoring = scoring.fields(6)?;
     let weight = |value: &ColdValue| {
@@ -3594,18 +4737,67 @@ fn task_evaluation_spec(values: &[ColdValue]) -> PyResult<xlog_cuda::SemanticTas
     };
     let admissible_truth_masks = [mask(&masks[0])?, mask(&masks[1])?, mask(&masks[2])?];
     let actor_eligible = values[6].boolean()?;
-    let program = Arc::new(
-        xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)
-            .map_err(xlog_err)?,
-    );
+    let mut program = xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)
+        .map_err(xlog_err)?;
+    if let Some(editable) = editable_program {
+        program = program.with_editable_program(editable);
+    }
+    let program = Arc::new(program);
     Ok(xlog_cuda::SemanticTaskEvaluationSpec {
         statement_records,
         allowed_support_records,
         program,
         scoring,
+        priority_levels,
         admissible_truth_masks,
         actor_eligible,
+        training_domain: read_training_domain(training_domain)?,
     })
+}
+
+fn task_priority_levels(value: &ColdValue) -> PyResult<Vec<xlog_cuda::SemanticTaskPriorityLevel>> {
+    value
+        .sequence()?
+        .iter()
+        .map(|level| {
+            let goals = level
+                .sequence()?
+                .iter()
+                .map(|goal| {
+                    let fields = goal.fields(3)?;
+                    Ok(xlog_cuda::SemanticTaskPriorityGoal {
+                        query: u8::try_from(fields[0].unsigned()?)
+                            .map_err(|_| invalid("task priority query exceeds u8"))?,
+                        target_truth: u8::try_from(fields[1].unsigned()?)
+                            .map_err(|_| invalid("task priority truth exceeds u8"))?,
+                        weight: u32::try_from(fields[2].unsigned()?)
+                            .map_err(|_| invalid("task priority weight exceeds u32"))?,
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(xlog_cuda::SemanticTaskPriorityLevel { goals })
+        })
+        .collect()
+}
+
+fn task_priority_levels_tuple(
+    py: Python<'_>,
+    levels: &[xlog_cuda::SemanticTaskPriorityLevel],
+) -> PyResult<Py<PyTuple>> {
+    let mut rows = Vec::with_capacity(levels.len());
+    for level in levels {
+        rows.push(
+            PyTuple::new(
+                py,
+                level
+                    .goals
+                    .iter()
+                    .map(|goal| (goal.query, goal.target_truth, goal.weight)),
+            )?
+            .unbind(),
+        );
+    }
+    Ok(PyTuple::new(py, rows)?.unbind())
 }
 
 fn read_task_replay_limits(
@@ -3636,6 +4828,7 @@ fn read_task_replay_limits(
 struct TaskAuthority {
     canonical: Vec<u8>,
     task_ref: String,
+    priority_levels: Vec<xlog_cuda::SemanticTaskPriorityLevel>,
     scope: Vec<String>,
     live: Vec<LiveAuthority>,
     replay: Vec<ReplayRow>,
@@ -3651,27 +4844,42 @@ struct TaskAuthority {
     corpus_sources: BTreeSet<String>,
 }
 
+fn parse_live_authorities(value: &ColdValue, scope: &[String]) -> PyResult<Vec<LiveAuthority>> {
+    value
+        .sequence()?
+        .iter()
+        .map(|value| {
+            let fields = value.fields(2)?;
+            validate_live(&fields[0], scope)?;
+            Ok(LiveAuthority {
+                canonical: fields[0].clone(),
+                retention_micros: fields[1].signed()?,
+            })
+        })
+        .collect()
+}
+
+fn parse_replay_rows_with_live(
+    value: &ColdValue,
+    live: &[LiveAuthority],
+) -> PyResult<Vec<ReplayRow>> {
+    value
+        .sequence()?
+        .iter()
+        .map(|value| ReplayRow::parse_with_live(value, live))
+        .collect()
+}
+
 impl TaskAuthority {
     fn parse(values: &[ColdValue]) -> PyResult<Self> {
-        if values.len() != 9 {
+        if values.len() != 10 {
             return Err(invalid("incorrect task authority input count"));
         }
         let scope = values[1].strings()?;
         if scope.len() != 5 {
             return Err(invalid("task_scope must contain five explicit fields"));
         }
-        let live = values[2]
-            .sequence()?
-            .iter()
-            .map(|value| {
-                let fields = value.fields(2)?;
-                validate_live(&fields[0], &scope)?;
-                Ok(LiveAuthority {
-                    canonical: fields[0].clone(),
-                    retention_micros: fields[1].signed()?,
-                })
-            })
-            .collect::<PyResult<Vec<_>>>()?;
+        let live = parse_live_authorities(&values[2], &scope)?;
         let mut dependencies = Vec::new();
         for value in values[4].sequence()? {
             let fields = value.fields(7)?;
@@ -3717,16 +4925,14 @@ impl TaskAuthority {
                 .map(|value| ResolvedGrant::parse(value, training))
                 .collect::<PyResult<Vec<_>>>()
         };
+        let replay = parse_replay_rows_with_live(&values[3], &live)?;
         let result = Self {
             canonical: ColdValue::Sequence(values.to_vec()).canonical_bytes(),
             task_ref: values[0].text()?.to_owned(),
+            priority_levels: task_priority_levels(&values[9])?,
             scope,
             live,
-            replay: values[3]
-                .sequence()?
-                .iter()
-                .map(ReplayRow::parse)
-                .collect::<PyResult<_>>()?,
+            replay,
             dependencies,
             feedback_roots: values[5].strings()?,
             publication: grants(&values[6], false)?,
@@ -4243,6 +5449,14 @@ impl TaskAuthority {
         Ok(())
     }
 
+    fn authority_root(&self) -> Identity256 {
+        let mut authority = Sha256::new();
+        authority.update(b"xlog.task-authority.canonical.v1\0");
+        authority.update((self.canonical.len() as u64).to_le_bytes());
+        authority.update(&self.canonical);
+        Identity256::from_bytes(authority.finalize().into())
+    }
+
     fn goal_witness(
         &self,
         observations: &xlog_cuda::SemanticTaskObservationRoots,
@@ -4251,11 +5465,6 @@ impl TaskAuthority {
             hash.update((value.len() as u64).to_le_bytes());
             hash.update(value.as_bytes());
         }
-        let mut authority = Sha256::new();
-        authority.update(b"xlog.task-authority.canonical.v1\0");
-        authority.update((self.canonical.len() as u64).to_le_bytes());
-        authority.update(&self.canonical);
-
         let mut links = Sha256::new();
         links.update(b"xlog.task-authority.mandatory-links.v1\0");
         for node in &self.dependencies {
@@ -4330,7 +5539,7 @@ impl TaskAuthority {
         }
         SemanticTaskGoalWitness {
             semantic_root: observations.root_digest,
-            authority_root: Identity256::from_bytes(authority.finalize().into()),
+            authority_root: self.authority_root(),
             mandatory_links_root: Identity256::from_bytes(links.finalize().into()),
             constraints_root: Identity256::from_bytes(constraints.finalize().into()),
             mandatory_link_count: self.dependencies.len() as u64,
@@ -4501,6 +5710,13 @@ enum TaskUsePhase {
         reads: bool,
     },
     Imported,
+    InitialPrefill {
+        scope: Arc<()>,
+    },
+    InitialPrefillReady {
+        scope: Arc<()>,
+    },
+    InitialPrefillBound,
     Recording {
         scope: Arc<()>,
         operation: Option<String>,
@@ -4510,6 +5726,7 @@ enum TaskUsePhase {
         operation: Option<String>,
     },
     Segment(String),
+    ArenaPreparing(Box<TaskUsePhase>),
     Refused,
 }
 
@@ -4523,20 +5740,55 @@ struct TaskCheckpointSeed {
     authority: Vec<ColdValue>,
     evaluation: Vec<ColdValue>,
     training_objective: ColdValue,
+    training_domain: ColdValue,
     initial_sources: ColdValue,
     source_mapping: ColdValue,
     replay_selection: ColdValue,
 }
 
+/// An arena admission may append sources and replay history, never reinterpret
+/// the selected task, its data scope, or a previously admitted record.
+fn require_retained_arena_authority(
+    selected: &[ColdValue],
+    candidate: &[ColdValue],
+) -> PyResult<()> {
+    if selected.len() != 10 || candidate.len() != 10 {
+        return Err(invalid("arena admission requires complete task authority"));
+    }
+    for index in [0, 1, 2, 5, 9] {
+        if selected[index] != candidate[index] {
+            return Err(invalid(
+                "arena admission changed the selected task or original data scope",
+            ));
+        }
+    }
+    for index in [3, 4] {
+        let original = selected[index].sequence()?;
+        let extended = candidate[index].sequence()?;
+        if !extended.starts_with(original) {
+            return Err(invalid(
+                "arena admission changed an original source, replay row or dependency",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CheckpointTaskPhase {
     Imported,
+    InitialPrefillBound,
     Segment(String),
 }
 
 fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> {
-    match &state.phase {
+    let phase = match &state.phase {
+        TaskUsePhase::ArenaPreparing(original) => original.as_ref(),
+        phase => phase,
+    };
+    match phase {
         TaskUsePhase::Imported => Ok(CheckpointTaskPhase::Imported),
+        TaskUsePhase::InitialPrefillBound => Ok(CheckpointTaskPhase::InitialPrefillBound),
         TaskUsePhase::Segment(operation) => Ok(CheckpointTaskPhase::Segment(operation.clone())),
         _ => Err(invalid(
             "checkpoint requires an imported or admitted stable task phase",
@@ -4549,10 +5801,12 @@ impl TaskCheckpointSeed {
         &self,
         snapshot: &AuthoritySnapshot,
         phase: &CheckpointTaskPhase,
+        binding: &TaskCheckpointBinding,
     ) -> PyResult<Vec<u8>> {
         let snapshot = ColdValue::from_canonical_bytes(&snapshot.canonical)?;
         let (phase, operation) = match phase {
             CheckpointTaskPhase::Imported => ("imported", ColdValue::None),
+            CheckpointTaskPhase::InitialPrefillBound => ("initial-prefill-bound", ColdValue::None),
             CheckpointTaskPhase::Segment(operation) => {
                 ("segment", ColdValue::Text(operation.clone()))
             }
@@ -4567,28 +5821,45 @@ impl TaskCheckpointSeed {
             snapshot,
             ColdValue::Text(phase.to_owned()),
             operation,
+            ColdValue::Bytes(Arc::from(binding.encode())),
+            self.training_domain.clone(),
         ])))
     }
 
-    fn decode(bytes: &[u8]) -> PyResult<(Self, AuthoritySnapshot, CheckpointTaskPhase)> {
+    fn decode(
+        bytes: &[u8],
+    ) -> PyResult<(
+        Self,
+        AuthoritySnapshot,
+        CheckpointTaskPhase,
+        TaskCheckpointBinding,
+    )> {
         let value = checkpoint_cold_value(bytes)?;
-        let fields = value.fields(9)?;
+        let fields = value.fields(11)?;
         let phase = match fields[7].text()? {
             "imported" if fields[8] == ColdValue::None => CheckpointTaskPhase::Imported,
+            "initial-prefill-bound" if fields[8] == ColdValue::None => {
+                CheckpointTaskPhase::InitialPrefillBound
+            }
             "segment" => CheckpointTaskPhase::Segment(fields[8].text()?.to_owned()),
             _ => return Err(invalid("checkpoint task phase is invalid")),
+        };
+        let ColdValue::Bytes(binding) = &fields[9] else {
+            return Err(invalid("checkpoint native task binding is absent"));
         };
         Ok((
             Self {
                 authority: fields[0].sequence()?.to_vec(),
                 evaluation: fields[1].sequence()?.to_vec(),
                 training_objective: fields[2].clone(),
+                training_domain: fields[10].clone(),
                 initial_sources: fields[3].clone(),
                 source_mapping: fields[4].clone(),
                 replay_selection: fields[5].clone(),
             },
             AuthoritySnapshot::parse(&fields[6])?,
             phase,
+            TaskCheckpointBinding::decode(binding)?,
         ))
     }
 }
@@ -4623,7 +5894,7 @@ fn checkpoint_cold_value_bytes(value: &ColdValue) -> Vec<u8> {
         }
     }
     let mut bytes = b"XLOG-CHECKPOINT-TASK\0".to_vec();
-    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&3u32.to_le_bytes());
     append(value, &mut bytes);
     bytes
 }
@@ -4702,7 +5973,7 @@ fn checkpoint_cold_value(bytes: &[u8]) -> PyResult<ColdValue> {
 
     let mut remaining = bytes;
     if take(&mut remaining, 21)? != b"XLOG-CHECKPOINT-TASK\0"
-        || u32::from_le_bytes(take(&mut remaining, 4)?.try_into().unwrap()) != 1
+        || u32::from_le_bytes(take(&mut remaining, 4)?.try_into().unwrap()) != 3
     {
         return Err(invalid(
             "checkpoint task capsule has another domain or version",
@@ -4750,9 +6021,74 @@ impl TaskIssuance {
 }
 
 impl TaskUseState {
+    fn begin_arena_preparation(&mut self) -> PyResult<()> {
+        checkpoint_task_phase(self)?;
+        self.phase = TaskUsePhase::ArenaPreparing(Box::new(self.phase.clone()));
+        Ok(())
+    }
+
+    fn finish_arena_preparation(&mut self) -> PyResult<()> {
+        let phase = std::mem::replace(&mut self.phase, TaskUsePhase::Refused);
+        match phase {
+            TaskUsePhase::ArenaPreparing(original) => {
+                self.phase = *original;
+                Ok(())
+            }
+            other => {
+                self.phase = other;
+                Err(invalid("task use has no cold arena preparation"))
+            }
+        }
+    }
+
+    fn begin_initial_prefill(&mut self) -> PyResult<Arc<()>> {
+        if !matches!(self.phase, TaskUsePhase::Imported) {
+            return Err(invalid(
+                "initial prefill requires one imported task before parent binding",
+            ));
+        }
+        let scope = Arc::new(());
+        self.phase = TaskUsePhase::InitialPrefill {
+            scope: Arc::clone(&scope),
+        };
+        Ok(scope)
+    }
+
+    fn require_initial_prefill(&self, scope: &Arc<()>) -> PyResult<()> {
+        if !matches!(&self.phase, TaskUsePhase::InitialPrefill { scope: current } if Arc::ptr_eq(current, scope))
+        {
+            return Err(invalid("initial prefill belongs to another task scope"));
+        }
+        Ok(())
+    }
+
+    fn finish_initial_prefill(&mut self, scope: &Arc<()>) -> PyResult<()> {
+        self.require_initial_prefill(scope)?;
+        self.phase = TaskUsePhase::InitialPrefillReady {
+            scope: Arc::clone(scope),
+        };
+        Ok(())
+    }
+
+    fn require_initial_prefill_ready(&self, scope: &Arc<()>) -> PyResult<()> {
+        if !matches!(&self.phase, TaskUsePhase::InitialPrefillReady { scope: current } if Arc::ptr_eq(current, scope))
+        {
+            return Err(invalid(
+                "initial prefill receipt belongs to another task scope",
+            ));
+        }
+        Ok(())
+    }
+
+    fn commit_initial_prefill(&mut self, scope: &Arc<()>) -> PyResult<()> {
+        self.require_initial_prefill_ready(scope)?;
+        self.phase = TaskUsePhase::InitialPrefillBound;
+        Ok(())
+    }
+
     fn begin_build(&mut self) -> PyResult<Arc<()>> {
         let operation = match &self.phase {
-            TaskUsePhase::Imported => None,
+            TaskUsePhase::Imported | TaskUsePhase::InitialPrefillBound => None,
             TaskUsePhase::Segment(operation) => Some(operation.clone()),
             _ => {
                 return Err(invalid(
@@ -4867,7 +6203,10 @@ impl TaskUseState {
     fn require_read(&self) -> PyResult<()> {
         match &self.phase {
             TaskUsePhase::Imported
+            | TaskUsePhase::InitialPrefillReady { .. }
+            | TaskUsePhase::InitialPrefillBound
             | TaskUsePhase::Segment(_)
+            | TaskUsePhase::ArenaPreparing(_)
             | TaskUsePhase::Importing { reads: true, .. } => Ok(()),
             _ => Err(invalid(
                 "task use is not available outside its controlled import",
@@ -4886,7 +6225,9 @@ impl TaskUseState {
 
     fn require_public_use(&self) -> PyResult<()> {
         match &self.phase {
-            TaskUsePhase::Imported | TaskUsePhase::Segment(_) => Ok(()),
+            TaskUsePhase::Imported
+            | TaskUsePhase::InitialPrefillBound
+            | TaskUsePhase::Segment(_) => Ok(()),
             _ => Err(invalid(
                 "unfinished or refused import grants no public operation",
             )),
@@ -4911,6 +6252,14 @@ impl TaskUseState {
                 operation,
                 reads: true,
             } => operation,
+            TaskUsePhase::ArenaPreparing(original) => match original.as_ref() {
+                TaskUsePhase::Segment(operation) => operation,
+                _ => {
+                    return Err(invalid(
+                        "tensor content requires an admitted segment or controlled import",
+                    ))
+                }
+            },
             _ => {
                 return Err(invalid(
                     "tensor content requires an admitted segment or controlled import",
@@ -5015,9 +6364,24 @@ pub(crate) struct PySemanticTransitionTaskUse {
     authority: TaskAuthority,
     checkpoint: TaskCheckpointSeed,
     state: Mutex<TaskUseState>,
+    delivery: Mutex<Option<DeliveryReceiverBinding>>,
+}
+
+#[derive(Clone)]
+struct DeliveryReceiverBinding {
+    recipient_id: Identity256,
+    verification_key: [u8; 32],
+    expected_effect: Vec<u8>,
 }
 
 impl PySemanticTransitionTaskUse {
+    fn delivery_binding(&self) -> PyResult<DeliveryReceiverBinding> {
+        self.delivery
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("delivery receiver binding mutex is poisoned"))?
+            .clone()
+            .ok_or_else(|| invalid("task use has no trusted delivery receiver binding"))
+    }
     fn state(&self) -> PyResult<MutexGuard<'_, TaskUseState>> {
         self.state
             .lock()
@@ -5044,6 +6408,336 @@ impl PySemanticTransitionTaskUse {
         }
         Ok(())
     }
+
+    fn checked_initial_source_layout(
+        &self,
+        py: Python<'_>,
+        prefix_capacity: u64,
+        feedback_capacity: u64,
+        max_position: u64,
+        pad_token: u64,
+        provenance_capacity_records: u64,
+    ) -> PyResult<SemanticInitialSourceLayout> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        drop(owner);
+        if !matches!(self.state()?.phase, TaskUsePhase::Imported) {
+            return Err(invalid(
+                "initial source layout requires an imported task before parent binding",
+            ));
+        }
+        xlog_cuda::initial_source_layout(
+            &self.authority.initial_sources,
+            &self.authority.source_mapping,
+            &self.authority.canonical,
+            self.task_epoch,
+            provenance_capacity_records,
+            prefix_capacity,
+            feedback_capacity,
+            max_position,
+            pad_token,
+        )
+        .map_err(xlog_err)
+    }
+}
+
+/// The same imported task and native Session own this one-use model prefill.
+/// The wrapper must call its methods at the real model input/output hooks.
+#[pyclass(
+    name = "SemanticInitialPrefillStage",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticInitialPrefillStage {
+    session: Py<PySemanticTransitionSession>,
+    task_use: Py<PySemanticTransitionTaskUse>,
+    scope: Arc<()>,
+    lease: SemanticInitialPrefillLease,
+    layout: Py<PyTuple>,
+    prefix_len: usize,
+    model_producers: Mutex<Vec<Py<PyAny>>>,
+    input_producer: Mutex<Option<Py<PyAny>>>,
+    output_producers: Mutex<Vec<Py<PyAny>>>,
+}
+
+/// A completed, one-use handoff from the original model wrapper hooks to the
+/// parent publisher. Retaining this object also retains the original producers.
+#[pyclass(
+    name = "SemanticInitialPrefillReceipt",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticInitialPrefillReceipt {
+    stage: Py<PySemanticInitialPrefillStage>,
+    consumed: AtomicBool,
+}
+
+/// Original model or transient bytes from one real prefill forward. The
+/// issuing Runtime must retain this complete object through creator cleanup.
+#[pyclass(
+    name = "SemanticInitialPrefillContentWitness",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticInitialPrefillContentWitness {
+    inner: SemanticInitialPrefillContentWitness,
+    _inputs: Py<PyAny>,
+    _producers: Vec<Py<PyAny>>,
+    stage: Py<PySemanticInitialPrefillStage>,
+}
+
+#[pymethods]
+impl PySemanticInitialPrefillContentWitness {
+    /// Enqueue a check against the same pre-forward or original transient seal.
+    /// No new baseline is created, including after the parent consumes the stage.
+    #[pyo3(signature = (*, tensors, consumer_stream))]
+    fn verify(
+        &self,
+        py: Python<'_>,
+        tensors: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let stage = self.stage.borrow(py);
+        let session = stage.session.borrow(py);
+        let mut budget = 16 * 1024 * 1024;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let check = || -> PyResult<()> {
+            let owner = session.witness_owner()?;
+            stage.task_use.borrow(py).require_identity(&owner)
+        };
+        check()?;
+        let parsed = parse_tensor_inputs_guarded(
+            tensors,
+            &mut budget,
+            session.device_ordinal,
+            stream,
+            &check,
+        )?;
+        let mut owner = session.witness_owner()?;
+        stage.task_use.borrow(py).require_identity(&owner)?;
+        owner
+            .verify_initial_prefill_tensor_content(
+                &stage.lease,
+                &self.inner,
+                parsed.handoff.into_native(),
+                stream,
+            )
+            .map_err(xlog_err)
+    }
+}
+
+impl PySemanticInitialPrefillStage {
+    fn require_active(&self, py: Python<'_>) -> PyResult<()> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let issued = self.task_use.borrow(py);
+        let owner = session.owner()?;
+        issued.require_identity(&owner)?;
+        drop(owner);
+        let result = issued.state()?.require_initial_prefill(&self.scope);
+        result
+    }
+}
+
+#[pymethods]
+impl PySemanticInitialPrefillStage {
+    /// The original `(source, prefix, prefill_tokens, ring_head)` issued by
+    /// this same TaskUse. It contains no caller-supplied cache or authority.
+    fn source_layout(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        self.require_active(py)?;
+        Ok(self.layout.clone_ref(py))
+    }
+
+    /// Seal the original complete model tensor and backing allocation rosters
+    /// before the model's prefill forward. Both use bind_parent's typed rows.
+    #[pyo3(signature = (*, tensors, model_allocations, consumer_stream))]
+    fn bind_model_content(
+        slf: Py<Self>,
+        py: Python<'_>,
+        tensors: &Bound<'_, PyAny>,
+        model_allocations: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PySemanticInitialPrefillContentWitness>> {
+        let stage = slf.borrow(py);
+        let this = &*stage;
+        this.require_active(py)?;
+        let mut budget = 16 * 1024 * 1024;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let check = || this.require_active(py);
+        let device = this.session.borrow(py).device_ordinal;
+        let model = parse_tensor_inputs_guarded(tensors, &mut budget, device, stream, &check)?;
+        let allocations =
+            parse_tensor_inputs_guarded(model_allocations, &mut budget, device, stream, &check)?;
+        let mut inputs = model.handoff.into_native();
+        inputs.extend(allocations.handoff.into_native());
+        {
+            let mut retained = this.model_producers.lock().map_err(|_| {
+                PyRuntimeError::new_err("initial prefill model custody is poisoned")
+            })?;
+            retained.extend(model.producers);
+            retained.extend(allocations.producers);
+        }
+        this.require_active(py)?;
+        let inner = this
+            .session
+            .borrow(py)
+            .owner()?
+            .bind_initial_prefill_model_content(&this.lease, inputs, stream)
+            .map_err(xlog_err)?;
+        drop(stage);
+        Py::new(
+            py,
+            PySemanticInitialPrefillContentWitness {
+                inner,
+                _inputs: tensors.clone().unbind(),
+                _producers: Vec::new(),
+                stage: slf,
+            },
+        )
+    }
+
+    /// Capture original pre-call, transient or autograd-saved tensors after
+    /// model binding. Capture closes when record_outputs issues the receipt.
+    #[pyo3(signature = (*, tensors, consumer_stream))]
+    fn capture_tensor_content(
+        slf: Py<Self>,
+        py: Python<'_>,
+        tensors: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PySemanticInitialPrefillContentWitness>> {
+        let stage = slf.borrow(py);
+        let this = &*stage;
+        this.require_active(py)?;
+        let mut budget = 16 * 1024 * 1024;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let check = || this.require_active(py);
+        let device = this.session.borrow(py).device_ordinal;
+        let parsed = parse_tensor_inputs_guarded(tensors, &mut budget, device, stream, &check)?;
+        this.require_active(py)?;
+        let inner = this
+            .session
+            .borrow(py)
+            .owner()?
+            .capture_initial_prefill_tensor_content(
+                &this.lease,
+                parsed.handoff.into_native(),
+                stream,
+            )
+            .map_err(xlog_err)?;
+        let producers = parsed.producers;
+        drop(stage);
+        Py::new(
+            py,
+            PySemanticInitialPrefillContentWitness {
+                inner,
+                _inputs: tensors.clone().unbind(),
+                _producers: producers,
+                stage: slf,
+            },
+        )
+    }
+
+    /// Authenticate the actual contiguous I64 token tensor at the model's
+    /// pre-hook; a device mismatch traps before the forward continues.
+    #[pyo3(signature = (*, token_tensor, consumer_stream))]
+    fn record_input(
+        &self,
+        py: Python<'_>,
+        token_tensor: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.require_active(py)?;
+        let mut budget = 16 * 1024 * 1024;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let check = || self.require_active(py);
+        validate_producer_device_guarded(
+            token_tensor,
+            self.session.borrow(py).device_ordinal,
+            &check,
+        )?;
+        let count = u64::try_from(self.prefix_len)
+            .map_err(|_| invalid("initial prefill token count exceeds native domain"))?;
+        let row_bytes = count
+            .checked_mul(8)
+            .ok_or_else(|| invalid("initial prefill token tensor size overflows"))?;
+        let input = SemanticTensorInput {
+            layout: SemanticTensorLayout {
+                role: 0,
+                index: 0,
+                element_bytes: 8,
+                scalar_type: 7,
+                rank: 2,
+                logical_axis: 1,
+                dimensions: [1, count, 0, 0],
+                strides_bytes: [row_bytes, 8, 0, 0],
+            },
+            logical_begin: 0,
+            logical_end: count,
+            tensor: crate::dlpack_from_py_for_stream_guarded(
+                token_tensor,
+                i64::try_from(stream)
+                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
+                &check,
+            )?,
+            native_allocation: None,
+        };
+        *self
+            .input_producer
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("initial prefill input custody is poisoned"))? =
+            Some(token_tensor.clone().unbind());
+        self.require_active(py)?;
+        self.session
+            .borrow(py)
+            .owner()?
+            .record_initial_prefill_input(&self.lease, input, stream)
+            .map_err(xlog_err)
+    }
+
+    /// Seal all original key/value, recurrent and accumulator outputs at the
+    /// final post-detach wrapper hook, then close this one-use stage for bind.
+    #[pyo3(signature = (*, tensors, consumer_stream))]
+    fn record_outputs(
+        slf: Py<Self>,
+        py: Python<'_>,
+        tensors: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PySemanticInitialPrefillReceipt>> {
+        let stage = slf.borrow(py);
+        let this = &*stage;
+        this.require_active(py)?;
+        let mut budget = 16 * 1024 * 1024;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let check = || this.require_active(py);
+        let device = this.session.borrow(py).device_ordinal;
+        let parsed = parse_tensor_inputs_guarded(tensors, &mut budget, device, stream, &check)?;
+        {
+            let mut retained = this.output_producers.lock().map_err(|_| {
+                PyRuntimeError::new_err("initial prefill output custody is poisoned")
+            })?;
+            retained.extend(parsed.producers);
+        }
+        this.require_active(py)?;
+        this.session
+            .borrow(py)
+            .owner()?
+            .record_initial_prefill_outputs(&this.lease, parsed.handoff.into_native(), stream)
+            .map_err(xlog_err)?;
+        this.task_use
+            .borrow(py)
+            .state()?
+            .finish_initial_prefill(&this.scope)?;
+        drop(stage);
+        Py::new(
+            py,
+            PySemanticInitialPrefillReceipt {
+                stage: slf,
+                consumed: AtomicBool::new(false),
+            },
+        )
+    }
 }
 
 /// The shared Session rejects reentrant imports from any controller. Only a
@@ -5053,6 +6747,7 @@ struct ColdImportGuard<'a> {
     issuance: TaskIssuance,
     original_decisions: Option<Arc<[u8]>>,
     committed: bool,
+    deferred: bool,
 }
 
 impl<'a> ColdImportGuard<'a> {
@@ -5084,6 +6779,7 @@ impl<'a> ColdImportGuard<'a> {
             issuance,
             original_decisions,
             committed: false,
+            deferred: false,
         })
     }
 }
@@ -5096,9 +6792,13 @@ impl Drop for ColdImportGuard<'_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !self.committed {
-            owner.abort();
+            if let Some(owner) = owner.as_mut() {
+                owner.abort();
+            }
         }
-        self.session.importing.store(false, Ordering::Release);
+        if !self.deferred {
+            self.session.importing.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -5658,6 +7358,49 @@ impl PySemanticCompletedActionLane {
 }
 
 #[cfg(feature = "semantic-policy")]
+#[pyclass(
+    name = "SemanticCompletedTheoryDelta",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedTheoryDelta {
+    inner: xlog_cuda::SemanticCompletedTheoryDeltaMaterial,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedTheoryDelta {
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.inner.kind
+    }
+    #[getter]
+    fn delta(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.delta)
+    }
+    #[getter]
+    fn theory_generation(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.theory_generation.as_bytes()).unbind()
+    }
+    #[getter]
+    fn verdict(&self) -> &'static str {
+        self.inner.verdict
+    }
+    #[getter]
+    fn evidence(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.evidence)
+    }
+    #[getter]
+    fn lane(&self) -> u32 {
+        self.inner.lane
+    }
+    #[getter]
+    fn slot(&self) -> u32 {
+        self.inner.slot
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
 #[pyclass(name = "SemanticCompletedTaskFacts", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticCompletedTaskFacts {
     slot: usize,
@@ -5779,6 +7522,39 @@ impl PySemanticCompletedTaskGround {
     #[getter]
     fn witness(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
         completed_action_material(py, &self.inner.witness)
+    }
+    #[getter]
+    fn scoring_law(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.scoring_law)
+    }
+    #[getter]
+    fn scoring_weights(&self) -> [u64; 6] {
+        let scoring = self.inner.scoring;
+        [
+            scoring.correct_weight.into(),
+            scoring.all_correct_weight.into(),
+            scoring.work_weight.into(),
+            scoring.improvement_weight.into(),
+            scoring.refusal_weight.into(),
+            scoring.spent_weight.into(),
+        ]
+    }
+    #[getter]
+    fn priority_levels(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        task_priority_levels_tuple(py, &self.inner.priority_levels)
+    }
+    #[getter]
+    fn return_bound(&self) -> i64 {
+        self.inner.return_bound
+    }
+    #[getter]
+    fn structural_cost_descriptor(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let descriptor = self.inner.structural_cost;
+        Ok(
+            (PyBytes::new(py, descriptor.unit.as_bytes()), descriptor.cap)
+                .into_pyobject(py)?
+                .unbind(),
+        )
     }
     #[getter]
     fn task_identity(&self, py: Python<'_>) -> Py<PyBytes> {
@@ -5941,6 +7717,57 @@ impl PySemanticCompletedActionProjection {
         completed_action_material(py, &self.inner.owner)
     }
     #[getter]
+    fn initial_prefill(&self, py: Python<'_>) -> PyResult<Option<Py<PySemanticCompletedMaterial>>> {
+        self.inner
+            .initial_prefill
+            .as_ref()
+            .map(|material| completed_action_material(py, material))
+            .transpose()
+    }
+    #[getter]
+    fn world_root(&self, py: Python<'_>) -> PyResult<Option<Py<PySemanticCompletedMaterial>>> {
+        self.inner
+            .world_root
+            .as_ref()
+            .map(|material| completed_action_material(py, material))
+            .transpose()
+    }
+    #[getter]
+    fn schema_generation(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.schema_generation)
+    }
+    #[getter]
+    fn engine_generation(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.action_law)
+    }
+    #[getter]
+    fn action_law(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.action_law)
+    }
+    #[getter]
+    fn edit_codebook(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.edit_codebook)
+    }
+    #[getter]
+    fn roster(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.roster)
+    }
+    #[getter]
+    fn predecessor_semantic_root_digest(&self, py: Python<'_>) -> Py<PyBytes> {
+        PyBytes::new(py, self.inner.predecessor_semantic_root_digest.as_bytes()).unbind()
+    }
+    #[getter]
+    fn theory_deltas(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let deltas = self
+            .inner
+            .theory_deltas
+            .iter()
+            .cloned()
+            .map(|inner| Py::new(py, PySemanticCompletedTheoryDelta { inner }))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, deltas).map(Bound::unbind)
+    }
+    #[getter]
     fn predecessor(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         completed_publication_identity(py, self.inner.predecessor)
     }
@@ -5954,6 +7781,10 @@ impl PySemanticCompletedActionProjection {
     }
     #[getter]
     fn result_material(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
+        completed_action_material(py, &self.inner.result)
+    }
+    #[getter]
+    fn observation(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
         completed_action_material(py, &self.inner.result)
     }
     #[getter]
@@ -6115,6 +7946,8 @@ pub(crate) struct PySemanticPreparedStep {
     #[cfg(feature = "semantic-policy")]
     policy_inputs: Mutex<[Option<PreparedPolicyInputs>; 2]>,
     gradient_deliveries: Mutex<[Option<Py<PySemanticGradientDelivery>>; 2]>,
+    #[cfg(feature = "semantic-policy")]
+    group_gradient_deliveries: Mutex<[Vec<Py<PySemanticGradientDelivery>>; 2]>,
 }
 
 /// Native-owned delivery from one real AccumulateGrad node into the canonical
@@ -6160,6 +7993,37 @@ pub(crate) struct PySemanticGradientDelivery {
     _edges: Vec<Py<PyAny>>,
     _callbacks: Vec<Py<PySemanticGradientDeliveryHook>>,
     handles: Mutex<Option<Vec<Py<PyAny>>>>,
+    deferred_hooks: Mutex<Option<Vec<GradientHookEntry>>>,
+    activated_once: AtomicBool,
+    restore_on_finish: bool,
+    restores: Mutex<Vec<GradientSlotRestore>>,
+}
+
+struct GradientSlotRestore {
+    effective: Py<PyAny>,
+    gradient: Py<PyAny>,
+    original_grad: Py<PyAny>,
+}
+
+struct GradientHookEntry {
+    node: Py<PyAny>,
+    effective: Py<PyAny>,
+    gradient: Py<PyAny>,
+    original_grad: Py<PyAny>,
+    callback: Py<PySemanticGradientDeliveryHook>,
+}
+
+fn swap_group_leaf_gradient(
+    effective: &Bound<'_, PyAny>,
+    expected: &Bound<'_, PyAny>,
+    replacement: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    if !effective.getattr("grad")?.is(expected) {
+        return Err(invalid(
+            "original leaf gradient changed outside group capture",
+        ));
+    }
+    effective.setattr("grad", replacement)
 }
 
 #[pymethods]
@@ -6168,6 +8032,11 @@ impl PySemanticGradientDelivery {
     /// A zero accumulation counter clears role 24/25; a nonzero counter keeps
     /// the existing slots so subsequent node deliveries add in place.
     fn record_reset(&self, py: Python<'_>) -> PyResult<()> {
+        if self.restore_on_finish {
+            return Err(invalid(
+                "group delivery shares the target bank's single gradient reset",
+            ));
+        }
         if self
             .handles
             .lock()
@@ -6187,13 +8056,91 @@ impl PySemanticGradientDelivery {
 
     /// Remove cold node hooks after their operations have been captured. The
     /// captured device graph retains the recorded reset/add/presence work.
+    fn activate(&self, py: Python<'_>) -> PyResult<()> {
+        self.activate_group(py)
+    }
+
     fn finish_recording(&self, py: Python<'_>) -> PyResult<()> {
         self.remove_hooks(py, false)
     }
 }
 
 impl PySemanticGradientDelivery {
+    /// Attach a cold-verified historical model's nodes only for this bank's
+    /// capture. Another bank may already be staged, but cannot be active.
+    fn activate_group(&self, py: Python<'_>) -> PyResult<()> {
+        if !self.restore_on_finish {
+            return Err(invalid("ordinary gradient delivery is already active"));
+        }
+        let entries = self
+            .deferred_hooks
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("group gradient hooks are poisoned"))?
+            .take()
+            .ok_or_else(|| invalid("group gradient delivery was already activated"))?;
+        let mut handles = Vec::with_capacity(entries.len());
+        let mut attached = Vec::with_capacity(entries.len());
+        let installed = (|| -> PyResult<()> {
+            for entry in &entries {
+                let effective = entry.effective.bind(py);
+                let node = entry.node.bind(py);
+                if node.get_type().name()? != "AccumulateGrad"
+                    || !node.getattr("variable")?.is(effective)
+                {
+                    return Err(invalid(
+                        "original physical AccumulateGrad edge changed before capture",
+                    ));
+                }
+                swap_group_leaf_gradient(
+                    effective,
+                    entry.original_grad.bind(py),
+                    entry.gradient.bind(py),
+                )?;
+                attached.push(GradientSlotRestore {
+                    effective: entry.effective.clone_ref(py),
+                    gradient: entry.gradient.clone_ref(py),
+                    original_grad: entry.original_grad.clone_ref(py),
+                });
+                handles.push(
+                    node.call_method1("register_hook", (entry.callback.clone_ref(py),))?
+                        .unbind(),
+                );
+            }
+            Ok(())
+        })();
+        if let Err(error) = installed {
+            for handle in handles.drain(..).rev() {
+                let _ = handle.bind(py).call_method0("remove");
+            }
+            for restore in attached.into_iter().rev() {
+                let _ = swap_group_leaf_gradient(
+                    restore.effective.bind(py),
+                    restore.gradient.bind(py),
+                    restore.original_grad.bind(py),
+                );
+            }
+            return Err(error);
+        }
+        *self
+            .restores
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("group gradient restoration is poisoned"))? =
+            attached;
+        *self
+            .handles
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("gradient-delivery owner is poisoned"))? =
+            Some(handles);
+        self.activated_once.store(true, Ordering::Release);
+        Ok(())
+    }
+
     fn remove_hooks(&self, py: Python<'_>, already_removed_ok: bool) -> PyResult<()> {
+        if self.restore_on_finish && !self.activated_once.load(Ordering::Acquire) {
+            return Err(invalid(
+                "historical gradient delivery was never activated in its Update bank",
+            ));
+        }
         let handles = self
             .handles
             .lock()
@@ -6214,6 +8161,23 @@ impl PySemanticGradientDelivery {
                 }
             }
         }
+        if self.restore_on_finish {
+            let mut restores = self
+                .restores
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("group gradient restoration is poisoned"))?;
+            for restore in restores.drain(..) {
+                if let Err(error) = swap_group_leaf_gradient(
+                    restore.effective.bind(py),
+                    restore.gradient.bind(py),
+                    restore.original_grad.bind(py),
+                ) {
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+            }
+        }
         if let Some(error) = failure {
             return Err(error);
         }
@@ -6230,6 +8194,19 @@ impl PySemanticPreparedStep {
             .iter()
             .filter_map(|delivery| delivery.as_ref().map(|item| item.clone_ref(py)))
             .collect::<Vec<_>>();
+        #[cfg(feature = "semantic-policy")]
+        let deliveries = {
+            let mut deliveries = deliveries;
+            let groups = self.group_gradient_deliveries.lock().map_err(|_| {
+                PyRuntimeError::new_err("group gradient-delivery roster is poisoned")
+            })?;
+            deliveries.extend(
+                groups
+                    .iter()
+                    .flat_map(|bank| bank.iter().map(|item| item.clone_ref(py))),
+            );
+            deliveries
+        };
         let mut failure = None;
         for delivery in deliveries {
             if let Err(error) = delivery.borrow(py).remove_hooks(py, true) {
@@ -6248,13 +8225,13 @@ impl PySemanticPreparedStep {
 #[cfg(feature = "semantic-policy")]
 struct PreparedPolicyInputs {
     model_output: Py<PyAny>,
-    inputs: [Py<PyAny>; 4],
+    inputs: [Py<PyAny>; 9],
     invocation_issued: bool,
 }
 
 #[cfg(feature = "semantic-policy")]
 impl PreparedPolicyInputs {
-    fn issue_originals(&mut self, py: Python<'_>) -> PyResult<(Py<PyAny>, [Py<PyAny>; 4])> {
+    fn issue_originals(&mut self, py: Python<'_>) -> PyResult<(Py<PyAny>, [Py<PyAny>; 9])> {
         if self.invocation_issued {
             return Err(invalid("prepared policy invocation was already issued"));
         }
@@ -6563,16 +8540,17 @@ impl PySemanticPreparedStep {
     /// ``leaves`` are ``(GradientEdge_or_None, effective_input,
     /// gradient_input_or_None, presence_input, phase_mask_input)`` in the
     /// original physical parameter order.
-    #[pyo3(signature = (bank, phase, accumulation, leaves, *, consumer_stream))]
+    #[pyo3(signature = (bank, phase, accumulation, leaves, *, consumer_stream, group_member=None))]
     fn register_gradient_delivery(
         &self,
-        py: Python<'_>,
         bank: &Bound<'_, PyAny>,
         phase: &Bound<'_, PyAny>,
         accumulation: &Bound<'_, PyAny>,
         leaves: &Bound<'_, PyAny>,
         consumer_stream: &Bound<'_, PyAny>,
+        group_member: Option<Py<PySemanticRetainedReplayMember>>,
     ) -> PyResult<Py<PySemanticGradientDelivery>> {
+        let py = bank.py();
         let session = self.session.borrow(py);
         session.require_creator()?;
         let bank = usize::try_from(ColdValue::read(bank, &mut 128, 0)?.unsigned()?)
@@ -6580,7 +8558,13 @@ impl PySemanticPreparedStep {
         if bank > 1 {
             return Err(invalid("gradient delivery requires bank zero or one"));
         }
-        {
+        #[cfg(not(feature = "semantic-policy"))]
+        if group_member.is_some() {
+            return Err(invalid(
+                "group gradient delivery requires a semantic-policy build",
+            ));
+        }
+        if group_member.is_none() {
             let owners = self
                 .gradient_deliveries
                 .lock()
@@ -6591,9 +8575,46 @@ impl PySemanticPreparedStep {
                 ));
             }
         }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(member) = &group_member {
+            let member = member.borrow(py);
+            let source = member.session.borrow(py);
+            source.require_creator()?;
+            if member.completed.load(Ordering::Acquire)
+                || !source.importing.load(Ordering::Acquire)
+                || self.session.as_ptr() == member.session.as_ptr()
+            {
+                return Err(invalid(
+                    "group gradient delivery requires an open distinct original replay",
+                ));
+            }
+            let group = member
+                .group_use
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("retained group use is poisoned"))?;
+            if group.gradient_banks[bank]
+                || group
+                    .target
+                    .as_ref()
+                    .is_some_and(|owner| !owner.same_handle(&self.inner))
+            {
+                return Err(invalid(
+                    "original replay already has gradient delivery for this bank or another Update",
+                ));
+            }
+        }
         let consumer_stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
         let check = || {
             self.require_task(py, &self.task_use.borrow(py))?;
+            #[cfg(feature = "semantic-policy")]
+            if let Some(member) = &group_member {
+                let member = member.borrow(py);
+                if member.completed.load(Ordering::Acquire)
+                    || !member.session.borrow(py).importing.load(Ordering::Acquire)
+                {
+                    return Err(invalid("original replay closed during gradient handoff"));
+                }
+            }
             Ok(())
         };
         let rows = object_sequence(leaves, &mut 8192)?;
@@ -6713,13 +8734,33 @@ impl PySemanticPreparedStep {
         }
         let mut owner = session.owner()?;
         self.content_binding_with_owner(py, &owner)?;
-        let binding = owner
-            .bind_prepared_gradient_delivery(
+        let inputs = parsed.handoff.into_native();
+        #[cfg(feature = "semantic-policy")]
+        let binding = if let Some(member) = &group_member {
+            let member = member.borrow(py);
+            let source = member.session.borrow(py);
+            let source_owner = source.owner()?;
+            let parent = member.parent.borrow(py);
+            let lease = parent.lease()?;
+            let invocation = member.invocation.borrow(py);
+            owner.bind_imported_group_gradient_delivery(
                 &self.inner,
                 bank,
-                parsed.handoff.into_native(),
+                &source_owner,
+                &lease,
+                invocation.rng,
+                member.replay_ordinal,
+                &member.replay_row,
+                inputs,
                 consumer_stream,
             )
+        } else {
+            owner.bind_prepared_gradient_delivery(&self.inner, bank, inputs, consumer_stream)
+        }
+        .map_err(xlog_err)?;
+        #[cfg(not(feature = "semantic-policy"))]
+        let binding = owner
+            .bind_prepared_gradient_delivery(&self.inner, bank, inputs, consumer_stream)
             .map_err(xlog_err)?;
         drop(owner);
 
@@ -6729,6 +8770,7 @@ impl PySemanticPreparedStep {
             gradient: Py<PyAny>,
             presence: Py<PyAny>,
             restore_none: bool,
+            original_grad: Py<PyAny>,
         }
         let mut hook_leaves = Vec::new();
         let mut gradients = Vec::new();
@@ -6768,7 +8810,7 @@ impl PySemanticPreparedStep {
                 ));
             }
             let current = effective.getattr("grad")?;
-            if !current.is_none() && !current.is(gradient.bind(py)) {
+            if group_member.is_none() && !current.is_none() && !current.is(gradient.bind(py)) {
                 return Err(invalid(
                     "the physical leaf already owns a different gradient allocation",
                 ));
@@ -6780,6 +8822,7 @@ impl PySemanticPreparedStep {
                 gradient,
                 presence,
                 restore_none: current.is_none(),
+                original_grad: current.unbind(),
             });
         }
 
@@ -6796,6 +8839,19 @@ impl PySemanticPreparedStep {
                 )
             })
             .collect::<PyResult<Vec<_>>>()?;
+        let deferred_hooks = group_member.as_ref().map(|_| {
+            hook_leaves
+                .iter()
+                .zip(&callbacks)
+                .map(|(leaf, callback)| GradientHookEntry {
+                    node: leaf.node.clone_ref(py),
+                    effective: leaf.effective.clone_ref(py),
+                    gradient: leaf.gradient.clone_ref(py),
+                    original_grad: leaf.original_grad.clone_ref(py),
+                    callback: callback.clone_ref(py),
+                })
+                .collect::<Vec<_>>()
+        });
         let delivery = Py::new(
             py,
             PySemanticGradientDelivery {
@@ -6806,17 +8862,49 @@ impl PySemanticPreparedStep {
                 _producers: parsed.producers,
                 _edges: edges,
                 _callbacks: callbacks.iter().map(|item| item.clone_ref(py)).collect(),
-                handles: Mutex::new(Some(Vec::new())),
+                handles: Mutex::new(group_member.is_none().then(Vec::new)),
+                deferred_hooks: Mutex::new(deferred_hooks),
+                activated_once: AtomicBool::new(group_member.is_none()),
+                restore_on_finish: group_member.is_some(),
+                restores: Mutex::new(Vec::new()),
             },
         )?;
         let mut owners = self
             .gradient_deliveries
             .lock()
             .map_err(|_| PyRuntimeError::new_err("gradient-delivery roster is poisoned"))?;
-        if owners[bank].is_some() {
+        if group_member.is_none() && owners[bank].is_some() {
             return Err(invalid(
                 "gradient delivery was already registered for this bank",
             ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(member) = &group_member {
+            let member = member.borrow(py);
+            let mut group = member
+                .group_use
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("retained group use is poisoned"))?;
+            if group.gradient_banks[bank]
+                || group
+                    .target
+                    .as_ref()
+                    .is_some_and(|owner| !owner.same_handle(&self.inner))
+            {
+                return Err(invalid(
+                    "original group gradient delivery changed before registration",
+                ));
+            }
+            self.group_gradient_deliveries.lock().map_err(|_| {
+                PyRuntimeError::new_err("group gradient-delivery roster is poisoned")
+            })?[bank]
+                .push(delivery.clone_ref(py));
+            group.gradient_banks[bank] = true;
+            group.deliveries[bank] = Some(delivery.clone_ref(py));
+            if group.target.is_none() {
+                group.target = Some(self.inner.clone());
+            }
+            return Ok(delivery);
         }
         let mut handles = Vec::new();
         let mut attached = Vec::new();
@@ -6826,7 +8914,11 @@ impl PySemanticPreparedStep {
                 // Native registration, not the numerical producer, attaches
                 // canonical role-24 storage to this real AccumulateGrad node.
                 effective.setattr("grad", leaf.gradient.bind(py))?;
-                attached.push((leaf.effective.clone_ref(py), leaf.restore_none));
+                attached.push((
+                    leaf.effective.clone_ref(py),
+                    leaf.gradient.clone_ref(py),
+                    leaf.restore_none,
+                ));
                 let handle = leaf
                     .node
                     .bind(py)
@@ -6839,7 +8931,7 @@ impl PySemanticPreparedStep {
             for handle in handles.drain(..).rev() {
                 let _ = handle.bind(py).call_method0("remove");
             }
-            for (effective, restore_none) in attached.into_iter().rev() {
+            for (effective, _, restore_none) in attached.into_iter().rev() {
                 if restore_none {
                     let _ = effective.bind(py).setattr("grad", py.None());
                 }
@@ -6896,19 +8988,116 @@ impl PySemanticPreparedStep {
                 consumer_stream,
             )
             .map_err(xlog_err)?;
-        let [parameters, text, baselines] = gradients.into_dlpack().map_err(xlog_err)?;
-        let parameters =
-            retain_export_owner(parameters, self.session.clone_ref(py), session.owner_thread)?;
-        let text = retain_export_owner(text, self.session.clone_ref(py), session.owner_thread)?;
-        let baselines =
-            retain_export_owner(baselines, self.session.clone_ref(py), session.owner_thread)?;
-        Ok((
-            crate::dlpack_capsule_from_tensor(py, parameters)?,
-            crate::dlpack_capsule_from_tensor(py, text)?,
-            crate::dlpack_capsule_from_tensor(py, baselines)?,
-        )
-            .into_pyobject(py)?
-            .unbind())
+        let capsules = gradients
+            .into_dlpack()
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|tensor| {
+                let tensor =
+                    retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
+    }
+
+    /// Return parameter, full MASK and baseline adjoints for this exact
+    /// prepared Proposal's frozen actor or edit row in a recording Update bank.
+    /// Native membership determines the numerical path; the caller cannot
+    /// reclassify a row or omit the other required group members.
+    /// Nine capsules are returned: the three FP32 adjoints, then their three
+    /// FP64 ordinary/underflow envelopes, then their three FP64
+    /// magnitude/ordinary/underflow bounds. These are selected late outputs,
+    /// not the paired actor/full domains required before a draw.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (update_step, bank, member_ordinal, *, consumer_stream))]
+    fn group_update_vjp(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+        bank: &Bound<'_, PyAny>,
+        member_ordinal: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let bank = usize::try_from(ColdValue::read(bank, &mut 128, 0)?.unsigned()?)
+            .map_err(|_| invalid("prepared policy bank exceeds native address space"))?;
+        let ordinal = ColdValue::read(member_ordinal, &mut 128, 0)?.unsigned()?;
+        let ordinal_index = usize::try_from(ordinal)
+            .map_err(|_| invalid("frozen group ordinal exceeds native address space"))?;
+        let consumer_stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        {
+            let update = update_step.borrow(py);
+            if self.session.as_ptr() != update.session.as_ptr()
+                || !Arc::ptr_eq(&self.scope, &update.scope)
+            {
+                return Err(invalid(
+                    "group policy backward requires an Update from the same prepared segment",
+                ));
+            }
+            update.require_task(py, &self.task_use.borrow(py))?;
+        }
+        let row = self
+            .task_use
+            .borrow(py)
+            .authority
+            .replay
+            .get(ordinal_index)
+            .ok_or_else(|| invalid("group policy row is absent from the admitted replay"))?
+            .training_view_row()?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        self.content_binding_with_owner(py, &owner)?;
+        let gradients = owner
+            .record_prepared_policy_group_vjp(
+                &self.inner,
+                bank,
+                &update_step.borrow(py).inner,
+                ordinal,
+                &row,
+                consumer_stream,
+            )
+            .map_err(xlog_err)?;
+        let capsules = gradients
+            .into_dlpack()
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|tensor| {
+                let tensor =
+                    retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
+    }
+
+    /// Record the native group reduction after all frozen actor and edit rows
+    /// have contributed once in this Update bank. Returns one FP32[1] DLPack
+    /// scalar: raw episode sums are normalized, summed in the admitted order,
+    /// then multiplied by the original frozen critic coefficient once. Its
+    /// numerical value is native, not a host reconstructed loss.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (bank, *, consumer_stream))]
+    fn group_critic_scalar(
+        &self,
+        py: Python<'_>,
+        bank: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        self.session.borrow(py).require_creator()?;
+        let bank = usize::try_from(ColdValue::read(bank, &mut 128, 0)?.unsigned()?)
+            .map_err(|_| invalid("group critic bank exceeds native address space"))?;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        self.content_binding_with_owner(py, &owner)?;
+        let scalar = owner
+            .record_prepared_group_critic(&self.inner, bank, stream)
+            .map_err(xlog_err)?
+            .into_dlpack()
+            .map_err(xlog_err)?;
+        let scalar = retain_export_owner(scalar, self.session.clone_ref(py), session.owner_thread)?;
+        crate::dlpack_capsule_from_tensor(py, scalar)
     }
 
     /// Export an admitted immutable record; bank-varying records require their
@@ -7472,11 +9661,415 @@ pub(crate) struct PySemanticPolicyInvocation {
     _task_use: Py<PySemanticTransitionTaskUse>,
     _parent: ContentStepOwner,
     _model_output: Py<PyAny>,
-    _inputs: [Py<PyAny>; 4],
+    _inputs: [Py<PyAny>; 9],
     rng: SemanticRngBinding,
     outcome: xlog_cuda::SemanticTransitionOutcome,
     training: bool,
     final_use_started: Mutex<bool>,
+}
+
+/// An original replay invocation whose tape, reader and model graph remain
+/// owned until its contribution to the frozen Update group is finally used.
+#[pyclass(
+    name = "SemanticRetainedReplayMember",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticRetainedReplayMember {
+    session: Py<PySemanticTransitionSession>,
+    task_use: Py<PySemanticTransitionTaskUse>,
+    parent: Py<PySemanticPublishedParent>,
+    controller_identity: Arc<()>,
+    replay_ordinal: u64,
+    replay_row: SemanticTrainingViewRow,
+    #[cfg(feature = "semantic-policy")]
+    invocation: Py<PySemanticPolicyInvocation>,
+    original_decisions: Arc<[u8]>,
+    material: Arc<xlog_cuda::SemanticReplayMaterial>,
+    expected: (String, Vec<u8>),
+    finish_invocation: Py<PyAny>,
+    refresh_snapshot: Py<PyAny>,
+    #[cfg(feature = "semantic-policy")]
+    group_use: Mutex<RetainedGroupUse>,
+    completed: AtomicBool,
+}
+
+#[cfg(feature = "semantic-policy")]
+struct RetainedGroupUse {
+    update: Option<Py<PySemanticPreparedStep>>,
+    target: Option<SemanticPreparedStep>,
+    completion: Option<RetainedTargetCompletion>,
+    banks: [bool; 2],
+    gradient_banks: [bool; 2],
+    deliveries: [Option<Py<PySemanticGradientDelivery>>; 2],
+}
+
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetainedTargetCompletion {
+    Published,
+    Unpublished,
+}
+
+impl Drop for PySemanticRetainedReplayMember {
+    fn drop(&mut self) {
+        if self.completed.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = Python::try_attach(|py| {
+            let session = self.session.borrow(py);
+            if let Some(owner) = session
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+            {
+                owner.abort();
+            }
+            session.importing.store(false, Ordering::Release);
+            if let Ok(mut state) = self.task_use.borrow(py).state() {
+                state.phase = TaskUsePhase::Refused;
+            }
+        });
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticRetainedReplayMember {
+    /// Record this original replay's single actor or edit contribution to the
+    /// target Update graph. The original model output, published reader and
+    /// tape stay owned by this handle through both mutually exclusive banks.
+    #[pyo3(signature = (update_step, bank, *, consumer_stream))]
+    fn group_update_vjp(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+        bank: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        let bank = usize::try_from(ColdValue::read(bank, &mut 128, 0)?.unsigned()?)
+            .map_err(|_| invalid("group Update bank exceeds native address space"))?;
+        if bank > 1 || self.completed.load(Ordering::Acquire) {
+            return Err(invalid("retained replay has no open group Update bank"));
+        }
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        let source_session = self.session.borrow(py);
+        source_session.require_creator()?;
+        if !source_session.importing.load(Ordering::Acquire) {
+            return Err(invalid(
+                "original replay is no longer retained for group backward",
+            ));
+        }
+        let update = update_step.borrow(py);
+        if self.session.as_ptr() == update.session.as_ptr() {
+            return Err(invalid(
+                "historical group member requires a distinct target Session",
+            ));
+        }
+        let target_session = update.session.borrow(py);
+        target_session.require_creator()?;
+        update.require_task(py, &update.task_use.borrow(py))?;
+        let mut use_state = self
+            .group_use
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("retained group use is poisoned"))?;
+        let delivery = use_state.deliveries[bank]
+            .as_ref()
+            .ok_or_else(|| invalid("original group gradient delivery is absent"))?
+            .borrow(py);
+        if !delivery.activated_once.load(Ordering::Acquire)
+            || delivery
+                .handles
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("group gradient-delivery owner is poisoned"))?
+                .is_none()
+        {
+            return Err(invalid(
+                "original group gradient delivery must be active during this bank's VJP",
+            ));
+        }
+        drop(delivery);
+        if !use_state.gradient_banks[bank]
+            || use_state.banks[bank]
+            || use_state
+                .target
+                .as_ref()
+                .is_some_and(|bound| !bound.same_handle(&update.inner))
+        {
+            return Err(invalid(
+                "retained replay already served this bank or another Update",
+            ));
+        }
+        let mut target_owner = target_session.owner()?;
+        update.content_binding_with_owner(py, &target_owner)?;
+        let mut source_owner = source_session.owner()?;
+        let parent = self.parent.borrow(py);
+        let lease = parent.lease()?;
+        let invocation = self.invocation.borrow(py);
+        let gradients = target_owner
+            .record_imported_policy_group_vjp(
+                &update.inner,
+                bank,
+                &mut source_owner,
+                &lease,
+                invocation.rng,
+                self.replay_ordinal,
+                &self.replay_row,
+                stream,
+            )
+            .map_err(xlog_err)?;
+        let capsules = gradients
+            .into_dlpack()
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|tensor| {
+                let tensor = retain_export_owner(
+                    tensor,
+                    self.session.clone_ref(py),
+                    source_session.owner_thread,
+                )?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        use_state.banks[bank] = true;
+        if use_state.update.is_none() {
+            use_state.update = Some(update_step.clone_ref(py));
+        }
+        if use_state.target.is_none() {
+            use_state.target = Some(update.inner.clone());
+        }
+        Ok(PyTuple::new(py, capsules)?.unbind())
+    }
+
+    /// Record completed execution of the published target Update. This does
+    /// not release the source: its allocations remain alive until the target
+    /// executable and all of its step owners have retired.
+    fn confirm_published_target(&self, py: Python<'_>) -> PyResult<()> {
+        self.confirm_target_completion(py, None)
+    }
+
+    /// Record completed execution of a skipped or refused target Update.
+    /// No group VJP is inferred from this terminal outcome.
+    fn confirm_unpublished_target(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+    ) -> PyResult<()> {
+        self.confirm_target_completion(py, Some(update_step))
+    }
+
+    /// Retire the retained original after target segment retirement. The
+    /// normal import authority refresh and reader release still run once.
+    fn finish(&self, py: Python<'_>) -> PyResult<()> {
+        self.finish_retained_import(py, None)
+    }
+
+    /// Retire a retained original after its nonpublishing target has retired.
+    fn finish_without_published_update(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+    ) -> PyResult<()> {
+        self.finish_retained_import(py, Some(update_step))
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+impl PySemanticRetainedReplayMember {
+    fn confirm_target_completion(
+        &self,
+        py: Python<'_>,
+        unpublished_update: Option<Py<PySemanticPreparedStep>>,
+    ) -> PyResult<()> {
+        if self.completed.load(Ordering::Acquire) {
+            return Err(invalid("retained replay member has already finished"));
+        }
+        let mut use_state = self
+            .group_use
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("retained group use is poisoned"))?;
+        if use_state.completion.is_some() {
+            return Err(invalid(
+                "retained target completion has already been confirmed",
+            ));
+        }
+        let (update, completion) = if let Some(update) = unpublished_update {
+            let changed_target = {
+                let target = update.borrow(py);
+                use_state
+                    .target
+                    .as_ref()
+                    .is_some_and(|bound| !bound.same_handle(&target.inner))
+            };
+            if changed_target
+                || use_state
+                    .update
+                    .as_ref()
+                    .is_some_and(|bound| !bound.is(&update))
+            {
+                return Err(invalid(
+                    "unpublished Update differs from the retained member's bound target",
+                ));
+            }
+            (update, RetainedTargetCompletion::Unpublished)
+        } else {
+            if use_state.banks != [true, true] || use_state.gradient_banks != [true, true] {
+                return Err(invalid("retained replay requires both Update banks and original physical gradient deliveries"));
+            }
+            (
+                use_state
+                    .update
+                    .as_ref()
+                    .ok_or_else(|| invalid("retained replay has no original Update owner"))?
+                    .clone_ref(py),
+                RetainedTargetCompletion::Published,
+            )
+        };
+        for delivery in use_state.deliveries.iter().flatten() {
+            let delivery = delivery.borrow(py);
+            if delivery.activated_once.load(Ordering::Acquire)
+                && delivery
+                    .handles
+                    .lock()
+                    .map_err(|_| {
+                        PyRuntimeError::new_err("group gradient-delivery owner is poisoned")
+                    })?
+                    .is_some()
+            {
+                return Err(invalid(
+                    "retained gradient delivery is still active during target completion",
+                ));
+            }
+        }
+        {
+            let update = update.borrow(py);
+            let target_session = update.session.borrow(py);
+            target_session.require_creator()?;
+            let target_owner = target_session.owner()?;
+            match completion {
+                RetainedTargetCompletion::Published => target_owner
+                    .require_recorded_group_critic(&update.inner)
+                    .map_err(xlog_err)?,
+                RetainedTargetCompletion::Unpublished => target_owner
+                    .require_completed_unpublished_group_update(&update.inner)
+                    .map_err(xlog_err)?,
+            }
+            use_state.target = Some(update.inner.clone());
+        }
+        use_state.update = Some(update);
+        use_state.completion = Some(completion);
+        Ok(())
+    }
+
+    fn finish_retained_import(
+        &self,
+        py: Python<'_>,
+        unpublished_update: Option<Py<PySemanticPreparedStep>>,
+    ) -> PyResult<()> {
+        if self.completed.load(Ordering::Acquire) {
+            return Err(invalid("retained replay member has already finished"));
+        }
+        let update = {
+            let use_state = self
+                .group_use
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("retained group use is poisoned"))?;
+            let expected_completion = if unpublished_update.is_some() {
+                RetainedTargetCompletion::Unpublished
+            } else {
+                RetainedTargetCompletion::Published
+            };
+            if use_state.completion != Some(expected_completion) {
+                return Err(invalid(
+                    "retained target completion must be confirmed before source retirement",
+                ));
+            }
+            let update = use_state
+                .update
+                .as_ref()
+                .ok_or_else(|| invalid("retained replay has no original Update owner"))?;
+            if unpublished_update
+                .as_ref()
+                .is_some_and(|given| !given.is(update))
+            {
+                return Err(invalid(
+                    "unpublished Update differs from the confirmed target",
+                ));
+            }
+            update.clone_ref(py)
+        };
+        {
+            let update = update.borrow(py);
+            let target_session = update.session.borrow(py);
+            target_session.require_creator()?;
+            let target_owner = target_session.owner()?;
+            target_owner
+                .require_retired_prepared_step(&update.inner)
+                .map_err(xlog_err)?;
+        }
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        if !session.importing.load(Ordering::Acquire) {
+            return Err(invalid("retained original import was already closed"));
+        }
+        let issued = self.task_use.borrow(py);
+        let acquired = self.parent.borrow(py);
+        let controller = PySemanticTransitionController {
+            session: self.session.clone_ref(py),
+            identity: Arc::clone(&self.controller_identity),
+        };
+        let mut import = ColdImportGuard {
+            session: &session,
+            issuance: issued.issuance.clone(),
+            original_decisions: Some(Arc::clone(&self.original_decisions)),
+            committed: false,
+            deferred: false,
+        };
+        let completion = (|| -> PyResult<()> {
+            let mut owner = session.owner()?;
+            let state =
+                controller.execution_state(py, &issued, &acquired, &owner, Some(&import))?;
+            if PySemanticTransitionController::execution_binding(&state, true)? != self.expected {
+                return Err(invalid(
+                    "retained replay authority changed before original final use",
+                ));
+            }
+            drop(state);
+            let invocation = self.invocation.borrow(py);
+            invocation.start_final_use()?;
+            owner
+                .finish_policy_invocation(&*acquired.lease()?, invocation.rng, 1)
+                .map_err(xlog_err)
+        })();
+        let result = controller.finalize_replay_import(
+            py,
+            &self.task_use,
+            &self.parent,
+            &issued,
+            &acquired,
+            &self.material,
+            self.finish_invocation.bind(py),
+            self.refresh_snapshot.bind(py),
+            &import,
+            &self.expected,
+            completion,
+        );
+        if result.is_ok() {
+            import.committed = true;
+            let mut use_state = self
+                .group_use
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            use_state.update = None;
+            use_state.target = None;
+            use_state.deliveries = std::array::from_fn(|_| None);
+            self.completed.store(true, Ordering::Release);
+        } else if let Ok(mut state) = issued.state() {
+            state.phase = TaskUsePhase::Refused;
+        }
+        result
+    }
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -7525,6 +10118,50 @@ impl PySemanticPolicyInvocation {
         result.set_item("next_proposal", observation.next_proposal)?;
         result.set_item("query_count", task.query_count)?;
         result.set_item(
+            "truths",
+            PyTuple::new(
+                py,
+                task.facts
+                    .iter()
+                    .map(|fact| (fact.truth[0], fact.truth[1], fact.truth[2])),
+            )?,
+        )?;
+        result.set_item(
+            "correct",
+            PyTuple::new(
+                py,
+                task.facts
+                    .iter()
+                    .map(|fact| (fact.correct[0], fact.correct[1], fact.correct[2])),
+            )?,
+        )?;
+        let program_rules = observation
+            .lanes
+            .iter()
+            .map(|lane| {
+                PyTuple::new(
+                    py,
+                    lane.program_rules.iter().map(|rule| {
+                        rule.map(|rule| {
+                            (
+                                rule.head_predicate,
+                                rule.left_predicate,
+                                rule.right_predicate,
+                                rule.body_count,
+                                rule.head_variables[0],
+                                rule.head_variables[1],
+                                rule.left_variables[0],
+                                rule.left_variables[1],
+                                rule.right_variables[0],
+                                rule.right_variables[1],
+                            )
+                        })
+                    }),
+                )
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        result.set_item("program_rules", PyTuple::new(py, program_rules)?)?;
+        result.set_item(
             "facts",
             PyTuple::new(
                 py,
@@ -7568,8 +10205,12 @@ impl PySemanticPolicyInvocation {
     }
 
     /// Supply the original loss's contiguous FP64[136] selected-score
-    /// cotangents. Returns real FP32 parameter and full MASK adjoint capsules,
-    /// in that order, to be applied to the retained original graph. No model
+    /// cotangents. Returns FP32 parameter, full MASK and zero baseline adjoints,
+    /// followed by their three full FP64 E[...,2] error envelopes and three
+    /// contiguous FP64 D[2,...,4] bounds in actor/full and (M,O,U,I) order.
+    /// Explicit external coefficients seed only full, not an actor source.
+    /// Only the first three are autograd cotangents.
+    /// They are applied to the retained original graph. No model
     /// getter, second forward, Python selected-score or new primal leaf is used.
     /// Adjoint consumers enqueue on ``consumer_stream`` after this returns;
     /// readiness is ordered by the native producer event without a host wait.
@@ -7643,9 +10284,8 @@ impl PySemanticPolicyInvocation {
             ),
         }
         .map_err(xlog_err)?;
-        let [parameters, text] = gradients.into_dlpack().map_err(xlog_err)?;
         // The actual parent also owns the original continuation producers and
-        // Session. Both capsule owners preserve them through late consumers,
+        // Session. All capsule owners preserve them through late consumers,
         // with final Python decrefs deferred to the creating thread.
         let export_owner = || -> PublishedExportOwner {
             match &self._parent {
@@ -7653,14 +10293,16 @@ impl PySemanticPolicyInvocation {
                 ContentStepOwner::Prepared(step) => step.clone_ref(py).into(),
             }
         };
-        let parameters = retain_export_owner(parameters, export_owner(), session.owner_thread)?;
-        let text = retain_export_owner(text, export_owner(), session.owner_thread)?;
-        Ok((
-            crate::dlpack_capsule_from_tensor(py, parameters)?,
-            crate::dlpack_capsule_from_tensor(py, text)?,
-        )
-            .into_pyobject(py)?
-            .unbind())
+        let capsules = gradients
+            .into_dlpack()
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|tensor| {
+                let tensor = retain_export_owner(tensor, export_owner(), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
     }
 
     /// Consume this prepared proposal's exact retained tape against the
@@ -7670,8 +10312,12 @@ impl PySemanticPolicyInvocation {
     /// unselected invocations graph-connected zeros; Python never reads the
     /// selected ordinal, reconstructs selected scores, or runs a second primal.
     ///
-    /// Returns FP32 parameter, full MASK and component-baseline adjoint
-    /// capsules, in that order. This is a single-use handoff, including
+    /// Returns FP32 parameter, full MASK and component-baseline adjoints,
+    /// then their three full FP64 E[...,2] ordinary/underflow envelopes and
+    /// three contiguous FP64 D[2,...,4] bounds in actor/full and (M,O,U,I)
+    /// order. E and D.full.O/U come from the same coherent result. These are
+    /// selected-tape bounds, not pre-draw support/prefix coverage. Only the first three
+    /// capsules are autograd cotangents. This is a single-use handoff, including
     /// uncertain native failures.
     #[pyo3(signature = (update_step, *, consumer_stream))]
     fn backward_selected(
@@ -7729,18 +10375,17 @@ impl PySemanticPolicyInvocation {
                 consumer_stream,
             )
             .map_err(xlog_err)?;
-        let [parameters, text, baselines] = gradients.into_dlpack().map_err(xlog_err)?;
         let export_owner = || policy_step.clone_ref(py);
-        let parameters = retain_export_owner(parameters, export_owner(), session.owner_thread)?;
-        let text = retain_export_owner(text, export_owner(), session.owner_thread)?;
-        let baselines = retain_export_owner(baselines, export_owner(), session.owner_thread)?;
-        Ok((
-            crate::dlpack_capsule_from_tensor(py, parameters)?,
-            crate::dlpack_capsule_from_tensor(py, text)?,
-            crate::dlpack_capsule_from_tensor(py, baselines)?,
-        )
-            .into_pyobject(py)?
-            .unbind())
+        let capsules = gradients
+            .into_dlpack()
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|tensor| {
+                let tensor = retain_export_owner(tensor, export_owner(), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
     }
 
     /// Finish the original published or refused inference use after consumers are enqueued.
@@ -7749,10 +10394,11 @@ impl PySemanticPolicyInvocation {
     /// consumers (legacy default stream 1 is allowed; 0 and 2 are not). Native
     /// finalization joins that stream without a host wait and retires only this
     /// invocation's retained policy tape. It does not release the parent.
-    /// Published training invocations require ``backward`` or, after an in-graph
-    /// temporal Update VJP, ``finish_recorded_training``; refused training
-    /// invocations require ``finish_refusal``. Final use is one-shot, including
-    /// uncertain native failures.
+    /// Published training invocations require ``backward`` or, after a completed
+    /// group Update, ``finish_recorded_training`` for a consumed tape or
+    /// ``finish_unselected_recorded_training`` for an unselected tape. Refused
+    /// training invocations require ``finish_refusal``. Final use is one-shot,
+    /// including uncertain native failures.
     #[pyo3(signature = (*, consumer_stream))]
     fn finish_inference(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
@@ -7779,6 +10425,56 @@ impl PySemanticPolicyInvocation {
         py: Python<'_>,
         update_step: Py<PySemanticPreparedStep>,
         consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.finish_recorded_training_use(py, update_step, consumer_stream, false)
+    }
+
+    /// Finish a published local Proposal that was outside the exact frozen
+    /// actor/edit group. A completed, published Update must have recorded both
+    /// full-group critic reductions; a completed Update that did not publish
+    /// also permits terminal use without claiming a policy VJP. This tape must
+    /// have no Update VJP. No synthetic gradient or second backward is produced.
+    #[pyo3(signature = (update_step, *, consumer_stream))]
+    fn finish_unselected_recorded_training(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.finish_recorded_training_use(py, update_step, consumer_stream, true)
+    }
+
+    /// Finish an actual native refusal from inference or training without a VJP.
+    ///
+    /// Enqueue final consumers on the explicit ``consumer_stream`` first.
+    /// Stream 1 is allowed; 0 and 2 are refused. Published outcomes are not
+    /// admitted here. This shares the one-shot final-use owner with ``backward``,
+    /// ``finish_recorded_training`` and ``finish_inference`` and retains the
+    /// parent for its later release.
+    #[pyo3(signature = (*, consumer_stream))]
+    fn finish_refusal(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.session.borrow(py).require_creator()?;
+        self.require_public_result(py)?;
+        if !matches!(
+            &self.outcome,
+            xlog_cuda::SemanticTransitionOutcome::Refused(_)
+        ) {
+            return Err(invalid(
+                "policy refusal completion requires an actual native refusal",
+            ));
+        }
+        self.finish_final_use(py, consumer_stream)
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+impl PySemanticPolicyInvocation {
+    fn finish_recorded_training_use(
+        &self,
+        py: Python<'_>,
+        update_step: Py<PySemanticPreparedStep>,
+        consumer_stream: &Bound<'_, PyAny>,
+        unselected: bool,
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         self.require_public_result(py)?;
@@ -7821,41 +10517,23 @@ impl PySemanticPolicyInvocation {
                 "policy authority changed before recorded training completion",
             ));
         }
-        owner
-            .finish_recorded_training_policy_invocation(
+        let result = if unselected {
+            owner.finish_unselected_recorded_training_policy_invocation(
                 &policy_step.borrow(py).inner,
                 &update_step.borrow(py).inner,
                 self.rng,
                 consumer_stream,
             )
-            .map_err(xlog_err)
+        } else {
+            owner.finish_recorded_training_policy_invocation(
+                &policy_step.borrow(py).inner,
+                &update_step.borrow(py).inner,
+                self.rng,
+                consumer_stream,
+            )
+        };
+        result.map_err(xlog_err)
     }
-
-    /// Finish an actual native refusal from inference or training without a VJP.
-    ///
-    /// Enqueue final consumers on the explicit ``consumer_stream`` first.
-    /// Stream 1 is allowed; 0 and 2 are refused. Published outcomes are not
-    /// admitted here. This shares the one-shot final-use owner with ``backward``,
-    /// ``finish_recorded_training`` and ``finish_inference`` and retains the
-    /// parent for its later release.
-    #[pyo3(signature = (*, consumer_stream))]
-    fn finish_refusal(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.session.borrow(py).require_creator()?;
-        self.require_public_result(py)?;
-        if !matches!(
-            &self.outcome,
-            xlog_cuda::SemanticTransitionOutcome::Refused(_)
-        ) {
-            return Err(invalid(
-                "policy refusal completion requires an actual native refusal",
-            ));
-        }
-        self.finish_final_use(py, consumer_stream)
-    }
-}
-
-#[cfg(feature = "semantic-policy")]
-impl PySemanticPolicyInvocation {
     fn finish_final_use(&self, py: Python<'_>, consumer_stream: &Bound<'_, PyAny>) -> PyResult<()> {
         let expected = {
             let session = self.session.borrow(py);
@@ -8012,6 +10690,12 @@ fn descriptor_meaning_object(
             ("support_event", *source_record)
                 .into_pyobject(py)?
                 .into_any()
+        }
+        SemanticActionDescriptor::RulePredicate { predicate } => {
+            ("rule_predicate", *predicate).into_pyobject(py)?.into_any()
+        }
+        SemanticActionDescriptor::RuleVariable { index } => {
+            ("rule_variable", *index).into_pyobject(py)?.into_any()
         }
     };
     Ok(value.unbind())
@@ -8850,6 +11534,93 @@ impl PySemanticTransitionTaskUse {
         session.binding(py)
     }
 
+    /// Return ``(source, prefix, prefill_tokens, ring_head)`` for this task's
+    /// admitted observed mapping. ``source`` is the original 32-row active
+    /// ring and ``prefix`` is its ordered committed predecessor; each row has
+    /// the eight fields accepted by ``bind_parent``. ``prefill_tokens`` are
+    /// exactly the tokens whose model cache must be computed before that bind.
+    /// This imported-phase layout is not a model-cache or publication witness.
+    #[pyo3(signature = (*, prefix_capacity, feedback_capacity, max_position, pad_token, provenance_capacity_records))]
+    fn initial_source_layout(
+        &self,
+        py: Python<'_>,
+        prefix_capacity: u64,
+        feedback_capacity: u64,
+        max_position: u64,
+        pad_token: u64,
+        provenance_capacity_records: u64,
+    ) -> PyResult<Py<PyTuple>> {
+        let layout = self.checked_initial_source_layout(
+            py,
+            prefix_capacity,
+            feedback_capacity,
+            max_position,
+            pad_token,
+            provenance_capacity_records,
+        )?;
+        initial_source_parts(py, layout)
+    }
+
+    /// Issue one pre-parent stage for the exact admitted committed prefix and
+    /// model generation. The returned stage accepts original model content,
+    /// the actual wrapper input and its post-detach outputs in that order.
+    /// Neither this call nor the layout is a completed model-forward receipt.
+    #[pyo3(signature = (*, prefix_capacity, feedback_capacity, max_position, pad_token, provenance_capacity_records, model_generation))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "initial prefill binds the complete admitted source and model geometry"
+    )]
+    fn begin_initial_prefill(
+        slf: Py<Self>,
+        py: Python<'_>,
+        prefix_capacity: u64,
+        feedback_capacity: u64,
+        max_position: u64,
+        pad_token: u64,
+        provenance_capacity_records: u64,
+        model_generation: u64,
+    ) -> PyResult<Py<PySemanticInitialPrefillStage>> {
+        let issued = slf.borrow(py);
+        let layout = issued.checked_initial_source_layout(
+            py,
+            prefix_capacity,
+            feedback_capacity,
+            max_position,
+            pad_token,
+            provenance_capacity_records,
+        )?;
+        let parts = initial_source_parts(py, layout.clone())?;
+        let prefix_len = layout.prefill_tokens.len();
+        let scope = issued.state()?.begin_initial_prefill()?;
+        let session = issued.session.clone_ref(py);
+        let lease = {
+            let session_ref = session.borrow(py);
+            let mut owner = session_ref.owner()?;
+            match owner.begin_initial_prefill(layout, model_generation) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    owner.abort();
+                    return Err(xlog_err(error));
+                }
+            }
+        };
+        drop(issued);
+        Py::new(
+            py,
+            PySemanticInitialPrefillStage {
+                session,
+                task_use: slf,
+                scope,
+                lease,
+                layout: parts,
+                prefix_len,
+                model_producers: Mutex::new(Vec::new()),
+                input_producer: Mutex::new(None),
+                output_producers: Mutex::new(Vec::new()),
+            },
+        )
+    }
+
     /// Return one immutable native projection of the exact ordered query,
     /// admitted theory plus executed observer program, observed four-valued
     /// result, and the three stored truths in query order. This does not
@@ -8870,21 +11641,142 @@ impl PySemanticTransitionTaskUse {
         let (identity, truth) = owner
             .task_content()
             .ok_or_else(|| invalid("native task content binding is absent"))?;
-        let query_identity = PyBytes::new(py, identity.query.as_bytes()).unbind();
-        let theory_program_identity = PyBytes::new(py, identity.theory_program.as_bytes()).unbind();
-        let result_identity = PyBytes::new(py, identity.result.as_bytes()).unbind();
-        let [first, second, third] = truth.map(|truth| match truth {
-            SemanticTruth::Neither => 0,
-            SemanticTruth::True => 1,
-            SemanticTruth::False => 2,
-            SemanticTruth::Both => 3,
-        });
+        Ok(task_content_read(py, (identity, truth)))
+    }
+
+    /// Project the native law frozen at cold task binding, before any Proposal.
+    /// Returns ``(scoring_identity, evaluator_f64_bits, coefficient_f32_bits,
+    /// (cost_unit_identity, cost_cap))``. This does not create training groups,
+    /// grant actor eligibility or establish a physical numerical certificate.
+    fn task_objective_law(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        let law = owner
+            .task_objective_law()
+            .ok_or_else(|| invalid("native task objective law is absent"))?;
+        let identity = owner
+            .task_scoring_law_identity()
+            .map_err(xlog_err)?
+            .ok_or_else(|| invalid("native task scoring law is absent"))?;
         Ok((
-            query_identity,
-            theory_program_identity,
-            result_identity,
-            (first, second, third),
-        ))
+            PyBytes::new(py, identity.as_bytes()),
+            (law.evaluator_min.to_bits(), law.evaluator_max.to_bits()),
+            PyTuple::new(py, law.coefficients.map(f32::to_bits))?,
+            (
+                PyBytes::new(py, law.structural_cost.unit.as_bytes()),
+                law.structural_cost.cap,
+            ),
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+
+    /// Return ``(domain_identity_bytes, original_domain_projection)`` from the
+    /// retained native owner. None means no prospective training was bound.
+    /// This is metadata custody, not a roster, grant or numerical certificate.
+    fn task_training_domain(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.session.borrow(py).require_creator()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        let Some(domain) = owner.task_training_domain() else {
+            return Ok(py.None());
+        };
+        let projection = self.checkpoint.training_domain.python_value(py)?;
+        Ok((PyBytes::new(py, domain.identity().as_bytes()), projection)
+            .into_pyobject(py)?
+            .into_any()
+            .unbind())
+    }
+
+    /// Return original pre-draw actor/full domains as three owner-bearing
+    /// DLPack capsules: parameters [2,P,4], text [2,32,V,4], baselines
+    /// [2,1,136,4], FP64 (M,O,U,I). These are not selected backward outputs
+    /// and not a physical model certificate. Consume them in the same model
+    /// numerical owner before freezing its original work/continuation.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (parent, bank, consumer_stream))]
+    fn policy_numerical_domains(
+        &self,
+        py: Python<'_>,
+        parent: &Bound<'_, PyAny>,
+        bank: Option<usize>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        let parent = ContentStepOwner::from_python(parent)?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        self.require_identity(&owner)?;
+        let tensors = match parent {
+            ContentStepOwner::Prepared(step) => {
+                let step = step.borrow(py);
+                step.require_task(py, self)?;
+                step.content_binding_with_owner(py, &owner)?;
+                step.require_recording_stream(&owner, stream)?;
+                owner.prepared_policy_numerical_domains(
+                    &step.inner,
+                    bank.ok_or_else(|| {
+                        invalid("prepared policy domains require their original bank")
+                    })?,
+                    stream,
+                )
+            }
+            ContentStepOwner::Published(parent) => {
+                let parent = parent.borrow(py);
+                parent.require_task(py, self)?;
+                parent.content_binding_with_owner(py, &owner)?;
+                if bank.is_some() {
+                    return Err(invalid("acquired policy domains require bank=None"));
+                }
+                let lease = parent.lease()?;
+                owner.policy_numerical_domains(&lease, stream)
+            }
+        }
+        .map_err(xlog_err)?;
+        drop(owner);
+        let capsules = tensors
+            .into_iter()
+            .map(|tensor| {
+                let tensor =
+                    retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
+    }
+
+    /// Return the bound native semantic goal root before any Proposal. This
+    /// 32-byte root is the same one retained in completed task ground; reading
+    /// it neither recomputes the goal nor grants execution authority.
+    fn semantic_goal_root(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
+        self.session.borrow(py).require_creator()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        self.state()?.require_public_use()?;
+        let root = owner
+            .task_semantic_goal_root()
+            .ok_or_else(|| invalid("native task goal witness is absent"))?;
+        Ok(PyBytes::new(py, root.as_bytes()).unbind())
+    }
+
+    /// Ordered task-local levels from the same native bank used by selection.
+    /// Each level is an ordered tuple of (query ordinal, truth code, weight)
+    /// goals. The truth-match score is zero or one; progress subtracts the
+    /// acquired base of the current step before comparing candidates.
+    fn task_priority_levels(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        let levels = owner
+            .task_priority_levels()
+            .ok_or_else(|| invalid("native task priority binding is absent"))?;
+        task_priority_levels_tuple(py, levels)
     }
 
     /// Read the same native Session layout; this does not grant execution.
@@ -8964,27 +11856,49 @@ impl PySemanticTransitionController {
         })
     }
 
+    /// Versioned (unit identity, maximum raw cost) of this Session's native
+    /// program mode, available before import_task freezes its objective.
+    #[getter]
+    fn structural_cost_descriptor(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let descriptor =
+            xlog_cuda::semantic_structural_cost_descriptor(session.editable_program.is_some());
+        Ok(
+            (PyBytes::new(py, descriptor.unit.as_bytes()), descriptor.cap)
+                .into_pyobject(py)?
+                .unbind(),
+        )
+    }
+
     /// Record one fixed bounded segment without submitting it. The original
     /// producer prepares cold storage on consumer_stream and returns an owner
-    /// with memory_scope, enqueue_step(step, bank), and finish_segment() methods.
+    /// with memory_scope, prepare_unpublished_successors(),
+    /// enqueue_step(step, bank), and finish_segment() methods.
     /// memory_scope spans allocation/recording through EndCapture/instantiate;
     /// enqueue_step records both fixed bank branches per slot and returns None.
     /// Each bank binds its own original model witness, continuation, policy and
     /// update outputs through this controller. Device admission selects exactly
     /// one retained branch; no branch aliases the other's primal or tape owners.
     /// Python receives neither the graph nor authority to report its completion.
-    /// transitions is a nonempty exact tuple of "proposal" or "recompute" modes;
-    /// its length fixes the bound and each mode is retained before any callback.
+    /// transitions is a nonempty exact tuple of requested modes; its length fixes
+    /// the bound. Native claims the frozen per-step content and work capacities,
+    /// the producer slab, and every later external CUDA allocation upper bound
+    /// before the first producer callback.
     /// Device DRAIN_REQUIRED overrides either nominal mode. Recompute binds the
     /// original model continuation without a policy or backward obligation.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, transitions, producer))]
+    #[pyo3(signature = (task_use, *, transitions, producer, tensor_content_capacity, model_work_capacity, segment_capacity_bytes, other_external_cuda_bytes))]
     fn build_segment(
         &self,
         py: Python<'_>,
         task_use: Py<PySemanticTransitionTaskUse>,
         transitions: &Bound<'_, PyAny>,
         producer: Py<PyAny>,
+        tensor_content_capacity: &Bound<'_, PyAny>,
+        model_work_capacity: &Bound<'_, PyAny>,
+        segment_capacity_bytes: &Bound<'_, PyAny>,
+        other_external_cuda_bytes: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let session = self.session.borrow(py);
         session.require_creator()?;
@@ -8994,6 +11908,24 @@ impl PySemanticTransitionController {
             return Err(invalid("segment task belongs to another Session"));
         }
         let transitions = prepared_transitions(transitions)?;
+        let cold_capacity = SemanticSegmentColdCapacity {
+            tensor_content_capacity: usize::try_from(
+                ColdValue::read(tensor_content_capacity, &mut 128, 0)?.unsigned()?,
+            )
+            .map_err(|_| invalid("tensor content capacity exceeds native address space"))?,
+            model_work_capacity: usize::try_from(
+                ColdValue::read(model_work_capacity, &mut 128, 0)?.unsigned()?,
+            )
+            .map_err(|_| invalid("model work capacity exceeds native address space"))?,
+            segment_capacity_bytes: u64::try_from(
+                ColdValue::read(segment_capacity_bytes, &mut 128, 0)?.unsigned()?,
+            )
+            .map_err(|_| invalid("segment slab capacity exceeds native byte range"))?,
+            other_external_cuda_bytes: u64::try_from(
+                ColdValue::read(other_external_cuda_bytes, &mut 128, 0)?.unsigned()?,
+            )
+            .map_err(|_| invalid("external CUDA upper bound exceeds native byte range"))?,
+        };
         if session.importing.load(Ordering::Acquire)
             || session.retiring.load(Ordering::Acquire)
             || session.recording.swap(true, Ordering::AcqRel)
@@ -9020,7 +11952,9 @@ impl PySemanticTransitionController {
             }
             let mut state = issued.state()?;
             let scope = state.begin_build()?;
-            let handles = owner.prepare_segment_steps(transitions).map_err(xlog_err)?;
+            let handles = owner
+                .prepare_segment_steps(transitions, cold_capacity)
+                .map_err(xlog_err)?;
             let stream = owner.prepared_stream(&handles[0]).map_err(xlog_err)?;
             (scope, state.snapshot.canonical.clone(), handles, stream)
         };
@@ -9036,6 +11970,8 @@ impl PySemanticTransitionController {
                     continuation_producers: Mutex::new(std::array::from_fn(|_| Vec::new())),
                     policy_inputs: Mutex::new(std::array::from_fn(|_| None)),
                     gradient_deliveries: Mutex::new(std::array::from_fn(|_| None)),
+                    #[cfg(feature = "semantic-policy")]
+                    group_gradient_deliveries: Mutex::new(std::array::from_fn(|_| Vec::new())),
                 },
             )?);
         }
@@ -9084,6 +12020,17 @@ impl PySemanticTransitionController {
             Ok(entered)
         })?;
         let recorded = (|| -> PyResult<()> {
+            let prepare_successors =
+                recording_callback(check, || prepared.getattr("prepare_unpublished_successors"))?;
+            recording_callback(check, || {
+                let value = prepare_successors.call0()?;
+                if !value.is_none() {
+                    return Err(invalid(
+                        "prepare_unpublished_successors must return None, not a host result",
+                    ));
+                }
+                Ok(())
+            })?;
             let external: Arc<dyn Send + Sync> = resources.clone();
             let (mut capture, capture_stream) = {
                 let mut owner = session.owner()?;
@@ -9357,10 +12304,7 @@ impl PySemanticTransitionController {
         };
         let shared = &*session;
         let outcomes = py.detach(|| {
-            let mut owner = shared
-                .inner
-                .lock()
-                .map_err(|_| invalid("native semantic session owner mutex is poisoned"))?;
+            let mut owner = shared.witness_owner()?;
             owner.complete_prepared_segment().map_err(xlog_err)
         })?;
         let check = || -> PyResult<()> {
@@ -9640,15 +12584,17 @@ impl PySemanticTransitionController {
     }
 
     /// Inspect cold native observation coverage before constructing the task's
-    /// authority graph. The replay transport, exact selection and byte limits
-    /// are identical to import_task; no replay is executed or restored here.
+    /// authority graph. The scope and live authorities are the same original
+    /// inputs later supplied to import_task; the replay transport, exact
+    /// selection and byte limits are also identical. No replay is executed or
+    /// restored here, and import_task independently checks current authority.
     /// Returns (root_digest, root_extents, query_records, contributors), where
     /// each contributor is (query_ordinal, original_target_or_None, original_support).
     /// These are original admission coordinates, not learned features, current
     /// device receipts or use grants. A derived target remains None even when
     /// its value equals an admitted query. import_task independently recomputes
     /// this coverage and requires original targets before issuing its TaskUse.
-    #[pyo3(signature = (*, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, actor_eligible, replay_rows, replay_selection, max_material_bytes, max_total_material_bytes, max_evidence_bytes))]
+    #[pyo3(signature = (*, task_scope, live_authorities, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, actor_eligible, replay_rows, replay_selection, max_material_bytes, max_total_material_bytes, max_evidence_bytes))]
     #[expect(
         clippy::too_many_arguments,
         reason = "observation coverage retains every independent task and replay input"
@@ -9656,6 +12602,8 @@ impl PySemanticTransitionController {
     fn task_observation_roots(
         &self,
         py: Python<'_>,
+        task_scope: &Bound<'_, PyAny>,
+        live_authorities: &Bound<'_, PyAny>,
         statement_records: &Bound<'_, PyAny>,
         allowed_support_records: &Bound<'_, PyAny>,
         task_program_source: &Bound<'_, PyAny>,
@@ -9671,6 +12619,12 @@ impl PySemanticTransitionController {
     ) -> PyResult<Py<PyTuple>> {
         self.session.borrow(py).require_creator()?;
         let mut budget = 16 * 1024 * 1024;
+        let scope = ColdValue::read(task_scope, &mut budget, 0)?.strings()?;
+        if scope.len() != 5 {
+            return Err(invalid("task_scope must contain five explicit fields"));
+        }
+        let live =
+            parse_live_authorities(&ColdValue::read(live_authorities, &mut budget, 0)?, &scope)?;
         let [material_limit, total_material_limit, evidence_limit] = read_task_replay_limits(
             max_material_bytes,
             max_total_material_bytes,
@@ -9694,11 +12648,7 @@ impl PySemanticTransitionController {
             total_material_limit,
             evidence_limit,
         )?;
-        let rows = rows
-            .sequence()?
-            .iter()
-            .map(ReplayRow::parse)
-            .collect::<PyResult<Vec<_>>>()?;
+        let rows = parse_replay_rows_with_live(&rows, &live)?;
         let (_, selected) =
             decode_selected_replay(&rows, &ColdValue::read(replay_selection, &mut budget, 0)?)?;
         let session = self.session.borrow(py);
@@ -9730,10 +12680,23 @@ impl PySemanticTransitionController {
     /// refusal, spent) unsigned weights. ``admissible_truth_masks`` supplies three
     /// bit masks over (neither, true, false, both), in that bit order.
     ///
+    /// ``training_domain`` is the original ``(manifests, loader)`` projection:
+    /// manifests are sorted ``(sha256_hex, (entries, keys, records, bytes))``
+    /// rows, and loader is ``((window, pad_id, mask_id, block_size), batch_size,
+    /// mask_permille, training_seed, mask_policy_sha256_hex)``. The application
+    /// must extract it from validated sealed inputs before the first action;
+    /// native binding does not authenticate external manifest ownership. None
+    /// explicitly means no prospective training arena and cannot be expanded
+    /// into one during later admission. It grants no actor eligibility.
+    ///
     /// ``training_objective`` is None only when replay_rows is empty. Otherwise it
     /// is ``(evaluator_f64_bits, coefficient_f32_bits, cost, truth_tokens, groups,
     /// canaries)``. The evaluator pair and nine coefficient words are exact IEEE
-    /// bit patterns. Cost is ``(unit_identity, positive_cap)``. Each group is
+    /// bit patterns. Cost is the exact ``(unit_identity, positive_cap)`` from
+    /// this controller's pre-import structural_cost_descriptor property; the
+    /// native bound task checks both fields. Evaluator and coefficient bits must
+    /// equal its pre-action ``task_objective_law()`` projection as well; a later
+    /// arena cannot choose another interval or refit the coefficients. Each group is
     /// ``(kind, positive_denominator, strictly_increasing_row_ordinals)`` and the
     /// complete mandatory group roster must cover every row. ``truth_tokens`` maps
     /// neither, true, false and both to four distinct vocabulary ids. Each canary
@@ -9843,14 +12806,21 @@ impl PySemanticTransitionController {
     /// and trusted application callbacks, not permissions inferred from archive.
     ///
     /// restore_invocation(task_use, restored_parent, full_row, transition) returns
-    /// (original_model_output, continuation_arguments), where the second tuple
-    /// is (text_rows, text_row_count, selected_text, active_rows, active_row_count,
-    /// numerical_admissibility, tensors, producer_witness, consumer_stream).
-    /// The six services are original CUDA DLPack producers; the witness is the
-    /// original transient capture for this restored parent and exact roster.
+    /// (original_model_output, finalize_continuation, consumer_stream). The second
+    /// value is a callable retaining that original invocation, not an already
+    /// captured continuation. finalize_continuation(task_use, restored_parent,
+    /// original_model_output) runs once after proposal policy snapshots are bound,
+    /// before capture/launch, and returns (text_rows, text_row_count, selected_text,
+    /// active_rows, active_row_count, numerical_admissibility, tensors,
+    /// producer_witness) for a non-drawing transition. A proposal inserts original numerical_blocks,
+    /// model_schema_digest and model_identity before tensors. Its seventh CUDA
+    /// service is FP64[N,2,3], covered by the same transient witness; the two
+    /// identities are bytes from the original sealed model contract.
     /// For a proposal, pack_policy(task_use, restored_parent, original_model_output)
-    /// returns (binding, text_logits, parameters, product_support), computed by
-    /// the same Runtime after the genuine continuation has been bound. For
+    /// returns (binding, text_logits, parameters, product_support,
+    /// component_baselines, parameter_errors, baseline_errors, parameter_domains,
+    /// text_domains, baseline_domains, producer_witness), computed by the same
+    /// Runtime before the final continuation is captured. For
     /// recompute/drain pack_policy must be None; no policy draw is synthesized.
     /// These callbacks receive genuine task-bound readers only within a dynamic
     /// import read scope; ordinary controller execution/backward remains closed.
@@ -9863,7 +12833,7 @@ impl PySemanticTransitionController {
     /// Only then does this same TaskUse become Imported. Any failed import
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
-    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, actor_eligible, live_authorities, replay_rows, training_objective, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot))]
+    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, live_authorities, replay_rows, training_objective, training_domain, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
     #[expect(
         clippy::too_many_arguments,
         reason = "task import binds the complete authority, replay, and callback contract"
@@ -9878,11 +12848,13 @@ impl PySemanticTransitionController {
         task_program_source: &Bound<'_, PyAny>,
         task_query_ordinals: &Bound<'_, PyAny>,
         task_scoring: &Bound<'_, PyAny>,
+        task_priority_levels: &Bound<'_, PyAny>,
         admissible_truth_masks: &Bound<'_, PyAny>,
         actor_eligible: &Bound<'_, PyAny>,
         live_authorities: &Bound<'_, PyAny>,
         replay_rows: &Bound<'_, PyAny>,
         training_objective: &Bound<'_, PyAny>,
+        training_domain: &Bound<'_, PyAny>,
         max_material_bytes: &Bound<'_, PyAny>,
         max_total_material_bytes: &Bound<'_, PyAny>,
         max_evidence_bytes: &Bound<'_, PyAny>,
@@ -9900,7 +12872,11 @@ impl PySemanticTransitionController {
         pack_policy: &Bound<'_, PyAny>,
         finish_invocation: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PySemanticTransitionTaskUse>> {
+        resolve_checkpoint: Option<&Bound<'_, PyAny>>,
+        max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
+        max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
+        retain_policy: bool,
+    ) -> PyResult<Py<PyAny>> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
         let mut import = ColdImportGuard::begin(&session, None)?;
@@ -9921,6 +12897,7 @@ impl PySemanticTransitionController {
             publication_grants,
             inference_grants,
             training_grants,
+            task_priority_levels,
         ]
         .into_iter()
         .enumerate()
@@ -9945,6 +12922,7 @@ impl PySemanticTransitionController {
             .map(ReplayRow::training_view_row)
             .collect::<PyResult<Vec<_>>>()?;
         let training_objective_value = ColdValue::read(training_objective, &mut budget, 0)?;
+        let training_domain_value = ColdValue::read(training_domain, &mut budget, 0)?;
         let training_objective = read_training_objective(&training_objective_value)?;
         if training_views.is_empty() != training_objective.is_none() {
             return Err(invalid(
@@ -9954,7 +12932,7 @@ impl PySemanticTransitionController {
         let initial_sources = ColdValue::read(initial_sources, &mut budget, 0)?;
         let source_mapping = ColdValue::read(source_mapping, &mut budget, 0)?;
         authority.bind_initial_sources(&initial_sources, &source_mapping)?;
-        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        let mut snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
         authority.check_snapshot(&snapshot)?;
         let evaluation = read_task_evaluation_values(
             statement_records,
@@ -9966,7 +12944,26 @@ impl PySemanticTransitionController {
             actor_eligible,
             &mut budget,
         )?;
-        let spec = task_evaluation_spec(&evaluation)?;
+        if let Some(source) = &session.editable_observer_source {
+            if evaluation[2].text()? != source {
+                return Err(invalid("task observer source differs from its admission"));
+            }
+        }
+        let spec = task_evaluation_spec(
+            &evaluation,
+            authority.priority_levels.clone(),
+            session.editable_program.clone(),
+            &training_domain_value,
+        )?;
+        let checkpoint_referents = resolve_replay_checkpoint_referents(
+            py,
+            &authority,
+            &mut snapshot,
+            resolve_checkpoint,
+            refresh_snapshot,
+            max_checkpoint_bytes,
+            max_total_checkpoint_bytes,
+        )?;
         let replay_selection = ColdValue::read(replay_selection, &mut budget, 0)?;
         let (selection, selected_material) =
             decode_selected_replay(&authority.replay, &replay_selection)?;
@@ -9989,6 +12986,9 @@ impl PySemanticTransitionController {
                 }
             }
             let kind = material.material.transition_kind();
+            if retain_policy && kind != SemanticTransitionKind::Proposal {
+                return Err(invalid("retained replay requires an original Proposal"));
+            }
             if kind == SemanticTransitionKind::Proposal {
                 if !pack_policy.is_callable() {
                     return Err(invalid(
@@ -10009,15 +13009,16 @@ impl PySemanticTransitionController {
                 Some(kind),
             )
         } else {
+            if retain_policy {
+                return Err(invalid(
+                    "retained replay requires a selected original Proposal",
+                ));
+            }
             if operation != ColdValue::None
-                || [
-                    restore_invocation,
-                    pack_policy,
-                    finish_invocation,
-                    refresh_snapshot,
-                ]
-                .iter()
-                .any(|callback| !callback.is_none())
+                || [restore_invocation, pack_policy, finish_invocation]
+                    .iter()
+                    .any(|callback| !callback.is_none())
+                || (checkpoint_referents.is_empty() && !refresh_snapshot.is_none())
             {
                 return Err(invalid(
                     "fresh import requires no replay operation or callbacks",
@@ -10031,6 +13032,17 @@ impl PySemanticTransitionController {
             owner
                 .bind_task_goal_witness(goal_witness)
                 .map_err(xlog_err)?;
+            if !checkpoint_referents.is_empty() {
+                let native_task = TaskCheckpointBinding::from_owner(&owner)?;
+                if checkpoint_referents
+                    .iter()
+                    .any(|referent| !referent.task.same_task_content(native_task))
+                {
+                    return Err(invalid(
+                        "actor checkpoint differs from the current native task content or scoring law",
+                    ));
+                }
+            }
             if let Some(objective) = training_objective {
                 owner
                     .bind_training_view_arena(training_views, objective)
@@ -10063,13 +13075,16 @@ impl PySemanticTransitionController {
                     authority: values,
                     evaluation,
                     training_objective: training_objective_value,
+                    training_domain: training_domain_value,
                     initial_sources,
                     source_mapping,
                     replay_selection,
                 },
                 state: Mutex::new(TaskUseState { phase, snapshot }),
+                delivery: Mutex::new(None),
             },
         )?;
+        let mut retained = None;
         if let (Some(ordinal), Some(material), Some(kind)) =
             (selection, selected_material, transition)
         {
@@ -10084,16 +13099,532 @@ impl PySemanticTransitionController {
                 finish_invocation,
                 refresh_snapshot,
                 &import,
+                retain_policy,
             );
-            if let Err(error) = replay {
-                if let Ok(mut state) = task_use.borrow(py).state() {
-                    state.phase = TaskUsePhase::Refused;
+            match replay {
+                Ok(member) => retained = member,
+                Err(error) => {
+                    if let Ok(mut state) = task_use.borrow(py).state() {
+                        state.phase = TaskUsePhase::Refused;
+                    }
+                    return Err(error);
                 }
-                return Err(error);
             }
         }
+        if let Some(member) = retained {
+            let result = (task_use, member).into_pyobject(py)?.unbind().into_any();
+            import.committed = true;
+            import.deferred = true;
+            return Ok(result);
+        }
         import.committed = true;
-        Ok(task_use)
+        Ok(task_use.into_any())
+    }
+
+    /// Admit a larger training arena from this exact selected publication.
+    /// The source remains the sole execution owner while a fresh cold Session
+    /// reconstructs unchanged native material and the trusted model factory
+    /// verifies its own complete state. No candidate operation is public until
+    /// the source issuance is revoked and the candidate phase is opened.
+    #[pyo3(signature = (task_use, *, parent, consumer_streams, snapshot, snapshot_model_state, restore_model, replay_rows, training_objective, training_domain, dependencies, publication_grants, inference_grants, training_grants, capacities, memory_bytes, max_material_bytes, max_total_material_bytes, max_evidence_bytes, refresh_snapshot))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "cold arena admission binds complete authority and model custody"
+    )]
+    fn admit_training_arena(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        consumer_streams: &Bound<'_, PyAny>,
+        snapshot: &Bound<'_, PyAny>,
+        snapshot_model_state: &Bound<'_, PyAny>,
+        restore_model: &Bound<'_, PyAny>,
+        replay_rows: &Bound<'_, PyAny>,
+        training_objective: &Bound<'_, PyAny>,
+        training_domain: &Bound<'_, PyAny>,
+        dependencies: &Bound<'_, PyAny>,
+        publication_grants: &Bound<'_, PyAny>,
+        inference_grants: &Bound<'_, PyAny>,
+        training_grants: &Bound<'_, PyAny>,
+        capacities: &Bound<'_, PyAny>,
+        memory_bytes: &Bound<'_, PyAny>,
+        max_material_bytes: &Bound<'_, PyAny>,
+        max_total_material_bytes: &Bound<'_, PyAny>,
+        max_evidence_bytes: &Bound<'_, PyAny>,
+        refresh_snapshot: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
+        self.session.borrow(py).require_creator()?;
+        self.require_issued(task_use)?;
+        parent.require_task(py, task_use)?;
+        if !snapshot_model_state.is_callable()
+            || !restore_model.is_callable()
+            || !refresh_snapshot.is_callable()
+        {
+            return Err(invalid(
+                "cold arena admission requires trusted model and authority callbacks",
+            ));
+        }
+        let selected_seed = task_use.checkpoint.clone();
+        let selected_phase = checkpoint_task_phase(&*task_use.state()?)?;
+        if !matches!(&selected_phase, CheckpointTaskPhase::Segment(operation) if operation == "inference")
+        {
+            return Err(invalid(
+                "training arena admission requires a selected published inference segment",
+            ));
+        }
+        let (source_capacities, admission_limits, device_ordinal, source_memory_bytes) = {
+            let source = self.session.borrow(py);
+            (
+                source.capacities,
+                source.admission_limits,
+                source.device_ordinal,
+                source.memory_bytes,
+            )
+        };
+        let mut budget = 16 * 1024 * 1024;
+        let [material_limit, total_material_limit, evidence_limit] = read_task_replay_limits(
+            max_material_bytes,
+            max_total_material_bytes,
+            max_evidence_bytes,
+            &mut budget,
+        )?;
+        let candidate_domain = ColdValue::read(training_domain, &mut budget, 0)?;
+        if candidate_domain == ColdValue::None || candidate_domain != selected_seed.training_domain
+        {
+            return Err(invalid(
+                "arena admission changed or omitted the original pre-action training domain",
+            ));
+        }
+        let mut authority_values = selected_seed.authority.clone();
+        for (index, value) in [
+            (4, dependencies),
+            (6, publication_grants),
+            (7, inference_grants),
+            (8, training_grants),
+        ] {
+            authority_values[index] = ColdValue::read(value, &mut budget, 0)?;
+        }
+        authority_values[3] = read_replay_rows(
+            replay_rows,
+            &mut budget,
+            material_limit,
+            total_material_limit,
+            evidence_limit,
+        )?;
+        require_retained_arena_authority(&selected_seed.authority, &authority_values)?;
+        let mut authority = TaskAuthority::parse(&authority_values)?;
+        authority.bind_initial_sources(
+            &selected_seed.initial_sources,
+            &selected_seed.source_mapping,
+        )?;
+        let training_views = authority
+            .replay
+            .iter()
+            .map(ReplayRow::training_view_row)
+            .collect::<PyResult<Vec<_>>>()?;
+        let objective_value = ColdValue::read(training_objective, &mut budget, 0)?;
+        let objective = read_training_objective(&objective_value)?.ok_or_else(|| {
+            invalid("cold arena admission requires a complete training objective")
+        })?;
+        if training_views.is_empty() {
+            return Err(invalid(
+                "cold arena admission requires retained training rows",
+            ));
+        }
+        let capacity_values = ColdValue::read(capacities, &mut budget, 0)?;
+        let capacity_values = capacity_values.sequence()?;
+        if capacity_values.len() != 4 {
+            return Err(invalid(
+                "cold arena capacities require four exact native bounds",
+            ));
+        }
+        let mut candidate_capacities = [0u32; 4];
+        for (index, value) in capacity_values.iter().enumerate() {
+            candidate_capacities[index] = u32::try_from(value.unsigned()?)
+                .map_err(|_| invalid("cold arena capacity exceeds native domain"))?;
+        }
+        let candidate_capacities = (
+            candidate_capacities[0],
+            candidate_capacities[1],
+            candidate_capacities[2],
+            candidate_capacities[3],
+        );
+        for (old, new) in [
+            (source_capacities.0, candidate_capacities.0),
+            (source_capacities.1, candidate_capacities.1),
+            (source_capacities.2, candidate_capacities.2),
+            (source_capacities.3, candidate_capacities.3),
+        ] {
+            if new < old {
+                return Err(invalid(
+                    "cold arena admission cannot shrink native capacity",
+                ));
+            }
+        }
+        let candidate_memory_bytes = ColdValue::read(memory_bytes, &mut budget, 0)?.unsigned()?;
+        if candidate_memory_bytes < source_memory_bytes {
+            return Err(invalid(
+                "cold arena admission cannot shrink native memory budget",
+            ));
+        }
+        let initial_snapshot =
+            AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        initial_snapshot.newer_than(&task_use.state()?.snapshot)?;
+        let check_use =
+            |authority: &TaskAuthority, snapshot: &AuthoritySnapshot| match &selected_phase {
+                CheckpointTaskPhase::Imported | CheckpointTaskPhase::InitialPrefillBound => {
+                    authority.check_snapshot(snapshot).map(drop)
+                }
+                CheckpointTaskPhase::Segment(operation) => {
+                    authority.check_use(operation, snapshot, false)
+                }
+            };
+        check_use(&task_use.authority, &initial_snapshot)?;
+        check_use(&authority, &initial_snapshot)?;
+        task_use
+            .authority
+            .check_use("training", &initial_snapshot, false)?;
+        authority.check_use("training", &initial_snapshot, false)?;
+        {
+            let source = self.session.borrow(py);
+            let mut owner = source.owner()?;
+            task_use.require_current(&owner)?;
+            owner
+                .current_recompute_state_material(&*parent.lease()?)
+                .map_err(xlog_err)?;
+        }
+        task_use.state()?.begin_arena_preparation()?;
+
+        let mut source_checkpoint: Option<Vec<u8>> = None;
+        let mut candidate_session: Option<Py<PySemanticTransitionSession>> = None;
+        let verify_source = |checkpoint: &[u8]| -> PyResult<AuthoritySnapshot> {
+            let refreshed = refresh_snapshot.call0()?;
+            let mut budget = 16 * 1024 * 1024;
+            let current = AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut budget, 0)?)?;
+            current.newer_than(&initial_snapshot)?;
+            check_use(&task_use.authority, &current)?;
+            let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
+            {
+                let source = self.session.borrow(py);
+                let mut owner = source.owner()?;
+                task_use.require_current(&owner)?;
+                let lease = parent.lease()?;
+                if owner
+                    .current_recompute_state_material(&lease)
+                    .map_err(xlog_err)?
+                    != manifest.native
+                {
+                    return Err(invalid(
+                        "selected native state changed during cold arena preparation",
+                    ));
+                }
+            }
+            let model = snapshot_model_state.call0()?;
+            if !model.is_exact_instance_of::<PyBytes>()
+                || model.cast::<PyBytes>()?.as_bytes() != manifest.model
+            {
+                return Err(invalid(
+                    "selected model state changed during cold arena preparation",
+                ));
+            }
+            {
+                let source = self.session.borrow(py);
+                let mut owner = source.owner()?;
+                task_use.require_current(&owner)?;
+                if owner
+                    .published_state_material(&*parent.lease()?)
+                    .map_err(xlog_err)?
+                    != manifest.native
+                {
+                    return Err(invalid(
+                        "selected native state changed during model verification",
+                    ));
+                }
+            }
+            Ok(current)
+        };
+
+        let result = (|| -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
+            let checkpoint = self.save_checkpoint(
+                py,
+                task_use,
+                parent,
+                consumer_streams,
+                snapshot,
+                snapshot_model_state,
+            )?;
+            let checkpoint = checkpoint.bind(py).as_bytes().to_vec();
+            source_checkpoint = Some(checkpoint.clone());
+            let manifest = SemanticCheckpointManifest::decode(&checkpoint)?;
+            let (_, saved_snapshot, phase, saved_binding) =
+                TaskCheckpointSeed::decode(&manifest.task)?;
+            if saved_snapshot.canonical != initial_snapshot.canonical {
+                return Err(invalid(
+                    "cold arena checkpoint changed its source authority snapshot",
+                ));
+            }
+            if phase != selected_phase {
+                return Err(invalid("cold arena source phase changed during checkpoint"));
+            }
+            let _historical_initial_prefill =
+                SemanticTransitionSession::verify_checkpoint_initial_prefill_source(
+                    &manifest.initial_prefill,
+                    &manifest.native,
+                    Identity256::from_bytes(saved_binding.identity),
+                    saved_binding.epoch,
+                    saved_binding.content_identity(),
+                    phase == CheckpointTaskPhase::InitialPrefillBound,
+                )
+                .map_err(xlog_err)?;
+            let admission = SemanticTransitionSession::state_material_admission(&manifest.native)
+                .map_err(xlog_err)?;
+            let editable_source = cold_task::editable_source_from_admission(&admission)?;
+            if let Some(source) = &editable_source {
+                if selected_seed
+                    .evaluation
+                    .get(2)
+                    .ok_or_else(|| invalid("cold arena task evaluation is incomplete"))?
+                    .text()?
+                    != source.observer_source
+                {
+                    return Err(invalid(
+                        "cold arena observer differs from original admission",
+                    ));
+                }
+            }
+            let spec = task_evaluation_spec(
+                &selected_seed.evaluation,
+                task_use.authority.priority_levels.clone(),
+                editable_source.map(|source| source.program),
+                &selected_seed.training_domain,
+            )?;
+            let (_, selected_material) =
+                decode_selected_replay(&authority.replay, &selected_seed.replay_selection)?;
+            let successor = Py::new(
+                py,
+                PySemanticTransitionSession::from_admission(
+                    admission,
+                    candidate_capacities,
+                    admission_limits,
+                    device_ordinal,
+                    candidate_memory_bytes,
+                )?,
+            )?;
+            candidate_session = Some(successor.clone_ref(py));
+            let native_binding = {
+                let session = successor.borrow(py);
+                let mut owner = session.owner()?;
+                let observations = owner
+                    .task_observation_roots(
+                        &spec,
+                        selected_material.as_ref().map(|binding| &binding.material),
+                    )
+                    .map_err(xlog_err)?;
+                let mut original_authority = TaskAuthority::parse(&selected_seed.authority)?;
+                original_authority.bind_initial_sources(
+                    &selected_seed.initial_sources,
+                    &selected_seed.source_mapping,
+                )?;
+                original_authority
+                    .bind_native_reads(&observations, &spec.allowed_support_records)?;
+                authority.bind_native_reads(&observations, &spec.allowed_support_records)?;
+                let original_goal_witness = original_authority.goal_witness(&observations);
+                let goal_witness = authority.goal_witness(&observations);
+                owner.bind_task_evaluation(spec).map_err(xlog_err)?;
+                owner
+                    .bind_task_goal_witness(original_goal_witness)
+                    .map_err(xlog_err)?;
+                owner
+                    .restore_state_material(&manifest.native)
+                    .map_err(xlog_err)?;
+                owner
+                    .rebind_restored_training_arena(
+                        &manifest.native,
+                        goal_witness,
+                        training_views,
+                        objective,
+                    )
+                    .map_err(xlog_err)?;
+                let binding = TaskCheckpointBinding::from_owner(&owner)?;
+                if !saved_binding.same_cold_arena_content(binding) {
+                    return Err(invalid("cold arena changed selected native task content"));
+                }
+                binding
+            };
+            let controller_identity = Arc::new(());
+            let controller = Py::new(
+                py,
+                PySemanticTransitionController {
+                    session: successor.clone_ref(py),
+                    identity: Arc::clone(&controller_identity),
+                },
+            )?;
+            let issuance = TaskIssuance::issue(Arc::clone(&successor.borrow(py).issuance))?;
+            let original_phase = match &phase {
+                CheckpointTaskPhase::Imported => TaskUsePhase::Imported,
+                CheckpointTaskPhase::InitialPrefillBound => TaskUsePhase::InitialPrefillBound,
+                CheckpointTaskPhase::Segment(operation) => TaskUsePhase::Segment(operation.clone()),
+            };
+            let candidate_task = Py::new(
+                py,
+                PySemanticTransitionTaskUse {
+                    session: successor.clone_ref(py),
+                    controller: controller_identity,
+                    issuance,
+                    importing: Arc::clone(&successor.borrow(py).importing),
+                    task_identity: native_binding.identity,
+                    task_epoch: native_binding.epoch,
+                    authority,
+                    checkpoint: TaskCheckpointSeed {
+                        authority: authority_values,
+                        evaluation: selected_seed.evaluation,
+                        training_objective: objective_value,
+                        training_domain: selected_seed.training_domain,
+                        initial_sources: selected_seed.initial_sources,
+                        source_mapping: selected_seed.source_mapping,
+                        replay_selection: selected_seed.replay_selection,
+                    },
+                    state: Mutex::new(TaskUseState {
+                        phase: TaskUsePhase::ArenaPreparing(Box::new(original_phase)),
+                        snapshot: initial_snapshot.clone(),
+                    }),
+                    delivery: Mutex::new(None),
+                },
+            )?;
+            let candidate_parent = {
+                let issued = candidate_task.borrow(py);
+                let session = successor.borrow(py);
+                let mut owner = session.owner()?;
+                issued.require_current(&owner)?;
+                let lease = owner.acquire().map_err(xlog_err)?;
+                Py::new(
+                    py,
+                    PySemanticPublishedParent {
+                        session: successor.clone_ref(py),
+                        task_use: candidate_task.clone_ref(py),
+                        inner: Mutex::new(lease),
+                        continuation_producers: Mutex::new(Vec::new()),
+                    },
+                )?
+            };
+            let admitted_native = {
+                let acquired = candidate_parent.borrow(py);
+                let material = successor
+                    .borrow(py)
+                    .owner()?
+                    .published_state_material(&*acquired.lease()?)
+                    .map_err(xlog_err)?;
+                material
+            };
+            let model = restore_model
+                .call1((
+                    controller.clone_ref(py),
+                    candidate_task.clone_ref(py),
+                    candidate_parent.clone_ref(py),
+                    PyBytes::new(py, &manifest.model),
+                ))?
+                .unbind();
+            {
+                let issued = candidate_task.borrow(py);
+                let acquired = candidate_parent.borrow(py);
+                acquired.require_task(py, &issued)?;
+                let session = successor.borrow(py);
+                let mut owner = session.owner()?;
+                issued.require_current(&owner)?;
+                if checkpoint_task_phase(&*issued.state()?)? != phase {
+                    return Err(invalid(
+                        "cold arena candidate phase changed during model restore",
+                    ));
+                }
+                if owner
+                    .published_state_material(&*acquired.lease()?)
+                    .map_err(xlog_err)?
+                    != admitted_native
+                {
+                    return Err(invalid(
+                        "cold arena candidate native state changed during model restore",
+                    ));
+                }
+            }
+            let latest = verify_source(&checkpoint)?;
+            check_use(&candidate_task.borrow(py).authority, &latest)?;
+            task_use.authority.check_use("training", &latest, false)?;
+            candidate_task
+                .borrow(py)
+                .authority
+                .check_use("training", &latest, false)?;
+            {
+                let issued = candidate_task.borrow(py);
+                let mut state = issued.state()?;
+                if !matches!(state.phase, TaskUsePhase::ArenaPreparing(_)) {
+                    return Err(invalid("cold arena candidate escaped preparation"));
+                }
+                state.snapshot = latest;
+            }
+            let admitted = Py::new(
+                py,
+                PySemanticTransitionRestoredCheckpoint {
+                    session: successor,
+                    controller,
+                    task_use: candidate_task.clone_ref(py),
+                    parent: candidate_parent,
+                    model,
+                },
+            )?;
+            {
+                let source = self.session.borrow(py);
+                let issued = candidate_task.borrow(py);
+                let mut source_state = task_use.state()?;
+                let mut candidate_state = issued.state()?;
+                if !matches!(source_state.phase, TaskUsePhase::ArenaPreparing(_))
+                    || !matches!(candidate_state.phase, TaskUsePhase::ArenaPreparing(_))
+                {
+                    return Err(invalid("cold arena handoff lost its original preparation"));
+                }
+                let activated_phase = match &candidate_state.phase {
+                    TaskUsePhase::ArenaPreparing(original) => *original.clone(),
+                    _ => unreachable!("checked candidate preparation"),
+                };
+                TaskIssuance::issue(Arc::clone(&source.issuance))?;
+                source_state.phase = TaskUsePhase::Refused;
+                candidate_state.phase = activated_phase;
+            }
+            Ok(admitted)
+        })();
+        if result.is_err() {
+            if let Some(successor) = candidate_session {
+                if let Ok(mut owner) = successor.borrow(py).owner() {
+                    owner.abort();
+                }
+            }
+            let safe = match source_checkpoint.as_deref() {
+                Some(checkpoint) => verify_source(checkpoint).ok(),
+                None => (|| -> PyResult<AuthoritySnapshot> {
+                    let refreshed = refresh_snapshot.call0()?;
+                    let mut budget = 16 * 1024 * 1024;
+                    let current =
+                        AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut budget, 0)?)?;
+                    current.newer_than(&initial_snapshot)?;
+                    check_use(&task_use.authority, &current)?;
+                    task_use.authority.check_use("training", &current, false)?;
+                    let source = self.session.borrow(py);
+                    let owner = source.owner()?;
+                    task_use.require_current(&owner)?;
+                    Ok(current)
+                })()
+                .ok(),
+            };
+            if let Ok(mut state) = task_use.state() {
+                if let Some(snapshot) = safe {
+                    state.snapshot = snapshot;
+                    let _ = state.finish_arena_preparation();
+                } else {
+                    state.phase = TaskUsePhase::Refused;
+                }
+            }
+        }
+        result
     }
 
     /// Seal the exact selected publication, task capsule and model state into one
@@ -10111,7 +13642,10 @@ impl PySemanticTransitionController {
         snapshot_model_state: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyBytes>> {
         self.session.borrow(py).require_creator()?;
-        self.require_issued(task_use)?;
+        self.require_read_issued(task_use)?;
+        if !matches!(task_use.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
+            task_use.state()?.require_public_use()?;
+        }
         parent.require_task(py, task_use)?;
         if !snapshot_model_state.is_callable() {
             return Err(invalid(
@@ -10135,7 +13669,7 @@ impl PySemanticTransitionController {
             ));
         }
         let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
-        let (identity, task_identity, task_epoch, prior_snapshot, phase, config) = {
+        let (identity, task_binding, prior_snapshot, phase, config) = {
             let session = self.session.borrow(py);
             if session.importing.load(Ordering::Acquire)
                 || session.recording.load(Ordering::Acquire)
@@ -10151,7 +13685,7 @@ impl PySemanticTransitionController {
             snapshot.newer_than(&state.snapshot)?;
             let phase = checkpoint_task_phase(&state)?;
             match &phase {
-                CheckpointTaskPhase::Imported => {
+                CheckpointTaskPhase::Imported | CheckpointTaskPhase::InitialPrefillBound => {
                     task_use.authority.check_snapshot(&snapshot)?;
                 }
                 CheckpointTaskPhase::Segment(operation) => {
@@ -10165,15 +13699,10 @@ impl PySemanticTransitionController {
                 .quiesce_published_reader(&lease, &streams)
                 .map_err(xlog_err)?;
             let identity = owner.published_identity(&lease).map_err(xlog_err)?;
-            let task_identity = *owner
-                .task_evaluation_identity()
-                .ok_or_else(|| invalid("checkpoint save lost its native task binding"))?
-                .as_bytes();
-            let task_epoch = owner.task_evaluation_epoch();
+            let task_binding = TaskCheckpointBinding::from_owner(&owner)?;
             (
                 identity,
-                task_identity,
-                task_epoch,
+                task_binding,
                 prior_snapshot,
                 phase,
                 SemanticCheckpointSessionConfig {
@@ -10191,15 +13720,16 @@ impl PySemanticTransitionController {
             }
             Ok(model.cast::<PyBytes>()?.as_bytes().to_vec())
         });
-        let native = {
+        let materials = {
             let session = self.session.borrow(py);
             let mut owner = session.owner()?;
             task_use.require_current(&owner)?;
             let state = task_use.state()?;
             if state.snapshot.canonical != prior_snapshot
                 || checkpoint_task_phase(&state)? != phase
-                || task_use.task_identity != task_identity
-                || task_use.task_epoch != task_epoch
+                || task_use.task_identity != task_binding.identity
+                || task_use.task_epoch != task_binding.epoch
+                || TaskCheckpointBinding::from_owner(&owner)? != task_binding
             {
                 return Err(invalid(
                     "checkpoint task binding changed during model serialization",
@@ -10215,21 +13745,119 @@ impl PySemanticTransitionController {
             if model.is_err() {
                 None
             } else {
-                Some(owner.published_state_material(&lease).map_err(xlog_err)?)
+                let native = owner.published_state_material(&lease).map_err(xlog_err)?;
+                let (initial_prefill, present) = owner
+                    .checkpoint_initial_prefill_material(&lease)
+                    .map_err(xlog_err)?;
+                if (phase == CheckpointTaskPhase::InitialPrefillBound) != present
+                    && !matches!(phase, CheckpointTaskPhase::Segment(_))
+                {
+                    return Err(invalid(
+                        "checkpoint initial prefill differs from its task phase",
+                    ));
+                }
+                Some((native, initial_prefill))
             }
         };
         let model = model?;
-        let native = native.expect("successful model serialization exports native state");
-        let task = task_use.checkpoint.encode(&snapshot, &phase)?;
+        let (native, initial_prefill) =
+            materials.expect("successful model serialization exports native state");
+        let task = task_use
+            .checkpoint
+            .encode(&snapshot, &phase, &task_binding)?;
         let session = config.encode()?;
         let checkpoint = SemanticCheckpointManifest {
             native,
             model,
             task,
             session,
+            initial_prefill,
         }
         .encode()?;
         Ok(PyBytes::new(py, &checkpoint).unbind())
+    }
+
+    /// Decode native output intents from a complete checkpoint. This read-only
+    /// projection is not proof of durable commit or delivery authority.
+    fn checkpoint_output_intents(
+        &self,
+        py: Python<'_>,
+        checkpoint: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        if !checkpoint.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "checkpoint intent projection requires exact builtin bytes",
+            ));
+        }
+        let manifest =
+            SemanticCheckpointManifest::decode(checkpoint.cast::<PyBytes>()?.as_bytes())?;
+        let intents = xlog_cuda::output_intents_from_publication_material(&manifest.native)
+            .map_err(xlog_err)?;
+        let rows = intents
+            .iter()
+            .map(|intent| {
+                (
+                    PyBytes::new(py, intent.stable_identity.as_bytes()),
+                    PyBytes::new(py, &intent.effect),
+                    PyBytes::new(py, &intent.payload),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(PyTuple::new(py, rows)?.unbind())
+    }
+
+    /// Return only intents without a verified durable acknowledgement. Both
+    /// sealed native queues and the trusted receiver key are checked after
+    /// restoration; this projection itself does not perform delivery.
+    #[pyo3(signature = (task_use, checkpoint))]
+    fn checkpoint_pending_output_intents(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        checkpoint: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        self.require_issued(task_use)?;
+        if !checkpoint.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "pending intent projection requires exact checkpoint bytes",
+            ));
+        }
+        let binding = task_use.delivery_binding()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        task_use.require_current(&owner)?;
+        let current_binding = TaskCheckpointBinding::from_owner(&owner)?;
+        drop(owner);
+        let manifest =
+            SemanticCheckpointManifest::decode(checkpoint.cast::<PyBytes>()?.as_bytes())?;
+        let (seed, _, _, saved_binding) = TaskCheckpointSeed::decode(&manifest.task)?;
+        if !saved_binding.same_task_content(current_binding)
+            || seed.authority != task_use.checkpoint.authority
+        {
+            return Err(invalid(
+                "checkpoint pending intents belong to another task or live envelope",
+            ));
+        }
+        let intents = xlog_cuda::pending_output_intents_from_publication_material(
+            &manifest.native,
+            binding.recipient_id,
+            &binding.verification_key,
+            &binding.expected_effect,
+        )
+        .map_err(xlog_err)?;
+        let rows = intents
+            .iter()
+            .map(|intent| {
+                (
+                    PyBytes::new(py, intent.stable_identity.as_bytes()),
+                    PyBytes::new(py, &intent.effect),
+                    PyBytes::new(py, &intent.payload),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(PyTuple::new(py, rows)?.unbind())
     }
 
     /// Export one genuinely held transition into the existing replay carrier.
@@ -10376,7 +14004,7 @@ impl PySemanticTransitionController {
 
     /// Capture the current bytes of real original tensors for this same parent.
     /// ``tensors`` uses the original typed layout/interval/producer rows accepted
-    /// by bind_parent, including I64=7 and Bool8=8. Original Python producers and
+    /// by bind_parent, including I64=7, Bool8=8 and F64=9. Original Python producers and
     /// their autograd objects remain retained independently of mutable input rows.
     /// Role 0 is the private transient namespace, never a publication role.
     /// Its index is the operand's ordinal in the complete supplied roster,
@@ -10549,21 +14177,26 @@ impl PySemanticTransitionController {
 
     /// Retain the actual original-forward outputs for this acquired parent.
     /// ``tensors`` uses the typed tensor layout from cold parent import. The
-    /// six service arguments are contiguous CUDA DLPack producers: text_rows
+    /// six base service arguments are contiguous CUDA DLPack producers: text_rows
     /// U64[32,2], text_row_count U64[1], selected_text Bool8[32], active_rows
     /// U64[A,4], active_row_count U64[1], and numerical_admissibility Bool8[1].
     /// Selection is indexed by original source slot. Active rows contain
     /// (physical_row, source_slot, logical_position, kind), with FILLED=1,
     /// MASK=2 and FEEDBACK=3; invalid feedback slots leave physical gaps.
     /// The original transient ``producer_witness`` captures model tensors in
-    /// their original order followed by these six services at role 0 indices
-    /// N through N+5. Model-content witnesses cannot substitute for this capture.
+    /// their original order followed by these services at role 0 indices
+    /// N through N+5. A model with a sealed physical-parameter roster must
+    /// also supply FP64[N_physical,2,3] numerical_blocks for Proposal/replay,
+    /// at index N+6, and the original schema digest and model identity. Both
+    /// actor-reference and full-objective rows contain B, ordinary and U;
+    /// Update has no pre-draw block tensor. Model-content witnesses cannot
+    /// substitute for this capture.
     /// ``consumer_stream`` is explicit (or legacy stream 1); 0 and 2 are refused.
     /// Native validation checks the acquired source, prefix, services and
     /// generations before pending ranges enter the sole publication CAS. A
     /// prepared parent requires ``bank`` and retains a distinct continuation for
     /// each recorded branch; published parents reject it.
-    #[pyo3(signature = (task_use, *, parent, text_rows, text_row_count, selected_text, active_rows, active_row_count, numerical_admissibility, tensors, producer_witness, consumer_stream, bank=None))]
+    #[pyo3(signature = (task_use, *, parent, text_rows, text_row_count, selected_text, active_rows, active_row_count, numerical_admissibility, tensors, producer_witness, consumer_stream, bank=None, numerical_blocks=None, model_schema_digest=None, model_identity=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "continuation binding retains each typed producer and its witness"
@@ -10583,6 +14216,9 @@ impl PySemanticTransitionController {
         producer_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
         bank: Option<usize>,
+        numerical_blocks: Option<&Bound<'_, PyAny>>,
+        model_schema_digest: Option<&Bound<'_, PyAny>>,
+        model_identity: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         self.require_read_issued(task_use)?;
@@ -10609,6 +14245,9 @@ impl PySemanticTransitionController {
                     consumer_stream,
                     None,
                     None,
+                    numerical_blocks,
+                    model_schema_digest,
+                    model_identity,
                 )
             }
             ContentStepOwner::Prepared(step) => {
@@ -10629,6 +14268,9 @@ impl PySemanticTransitionController {
                     consumer_stream,
                     Some(bank),
                     None,
+                    numerical_blocks,
+                    model_schema_digest,
+                    model_identity,
                 )
             }
         }
@@ -10645,7 +14287,7 @@ impl PySemanticTransitionController {
     /// position or substitute new tensors.
     /// XLOG computes every canary measurement, resource tally and refusal on device.
     /// ``bank`` identifies the recorded branch that owns these original outputs.
-    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, baseline_forward, candidate_forward, allocation_witness, consumer_stream))]
+    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, slab_backing, slab_bytes, baseline_forward, candidate_forward, allocation_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "prepared update binding retains model geometry and numerical admissibility"
@@ -10661,6 +14303,8 @@ impl PySemanticTransitionController {
         model_storages: &Bound<'_, PyAny>,
         model_views: &Bound<'_, PyAny>,
         numerical_admissibility: &Bound<'_, PyAny>,
+        slab_backing: &Bound<'_, PyAny>,
+        slab_bytes: &Bound<'_, PyAny>,
         baseline_forward: &PySemanticModelForwardWitness,
         candidate_forward: &PySemanticModelForwardWitness,
         allocation_witness: &PySemanticTensorContentWitness,
@@ -10674,6 +14318,12 @@ impl PySemanticTransitionController {
         let parent = ContentStepRef::Prepared(step);
         let mut budget = 16 * 1024 * 1024;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let slab_bytes = ColdValue::read(slab_bytes, &mut budget, 0)?.unsigned()?;
+        if slab_bytes == 0 || slab_bytes > i64::MAX as u64 {
+            return Err(invalid(
+                "model update slab has no supported exact byte extent",
+            ));
+        }
         let storages = parse_model_storages(model_storages, &mut budget)?;
         let views = parse_model_views(model_views, &mut budget)?;
         let expected = {
@@ -10755,6 +14405,29 @@ impl PySemanticTransitionController {
             logical_end: 0,
             native_allocation: None,
         };
+        validate_producer_device_guarded(slab_backing, device, &check)?;
+        producer_owners.0.push(slab_backing.clone().unbind());
+        let slab_backing = SemanticTensorInput {
+            tensor: crate::dlpack_from_py_for_stream_guarded(
+                slab_backing,
+                i64::try_from(stream)
+                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
+                &check,
+            )?,
+            layout: SemanticTensorLayout {
+                role: 0,
+                index: 0,
+                element_bytes: 1,
+                scalar_type: 1,
+                rank: 1,
+                logical_axis: u64::MAX,
+                dimensions: [slab_bytes, 0, 0, 0],
+                strides_bytes: [1, 0, 0, 0],
+            },
+            logical_begin: 0,
+            logical_end: 0,
+            native_allocation: None,
+        };
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         let state = self.continuation_state(py, task_use, parent, &owner, None)?;
@@ -10775,6 +14448,7 @@ impl PySemanticTransitionController {
                 },
                 tensor_handoff.into_native(),
                 numerical_admissibility,
+                slab_backing,
                 &baseline_forward.inner,
                 &candidate_forward.inner,
                 &allocation_witness.inner,
@@ -10793,13 +14467,18 @@ impl PySemanticTransitionController {
 
     /// Bind the original policy producers while this genuine step is recording.
     /// The combined transient witness covers text logits, product support,
-    /// parameters and the model-issued component baselines in that exact order.
+    /// parameters, model-issued baselines, parameter/baseline errors, and
+    /// parameter/text/baseline domains in that exact order. Numerical arrays
+    /// are original CUDA FP64 views: pointwise E[...,2]=(O,U) and preliminary
+    /// D[...,4]=(M,O,U,I). I is independently derived on the ideal formula.
     /// This records no host publication or RNG identity and returns no invocation;
     /// only actual completed execution can expose the original result and its
     /// retained late-backward tape. ``bank`` identifies the recorded branch whose
     /// original numerical producers remain owned until native result selection.
+    /// Policy producers may bind before the original continuation. The native
+    /// branch joins both bindings before any transition can execute.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, step, bank, binding, model_output, text_logits, product_support, parameters, component_baselines, producer_witness, consumer_stream))]
+    #[pyo3(signature = (task_use, *, step, bank, binding, model_output, text_logits, product_support, parameters, component_baselines, parameter_errors, baseline_errors, parameter_domains, text_domains, baseline_domains, producer_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "parent binding retains complete publication and model ownership"
@@ -10816,6 +14495,11 @@ impl PySemanticTransitionController {
         product_support: Py<PyAny>,
         parameters: Py<PyAny>,
         component_baselines: Py<PyAny>,
+        parameter_errors: Py<PyAny>,
+        baseline_errors: Py<PyAny>,
+        parameter_domains: Py<PyAny>,
+        text_domains: Py<PyAny>,
+        baseline_domains: Py<PyAny>,
         producer_witness: &PySemanticTensorContentWitness,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
@@ -10860,6 +14544,11 @@ impl PySemanticTransitionController {
             product_support,
             parameters,
             component_baselines,
+            parameter_errors,
+            baseline_errors,
+            parameter_domains,
+            text_domains,
+            baseline_domains,
         ];
         let device = self.session.borrow(py).device_ordinal;
         let mut handoff = TensorHandoff(Vec::with_capacity(inputs.len()));
@@ -10895,7 +14584,8 @@ impl PySemanticTransitionController {
                 "prepared policy authority changed during producer handoff",
             ));
         }
-        let [text, support, parameters, component_baselines]: [_; 4] = handoff
+        let [text, support, parameters, component_baselines, parameter_errors,
+            baseline_errors, parameter_domains, text_domains, baseline_domains]: [_; 9] = handoff
             .into_native()
             .try_into()
             .unwrap_or_else(|_| unreachable!("exact policy producer roster"));
@@ -10908,6 +14598,13 @@ impl PySemanticTransitionController {
                 support,
                 parameters,
                 component_baselines,
+                [
+                    parameter_errors,
+                    baseline_errors,
+                    parameter_domains,
+                    text_domains,
+                    baseline_domains,
+                ],
                 &producer_witness.inner,
                 stream,
             )
@@ -10932,14 +14629,16 @@ impl PySemanticTransitionController {
 
     /// Snapshot one original full-MASK policy, execute all draws and the sole device
     /// publication, and retain its late tape. ``binding`` is the exact pair
-    /// returned with the packing layout. Inputs are contiguous one-dimensional
-    /// F32[32,V], Bool8[support_cells], FP32[parameter_cells] and
-    /// FP32[1,136], respectively.
+    /// returned with the packing layout. The original contiguous CUDA inputs
+    /// are F32[32,V], Bool8[support_cells], FP32[P], FP32[1,136], followed by
+    /// FP64 envelopes [P,2], [1,136,2] and domains [P,4], [32,V,4], [1,136,4]
+    /// in (M,O,U,I) order. Pointwise E differs from preliminary D.O/U.
+    /// Their common witness uses that exact order on ``consumer_stream``.
     /// ``model_output`` is the caller-authenticated original output, retained
     /// without invoking a getter; rows/selected bits come only from the already
     /// admitted continuation. Acquire of the result remains explicit.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, parent, binding, model_output, text_logits, product_support, parameters, component_baselines))]
+    #[pyo3(signature = (task_use, *, parent, binding, model_output, text_logits, product_support, parameters, component_baselines, parameter_errors, baseline_errors, parameter_domains, text_domains, baseline_domains, producer_witness, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "replay import carries independent material and lifecycle callbacks"
@@ -10955,6 +14654,13 @@ impl PySemanticTransitionController {
         product_support: Py<PyAny>,
         parameters: Py<PyAny>,
         component_baselines: Py<PyAny>,
+        parameter_errors: Py<PyAny>,
+        baseline_errors: Py<PyAny>,
+        parameter_domains: Py<PyAny>,
+        text_domains: Py<PyAny>,
+        baseline_domains: Py<PyAny>,
+        producer_witness: &PySemanticTensorContentWitness,
+        consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<PySemanticPolicyInvocation> {
         self.session.borrow(py).require_creator()?;
         self.require_issued(&task_use.borrow(py))?;
@@ -10968,7 +14674,15 @@ impl PySemanticTransitionController {
             product_support,
             parameters,
             component_baselines,
+            parameter_errors,
+            baseline_errors,
+            parameter_domains,
+            text_domains,
+            baseline_domains,
+            producer_witness,
+            consumer_stream,
             None,
+            || Ok(()),
         )
     }
 
@@ -11007,7 +14721,8 @@ impl PySemanticTransitionController {
     /// (None for this fresh initializer; recovery must preserve actual history), ring_head, provenance_capacity_records, prefix_capacity,
     /// feedback_capacity, max_position, pad_token, terminal_tokens,
     /// final_intent_payload_bytes, intent_effect (actual application bytes),
-    /// intent_entry_capacity, intent_payload_capacity_bytes, model_generation, policy_generation,
+    /// intent_entry_capacity, intent_payload_capacity_bytes,
+    /// acknowledgement_payload_capacity_bytes, model_generation, policy_generation,
     /// model_numerical_mode (complete, restorable producer-owned cold metadata),
     /// model_contract_layout (S_begin, S_bytes, S_digest_offset, generation_offset,
     /// N_offset, identity_offset), six u64 byte coordinates in record 44,
@@ -11035,7 +14750,7 @@ impl PySemanticTransitionController {
     /// ``tensors`` rows are ``(layout, logical_begin, logical_end, producer)``.
     /// A layout is ``(role, index, element_bytes, scalar_type, rank, logical_axis,
     /// dimensions[4], strides_bytes[4])``. Scalar codes are U8=1/U32=2/U64=3/
-    /// F16=4/BF16=5/F32=6/I64=7/Bool8=8. The original DLPack dtype and layout must agree;
+    /// F16=4/BF16=5/F32=6/I64=7/Bool8=8/F64=9. The original DLPack dtype and layout must agree;
     /// no numerical conversion or detached replacement leaf is performed.
     /// ``model_allocations`` uses the same tensor-input rows with complete U8
     /// backing vectors, role zero and index equal to allocation ordinal.
@@ -11043,7 +14758,7 @@ impl PySemanticTransitionController {
     /// their ordinal is the producer storage identity. ``model_views`` rows are
     /// ``(role, index, storage, byte_offset)`` in role/index order. View offsets
     /// are relative to that storage, independently of tensor version identity.
-    #[pyo3(signature = (task_use, *, metadata, source, prefix, records, tensors, model_allocations, model_storages, model_views))]
+    #[pyo3(signature = (task_use, *, metadata, source, prefix, records, tensors, model_allocations, model_storages, model_views, prefill_receipt=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "execution continuation retains each typed producer and callback guard"
@@ -11060,19 +14775,52 @@ impl PySemanticTransitionController {
         model_allocations: &Bound<'_, PyAny>,
         model_storages: &Bound<'_, PyAny>,
         model_views: &Bound<'_, PyAny>,
+        prefill_receipt: Option<&PySemanticInitialPrefillReceipt>,
     ) -> PyResult<Py<PyTuple>> {
         self.session.borrow(py).require_creator()?;
-        self.require_issued(task_use)?;
+        self.require_read_issued(task_use)?;
         {
             let session = self.session.borrow(py);
             task_use.require_current(&*session.owner()?)?;
-            if !matches!(task_use.state()?.phase, TaskUsePhase::Imported) {
+            if !matches!(
+                task_use.state()?.phase,
+                TaskUsePhase::Imported | TaskUsePhase::InitialPrefillReady { .. }
+            ) {
                 return Err(invalid(
                     "initial parent must be bound before segment admission",
                 ));
             }
         }
         let mut parent = parse_parent(metadata, source, prefix, records, task_use)?;
+        let prefill_scope = if parent.prefix.is_empty() {
+            if prefill_receipt.is_some() {
+                return Err(invalid(
+                    "empty initial prefix cannot consume a prefill receipt",
+                ));
+            }
+            None
+        } else {
+            let receipt = prefill_receipt.ok_or_else(|| {
+                invalid("nonempty initial prefix requires its completed prefill receipt")
+            })?;
+            let stage = receipt.stage.borrow(py);
+            if stage.session.as_ptr() != self.session.as_ptr()
+                || !stage
+                    .task_use
+                    .borrow(py)
+                    .issuance
+                    .same_as(&task_use.issuance)
+                || receipt.consumed.load(Ordering::Acquire)
+            {
+                return Err(invalid(
+                    "initial prefill receipt belongs to another or consumed task",
+                ));
+            }
+            task_use
+                .state()?
+                .require_initial_prefill_ready(&stage.scope)?;
+            Some(Arc::clone(&stage.scope))
+        };
         let device = self.session.borrow(py).device_ordinal;
         let mut budget = 16 * 1024 * 1024;
         parent.model_memory.storages = parse_model_storages(model_storages, &mut budget)?;
@@ -11089,12 +14837,34 @@ impl PySemanticTransitionController {
         let mut owner = session.owner()?;
         task_use.require_current(&owner)?;
         let state = task_use.state()?;
-        if !matches!(state.phase, TaskUsePhase::Imported) {
+        if !matches!(
+            (&state.phase, parent.prefix.is_empty()),
+            (TaskUsePhase::Imported, true) | (TaskUsePhase::InitialPrefillReady { .. }, false)
+        ) {
             return Err(invalid("task phase changed during parent producer handoff"));
         }
+        drop(state);
         parent.tensors = tensors.into_native();
         parent.model_memory.allocations = allocations.into_native();
-        let identity = owner.bind_parent(parent).map_err(xlog_err)?;
+        if let Some(receipt) = prefill_receipt {
+            receipt
+                .consumed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .map_err(|_| invalid("initial prefill receipt was already consumed"))?;
+        }
+        let identity = match owner.bind_parent(parent) {
+            Ok(identity) => identity,
+            Err(error) => {
+                if prefill_scope.is_some() {
+                    owner.abort();
+                    task_use.state()?.phase = TaskUsePhase::Refused;
+                }
+                return Err(xlog_err(error));
+            }
+        };
+        if let Some(scope) = prefill_scope {
+            task_use.state()?.commit_initial_prefill(&scope)?;
+        }
         Ok((
             PyBytes::new(py, identity.instance.as_bytes()),
             identity.word,
@@ -11130,6 +14900,107 @@ impl PySemanticTransitionController {
         owner
             .admit_external_activation(&*parent.lease()?)
             .map_err(xlog_err)
+    }
+
+    /// Bind one local receiver to this TaskUse before delivery. Only the
+    /// privileged application may source these exact bytes from its retained
+    /// live grant; the task document and checkpoint never carry the secret.
+    #[pyo3(signature = (task_use, *, recipient_id, verification_key, expected_effect))]
+    fn bind_delivery_receiver(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        recipient_id: &Bound<'_, PyAny>,
+        verification_key: &Bound<'_, PyAny>,
+        expected_effect: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.session.borrow(py).require_creator()?;
+        self.require_issued(task_use)?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        task_use.require_current(&owner)?;
+        drop(owner);
+        let recipient_id = identity_bytes(recipient_id)?;
+        if recipient_id == Identity256::default()
+            || !verification_key.is_exact_instance_of::<PyBytes>()
+            || !expected_effect.is_exact_instance_of::<PyBytes>()
+        {
+            return Err(invalid(
+                "trusted receiver requires exact nonzero identity, key and effect bytes",
+            ));
+        }
+        let verification_key: [u8; 32] = verification_key
+            .cast::<PyBytes>()?
+            .as_bytes()
+            .try_into()
+            .map_err(|_| invalid("delivery verification key must contain exactly 32 bytes"))?;
+        let expected_effect = expected_effect.cast::<PyBytes>()?.as_bytes().to_vec();
+        if verification_key.iter().all(|&byte| byte == 0) || expected_effect.is_empty() {
+            return Err(invalid("trusted receiver key and effect must be nonempty"));
+        }
+        let mut binding = task_use
+            .delivery
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("delivery receiver binding mutex is poisoned"))?;
+        if binding.is_some() {
+            return Err(invalid(
+                "task use already has its one delivery receiver binding",
+            ));
+        }
+        *binding = Some(DeliveryReceiverBinding {
+            recipient_id,
+            verification_key,
+            expected_effect,
+        });
+        Ok(())
+    }
+
+    /// Commit one durable receiver acknowledgement after FINAL. The key and
+    /// recipient come from the trusted local grant, never from task content.
+    /// A byte-identical retry returns the existing publication identity.
+    #[pyo3(signature = (task_use, *, parent, snapshot, receipt))]
+    fn acknowledge_delivery(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        snapshot: &Bound<'_, PyAny>,
+        receipt: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        self.require_issued(task_use)?;
+        parent.require_task(py, task_use)?;
+        if !receipt.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "delivery acknowledgement requires exact receipt bytes",
+            ));
+        }
+        let binding = task_use.delivery_binding()?;
+        let mut budget = 16 * 1024 * 1024;
+        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        task_use.require_current(&owner)?;
+        task_use
+            .state()?
+            .revalidate_activation(&task_use.authority, snapshot)?;
+        let identity = owner
+            .acknowledge_delivery(
+                &*parent.lease()?,
+                receipt.cast::<PyBytes>()?.as_bytes(),
+                binding.recipient_id,
+                &binding.verification_key,
+                &binding.expected_effect,
+            )
+            .map_err(xlog_err)?;
+        Ok((
+            PyBytes::new(py, identity.instance.as_bytes()),
+            identity.word,
+            PyBytes::new(py, identity.logical_digest.as_bytes()),
+            PyBytes::new(py, identity.state_digest.as_bytes()),
+        )
+            .into_pyobject(py)?
+            .unbind())
     }
 }
 
@@ -11353,7 +15224,13 @@ impl PySemanticTransitionController {
         finish_invocation: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
         import: &ColdImportGuard<'_>,
-    ) -> PyResult<()> {
+        retain_policy: bool,
+    ) -> PyResult<Option<Py<PySemanticRetainedReplayMember>>> {
+        #[cfg(not(feature = "semantic-policy"))]
+        let _ = retain_policy;
+        #[cfg(feature = "semantic-policy")]
+        let original_decisions = Arc::clone(&material.original_decisions);
+        let material = Arc::new(material.material);
         let issued = task_use.borrow(py);
         let lease = {
             let mut owner = import.session.owner()?;
@@ -11379,7 +15256,7 @@ impl PySemanticTransitionController {
         };
         // All temporary original outputs and policy invocation owners leave this
         // block before the Runtime is asked to retire its remaining aliases.
-        let replay_result = (|| -> PyResult<()> {
+        let replay_result = (|| -> PyResult<Option<Py<PySemanticRetainedReplayMember>>> {
             let row = issued.authority.replay[ordinal].python_view(py)?;
             let transition = match kind {
                 SemanticTransitionKind::Proposal => "proposal",
@@ -11399,35 +15276,71 @@ impl PySemanticTransitionController {
             self.check_import_callback(py, &issued, &acquired, import, &expected)?;
             let mut budget = 16 * 1024 * 1024;
             let restored = object_sequence(&restored, &mut budget)?;
-            if restored.len() != 2 {
+            if restored.len() != 3 || !restored[1].is_callable() {
                 return Err(invalid(
-                    "original invocation restore must return its output and continuation arguments",
+                    "original invocation restore must return its output, final continuation callable and consumer stream",
                 ));
             }
             // Retain the original output even without the policy feature.
             let _original_output = restored[0].clone().unbind();
-            let arguments = object_sequence(&restored[1], &mut budget)?;
-            if arguments.len() != 9 {
-                return Err(invalid("original continuation requires six CUDA services, tensors, its captured producer witness and consumer stream"));
-            }
-            let producer_witness =
-                arguments[7].extract::<PyRef<'_, PySemanticTensorContentWitness>>()?;
-            self.bind_continuation_in_execution(
-                py,
-                &issued,
-                ContentStepRef::Published(&acquired),
-                &arguments[0],
-                &arguments[1],
-                &arguments[2],
-                &arguments[3],
-                &arguments[4],
-                &arguments[5],
-                &arguments[6],
-                &producer_witness,
-                &arguments[8],
-                None,
-                Some(import),
-            )?;
+            // Freeze the original stream before policy handoffs. The delayed
+            // continuation supplies its final witness but cannot replace this
+            // stream or an earlier continuation accepted by native code.
+            let consumer_stream = parse_witness_consumer_stream(&restored[2], &mut budget)?
+                .into_pyobject(py)?
+                .into_any();
+            let bind_continuation = |mut budget: usize| {
+                let continuation = {
+                    let _reads = ImportReadScope::enter(&issued)?;
+                    restored[1].call1((
+                        task_use.clone_ref(py),
+                        parent.clone_ref(py),
+                        _original_output.clone_ref(py),
+                    ))?
+                };
+                self.check_import_callback(py, &issued, &acquired, import, &expected)?;
+                let arguments = object_sequence(&continuation, &mut budget)?;
+                let (blocks, schema, identity, tensors_index, witness_index) = if kind
+                    == SemanticTransitionKind::Proposal
+                {
+                    if arguments.len() != 11 {
+                        return Err(invalid("final proposal continuation requires seven CUDA services, sealed model identities, tensors and its captured producer witness"));
+                    }
+                    (
+                        Some(&arguments[6]),
+                        Some(&arguments[7]),
+                        Some(&arguments[8]),
+                        9,
+                        10,
+                    )
+                } else {
+                    if arguments.len() != 8 {
+                        return Err(invalid("final non-drawing continuation requires six CUDA services, tensors and its captured producer witness"));
+                    }
+                    (None, None, None, 6, 7)
+                };
+                let producer_witness = arguments[witness_index]
+                    .extract::<PyRef<'_, PySemanticTensorContentWitness>>()?;
+                self.bind_continuation_in_execution(
+                    py,
+                    &issued,
+                    ContentStepRef::Published(&acquired),
+                    &arguments[0],
+                    &arguments[1],
+                    &arguments[2],
+                    &arguments[3],
+                    &arguments[4],
+                    &arguments[5],
+                    &arguments[tensors_index],
+                    &producer_witness,
+                    &consumer_stream,
+                    None,
+                    Some(import),
+                    blocks,
+                    schema,
+                    identity,
+                )
+            };
             if kind == SemanticTransitionKind::Proposal {
                 #[cfg(feature = "semantic-policy")]
                 {
@@ -11441,40 +15354,75 @@ impl PySemanticTransitionController {
                     };
                     self.check_import_callback(py, &issued, &acquired, import, &expected)?;
                     let policy = object_sequence(&policy, &mut budget)?;
-                    if policy.len() != 5 {
-                        return Err(invalid("Runtime replay policy requires binding, logits, parameters, actual product support and component baselines"));
+                    if policy.len() != 11 {
+                        return Err(invalid("Runtime replay policy requires binding, text, parameters, product support, baselines, five original numerical views and their common witness"));
                     }
+                    let policy_witness =
+                        policy[10].extract::<PyRef<'_, PySemanticTensorContentWitness>>()?;
                     let invocation = self.execute_policy_in_execution(
                         py,
                         task_use.clone_ref(py),
                         parent.clone_ref(py),
                         &policy[0],
-                        _original_output,
+                        _original_output.clone_ref(py),
                         policy[1].clone().unbind(),
                         policy[3].clone().unbind(),
                         policy[2].clone().unbind(),
                         policy[4].clone().unbind(),
+                        policy[5].clone().unbind(),
+                        policy[6].clone().unbind(),
+                        policy[7].clone().unbind(),
+                        policy[8].clone().unbind(),
+                        policy[9].clone().unbind(),
+                        &policy_witness,
+                        &consumer_stream,
                         Some(import),
+                        || bind_continuation(budget),
                     )?;
                     // Keep the complete original invocation in existing failure
                     // custody until native final use succeeds. Import replay
                     // verifies history; it neither runs a backward nor opens
                     // the public policy final-use API during Importing.
-                    let retained = TensorHandoff(vec![invocation]);
-                    let invocation = &retained.0[0];
                     let comparison = invocation
                         .outcome
                         .as_published()
                         .map_err(xlog_err)
                         .and_then(|_| {
-                            self.verify_import_successor(
-                                py,
-                                &issued,
-                                &acquired,
-                                &material.material,
-                                import,
-                            )
+                            self.verify_import_successor(py, &issued, &acquired, &material, import)
                         });
+                    if retain_policy {
+                        comparison?;
+                        let invocation = Py::new(py, invocation)?;
+                        return Py::new(
+                            py,
+                            PySemanticRetainedReplayMember {
+                                session: self.session.clone_ref(py),
+                                task_use: task_use.clone_ref(py),
+                                parent: parent.clone_ref(py),
+                                controller_identity: Arc::clone(&self.identity),
+                                replay_ordinal: ordinal as u64,
+                                replay_row: issued.authority.replay[ordinal].training_view_row()?,
+                                invocation,
+                                original_decisions,
+                                material: Arc::clone(&material),
+                                expected: expected.clone(),
+                                finish_invocation: finish_invocation.clone().unbind(),
+                                refresh_snapshot: refresh_snapshot.clone().unbind(),
+                                group_use: Mutex::new(RetainedGroupUse {
+                                    update: None,
+                                    target: None,
+                                    completion: None,
+                                    banks: [false; 2],
+                                    gradient_banks: [false; 2],
+                                    deliveries: std::array::from_fn(|_| None),
+                                }),
+                                completed: AtomicBool::new(false),
+                            },
+                        )
+                        .map(Some);
+                    }
+                    let retained = TensorHandoff(vec![invocation]);
+                    let invocation = &retained.0[0];
                     let completion = (|| -> PyResult<()> {
                         let mut owner = import.session.owner()?;
                         let state =
@@ -11503,17 +15451,55 @@ impl PySemanticTransitionController {
                 #[cfg(not(feature = "semantic-policy"))]
                 return Err(invalid("proposal replay requires a semantic-policy build"));
             } else {
+                bind_continuation(budget)?;
                 self.execute_continuation_in_execution(py, &issued, &acquired, Some(import))?;
-                self.verify_import_successor(py, &issued, &acquired, &material.material, import)?;
+                self.verify_import_successor(py, &issued, &acquired, &material, import)?;
             }
-            Ok(())
+            Ok(None)
         })();
+        if replay_result.as_ref().is_ok_and(Option::is_some) {
+            return replay_result;
+        }
+        self.finalize_replay_import(
+            py,
+            task_use,
+            &parent,
+            &issued,
+            &acquired,
+            &material,
+            finish_invocation,
+            refresh_snapshot,
+            import,
+            &expected,
+            replay_result.map(|_| ()),
+        )?;
+        Ok(None)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one canonical replay completion retains original callbacks and native owners"
+    )]
+    fn finalize_replay_import(
+        &self,
+        py: Python<'_>,
+        task_use: &Py<PySemanticTransitionTaskUse>,
+        parent: &Py<PySemanticPublishedParent>,
+        issued: &PySemanticTransitionTaskUse,
+        acquired: &PySemanticPublishedParent,
+        material: &xlog_cuda::SemanticReplayMaterial,
+        finish_invocation: &Bound<'_, PyAny>,
+        refresh_snapshot: &Bound<'_, PyAny>,
+        import: &ColdImportGuard<'_>,
+        expected: &(String, Vec<u8>),
+        replay_result: PyResult<()>,
+    ) -> PyResult<()> {
         // Cleanup runs exactly once even if restore, packing, execution or the
         // first comparison failed. Its sole permission is retiring the original
         // Runtime's temporary owners; an aborted native owner still rejects reads.
         let cleanup_result = (|| -> PyResult<Vec<u64>> {
             let streams = {
-                let _reads = ImportReadScope::enter(&issued)?;
+                let _reads = ImportReadScope::enter(issued)?;
                 finish_invocation.call1((task_use.clone_ref(py), parent.clone_ref(py)))?
             };
             let mut budget = 16 * 1024 * 1024;
@@ -11532,7 +15518,7 @@ impl PySemanticTransitionController {
         let streams = match (replay_result, cleanup_result) {
             (Err(error), cleanup) => {
                 let release = cleanup
-                    .and_then(|streams| Self::release_import_reader(&acquired, import, &streams));
+                    .and_then(|streams| Self::release_import_reader(acquired, import, &streams));
                 return finish_with_cleanup(py, Err(error), release);
             }
             (Ok(()), Err(error)) => return Err(error),
@@ -11540,7 +15526,7 @@ impl PySemanticTransitionController {
         };
         let mut release_allowed = true;
         let final_result = (|| -> PyResult<AuthoritySnapshot> {
-            self.check_import_callback(py, &issued, &acquired, import, &expected)?;
+            self.check_import_callback(py, issued, acquired, import, expected)?;
             // Current authority refresh is not a model callback and opens no
             // unfinished import reads. Historical role39 never supplies rights.
             let snapshot = refresh_snapshot.call0()?;
@@ -11548,8 +15534,8 @@ impl PySemanticTransitionController {
             let snapshot = AuthoritySnapshot::parse(&ColdValue::read(&snapshot, &mut budget, 0)?)?;
             {
                 let mut owner = import.session.owner()?;
-                let state = self.execution_state(py, &issued, &acquired, &owner, Some(import))?;
-                if Self::execution_binding(&state, true)? != expected {
+                let state = self.execution_state(py, issued, acquired, &owner, Some(import))?;
+                if Self::execution_binding(&state, true)? != *expected {
                     return Err(invalid(
                         "current authority changed outside the importer's refresh",
                     ));
@@ -11565,18 +15551,19 @@ impl PySemanticTransitionController {
                     .map_err(xlog_err)?;
                 release_allowed = true;
             }
-            self.verify_import_successor(py, &issued, &acquired, &material.material, import)?;
+            self.verify_import_successor(py, issued, acquired, material, import)?;
             Ok(snapshot)
         })();
         let release = if release_allowed {
-            Self::release_import_reader(&acquired, import, &streams)
+            Self::release_import_reader(acquired, import, &streams)
         } else {
             Ok(())
         };
         let snapshot = finish_with_cleanup(py, final_result, release)?;
         let owner = import.session.owner()?;
-        let mut state = self.execution_state(py, &issued, &acquired, &owner, Some(import))?;
-        state.finish_import(&issued.authority, snapshot)
+        let mut state = self.execution_state(py, issued, acquired, &owner, Some(import))?;
+        state.finish_import(&issued.authority, snapshot)?;
+        Ok(())
     }
 
     fn release_import_reader(
@@ -11666,6 +15653,9 @@ impl PySemanticTransitionController {
         consumer_stream: &Bound<'_, PyAny>,
         prepared_bank: Option<usize>,
         import: Option<&ColdImportGuard<'_>>,
+        numerical_blocks: Option<&Bound<'_, PyAny>>,
+        model_schema_digest: Option<&Bound<'_, PyAny>>,
+        model_identity: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         match parent {
             ContentStepRef::Published(_) if prepared_bank.is_some() => {
@@ -11703,7 +15693,9 @@ impl PySemanticTransitionController {
             }
             Ok(())
         };
-        let services = [
+        let model_schema_digest = model_schema_digest.map(identity_bytes).transpose()?;
+        let model_identity = model_identity.map(identity_bytes).transpose()?;
+        let mut services = vec![
             text_rows,
             text_row_count,
             selected_text,
@@ -11711,6 +15703,7 @@ impl PySemanticTransitionController {
             active_row_count,
             numerical_admissibility,
         ];
+        services.extend(numerical_blocks);
         // Retain the original Python producers independently of mutable input
         // rows. Native code retains the captured witness without a Python cycle.
         // Any failed callback leaves these original autograd owners quarantined.
@@ -11725,7 +15718,7 @@ impl PySemanticTransitionController {
             .0
             .extend(services.iter().map(|value| (*value).clone().unbind()));
         let device = self.session.borrow(py).device_ordinal;
-        for producer in services {
+        for producer in &services {
             validate_continuation_producer_guarded(producer, device, &check)?;
         }
         let ParsedTensorInputs {
@@ -11734,7 +15727,7 @@ impl PySemanticTransitionController {
         } = parse_tensor_inputs_guarded(tensors, &mut budget, device, consumer_stream, &check)?;
         producer_owners.0.extend(producers);
         let mut service_handoff = TensorHandoff(Vec::with_capacity(services.len()));
-        for producer in services {
+        for producer in &services {
             service_handoff
                 .0
                 .push(crate::dlpack_from_py_for_stream_guarded(
@@ -11764,9 +15757,15 @@ impl PySemanticTransitionController {
                 .to_vec(),
             None => state.snapshot.canonical.clone(),
         };
+        let mut service_tensors = service_handoff.into_native();
+        let numerical_blocks = if services.len() == 7 {
+            service_tensors.pop()
+        } else {
+            None
+        };
         let [text_rows, text_row_count, selected_text, active_rows,
-            active_row_count, numerical_admissibility]: [_; 6] = service_handoff
-                .into_native().try_into()
+            active_row_count, numerical_admissibility]: [_; 6] = service_tensors
+                .try_into()
                 .unwrap_or_else(|_| unreachable!("exact continuation service producer roster"));
         let input = SemanticContinuationInput {
             text_rows,
@@ -11775,6 +15774,9 @@ impl PySemanticTransitionController {
             active_rows,
             active_row_count,
             numerical_admissibility,
+            numerical_blocks,
+            model_schema_digest,
+            model_identity,
             tensors: tensors.into_native(),
             authority_decisions,
         };
@@ -11956,11 +15958,22 @@ impl PySemanticTransitionController {
         product_support: Py<PyAny>,
         parameters: Py<PyAny>,
         component_baselines: Py<PyAny>,
+        parameter_errors: Py<PyAny>,
+        baseline_errors: Py<PyAny>,
+        parameter_domains: Py<PyAny>,
+        text_domains: Py<PyAny>,
+        baseline_domains: Py<PyAny>,
+        producer_witness: &PySemanticTensorContentWitness,
+        consumer_stream: &Bound<'_, PyAny>,
         import: Option<&ColdImportGuard<'_>>,
+        bind_continuation: impl FnOnce() -> PyResult<()>,
     ) -> PyResult<PySemanticPolicyInvocation> {
         let issued = task_use.borrow(py);
         let acquired = parent.borrow(py);
         let mut budget = 16 * 1024 * 1024;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let producer_stream = i64::try_from(stream)
+            .map_err(|_| invalid("consumer stream exceeds the DLPack signed stream range"))?;
         let fields = object_sequence(binding, &mut budget)?;
         if fields.len() != 2 {
             return Err(invalid(
@@ -11980,28 +15993,57 @@ impl PySemanticTransitionController {
             }
             let expected = Self::execution_binding(&state, import.is_some())?;
             let training = expected.0 == "training";
-            (
+            let rng = owner
+                .admitted_policy_rng(&*acquired.lease()?)
+                .map_err(xlog_err)?;
+            if import.is_none() {
+                // Public execution still requires an already bound continuation;
+                // only the canonical importer owns the two-stage replay handoff.
                 owner
                     .continuation_rng(&*acquired.lease()?)
-                    .map_err(xlog_err)?,
-                expected,
-                training,
-            )
+                    .map_err(xlog_err)?;
+            }
+            (rng, expected, training)
         };
         let inputs = [
             text_logits,
             product_support,
             parameters,
             component_baselines,
+            parameter_errors,
+            baseline_errors,
+            parameter_domains,
+            text_domains,
+            baseline_domains,
         ];
         let device = self.session.borrow(py).device_ordinal;
+        // Retain the actual graph and Python producer owners through both
+        // native binding stages, including an uncertain continuation failure.
+        let mut original_owners = TensorHandoff(vec![
+            model_output.clone_ref(py),
+            producer_witness._inputs.clone_ref(py),
+        ]);
+        original_owners
+            .0
+            .extend(inputs.iter().map(|input| input.clone_ref(py)));
+        original_owners.0.extend(
+            producer_witness
+                ._producers
+                .iter()
+                .map(|input| input.clone_ref(py)),
+        );
         let check = || {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
             let state = self.execution_state(py, &issued, &acquired, &owner, import)?;
+            self.require_continuation_witness(
+                py,
+                ContentStepRef::Published(&acquired),
+                producer_witness,
+            )?;
             if Self::execution_binding(&state, import.is_some())? != expected
                 || owner
-                    .continuation_rng(&*acquired.lease()?)
+                    .admitted_policy_rng(&*acquired.lease()?)
                     .map_err(xlog_err)?
                     != rng
             {
@@ -12016,10 +16058,58 @@ impl PySemanticTransitionController {
         for input in &inputs {
             handoff.0.push(crate::dlpack_from_py_for_stream_guarded(
                 input.bind(py),
-                1,
+                producer_stream,
                 &check,
             )?);
         }
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        let state = self.execution_state(py, &issued, &acquired, &owner, import)?;
+        if Self::execution_binding(&state, import.is_some())? != expected
+            || owner
+                .admitted_policy_rng(&*acquired.lease()?)
+                .map_err(xlog_err)?
+                != rng
+        {
+            return Err(invalid("policy invocation changed during producer handoff"));
+        }
+        self.require_continuation_witness(
+            py,
+            ContentStepRef::Published(&acquired),
+            producer_witness,
+        )?;
+        let [text, support, parameters, component_baselines, parameter_errors,
+            baseline_errors, parameter_domains, text_domains, baseline_domains]: [_; 9] = handoff
+            .into_native()
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("exact policy producer roster"));
+        owner
+            .bind_policy_dlpack(
+                &*acquired.lease()?,
+                binding,
+                rng,
+                text,
+                support,
+                parameters,
+                component_baselines,
+                [
+                    parameter_errors,
+                    baseline_errors,
+                    parameter_domains,
+                    text_domains,
+                    baseline_domains,
+                ],
+                &producer_witness.inner,
+                stream,
+            )
+            .map_err(xlog_err)?;
+        // Replay joins the continuation only after all nine original operands
+        // have their private device snapshots. Release native locks before its
+        // guarded Python producer handoffs; failure retains those native banks.
+        drop(state);
+        drop(owner);
+        drop(session);
+        bind_continuation()?;
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         let state = self.execution_state(py, &issued, &acquired, &owner, import)?;
@@ -12029,18 +16119,14 @@ impl PySemanticTransitionController {
                 .map_err(xlog_err)?
                 != rng
         {
-            return Err(invalid("policy invocation changed during producer handoff"));
+            return Err(invalid(
+                "policy invocation changed while binding its continuation",
+            ));
         }
-        let [text, support, parameters, component_baselines]: [_; 4] = handoff
-            .into_native()
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("exact policy producer roster"));
-        owner
-            .bind_policy_dlpack(binding, rng, text, support, parameters, component_baselines)
-            .map_err(xlog_err)?;
         owner.capture().map_err(xlog_err)?;
         owner.launch().map_err(xlog_err)?;
         let outcome = owner.observe(rng.proposal).map_err(xlog_err)?;
+        drop(original_owners.into_native());
         drop(state);
         drop(acquired);
         drop(issued);
@@ -12237,14 +16323,312 @@ fn parse_admission(
 #[cfg(test)]
 mod tests {
     use super::{
-        object_sequence, parse_admission, parse_text_slots, read_replay_rows, select_replay_row,
-        AuthoritySnapshot, ColdValue, FeedbackSchema, PredicateInput, RecordInput, ReplayBasis,
-        ReplayRow, SupportInput, TaskAuthority, TaskUsePhase, TaskUseState,
+        initial_source_parts, object_sequence, parse_admission, parse_text_slots, read_replay_rows,
+        replay_hash, select_replay_row, validate_replay_training_payload, AuthoritySnapshot,
+        ColdValue, FeedbackSchema, PredicateInput, RecordInput, ReplayBasis, ReplayRow,
+        SupportInput, TaskAuthority, TaskUsePhase, TaskUseState,
     };
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyTuple};
     use std::ffi::CString;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::Arc;
+    use std::sync::Mutex;
     use xlog_cuda::{SemanticArgument, SemanticPolarity, SemanticRecordRole};
+
+    #[test]
+    fn released_cold_session_rejects_saved_session_aliases() {
+        let session = super::PySemanticTransitionSession {
+            inner: Mutex::new(None),
+            editable_program: None,
+            editable_observer_source: None,
+            importing: Arc::new(AtomicBool::new(false)),
+            recording: AtomicBool::new(false),
+            retiring: AtomicBool::new(false),
+            prepared_segment: Mutex::new(None),
+            issuance: Arc::new(AtomicU64::new(0)),
+            owner_thread: std::thread::current().id(),
+            device_ordinal: 0,
+            capacities: (0, 0, 0, 0),
+            admission_limits: (0, 0, 0, 0),
+            memory_bytes: 0,
+        };
+        assert!(session.owner().is_err());
+        assert!(session.release_observed_cold().is_err());
+    }
+
+    #[test]
+    fn historical_group_gradient_restores_existing_leaf_slot() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let effective = py.import("types")?.getattr("SimpleNamespace")?.call0()?;
+            let original = PyDict::new(py);
+            let target = PyDict::new(py);
+            let unrelated = PyDict::new(py);
+            effective.setattr("grad", &original)?;
+
+            super::swap_group_leaf_gradient(&effective, original.as_any(), target.as_any())?;
+            assert!(effective.getattr("grad")?.is(target.as_any()));
+            assert!(super::swap_group_leaf_gradient(
+                &effective,
+                unrelated.as_any(),
+                original.as_any(),
+            )
+            .is_err());
+            assert!(effective.getattr("grad")?.is(target.as_any()));
+            super::swap_group_leaf_gradient(&effective, target.as_any(), original.as_any())?;
+            assert!(effective.getattr("grad")?.is(original.as_any()));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn cold_arena_binding_keeps_task_content_but_advances_authority() {
+        let source = super::TaskCheckpointBinding {
+            identity: [1; 32],
+            epoch: 7,
+            content: [[2; 32], [3; 32], [4; 32]],
+            goal: [5; 32],
+            scoring_law: [6; 32],
+        };
+        let candidate = super::TaskCheckpointBinding {
+            identity: [8; 32],
+            epoch: 8,
+            ..source
+        };
+        assert!(source.same_cold_arena_content(candidate));
+        assert!(!source.same_task_content(candidate));
+        assert!(
+            !source.same_cold_arena_content(super::TaskCheckpointBinding {
+                goal: [9; 32],
+                ..candidate
+            })
+        );
+        assert!(
+            !source.same_cold_arena_content(super::TaskCheckpointBinding {
+                content: [[9; 32], [3; 32], [4; 32]],
+                ..candidate
+            })
+        );
+        assert!(
+            !source.same_cold_arena_content(super::TaskCheckpointBinding {
+                scoring_law: [9; 32],
+                ..candidate
+            })
+        );
+        assert!(
+            !source.same_cold_arena_content(super::TaskCheckpointBinding {
+                epoch: 9,
+                ..candidate
+            })
+        );
+        assert!(
+            !source.same_cold_arena_content(super::TaskCheckpointBinding {
+                identity: source.identity,
+                ..candidate
+            })
+        );
+    }
+
+    #[test]
+    fn checkpoint_keeps_initial_prefill_distinct_from_imported_task() {
+        let (_, snapshot) = fresh_source_authority("").unwrap();
+        let imported = TaskUseState {
+            phase: TaskUsePhase::Imported,
+            snapshot: snapshot.clone(),
+        };
+        let prefilled = TaskUseState {
+            phase: TaskUsePhase::InitialPrefillBound,
+            snapshot: snapshot.clone(),
+        };
+        assert_ne!(
+            super::checkpoint_task_phase(&imported).unwrap(),
+            super::checkpoint_task_phase(&prefilled).unwrap(),
+        );
+        let seed = super::TaskCheckpointSeed {
+            authority: Vec::new(),
+            evaluation: Vec::new(),
+            training_objective: ColdValue::None,
+            training_domain: ColdValue::None,
+            initial_sources: ColdValue::None,
+            source_mapping: ColdValue::None,
+            replay_selection: ColdValue::None,
+        };
+        let bytes = seed
+            .encode(
+                &snapshot,
+                &super::checkpoint_task_phase(&prefilled).unwrap(),
+                &super::TaskCheckpointBinding {
+                    identity: [1; 32],
+                    epoch: 2,
+                    content: [[3; 32], [4; 32], [5; 32]],
+                    goal: [6; 32],
+                    scoring_law: [7; 32],
+                },
+            )
+            .unwrap();
+        let (_, decoded_snapshot, phase, binding) =
+            super::TaskCheckpointSeed::decode(&bytes).unwrap();
+        assert_eq!(phase, super::CheckpointTaskPhase::InitialPrefillBound);
+        assert_eq!(decoded_snapshot.canonical, snapshot.canonical);
+        assert_eq!(binding.identity, [1; 32]);
+        assert_eq!(binding.epoch, 2);
+    }
+
+    #[test]
+    fn actor_checkpoint_refresh_rechecks_training_without_weakening_inference() {
+        let (values, original) = task_inputs("");
+        let authority = TaskAuthority::parse(&values).unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = pyo3::types::PyDict::new(py);
+            py.run(
+                &CString::new(format!(
+                    "{TASK_INPUT}\nrefreshed = (1, ('1970-01-01T00:00:02Z', 2_000_000), snapshot[2], snapshot[3], ('training-revoke',))\nrefresh = lambda: refreshed"
+                ))
+                .unwrap(),
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+            let refresh = globals.get_item("refresh").unwrap().unwrap();
+            let mut refused = original.clone();
+            assert!(super::refresh_checkpoint_authority(
+                &authority,
+                &mut refused,
+                &refresh,
+                "inference",
+                true,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("revoked"));
+            assert_eq!(refused.canonical, original.canonical);
+
+            let mut non_actor = original.clone();
+            super::refresh_checkpoint_authority(
+                &authority,
+                &mut non_actor,
+                &refresh,
+                "inference",
+                false,
+            )
+            .unwrap();
+            assert_eq!(non_actor.revision, 1);
+        });
+    }
+
+    #[test]
+    fn checkpoint_referent_is_bounded_versioned_and_exact() {
+        let binding = super::TaskCheckpointBinding {
+            identity: [1; 32],
+            epoch: 7,
+            content: [[2; 32], [3; 32], [4; 32]],
+            goal: [5; 32],
+            scoring_law: [6; 32],
+        };
+        let referent = super::CheckpointReferent {
+            checkpoint_digest: [7; 32],
+            checkpoint_bytes: 900,
+            publication: [8; 104],
+            semantic_root: [9; 32],
+            model_generation: 11,
+            model_digest: [10; 32],
+            task: binding,
+            scope_digest: [11; 32],
+            authority_root: [12; 32],
+            snapshot_digest: [13; 32],
+            phase: super::CheckpointTaskPhase::InitialPrefillBound,
+        };
+        let bytes = referent.encode();
+        assert!(bytes.len() < 1024);
+        assert_eq!(super::CheckpointReferent::decode(&bytes).unwrap(), referent);
+        assert!(
+            super::check_checkpoint_referent_limits(std::slice::from_ref(&referent), 899, 900)
+                .is_err()
+        );
+        assert!(
+            super::check_checkpoint_referent_limits(std::slice::from_ref(&referent), 900, 899)
+                .is_err()
+        );
+        super::check_checkpoint_referent_limits(&[referent.clone(), referent.clone()], 900, 900)
+            .unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            let fields = super::PySemanticTransitionSession::inspect_checkpoint_referent(
+                py,
+                super::PyBytes::new(py, &bytes).as_any(),
+            )
+            .unwrap();
+            assert_eq!(
+                fields
+                    .get_item("checkpoint_sha256")
+                    .unwrap()
+                    .unwrap()
+                    .cast::<super::PyBytes>()
+                    .unwrap()
+                    .as_bytes(),
+                &[7; 32]
+            );
+            assert_eq!(
+                fields
+                    .get_item("phase")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "initial-prefill-bound"
+            );
+            assert!(
+                super::PySemanticTransitionSession::verify_checkpoint_referent(
+                    super::PyBytes::new(py, &bytes).as_any(),
+                    super::PyBytes::new(py, b"wrong checkpoint").as_any(),
+                )
+                .is_err()
+            );
+        });
+        assert!(super::CheckpointReferent::decode(&bytes[..bytes.len() - 1]).is_err());
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(super::CheckpointReferent::decode(&trailing).is_err());
+        let mut version = bytes;
+        version[super::CheckpointReferent::MAGIC.len()] ^= 1;
+        assert!(super::CheckpointReferent::decode(&version).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "semantic-policy")]
+    fn completed_projection_exposes_native_theory_deltas() {
+        Python::initialize();
+        Python::attach(|py| {
+            assert!(py
+                .get_type::<super::PySemanticCompletedActionProjection>()
+                .hasattr("theory_deltas")
+                .unwrap());
+        });
+    }
+
+    #[test]
+    #[cfg(feature = "semantic-policy")]
+    fn completed_task_ground_exposes_bound_scoring_law() {
+        Python::initialize();
+        Python::attach(|py| {
+            let ground = py.get_type::<super::PySemanticCompletedTaskGround>();
+            for field in [
+                "scoring_law",
+                "scoring_weights",
+                "return_bound",
+                "structural_cost_descriptor",
+            ] {
+                assert!(ground.hasattr(field).unwrap(), "{field}");
+            }
+            assert!(py
+                .get_type::<super::PySemanticTransitionController>()
+                .hasattr("structural_cost_descriptor")
+                .unwrap());
+        });
+    }
 
     #[test]
     fn task_program_transport_preserves_explicit_configuration_without_cuda() {
@@ -12321,7 +16705,7 @@ mod tests {
                 "()",
                 "('drain',)",
                 "('proposal', True)",
-                "('update',)",
+                "('unknown',)",
                 "['proposal']",
                 "3",
                 "type('Schedule', (tuple,), {})(('proposal',))",
@@ -12959,16 +17343,19 @@ def replay_fixture(split='request-local-replay'):
             invocation['entry_boundary_identity'], invocation['numerical_realization_identity']]) if name == 'logits_identity' else None
         add(invocation[name], kind, reconstruction)
     add(hid('provenance'), 'provenance')
-    training = (b'dlm-new/training-view/v1'.ljust(32, b'\0') + bytes.fromhex(identity_digest)
+    training = (b'dlm-new/training-view/v2'.ljust(32, b'\0') + bytes.fromhex(identity_digest)
         + bytes.fromhex(invocation['source_tokens_identity']) + struct.pack('<5Q', 8, 4, 2, 0, 4)
+        + struct.pack('<16Q', *([0]*16))
         + struct.pack('<8q', *range(8)) + struct.pack('<8q', -100, -100, -100, -100, -100, 3, -100, -100)
         + struct.pack('<8f', 0, 0, 0, 0, 0, 1, 0, 0) + struct.pack('<8q', *([-100]*8))
         + struct.pack('<8q', *([-100]*8))
+        + struct.pack('<8q', *([-100]*8)) + struct.pack('<8q', *([-1]*8))
         + struct.pack('<8q', *range(8)) + struct.pack('<8q', 0, 1, 2, 3, 0, 1, 2, 3)
-        + struct.pack('<8q', 4, 4, 4, 4, 5, 2, 5, 5) + struct.pack('<8q', -1, 0, 1, 2, -1, 4, 5, 6))
+        + struct.pack('<8q', 4, 4, 4, 4, 5, 2, 5, 5) + struct.pack('<8q', -1, 0, 1, 2, -1, 4, 1, 6))
     materials.append((dict(identity=digest(training), kind='training-view',
         bytes_sha256=digest(training), reconstruction=None), training))
     envelope = dict(neural_generation=invocation['model_generation'], provenance_identity=hid('provenance'),
+        actor_eligible=False, downstream_snapshot_identity=None,
         execution_materials=dict(action_base_h_logical=hid('base'), action_successor_h_logical=hid('successor'),
             invocation=invocation, training_view_identity=digest(training), baseline=None,
             materials=[reference for reference, _ in materials]))
@@ -13000,7 +17387,7 @@ def grant(name):
             ('1970-01-01T00:00:08Z', 8_000_000), name+'-revoke')
 inputs = ('task', scope, ((envelope, 10_000_000),), replay, nodes,
           ('feedback',), (grant('publication'),), (grant('inference'),),
-          (grant('training')+('current-request-fast-adaptation',),))
+          (grant('training')+('current-request-fast-adaptation',),), ())
 snapshot = (0, ('1970-01-01T00:00:01Z', 1_000_000),
             ('1970-01-01T00:00:05Z', 5_000_000),
             ((envelope, ('1970-01-01T00:00:05Z', 5_000_000), ()),), ())
@@ -13109,6 +17496,185 @@ row[2] = canonical(episode)
                 "{mutation}"
             );
         }
+    }
+
+    const LIVE_ANCHOR_INPUT: &str = r#"
+digest = lambda value: hashlib.sha256(value).hexdigest()
+hid = lambda text: digest(text.encode())
+canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':'))
+names = ('data_manifest_hash', 'example_id', 'final_split', 'tokenizer_hash',
+         'tokenizer_revision', 'mask_policy_hash', 'training_seed', 'epoch_index', 'variant_index')
+envelope[8] = ['durable-slow-consolidation']
+envelope[13] = True
+envelope[14] = True
+episode = replay_fixture('train')
+view, view_digest, _, length, block, targets = episode[1]
+normalized = hid('normalized-record')
+reference, training = episode[3][-1]
+training = training[:64] + bytes.fromhex(normalized) + training[96:]
+training = bytearray(training)
+struct.pack_into('<Q', training, 128, 2)
+retention_offset = 264 + 8*8 + 8*8 + 8*4 + 8*8
+struct.pack_into('<q', training, retention_offset + 8, 2)
+struct.pack_into('<q', training, retention_offset + 16, 3)
+training = bytes(training)
+training_digest = digest(training)
+record = dict(example_id='sample', group='language', training_view=dict(zip(names, view)),
+              training_view_identity=training_digest)
+record['content_sha256'] = digest(canonical(['dlm-new/corpus-anchor/v1', record]).encode())
+entry = ['sample', 'train', hid('acquired'), hid('transformation'), normalized,
+         'decontamination', [], envelope, ['live', ['train', 'dev'], 'cross-request'], None]
+evidence = canonical(['dlm-new/corpus-anchor-admission/v1', view[0], entry]).encode()
+anchor = ('anchor', (view, view_digest, record['content_sha256'], length, block, targets),
+          canonical(record), ((dict(identity=training_digest, kind='training-view',
+                                   bytes_sha256=training_digest, reconstruction=None), training),), evidence)
+inputs = (*inputs[:3], (anchor,), *inputs[4:8],
+          (grant('training')+('durable-slow-consolidation',),), inputs[9])
+"#;
+
+    #[test]
+    fn live_anchor_requires_its_exact_current_durable_authority() {
+        let (values, snapshot) = task_inputs(LIVE_ANCHOR_INPUT);
+        let authority = TaskAuthority::parse(&values).unwrap();
+        authority.check_snapshot(&snapshot).unwrap();
+        authority.check_use("training", &snapshot, true).unwrap();
+        assert!(matches!(
+            authority.replay[0].basis,
+            ReplayBasis::CorpusAnchor { .. }
+        ));
+
+        for mutation in [
+            "entry[7] = [envelope[0], 'other-envelope', *envelope[2:]]",
+            "entry[8] = ['live', ['train'], 'request']",
+            "envelope[8] = ['current-request-fast-adaptation']",
+            "envelope[13] = False",
+            "envelope[14] = False",
+        ] {
+            let changed = format!(
+                "{LIVE_ANCHOR_INPUT}\n{mutation}\nevidence = canonical(['dlm-new/corpus-anchor-admission/v1', view[0], entry]).encode()\nanchor = (*anchor[:4], evidence)\ninputs = (*inputs[:3], (anchor,), *inputs[4:])"
+            );
+            let (values, _) = task_inputs(&changed);
+            assert!(TaskAuthority::parse(&values).is_err(), "{mutation}");
+        }
+    }
+
+    #[test]
+    fn training_view_rejects_legacy_schema_and_detached_v2_arrays() {
+        let rows = replay_transport("", 1 << 20, 1024).unwrap();
+        let row = ReplayRow::parse(&rows.sequence().unwrap()[0]).unwrap();
+        let identity = row.identity.fields(6).unwrap();
+        let source = replay_hash(b"source_tokens_identity");
+        let original = row
+            .materials
+            .iter()
+            .find(|material| material.kind == "training-view")
+            .unwrap();
+        for (name, mutate) in [
+            ("legacy schema", (0, 0_i64)),
+            ("orphan branch span", (144, 1)),
+            ("undeclared branch label", (552, 1)),
+            ("duplicate source slot", (688, 0)),
+            ("invalid topology parent", (912, 99)),
+            ("wrong prediction parent", (920, 5)),
+            ("missing MASK target", (368, -100)),
+            ("invented retention target", (488, 1)),
+        ] {
+            let mut bytes = original.bytes.as_deref().unwrap().to_vec();
+            if name == "legacy schema" {
+                bytes[..32].fill(0);
+                let tag = b"dlm-new/training-view/v1";
+                bytes[..tag.len()].copy_from_slice(tag);
+            } else {
+                bytes[mutate.0..mutate.0 + 8].copy_from_slice(&mutate.1.to_le_bytes());
+            }
+            let mut material = original.clone();
+            material.identity = replay_hash(&bytes);
+            material.bytes_sha256 = Some(material.identity.clone());
+            material.bytes = Some(Arc::from(bytes));
+            assert!(
+                validate_replay_training_payload(&material, identity, &source, false).is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn training_view_preserves_three_declared_branch_answers_and_inactive_rows() {
+        let rows = replay_transport("", 1 << 20, 1024).unwrap();
+        let row = ReplayRow::parse(&rows.sequence().unwrap()[0]).unwrap();
+        let identity = row.identity.fields(6).unwrap();
+        let source = replay_hash(b"source_tokens_identity");
+        let original = row
+            .materials
+            .iter()
+            .find(|material| material.kind == "training-view")
+            .unwrap();
+        let mut bytes = vec![0u8; 264];
+        bytes[..136].copy_from_slice(&original.bytes.as_deref().unwrap()[..136]);
+        bytes[96..104].copy_from_slice(&16u64.to_le_bytes());
+        let branches: [u64; 16] = [2, 8, 9, 9, 10, 3, 10, 11, 11, 12, 3, 12, 13, 13, 14, 3];
+        for (index, word) in branches.into_iter().enumerate() {
+            bytes[136 + index * 8..144 + index * 8].copy_from_slice(&word.to_le_bytes());
+        }
+        fn append(bytes: &mut Vec<u8>, values: &[i64]) {
+            for &value in values {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        append(
+            &mut bytes,
+            &[0, 1, 2, 3, 0, 1, 2, 3, 20, 21, 22, 23, 24, 25, 0, 0],
+        );
+        append(
+            &mut bytes,
+            &[
+                -100, -100, -100, -100, -100, 1, -100, -100, -100, -100, -100, -100, -100, -100,
+                -100, -100,
+            ],
+        );
+        for index in 0..16 {
+            bytes.extend_from_slice(&(if index == 5 { 1.0f32 } else { 0.0f32 }).to_le_bytes());
+        }
+        append(&mut bytes, &[-100; 16]);
+        append(&mut bytes, &[-100; 16]);
+        append(
+            &mut bytes,
+            &[
+                -100, -100, -100, -100, -100, -100, -100, -100, 21, -100, 23, -100, 25, -100, -100,
+                -100,
+            ],
+        );
+        append(
+            &mut bytes,
+            &[-1, -1, -1, -1, -1, -1, -1, -1, 0, -1, 1, -1, 2, -1, -1, -1],
+        );
+        append(&mut bytes, &(0..16).collect::<Vec<_>>());
+        append(
+            &mut bytes,
+            &[0, 1, 2, 3, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3, 0, 0],
+        );
+        append(
+            &mut bytes,
+            &[4, 4, 4, 4, 5, 2, 5, 5, 5, 5, 5, 5, 5, 5, 0, 0],
+        );
+        append(
+            &mut bytes,
+            &[-1, 0, 1, 2, -1, 4, 1, 6, 1, 8, 1, 10, 1, 12, -2, -2],
+        );
+        let mut material = original.clone();
+        material.identity = replay_hash(&bytes);
+        material.bytes_sha256 = Some(material.identity.clone());
+        material.bytes = Some(Arc::from(bytes));
+        validate_replay_training_payload(&material, identity, &source, false).unwrap();
+
+        let mut detached = material.clone();
+        let mut bytes = detached.bytes.as_deref().unwrap().to_vec();
+        let branch_parent = 264 + 16 * 76 + 9 * 8;
+        bytes[branch_parent..branch_parent + 8].copy_from_slice(&0i64.to_le_bytes());
+        detached.identity = replay_hash(&bytes);
+        detached.bytes_sha256 = Some(detached.identity.clone());
+        detached.bytes = Some(Arc::from(bytes));
+        assert!(validate_replay_training_payload(&detached, identity, &source, false).is_err());
     }
 
     #[test]
@@ -13264,6 +17830,7 @@ row[2] = canonical(episode)
             };
             let parsed = read(1 << 20, 1 << 20, 1024).unwrap();
             let row = ReplayRow::parse(&parsed.sequence().unwrap()[0]).unwrap();
+            assert!(row.checkpoint_referent().unwrap().is_none());
             let material_bytes = row
                 .materials
                 .iter()
@@ -13542,7 +18109,7 @@ row[2] = canonical(episode)
     #[test]
     fn replay_episode_hash_preserves_uninterpreted_json_lexemes() {
         let rows = replay_transport(
-            "episode = json.loads(row[2]); episode['intent']['task_text'] += '\\ud800'; episode['intent']['budgets']['fuel'] = 2**200; episode['intent']['budgets']['\\ud800'] = 1; episode['intent']['budgets']['\\ue000'] = 2; episode['intent']['budgets']['\\U00010000'] = 3; episode['action_trace']['total_return'] = 1e-09\nepisode.pop('content_sha256'); canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')); digest = hashlib.sha256(canonical(episode).encode()).hexdigest(); episode['content_sha256'] = digest\nrow[1] = canonical(episode); row[1] = (*row[1][:2], digest, *row[1][3:])",
+            "episode = json.loads(row[2]); episode['intent']['task_text'] += '\\ud800'; episode['intent']['budgets']['fuel'] = 2**200; episode['intent']['budgets']['\\ud800'] = 1; episode['intent']['budgets']['\\ue000'] = 2; episode['intent']['budgets']['\\U00010000'] = 3; episode['action_trace']['total_return'] = 1e-09\nepisode.pop('content_sha256'); canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')); digest = hashlib.sha256(canonical(episode).encode()).hexdigest(); episode['content_sha256'] = digest\nrow[2] = canonical(episode); row[1] = (*row[1][:2], digest, *row[1][3:])",
             1 << 20, 1024,
         ).unwrap();
         let row = ReplayRow::parse(&rows.sequence().unwrap()[0]).unwrap();
@@ -13625,13 +18192,49 @@ mapping = [('source', 1, 7)]
         );
     }
 
+    #[test]
+    fn initial_source_parts_preserve_native_ring_slots_and_empty_prefill() -> PyResult<()> {
+        let (authority, _) =
+            observed_source_authority("mapping = [('source', 0, 0), ('source', 1, 1)]")?;
+        let layout = xlog_cuda::initial_source_layout(
+            &authority.initial_sources,
+            &authority.source_mapping,
+            &authority.canonical,
+            3,
+            34,
+            64,
+            3,
+            262144,
+            0,
+        )
+        .unwrap();
+        Python::attach(|py| {
+            let parts = initial_source_parts(py, layout)?;
+            let parts = parts.bind(py);
+            let source_value = parts.get_item(0)?;
+            let source = source_value.cast::<PyTuple>()?;
+            assert_eq!(source.len(), 32);
+            let first_value = source.get_item(0)?;
+            let first = first_value.cast::<PyTuple>()?;
+            assert_eq!(first.get_item(0)?.extract::<u64>()?, 40);
+            assert_eq!(first.get_item(2)?.extract::<u64>()?, 1);
+            let second_value = source.get_item(1)?;
+            let second = second_value.cast::<PyTuple>()?;
+            assert_eq!(second.get_item(0)?.extract::<u64>()?, 41);
+            assert_eq!(parts.get_item(1)?.cast::<PyTuple>()?.len(), 0);
+            assert_eq!(parts.get_item(2)?.cast::<PyTuple>()?.len(), 0);
+            assert_eq!(parts.get_item(3)?.extract::<u64>()?, 2);
+            Ok(())
+        })
+    }
+
     fn fresh_source_authority(change: &str) -> PyResult<(TaskAuthority, AuthoritySnapshot)> {
         // Fresh observations have no replay target/MASK projection. Keep the
         // actual source, derived receipt, feedback and observer dependency roots.
         observed_source_authority(&format!(
             "nodes = (nodes[0], ('receipt', 'derived', ('source',), (), (), None, ('statement', 1)), nodes[4], nodes[5])\n\
              ids = tuple(node[0] for node in nodes)\n\
-             inputs = (*inputs[:3], (), nodes, inputs[5], (grant('publication'),), (grant('inference'),), (grant('training')+('current-request-fast-adaptation',),))\n\
+             inputs = (*inputs[:3], (), nodes, inputs[5], (grant('publication'),), (grant('inference'),), (grant('training')+('current-request-fast-adaptation',),), inputs[9])\n\
              {change}",
         ))
     }
@@ -13691,16 +18294,16 @@ mapping = [('source', 1, 7)]
                 "source admission excludes learning"),
             ("entry[1] = 'eval'; entry[8][1] = ['eval']", "source admission excludes learning"),
             ("inputs = (*inputs[:6], (), *inputs[7:])", "full dependency closure"),
-            ("inputs = (*inputs[:8], ())", "full dependency closure"),
-            ("inputs = (*inputs[:8], ((*inputs[8][0][:4], ('source',), *inputs[8][0][5:]),))",
+            ("inputs = (*inputs[:8], (), *inputs[9:])", "full dependency closure"),
+            ("inputs = (*inputs[:8], ((*inputs[8][0][:4], ('source',), *inputs[8][0][5:]),), *inputs[9:])",
                 "full dependency closure"),
-            ("inputs = (*inputs[:8], ((*inputs[8][0][:2], 'deny', *inputs[8][0][3:]),))",
+            ("inputs = (*inputs[:8], ((*inputs[8][0][:2], 'deny', *inputs[8][0][3:]),), *inputs[9:])",
                 "denied, expired, or revoked"),
-            ("inputs = (*inputs[:8], ((*inputs[8][0][:5], ('1970-01-01T00:00:01Z', 1_000_000), *inputs[8][0][6:]),))",
+            ("inputs = (*inputs[:8], ((*inputs[8][0][:5], ('1970-01-01T00:00:01Z', 1_000_000), *inputs[8][0][6:]),), *inputs[9:])",
                 "denied, expired, or revoked"),
             ("snapshot = (*snapshot[:4], ('training-revoke',))", "denied, expired, or revoked"),
             ("snapshot = (*snapshot[:4], ('publication-revoke',))", "denied, expired, or revoked"),
-            ("inputs = (*inputs[:8], ((*inputs[8][0][:7], 'durable-slow-consolidation'),))",
+            ("inputs = (*inputs[:8], ((*inputs[8][0][:7], 'durable-slow-consolidation'),), *inputs[9:])",
                 "immutable split or replay scope"),
         ] {
             let (authority, snapshot) = fresh_source_authority(change).unwrap();
@@ -13787,7 +18390,7 @@ mapping = [('source', 1, 7)]
     #[test]
     fn observed_request_local_source_does_not_inherit_durable_replay_permission() {
         let (authority, snapshot) = observed_source_authority(
-            "envelope[8] = ['current-request-fast-adaptation', 'durable-slow-consolidation']\nenvelope[13] = envelope[14] = True\nreplay = (replay_fixture('train'),)\ninputs = (*inputs[:3], replay, *inputs[4:8], (grant('training')+('durable-slow-consolidation',),))",
+            "envelope[8] = ['current-request-fast-adaptation', 'durable-slow-consolidation']\nenvelope[13] = envelope[14] = True\nreplay = (replay_fixture('train'),)\ninputs = (*inputs[:3], replay, *inputs[4:8], (grant('training')+('durable-slow-consolidation',),), *inputs[9:])",
         ).unwrap();
         assert!(authority.check_use("training", &snapshot, true).is_err());
     }
@@ -14059,13 +18662,17 @@ continuation = inspect.signature(SemanticTransitionController.bind_continuation)
 assert tuple(continuation.parameters) == (
     'self', 'task_use', 'parent', 'text_rows', 'text_row_count', 'selected_text',
     'active_rows', 'active_row_count', 'numerical_admissibility', 'tensors',
-    'producer_witness', 'consumer_stream', 'bank')
-for name in tuple(continuation.parameters)[2:-1]:
+    'producer_witness', 'consumer_stream', 'bank', 'numerical_blocks',
+    'model_schema_digest', 'model_identity')
+for name in tuple(continuation.parameters)[2:12]:
     parameter = continuation.parameters[name]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is inspect.Parameter.empty
 assert continuation.parameters['bank'].kind is inspect.Parameter.KEYWORD_ONLY
 assert continuation.parameters['bank'].default is None
+for name in ('numerical_blocks', 'model_schema_digest', 'model_identity'):
+    assert continuation.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+    assert continuation.parameters[name].default is None
 assert hasattr(SemanticTensorContentWitness, 'verify')
 for name in ('digest', 'pointer', 'status', 'identity', 'tensors', 'parent'):
     assert not hasattr(SemanticTensorContentWitness, name), name
@@ -14175,6 +18782,15 @@ for method in ('finish_inference', 'finish_refusal'):
     assert tuple(finish.parameters) == ('self', 'consumer_stream')
     assert finish.parameters['consumer_stream'].kind is inspect.Parameter.KEYWORD_ONLY
     assert finish.parameters['consumer_stream'].default is inspect.Parameter.empty
+for method in ('finish_recorded_training', 'finish_unselected_recorded_training'):
+    finish = inspect.signature(getattr(SemanticPolicyInvocation, method))
+    assert tuple(finish.parameters) == ('self', 'update_step', 'consumer_stream')
+    assert finish.parameters['consumer_stream'].kind is inspect.Parameter.KEYWORD_ONLY
+    assert finish.parameters['consumer_stream'].default is inspect.Parameter.empty
+finish = inspect.signature(SemanticRetainedReplayMember.finish_without_published_update)
+assert tuple(finish.parameters) == ('self', 'update_step')
+assert tuple(inspect.signature(SemanticRetainedReplayMember.confirm_published_target).parameters) == ('self',)
+assert tuple(inspect.signature(SemanticRetainedReplayMember.confirm_unpublished_target).parameters) == ('self', 'update_step')
 assert inspect.isgetsetdescriptor(SemanticPolicyInvocation.refusal)
 assert SemanticPolicyInvocation.refusal.__name__ == 'refusal'
 try:
@@ -14277,7 +18893,7 @@ else:
     #[test]
     fn one_training_use_cannot_union_incompatible_learning_purposes() {
         let (values, snapshot) = task_inputs(
-            "envelope[8]=['current-request-fast-adaptation','durable-slow-consolidation']; envelope[13]=True; envelope[14]=True\ninputs=inputs[:8]+((grant('fast')+('current-request-fast-adaptation',), grant('slow')+('durable-slow-consolidation',)),)",
+            "envelope[8]=['current-request-fast-adaptation','durable-slow-consolidation']; envelope[13]=True; envelope[14]=True\ninputs=inputs[:8]+((grant('fast')+('current-request-fast-adaptation',), grant('slow')+('durable-slow-consolidation',)),)+inputs[9:]",
         );
         let authority = TaskAuthority::parse(&values).unwrap();
         authority.check_use("inference", &snapshot, true).unwrap();
@@ -14294,7 +18910,7 @@ else:
             restored_snapshot.segment_end.micros,
             snapshot.segment_end.micros
         );
-        let identity = &values[3].sequence().unwrap()[0].fields(4).unwrap()[0];
+        let identity = &values[3].sequence().unwrap()[0].fields(5).unwrap()[1];
         assert_eq!(
             &ColdValue::from_canonical_bytes(&identity.canonical_bytes()).unwrap(),
             identity
@@ -14461,9 +19077,9 @@ else:
         let mut derived = observations.clone();
         derived.contributors[0].1 = None;
         assert!(authority.bind_native_reads(&derived, &[]).is_err());
-        let mut absent_query = observations.clone();
-        absent_query.contributors[0].0 = 2;
-        assert!(authority.bind_native_reads(&absent_query, &[]).is_err());
+        let mut outside_query = observations.clone();
+        outside_query.contributors[0].0 = 3;
+        assert!(authority.bind_native_reads(&outside_query, &[]).is_err());
         let (values, _) = task_inputs(&format!("{extra}\nnodes=nodes[:-1]+(('contra','derived',('original',),('target',),(),None,('support',1)),); inputs=inputs[:4]+(nodes,)+inputs[5:]"));
         assert!(TaskAuthority::parse(&values).is_err());
     }
@@ -14501,6 +19117,46 @@ else:
         );
         assert!(state.revalidate_activation(&authority, revoked).is_err());
         assert!(matches!(state.phase, TaskUsePhase::Refused));
+    }
+
+    #[test]
+    fn cold_arena_preparation_retains_selected_phase_without_allowing_execution() {
+        use super::checkpoint_task_phase;
+
+        let (_, snapshot) = task_inputs("");
+        let mut state = TaskUseState {
+            phase: TaskUsePhase::Segment("inference".into()),
+            snapshot,
+        };
+        let selected = checkpoint_task_phase(&state).unwrap();
+        state.begin_arena_preparation().unwrap();
+        assert_eq!(checkpoint_task_phase(&state).unwrap(), selected);
+        assert!(state.require_read().is_ok());
+        assert!(state.require_public_use().is_err());
+        state.finish_arena_preparation().unwrap();
+        assert_eq!(checkpoint_task_phase(&state).unwrap(), selected);
+        assert!(state.require_public_use().is_ok());
+    }
+
+    #[test]
+    fn cold_arena_authority_preserves_original_scope_and_replay_rows() {
+        use super::require_retained_arena_authority;
+
+        let (selected, _) = task_inputs("");
+        let mut candidate = selected.clone();
+        assert!(require_retained_arena_authority(&selected, &candidate).is_ok());
+        let mut rows = candidate[3].sequence().unwrap().to_vec();
+        rows.push(rows[0].clone());
+        candidate[3] = ColdValue::Sequence(rows);
+        assert!(require_retained_arena_authority(&selected, &candidate).is_ok());
+        candidate[3] = ColdValue::Sequence(Vec::new());
+        assert!(require_retained_arena_authority(&selected, &candidate).is_err());
+        candidate = selected.clone();
+        candidate[1] = ColdValue::Sequence(Vec::new());
+        assert!(require_retained_arena_authority(&selected, &candidate).is_err());
+        candidate = selected.clone();
+        candidate[2] = ColdValue::Sequence(Vec::new());
+        assert!(require_retained_arena_authority(&selected, &candidate).is_err());
     }
 
     #[test]
@@ -14914,6 +19570,31 @@ else:
     }
 
     #[test]
+    fn initial_prefill_is_exclusive_to_one_imported_task_scope() {
+        let (_, snapshot) = task_inputs("");
+        let mut state = TaskUseState {
+            phase: TaskUsePhase::Imported,
+            snapshot,
+        };
+        let scope = state.begin_initial_prefill().unwrap();
+        assert!(state.begin_initial_prefill().is_err());
+        assert!(state.require_public_use().is_err());
+        assert!(state.begin_build().is_err());
+        assert!(state.finish_initial_prefill(&Arc::new(())).is_err());
+        state.finish_initial_prefill(&scope).unwrap();
+        assert!(state.require_initial_prefill_ready(&scope).is_ok());
+        assert!(state.require_initial_prefill_ready(&Arc::new(())).is_err());
+        assert!(state.require_public_use().is_err());
+        assert!(state.finish_initial_prefill(&scope).is_err());
+        assert!(state.begin_build().is_err());
+        state.commit_initial_prefill(&scope).unwrap();
+        assert!(state.require_initial_prefill_ready(&scope).is_err());
+        assert!(state.begin_initial_prefill().is_err());
+        assert!(state.require_public_use().is_ok());
+        assert!(state.begin_build().is_ok());
+    }
+
+    #[test]
     fn tensor_content_handoff_detects_authority_refresh_and_refusal() {
         let (values, snapshot) = task_inputs("");
         let authority = TaskAuthority::parse(&values).unwrap();
@@ -15087,6 +19768,8 @@ for change in cases:
             r#"
 assert 'SemanticTransitionController' in globals(), 'native controller is missing'
 assert 'SemanticTransitionTaskUse' in globals(), 'native task-use handle is missing'
+assert hasattr(SemanticTransitionColdTask, 'task_content'), 'cold content read is missing'
+assert hasattr(SemanticTransitionColdTask, 'close'), 'fresh cold terminal release is missing'
 for invalid in (None, object(), {}, 1):
     try:
         SemanticTransitionController(invalid)
@@ -15102,6 +19785,33 @@ else:
     raise AssertionError('consumer minted its own task use')
 "#,
         );
+    }
+
+    #[test]
+    fn cold_and_imported_task_content_share_the_public_encoding() {
+        Python::initialize();
+        Python::attach(|py| {
+            let content = xlog_cuda::SemanticTaskContentIdentity {
+                query: xlog_cuda::Identity256::from_bytes([1; 32]),
+                theory_program: xlog_cuda::Identity256::from_bytes([2; 32]),
+                result: xlog_cuda::Identity256::from_bytes([3; 32]),
+            };
+            let read = super::task_content_read(
+                py,
+                (
+                    content,
+                    [
+                        xlog_cuda::SemanticTruth::Neither,
+                        xlog_cuda::SemanticTruth::True,
+                        xlog_cuda::SemanticTruth::Both,
+                    ],
+                ),
+            );
+            assert_eq!(read.0.bind(py).as_bytes(), &[1; 32]);
+            assert_eq!(read.1.bind(py).as_bytes(), &[2; 32]);
+            assert_eq!(read.2.bind(py).as_bytes(), &[3; 32]);
+            assert_eq!(read.3, (0, 1, 3));
+        });
     }
 
     #[test]

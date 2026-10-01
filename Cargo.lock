@@ -2214,6 +2214,7 @@ dependencies = [
  "cudarc",
  "getrandom 0.3.4",
  "libloading",
+ "serde_json",
  "sha2",
  "xlog-core",
  "xlog-logic",

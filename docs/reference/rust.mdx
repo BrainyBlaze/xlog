@@ -82,31 +82,78 @@ unconditioned or CPU fallback is substituted when validation fails.
 
 `xlog_cuda::SemanticTaskEvaluationSpec` binds two ordered admitted statement
 records, their allowed supports, a native `SemanticTaskProgram`, explicit
-`SemanticTaskScoring` coefficients, and two truth-eligibility masks. XLOG does
+`SemanticTaskScoring` coefficients, ordered task-local priority levels, and
+three truth-eligibility masks. XLOG does
 not prescribe the statement predicate, arguments, task answers, or reward
-weights. The resident transition ABI still has two query slots and two candidate
+weights. The resident transition ABI has three query slots and two candidate
 lanes; this is a capacity limit, not a task definition.
 
 Use `xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)`
-for a self-contained XLOG source program with two selected zero-arity queries.
+for a self-contained XLOG source program with three selected zero-arity queries.
 Source facts provide its concrete inputs. During cold task binding, the native
 owner runs the canonical GPU evaluator and derives expected Boolean truth from
 the completed query results. Python cannot inject an expected-answer array.
 This adapter does not resolve imports or accept external relation buffers.
 
-Scoring maximizes `correct_weight * correct_queries + all_correct_weight *
-all_correct - work_weight * measured_work` among eligible candidates, retaining
-the earlier candidate on ties. Return scoring separately prices improvement,
-refusals, and spent work. All six coefficients are required nonnegative `u32`
-values; combinations that can overflow the signed return are rejected.
+Selection first excludes candidates outside the three hard truth masks. It then
+compares ordered `SemanticTaskPriorityLevel` values lexicographically. Each
+`SemanticTaskPriorityGoal` names one native query, target truth and positive
+weight; its normalized truth-match progress is the candidate's zero-or-one
+match minus the acquired base's match for the current step. At most three
+levels and three distinct query goals fit the bank. Predictive query agreement,
+lower measured work, then earlier candidate index break ties. The six
+`SemanticTaskScoring` coefficients remain measurement and return inputs, not
+priority levels: return separately prices improvement, refusals and spent work.
+They are required nonnegative `u32` values; combinations that can overflow the
+signed return are rejected.
 Each nonzero four-bit mask permits truth value `n` through bit `n`.
 
 Task identity binds the exact program source, query mapping, observed result
-bytes, expected truths, scoring, masks, and admitted record selections.
+bytes, expected truths, scoring, ordered priorities, masks, and admitted record
+selections.
+Cold binding also freezes `SemanticTaskObjectiveLaw`: the native scoring law's
+full signed return bound, its outward-rounded FP64 interval, the nine FP32
+objective coefficients, and the structural-cost unit/cap. The task and checkpoint
+scoring identities bind the exact interval and coefficient bits. Both initial
+training-arena admission and post-restore arena transfer reject a different law;
+training-group membership does not choose or refit it. This law alone does not
+bound future group geometry or certify physical model gradients.
+The proposal's original native preflight consumes that retained return bound and
+the original baseline domains to enclose the ordered raw FP32 sum of 136 squared
+differences. Upward reward conversion, subtraction-magnitude enclosure, squaring
+and addition cover every admitted baseline and legal-count mask before drawing.
+Nonrepresentable raw arithmetic follows the existing numerical refusal; a later
+denominator or small critic coefficient cannot repair it. This check is not an
+actor/full gradient-error certificate, and does not change either coefficient law.
+`SemanticTaskEvaluationSpec::training_domain` additionally retains
+`SemanticTrainingDomain`: the hash-sorted sealed manifest identities and all four
+caps, the original window/padding/mask/block geometry, batch size, mask permille,
+arbitrary-width decimal training seed, and mask-policy identity. Native binding
+validates and retains this domain before actions. `None` explicitly denotes no
+prospective arena; training admission cannot invent a domain afterwards.
+`task_training_domain()` reads the same retained owner without a device transfer.
+The task and checkpoint scoring identities seal the entire domain. Initial and
+restored arena admission check the real rows against its manifest/seed/mask and
+packed geometry, separate episode/anchor record bounds, and each group's actual
+nonempty member count. The record bound is the minimum original records-per-input
+cap, never a storage or byte capacity. The application remains responsible for
+validating the sealed manifests and their hash/cap association. This domain binds
+future geometry but does not establish a uniform physical numerical certificate.
+The scoring identity binds immutable content independently of task-use authority,
+so a cold arena transfer can advance authority while retaining the evaluator.
 Restoration re-executes the observer and checks this identity. Observer failures
 poison the session; previous bindings cannot be reused after such a failure.
 Cold observer reads are outside the resident transition loop, and must not be
 reported as measured zero-transfer execution.
+
+For an admitted `SemanticProgramAdmission`, the resident proposal can insert a
+range-restricted rule with exactly two binary body atoms in either edit slot.
+Its typed result is `SemanticTransitionLane::program_rules`; graph support
+insertions remain in `SemanticTransitionLane::edits`. A rule attempt is retained
+in `program_rules` even if its lane later fails a hard constraint. Graph support
+insertion is unavailable for editable-program tasks because it would not change
+their program closure. Three task queries are evaluated from each candidate's
+actual closure, with rule and query receipts checked at observation.
 
 ### Supplied numerical policy
 
@@ -118,12 +165,21 @@ The `semantic-policy` Cargo feature requires all three build inputs:
   `policy_provider::numeric`.
 
 There is no default producer or digest. The build stages the verified header
-bytes and checks numerical ABI version 1: FP32 vectors of width 128, 18 fields,
-the field and adjoint layouts, and the forward and derivative operation
-signatures. These are explicit supported-ABI constraints, not support for an
+bytes and checks numerical ABI version 4: FP32 vectors of width 128, 18 fields,
+the field and adjoint layouts, and the five forward/derivative operations and
+their domain transfers. `PrimalEnvelope` has 24-byte stride: ordinary and
+underflow errors followed by an independent ideal magnitude. `DomainValue`
+has 32-byte stride in `(M,O,U,I)` order: actual magnitude, ordinary error,
+underflow error and independent ideal magnitude. `CoherentCotangent` has
+64-byte stride and carries actor/full labels alongside one actual FP32
+cotangent. Both labels use the rounding case of that full operation; the actor
+label is real-valued, not a second FP32 backward.
+
+These are explicit supported-ABI constraints, not support for an
 arbitrary model architecture. The selected header digest and namespace are
 included in restoration compatibility identity. Integrity and ABI checks do
-not establish numerical correctness or GPU equivalence.
+not establish numerical correctness or GPU equivalence. Older header versions
+and three-field domains are rejected, not converted.
 
 ## Breaking changes
 

@@ -296,6 +296,11 @@ impl<'a> SemanticMaterialReader<'a> {
         let len = self.count(1)?;
         self.take(len)
     }
+    pub(crate) fn take_rest(&mut self) -> &'a [u8] {
+        let value = self.remaining;
+        self.remaining = &[];
+        value
+    }
     pub(crate) fn finish(self) -> Result<(), SemanticHypergraphError> {
         if self.remaining.is_empty() {
             Ok(())
@@ -367,7 +372,6 @@ impl SemanticRootMaterial {
     }
 
     /// Resolves retained text once for the existing cold typed-admission path.
-    #[cfg(test)]
     pub(crate) fn admission_records(
         &self,
     ) -> Result<SemanticAdmissionRecords, SemanticHypergraphError> {
@@ -722,7 +726,7 @@ fn qualified_statement_identity(
 
 /// Reconstructs a decoder-selected target from the same retained typed input.
 /// Source references select values only; they never create an original target.
-fn material_statement_key(
+pub(crate) fn material_statement_key(
     admission: &SemanticAdmission,
     original: Option<u32>,
     reconstruction: &[u32; 10],
@@ -1107,6 +1111,7 @@ fn material_from_arena(
 pub struct SemanticAdmission {
     records: SemanticAdmissionRecords,
     symbols: symbol::SymbolSnapshot,
+    schema_bytes: Vec<u8>,
     schema_generation: Identity256,
     identity: Identity256,
     base: SemanticRootHandle,
@@ -1136,6 +1141,10 @@ impl SemanticAdmission {
     }
     pub const fn schema_generation(&self) -> Identity256 {
         self.schema_generation
+    }
+    /// Exact canonical preimage of the admitted schema generation.
+    pub fn schema_bytes(&self) -> &[u8] {
+        &self.schema_bytes
     }
     pub const fn identity(&self) -> Identity256 {
         self.identity
@@ -1201,11 +1210,6 @@ fn argument_type(argument: SemanticArgument) -> ScalarType {
         SemanticArgument::Bool(_) => ScalarType::Bool,
         SemanticArgument::Symbol(_) => ScalarType::Symbol,
     }
-}
-
-fn hash_sized_bytes(hash: &mut Sha256, bytes: &[u8]) {
-    hash.update((bytes.len() as u64).to_le_bytes());
-    hash.update(bytes);
 }
 
 // One private admission path. It owns the input, validates the complete closure
@@ -1324,26 +1328,28 @@ fn admit_semantic_records(
     }
     let symbols = symbol::snapshot_checked(&symbol_ids, limits.max_terms as usize, byte_budget)
         .map_err(|error| admission_error(error.to_string()))?;
-    let mut schema_hash = Sha256::new();
-    schema_hash.update(b"xlog.semantic.schema.v2\0");
-    schema_hash.update((predicates.len() as u32).to_le_bytes());
+    let mut schema_bytes = Vec::new();
+    schema_bytes.extend_from_slice(b"xlog.semantic.schema.v2\0");
+    schema_bytes.extend_from_slice(&(predicates.len() as u32).to_le_bytes());
     for predicate in predicates.values() {
-        schema_hash.update(predicate.predicate.0.to_le_bytes());
-        schema_hash.update([predicate.role.code()]);
-        schema_hash.update((predicate.schema.arity() as u32).to_le_bytes());
+        schema_bytes.extend_from_slice(&predicate.predicate.0.to_le_bytes());
+        schema_bytes.push(predicate.role.code());
+        schema_bytes.extend_from_slice(&(predicate.schema.arity() as u32).to_le_bytes());
         for (name, ty) in &predicate.schema.columns {
-            hash_sized_bytes(&mut schema_hash, name.as_bytes());
-            schema_hash.update([ty.to_code()]);
+            schema_bytes.extend_from_slice(&(name.len() as u64).to_le_bytes());
+            schema_bytes.extend_from_slice(name.as_bytes());
+            schema_bytes.push(ty.to_code());
         }
-        schema_hash.update((predicate.schema.key_columns.len() as u32).to_le_bytes());
+        schema_bytes.extend_from_slice(&(predicate.schema.key_columns.len() as u32).to_le_bytes());
         for &key in &predicate.schema.key_columns {
-            schema_hash.update((key as u32).to_le_bytes());
+            schema_bytes.extend_from_slice(&(key as u32).to_le_bytes());
         }
         for label in predicate.schema.sort_labels() {
-            hash_sized_bytes(&mut schema_hash, label.as_bytes());
+            schema_bytes.extend_from_slice(&(label.len() as u64).to_le_bytes());
+            schema_bytes.extend_from_slice(label.as_bytes());
         }
     }
-    let schema_generation = Identity256::from_bytes(schema_hash.finalize().into());
+    let schema_generation = Identity256::from_bytes(Sha256::digest(&schema_bytes).into());
     let mut symbol_text = symbols.entries().iter();
     let mut atoms = Vec::<[u8; 32]>::with_capacity(records.records.len());
     let mut encoded_records = Vec::with_capacity(records.records.len());
@@ -1426,6 +1432,7 @@ fn admit_semantic_records(
     Ok(SemanticAdmission {
         records,
         symbols,
+        schema_bytes,
         schema_generation,
         identity,
         base,
@@ -5935,6 +5942,31 @@ pub(crate) mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn admitted_schema_bytes_are_the_generation_preimage() {
+        let records = numeric_records();
+        let baseline = admit_numeric(records.clone());
+        assert!(!baseline.schema_bytes().is_empty());
+        assert_eq!(
+            Sha256::digest(baseline.schema_bytes()).as_slice(),
+            baseline.schema_generation().as_bytes()
+        );
+
+        let mut different_fact = records.clone();
+        different_fact.records[0].arguments[0] = SemanticArgument::U32(0);
+        assert_eq!(
+            admit_numeric(different_fact).schema_bytes(),
+            baseline.schema_bytes()
+        );
+
+        let mut different_schema = records;
+        different_schema.predicates[0].schema.key_columns.reverse();
+        assert_ne!(
+            admit_numeric(different_schema).schema_bytes(),
+            baseline.schema_bytes()
+        );
     }
 
     #[test]

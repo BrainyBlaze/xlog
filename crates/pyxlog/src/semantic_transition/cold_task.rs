@@ -1,6 +1,7 @@
 //! Canonical creator-thread construction for one fresh semantic task parent.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::thread::ThreadId;
 
 use pyo3::prelude::*;
@@ -16,6 +17,106 @@ use super::{invalid, xlog_err, PySemanticTransitionController, PySemanticTransit
 
 const MAX_POSITION: u64 = 262_144;
 const STATEMENT_RECORDS: (u32, u32, u32) = (0, 1, 2);
+
+pub(super) struct EditableTaskSource {
+    pub program: Arc<xlog_cuda::SemanticProgramAdmission>,
+    pub observer_source: String,
+}
+
+/// Recover executable source only from the canonical typed cold admission.
+/// This same path is used for fresh construction and checkpoint restoration;
+/// serialized rule words are never accepted as an alternative source.
+pub(super) fn editable_source_from_admission(
+    admission: &SemanticAdmissionRecords,
+) -> PyResult<Option<EditableTaskSource>> {
+    if admission.predicates.len() != 2
+        || admission.predicates[0].predicate != RelId(1)
+        || admission.predicates[0].role != SemanticRecordRole::Statement
+        || admission.predicates[1].predicate != RelId(2)
+        || admission.predicates[1].role != SemanticRecordRole::Qualifier
+        || admission.predicates[0].schema.sort_labels()
+            != [
+                "task-statement-ordinal",
+                "task-statement-text",
+                "truth4-admissibility-mask",
+            ]
+        || admission.predicates[1].schema.sort_labels() != ["task-input-kind", "task-input-text"]
+        || admission.predicates[0].schema.key_columns != [0]
+        || admission.predicates[1].schema.key_columns != [0]
+        || !admission.predicates[0]
+            .schema
+            .columns
+            .iter()
+            .map(|(name, scalar)| (name.as_str(), *scalar))
+            .eq([
+                ("ordinal", ScalarType::U32),
+                ("statement", ScalarType::Symbol),
+                ("truth_mask", ScalarType::U32),
+            ])
+        || !admission.predicates[1]
+            .schema
+            .columns
+            .iter()
+            .map(|(name, scalar)| (name.as_str(), *scalar))
+            .eq([("kind", ScalarType::U32), ("content", ScalarType::Symbol)])
+    {
+        return Ok(None);
+    }
+    if admission.records.len() != 6 || !admission.supports.is_empty() {
+        return Err(invalid(
+            "editable task admission has incomplete source records",
+        ));
+    }
+    let symbol = |argument: &SemanticArgument| -> PyResult<String> {
+        let SemanticArgument::Symbol(id) = argument else {
+            return Err(invalid("editable task source must be an admitted symbol"));
+        };
+        xlog_core::symbol::resolve_checked(*id)
+            .ok_or_else(|| invalid("editable task source symbol is unavailable"))
+    };
+    let mut statements = Vec::with_capacity(3);
+    for (index, record) in admission.records[..3].iter().enumerate() {
+        let [SemanticArgument::U32(ordinal), content, SemanticArgument::U32(mask)] =
+            record.arguments.as_slice()
+        else {
+            return Err(invalid(
+                "editable task statement has invalid typed arguments",
+            ));
+        };
+        if record.predicate != RelId(1)
+            || *ordinal != index as u32
+            || record.qualifiers != [3, 4, 5]
+            || !(1..=15).contains(mask)
+        {
+            return Err(invalid(
+                "editable task statement order or source links differ",
+            ));
+        }
+        statements.push(symbol(content)?);
+    }
+    let mut sources = Vec::with_capacity(3);
+    for (index, record) in admission.records[3..].iter().enumerate() {
+        let [SemanticArgument::U32(kind), content] = record.arguments.as_slice() else {
+            return Err(invalid("editable task input has invalid typed arguments"));
+        };
+        if record.predicate != RelId(2) || *kind != index as u32 || !record.qualifiers.is_empty() {
+            return Err(invalid(
+                "editable task input order differs from its admission",
+            ));
+        }
+        sources.push(symbol(content)?);
+    }
+    let program = xlog_gpu::logic::compile_positive_binary_task(
+        &sources[0],
+        &sources[1],
+        [&statements[0], &statements[1], &statements[2]],
+    )
+    .map_err(xlog_err)?;
+    Ok(Some(EditableTaskSource {
+        program: Arc::new(program),
+        observer_source: sources[2].clone(),
+    }))
+}
 
 #[derive(Clone)]
 struct FreshRecord {
@@ -45,6 +146,7 @@ pub(crate) struct PySemanticTransitionFreshParent {
     intent_effect: Vec<u8>,
     intent_entry_capacity: u64,
     intent_payload_capacity_bytes: usize,
+    acknowledgement_payload_capacity_bytes: usize,
     generations: (u64, u64, u64, u64),
     training_cursor: u64,
     training_rng: [u64; 4],
@@ -85,6 +187,10 @@ impl PySemanticTransitionFreshParent {
         metadata.set_item(
             "intent_payload_capacity_bytes",
             self.intent_payload_capacity_bytes,
+        )?;
+        metadata.set_item(
+            "acknowledgement_payload_capacity_bytes",
+            self.acknowledgement_payload_capacity_bytes,
         )?;
         metadata.set_item("model_generation", self.generations.0)?;
         metadata.set_item("policy_generation", self.generations.1)?;
@@ -173,12 +279,16 @@ pub(crate) struct PySemanticTransitionColdTask {
     session: Py<PySemanticTransitionSession>,
     controller: Py<PySemanticTransitionController>,
     parent: Py<PySemanticTransitionFreshParent>,
+    content: (
+        xlog_cuda::SemanticTaskContentIdentity,
+        [xlog_cuda::SemanticTruth; 3],
+    ),
 }
 
 #[pymethods]
 impl PySemanticTransitionColdTask {
     #[new]
-    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng))]
+    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the cold producer receives independent native resource budgets"
@@ -202,6 +312,7 @@ impl PySemanticTransitionColdTask {
         intent_effect: &Bound<'_, PyAny>,
         intent_entry_capacity: u64,
         intent_payload_capacity_bytes: usize,
+        acknowledgement_payload_capacity_bytes: usize,
         authority_decisions_capacity_bytes: usize,
         generations: (u64, u64, u64, u64),
         training_cursor: u64,
@@ -226,12 +337,21 @@ impl PySemanticTransitionColdTask {
             &intent_effect,
             intent_entry_capacity,
             intent_payload_capacity_bytes,
+            acknowledgement_payload_capacity_bytes,
             authority_decisions_capacity_bytes,
             generations.0,
             rng,
         )?;
-        xlog_gpu::logic::SemanticLogicTaskProgram::compile(observer_program.clone(), [0, 1, 2])
-            .map_err(xlog_err)?;
+        let statement_records = [
+            STATEMENT_RECORDS.0,
+            STATEMENT_RECORDS.1,
+            STATEMENT_RECORDS.2,
+        ];
+        let mut program = xlog_gpu::logic::SemanticLogicTaskProgram::compile(
+            observer_program.clone(),
+            statement_records.map(|record| record as usize),
+        )
+        .map_err(xlog_err)?;
 
         let task_digest = task_digest(
             &initial_theory,
@@ -275,6 +395,7 @@ impl PySemanticTransitionColdTask {
                 intent_effect,
                 intent_entry_capacity,
                 intent_payload_capacity_bytes,
+                acknowledgement_payload_capacity_bytes,
                 generations,
                 training_cursor,
                 training_rng,
@@ -285,16 +406,21 @@ impl PySemanticTransitionColdTask {
                 records,
             },
         )?;
-        let session = Py::new(
-            py,
-            PySemanticTransitionSession::from_admission(
-                admission,
-                capacities,
-                admission_limits,
-                device_ordinal,
-                memory_bytes,
-            )?,
+        let native_session = PySemanticTransitionSession::from_admission(
+            admission,
+            capacities,
+            admission_limits,
+            device_ordinal,
+            memory_bytes,
         )?;
+        if let Some(editable) = native_session.editable_program.as_ref() {
+            program = program.with_editable_program(Arc::clone(editable));
+        }
+        let content = native_session
+            .owner()?
+            .observe_cold_task_content(statement_records, &[], &program)
+            .map_err(xlog_err)?;
+        let session = Py::new(py, native_session)?;
         let controller = Py::new(
             py,
             PySemanticTransitionController::new(py, session.clone_ref(py))?,
@@ -303,25 +429,41 @@ impl PySemanticTransitionColdTask {
             session,
             controller,
             parent,
+            content,
         })
     }
 
     #[getter]
     fn session(&self, py: Python<'_>) -> PyResult<Py<PySemanticTransitionSession>> {
-        self.session.borrow(py).require_creator()?;
+        self.session.borrow(py).owner()?;
         Ok(self.session.clone_ref(py))
     }
 
     #[getter]
     fn controller(&self, py: Python<'_>) -> PyResult<Py<PySemanticTransitionController>> {
-        self.session.borrow(py).require_creator()?;
+        self.session.borrow(py).owner()?;
         Ok(self.controller.clone_ref(py))
     }
 
     #[getter]
     fn parent(&self, py: Python<'_>) -> PyResult<Py<PySemanticTransitionFreshParent>> {
-        self.session.borrow(py).require_creator()?;
+        self.session.borrow(py).owner()?;
         Ok(self.parent.clone_ref(py))
+    }
+
+    /// Terminally release this observed-only fresh CUDA Session before a
+    /// restored Session is allocated. Immutable task content and statement
+    /// ordinals remain readable; saved Session/controller aliases cannot run.
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        self.session.borrow(py).release_observed_cold()
+    }
+
+    /// Return content observed by the native cold task before final import.
+    /// Final import must reproduce these identities and objective truths.
+    #[getter]
+    fn task_content(&self, py: Python<'_>) -> PyResult<super::TaskContentRead> {
+        self.session.borrow(py).require_creator()?;
+        Ok(super::task_content_read(py, self.content))
     }
 
     #[getter]
@@ -419,6 +561,7 @@ fn validate_parent_geometry(
     intent_effect: &[u8],
     intent_entry_capacity: u64,
     intent_payload_capacity_bytes: usize,
+    acknowledgement_payload_capacity_bytes: usize,
     authority_decisions_capacity_bytes: usize,
     model_generation: u64,
     rng: (u64, u8, u32),
@@ -453,6 +596,7 @@ fn validate_parent_geometry(
         || (intent_effect.len() as u64)
             .checked_add(final_intent_payload_bytes)
             .is_none_or(|needed| needed > intent_payload_capacity_bytes as u64)
+        || acknowledgement_payload_capacity_bytes == 0
         || authority_decisions_capacity_bytes == 0
     {
         return Err(invalid(
@@ -651,7 +795,6 @@ fn fresh_records(
         fresh_record(26, "rng", task_digest, &rng_detail),
         fresh_record(27, "empty-replay-index", task_digest, &[]),
         fresh_record(28, "empty-replay-payload", task_digest, &[]),
-        fresh_record(32, "empty-acknowledgements", task_digest, &[]),
         fresh_record(34, "task-goal", task_digest, &generation_detail),
         fresh_record(35, "fresh-world-root", task_digest, &[]),
         fresh_record(36, "empty-edit-journal", task_digest, &[]),
@@ -674,4 +817,31 @@ fn initial_role_counts() -> [u64; 55] {
         counts[role as usize - 1] = 0;
     }
     counts
+}
+
+#[cfg(test)]
+mod editable_source_tests {
+    use super::{editable_source_from_admission, task_admission};
+
+    #[test]
+    fn fresh_and_restored_admissions_recover_the_same_canonical_program() {
+        let theory = "pred p(u32, u32).\npred q(u32, u32).\npred t(u32, u32).\n";
+        let facts = "p(1, 2).\nq(2, 3).\n";
+        let observer = "pred t(u32, u32).\nt(1, 3).\n?- t(1, 3).\n?- t(1, 4).\n?- t(4, 3).\n";
+        let statements = [
+            ("t(1, 3)".to_owned(), 15),
+            ("t(1, 4)".to_owned(), 15),
+            ("t(4, 3)".to_owned(), 15),
+        ];
+        let admission = task_admission(theory, facts, observer, &statements).unwrap();
+        let source = editable_source_from_admission(&admission).unwrap().unwrap();
+        assert_eq!(source.observer_source, observer);
+        assert_eq!(source.program.predicate_count, 3);
+        assert_eq!(source.program.initial_facts.len(), 2);
+        assert_eq!(source.program.queries[0].first, 1);
+
+        let mut invalid = admission;
+        invalid.records[0].qualifiers.clear();
+        assert!(editable_source_from_admission(&invalid).is_err());
+    }
 }

@@ -2346,6 +2346,34 @@ impl CapturedCudaGraph {
         })
     }
 
+    /// Materialize graph-owned device resources before the first replay without
+    /// executing any node. A failed or uncertain upload keeps the graph owner
+    /// behind its completion fence instead of releasing captured allocations.
+    pub(crate) fn upload_cold(&self, stream: &Arc<CudaStream>) -> Result<()> {
+        let _ordinary = reserve_uncaptured_stream(stream).map_err(|error| {
+            XlogError::Kernel(format!("CUDA graph upload admission failed: {error}"))
+        })?;
+        let mut execution = self
+            .execution
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.require_replay(stream, &execution)?;
+        self.context.bind_to_thread().map_err(|error| {
+            XlogError::Kernel(format!("CUDA graph upload context failed: {error}"))
+        })?;
+        execution
+            .completion
+            .submit(stream, None, || {
+                // SAFETY: the executable, context, and original stream remain
+                // owned for the completion fence's entire lifetime.
+                unsafe { sys::cuGraphUpload(self.exec, stream.cu_stream()).result() }
+            })
+            .map_err(|error| XlogError::Kernel(format!("CUDA graph upload failed: {error}")))?;
+        execution.completion.wait().map_err(|error| {
+            XlogError::Kernel(format!("CUDA graph upload completion failed: {error}"))
+        })
+    }
+
     /// Replay inside an existing admission without acquiring an overlapping group
     /// or a new capture pin.
     pub fn launch_in(&self, enqueue: &crate::launch::CudaEnqueue<'_>) -> Result<()> {

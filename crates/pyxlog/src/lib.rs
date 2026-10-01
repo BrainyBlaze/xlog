@@ -1252,6 +1252,9 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<semantic_transition::cold_task::PySemanticTransitionColdTask>()?;
     m.add_class::<semantic_transition::cold_task::PySemanticTransitionFreshParent>()?;
     m.add_class::<semantic_transition::PySemanticTransitionTaskUse>()?;
+    m.add_class::<semantic_transition::PySemanticInitialPrefillStage>()?;
+    m.add_class::<semantic_transition::PySemanticInitialPrefillContentWitness>()?;
+    m.add_class::<semantic_transition::PySemanticInitialPrefillReceipt>()?;
     m.add_class::<semantic_transition::PySemanticPublishedParent>()?;
     m.add_class::<semantic_transition::PySemanticTransitionRestoredCheckpoint>()?;
     m.add_class::<semantic_transition::PyNativeTensorAllocation>()?;
@@ -1269,6 +1272,8 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticCompletedActionLane>()?;
     #[cfg(feature = "semantic-policy")]
+    m.add_class::<semantic_transition::PySemanticCompletedTheoryDelta>()?;
+    #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticCompletedTaskFacts>()?;
     #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticCompletedLaneOutcome>()?;
@@ -1283,6 +1288,8 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<semantic_transition::PySemanticModelForwardWitness>()?;
     #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticPolicyInvocation>()?;
+    #[cfg(feature = "semantic-policy")]
+    m.add_class::<semantic_transition::PySemanticRetainedReplayMember>()?;
     m.add_class::<relation_metadata::RelationEvidence>()?;
     m.add_class::<LogicQueryResult>()?;
     m.add_class::<LogicEvalResult>()?;
