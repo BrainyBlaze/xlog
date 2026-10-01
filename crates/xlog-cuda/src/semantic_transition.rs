@@ -29768,9 +29768,9 @@ mod tests {
                 &mut component_baselines,
             )
             .unwrap();
-        let mut original_logit = logits.view().slice(0..1);
-        let mut original_support = support.view().slice(0..1);
-        let mut original_parameter = parameters.view().slice(0..1);
+        let original_logit = logits.view().slice(0..1);
+        let original_support = support.view().slice(0..1);
+        let original_parameter = parameters.view().slice(0..1);
         let layouts = policy_numerical_producer_layouts(
             session.codebooks.input_cells,
             layout.parameter_cells,
@@ -29869,15 +29869,21 @@ mod tests {
             before_policy_binding,
             "policy binding must not upload state or immutable catalogue metadata"
         );
-        provider
-            .htod_sync_copy_into_tracked(&[9.0], &mut original_logit)
-            .unwrap();
-        provider
-            .htod_sync_copy_into_tracked(&[0u8], &mut original_support)
-            .unwrap();
-        provider
-            .htod_sync_copy_into_tracked(&[9.0], &mut original_parameter)
-            .unwrap();
+        // Original captured producers remain immutable through final use.
+        // Distinct device banks prove that the policy owns its snapshots.
+        let policy = session.policy.as_ref().unwrap();
+        assert_ne!(
+            policy.text_logits.device_ptr_value(),
+            original_logit.device_ptr_value()
+        );
+        assert_ne!(
+            session.support.device_ptr_value(),
+            original_support.device_ptr_value()
+        );
+        assert_ne!(
+            policy.parameters.device_ptr_value(),
+            original_parameter.device_ptr_value()
+        );
         let read = |view: crate::memory::DeviceMemoryView<f32>| {
             provider.device().inner().dtoh_sync_copy(&view).unwrap()[0]
         };
