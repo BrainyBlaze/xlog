@@ -755,14 +755,15 @@ fn resolve_replay_checkpoint_referents(
             native
                 .material
                 .verify_initial_prefill_checkpoint_source(
-                    child
-                        .bytes
-                        .as_deref()
-                        .expect("recovered prefill has original bytes"),
-                    replay_digest_identity(&child.identity)?,
+                    (
+                        child
+                            .bytes
+                            .as_deref()
+                            .expect("recovered prefill has original bytes"),
+                        replay_digest_identity(&child.identity)?,
+                    ),
                     row.action_identity()?,
-                    &manifest.native,
-                    &manifest.initial_prefill,
+                    (&manifest.native, &manifest.initial_prefill),
                     Identity256::from_bytes(binding.identity),
                     binding.epoch,
                     binding.content_identity(),

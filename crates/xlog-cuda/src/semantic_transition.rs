@@ -264,6 +264,7 @@ impl SemanticTaskScoring {
         })
     }
 
+    #[cfg(feature = "semantic-policy")]
     fn completed_law_bytes(
         self,
         task_identity: Identity256,
@@ -6360,13 +6361,13 @@ impl SemanticReplayMaterial {
 
     /// The compact reference is useful only if the full original checkpoint
     /// carries precisely the source publication and prefill bytes in this child.
+    /// Keep the child bytes with their seal and the original checkpoint sections
+    /// together; the task binding belongs to that original checkpoint.
     pub fn verify_initial_prefill_checkpoint_source(
         &self,
-        child: &[u8],
-        child_identity: Identity256,
+        (child, child_identity): (&[u8], Identity256),
         action_identity: Identity256,
-        original_native: &[u8],
-        original_prefill_section: &[u8],
+        (original_native, original_prefill_section): (&[u8], &[u8]),
         task_identity: Identity256,
         task_epoch: u64,
         task_content: SemanticTaskContentIdentity,
@@ -9259,13 +9260,6 @@ struct PreparedSegmentState {
     active: bool,
     finished: bool,
     capturing: bool,
-    #[cfg_attr(
-        not(any(test, feature = "semantic-policy")),
-        expect(
-            dead_code,
-            reason = "submission is owned by the semantic-policy graph path"
-        )
-    )]
     submitted: bool,
     completed: bool,
 }
@@ -13276,6 +13270,7 @@ pub struct SemanticTransitionWork {
 }
 
 impl SemanticTransitionWork {
+    #[cfg(any(test, feature = "semantic-policy"))]
     fn raw_structural_cost(self) -> u64 {
         self.edit_commands + self.added_supports + self.defined_truth_changes
     }
@@ -22481,13 +22476,12 @@ impl SemanticTransitionSession {
                 .filter(|range| matches!(range.role, 18..=25))
             {
                 let (owner, _) = storage.model_memory.location(range.role, range.index)?;
-                if owner == allocation_index {
-                    if selected_slot
+                if owner == allocation_index
+                    && selected_slot
                         .replace(range.storage_slot as usize)
                         .is_some_and(|prior| prior != range.storage_slot as usize)
-                    {
-                        return Err(SemanticTransitionError::ObservationMismatch);
-                    }
+                {
+                    return Err(SemanticTransitionError::ObservationMismatch);
                 }
             }
             let slot = selected_slot.unwrap_or(slots[(lease.identity.word & 1) as usize]);
@@ -23210,13 +23204,12 @@ impl SemanticTransitionSession {
                 .filter(|range| matches!(range.role, 18..=25))
             {
                 let (owner, _) = storage.model_memory.location(range.role, range.index)?;
-                if owner == allocation_index {
-                    if selected_slot
+                if owner == allocation_index
+                    && selected_slot
                         .replace(range.storage_slot as usize)
                         .is_some_and(|prior| prior != range.storage_slot as usize)
-                    {
-                        return Err(SemanticTransitionError::ObservationMismatch);
-                    }
+                {
+                    return Err(SemanticTransitionError::ObservationMismatch);
                 }
             }
             let slot = selected_slot.unwrap_or(slots[(lease.identity.word & 1) as usize]);
