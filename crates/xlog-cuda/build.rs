@@ -552,6 +552,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        kernels_dir.join("semantic_policy_domains.cuh").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         kernels_dir.join("totalorder.cuh").display()
     );
 
@@ -849,7 +853,7 @@ mod semantic_policy_build_tests {
                     true,
                 ),
                 (
-                    fixture.replace("abi_version = 1", "abi_version = 2"),
+                    fixture.replace("abi_version = 4", "abi_version = 3"),
                     "supplied_policy::numeric",
                     false,
                 ),
@@ -875,6 +879,11 @@ mod semantic_policy_build_tests {
                 ),
                 (
                     fixture.replace("void advance_vjp(", "void missing_vjp("),
+                    "supplied_policy::numeric",
+                    false,
+                ),
+                (
+                    fixture.replace("void domain_advance_vjp(", "void missing_domain_vjp("),
                     "supplied_policy::numeric",
                     false,
                 ),

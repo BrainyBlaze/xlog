@@ -463,16 +463,26 @@ __device__ void sha256(Bytes input, uint64_t length, uint64_t *output, NativeWor
     for (uint64_t block = 0; block < block_count; ++block) {
         charge_native(work, NativeWorkEvent::ShaBlock, 1);
         uint32_t schedule[64];
-        for (uint32_t index = 0; index < 16; ++index) {
-            uint32_t word = 0;
-            for (uint32_t byte = 0; byte < 4; ++byte) {
-                uint64_t offset = block * 64 + index * 4 + byte;
-                uint8_t value = offset < length ? input[offset] :
-                    offset == length ? 0x80 : offset >= length_offset ?
-                    uint8_t(bit_length >> ((block_count * 64 - 1 - offset) * 8)) : 0;
-                word = (word << 8) | value;
+        const uint64_t block_offset = block * 64;
+        if (block_offset <= length && length - block_offset >= 64) {
+            for (uint32_t index = 0; index < 16; ++index) {
+                const uint64_t offset = block_offset + index * 4;
+                schedule[index] = uint32_t(input[offset]) << 24 |
+                    uint32_t(input[offset + 1]) << 16 |
+                    uint32_t(input[offset + 2]) << 8 | uint32_t(input[offset + 3]);
             }
-            schedule[index] = word;
+        } else {
+            for (uint32_t index = 0; index < 16; ++index) {
+                uint32_t word = 0;
+                for (uint32_t byte = 0; byte < 4; ++byte) {
+                    const uint64_t offset = block_offset + index * 4 + byte;
+                    const uint8_t value = offset < length ? input[offset] :
+                        offset == length ? 0x80 : offset >= length_offset ?
+                        uint8_t(bit_length >> ((block_count * 64 - 1 - offset) * 8)) : 0;
+                    word = (word << 8) | value;
+                }
+                schedule[index] = word;
+            }
         }
         for (uint32_t index = 16; index < 64; ++index) {
             const uint32_t a = schedule[index - 15];

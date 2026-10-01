@@ -1410,6 +1410,7 @@ fn public_session_evaluates_actual_carry_edits_and_task_local_refusals() {
         priority_levels: vec![],
         admissible_truth_masks: [7, 7, 7],
         actor_eligible: true,
+        training_domain: None,
     };
     #[derive(Debug)]
     struct FailingProgram;
