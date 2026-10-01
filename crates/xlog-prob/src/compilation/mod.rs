@@ -133,7 +133,7 @@ pub(crate) struct CircuitCompilationContext<'a> {
 
 fn increment_circuit_event(counter: &AtomicU64, event: &str) -> Result<()> {
     counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             value.checked_add(1)
         })
         .map(|_| ())

@@ -245,7 +245,7 @@ impl AllocationReclamation {
             ));
         }
         accounting
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                 value.checked_add(bytes)
             })
             .map_err(|_| ResourceError::Driver("pending allocation accounting overflow".into()))?;
@@ -311,7 +311,7 @@ impl AllocationReclamation {
             let resource = state.resource.take();
             if let Some((accounting, bytes)) = &state.pending {
                 accounting
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                         value.checked_sub(*bytes)
                     })
                     .map_err(|_| {
@@ -2727,12 +2727,12 @@ impl GpuMemoryManager {
     }
 
     fn record_deallocation_failure(&self, bytes: u64) {
-        let _ = self.accounting.deallocation_failure_count.fetch_update(
+        let _ = self.accounting.deallocation_failure_count.try_update(
             Ordering::SeqCst,
             Ordering::SeqCst,
             |current| Some(current.saturating_add(1)),
         );
-        let _ = self.accounting.deallocation_failure_bytes.fetch_update(
+        let _ = self.accounting.deallocation_failure_bytes.try_update(
             Ordering::SeqCst,
             Ordering::SeqCst,
             |current| Some(current.saturating_add(bytes)),

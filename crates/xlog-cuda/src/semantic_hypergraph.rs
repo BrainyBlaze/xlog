@@ -2713,7 +2713,7 @@ impl CudaKernelProvider {
                 detail: "resident stream id is not live in provider runtime".into(),
             })?;
         let owner = NEXT_OWNER_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1).filter(|next| *next != 0)
             })
             .map_err(|_| SemanticHypergraphError::GenerationExhausted {

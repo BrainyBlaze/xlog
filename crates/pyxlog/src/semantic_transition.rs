@@ -5998,7 +5998,7 @@ struct TaskIssuance {
 impl TaskIssuance {
     fn issue(counter: Arc<AtomicU64>) -> PyResult<Self> {
         let previous = counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
                 generation.checked_add(1)
             })
             .map_err(|_| invalid("native task issuance generation is exhausted"))?;
