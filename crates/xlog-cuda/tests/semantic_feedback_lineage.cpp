@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cfenv>
 #include <csignal>
 #include <cstdint>
 #include <cstring>
@@ -43,8 +44,34 @@ static double __dadd_rn(double a, double b) { return a+b; }
 static double __dsub_rn(double a, double b) { return a-b; }
 static double __ddiv_rn(double a, double b) { return a/b; }
 static double __dmul_rn(double a, double b) { return a*b; }
+template<typename Result,typename Operation>
+static Result host_rounded(int rounding,Operation operation) {
+    const int original = std::fegetround();
+    if (original == -1 || std::fesetround(rounding) != 0) std::abort();
+    volatile Result result = operation();
+    if (std::fesetround(original) != 0) std::abort();
+    return result;
+}
+static double __dmul_ru(double a, double b) {
+    return host_rounded<double>(FE_UPWARD,[&]{return a*b;});
+}
 static double __ull2double_rn(uint64_t value) { return static_cast<double>(value); }
 #ifdef XLOG_SEMANTIC_POLICY
+static double __dadd_ru(double a,double b) { return host_rounded<double>(FE_UPWARD,[&]{return a+b;}); }
+static double __dadd_rd(double a,double b) { return host_rounded<double>(FE_DOWNWARD,[&]{return a+b;}); }
+static double __dmul_rd(double a,double b) { return host_rounded<double>(FE_DOWNWARD,[&]{return a*b;}); }
+static double __dsub_rd(double a,double b) { return host_rounded<double>(FE_DOWNWARD,[&]{return a-b;}); }
+static double __ddiv_ru(double a,double b) { return host_rounded<double>(FE_UPWARD,[&]{return a/b;}); }
+static double __ddiv_rd(double a,double b) { return host_rounded<double>(FE_DOWNWARD,[&]{return a/b;}); }
+static double __ull2double_ru(uint64_t value) { return host_rounded<double>(FE_UPWARD,[&]{return double(value);}); }
+static double __ull2double_rd(uint64_t value) { return host_rounded<double>(FE_DOWNWARD,[&]{return double(value);}); }
+static float __ull2float_ru(uint64_t value) { return host_rounded<float>(FE_UPWARD,[&]{return float(value);}); }
+static float __double2float_ru(double value) { return host_rounded<float>(FE_UPWARD,[&]{return float(value);}); }
+static float __double2float_rd(double value) { return host_rounded<float>(FE_DOWNWARD,[&]{return float(value);}); }
+static float __fadd_ru(float a,float b) { return host_rounded<float>(FE_UPWARD,[&]{return a+b;}); }
+static float __fmul_ru(float a,float b) { return host_rounded<float>(FE_UPWARD,[&]{return a*b;}); }
+static float __fdiv_ru(float a,float b) { return host_rounded<float>(FE_UPWARD,[&]{return a/b;}); }
+static float __fdiv_rd(float a,float b) { return host_rounded<float>(FE_DOWNWARD,[&]{return a/b;}); }
 static double __ll2double_rn(long long value) { return static_cast<double>(value); }
 static float __ll2float_rn(long long value) { return static_cast<float>(value); }
 static float __ull2float_rn(uint64_t value) { return static_cast<float>(value); }
@@ -54,7 +81,7 @@ static float __fsub_rn(float a, float b) { return a-b; }
 static float __fmul_rn(float a, float b) { return a*b; }
 static float __fdiv_rn(float a, float b) { return a/b; }
 #endif
-template<typename T> T atomicAdd(T* target, T value) { T old=*target; *target+=value; return old; }
+template<typename T,typename Value> T atomicAdd(T* target, Value value) { T old=*target; *target+=T(value); return old; }
 template<typename T> T atomicOr(T* target, T value) { T old=*target; *target|=value; return old; }
 template<typename T> T atomicExch(T* target, T value) { T old=*target; *target=value; return old; }
 using cudaGraphConditionalHandle = uint64_t;
@@ -90,7 +117,7 @@ static void install_fatal_signal_backtraces() {
 }
 
 static void device_step_admission_preserves_refused_publications() {
-    for(uint64_t scenario=0;scenario<11;++scenario) {
+    for(uint64_t scenario=0;scenario<12;++scenario) {
         PublicationBank banks[2]{};PublicationControl control{};PublicationLease lease{};
         control.abi=1;control.word=2;control.instance[0]=41;
         for(uint64_t bank=0;bank<2;++bank) {
@@ -112,6 +139,7 @@ static void device_step_admission_preserves_refused_publications() {
         if(scenario==8){requested_kind=3;expected=1;}
         if(scenario==9){requested_kind=0;expected=1;}
         if(scenario==10){control.reader_counts[0]=UINT64_MAX;expected=1;}
+        if(scenario==11){banks[0].header.terminal=1;banks[0].header.fuel=1;expected=5;}
         const auto before_control=control;std::array<PublicationBank,2> before_banks{banks[0],banks[1]};
         semantic_publication_step_admit(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease),
             requested_kind,reinterpret_cast<uint64_t>(&conditional),0);
@@ -137,7 +165,7 @@ static void device_step_lease_tracks_current_parent_and_drain() {
     }
     for(uint64_t invocation=0;invocation<4;++invocation) {
         if(invocation){control.word=3;banks[1].header.terminal=invocation==2 ? 1 : 0;}
-        if(invocation>=2)banks[1].header.fuel=1;
+        if(invocation==3)banks[1].header.fuel=1;
         uint64_t conditional=0;
         semantic_publication_step_admit(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease),
             invocation==3 ? 2 : 1,reinterpret_cast<uint64_t>(&conditional),0);
@@ -567,7 +595,7 @@ static void task_preflight_accepts_all_four_truth_states() {
 
 static void resident_numerical_refusal_precedes_publication();
 
-static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
+static void unbounded_policy_refusal_preserves_acquired_publication() {
     static constexpr uint64_t model_schema_begin=104;
     static constexpr std::array<uint8_t,8> model_schema{44,0,0x80,0xff,0,0,0,0};
     static constexpr uint64_t model_contract_bytes=model_schema_begin+model_schema.size();
@@ -686,39 +714,37 @@ static void ordinary_publication_refusal_releases_gate_and_preserves_base() {
             "publication refusal fixture could not authenticate its selected model descriptor");
         PublicationLease lease{};descriptor.publication.control=reinterpret_cast<uint64_t>(&control);
         descriptor.publication.lease=reinterpret_cast<uint64_t>(&lease);
+        descriptor.text=services.binding();
         std::array<float,4*128> z{};std::array<float,128*128> recurrence{};
         std::array<float,18*128> positions{};std::array<float,2*37*128> recurrent{};
-        descriptor.text=services.binding();descriptor.policy.z=reinterpret_cast<uint64_t>(z.data());
+        descriptor.policy.z=reinterpret_cast<uint64_t>(z.data());
         descriptor.policy.recurrence=reinterpret_cast<uint64_t>(recurrence.data());
         descriptor.policy.positions=reinterpret_cast<uint64_t>(positions.data());
         descriptor.policy.recurrent=reinterpret_cast<uint64_t>(recurrent.data());
         for(auto& field:descriptor.policy.fields) { field.cardinality=1;field.null_category=0; }
         execution.support[32]=0;
-#ifdef XLOG_SEMANTIC_POLICY
         if(nonfinite)z[0]=NAN;
-#else
-        if(nonfinite)continue;
-#endif
         require_content_trap([&] {
             control.reader_gate=1;
             execution.support[0]=2;semantic_transition_execute(descriptor);
         },"malformed inactive TEXT support reached publication begin");
         descriptor.publication.operation=2;semantic_transition_execute(descriptor);descriptor.publication.operation=0;
         require(lease.active==1 && !lease.status,"publication refusal did not acquire its actual reader");
-        const auto original_bank=bank;
+        const auto original_bank=bank,original_inactive=inactive;
         semantic_transition_execute(descriptor);
-        if(execution.state.status!=(nonfinite ? 5 : 2) || control.refusal) {
-            std::cerr<<"ordinary publication refusal did not traverse the validated publication begin path: state.status="
+        if(execution.state.status!=5 || control.refusal) {
+            std::cerr<<"unbounded policy input did not refuse before publication begin: state.status="
                 <<execution.state.status<<", control.refusal="<<control.refusal<<", nonfinite="<<nonfinite<<'\n';
             std::exit(1);
         }
         require(control.word==lease.word && control.reader_gate==0 && lease.active==1 &&
-            control.reader_counts[lease.bank]==1 && !inactive.header.abi && std::memcmp(&bank,&original_bank,sizeof(bank))==0,
-            "ordinary refusal published effects, leaked its gate, or changed the acquired bank");
+            control.reader_counts[lease.bank]==1 && std::memcmp(&inactive,&original_inactive,sizeof(inactive))==0 &&
+            std::memcmp(&bank,&original_bank,sizeof(bank))==0,
+            "unbounded policy refusal published effects, leaked its gate, or changed a retained bank");
         const auto& cleanup=execution.state.cleanup_receipts[0];
-        require(cleanup.words[0]==semantic_graph::kOk && cleanup.words[3]==sealed.words[34] &&
-            cleanup.words[4]==sealed.words[35]+1 && cleanup.words[39]==91 && !execution.state.retired_roots_mask,
-            "ordinary refusal lost the actual exclusive inactive-root retirement receipt");
+        const semantic_graph::Receipt empty{};
+        require(std::memcmp(&cleanup,&empty,sizeof(empty))==0 && !execution.state.retired_roots_mask,
+            "unbounded policy refusal retired an inactive root before publication begin");
         execution.check_protected_root();
         descriptor.publication.operation=3;semantic_transition_execute(descriptor);
         require(!lease.status && !lease.active && !control.reader_counts[0] && !control.reader_gate,
@@ -1155,13 +1181,14 @@ struct StepPublicationFixture {
         control.continuation=reinterpret_cast<uint64_t>(&pending);
         pending.ranges=reinterpret_cast<uint64_t>(pending_ranges.data());pending.range_count=pending_ranges.size();
         execution.descriptor.publication.control=reinterpret_cast<uint64_t>(&control);
-        const uint64_t initialization_status=publication_initialize(execution.descriptor,control);
+        const uint64_t initialization_status=publication_initialize(execution.descriptor,control,1);
         if(initialization_status)std::cerr<<"initial prefix extent "<<prefix_tokens.size()<<", status "<<initialization_status<<'\n';
         require(initialization_status==0,"step fixture actual publication initialization refused");
         require(publication_acquire(control,lease)==0,"step fixture initial reader refused");
     }
     void publish() {
         const uint64_t word=lease.word;auto& base=banks[lease.bank];pending.base_word=word;
+        pending.transition_kind=2;
         uint64_t end=0;
         require(publication_validate_source(base,contract,&end)==0,"step fixture source validation failed");
         for(auto& item:pending_ranges)if(item.role==1 || item.role==4 || item.role==5) {
@@ -1189,15 +1216,17 @@ struct StepPublicationFixture {
     }
 };
 
-static void original_content_seal_accepts_equal_strided_producer() {
-    PublicationTensorLayout canonical{};canonical.role=18;canonical.element_bytes=4;
-    canonical.scalar_type=6;canonical.rank=2;canonical.logical_axis=UINT64_MAX;
+template<typename Value,uint64_t scalar_type>
+static void original_content_seal_accepts_equal_strided_producer_for_type() {
+    constexpr uint64_t width=sizeof(Value);
+    PublicationTensorLayout canonical{};canonical.role=18;canonical.element_bytes=width;
+    canonical.scalar_type=scalar_type;canonical.rank=2;canonical.logical_axis=UINT64_MAX;
     canonical.dimensions[0]=2;canonical.dimensions[1]=3;
-    canonical.strides_bytes[0]=12;canonical.strides_bytes[1]=4;
-    std::array<float,6> original{1,2,3,4,5,6};
+    canonical.strides_bytes[0]=3*width;canonical.strides_bytes[1]=width;
+    std::array<Value,6> original{1,2,3,4,5,6};
     StepPublicationFixture fixture(false,{},&canonical,original.data(),sizeof(original));
     auto& sealed=fixture.range(fixture.lease.bank,18);
-    auto* published=static_cast<float*>(fixture.data(sealed));
+    auto* published=static_cast<Value*>(fixture.data(sealed));
     std::array<uint64_t,4> backing{};
     require(publication_backing_digest(fixture.control,sealed,backing.data())==0 &&
         publication_identity_equal(backing.data(),sealed.backing_digest),
@@ -1207,25 +1236,25 @@ static void original_content_seal_accepts_equal_strided_producer() {
     const std::array<uint64_t,4> original_digest{
         sealed.digest[0],sealed.digest[1],sealed.digest[2],sealed.digest[3]};
 
-    const auto verify=[&](float* data,uint64_t length,uint64_t column_stride) {
+    const auto verify=[&](Value* data,uint64_t length,uint64_t column_stride) {
         auto range=sealed;range.length_bytes=length;
-        auto layout=canonical;layout.strides_bytes[0]=4;layout.strides_bytes[1]=column_stride;
+        auto layout=canonical;layout.strides_bytes[0]=width;layout.strides_bytes[1]=column_stride;
         semantic_tensor_content_witness(reinterpret_cast<uint64_t>(data),length,range,layout,
             reinterpret_cast<uint64_t>(sealed.digest),1);
         require(publication_identity_equal(sealed.digest,original_digest.data()),
             "verification replaced the original model content seal");
     };
-    std::array<float,6> transposed{1,4,2,5,3,6};
-    verify(transposed.data(),sizeof(transposed),8);
-    std::array<float,12> padded{1,4,-77,-77,2,5,-77,-77,3,6,-77,-77};
-    constexpr uint64_t padded_extent=10*sizeof(float);
-    verify(padded.data(),padded_extent,16);
-    reinterpret_cast<uint8_t*>(padded.data())[2*sizeof(float)]^=1;
-    verify(padded.data(),padded_extent,16);
+    std::array<Value,6> transposed{1,4,2,5,3,6};
+    verify(transposed.data(),sizeof(transposed),2*width);
+    std::array<Value,12> padded{1,4,-77,-77,2,5,-77,-77,3,6,-77,-77};
+    constexpr uint64_t padded_extent=10*width;
+    verify(padded.data(),padded_extent,4*width);
+    reinterpret_cast<uint8_t*>(padded.data())[2*width]^=1;
+    verify(padded.data(),padded_extent,4*width);
 
     require_content_trap([&] {
-        reinterpret_cast<uint8_t*>(padded.data())[5*sizeof(float)]^=1;
-        verify(padded.data(),padded_extent,16);
+        reinterpret_cast<uint8_t*>(padded.data())[5*width]^=1;
+        verify(padded.data(),padded_extent,4*width);
     });
     require_content_trap([&] {
         reinterpret_cast<uint8_t*>(published)[0]^=1;
@@ -1237,7 +1266,7 @@ static void original_content_seal_accepts_equal_strided_producer() {
         auto range=sealed;auto layout=canonical;
         if(field==0)range.role=layout.role=19;
         if(field==1)range.index=layout.index=1;
-        if(field==2)layout.scalar_type=2;
+        if(field==2)layout.scalar_type=width==4 ? 2 : 3;
         if(field==3)range.logical_begin=range.logical_end=1;
         std::array<uint64_t,4> changed{};
         require(publication_range_digest(fixture.control,range,&layout,changed.data())==0,
@@ -1245,6 +1274,11 @@ static void original_content_seal_accepts_equal_strided_producer() {
         require(!publication_identity_equal(changed.data(),sealed.digest),
             "original model seal omitted role, index, scalar type, or logical interval");
     }
+}
+
+static void original_content_seal_accepts_equal_strided_producer() {
+    original_content_seal_accepts_equal_strided_producer_for_type<float,6>();
+    original_content_seal_accepts_equal_strided_producer_for_type<double,9>();
 }
 
 static void resident_numerical_refusal_precedes_publication() {
@@ -1956,7 +1990,7 @@ static void initial_prefix_identity_is_native_owned() {
         previous=expected;
         require(publication_release(fixture.control,fixture.lease)==0,"initial identity reader release failed");
         fixture.banks[0].header.abi=0;
-        require(publication_initialize(fixture.execution.descriptor,fixture.control,true)==0 &&
+        require(publication_initialize(fixture.execution.descriptor,fixture.control,4)==0 &&
             publication_identity_equal(actual,expected.data()),
             "restoration changed the saved initial prefix identity");
         // Saved logical/state digests still name the original identity. Restore
@@ -1964,7 +1998,7 @@ static void initial_prefix_identity_is_native_owned() {
         auto* changed=static_cast<uint64_t*>(fixture.data(fixture.range(0,3)));
         changed[0]^=1;const uint64_t corrupted=changed[0];
         fixture.banks[0].header.abi=0;
-        require(publication_initialize(fixture.execution.descriptor,fixture.control,true)!=0 &&
+        require(publication_initialize(fixture.execution.descriptor,fixture.control,4)!=0 &&
             fixture.banks[0].header.abi==0 && changed[0]==corrupted,
             "restoration repaired a corrupted prefix identity instead of rejecting it");
     }
@@ -2029,6 +2063,26 @@ int main(int argc, char** argv) {
     }
     require(argc==1,"unexpected feedback test arguments");
     install_fatal_signal_backtraces();
+    const int original_rounding = std::fegetround();
+    require(__dmul_ru(0x1.0000000000001p0,0x1.0000000000001p0)==0x1.0000000000003p0,
+            "host directed product did not round upward");
+    require(__dmul_ru(100.0,0.125)==12.5 && std::fegetround()==original_rounding,
+            "host directed product changed an exact result or the rounding mode");
+#ifdef XLOG_SEMANTIC_POLICY
+    require(__dadd_ru(1.0,0x1p-54)==0x1.0000000000001p0 && __dadd_rd(1.0,0x1p-54)==1.0 &&
+            __dmul_rd(0x1.0000000000001p0,0x1.0000000000001p0)==0x1.0000000000002p0 &&
+            __dsub_rd(1.0,0x1p-54)==0x1.fffffffffffffp-1 &&
+            __ddiv_ru(1.0,3.0)==0x1.5555555555556p-2 && __ddiv_rd(1.0,3.0)==0x1.5555555555555p-2,
+            "host directed double arithmetic did not bracket the exact result");
+    require(__ull2double_ru((1ULL<<53)+1)==0x1.0000000000001p53 &&
+            __ull2double_rd((1ULL<<53)+1)==0x1p53 && __ull2float_ru((1ULL<<24)+1)==0x1.000002p24f &&
+            __double2float_ru(1.0+0x1p-25)==0x1.000002p0f && __double2float_rd(1.0+0x1p-25)==1.0f &&
+            __fadd_ru(1.0f,0x1p-25f)==0x1.000002p0f &&
+            __fmul_ru(0x1.000002p0f,0x1.000002p0f)==0x1.000006p0f &&
+            __fdiv_ru(1.0f,3.0f)==0x1.555556p-2f && __fdiv_rd(1.0f,3.0f)==0x1.555554p-2f &&
+            std::fegetround()==original_rounding,
+            "host directed conversion or float arithmetic lost rounding or its original mode");
+#endif
     task_preflight_accepts_all_four_truth_states();
     task_selection_uses_supplied_scoring();
     editable_program_excludes_graph_support_edits();
@@ -2050,7 +2104,7 @@ int main(int argc, char** argv) {
     malformed_support_is_not_an_ordinary_refusal();
     ordinary_refusals_finish_actual_candidate_cleanup();
     native_work_preserves_one_model_charge_through_refusal();
-    ordinary_publication_refusal_releases_gate_and_preserves_base();
+    unbounded_policy_refusal_preserves_acquired_publication();
     resident_numerical_refusal_precedes_publication();
     for(uint64_t role : {6,7})fixed_continuation_buffers_keep_semantic_intervals(role);
     original_content_seal_accepts_equal_strided_producer();

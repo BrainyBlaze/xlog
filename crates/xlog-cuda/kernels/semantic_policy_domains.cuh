@@ -152,10 +152,9 @@ __device__ void merge_work(uint64_t pointer,const semantic_graph::NativeWorkTall
 }
 }
 
-extern "C" __global__ void semantic_policy_uniform_domains(PolicyDescriptor p,uint64_t components_pointer,
-        uint64_t support_pointer) {
+extern "C" __global__ void semantic_policy_uniform_domains(PolicyDescriptor p,PolicyUniformDescriptor u,
+        uint64_t components_pointer,uint64_t support_pointer) {
     using namespace policy_uniform;
-    const auto& u=*reinterpret_cast<const PolicyUniformDescriptor*>(p.numerical.uniform);
     const auto* components=reinterpret_cast<const Component*>(components_pointer);
     const auto* support=reinterpret_cast<const uint8_t*>(support_pointer);
     auto* parameters=reinterpret_cast<CoherentCotangent*>(u.roots[0]);
@@ -173,6 +172,9 @@ extern "C" __global__ void semantic_policy_uniform_domains(PolicyDescriptor p,ui
     __shared__ uint32_t legal_count,has_null;
     semantic_graph::NativeWorkTally work{};
     if(threadIdx.x==0) {
+        // Initialize the retained private descriptor on-device; binding must
+        // not upload its immutable pointer/law metadata from host memory.
+        *reinterpret_cast<PolicyUniformDescriptor*>(p.numerical.uniform)=u;
         *reinterpret_cast<uint64_t*>(u.status)=0;
         *reinterpret_cast<semantic_graph::NativeWorkTally*>(u.work)={};
         weight=importance();
