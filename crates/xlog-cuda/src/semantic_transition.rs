@@ -11778,6 +11778,7 @@ struct Descriptor {
     backward: PolicyBackward,
     task: u64,
     task_words: u64,
+    task_return_bound: u64,
     publication: PublicationCommand,
     text: TextBinding,
     model_work: ModelWorkInput,
@@ -12685,7 +12686,7 @@ const _: () = assert!(size_of::<PolicyNumericalDescriptor>() == 88);
 const _: () = assert!(size_of::<PolicyAdjointNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 768);
 const _: () = assert!(size_of::<PolicyBackward>() == 256);
-const _: () = assert!(size_of::<Descriptor>() == 1224);
+const _: () = assert!(size_of::<Descriptor>() == 1232);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -12728,7 +12729,7 @@ mod task_state_contract {
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
         assert_eq!(size_of::<DeviceState>(), 7568);
-        assert_eq!(size_of::<Descriptor>(), 1224);
+        assert_eq!(size_of::<Descriptor>(), 1232);
     }
 
     #[test]
@@ -28581,6 +28582,10 @@ impl SemanticTransitionSession {
                 .task
                 .as_ref()
                 .map_or(0, |(_, device)| device.len() as u64),
+            task_return_bound: self
+                .task
+                .as_ref()
+                .map_or(0, |(binding, _)| binding.objective_law.return_bound as u64),
             publication: PublicationCommand {
                 control: self
                     .publication
@@ -29009,6 +29014,7 @@ mod tests {
             backward: PolicyBackward::default(),
             task: 40,
             task_words: 66,
+            task_return_bound: 0,
             publication: PublicationCommand {
                 control: 48,
                 lease: 0,

@@ -758,7 +758,7 @@ struct Descriptor {
     uint64_t logits,support,scratch,receipts,state,components,codebooks,arena[7];
     PolicyDescriptor policy;
     PolicyBackward backward;
-    uint64_t task,task_words;
+    uint64_t task,task_words,task_return_bound;
     PublicationCommand publication;
     TextBinding text;
     ModelWorkInput model_work;
@@ -795,26 +795,37 @@ __device__ bool task_program_bank(const uint64_t* task,uint64_t word_count,
     return true;
 }
 
-// Bound the complete selected return across every reachable prefix, before
-// any draw, using the admitted scoring law and structural work capacities.
-__device__ bool task_critic_admissible(const uint64_t* task,const TaskProgramBank& bank,
-        const PolicyDescriptor& policy) {
-    constexpr uint64_t limit=uint64_t(1)<<59;
-    if(!policy.component_baselines || policy.component_baselines%alignof(float))return false;
-    for(uint32_t i=25;i<=30;++i)if(task[i]>UINT32_MAX)return false;
-    const uint64_t cost_cap=bank.editable ? 2+PROGRAM_FACT_CAPACITY+3 : 6;
-    const uint64_t spent_cap=bank.editable ? 19 : 17;
-    const uint64_t value_span=3*task[25]+task[26]+cost_cap*task[27];
-    uint64_t remaining=limit;
-    if(task[28] && value_span>remaining/task[28])return false;
-    remaining-=value_span*task[28];
-    if(task[29]>remaining/2)return false;
-    remaining-=2*task[29];
-    if(task[30]>remaining/spent_cap)return false;
+// The original task binding owns the complete signed return enclosure. Cover
+// the actual raw RN32 critic reduction over every admitted baseline and legal
+// count before any draw, denominator or coefficient can conceal overflow.
+__device__ bool task_critic_admissible(uint64_t return_bound,const PolicyDescriptor& policy,
+        semantic_graph::NativeWorkTally* work) {
+#ifdef XLOG_SEMANTIC_POLICY
+    if(return_bound>uint64_t(INT64_MAX) || !policy.component_baselines ||
+       policy.component_baselines%alignof(float) || !policy.numerical.baseline_domains ||
+       policy.numerical.baseline_domains%alignof(model_policy::DomainValue))return false;
     const auto* baselines=reinterpret_cast<const float*>(policy.component_baselines);
-    for(uint32_t i=0;i<COMPONENT_COUNT;++i)
-        if(!isfinite(baselines[i]) || fabsf(baselines[i])>float(limit))return false;
+    const auto* domains=reinterpret_cast<const model_policy::DomainValue*>(policy.numerical.baseline_domains);
+    // R is converted to RN32 by the original backward before subtraction.
+    // The upward conversion covers both signs throughout [-bound,+bound].
+    const float reward_magnitude=__ull2float_ru(return_bound);
+    float raw=0.0f;
+    for(uint32_t i=0;i<COMPONENT_COUNT;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Category,1);
+        const auto domain=domains[i];
+        if(!isfinite(baselines[i]) || !model_policy::finite_domain(domain) ||
+           domain.magnitude<fabs(double(baselines[i])))return false;
+        const float difference=__double2float_ru(__dadd_ru(domain.magnitude,double(reward_magnitude)));
+        const float square=__fmul_ru(difference,difference);
+        // Legal-count masks can only omit nonnegative terms. Keeping all 136
+        // encloses every prefix without borrowing a future selected receipt.
+        raw=__fadd_ru(raw,square);
+        if(!isfinite(raw))return false;
+    }
     return true;
+#else
+    return false;
+#endif
 }
 
 __device__ void retain_policy_cell(const PolicyDescriptor& policy,const Component& component,
@@ -914,7 +925,7 @@ static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
 static_assert(sizeof(AcknowledgementQueueHeader)==72,"acknowledgement queue ABI");
 static_assert(sizeof(AcknowledgementEntry)==136,"acknowledgement entry ABI");
-static_assert(sizeof(Descriptor)==1224,"launch ABI");
+static_assert(sizeof(Descriptor)==1232,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 
 __device__ uint64_t text_row_count(TextBinding binding) {
@@ -5483,7 +5494,9 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             }
         } else program_bank=TaskProgramBank{};
         const bool critic_admissible=!task || !descriptor.policy.z ||
-            (task && !failed && task_critic_admissible(task,program_bank,descriptor.policy));
+            (task && !failed && task_critic_admissible(descriptor.task_return_bound,descriptor.policy,&sampler_work));
+        execution_work_merge_native(state->execution_work,sampler_work);
+        sampler_work=semantic_graph::NativeWorkTally{};
         if(!failed && descriptor.publication.control) {
             auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
             if(!control.continuation) { semantic_content_integrity_trap();return; }
