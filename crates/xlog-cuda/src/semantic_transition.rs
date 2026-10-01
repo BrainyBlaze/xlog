@@ -11891,6 +11891,7 @@ unsafe impl DeviceRepr for PolicyUniformDescriptor {}
 #[cfg(feature = "semantic-policy")]
 struct PolicyUniformBuffers {
     descriptor: TrackedCudaSlice<PolicyUniformDescriptor>,
+    initial_descriptor: PolicyUniformDescriptor,
     outputs: [TrackedCudaSlice<f64>; 3],
     roots: [TrackedCudaSlice<f64>; 3],
     scratch: [TrackedCudaSlice<f64>; 6],
@@ -12338,11 +12339,13 @@ fn enqueue_policy_uniform_domains(
     recorder.read(components);
     recorder.read(support);
     buffers.numerical.record(&mut recorder);
+    recorder.write(&buffers.numerical.uniform.descriptor);
     let descriptor = SemanticTransitionSession::retained_policy_descriptor(buffers);
     enqueue_recorded(domain, poisoned, recorder, |enqueue| {
         // SAFETY: cold reservation and the immutable descriptor bind disjoint
         // scratch, original snapshots and complete output capacities. The
-        // recorder orders all nine producers before this one native transfer.
+        // recorder orders all nine producers and the private descriptor's
+        // device initialization before this one native transfer.
         unsafe {
             buffers.numerical.uniform.execute.clone().launch_in(
                 enqueue,
@@ -12353,6 +12356,7 @@ fn enqueue_policy_uniform_domains(
                 },
                 (
                     descriptor,
+                    buffers.numerical.uniform.initial_descriptor,
                     components.device_ptr_value(),
                     support.device_ptr_value(),
                 ),
@@ -12808,6 +12812,8 @@ content_kernel_parameter!(PublicationRange);
 content_kernel_parameter!(SemanticTensorLayout);
 content_kernel_parameter!(ContinuationInputs);
 content_kernel_parameter!(PolicyDescriptor);
+#[cfg(feature = "semantic-policy")]
+content_kernel_parameter!(PolicyUniformDescriptor);
 
 const _: () = assert!(size_of::<PendingContinuation>() == 336);
 const _: () = assert!(size_of::<ContinuationInputs>() == 184);
@@ -25576,8 +25582,26 @@ impl SemanticTransitionSession {
         let descriptor = reservation
             .alloc::<PolicyUniformDescriptor>(1)
             .map_err(|error| runtime_error("uniform policy descriptor allocation", error))?;
+        let initial_descriptor = PolicyUniformDescriptor {
+            outputs: outputs.each_ref().map(TrackedCudaSlice::device_ptr_value),
+            roots: roots.each_ref().map(TrackedCudaSlice::device_ptr_value),
+            recurrent: scratch[0].device_ptr_value(),
+            hidden: scratch[1].device_ptr_value(),
+            scores: scratch[2].device_ptr_value(),
+            recurrent_cotangents: scratch[3].device_ptr_value(),
+            score_cotangents: scratch[4].device_ptr_value(),
+            score_roots: scratch[5].device_ptr_value(),
+            status: status.device_ptr_value(),
+            work: work.device_ptr_value(),
+            training_rows: self
+                .task_training_domain()
+                .map_or(0, SemanticTrainingDomain::record_limit),
+            return_bound: law.return_bound as u64,
+            loss_coefficients: [3, 6, 7, 8].map(|index| f64::from(law.coefficients[index])),
+        };
         let uniform = Arc::new(PolicyUniformBuffers {
             descriptor,
+            initial_descriptor,
             roots,
             outputs,
             scratch,
@@ -25595,33 +25619,6 @@ impl SemanticTransitionSession {
                     runtime_error("kernel lookup", "uniform policy domains unavailable")
                 })?,
         });
-        upload_publication(
-            &self.provider,
-            &[PolicyUniformDescriptor {
-                outputs: uniform
-                    .outputs
-                    .each_ref()
-                    .map(TrackedCudaSlice::device_ptr_value),
-                roots: uniform
-                    .roots
-                    .each_ref()
-                    .map(TrackedCudaSlice::device_ptr_value),
-                recurrent: uniform.scratch[0].device_ptr_value(),
-                hidden: uniform.scratch[1].device_ptr_value(),
-                scores: uniform.scratch[2].device_ptr_value(),
-                recurrent_cotangents: uniform.scratch[3].device_ptr_value(),
-                score_cotangents: uniform.scratch[4].device_ptr_value(),
-                score_roots: uniform.scratch[5].device_ptr_value(),
-                status: uniform.status.device_ptr_value(),
-                work: uniform.work.device_ptr_value(),
-                training_rows: self
-                    .task_training_domain()
-                    .map_or(0, SemanticTrainingDomain::record_limit),
-                return_bound: law.return_bound as u64,
-                loss_coefficients: [3, 6, 7, 8].map(|index| f64::from(law.coefficients[index])),
-            }],
-            &uniform.descriptor,
-        )?;
         let mut allocate_numerical = |cells: usize| {
             reservation
                 .alloc::<f64>(cells)
@@ -28147,16 +28144,23 @@ impl SemanticTransitionSession {
         if !self.pending {
             return Err(SemanticTransitionError::NoPendingLaunch);
         }
+        // Successful observation advances the session RNG. The original tape
+        // must keep the invocation that produced its retained receipts.
+        #[cfg(feature = "semantic-policy")]
+        let policy_invocation = self.rng;
         let result = self.observe_terminal(expected_proposal);
         if result.is_err() {
             self.poisoned = true;
         } else {
             self.pending = false;
             #[cfg(feature = "semantic-policy")]
-            if let Err(error) = self.retain_policy_tape(match &result {
-                Ok(SemanticTransitionOutcome::Refused(refusal)) => Some(*refusal),
-                _ => None,
-            }) {
+            if let Err(error) = self.retain_policy_tape(
+                policy_invocation,
+                match &result {
+                    Ok(SemanticTransitionOutcome::Refused(refusal)) => Some(*refusal),
+                    _ => None,
+                },
+            ) {
                 self.poisoned = true;
                 return Err(error);
             }
@@ -28173,11 +28177,13 @@ impl SemanticTransitionSession {
     #[cfg(feature = "semantic-policy")]
     fn retain_policy_tape(
         &mut self,
+        invocation: Option<SemanticRngBinding>,
         refusal: Option<SemanticTransitionRefusal>,
     ) -> Result<(), SemanticTransitionError> {
         let Some(policy) = self.policy.as_ref() else {
             return Ok(());
         };
+        let invocation = invocation.ok_or(SemanticTransitionError::ObservationMismatch)?;
         let next_state = &policy
             .replacement
             .as_ref()
@@ -28205,10 +28211,7 @@ impl SemanticTransitionSession {
             .replacement
             .take()
             .expect("proposal reserved its next working banks");
-        let invocation = self
-            .rng
-            .take()
-            .expect("observed policy retains its original invocation");
+        self.rng = None;
         self.captured = None;
         self.policy_tapes.push(PolicyTape {
             invocation,
@@ -29703,8 +29706,9 @@ mod tests {
         use crate::memory::CudaColumn;
         use xlog_core::{ScalarType, Schema};
 
+        // The complete catalogue's actor/full numerical buffers exceed 3 GiB.
         let provider = Arc::new(
-            crate::CudaProviderBuilder::new(0, MemoryBudget::with_limit(512 * 1024 * 1024))
+            crate::CudaProviderBuilder::new(0, MemoryBudget::with_limit(4 * 1024 * 1024 * 1024))
                 .with_stream_capacity(1)
                 .build()
                 .unwrap(),
@@ -29772,61 +29776,100 @@ mod tests {
                 &mut component_baselines,
             )
             .unwrap();
-        let mut original_logit = logits.view().slice(0..1);
-        let mut original_support = support.view().slice(0..1);
-        let mut original_parameter = parameters.view().slice(0..1);
-        let export = |slice: TrackedCudaSlice<u8>, scalar: ScalarType, cells: usize| {
-            let buffer = provider
-                .buffer_from_columns(
-                    vec![CudaColumn::Owned(slice)],
-                    cells as u64,
-                    Schema::new(vec![("input".into(), scalar)]),
-                )
-                .unwrap();
-            provider.to_dlpack_table(buffer).column(0).unwrap()
-        };
-        let logits = crate::dlpack::export_slice_managed_tensor(
-            Arc::new(logits.into_bytes()),
-            provider.device().ordinal() as i32,
-            crate::dlpack::DLDataType {
-                code: 2,
-                bits: 32,
-                lanes: 1,
-            },
-            32,
-            TEXT_CARDINALITY,
-        )
-        .unwrap();
-        let support = export(support, ScalarType::Bool, session.codebooks.input_cells);
-        let parameters = export(
-            parameters.into_bytes(),
-            ScalarType::F32,
+        let original_logit = logits.view().slice(0..1);
+        let original_support = support.view().slice(0..1);
+        let original_parameter = parameters.view().slice(0..1);
+        let layouts = policy_numerical_producer_layouts(
+            session.codebooks.input_cells,
             layout.parameter_cells,
-        );
-        let component_baselines = crate::dlpack::export_slice_managed_tensor(
-            Arc::new(component_baselines.into_bytes()),
-            provider.device().ordinal() as i32,
-            crate::dlpack::DLDataType {
-                code: 2,
-                bits: 32,
-                lanes: 1,
-            },
-            1,
-            COMPONENT_COUNT,
         )
         .unwrap();
+        let mut sources = vec![
+            logits.into_bytes().view(),
+            support.view(),
+            parameters.into_bytes().view(),
+            component_baselines.into_bytes().view(),
+        ];
+        for (index, numerical_layout) in layouts.iter().enumerate().skip(4) {
+            let cells = numerical_layout.dimensions[..numerical_layout.rank as usize]
+                .iter()
+                .product::<u64>() as usize;
+            // These producer inputs are fixed literal FP32 values, not computed
+            // model outputs. Their original real domains have zero error.
+            let values = match index {
+                4 | 5 => vec![0.0; cells],
+                6..=8 => {
+                    let magnitude = [3.0, 2.0, 0.5][index - 6];
+                    [magnitude, 0.0, 0.0, magnitude].repeat(cells / 4)
+                }
+                _ => unreachable!("five original numerical inputs"),
+            };
+            let mut numerical = provider.memory().alloc::<f64>(cells).unwrap();
+            provider
+                .htod_sync_copy_into_tracked(&values, &mut numerical)
+                .unwrap();
+            sources.push(numerical.into_bytes().view());
+        }
+        let publication = Arc::clone(session.publication.as_ref().unwrap());
+        let export = |view: DeviceMemoryView<u8>, tensor_layout: SemanticTensorLayout| {
+            let rank = tensor_layout.rank as usize;
+            export_owned_allocation(
+                view,
+                tensor_layout.dimensions[..rank]
+                    .iter()
+                    .map(|&n| n as i64)
+                    .collect(),
+                tensor_layout.strides_bytes[..rank]
+                    .iter()
+                    .map(|&n| (n / tensor_layout.element_bytes) as i64)
+                    .collect(),
+                (
+                    if tensor_layout.scalar_type == 8 { 6 } else { 2 },
+                    (tensor_layout.element_bytes * 8) as u8,
+                ),
+                provider.device().ordinal() as i32,
+                Arc::new(()),
+                Arc::clone(&publication),
+                None,
+                None,
+            )
+        };
+        let capture = sources
+            .iter()
+            .cloned()
+            .zip(layouts)
+            .map(|(view, layout)| SemanticTensorInput {
+                tensor: export(view, layout),
+                layout,
+                logical_begin: 0,
+                logical_end: 0,
+                native_allocation: None,
+            })
+            .collect();
+        let policy_witness = session.capture_tensor_content(&parent, capture, 1).unwrap();
+        let producers = sources
+            .into_iter()
+            .zip(layouts)
+            .map(|(view, layout)| export(view, layout))
+            .collect::<Vec<_>>();
+        let [logits, support, parameters, component_baselines, numerical @ ..]:
+            [DlpackManagedTensor; 9] = producers.try_into().ok().unwrap();
         let rng = session.continuation_rng(&parent).unwrap();
         let original_components = session.device_components.device_ptr_value();
         let original_codebooks = session.device_codebooks.device_ptr_value();
         let before_policy_binding = session.host_io_stats();
         session
             .bind_policy_dlpack(
+                &parent,
                 session.binding(),
                 rng,
                 logits,
                 support,
                 parameters,
                 component_baselines,
+                numerical,
+                &policy_witness,
+                1,
             )
             .unwrap();
         assert_eq!(
@@ -29834,15 +29877,21 @@ mod tests {
             before_policy_binding,
             "policy binding must not upload state or immutable catalogue metadata"
         );
-        provider
-            .htod_sync_copy_into_tracked(&[9.0], &mut original_logit)
-            .unwrap();
-        provider
-            .htod_sync_copy_into_tracked(&[0u8], &mut original_support)
-            .unwrap();
-        provider
-            .htod_sync_copy_into_tracked(&[9.0], &mut original_parameter)
-            .unwrap();
+        // Original captured producers remain immutable through final use.
+        // Distinct device banks prove that the policy owns its snapshots.
+        let policy = session.policy.as_ref().unwrap();
+        assert_ne!(
+            policy.text_logits.device_ptr_value(),
+            *original_logit.device_ptr()
+        );
+        assert_ne!(
+            session.support.device_ptr_value(),
+            *original_support.device_ptr()
+        );
+        assert_ne!(
+            policy.parameters.device_ptr_value(),
+            *original_parameter.device_ptr()
+        );
         let read = |view: crate::memory::DeviceMemoryView<f32>| {
             provider.device().inner().dtoh_sync_copy(&view).unwrap()[0]
         };
@@ -29884,7 +29933,9 @@ mod tests {
             assert!(session.release(&mut parent, &[1]).is_err());
         }
         session.capture().unwrap();
+        let before_launch = session.host_io_stats();
         session.launch().unwrap();
+        assert_eq!(session.host_io_stats(), before_launch);
         let outcome = session.observe(0).unwrap();
         assert_eq!(
             session.device_components.device_ptr_value(),
@@ -29981,6 +30032,7 @@ mod tests {
                 parent_identity
             );
             drop(witness);
+            drop(policy_witness);
             drop((original_logit, original_support, original_parameter));
             drop(outcome);
             assert_eq!(
@@ -30009,7 +30061,7 @@ mod tests {
         let gradients = session.backward_policy_dlpack(rng, cotangents, 1).unwrap();
         let parameter_pointer = gradients.parameters.device_ptr_value();
         let text_pointer = gradients.text_logits.device_ptr_value();
-        let [parameters, text] = gradients.into_dlpack().unwrap();
+        let [parameters, text, numerical @ ..] = gradients.into_dlpack().unwrap();
         assert_eq!(
             session.host_io_stats(),
             before_backward,
@@ -30052,6 +30104,29 @@ mod tests {
                 text_tensor.device.device_id,
                 provider.device().ordinal() as i32
             );
+            let dimensions = [
+                vec![1, COMPONENT_COUNT as i64],
+                vec![layout.parameter_cells as i64, 2],
+                vec![32, TEXT_CARDINALITY as i64, 2],
+                vec![1, COMPONENT_COUNT as i64, 2],
+                vec![2, layout.parameter_cells as i64, 4],
+                vec![2, 32, TEXT_CARDINALITY as i64, 4],
+                vec![2, 1, COMPONENT_COUNT as i64, 4],
+            ];
+            for (index, (tensor, dimensions)) in numerical.iter().zip(dimensions).enumerate() {
+                let tensor = &(*tensor.as_ptr()).dl_tensor;
+                assert_eq!(tensor.ndim as usize, dimensions.len());
+                assert!(!tensor.shape.is_null());
+                assert_eq!(
+                    std::slice::from_raw_parts(tensor.shape, dimensions.len()),
+                    dimensions
+                );
+                assert_eq!(
+                    (tensor.dtype.code, tensor.dtype.bits, tensor.dtype.lanes),
+                    (2, if index == 0 { 32 } else { 64 }, 1)
+                );
+                assert_eq!(tensor.device.device_id, provider.device().ordinal() as i32);
+            }
         }
         assert!(session.steps[&parent.token].consumer_streams.contains(&1));
         assert!(
@@ -30060,7 +30135,13 @@ mod tests {
         );
         drop(parameters);
         drop(text);
+        assert!(
+            session.release(&mut parent, &[1]).is_err(),
+            "baseline and numerical gradient owners retain their original parent"
+        );
+        drop(numerical);
         drop(witness);
+        drop(policy_witness);
         drop((original_logit, original_support, original_parameter));
         drop(outcome);
         session.release(&mut parent, &[1]).unwrap();
@@ -31391,8 +31472,7 @@ mod text_parent_tests {
         let mut records = Vec::new();
         let mut model_contract_layout = SemanticModelContractLayout::default();
         for role in 1..=55 {
-            if is_tensor_role(role)
-                || matches!(role, 1..=3 | 14..=16 | 30 | 31 | 33 | 43 | 47 | 48 | 55)
+            if is_tensor_role(role) || matches!(role, 1..=3 | 14..=16 | 30..=33 | 43 | 47 | 48 | 55)
             {
                 continue;
             }
@@ -31491,7 +31571,7 @@ mod text_parent_tests {
             ring_head: 2,
             provenance_records: 0,
             prefix_capacity: 64,
-            feedback_capacity: 2,
+            feedback_capacity: 3,
             max_position: 262144,
             pad_token: 0,
             terminal_tokens: vec![100],
@@ -33130,6 +33210,12 @@ mod text_parent_tests {
                     let mut bytes = vec![0; 104];
                     bytes.extend_from_slice(&[44, index as u8, 0x80, 0xff]);
                     bytes
+                } else if role == 32 {
+                    publication_abi_bytes(&[AcknowledgementQueueHeader {
+                        abi: 1,
+                        payload_capacity_bytes: 128,
+                        ..AcknowledgementQueueHeader::default()
+                    }])
                 } else {
                     vec![role as u8, index as u8, 0x80, 0xff]
                 };
@@ -34287,6 +34373,7 @@ mod text_parent_tests {
         coverage.range.digest = coverage.original_record_digest();
         let item = evidence.ranges.last_mut().unwrap();
         let mut attempt = item.attempt().unwrap();
+        attempt.transition_kind = 1;
         attempt.action_receipts_digest = bank.state.action_batch_root;
         attempt.semantic_receipts_digest = semantic_receipts_digest;
         attempt.coverage_digest = coverage.logical_record_digest().unwrap();

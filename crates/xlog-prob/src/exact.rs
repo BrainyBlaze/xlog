@@ -148,7 +148,7 @@ pub(crate) struct ExactCircuitWitness {
 #[cfg(feature = "host-io")]
 fn next_exact_circuit_generation() -> Result<u64> {
     NEXT_EXACT_CIRCUIT_GENERATION
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
             generation.checked_add(1)
         })
         .map_err(|_| {

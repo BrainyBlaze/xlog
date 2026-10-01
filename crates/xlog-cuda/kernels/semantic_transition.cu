@@ -1318,10 +1318,10 @@ __device__ uint64_t publication_content_view(const uint8_t* data,uint64_t length
     view->prefix[3]=range.logical_begin;view->prefix[4]=range.logical_end;
     *content_bytes=length;
     if(!layout)return 0;
-    // U8, U32, U64, F16, BF16, F32, I64 and Bool8 retain distinct type codes.
-    const uint64_t sizes[9]={0,1,4,8,2,2,4,8,1};
+    // U8, U32, U64, F16, BF16, F32, I64, Bool8 and F64 retain distinct type codes.
+    const uint64_t sizes[10]={0,1,4,8,2,2,4,8,1,8};
     if(layout->role!=range.role || layout->index!=range.index || layout->rank>4 ||
-       layout->scalar_type<1 || layout->scalar_type>8 || layout->element_bytes!=sizes[layout->scalar_type] ||
+       layout->scalar_type<1 || layout->scalar_type>9 || layout->element_bytes!=sizes[layout->scalar_type] ||
        (layout->logical_axis!=UINT64_MAX && layout->logical_axis>=layout->rank) || pointer%layout->element_bytes)return 1;
     view->prefix[5]=layout->element_bytes;view->prefix[6]=layout->scalar_type;
     view->prefix[7]=layout->rank;view->prefix[8]=layout->logical_axis;
