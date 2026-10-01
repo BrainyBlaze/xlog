@@ -58,14 +58,7 @@ fn template_source_addition(num_labels: usize) -> String {
 }
 
 fn grid_dim(n: u32, block: u32) -> u32 {
-    let mut grid = n.div_ceil(block);
-    if grid == 0 {
-        grid = 1;
-    }
-    if grid > 65_535 {
-        grid = 65_535;
-    }
-    grid
+    n.div_ceil(block).clamp(1, 65_535)
 }
 
 fn compute_reachable_device(

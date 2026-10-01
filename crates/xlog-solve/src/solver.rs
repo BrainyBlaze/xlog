@@ -257,7 +257,7 @@ impl SolverState {
             .map(|i| {
                 // Simple deterministic pseudo-random initialization
                 // Uses golden ratio for good distribution
-                let phi = 1.618033988749895_f64;
+                let phi = std::f64::consts::GOLDEN_RATIO;
                 let val = ((i as f64 + 1.0) * phi).fract() as f32;
                 // Keep values in [0.3, 0.7] to avoid starting at extremes
                 0.3 + val * 0.4
