@@ -28144,16 +28144,23 @@ impl SemanticTransitionSession {
         if !self.pending {
             return Err(SemanticTransitionError::NoPendingLaunch);
         }
+        // Successful observation advances the session RNG. The original tape
+        // must keep the invocation that produced its retained receipts.
+        #[cfg(feature = "semantic-policy")]
+        let policy_invocation = self.rng;
         let result = self.observe_terminal(expected_proposal);
         if result.is_err() {
             self.poisoned = true;
         } else {
             self.pending = false;
             #[cfg(feature = "semantic-policy")]
-            if let Err(error) = self.retain_policy_tape(match &result {
-                Ok(SemanticTransitionOutcome::Refused(refusal)) => Some(*refusal),
-                _ => None,
-            }) {
+            if let Err(error) = self.retain_policy_tape(
+                policy_invocation,
+                match &result {
+                    Ok(SemanticTransitionOutcome::Refused(refusal)) => Some(*refusal),
+                    _ => None,
+                },
+            ) {
                 self.poisoned = true;
                 return Err(error);
             }
@@ -28170,11 +28177,13 @@ impl SemanticTransitionSession {
     #[cfg(feature = "semantic-policy")]
     fn retain_policy_tape(
         &mut self,
+        invocation: Option<SemanticRngBinding>,
         refusal: Option<SemanticTransitionRefusal>,
     ) -> Result<(), SemanticTransitionError> {
         let Some(policy) = self.policy.as_ref() else {
             return Ok(());
         };
+        let invocation = invocation.ok_or(SemanticTransitionError::ObservationMismatch)?;
         let next_state = &policy
             .replacement
             .as_ref()
@@ -28202,10 +28211,7 @@ impl SemanticTransitionSession {
             .replacement
             .take()
             .expect("proposal reserved its next working banks");
-        let invocation = self
-            .rng
-            .take()
-            .expect("observed policy retains its original invocation");
+        self.rng = None;
         self.captured = None;
         self.policy_tapes.push(PolicyTape {
             invocation,
