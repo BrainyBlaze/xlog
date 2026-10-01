@@ -6,9 +6,6 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- *(cuda, python)* [**breaking**] retain the original sealed training inputs and complete loader domain before actions; require exact domain comparison at arena admission and fresh checkpoint restore. Task capsules use version 3; older capsules and task/scoring identities cannot restore under the new binding. This does not establish uniform physical numerical certification.
-- *(cuda, python)* [**breaking**] freeze the native task's full return interval and objective coefficient bits before actions, expose them through the original TaskUse, and retain them in task/checkpoint identity. Initial and restored training arenas must match that law exactly; older task identities cannot restore under the new binding.
-- *(cuda, python)* [**breaking**] consume supplied numerical policy ABI 4 with independently derived ideal primal bounds and coherent actor/full cotangent labels. Original domains now have four fields; late domains use contiguous actor/full `[2,...,4]` layout while retaining nine outputs. This source change does not establish uniform pre-draw certification or GPU qualification.
 - *(gpu)* [**breaking**] bind reusable materialized stores and retained session runtimes to the exact compiled `LogicProgram`. Cached evaluation and relation-delta cache parameters now use the opaque `LogicMaterializedStore` returned by `evaluate_with_relation_store_and_cache` or `evaluate_with_session_runtime`; use `as_relation_store` for read-only result inspection. Raw `RelationStore` values remain supported as authoritative input stores but can no longer be supplied as trusted derived caches.
 - *(runtime)* expose actual WCOJ-family fallback executions by attempted route, separately from pipeline-error declines.
 - *(configuration)* apply one strict boolean parser to production environment switches in runtime, build, diagnostics, benchmarks, solver tracing, and Python bindings.
@@ -16,8 +13,6 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
-- *(cuda)* enclose the original raw critic reduction before draws using the retained full evaluator bound and admitted baseline domains, rather than a separately reconstructed cap and observed baselines. This representability check does not establish the actor/full physical numerical certificate.
-- *(cuda)* preserve the native critic's ordered episode normalization and group reduction before applying its frozen coefficient once; retain the corresponding reverse-order cotangent arithmetic and original objective owner.
 - *(runtime)* encode each resident-route certificate node from its local fields once, avoiding repeated recursive plan formatting for deep unary plans while preserving exact expression constants and route identity.
 - *(runtime)* preserve nullary schemas when initializing mutually recursive predicates.
 - *(runtime)* serialize execution statistics through a JSON encoder so diagnostic text and operation names are escaped correctly.
