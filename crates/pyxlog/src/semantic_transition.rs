@@ -8,7 +8,7 @@
 
 //! Python ownership of the canonical admitted semantic session and cold policy layout.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::ThreadId;
@@ -708,33 +708,30 @@ fn resolve_replay_checkpoint_referents(
                 "actor checkpoint publication differs from the verified episode predecessor",
             ));
         }
-        if !verified.contains_key(&referent.checkpoint_digest) {
-            let source =
-                resolver.call1((PyBytes::new(py, &referent.checkpoint_digest), item_limit))?;
-            if !source.is_exact_instance_of::<PyBytes>() {
-                return Err(invalid(
-                    "checkpoint source resolver must return exact builtin bytes",
-                ));
+        match verified.entry(referent.checkpoint_digest) {
+            Entry::Vacant(entry) => {
+                let source =
+                    resolver.call1((PyBytes::new(py, &referent.checkpoint_digest), item_limit))?;
+                if !source.is_exact_instance_of::<PyBytes>() {
+                    return Err(invalid(
+                        "checkpoint source resolver must return exact builtin bytes",
+                    ));
+                }
+                let source = source.cast::<PyBytes>()?.as_bytes();
+                if source.len() > item_limit {
+                    return Err(invalid("resolved checkpoint exceeds its item limit"));
+                }
+                referent.verify_source(source)?;
+                entry.insert(source.to_vec());
+                refresh_checkpoint_authority(
+                    authority,
+                    snapshot,
+                    refresh_snapshot,
+                    operation,
+                    actor_row,
+                )?;
             }
-            let source = source.cast::<PyBytes>()?.as_bytes();
-            if source.len() > item_limit {
-                return Err(invalid("resolved checkpoint exceeds its item limit"));
-            }
-            referent.verify_source(source)?;
-            verified.insert(referent.checkpoint_digest, source.to_vec());
-            refresh_checkpoint_authority(
-                authority,
-                snapshot,
-                refresh_snapshot,
-                operation,
-                actor_row,
-            )?;
-        } else {
-            referent.verify_source(
-                verified
-                    .get(&referent.checkpoint_digest)
-                    .expect("verified source remains owned"),
-            )?;
+            Entry::Occupied(entry) => referent.verify_source(entry.get())?,
         }
         if *recovered_prefill {
             let source = verified
@@ -7999,7 +7996,13 @@ pub(crate) struct PySemanticGradientDelivery {
     deferred_hooks: Mutex<Option<Vec<GradientHookEntry>>>,
     activated_once: AtomicBool,
     restore_on_finish: bool,
-    restores: Mutex<Vec<(Py<PyAny>, Py<PyAny>, Py<PyAny>)>>,
+    restores: Mutex<Vec<GradientSlotRestore>>,
+}
+
+struct GradientSlotRestore {
+    effective: Py<PyAny>,
+    gradient: Py<PyAny>,
+    original_grad: Py<PyAny>,
 }
 
 struct GradientHookEntry {
@@ -8093,11 +8096,11 @@ impl PySemanticGradientDelivery {
                     entry.original_grad.bind(py),
                     entry.gradient.bind(py),
                 )?;
-                attached.push((
-                    entry.effective.clone_ref(py),
-                    entry.gradient.clone_ref(py),
-                    entry.original_grad.clone_ref(py),
-                ));
+                attached.push(GradientSlotRestore {
+                    effective: entry.effective.clone_ref(py),
+                    gradient: entry.gradient.clone_ref(py),
+                    original_grad: entry.original_grad.clone_ref(py),
+                });
                 handles.push(
                     node.call_method1("register_hook", (entry.callback.clone_ref(py),))?
                         .unbind(),
@@ -8109,11 +8112,11 @@ impl PySemanticGradientDelivery {
             for handle in handles.drain(..).rev() {
                 let _ = handle.bind(py).call_method0("remove");
             }
-            for (effective, gradient, original_grad) in attached.into_iter().rev() {
+            for restore in attached.into_iter().rev() {
                 let _ = swap_group_leaf_gradient(
-                    effective.bind(py),
-                    gradient.bind(py),
-                    original_grad.bind(py),
+                    restore.effective.bind(py),
+                    restore.gradient.bind(py),
+                    restore.original_grad.bind(py),
                 );
             }
             return Err(error);
@@ -8163,11 +8166,11 @@ impl PySemanticGradientDelivery {
                 .restores
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("group gradient restoration is poisoned"))?;
-            for (effective, gradient, original_grad) in restores.drain(..) {
+            for restore in restores.drain(..) {
                 if let Err(error) = swap_group_leaf_gradient(
-                    effective.bind(py),
-                    gradient.bind(py),
-                    original_grad.bind(py),
+                    restore.effective.bind(py),
+                    restore.gradient.bind(py),
+                    restore.original_grad.bind(py),
                 ) {
                     if failure.is_none() {
                         failure = Some(error);
@@ -8540,7 +8543,6 @@ impl PySemanticPreparedStep {
     #[pyo3(signature = (bank, phase, accumulation, leaves, *, consumer_stream, group_member=None))]
     fn register_gradient_delivery(
         &self,
-        py: Python<'_>,
         bank: &Bound<'_, PyAny>,
         phase: &Bound<'_, PyAny>,
         accumulation: &Bound<'_, PyAny>,
@@ -8548,6 +8550,7 @@ impl PySemanticPreparedStep {
         consumer_stream: &Bound<'_, PyAny>,
         group_member: Option<Py<PySemanticRetainedReplayMember>>,
     ) -> PyResult<Py<PySemanticGradientDelivery>> {
+        let py = bank.py();
         let session = self.session.borrow(py);
         session.require_creator()?;
         let bank = usize::try_from(ColdValue::read(bank, &mut 128, 0)?.unsigned()?)
@@ -15496,7 +15499,7 @@ impl PySemanticTransitionController {
         // Runtime's temporary owners; an aborted native owner still rejects reads.
         let cleanup_result = (|| -> PyResult<Vec<u64>> {
             let streams = {
-                let _reads = ImportReadScope::enter(&issued)?;
+                let _reads = ImportReadScope::enter(issued)?;
                 finish_invocation.call1((task_use.clone_ref(py), parent.clone_ref(py)))?
             };
             let mut budget = 16 * 1024 * 1024;
@@ -15515,7 +15518,7 @@ impl PySemanticTransitionController {
         let streams = match (replay_result, cleanup_result) {
             (Err(error), cleanup) => {
                 let release = cleanup
-                    .and_then(|streams| Self::release_import_reader(&acquired, import, &streams));
+                    .and_then(|streams| Self::release_import_reader(acquired, import, &streams));
                 return finish_with_cleanup(py, Err(error), release);
             }
             (Ok(()), Err(error)) => return Err(error),
@@ -15552,7 +15555,7 @@ impl PySemanticTransitionController {
             Ok(snapshot)
         })();
         let release = if release_allowed {
-            Self::release_import_reader(&acquired, import, &streams)
+            Self::release_import_reader(acquired, import, &streams)
         } else {
             Ok(())
         };
@@ -16541,8 +16544,14 @@ mod tests {
         let bytes = referent.encode();
         assert!(bytes.len() < 1024);
         assert_eq!(super::CheckpointReferent::decode(&bytes).unwrap(), referent);
-        assert!(super::check_checkpoint_referent_limits(&[referent.clone()], 899, 900).is_err());
-        assert!(super::check_checkpoint_referent_limits(&[referent.clone()], 900, 899).is_err());
+        assert!(
+            super::check_checkpoint_referent_limits(std::slice::from_ref(&referent), 899, 900)
+                .is_err()
+        );
+        assert!(
+            super::check_checkpoint_referent_limits(std::slice::from_ref(&referent), 900, 899)
+                .is_err()
+        );
         super::check_checkpoint_referent_limits(&[referent.clone(), referent.clone()], 900, 900)
             .unwrap();
         Python::initialize();
