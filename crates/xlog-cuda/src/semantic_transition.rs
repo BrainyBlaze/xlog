@@ -29933,7 +29933,9 @@ mod tests {
             assert!(session.release(&mut parent, &[1]).is_err());
         }
         session.capture().unwrap();
+        let before_launch = session.host_io_stats();
         session.launch().unwrap();
+        assert_eq!(session.host_io_stats(), before_launch);
         let outcome = session.observe(0).unwrap();
         assert_eq!(
             session.device_components.device_ptr_value(),
