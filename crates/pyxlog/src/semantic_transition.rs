@@ -12744,17 +12744,21 @@ impl PySemanticTransitionController {
     /// and trusted application callbacks, not permissions inferred from archive.
     ///
     /// restore_invocation(task_use, restored_parent, full_row, transition) returns
-    /// (original_model_output, continuation_arguments), where the second tuple
-    /// is (text_rows, text_row_count, selected_text, active_rows, active_row_count,
-    /// numerical_admissibility, tensors, producer_witness, consumer_stream) for
-    /// a non-drawing transition. A proposal with a sealed physical roster inserts original numerical_blocks,
+    /// (original_model_output, finalize_continuation, consumer_stream). The second
+    /// value is a callable retaining that original invocation, not an already
+    /// captured continuation. finalize_continuation(task_use, restored_parent,
+    /// original_model_output) runs once after proposal policy snapshots are bound,
+    /// before capture/launch, and returns (text_rows, text_row_count, selected_text,
+    /// active_rows, active_row_count, numerical_admissibility, tensors,
+    /// producer_witness) for a non-drawing transition. A proposal inserts original numerical_blocks,
     /// model_schema_digest and model_identity before tensors. Its seventh CUDA
     /// service is FP64[N,2,3], covered by the same transient witness; the two
     /// identities are bytes from the original sealed model contract.
     /// For a proposal, pack_policy(task_use, restored_parent, original_model_output)
     /// returns (binding, text_logits, parameters, product_support,
-    /// component_baselines), computed by
-    /// the same Runtime after the genuine continuation has been bound. For
+    /// component_baselines, parameter_errors, baseline_errors, parameter_domains,
+    /// text_domains, baseline_domains, producer_witness), computed by the same
+    /// Runtime before the final continuation is captured. For
     /// recompute/drain pack_policy must be None; no policy draw is synthesized.
     /// These callbacks receive genuine task-bound readers only within a dynamic
     /// import read scope; ordinary controller execution/backward remains closed.
@@ -15210,35 +15214,51 @@ impl PySemanticTransitionController {
             self.check_import_callback(py, &issued, &acquired, import, &expected)?;
             let mut budget = 16 * 1024 * 1024;
             let restored = object_sequence(&restored, &mut budget)?;
-            if restored.len() != 2 {
+            if restored.len() != 3 || !restored[1].is_callable() {
                 return Err(invalid(
-                    "original invocation restore must return its output and continuation arguments",
+                    "original invocation restore must return its output, final continuation callable and consumer stream",
                 ));
             }
             // Retain the original output even without the policy feature.
             let _original_output = restored[0].clone().unbind();
-            let arguments = object_sequence(&restored[1], &mut budget)?;
-            let (blocks, schema, identity, tensors_index, witness_index, stream_index) = if kind
-                == SemanticTransitionKind::Proposal
-                && arguments.len() == 12
-            {
-                (
-                    Some(&arguments[6]),
-                    Some(&arguments[7]),
-                    Some(&arguments[8]),
-                    9,
-                    10,
-                    11,
-                )
-            } else {
-                if arguments.len() != 9 {
-                    return Err(invalid("continuation requires six CUDA services, or seven proposal services with sealed model identities, followed by tensors, its captured producer witness and consumer stream"));
-                }
-                (None, None, None, 6, 7, 8)
-            };
-            let producer_witness =
-                arguments[witness_index].extract::<PyRef<'_, PySemanticTensorContentWitness>>()?;
-            let bind_continuation = || {
+            // Freeze the original stream before policy handoffs. The delayed
+            // continuation supplies its final witness but cannot replace this
+            // stream or an earlier continuation accepted by native code.
+            let consumer_stream = parse_witness_consumer_stream(&restored[2], &mut budget)?
+                .into_pyobject(py)?
+                .into_any();
+            let bind_continuation = |mut budget: usize| {
+                let continuation = {
+                    let _reads = ImportReadScope::enter(&issued)?;
+                    restored[1].call1((
+                        task_use.clone_ref(py),
+                        parent.clone_ref(py),
+                        _original_output.clone_ref(py),
+                    ))?
+                };
+                self.check_import_callback(py, &issued, &acquired, import, &expected)?;
+                let arguments = object_sequence(&continuation, &mut budget)?;
+                let (blocks, schema, identity, tensors_index, witness_index) = if kind
+                    == SemanticTransitionKind::Proposal
+                {
+                    if arguments.len() != 11 {
+                        return Err(invalid("final proposal continuation requires seven CUDA services, sealed model identities, tensors and its captured producer witness"));
+                    }
+                    (
+                        Some(&arguments[6]),
+                        Some(&arguments[7]),
+                        Some(&arguments[8]),
+                        9,
+                        10,
+                    )
+                } else {
+                    if arguments.len() != 8 {
+                        return Err(invalid("final non-drawing continuation requires six CUDA services, tensors and its captured producer witness"));
+                    }
+                    (None, None, None, 6, 7)
+                };
+                let producer_witness = arguments[witness_index]
+                    .extract::<PyRef<'_, PySemanticTensorContentWitness>>()?;
                 self.bind_continuation_in_execution(
                     py,
                     &issued,
@@ -15251,7 +15271,7 @@ impl PySemanticTransitionController {
                     &arguments[5],
                     &arguments[tensors_index],
                     &producer_witness,
-                    &arguments[stream_index],
+                    &consumer_stream,
                     None,
                     Some(import),
                     blocks,
@@ -15282,7 +15302,7 @@ impl PySemanticTransitionController {
                         task_use.clone_ref(py),
                         parent.clone_ref(py),
                         &policy[0],
-                        _original_output,
+                        _original_output.clone_ref(py),
                         policy[1].clone().unbind(),
                         policy[3].clone().unbind(),
                         policy[2].clone().unbind(),
@@ -15293,9 +15313,9 @@ impl PySemanticTransitionController {
                         policy[8].clone().unbind(),
                         policy[9].clone().unbind(),
                         &policy_witness,
-                        &arguments[stream_index],
+                        &consumer_stream,
                         Some(import),
-                        bind_continuation,
+                        || bind_continuation(budget),
                     )?;
                     // Keep the complete original invocation in existing failure
                     // custody until native final use succeeds. Import replay
@@ -15369,7 +15389,7 @@ impl PySemanticTransitionController {
                 #[cfg(not(feature = "semantic-policy"))]
                 return Err(invalid("proposal replay requires a semantic-policy build"));
             } else {
-                bind_continuation()?;
+                bind_continuation(budget)?;
                 self.execute_continuation_in_execution(py, &issued, &acquired, Some(import))?;
                 self.verify_import_successor(py, &issued, &acquired, &material, import)?;
             }

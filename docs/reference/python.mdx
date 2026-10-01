@@ -187,14 +187,27 @@ that will be passed to `import_task`. It binds a live anchor to that original
 authority before computing coverage; `import_task` still independently checks
 the current snapshot and use rights.
 
-During proposal replay, the native importer owns final use of its original
-policy invocation. It consumes the original policy pack and snapshots all nine
+During replay, `restore_invocation(task_use, restored_parent, full_row,
+transition)` returns `(original_model_output, finalize_continuation,
+consumer_stream)`. The callable retains the same original invocation; it does
+not return or seal the final continuation during restoration. For Proposal,
+the importer first consumes the original `pack_policy` result and snapshots all nine
 CUDA operands before binding the same parent's continuation. Native retains
 these pending banks and the original witness, joins the supplied consumer stream,
 and rechecks the original seals at continuation binding without replacing the
 snapshots. Pending snapshots cannot execute or draw until that join succeeds.
+The importer calls `finalize_continuation(task_use, restored_parent,
+original_model_output)` once after the policy handoff and before capture/launch,
+within the same guarded import read scope and without native locks. It returns
+`(text_rows, text_row_count, selected_text, active_rows, active_row_count,
+numerical_admissibility, numerical_blocks, model_schema_digest, model_identity,
+tensors, producer_witness)` for Proposal. Recompute and Drain omit the three
+physical-certificate fields and use the same delayed callback immediately before
+their continuation binding. The consumer stream is fixed by the first result;
+the final callback supplies the services and their final witness, not a new stream.
 This ordering does not supply a uniform numerical certificate or replace the
-required pre-draw admission. The importer schedules native finalization before
+required pre-draw admission. During proposal replay, the native importer owns
+final use of its original policy invocation and schedules native finalization before
 asking the Runtime to retire its temporary aliases; reader retirement then joins
 the named consumer streams. Full predecessor and successor comparisons remain
 required. The Runtime
