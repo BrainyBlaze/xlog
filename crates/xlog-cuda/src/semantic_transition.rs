@@ -6962,6 +6962,7 @@ fn publication_material_runtime() -> [u8; 32] {
         hash.update(policy_identity);
         #[cfg(feature = "semantic-policy")]
         hash.update(include_bytes!("../kernels/semantic_policy_binding.cuh"));
+        hash.update(include_bytes!("../kernels/semantic_policy_domains.cuh"));
         hash.update(include_bytes!("semantic_hypergraph.rs"));
         hash.update(include_bytes!("../kernels/semantic_hypergraph.cu"));
         hash.finalize().into()
@@ -11868,6 +11869,52 @@ struct PolicyNumericalDescriptor {
     parameter_cells: u64,
     parameter_envelopes: u64,
     baseline_envelopes: u64,
+    uniform: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PolicyUniformDescriptor {
+    outputs: [u64; 3],
+    roots: [u64; 3],
+    recurrent: u64,
+    hidden: u64,
+    scores: u64,
+    recurrent_cotangents: u64,
+    score_cotangents: u64,
+    score_roots: u64,
+    status: u64,
+    work: u64,
+    training_rows: u64,
+    return_bound: u64,
+    loss_coefficients: [f64; 4],
+}
+
+// SAFETY: repr(C) contains only plain scalar/pointer words; the cold native
+// owner validates every extent and retains all addressed storage through use.
+unsafe impl DeviceRepr for PolicyUniformDescriptor {}
+
+#[cfg(feature = "semantic-policy")]
+struct PolicyUniformBuffers {
+    descriptor: TrackedCudaSlice<PolicyUniformDescriptor>,
+    outputs: [TrackedCudaSlice<f64>; 3],
+    roots: [TrackedCudaSlice<f64>; 3],
+    scratch: [TrackedCudaSlice<f64>; 6],
+    status: TrackedCudaSlice<u64>,
+    work: TrackedCudaSlice<u64>,
+    execute: CudaFunction,
+}
+
+#[cfg(feature = "semantic-policy")]
+impl PolicyUniformBuffers {
+    fn record(&self, recorder: &mut LaunchRecorder) {
+        recorder.read(&self.descriptor);
+        for buffer in self.outputs.iter().chain(&self.roots).chain(&self.scratch) {
+            recorder.read_write(buffer);
+        }
+        recorder.read_write(&self.status);
+        recorder.read_write(&self.work);
+    }
 }
 
 #[repr(C)]
@@ -12155,14 +12202,6 @@ fn export_policy_gradients(
     let text_error = canonical_tensor_layout(text_error)?;
     // Native labels are interleaved per coordinate. The kernel explicitly
     // packs actor then full into these contiguous region-major exports.
-    let cotangent_domain = |mut layout: SemanticTensorLayout| {
-        let rank = layout.rank as usize;
-        layout.dimensions.copy_within(0..rank, 1);
-        layout.dimensions[0] = 2;
-        layout.rank += 1;
-        layout.strides_bytes = [0; 4];
-        canonical_tensor_layout(layout)
-    };
     let layouts = [
         original[2],
         original[0],
@@ -12170,9 +12209,9 @@ fn export_policy_gradients(
         original[4],
         text_error,
         original[5],
-        cotangent_domain(original[6])?,
-        cotangent_domain(original[7])?,
-        cotangent_domain(original[8])?,
+        paired_cotangent_domain(original[6])?,
+        paired_cotangent_domain(original[7])?,
+        paired_cotangent_domain(original[8])?,
     ];
     let numerical_views = numerical.roots.iter().map(|buffer| {
         // SAFETY: numerical roots are retained aligned FP64 storage.
@@ -12276,6 +12315,104 @@ struct PolicyNumericalBuffers {
     recurrent_errors: TrackedCudaSlice<f64>,
     parameter_envelopes: TrackedCudaSlice<f64>,
     baseline_envelopes: TrackedCudaSlice<f64>,
+    uniform: Arc<PolicyUniformBuffers>,
+}
+
+#[cfg(feature = "semantic-policy")]
+fn paired_cotangent_domain(
+    mut layout: SemanticTensorLayout,
+) -> Result<SemanticTensorLayout, SemanticTransitionError> {
+    let rank = layout.rank as usize;
+    layout.dimensions.copy_within(0..rank, 1);
+    layout.dimensions[0] = 2;
+    layout.rank += 1;
+    layout.strides_bytes = [0; 4];
+    canonical_tensor_layout(layout)
+}
+
+#[cfg(feature = "semantic-policy")]
+fn enqueue_policy_uniform_domains(
+    domain: &ResidentExecutionDomain,
+    poisoned: &mut bool,
+    buffers: &PolicyBuffers,
+    components: &TrackedCudaSlice<SemanticComponent>,
+    support: &TrackedCudaSlice<u8>,
+) -> Result<(), SemanticTransitionError> {
+    let mut recorder = domain.new_strict_recorder();
+    recorder.read(&buffers.parameters);
+    recorder.read(&buffers.component_baselines);
+    recorder.read(components);
+    recorder.read(support);
+    buffers.numerical.record(&mut recorder);
+    let descriptor = SemanticTransitionSession::retained_policy_descriptor(buffers);
+    enqueue_recorded(domain, poisoned, recorder, |enqueue| {
+        // SAFETY: cold reservation and the immutable descriptor bind disjoint
+        // scratch, original snapshots and complete output capacities. The
+        // recorder orders all nine producers before this one native transfer.
+        unsafe {
+            buffers.numerical.uniform.execute.clone().launch_in(
+                enqueue,
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    descriptor,
+                    components.device_ptr_value(),
+                    support.device_ptr_value(),
+                ),
+            )
+        }
+        .map_err(|error| XlogError::Kernel(error.to_string()))
+    })
+}
+
+#[cfg(feature = "semantic-policy")]
+fn export_policy_uniform_domains(
+    buffers: &PolicyBuffers,
+    support_cells: usize,
+    device: i32,
+    aliases: Arc<()>,
+    publication: Arc<PublicationStorage>,
+) -> Result<[DlpackManagedTensor; 3], SemanticTransitionError> {
+    let original =
+        policy_numerical_producer_layouts(support_cells, buffers.layout.parameter_cells)?;
+    let owner: Arc<dyn Send + Sync> = buffers.numerical.uniform.clone();
+    let tensors = buffers
+        .numerical
+        .uniform
+        .outputs
+        .iter()
+        .zip([original[6], original[7], original[8]])
+        .map(|(buffer, layout)| {
+            let layout = paired_cotangent_domain(layout)?;
+            let rank = layout.rank as usize;
+            // SAFETY: the typed retained FP64 output allocation has the exact
+            // native layout; no managed tensor or producer is fabricated.
+            let view = unsafe { buffer.view().cast::<u8>() }.expect("FP64 domain byte view");
+            Ok(export_owned_allocation(
+                view,
+                layout.dimensions[..rank]
+                    .iter()
+                    .map(|&n| n as i64)
+                    .collect(),
+                layout.strides_bytes[..rank]
+                    .iter()
+                    .map(|&n| (n / 8) as i64)
+                    .collect(),
+                (2, 64),
+                device,
+                Arc::clone(&aliases),
+                Arc::clone(&publication),
+                None,
+                Some(Arc::clone(&owner)),
+            ))
+        })
+        .collect::<Result<Vec<_>, SemanticTransitionError>>()?;
+    Ok(tensors
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("three uniform domain roots")))
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -12299,6 +12436,7 @@ impl PolicyNumericalBuffers {
         for buffer in self.buffers() {
             recorder.read_write(buffer);
         }
+        self.uniform.record(recorder);
     }
 
     fn descriptor(&self, parameter_cells: usize) -> PolicyNumericalDescriptor {
@@ -12314,6 +12452,7 @@ impl PolicyNumericalBuffers {
             parameter_cells: parameter_cells as u64,
             parameter_envelopes: self.parameter_envelopes.device_ptr_value(),
             baseline_envelopes: self.baseline_envelopes.device_ptr_value(),
+            uniform: self.uniform.descriptor.device_ptr_value(),
         }
     }
 }
@@ -12674,6 +12813,7 @@ macro_rules! content_kernel_parameter {
 content_kernel_parameter!(PublicationRange);
 content_kernel_parameter!(SemanticTensorLayout);
 content_kernel_parameter!(ContinuationInputs);
+content_kernel_parameter!(PolicyDescriptor);
 
 const _: () = assert!(size_of::<PendingContinuation>() == 336);
 const _: () = assert!(size_of::<ContinuationInputs>() == 184);
@@ -12682,11 +12822,12 @@ const _: () = assert!(size_of::<SemanticTaskFacts>() == 88);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3328);
 const _: () = assert!(size_of::<DeviceState>() == 7568);
 const _: () = assert!(size_of::<PolicyField>() == 32);
-const _: () = assert!(size_of::<PolicyNumericalDescriptor>() == 88);
+const _: () = assert!(size_of::<PolicyNumericalDescriptor>() == 96);
+const _: () = assert!(size_of::<PolicyUniformDescriptor>() == 160);
 const _: () = assert!(size_of::<PolicyAdjointNumericalDescriptor>() == 96);
-const _: () = assert!(size_of::<PolicyDescriptor>() == 768);
+const _: () = assert!(size_of::<PolicyDescriptor>() == 776);
 const _: () = assert!(size_of::<PolicyBackward>() == 256);
-const _: () = assert!(size_of::<Descriptor>() == 1232);
+const _: () = assert!(size_of::<Descriptor>() == 1240);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -12729,7 +12870,7 @@ mod task_state_contract {
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
         assert_eq!(size_of::<DeviceState>(), 7568);
-        assert_eq!(size_of::<Descriptor>(), 1232);
+        assert_eq!(size_of::<Descriptor>(), 1240);
     }
 
     #[test]
@@ -13547,6 +13688,22 @@ fn policy_buffer_bytes(
     let numerical_cells = numerical_cells
         .checked_add(adjoint_numerical_cells)
         .ok_or(SemanticTransitionError::GenerationExhausted)?;
+    let uniform_cells = layout
+        .parameter_cells
+        .checked_add(COMPONENT_COUNT)
+        .and_then(|cells| cells.checked_mul(2))
+        // Every unknown mapped text row has the same category domain. Keep
+        // one private row and the required 32-row region-major public output.
+        .and_then(|cells| cells.checked_add(33 * TEXT_CARDINALITY))
+        // Private coherent labels and distinct region-major export storage.
+        .and_then(|cells| cells.checked_mul(8))
+        .and_then(|cells| cells.checked_add(layout.recurrent_cells() * 12))
+        .and_then(|cells| cells.checked_add(layout.score_cells() * 12))
+        .and_then(|cells| cells.checked_add(128 * 4 + COMPONENT_COUNT * 8))
+        .ok_or(SemanticTransitionError::GenerationExhausted)?;
+    let numerical_cells = numerical_cells
+        .checked_add(uniform_cells)
+        .ok_or(SemanticTransitionError::GenerationExhausted)?;
     primal_cells
         // Each differentiable primal bank has a dedicated adjoint bank. Only the
         // forward hidden vector is shared scratch. A second retained adjoint bank
@@ -13558,6 +13715,9 @@ fn policy_buffer_bytes(
         .and_then(|cells| cells.checked_mul(size_of::<f32>()))
         .and_then(|bytes| bytes.checked_add(2 * COMPONENT_COUNT * size_of::<f64>()))
         .and_then(|bytes| bytes.checked_add(2 * size_of::<u64>()))
+        .and_then(|bytes| {
+            bytes.checked_add(12 * size_of::<u64>() + size_of::<PolicyUniformDescriptor>())
+        })
         .and_then(|bytes| {
             numerical_cells
                 .checked_mul(8)
@@ -24812,6 +24972,108 @@ impl SemanticTransitionSession {
             .and_then(|(binding, _)| binding.spec.training_domain.as_ref())
     }
 
+    /// Original pre-draw actor/full domains. Reading them grants no execution
+    /// or training use. The consumer retains all capsules through final use;
+    /// aliases must not be written while any original consumer remains live.
+    #[cfg(feature = "semantic-policy")]
+    pub fn policy_numerical_domains(
+        &mut self,
+        parent: &SemanticPublishedLease,
+        consumer_stream: u64,
+    ) -> Result<[DlpackManagedTensor; 3], SemanticTransitionError> {
+        self.checked_reader(parent)?;
+        dlpack_consumer_stream(consumer_stream)?;
+        if self.captured.is_some() {
+            return Err(publication_input_error(
+                "uniform domains must precede policy capture",
+            ));
+        }
+        let pending = self.pending_policy.as_ref().ok_or_else(|| {
+            publication_input_error("uniform domains require the nine original policy snapshots")
+        })?;
+        if pending
+            .witness
+            .as_ref()
+            .is_none_or(|(witness, _)| witness.reader_token != parent.token)
+        {
+            return Err(publication_input_error(
+                "uniform domains belong to another acquired parent",
+            ));
+        }
+        let publication = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let tensors = export_policy_uniform_domains(
+            &pending.buffers,
+            self.codebooks.input_cells,
+            self.provider.device().ordinal() as i32,
+            Arc::clone(&self.steps[&parent.token].aliases),
+            publication,
+        )?;
+        self.steps
+            .get_mut(&parent.token)
+            .expect("checked original parent")
+            .consumer_streams
+            .insert(consumer_stream);
+        self.order_content_consumers(consumer_stream)?;
+        Ok(tensors)
+    }
+
+    /// Same producer and formats on a genuine cold-prepared Proposal bank,
+    /// before its model work is frozen and its continuation is submitted.
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_policy_numerical_domains(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        consumer_stream: u64,
+    ) -> Result<[DlpackManagedTensor; 3], SemanticTransitionError> {
+        self.check_prepared_content_stream(step, consumer_stream)?;
+        if bank > 1 {
+            return Err(publication_input_error(
+                "prepared policy bank must be zero or one",
+            ));
+        }
+        let original = &self.steps[&step.token];
+        let prepared = original.prepared.as_ref().expect("checked prepared owner");
+        if prepared.transition_recorded & (1 << bank) != 0 {
+            return Err(publication_input_error(
+                "uniform domains must precede policy submission",
+            ));
+        }
+        let branch = &prepared.branches[bank];
+        if branch.policy_sources.len() != 9 {
+            return Err(publication_input_error(
+                "uniform domains require the nine original policy snapshots",
+            ));
+        }
+        let buffers = branch
+            .policy_buffers
+            .as_ref()
+            .or_else(|| branch.policy.as_ref().map(|policy| &policy.buffers))
+            .ok_or_else(|| publication_input_error("original uniform policy bank is absent"))?;
+        let tensors = export_policy_uniform_domains(
+            buffers,
+            self.codebooks.input_cells,
+            self.provider.device().ordinal() as i32,
+            Arc::clone(&original.aliases),
+            Arc::clone(
+                self.publication
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?,
+            ),
+        )?;
+        self.steps
+            .get_mut(&step.token)
+            .expect("checked original step")
+            .consumer_streams
+            .insert(consumer_stream);
+        self.order_content_consumers(consumer_stream)?;
+        Ok(tensors)
+    }
+
     /// Semantic root of the validated goal witness bound to the current task.
     /// This is the same root retained in its completed task ground.
     pub fn task_semantic_goal_root(&self) -> Option<Identity256> {
@@ -25046,6 +25308,8 @@ impl SemanticTransitionSession {
     /// ordinary-underflow envelopes followed by parameter/text/baseline
     /// magnitude-ordinary-underflow-independent-ideal domains. They share the
     /// same snapshot; pointwise E is not replaced by domain O/U.
+    /// The original cold task supplies the law for pre-draw uniform domains;
+    /// an absent prospective training domain has no admissible training groups.
     #[cfg(feature = "semantic-policy")]
     #[expect(
         clippy::too_many_arguments,
@@ -25199,6 +25463,9 @@ impl SemanticTransitionSession {
         reservation: &mut GpuMemoryReservation,
     ) -> Result<PolicyBuffers, SemanticTransitionError> {
         let layout = self.policy_layout()?;
+        let law = self.task_objective_law().ok_or_else(|| {
+            publication_input_error("uniform policy domains require the original cold task law")
+        })?;
         let text_cells = 32 * TEXT_CARDINALITY;
         let pwl_cells = reservation
             .alloc::<SemanticPolicyPwlCell>(COMPONENT_COUNT)
@@ -25272,12 +25539,103 @@ impl SemanticTransitionSession {
         };
         let adjoints = allocate_adjoints()?;
         let temporal_adjoints = Arc::new(allocate_adjoints()?);
+        let mut allocate_uniform = |cells: usize| {
+            reservation
+                .alloc::<f64>(cells)
+                .map_err(|error| runtime_error("uniform policy domain allocation", error))
+        };
+        let root_cells = [layout.parameter_cells, text_cells, COMPONENT_COUNT];
+        let mut roots = Vec::with_capacity(3);
+        let mut outputs = Vec::with_capacity(3);
+        for cells in root_cells {
+            let cells = cells
+                .checked_mul(8)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            outputs.push(allocate_uniform(cells)?);
+        }
+        for cells in [layout.parameter_cells, TEXT_CARDINALITY, COMPONENT_COUNT] {
+            roots.push(allocate_uniform(
+                cells
+                    .checked_mul(8)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?,
+            )?);
+        }
+        let roots: [_; 3] = roots
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("three policy roots"));
+        let outputs: [_; 3] = outputs
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("three policy outputs"));
+        let scratch = [
+            allocate_uniform(layout.recurrent_cells() * 4)?,
+            allocate_uniform(128 * 4)?,
+            allocate_uniform(layout.score_cells() * 4)?,
+            allocate_uniform(layout.recurrent_cells() * 8)?,
+            allocate_uniform(layout.score_cells() * 8)?,
+            allocate_uniform(COMPONENT_COUNT * 8)?,
+        ];
+        let status = reservation
+            .alloc::<u64>(1)
+            .map_err(|error| runtime_error("uniform policy status allocation", error))?;
+        let work = reservation
+            .alloc::<u64>(11)
+            .map_err(|error| runtime_error("uniform policy work allocation", error))?;
+        let descriptor = reservation
+            .alloc::<PolicyUniformDescriptor>(1)
+            .map_err(|error| runtime_error("uniform policy descriptor allocation", error))?;
+        let uniform = Arc::new(PolicyUniformBuffers {
+            descriptor,
+            roots,
+            outputs,
+            scratch,
+            status,
+            work,
+            execute: self
+                .provider
+                .device()
+                .inner()
+                .get_func(
+                    "xlog_semantic_transition",
+                    "semantic_policy_uniform_domains",
+                )
+                .ok_or_else(|| {
+                    runtime_error("kernel lookup", "uniform policy domains unavailable")
+                })?,
+        });
+        upload_publication(
+            &self.provider,
+            &[PolicyUniformDescriptor {
+                outputs: uniform
+                    .outputs
+                    .each_ref()
+                    .map(TrackedCudaSlice::device_ptr_value),
+                roots: uniform
+                    .roots
+                    .each_ref()
+                    .map(TrackedCudaSlice::device_ptr_value),
+                recurrent: uniform.scratch[0].device_ptr_value(),
+                hidden: uniform.scratch[1].device_ptr_value(),
+                scores: uniform.scratch[2].device_ptr_value(),
+                recurrent_cotangents: uniform.scratch[3].device_ptr_value(),
+                score_cotangents: uniform.scratch[4].device_ptr_value(),
+                score_roots: uniform.scratch[5].device_ptr_value(),
+                status: uniform.status.device_ptr_value(),
+                work: uniform.work.device_ptr_value(),
+                training_rows: self
+                    .task_training_domain()
+                    .map_or(0, SemanticTrainingDomain::record_limit),
+                return_bound: law.return_bound as u64,
+                loss_coefficients: [3, 6, 7, 8].map(|index| f64::from(law.coefficients[index])),
+            }],
+            &uniform.descriptor,
+        )?;
         let mut allocate_numerical = |cells: usize| {
             reservation
                 .alloc::<f64>(cells)
                 .map_err(|error| runtime_error("policy numerical allocation", error))
         };
         let numerical = PolicyNumericalBuffers {
+            uniform,
             parameter_errors: allocate_numerical(
                 layout
                     .parameter_cells
@@ -25448,6 +25806,16 @@ impl SemanticTransitionSession {
                 .expect("checked original cold policy bank"),
             branch.support.as_ref().expect("original support bank"),
             &sources,
+        )?;
+        enqueue_policy_uniform_domains(
+            &self.domain,
+            &mut self.poisoned,
+            branch
+                .policy_buffers
+                .as_ref()
+                .expect("original policy domain bank"),
+            &self.device_components,
+            branch.support.as_ref().expect("original support bank"),
         )?;
         self.attach_prepared_policy_continuation(step, bank)
     }
@@ -25863,6 +26231,13 @@ impl SemanticTransitionSession {
                 component_baselines,
                 numerical,
             },
+        )?;
+        enqueue_policy_uniform_domains(
+            &self.domain,
+            &mut self.poisoned,
+            &policy.buffers,
+            &self.device_components,
+            &self.support,
         )?;
         let consumer_stream = policy.witness.as_ref().map(|(_, stream)| *stream);
         if let Some(stream) = consumer_stream {
@@ -28559,10 +28934,9 @@ impl SemanticTransitionSession {
         #[cfg(not(feature = "semantic-policy"))]
         let policy = PolicyDescriptor::default();
         #[cfg(feature = "semantic-policy")]
-        let policy = io.policy.map_or(
-            PolicyDescriptor::default(),
-            Self::retained_policy_descriptor,
-        );
+        let policy = io.policy.map_or(PolicyDescriptor::default(), |policy| {
+            Self::retained_policy_descriptor(&policy.buffers)
+        });
         Descriptor {
             logits: 0,
             support: 0,
@@ -28614,7 +28988,7 @@ impl SemanticTransitionSession {
     }
 
     #[cfg(feature = "semantic-policy")]
-    fn retained_policy_descriptor(policy: &PolicyStorage) -> PolicyDescriptor {
+    fn retained_policy_descriptor(policy: &PolicyBuffers) -> PolicyDescriptor {
         let parameter = |offset: usize| policy.parameters.device_ptr_value() + (offset * 4) as u64;
         let mut retained_offset = 0usize;
         let fields = std::array::from_fn(|i| {

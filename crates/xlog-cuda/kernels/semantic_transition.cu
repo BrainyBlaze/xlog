@@ -436,6 +436,7 @@ struct PolicyNumericalDescriptor {
     uint64_t parameter_errors,baseline_errors,parameter_domains,text_domains,baseline_domains;
     uint64_t hidden_errors,score_errors,recurrent_errors,parameter_cells;
     uint64_t parameter_envelopes,baseline_envelopes;
+    uint64_t uniform;
 };
 struct PolicyDescriptor {
     uint64_t z,recurrence,positions,hidden,scores,recurrent,retained_scores,retained_score_stride;
@@ -854,7 +855,7 @@ static_assert(sizeof(PolicySelectedScoreVjp)==96,"selected-score VJP ABI");
 static_assert(sizeof(ActionBatchReceipt)==504,"action batch receipt ABI");
 static_assert(sizeof(State)==7568,"state ABI");
 static_assert(sizeof(PolicyField)==32,"policy field ABI");
-static_assert(sizeof(PolicyNumericalDescriptor)==88 && sizeof(PolicyDescriptor)==768,"policy ABI");
+static_assert(sizeof(PolicyNumericalDescriptor)==96 && sizeof(PolicyDescriptor)==776,"policy ABI");
 static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origin ABI");
 static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
 static_assert(sizeof(SemanticTrainingObjectiveRecord)==280,"training objective ABI");
@@ -925,8 +926,11 @@ static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
 static_assert(sizeof(AcknowledgementQueueHeader)==72,"acknowledgement queue ABI");
 static_assert(sizeof(AcknowledgementEntry)==136,"acknowledgement entry ABI");
-static_assert(sizeof(Descriptor)==1232,"launch ABI");
+static_assert(sizeof(Descriptor)==1240,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
+#ifdef XLOG_SEMANTIC_POLICY
+#include "semantic_policy_domains.cuh"
+#endif
 
 __device__ uint64_t text_row_count(TextBinding binding) {
     return binding.count && !(binding.count%alignof(uint64_t)) && binding.count<=UINT64_MAX-sizeof(uint64_t)
@@ -5452,6 +5456,13 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
     __shared__ semantic_program::Rule inserted_rules[2][2];
     __shared__ uint32_t inserted_counts[2],baseline_derived,candidate_derived[2];
     __shared__ semantic_graph::Receipt candidate;
+    if(threadIdx.x==0)state->execution_work=ExecutionWork{};
+    __syncthreads();
+    bool uniform_admissible=true;
+#ifdef XLOG_SEMANTIC_POLICY
+    if(descriptor.policy.z)uniform_admissible=policy_uniform_admissible(descriptor.policy,&sampler_work);
+#endif
+    execution_work_merge_parallel(state->execution_work,sampler_work);
     if(threadIdx.x==0) {
         base={books[14],semantic_graph::kRootKind,books[15],books[16]};
         acquired_bank=nullptr;publication_held=publication_staged=false;acquired_word=structural_end=0;
@@ -5466,7 +5477,6 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         for(uint32_t i=0;i<4;++i)state->action_batch_root[i]=0;
         // Drain never executes the model body. Other modes consume the common
         // original forward, including numerical refusals.
-        state->execution_work=ExecutionWork{};
         if(!descriptor.publication.control)consume_model_work(descriptor.model_work,state->execution_work);
         for(uint32_t i=0;i<3;++i)semantic_graph::clear_receipt(&state->cleanup_receipts[i]);
         lane_live=0;
@@ -5519,7 +5529,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             }
             uint64_t training_status=0;
             uint8_t original_numerical=numerical;
-            if(transition_kind==1)numerical &= critic_admissible;
+            if(transition_kind==1)numerical &= critic_admissible && uniform_admissible;
             if(transition_kind==1 && pending.numerical_blocks) {
                 if(!descriptor.publication.lease || !control.contract ||
                    !pending.physical_blocks ||
@@ -5620,7 +5630,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                     (update_refusal && update_refusal->reason) ? 15 : 5;
             }
         }
-        if(!failed && !descriptor.publication.control && !critic_admissible) {
+        if(!failed && !descriptor.publication.control && (!critic_admissible || !uniform_admissible)) {
             failed=1;state->status=5;
         }
         input_bank_admitted=!failed && transition_kind==1;

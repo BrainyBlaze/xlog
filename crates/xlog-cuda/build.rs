@@ -552,6 +552,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        kernels_dir.join("semantic_policy_domains.cuh").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         kernels_dir.join("totalorder.cuh").display()
     );
 

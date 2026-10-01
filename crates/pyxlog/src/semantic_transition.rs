@@ -11687,6 +11687,64 @@ impl PySemanticTransitionTaskUse {
             .unbind())
     }
 
+    /// Return original pre-draw actor/full domains as three owner-bearing
+    /// DLPack capsules: parameters [2,P,4], text [2,32,V,4], baselines
+    /// [2,1,136,4], FP64 (M,O,U,I). These are not selected backward outputs
+    /// and not a physical model certificate. Consume them in the same model
+    /// numerical owner before freezing its original work/continuation.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (parent, bank, consumer_stream))]
+    fn policy_numerical_domains(
+        &self,
+        py: Python<'_>,
+        parent: &Bound<'_, PyAny>,
+        bank: Option<usize>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        let parent = ContentStepOwner::from_python(parent)?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        self.require_identity(&owner)?;
+        let tensors = match parent {
+            ContentStepOwner::Prepared(step) => {
+                let step = step.borrow(py);
+                step.require_task(py, self)?;
+                step.content_binding_with_owner(py, &owner)?;
+                step.require_recording_stream(&owner, stream)?;
+                owner.prepared_policy_numerical_domains(
+                    &step.inner,
+                    bank.ok_or_else(|| {
+                        invalid("prepared policy domains require their original bank")
+                    })?,
+                    stream,
+                )
+            }
+            ContentStepOwner::Published(parent) => {
+                let parent = parent.borrow(py);
+                parent.require_task(py, self)?;
+                parent.content_binding_with_owner(py, &owner)?;
+                if bank.is_some() {
+                    return Err(invalid("acquired policy domains require bank=None"));
+                }
+                let lease = parent.lease()?;
+                owner.policy_numerical_domains(&lease, stream)
+            }
+        }
+        .map_err(xlog_err)?;
+        drop(owner);
+        let capsules = tensors
+            .into_iter()
+            .map(|tensor| {
+                let tensor =
+                    retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
+    }
+
     /// Return the bound native semantic goal root before any Proposal. This
     /// 32-byte root is the same one retained in completed task ground; reading
     /// it neither recomputes the goal nor grants execution authority.
