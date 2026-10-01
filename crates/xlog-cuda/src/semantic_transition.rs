@@ -29876,15 +29876,15 @@ mod tests {
         let policy = session.policy.as_ref().unwrap();
         assert_ne!(
             policy.text_logits.device_ptr_value(),
-            original_logit.device_ptr_value()
+            *original_logit.device_ptr()
         );
         assert_ne!(
             session.support.device_ptr_value(),
-            original_support.device_ptr_value()
+            *original_support.device_ptr()
         );
         assert_ne!(
             policy.parameters.device_ptr_value(),
-            original_parameter.device_ptr_value()
+            *original_parameter.device_ptr()
         );
         let read = |view: crate::memory::DeviceMemoryView<f32>| {
             provider.device().inner().dtoh_sync_copy(&view).unwrap()[0]
