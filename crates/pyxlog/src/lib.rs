@@ -1257,6 +1257,8 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<semantic_transition::PySemanticInitialPrefillReceipt>()?;
     m.add_class::<semantic_transition::PySemanticPublishedParent>()?;
     m.add_class::<semantic_transition::PySemanticTransitionRestoredCheckpoint>()?;
+    m.add_class::<semantic_transition::learning_phase::PySemanticLearningPhaseRecipe>()?;
+    m.add_class::<semantic_transition::learning_phase::PySemanticLearningPhaseTransition>()?;
     m.add_class::<semantic_transition::PyNativeTensorAllocation>()?;
     m.add_class::<semantic_transition::PySemanticPreparedStep>()?;
     #[cfg(feature = "semantic-policy")]

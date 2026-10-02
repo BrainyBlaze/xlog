@@ -46,6 +46,7 @@ use crate::guarded_python_callback as recording_callback;
 use crate::types::{val_err, xlog_err};
 
 pub(crate) mod cold_task;
+pub(crate) mod learning_phase;
 
 type PredicateInput = (u32, String, Vec<(String, u8, String)>, Vec<usize>);
 type RecordInput = (u32, Vec<(u8, Py<PyAny>)>, Vec<u32>);
@@ -109,6 +110,8 @@ pub(crate) struct PySemanticTransitionSession {
     recording: AtomicBool,
     retiring: AtomicBool,
     prepared_segment: Mutex<Option<PreparedPythonSegment>>,
+    learning_preparing: AtomicBool,
+    learning_transition: Mutex<Option<Py<learning_phase::PySemanticLearningPhaseTransition>>>,
     issuance: Arc<AtomicU64>,
     owner_thread: ThreadId,
     device_ordinal: usize,
@@ -241,6 +244,8 @@ impl PySemanticTransitionSession {
             recording: AtomicBool::new(false),
             retiring: AtomicBool::new(false),
             prepared_segment: Mutex::new(None),
+            learning_preparing: AtomicBool::new(false),
+            learning_transition: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
             owner_thread: std::thread::current().id(),
             device_ordinal,
@@ -1139,6 +1144,34 @@ impl PySemanticTransitionSession {
         training_domain: &Bound<'_, PyAny>,
         referent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
+        Self::restore_checkpoint_impl(
+            py,
+            checkpoint,
+            device_ordinal,
+            snapshot,
+            restore_model,
+            training_domain,
+            referent,
+            None,
+        )
+    }
+}
+
+impl PySemanticTransitionSession {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "canonical restore keeps the original checkpoint, authority, domain and optional cold phase recipe explicit"
+    )]
+    fn restore_checkpoint_impl(
+        py: Python<'_>,
+        checkpoint: &Bound<'_, PyAny>,
+        device_ordinal: usize,
+        snapshot: &Bound<'_, PyAny>,
+        restore_model: &Bound<'_, PyAny>,
+        training_domain: &Bound<'_, PyAny>,
+        referent: Option<&Bound<'_, PyAny>>,
+        learning_transition: Option<&xlog_cuda::SemanticLearningPhaseTransition>,
+    ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
         if !checkpoint.is_exact_instance_of::<PyBytes>() {
             return Err(invalid("checkpoint restore requires exact builtin bytes"));
         }
@@ -1241,6 +1274,22 @@ impl PySemanticTransitionSession {
         };
         validate_authority(&saved_snapshot)?;
         validate_authority(&current_snapshot)?;
+        let restored_phase = match learning_transition {
+            None => phase.clone(),
+            Some(transition) => CheckpointTaskPhase::Segment(
+                match transition.target {
+                    xlog_cuda::SemanticLearningPhase::Fast => "inference",
+                    xlog_cuda::SemanticLearningPhase::Consolidation => "training",
+                    xlog_cuda::SemanticLearningPhase::Alignment => {
+                        return Err(invalid("learning-phase restore cannot return to alignment"));
+                    }
+                }
+                .to_owned(),
+            ),
+        };
+        if let CheckpointTaskPhase::Segment(operation) = &restored_phase {
+            authority.check_use(operation, &current_snapshot, false)?;
+        }
         let restored_session = Self::from_admission(
             admission,
             config.capacities,
@@ -1249,6 +1298,10 @@ impl PySemanticTransitionSession {
             config.memory_bytes,
         )?;
         let session = Py::new(py, restored_session)?;
+        session
+            .borrow(py)
+            .learning_preparing
+            .store(learning_transition.is_some(), Ordering::Release);
         let native_binding = (|| -> PyResult<TaskCheckpointBinding> {
             let restored = session.borrow(py);
             let mut owner = restored.owner()?;
@@ -1269,9 +1322,13 @@ impl PySemanticTransitionSession {
                     .bind_training_view_arena(training_views, objective)
                     .map_err(xlog_err)?;
             }
-            owner
-                .restore_state_material(&manifest.native)
-                .map_err(xlog_err)?;
+            match learning_transition {
+                Some(transition) => {
+                    owner.restore_learning_phase_material(&manifest.native, transition)
+                }
+                None => owner.restore_state_material(&manifest.native),
+            }
+            .map_err(xlog_err)?;
             let native_binding = TaskCheckpointBinding::from_owner(&owner)?;
             if !saved_binding.same_task_content(native_binding) {
                 return Err(invalid(
@@ -1292,7 +1349,7 @@ impl PySemanticTransitionSession {
             let restored = session.borrow(py);
             TaskIssuance::issue(Arc::clone(&restored.issuance))?
         };
-        let task_phase = match &phase {
+        let task_phase = match &restored_phase {
             CheckpointTaskPhase::Imported => TaskUsePhase::Imported,
             CheckpointTaskPhase::InitialPrefillBound => TaskUsePhase::InitialPrefillBound,
             CheckpointTaskPhase::Segment(operation) => TaskUsePhase::Segment(operation.clone()),
@@ -1310,7 +1367,11 @@ impl PySemanticTransitionSession {
                 authority,
                 checkpoint: seed,
                 state: Mutex::new(TaskUseState {
-                    phase: task_phase,
+                    phase: if learning_transition.is_some() {
+                        TaskUsePhase::ArenaPreparing(Box::new(task_phase))
+                    } else {
+                        task_phase
+                    },
                     snapshot: current_snapshot,
                 }),
                 delivery: Mutex::new(None),
@@ -1332,12 +1393,27 @@ impl PySemanticTransitionSession {
                 },
             )?
         };
+        let restored_native = if learning_transition.is_some() {
+            let acquired = parent.borrow(py);
+            let native = session
+                .borrow(py)
+                .owner()?
+                .published_state_material(&*acquired.lease()?)
+                .map_err(xlog_err)?;
+            Some(native)
+        } else {
+            None
+        };
         let model = restore_model
             .call1((
                 controller.clone_ref(py),
                 task_use.clone_ref(py),
                 parent.clone_ref(py),
-                PyBytes::new(py, &manifest.model),
+                if learning_transition.is_some() {
+                    py.None()
+                } else {
+                    PyBytes::new(py, &manifest.model).into_any().unbind()
+                },
             ))
             .map(|model| model.unbind());
         let model = match model {
@@ -1360,7 +1436,7 @@ impl PySemanticTransitionSession {
             let mut owner = restored.owner()?;
             issued.require_current(&owner)?;
             let state = issued.state()?;
-            if checkpoint_task_phase(&state)? != phase
+            if checkpoint_task_phase(&state)? != restored_phase
                 || state.snapshot.canonical != restored_snapshot
             {
                 return Err(invalid(
@@ -1368,9 +1444,21 @@ impl PySemanticTransitionSession {
                 ));
             }
             drop(state);
-            owner
-                .verify_restored_state_material(&*acquired.lease()?, &manifest.native)
-                .map_err(xlog_err)?;
+            if let Some(native) = &restored_native {
+                if owner
+                    .published_state_material(&*acquired.lease()?)
+                    .map_err(xlog_err)?
+                    != *native
+                {
+                    return Err(invalid(
+                        "learning-phase candidate changed during model restoration",
+                    ));
+                }
+            } else {
+                owner
+                    .verify_restored_state_material(&*acquired.lease()?, &manifest.native)
+                    .map_err(xlog_err)?;
+            }
             if let Some(referent) = &original_referent {
                 owner
                     .bind_restored_checkpoint_initial_prefill(
@@ -6375,6 +6463,35 @@ struct DeliveryReceiverBinding {
 }
 
 impl PySemanticTransitionTaskUse {
+    fn require_learning_operation(
+        &self,
+        owner: &SemanticTransitionSession,
+        operation: &str,
+    ) -> PyResult<()> {
+        if operation != "training" {
+            return Ok(());
+        }
+        if let Some(record) = owner.learning_phase_history().last() {
+            let purpose = match record.target {
+                xlog_cuda::SemanticLearningPhase::Fast => "current-request-fast-adaptation",
+                xlog_cuda::SemanticLearningPhase::Alignment
+                | xlog_cuda::SemanticLearningPhase::Consolidation => "durable-slow-consolidation",
+            };
+            if self.authority.training.is_empty()
+                || self
+                    .authority
+                    .training
+                    .iter()
+                    .any(|grant| grant.learning_purpose.as_deref() != Some(purpose))
+            {
+                return Err(invalid(
+                    "training grant purpose differs from the actual native learning phase",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn delivery_binding(&self) -> PyResult<DeliveryReceiverBinding> {
         self.delivery
             .lock()
@@ -6755,6 +6872,11 @@ impl<'a> ColdImportGuard<'a> {
         session: &'a PySemanticTransitionSession,
         original_decisions: Option<Arc<[u8]>>,
     ) -> PyResult<Self> {
+        if session.learning_preparing.load(Ordering::Acquire) {
+            return Err(invalid(
+                "learning-phase preparation retains the original Session until durable resolution",
+            ));
+        }
         let mut owner = session.owner()?;
         if session.importing.load(Ordering::Acquire)
             || session.recording.load(Ordering::Acquire)
@@ -11951,6 +12073,9 @@ impl PySemanticTransitionController {
                 return Err(invalid("previous prepared segment has not been retired"));
             }
             let mut state = issued.state()?;
+            if let CheckpointTaskPhase::Segment(operation) = checkpoint_task_phase(&state)? {
+                issued.require_learning_operation(&owner, &operation)?;
+            }
             let scope = state.begin_build()?;
             let handles = owner
                 .prepare_segment_steps(transitions, cold_capacity)
@@ -12294,6 +12419,7 @@ impl PySemanticTransitionController {
         let expected = {
             let mut owner = session.owner()?;
             issued.require_identity(&owner)?;
+            issued.require_learning_operation(&owner, &operation)?;
             let mut state = issued.state()?;
             state.admit_built_segment(&scope, &issued.authority, operation.clone(), snapshot)?;
             let expected = Self::execution_binding(&state, false)?;
@@ -12579,6 +12705,9 @@ impl PySemanticTransitionController {
     fn abort(&self, py: Python<'_>) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
+        if session.learning_preparing.load(Ordering::Acquire) {
+            return Err(invalid("resolve or abandon the retained learning-phase transition before aborting its Session"));
+        }
         session.owner()?.abort();
         Ok(())
     }
@@ -13969,6 +14098,7 @@ impl PySemanticTransitionController {
             .text()?
             .to_owned();
         let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        task_use.require_learning_operation(&owner, &operation)?;
         let mut state = task_use.state()?;
         state.admit_segment(&task_use.authority, operation, snapshot)?;
         if let Err(error) = owner.admit_transition(&*parent.lease()?, kind) {
@@ -14187,7 +14317,10 @@ impl PySemanticTransitionController {
     /// their original order followed by these services at role 0 indices
     /// N through N+5. A model with a sealed physical-parameter roster must
     /// also supply FP64[N_physical,2,3] numerical_blocks for Proposal/replay,
-    /// at index N+6, and the original schema digest and model identity. Both
+    /// at index N+6. Acquired replay supplies its verified schema digest and
+    /// model identity; a prepared branch instead supplies the same bank's
+    /// ``model_content_witness`` and no host identities. Native retains its
+    /// private acquired model-contract snapshot and reads it on each replay. Both
     /// actor-reference and full-objective rows contain B, ordinary and U;
     /// Update has no pre-draw block tensor. Model-content witnesses cannot
     /// substitute for this capture.
@@ -14196,7 +14329,7 @@ impl PySemanticTransitionController {
     /// generations before pending ranges enter the sole publication CAS. A
     /// prepared parent requires ``bank`` and retains a distinct continuation for
     /// each recorded branch; published parents reject it.
-    #[pyo3(signature = (task_use, *, parent, text_rows, text_row_count, selected_text, active_rows, active_row_count, numerical_admissibility, tensors, producer_witness, consumer_stream, bank=None, numerical_blocks=None, model_schema_digest=None, model_identity=None))]
+    #[pyo3(signature = (task_use, *, parent, text_rows, text_row_count, selected_text, active_rows, active_row_count, numerical_admissibility, tensors, producer_witness, consumer_stream, bank=None, numerical_blocks=None, model_schema_digest=None, model_identity=None, model_content_witness=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "continuation binding retains each typed producer and its witness"
@@ -14219,6 +14352,7 @@ impl PySemanticTransitionController {
         numerical_blocks: Option<&Bound<'_, PyAny>>,
         model_schema_digest: Option<&Bound<'_, PyAny>>,
         model_identity: Option<&Bound<'_, PyAny>>,
+        model_content_witness: Option<&PySemanticTensorContentWitness>,
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         self.require_read_issued(task_use)?;
@@ -14248,6 +14382,7 @@ impl PySemanticTransitionController {
                     numerical_blocks,
                     model_schema_digest,
                     model_identity,
+                    model_content_witness,
                 )
             }
             ContentStepOwner::Prepared(step) => {
@@ -14271,6 +14406,7 @@ impl PySemanticTransitionController {
                     numerical_blocks,
                     model_schema_digest,
                     model_identity,
+                    model_content_witness,
                 )
             }
         }
@@ -15339,6 +15475,7 @@ impl PySemanticTransitionController {
                     blocks,
                     schema,
                     identity,
+                    None,
                 )
             };
             if kind == SemanticTransitionKind::Proposal {
@@ -15656,6 +15793,7 @@ impl PySemanticTransitionController {
         numerical_blocks: Option<&Bound<'_, PyAny>>,
         model_schema_digest: Option<&Bound<'_, PyAny>>,
         model_identity: Option<&Bound<'_, PyAny>>,
+        model_content_witness: Option<&PySemanticTensorContentWitness>,
     ) -> PyResult<()> {
         match parent {
             ContentStepRef::Published(_) if prepared_bank.is_some() => {
@@ -15668,11 +15806,24 @@ impl PySemanticTransitionController {
             }
             _ => {}
         }
+        if model_content_witness.is_some() && matches!(parent, ContentStepRef::Published(_)) {
+            return Err(invalid("acquired continuation requires its verified host model identities, not a prepared model-content witness"));
+        }
+        if matches!(parent, ContentStepRef::Prepared(_))
+            && (model_schema_digest.is_some()
+                || model_identity.is_some()
+                || numerical_blocks.is_some() != model_content_witness.is_some())
+        {
+            return Err(invalid("prepared numerical blocks require their same-bank model-content witness and no host model identities"));
+        }
         let expected = {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
             let state = self.continuation_state(py, task_use, parent, &owner, import)?;
             self.require_continuation_witness(py, parent, producer_witness)?;
+            if let Some(model_witness) = model_content_witness {
+                self.require_continuation_witness(py, parent, model_witness)?;
+            }
             self.continuation_binding(&state, parent, import.is_some())?
         };
         let mut budget = 16 * 1024 * 1024;
@@ -15714,6 +15865,15 @@ impl PySemanticTransitionController {
                 .iter()
                 .map(|value| value.clone_ref(py)),
         );
+        if let Some(model_witness) = model_content_witness {
+            producer_owners.0.push(model_witness._inputs.clone_ref(py));
+            producer_owners.0.extend(
+                model_witness
+                    ._producers
+                    .iter()
+                    .map(|value| value.clone_ref(py)),
+            );
+        }
         producer_owners
             .0
             .extend(services.iter().map(|value| (*value).clone().unbind()));
@@ -15741,6 +15901,9 @@ impl PySemanticTransitionController {
         let mut owner = session.owner()?;
         let state = self.continuation_state(py, task_use, parent, &owner, import)?;
         self.require_continuation_witness(py, parent, producer_witness)?;
+        if let Some(model_witness) = model_content_witness {
+            self.require_continuation_witness(py, parent, model_witness)?;
+        }
         if self.continuation_binding(&state, parent, import.is_some())? != expected {
             return Err(invalid(
                 "task phase changed during continuation producer handoff",
@@ -15792,6 +15955,7 @@ impl PySemanticTransitionController {
                 prepared_bank.expect("validated prepared bank"),
                 input,
                 &producer_witness.inner,
+                model_content_witness.map(|witness| &witness.inner),
                 consumer_stream,
             ),
         }
@@ -16346,6 +16510,8 @@ mod tests {
             recording: AtomicBool::new(false),
             retiring: AtomicBool::new(false),
             prepared_segment: Mutex::new(None),
+            learning_preparing: AtomicBool::new(false),
+            learning_transition: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
             owner_thread: std::thread::current().id(),
             device_ordinal: 0,
@@ -18663,14 +18829,14 @@ assert tuple(continuation.parameters) == (
     'self', 'task_use', 'parent', 'text_rows', 'text_row_count', 'selected_text',
     'active_rows', 'active_row_count', 'numerical_admissibility', 'tensors',
     'producer_witness', 'consumer_stream', 'bank', 'numerical_blocks',
-    'model_schema_digest', 'model_identity')
+    'model_schema_digest', 'model_identity', 'model_content_witness')
 for name in tuple(continuation.parameters)[2:12]:
     parameter = continuation.parameters[name]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is inspect.Parameter.empty
 assert continuation.parameters['bank'].kind is inspect.Parameter.KEYWORD_ONLY
 assert continuation.parameters['bank'].default is None
-for name in ('numerical_blocks', 'model_schema_digest', 'model_identity'):
+for name in ('numerical_blocks', 'model_schema_digest', 'model_identity', 'model_content_witness'):
     assert continuation.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
     assert continuation.parameters[name].default is None
 assert hasattr(SemanticTensorContentWitness, 'verify')

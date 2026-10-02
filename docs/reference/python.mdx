@@ -216,6 +216,23 @@ import. A failed final-use call quarantines the original invocation, and uncerta
 completion prevents reader release. Import does not retry final use, repeat
 publication, or substitute a backward call.
 
+For a prepared Proposal with a sealed physical-parameter roster,
+`controller.bind_continuation(..., parent=step, bank=bank,
+numerical_blocks=blocks, model_content_witness=model_content)` consumes the
+original witness returned by `bind_model_content` for that same Session, step
+and bank. Omit `model_schema_digest` and `model_identity`: the original bank guard
+must already have recorded its private acquired model-contract snapshot before
+the model forward. Native retains that snapshot, the model witness and its
+producer owners; the existing CUDA continuation node reads its schema and
+generation identity on each replay before validating the acquired record. There
+is no host identity readback, recapture or certificate reassignment after Update.
+`producer_witness` remains the distinct transient witness covering the complete
+continuation tensor roster and all seven services, including the original
+FP64 `[N_physical,2,3]` blocks as the seventh service. Non-drawing prepared steps
+omit both blocks and the model witness. Acquired replay retains the verified host
+identity interface above and rejects a prepared model witness. These bindings do
+not establish scientific numerical acceptance or measured ZERO TRANSFER.
+
 The original nine policy operands are CUDA FP32 text logits `[32,V]`, Bool8
 product support, FP32 packed parameters `[P]`, FP32 component baselines
 `[1,136]`, FP64 pointwise errors `[P,2]` and `[1,136,2]`, then FP64 domains
@@ -406,6 +423,92 @@ sessions pass revalidation does the method revoke the source task use and return
 the single runnable `SemanticTransitionRestoredCheckpoint`. A preparation
 failure leaves the source runnable only when it can still be revalidated; it
 never grants execution to the unfinished candidate.
+
+`SemanticLearningPhaseRecipe(*, source, target, phase_index,
+completed_updates_index, views)` describes a cold learning-phase boundary.
+The supported pairs are `alignment` to `fast`, `fast` to `consolidation`, and
+`consolidation` to `fast`; construction grants no scientific acceptance.
+`views` must cover every actual model/learning view in native `(role, index)`
+order, exactly once. Each row is `(role, index, operation, source_role,
+source_index)`. Operations are `preserve`, `zero`, `master-from-effective`,
+and `phase`. Unused source coordinates are zero. The producer supplies the
+actual phase and cumulative-progress scalar indices, not assumed ordinals.
+`phase` addresses that role-23 I64 scalar. `zero` is restricted to optimizer,
+gradient, and gradient-delivery views; it cannot reset cumulative progress,
+masks, rates, loss scale, effective weights, replay cursor, RNG, or budgets.
+`master-from-effective` names a matching BF16 effective view and its FP32
+role-21 master. Native code converts its exact finite value without rounding.
+Full backing allocations, padding, strides, and shared storage are retained;
+conflicting effects on aliases refuse the entire private candidate.
+
+`controller.prepare_learning_phase_transition(task_use, *, parent, recipe,
+consumer_streams, snapshot, scientific_owner, learning_grant_ref,
+checkpoint_destination, snapshot_model_state, restore_model,
+snapshot_restored_model, refresh_snapshot)` quiesces the exact successful
+recompute parent and seals the complete source with the ordinary checkpoint
+encoder. `learning_grant_ref` selects an original `durable-slow-consolidation`
+grant covering the complete dependency closure; fast-adaptation permission alone
+cannot authorize this durable full checkpoint. Fresh publication, data-use,
+retention and revocation checks remain independent of scientific acceptance.
+The trusted original scientific owner must implement
+`accept_learning_phase(parent, recipe, source_checkpoint, original_grant,
+destination, snapshot) -> bytes`. Its nonempty exact builtin bytes must contain
+the original frozen criteria, result, model lineage and destination acceptance.
+The owner must verify those inputs against its genuine scientific result; this
+privileged boundary is not a cryptographic issuer verifier and never interprets
+an arbitrary acceptance flag as that result. The native checkpoint retains the
+full recipe, source identity, cumulative progress, original acceptance, grant,
+destination and authority binding.
+
+Destination acceptance must be derived from the original durable-training
+permission's resolved scope, never merely from the caller's destination string,
+grant reference, or purpose. The original owner checks controller/tenant,
+repository, confidentiality, purpose, retention/deletion, cross-request reuse,
+and revocation restrictions for the full checkpoint and all derived weights;
+sealed-evaluation material is excluded. Returning serialized callback inputs
+does not establish this acceptance. Alignment acceptance concerns the actual
+jointly trained generation. Entering consolidation authorizes that phase, not
+its future result. Returning from consolidation requires an already accepted
+slow generation with absorbed residual, neutral adapters, retained accepted
+heads and a complete cache of that generation. Copy/reset neither performs
+nor proves absorption or the scientific retention and causality criteria.
+
+Restoration uses the same native Session allocation and task admission path as
+ordinary restore. For this transition only, the trusted factory is called once
+as `restore_model(controller, task_use, parent, None)`: reconstruct from the
+actual private native bank, including its new phase and reset optimizer values,
+not from the old model bytes. `snapshot_restored_model(returned_model) -> bytes`
+must serialize that complete real model, including physical aliases, optimizer
+and phase state. `snapshot_model_state()` snapshots the unchanged source.
+`refresh_snapshot()` supplies strictly newer original authority snapshots.
+These callbacks execute cold, on the creator thread, outside native/task locks.
+Both model snapshots and native banks are checked again before any handoff.
+
+The returned native-issued `SemanticLearningPhaseTransition` retains both
+owners privately. A fast successor resumes inference; consolidation resumes
+training, subject to its original rights. A later fast training segment requires
+`current-request-fast-adaptation` grants, while consolidation requires
+`durable-slow-consolidation` grants. Phase adoption does not issue those rights
+or make the resident fast Update a durable consolidation commit.
+The original Session blocks further import, execution and abort until resolution.
+`controller.pending_learning_phase_transition()` recovers that same retained
+object if the application loses its reference.
+
+Call `pending.commit_checkpoint(durable_owner)` exactly once. That original
+owner implements `commit(destination, complete_checkpoint, sha256) -> bytes`
+and `resolve(destination, sha256) -> bytes | None | False`. `commit` must
+atomically persist the full checkpoint in the accepted destination and return
+its exact durable readback. Only after readback and fresh revalidation does
+native code revoke the source task use and return the single runnable
+`SemanticTransitionRestoredCheckpoint`. Any uncertain completion leaves
+`pending.status == "unknown"`, retains both owners and forbids another commit.
+`pending.resolve_checkpoint()` only calls the same retained resolver: `None`
+remains unknown; exact checkpoint bytes allow activation; `False` must prove
+the write did not commit and permits revalidated source continuation.
+`pending.abandon_prepared()` is allowed only before a commit attempt.
+Ordinary save/restore and resident Update preserve this phase history and
+cumulative progress. The embedded native publication material uses version 2;
+older native material is not accepted by this phase-owning contract.
 
 For actor replay, retain the complete original pre-action checkpoint with its
 application owner and call `SemanticTransitionSession.checkpoint_referent(checkpoint)`

@@ -5,6 +5,11 @@
 //! world state. Descriptor meanings belong to the retained semantic admission.
 
 use crate::semantic_work::{ExecutionWork, ModelWorkEvent, ModelWorkKind, ModelWorkRecording};
+mod learning_phase;
+pub use learning_phase::{
+    SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseRecord,
+    SemanticLearningPhaseTransition,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -3423,10 +3428,12 @@ struct TextBinding {
 struct TextBindingStorage {
     inputs: Vec<PreparedSemanticTensor>,
     numerical_block_snapshot: Option<Arc<TrackedCudaSlice<f64>>>,
+    model_contract: Option<DeviceMemoryView<u8>>,
     physical_blocks: u64,
     model_schema_digest: Identity256,
     model_identity: Identity256,
     _witness: SemanticTensorContentWitness,
+    _model_content_witness: Option<SemanticTensorContentWitness>,
     consumer_stream: u64,
     parent: TextBindingParent,
 }
@@ -3469,6 +3476,9 @@ impl TextBindingStorage {
         if let Some(snapshot) = &self.numerical_block_snapshot {
             recorder.read(snapshot.as_ref());
         }
+        if let Some(contract) = &self.model_contract {
+            recorder.read(contract);
+        }
     }
 
     fn continuation_inputs(
@@ -3490,6 +3500,14 @@ impl TextBindingStorage {
             physical_blocks: self.physical_blocks,
             model_schema_digest: self.model_schema_digest,
             model_identity: self.model_identity,
+            model_contract: self
+                .model_contract
+                .as_ref()
+                .map_or(0, |contract| *contract.device_ptr()),
+            model_contract_bytes: self
+                .model_contract
+                .as_ref()
+                .map_or(0, |contract| contract.len() as u64),
             transition_kind: kind.code(),
             authority_bytes,
             training_selection,
@@ -4459,6 +4477,8 @@ struct ContinuationInputs {
     physical_blocks: u64,
     model_schema_digest: Identity256,
     model_identity: Identity256,
+    model_contract: u64,
+    model_contract_bytes: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -6483,6 +6503,7 @@ struct PublicationMaterial {
     model_allocations: Vec<Vec<u8>>,
     ranges: Vec<PublicationMaterialRange>,
     graph: SemanticRootMaterial,
+    learning_phases: Vec<SemanticLearningPhaseRecord>,
 }
 
 /// Read-only delivery material from a sealed publication. Reading an
@@ -6957,6 +6978,7 @@ fn publication_material_runtime() -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"xlog.publication.material-runtime.v1\0");
         hash.update(include_bytes!("semantic_transition.rs"));
+        hash.update(include_bytes!("semantic_transition/learning_phase.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
         let policy_identity: [u8; 32] =
             include!(concat!(env!("OUT_DIR"), "/semantic_policy_identity.rs"));
@@ -7224,7 +7246,7 @@ impl PublicationMaterial {
     fn encode(&self) -> Result<Vec<u8>, SemanticTransitionError> {
         self.validate()?;
         let mut bytes = b"XLOG-PUBLICATION-MATERIAL\0".to_vec();
-        material_u32(&mut bytes, 1);
+        material_u32(&mut bytes, 2);
         bytes.extend_from_slice(&publication_material_runtime());
         material_bytes(
             &mut bytes,
@@ -7271,6 +7293,7 @@ impl PublicationMaterial {
                 range.encode_into(&mut bytes)?;
             }
         }
+        learning_phase::encode_history(&self.learning_phases, &mut bytes)?;
         Ok(bytes)
     }
 
@@ -7278,7 +7301,7 @@ impl PublicationMaterial {
         let mut reader = SemanticMaterialReader::new(bytes);
         if reader.take(26).map_err(SemanticTransitionError::Semantic)?
             != b"XLOG-PUBLICATION-MATERIAL\0"
-            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 1
+            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 2
             || reader.take(32).map_err(SemanticTransitionError::Semantic)?
                 != publication_material_runtime()
         {
@@ -7373,6 +7396,7 @@ impl PublicationMaterial {
                 bytes: payload.to_vec(),
             });
         }
+        let learning_phases = learning_phase::decode_history(&mut reader)?;
         reader.finish().map_err(SemanticTransitionError::Semantic)?;
         let material = Self {
             bank,
@@ -7384,6 +7408,7 @@ impl PublicationMaterial {
             model_allocations,
             ranges,
             graph,
+            learning_phases,
         };
         material.validate()?;
         for range in &material.ranges {
@@ -7509,6 +7534,7 @@ impl PublicationMaterial {
                 "publication material lacks complete model backing bytes",
             ));
         }
+        learning_phase::validate_history(self)?;
         let mut model_slots = BTreeMap::new();
         let mut slot_allocations = BTreeMap::new();
         let backing_digests = self
@@ -7743,23 +7769,25 @@ impl PublicationStorage {
         &self,
         kind: SemanticTransitionKind,
         input: &SemanticContinuationInput,
+        prepared: bool,
     ) -> Result<(Option<usize>, Identity256, Identity256), SemanticTransitionError> {
         let expected = if kind == SemanticTransitionKind::Proposal {
             self.physical_parameter_roster.as_ref().map(Vec::len)
         } else {
             None
         };
+        let host_identities = expected.is_some() && !prepared;
         if input.numerical_blocks.is_some() != expected.is_some()
-            || input.model_schema_digest.is_some() != expected.is_some()
-            || input.model_identity.is_some() != expected.is_some()
+            || input.model_schema_digest.is_some() != host_identities
+            || input.model_identity.is_some() != host_identities
         {
             return Err(publication_input_error(
-                "proposal block bounds require the exact original model roster and identities",
+                "proposal block bounds require their original roster; only acquired replay accepts host model identities",
             ));
         }
         let schema = input.model_schema_digest.unwrap_or_default();
         let identity = input.model_identity.unwrap_or_default();
-        if expected.is_some()
+        if host_identities
             && (schema == Identity256::default() || identity == Identity256::default())
         {
             return Err(publication_input_error(
@@ -9439,7 +9467,6 @@ struct PreparedStepStorage {
     witness: CudaFunction,
     content_guard: CudaFunction,
     inputs_recorded: bool,
-    #[cfg(feature = "semantic-policy")]
     model_content_recorded: u8,
     transition_recorded: u8,
     drain_recorded: bool,
@@ -12816,7 +12843,7 @@ content_kernel_parameter!(PolicyDescriptor);
 content_kernel_parameter!(PolicyUniformDescriptor);
 
 const _: () = assert!(size_of::<PendingContinuation>() == 336);
-const _: () = assert!(size_of::<ContinuationInputs>() == 184);
+const _: () = assert!(size_of::<ContinuationInputs>() == 200);
 const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 296);
 const _: () = assert!(size_of::<SemanticTaskFacts>() == 88);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3328);
@@ -13471,6 +13498,7 @@ pub struct SemanticTransitionSession {
     // raw banks immutable until the joint publisher consumes this pending tuple.
     task_observed: bool,
     publication: Option<Arc<PublicationStorage>>,
+    learning_phases: Vec<SemanticLearningPhaseRecord>,
     publication_uploads: Vec<(usize, PublicationPayload)>,
     publication_issuer: Arc<()>,
     readers: BTreeMap<u64, PublishedReader>,
@@ -15011,7 +15039,6 @@ impl SemanticTransitionSession {
                     witness: witness.clone(),
                     content_guard: content_guard.clone(),
                     inputs_recorded: false,
-                    #[cfg(feature = "semantic-policy")]
                     model_content_recorded: 0,
                     transition_recorded: 0,
                     drain_recorded: false,
@@ -18024,12 +18051,15 @@ impl SemanticTransitionSession {
     /// Bind original forward outputs after their private witness was recorded.
     /// Numerical copies and native continuation preparation are recorded later
     /// by the complete step body; fresh authority bytes are uploaded at submit.
+    /// Proposal blocks retain this bank's original model-content witness; their
+    /// schema and identity come from its acquired device snapshot on each replay.
     pub fn bind_prepared_continuation(
         &mut self,
         step: &SemanticPreparedStep,
         bank: usize,
         continuation: SemanticContinuationInput,
         witness: &SemanticTensorContentWitness,
+        model_content_witness: Option<&SemanticTensorContentWitness>,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
         self.check_prepared_content_stream(step, consumer_stream)?;
@@ -18068,7 +18098,34 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let kind = self.prepared_transition_kind(step)?;
         let (physical_blocks, model_schema_digest, model_identity) =
-            storage.continuation_block_contract(kind, &continuation)?;
+            storage.continuation_block_contract(kind, &continuation, true)?;
+        let model_contract = match (physical_blocks, model_content_witness) {
+            (None, None) => None,
+            (Some(_), Some(model_witness)) => {
+                self.checked_prepared_content_witness(step, model_witness)?;
+                let owner = &self.steps[&step.token];
+                let TensorContentSeals::Model(seals) = &owner.content[model_witness.index].seals else {
+                    return Err(publication_input_error(
+                        "prepared block bounds require their original model-content witness",
+                    ));
+                };
+                let prepared = owner.prepared.as_ref().expect("prepared model owner");
+                if seals.prepared.as_ref().is_none_or(|source| source.bank != bank)
+                    || prepared.model_content_recorded & (1 << bank) == 0
+                {
+                    return Err(publication_input_error(
+                        "prepared block bounds require the same bank's recorded model-content guard",
+                    ));
+                }
+                // This is the existing private role44 snapshot, refreshed by
+                // the original acquire guard before this bank's model reads.
+                // Retain its witness below; never read identities on the host.
+                Some(seals.contract.view())
+            }
+            _ => return Err(publication_input_error(
+                "prepared proposal blocks and their model-content witness must be supplied together",
+            )),
+        };
         let service_layouts =
             continuation_service_layouts(tensor_count, capacity, physical_blocks)?;
         let SemanticContinuationInput {
@@ -18149,10 +18206,12 @@ impl SemanticTransitionSession {
         let binding = Arc::new(TextBindingStorage {
             inputs: services,
             numerical_block_snapshot,
+            model_contract,
             physical_blocks: physical_blocks.unwrap_or(0) as u64,
             model_schema_digest,
             model_identity,
             _witness: witness.clone(),
+            _model_content_witness: model_content_witness.cloned(),
             consumer_stream,
             parent: TextBindingParent::Prepared(Arc::clone(
                 owner.inputs.as_ref().expect("fixed inputs"),
@@ -20662,6 +20721,26 @@ impl SemanticTransitionSession {
         &mut self,
         bytes: &[u8],
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
+        self.restore_state_material_inner(bytes, None)
+    }
+
+    /// Cold-create a private successor from an authentic complete checkpoint.
+    /// Only the explicit phase and producer-authorized optimizer reset change;
+    /// all effective parameters, caches, native records and progress are copied.
+    /// The public Controller retains the old runnable owner until durable handoff.
+    pub fn restore_learning_phase_material(
+        &mut self,
+        bytes: &[u8],
+        transition: &SemanticLearningPhaseTransition,
+    ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
+        self.restore_state_material_inner(bytes, Some(transition))
+    }
+
+    fn restore_state_material_inner(
+        &mut self,
+        bytes: &[u8],
+        transition: Option<&SemanticLearningPhaseTransition>,
+    ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
         self.ensure_rebindable()?;
         if self.publication.is_some() || self.captured.is_some() || self.task.is_none() {
             return Err(publication_input_error(
@@ -20671,6 +20750,10 @@ impl SemanticTransitionSession {
         let mut material = PublicationMaterial::decode(bytes)?;
         let header = material.bank.header;
         let rng = header.rng_binding()?;
+        if let Some(transition) = transition {
+            let record = transition.apply(&mut material)?;
+            material.learning_phases.push(record);
+        }
         if header.authority_generation == 0 {
             return Err(publication_input_error(
                 "restored RNG or task generation exceeds its native domain",
@@ -20742,6 +20825,7 @@ impl SemanticTransitionSession {
             self.root = root;
             self.base_snapshot = snapshot;
             self.task_epoch = header.authority_generation;
+            self.learning_phases = material.learning_phases;
             let mut instance = [0; 32];
             getrandom::fill(&mut instance)
                 .map_err(|error| runtime_error("restored instance entropy", error))?;
@@ -20805,10 +20889,11 @@ impl SemanticTransitionSession {
                 &material.terminals,
                 &material.role_counts,
                 rng,
-                4,
+                if transition.is_some() { 5 } else { 4 },
             )?;
-            if restored.logical_digest != header.logical_digest
-                || restored.state_digest != header.state_digest
+            if transition.is_none()
+                && (restored.logical_digest != header.logical_digest
+                    || restored.state_digest != header.state_digest)
             {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
@@ -20818,6 +20903,12 @@ impl SemanticTransitionSession {
             self.poisoned = true;
         }
         result
+    }
+
+    /// Actual phase lineage owned by this Session. This is a cold metadata read,
+    /// not a scientific acceptance result or permission to execute training.
+    pub fn learning_phase_history(&self) -> &[SemanticLearningPhaseRecord] {
+        &self.learning_phases
     }
 
     /// Admit a new immutable training arena after an exact cold restore, while
@@ -21040,6 +21131,11 @@ impl SemanticTransitionSession {
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
         let expected = PublicationMaterial::decode(bytes)?;
         let actual = PublicationMaterial::decode(&self.published_state_material(lease)?)?;
+        if expected.learning_phases != actual.learning_phases {
+            return Err(publication_input_error(
+                "checkpoint restore changed retained learning-phase history",
+            ));
+        }
         let expected = expected.bank.header;
         let header = actual.bank.header;
         if header.instance == expected.instance
@@ -23266,6 +23362,7 @@ impl SemanticTransitionSession {
             model_allocations,
             ranges,
             graph,
+            learning_phases: self.learning_phases.clone(),
         }
         .encode()
     }
@@ -24272,7 +24369,7 @@ impl SemanticTransitionSession {
             .checked_add(32)
             .ok_or_else(|| publication_input_error("continuation active capacity overflow"))?;
         let (physical_blocks, model_schema_digest, model_identity) =
-            storage.continuation_block_contract(kind, continuation)?;
+            storage.continuation_block_contract(kind, continuation, false)?;
         let service_layouts =
             continuation_service_layouts(tensor_count, active_capacity, physical_blocks)?;
         if continuation.authority_decisions.is_empty() {
@@ -24350,10 +24447,12 @@ impl SemanticTransitionSession {
         let text_binding = Arc::new(TextBindingStorage {
             inputs: services,
             numerical_block_snapshot,
+            model_contract: None,
             physical_blocks: physical_blocks.unwrap_or(0) as u64,
             model_schema_digest,
             model_identity,
             _witness: witness.clone(),
+            _model_content_witness: None,
             consumer_stream,
             parent: TextBindingParent::Published {
                 bank: (lease.identity.word & 1) as usize,
@@ -24561,6 +24660,7 @@ impl SemanticTransitionSession {
             task_epoch: 0,
             task_observed: false,
             publication: None,
+            learning_phases: Vec::new(),
             publication_uploads: Vec::new(),
             publication_issuer: Arc::new(()),
             readers: BTreeMap::new(),
@@ -33311,6 +33411,7 @@ mod text_parent_tests {
                 admission_base_digest: [0; 32],
                 admission_base_extents: [0; 3],
             },
+            learning_phases: Vec::new(),
         };
         publication_material_sample_runtime(&mut material);
         for range in &mut material.ranges {

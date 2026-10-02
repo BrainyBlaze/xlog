@@ -324,6 +324,7 @@ struct ContinuationInputs {
     uint64_t training_selection,model_update_bindings,model_update_binding_count,model_update_admissibility;
     uint64_t model_update_refusal;
     uint64_t numerical_blocks,physical_blocks,model_schema_digest[4],model_identity[4];
+    uint64_t model_contract,model_contract_bytes;
 };
 struct PublicationStorageEntry { uint64_t pointer,bytes,generation; };
 struct PublicationRange {
@@ -909,7 +910,7 @@ static_assert(sizeof(PublicationBank)==50360,"publication bank ABI");
 static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
 static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
 static_assert(sizeof(PendingContinuation)==336,"pending continuation ABI");
-static_assert(sizeof(ContinuationInputs)==184,"continuation input ABI");
+static_assert(sizeof(ContinuationInputs)==200,"continuation input ABI");
 static_assert(sizeof(TextRow)==16,"compact text row ABI");
 static_assert(sizeof(TextBinding)==24,"compact text binding ABI");
 static_assert(sizeof(ModelUpdateBinding)==32,"model update binding ABI");
@@ -1911,6 +1912,35 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
     if(active_count>capacity)return 1;
     auto* ranges=reinterpret_cast<PublicationRange*>(pending.ranges);
     const auto* bank_ranges=reinterpret_cast<const PublicationRange*>(control.directories[lease.bank]);
+    if(inputs.model_contract || inputs.model_contract_bytes) {
+        // Native binds only the original same-bank content witness's private
+        // role44 snapshot. Its existing acquire guard refreshes and verifies
+        // these bytes before the model forward on every recorded execution.
+        // Do not substitute a cold host identity or re-read another bank here.
+        const auto& layout=contract.model_contract_layout;
+        if(inputs.transition_kind!=1 || !inputs.numerical_blocks ||
+           !inputs.model_contract || !inputs.model_contract_bytes ||
+           inputs.model_contract>UINT64_MAX-inputs.model_contract_bytes ||
+           layout.schema_digest_offset>inputs.model_contract_bytes ||
+           32>inputs.model_contract_bytes-layout.schema_digest_offset ||
+           layout.identity_offset>inputs.model_contract_bytes ||
+           32>inputs.model_contract_bytes-layout.identity_offset ||
+           inputs.model_schema_digest[0] || inputs.model_schema_digest[1] ||
+           inputs.model_schema_digest[2] || inputs.model_schema_digest[3] ||
+           inputs.model_identity[0] || inputs.model_identity[1] ||
+           inputs.model_identity[2] || inputs.model_identity[3])return 1;
+        const auto* original=reinterpret_cast<const uint8_t*>(inputs.model_contract);
+        auto* schema_bytes=reinterpret_cast<uint8_t*>(inputs.model_schema_digest);
+        auto* identity_bytes=reinterpret_cast<uint8_t*>(inputs.model_identity);
+        for(uint32_t i=0;i<32;++i) {
+            schema_bytes[i]=original[layout.schema_digest_offset+i];
+            identity_bytes[i]=original[layout.identity_offset+i];
+        }
+        if(!(inputs.model_schema_digest[0] || inputs.model_schema_digest[1] ||
+             inputs.model_schema_digest[2] || inputs.model_schema_digest[3]) ||
+           !(inputs.model_identity[0] || inputs.model_identity[1] ||
+             inputs.model_identity[2] || inputs.model_identity[3]))return 1;
+    }
     // Cold binding requires this slot for a versioned physical roster; other
     // model schemas retain their separate ordinary numerical predicate.
     if(inputs.transition_kind==1 && inputs.numerical_blocks) {
