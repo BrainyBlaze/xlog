@@ -762,6 +762,63 @@ or uncertain execution cannot return a binding. When the semantic-policy feature
 is disabled, the method raises its typed feature-required error instead of
 returning a six-field tuple with a fabricated `None` carrier.
 
+### Original Update measurements
+
+Before retirement, read `step.update_measurements` on the original completed
+step, between the original and repeated `completed_model_binding` checks. It
+returns a host-only dictionary for **both accepted and refused Updates**. A
+completed non-Update returns `None`; skipped, uncompleted, unknown, retired, or
+custody-invalid steps raise an error. This observation joins the original
+registered consumer streams and never reacquires a publication, runs a forward,
+recomputes a metric, or grants candidate execution authority.
+
+The dictionary contains `schema=1`, `predecessor`, `successor`, `bank`, the
+acquired `model_generation`, `model_geometry_digest`, `model_numerical_digest`,
+the original native `transition_status`, `selection`, `canaries`,
+`forward_receipts`, and `canary_refusal`. The identities and acquired model fields
+must equal the same completed binding; a refused Update has no successor.
+`selection` retains the native status, roster/selected-row coordinates, identities,
+training RNG and complete original replay-origin record.
+
+`canaries` is the original five-check tuple, in native kind order: symbolic utility,
+retained behavior, logit drift, goal chain, resource limits. Each check retains
+`evaluator_abi`, `kind`, `row_ordinal`, `identity`, `row_identity`,
+`row_content_identity`, `task_identity`, exact `lower_bound_bits` and
+`upper_bound_bits`, integer `memory_used`, `memory_limit`, `work_used`,
+`work_limit`, `obligation_positions`, `protected_member_offset`,
+`protected_member_count`, and `protected_positions`. These are original frozen
+inputs and original device counters, not phase acceptance thresholds.
+
+Each check's device-authored `availability` is `"not_executed"`, `"incomplete"`,
+or `"obtained"`. `measurement_bits` is an unsigned integer containing the
+original FP64 bits only for `"obtained"`; otherwise it is `None`, never an initial
+zero or a partial accumulator. An obtained measurement survives bounds,
+protected-retention, goal-chain, and resource refusals. The check's independent
+native `reason` is 0 for admissible, 1 non-finite, 2 outside bounds, 3 memory limit,
+4 work limit, 5 incomplete operands, 6 protected retention lost, 7 invalid goal
+witness, 8 work overflow, or 9 generation mismatch. `canary_refusal` separately
+retains the existing prioritized refusal report; `transition_status` and the
+original `execute_segment` refusal remain independent of individual availability.
+
+`forward_receipts` contains the original baseline and candidate records in that
+order. Each has `role` (0 or 1), the same availability vocabulary, and `material`
+(`None` if no complete receipt was obtained). Obtained material contains `role`,
+the **actual receipt's** `generation`, `work_sequence`, `scalar_type`, `dimensions`,
+`strides_bytes`, `model_geometry_digest`, `model_numerical_digest`, `logits_digest`,
+`identity`, and `canonical_bytes`. Native code validates the original logits
+owner/layout, receipt SHA-256, baseline binding, receipt order, and published
+candidate binding when present. The candidate generation is read from its receipt,
+not reconstructed as acquired generation plus one. Canonical bytes are the exact
+232-byte little-endian private receipt: ten scalar words, three stride words,
+then four 32-byte digests (geometry, numerics, logits, identity). The last digest
+seals the preceding 200 bytes. The original pointer word is inert evidence, not a
+CUDA alias or a replay capability. All returned dictionaries, tuples and bytes
+are host-owned and may outlive retirement; the getter itself may not.
+
+This port does not change the six native `execute_segment` row fields, objective
+reductions, canary algorithms, scientific acceptance, or the lifetime required
+for an unpublished multi-Update candidate.
+
 Use the same step's `record(44, 0, consumer_stream=...)`, `tensor(...)` and
 `tensor_allocation(...)` exports to serialize the original model contract and
 complete model backings. Their private storage is preallocated before capture

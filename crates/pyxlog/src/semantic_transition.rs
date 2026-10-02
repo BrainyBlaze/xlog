@@ -1607,6 +1607,191 @@ fn transition_refusal_report(
     Ok(Some(report.unbind()))
 }
 
+#[cfg(feature = "semantic-policy")]
+fn update_measurements_report(
+    py: Python<'_>,
+    observation: xlog_cuda::SemanticUpdateMeasurements,
+) -> PyResult<Py<PyDict>> {
+    let availability = |value| match value {
+        0 => "not_executed",
+        1 => "incomplete",
+        2 => "obtained",
+        _ => unreachable!("native observation validated availability"),
+    };
+    let identity = |value: xlog_cuda::SemanticPublishedIdentity| {
+        (
+            PyBytes::new(py, value.instance.as_bytes()),
+            value.word,
+            PyBytes::new(py, value.logical_digest.as_bytes()),
+            PyBytes::new(py, value.state_digest.as_bytes()),
+        )
+    };
+    let report = PyDict::new(py);
+    report.set_item("schema", 1)?;
+    report.set_item("predecessor", identity(observation.predecessor))?;
+    report.set_item("successor", observation.successor.map(identity))?;
+    report.set_item("bank", observation.bank)?;
+    report.set_item("model_generation", observation.model_generation)?;
+    report.set_item(
+        "model_geometry_digest",
+        PyBytes::new(py, observation.model_geometry_digest.as_bytes()),
+    )?;
+    report.set_item(
+        "model_numerical_digest",
+        PyBytes::new(py, observation.model_numerical_digest.as_bytes()),
+    )?;
+    report.set_item("transition_status", observation.transition_status)?;
+    let selected = &observation.selection;
+    let selection = PyDict::new(py);
+    for (name, value) in [
+        ("status", selected.status),
+        ("row_count", selected.row_count),
+        ("capacity", selected.capacity),
+        ("ordinal", selected.ordinal),
+        ("basis", selected.basis),
+        ("window", selected.window),
+        ("source_length", selected.source_length),
+        ("block_size", selected.block_size),
+        ("prefix_extent", selected.prefix_extent),
+        ("answer_start", selected.answer_start),
+        ("origin_candidate", selected.origin_candidate),
+    ] {
+        selection.set_item(name, value)?;
+    }
+    selection.set_item("identity", PyTuple::new(py, selected.identity)?)?;
+    selection.set_item(
+        "source_identity",
+        PyTuple::new(py, selected.source_identity)?,
+    )?;
+    selection.set_item(
+        "content_identity",
+        PyTuple::new(py, selected.content_identity)?,
+    )?;
+    selection.set_item("training_rng", PyTuple::new(py, selected.training_rng)?)?;
+    let origin = &selected.origin;
+    let source = PyDict::new(py);
+    for (name, value) in [
+        ("present", origin.present),
+        ("transition", origin.transition),
+        ("predecessor_word", origin.predecessor_word),
+        ("successor_word", origin.successor_word),
+        ("model_generation", origin.model_generation),
+        ("stream_serial", origin.stream_serial),
+        ("family_id", origin.family_id),
+        ("proposal", origin.proposal),
+    ] {
+        source.set_item(name, value)?;
+    }
+    for (name, value) in [
+        ("lineage_instance", origin.lineage_instance),
+        ("predecessor_instance", origin.predecessor_instance),
+        ("predecessor_logical", origin.predecessor_logical),
+        ("predecessor_state", origin.predecessor_state),
+        ("successor_instance", origin.successor_instance),
+        ("successor_logical", origin.successor_logical),
+        ("successor_state", origin.successor_state),
+        ("model_geometry_digest", origin.model_geometry_digest),
+        ("model_numerical_digest", origin.model_numerical_digest),
+    ] {
+        source.set_item(name, PyTuple::new(py, value)?)?;
+    }
+    selection.set_item("origin", source)?;
+    report.set_item("selection", selection)?;
+    let mut canaries = Vec::with_capacity(5);
+    for measured in observation.canaries {
+        let frozen = measured.frozen;
+        let check = PyDict::new(py);
+        for (name, value) in [
+            ("evaluator_abi", frozen.evaluator_abi),
+            ("kind", frozen.kind),
+            ("row_ordinal", frozen.row_ordinal),
+            ("lower_bound_bits", frozen.lower_bound_bits),
+            ("upper_bound_bits", frozen.upper_bound_bits),
+            ("memory_limit", frozen.memory_limit),
+            ("work_limit", frozen.work_limit),
+            ("protected_member_offset", frozen.protected_member_offset),
+            ("protected_member_count", frozen.protected_member_count),
+            ("reason", measured.reason),
+            ("memory_used", measured.memory_used),
+            ("work_used", measured.work_used),
+        ] {
+            check.set_item(name, value)?;
+        }
+        check.set_item("availability", availability(measured.availability))?;
+        check.set_item("measurement_bits", measured.measurement_bits)?;
+        check.set_item(
+            "obligation_positions",
+            PyTuple::new(py, frozen.obligation_positions)?,
+        )?;
+        check.set_item(
+            "protected_positions",
+            PyTuple::new(py, measured.protected_positions)?,
+        )?;
+        check.set_item("row_identity", PyTuple::new(py, frozen.row_identity)?)?;
+        check.set_item(
+            "row_content_identity",
+            PyTuple::new(py, frozen.row_content_identity)?,
+        )?;
+        check.set_item("task_identity", PyTuple::new(py, frozen.task_identity)?)?;
+        check.set_item("identity", PyTuple::new(py, frozen.identity)?)?;
+        canaries.push(check);
+    }
+    report.set_item("canaries", PyTuple::new(py, canaries)?)?;
+    let mut forwards = Vec::with_capacity(2);
+    for (role, receipt) in observation.forward_receipts.into_iter().enumerate() {
+        let forward = PyDict::new(py);
+        forward.set_item("role", role)?;
+        forward.set_item("availability", availability(receipt.availability))?;
+        let material = receipt
+            .material
+            .map(|receipt| -> PyResult<_> {
+                let payload = PyDict::new(py);
+                payload.set_item("role", receipt.role)?;
+                payload.set_item("generation", receipt.generation)?;
+                payload.set_item("work_sequence", receipt.work_sequence)?;
+                payload.set_item("scalar_type", receipt.scalar_type)?;
+                payload.set_item("dimensions", PyTuple::new(py, receipt.dimensions)?)?;
+                payload.set_item("strides_bytes", PyTuple::new(py, receipt.strides_bytes)?)?;
+                payload.set_item(
+                    "model_geometry_digest",
+                    PyBytes::new(py, receipt.model_geometry_digest.as_bytes()),
+                )?;
+                payload.set_item(
+                    "model_numerical_digest",
+                    PyBytes::new(py, receipt.model_numerical_digest.as_bytes()),
+                )?;
+                payload.set_item(
+                    "logits_digest",
+                    PyBytes::new(py, receipt.logits_digest.as_bytes()),
+                )?;
+                payload.set_item("identity", PyBytes::new(py, receipt.identity.as_bytes()))?;
+                payload.set_item(
+                    "canonical_bytes",
+                    PyBytes::new(py, &receipt.canonical_bytes),
+                )?;
+                Ok(payload)
+            })
+            .transpose()?;
+        forward.set_item("material", material)?;
+        forwards.push(forward);
+    }
+    report.set_item("forward_receipts", PyTuple::new(py, forwards)?)?;
+    let refusal = observation
+        .canary_refusal
+        .map(|evidence| {
+            transition_refusal_report(
+                py,
+                &xlog_cuda::SemanticTransitionOutcome::Refused(
+                    xlog_cuda::SemanticTransitionRefusal::RejectedModelUpdate { evidence },
+                ),
+            )
+        })
+        .transpose()?
+        .flatten();
+    report.set_item("canary_refusal", refusal)?;
+    Ok(report.unbind())
+}
+
 fn require_creator_thread(creator: ThreadId) -> PyResult<()> {
     if std::thread::current().id() != creator {
         return Err(PyRuntimeError::new_err(
@@ -9358,6 +9543,53 @@ impl PySemanticPreparedStep {
             )
                 .into_pyobject(py)?
                 .unbind())
+        }
+    }
+
+    /// Cold original Update observations, including known refusals. Availability
+    /// is authored by the original CUDA execution; incomplete accumulators are
+    /// never exported as measurement bits. The host-only snapshot grants no
+    /// execution authority and must be obtained before original step retirement.
+    #[getter]
+    fn update_measurements(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        if session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "Update observation cannot overlap recording, import or retirement",
+            ));
+        }
+        let mut owner = session.owner()?;
+        let binding = self.content_binding_with_owner(py, &owner)?;
+        if binding.0.is_none() {
+            return Err(invalid(
+                "Update observation requires the admitted original operation",
+            ));
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = &mut owner;
+            Err(invalid(
+                "Update observation requires the semantic-policy feature",
+            ))
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            let observation = owner
+                .prepared_update_measurements(&self.inner)
+                .map_err(xlog_err)?;
+            let report = observation
+                .map(|observation| update_measurements_report(py, observation))
+                .transpose()?;
+            if self.content_binding_with_owner(py, &owner)? != binding {
+                return Err(invalid(
+                    "original Update authority changed during observation",
+                ));
+            }
+            Ok(report)
         }
     }
 
