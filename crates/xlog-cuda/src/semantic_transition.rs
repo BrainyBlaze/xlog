@@ -5,6 +5,11 @@
 //! world state. Descriptor meanings belong to the retained semantic admission.
 
 use crate::semantic_work::{ExecutionWork, ModelWorkEvent, ModelWorkKind, ModelWorkRecording};
+mod learning_phase;
+pub use learning_phase::{
+    SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseRecord,
+    SemanticLearningPhaseTransition,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -6483,6 +6488,7 @@ struct PublicationMaterial {
     model_allocations: Vec<Vec<u8>>,
     ranges: Vec<PublicationMaterialRange>,
     graph: SemanticRootMaterial,
+    learning_phases: Vec<SemanticLearningPhaseRecord>,
 }
 
 /// Read-only delivery material from a sealed publication. Reading an
@@ -7224,7 +7230,7 @@ impl PublicationMaterial {
     fn encode(&self) -> Result<Vec<u8>, SemanticTransitionError> {
         self.validate()?;
         let mut bytes = b"XLOG-PUBLICATION-MATERIAL\0".to_vec();
-        material_u32(&mut bytes, 1);
+        material_u32(&mut bytes, 2);
         bytes.extend_from_slice(&publication_material_runtime());
         material_bytes(
             &mut bytes,
@@ -7271,6 +7277,7 @@ impl PublicationMaterial {
                 range.encode_into(&mut bytes)?;
             }
         }
+        learning_phase::encode_history(&self.learning_phases, &mut bytes)?;
         Ok(bytes)
     }
 
@@ -7278,7 +7285,7 @@ impl PublicationMaterial {
         let mut reader = SemanticMaterialReader::new(bytes);
         if reader.take(26).map_err(SemanticTransitionError::Semantic)?
             != b"XLOG-PUBLICATION-MATERIAL\0"
-            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 1
+            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 2
             || reader.take(32).map_err(SemanticTransitionError::Semantic)?
                 != publication_material_runtime()
         {
@@ -7373,6 +7380,7 @@ impl PublicationMaterial {
                 bytes: payload.to_vec(),
             });
         }
+        let learning_phases = learning_phase::decode_history(&mut reader)?;
         reader.finish().map_err(SemanticTransitionError::Semantic)?;
         let material = Self {
             bank,
@@ -7384,6 +7392,7 @@ impl PublicationMaterial {
             model_allocations,
             ranges,
             graph,
+            learning_phases,
         };
         material.validate()?;
         for range in &material.ranges {
@@ -7509,6 +7518,7 @@ impl PublicationMaterial {
                 "publication material lacks complete model backing bytes",
             ));
         }
+        learning_phase::validate_history(self)?;
         let mut model_slots = BTreeMap::new();
         let mut slot_allocations = BTreeMap::new();
         let backing_digests = self
@@ -13471,6 +13481,7 @@ pub struct SemanticTransitionSession {
     // raw banks immutable until the joint publisher consumes this pending tuple.
     task_observed: bool,
     publication: Option<Arc<PublicationStorage>>,
+    learning_phases: Vec<SemanticLearningPhaseRecord>,
     publication_uploads: Vec<(usize, PublicationPayload)>,
     publication_issuer: Arc<()>,
     readers: BTreeMap<u64, PublishedReader>,
@@ -20662,6 +20673,26 @@ impl SemanticTransitionSession {
         &mut self,
         bytes: &[u8],
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
+        self.restore_state_material_inner(bytes, None)
+    }
+
+    /// Cold-create a private successor from an authentic complete checkpoint.
+    /// Only the explicit phase and producer-authorized optimizer reset change;
+    /// all effective parameters, caches, native records and progress are copied.
+    /// The public Controller retains the old runnable owner until durable handoff.
+    pub fn restore_learning_phase_material(
+        &mut self,
+        bytes: &[u8],
+        transition: &SemanticLearningPhaseTransition,
+    ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
+        self.restore_state_material_inner(bytes, Some(transition))
+    }
+
+    fn restore_state_material_inner(
+        &mut self,
+        bytes: &[u8],
+        transition: Option<&SemanticLearningPhaseTransition>,
+    ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
         self.ensure_rebindable()?;
         if self.publication.is_some() || self.captured.is_some() || self.task.is_none() {
             return Err(publication_input_error(
@@ -20671,6 +20702,10 @@ impl SemanticTransitionSession {
         let mut material = PublicationMaterial::decode(bytes)?;
         let header = material.bank.header;
         let rng = header.rng_binding()?;
+        if let Some(transition) = transition {
+            let record = transition.apply(&mut material)?;
+            material.learning_phases.push(record);
+        }
         if header.authority_generation == 0 {
             return Err(publication_input_error(
                 "restored RNG or task generation exceeds its native domain",
@@ -20742,6 +20777,7 @@ impl SemanticTransitionSession {
             self.root = root;
             self.base_snapshot = snapshot;
             self.task_epoch = header.authority_generation;
+            self.learning_phases = material.learning_phases;
             let mut instance = [0; 32];
             getrandom::fill(&mut instance)
                 .map_err(|error| runtime_error("restored instance entropy", error))?;
@@ -20805,10 +20841,11 @@ impl SemanticTransitionSession {
                 &material.terminals,
                 &material.role_counts,
                 rng,
-                4,
+                if transition.is_some() { 5 } else { 4 },
             )?;
-            if restored.logical_digest != header.logical_digest
-                || restored.state_digest != header.state_digest
+            if transition.is_none()
+                && (restored.logical_digest != header.logical_digest
+                    || restored.state_digest != header.state_digest)
             {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
@@ -20818,6 +20855,12 @@ impl SemanticTransitionSession {
             self.poisoned = true;
         }
         result
+    }
+
+    /// Actual phase lineage owned by this Session. This is a cold metadata read,
+    /// not a scientific acceptance result or permission to execute training.
+    pub fn learning_phase_history(&self) -> &[SemanticLearningPhaseRecord] {
+        &self.learning_phases
     }
 
     /// Admit a new immutable training arena after an exact cold restore, while
@@ -21040,6 +21083,11 @@ impl SemanticTransitionSession {
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
         let expected = PublicationMaterial::decode(bytes)?;
         let actual = PublicationMaterial::decode(&self.published_state_material(lease)?)?;
+        if expected.learning_phases != actual.learning_phases {
+            return Err(publication_input_error(
+                "checkpoint restore changed retained learning-phase history",
+            ));
+        }
         let expected = expected.bank.header;
         let header = actual.bank.header;
         if header.instance == expected.instance
@@ -23266,6 +23314,7 @@ impl SemanticTransitionSession {
             model_allocations,
             ranges,
             graph,
+            learning_phases: self.learning_phases.clone(),
         }
         .encode()
     }
@@ -24561,6 +24610,7 @@ impl SemanticTransitionSession {
             task_epoch: 0,
             task_observed: false,
             publication: None,
+            learning_phases: Vec::new(),
             publication_uploads: Vec::new(),
             publication_issuer: Arc::new(()),
             readers: BTreeMap::new(),
@@ -33311,6 +33361,7 @@ mod text_parent_tests {
                 admission_base_digest: [0; 32],
                 admission_base_extents: [0; 3],
             },
+            learning_phases: Vec::new(),
         };
         publication_material_sample_runtime(&mut material);
         for range in &mut material.ranges {
