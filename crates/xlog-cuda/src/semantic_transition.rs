@@ -5164,6 +5164,9 @@ pub struct SemanticCompletedActionProjectionMaterial {
     pub action_law: SemanticCompletedStepWitnessMaterial,
     pub edit_codebook: SemanticCompletedStepWitnessMaterial,
     pub roster: SemanticCompletedStepWitnessMaterial,
+    /// Original pre-draw physical bounds and their native model/profile binding.
+    /// Non-actor actions and models without a physical roster have no certificate.
+    pub estimator_bound: Option<SemanticCompletedStepWitnessMaterial>,
     /// Native digest of the semantic root acquired by this Proposal.
     pub predecessor_semantic_root_digest: Identity256,
     pub predecessor: SemanticPublishedIdentity,
@@ -14486,6 +14489,8 @@ mod prepared_completion_tests {
         let parent = PublicationHeader {
             abi: 1,
             publication_word: 2,
+            // Proposal publication and model-weight banks advance separately.
+            neural_bank: 1,
             sealed_epoch: 1,
             proposal: 37,
             model_generation: 9,
@@ -16561,9 +16566,9 @@ impl SemanticTransitionSession {
             .result
             .view();
         let result = self.publication_read(result_view)?[0];
-        let bank = usize::try_from(result.header.neural_bank)
-            .ok()
-            .filter(|&value| value < 2)
+        let tape_index = self.completed_prepared_policy_tape(step)?;
+        let bank = self.policy_tapes[tape_index]
+            .prepared_bank
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let (state_view, receipt_view) = {
             let prepared = self
@@ -16574,11 +16579,7 @@ impl SemanticTransitionSession {
             let branch = &prepared.branches[bank];
             (
                 branch.state.view(),
-                branch
-                    .receipts
-                    .as_ref()
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?
-                    .view(),
+                self.policy_tapes[tape_index].receipts.view(),
             )
         };
         let state = self.publication_read(state_view)?[0];
@@ -16864,9 +16865,9 @@ impl SemanticTransitionSession {
                 u64::from(cold_extents.supports()),
                 u64::from(cold_extents.versions()),
             ];
-        let bank = usize::try_from(result.header.neural_bank)
-            .ok()
-            .filter(|&value| value < 2)
+        let tape_index = self.completed_prepared_policy_tape(step)?;
+        let bank = self.policy_tapes[tape_index]
+            .prepared_bank
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let (
             state_view,
@@ -16882,17 +16883,11 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .expect("checked prepared owner");
             let branch = &prepared.branches[bank];
-            let policy = branch
-                .policy
-                .as_ref()
-                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let tape = &self.policy_tapes[tape_index];
+            let policy = &tape.policy;
             (
                 branch.state.view(),
-                branch
-                    .receipts
-                    .as_ref()
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?
-                    .view(),
+                tape.receipts.view(),
                 policy.final_masks.view(),
                 policy.active_sets.view(),
                 policy.pwl_cells.view(),
@@ -17551,6 +17546,18 @@ impl SemanticTransitionSession {
         let mut attempt_receipt =
             completed_action_child_material(owner_identity, b"attempt-receipt", 0, &attempt_bytes);
         attempt_receipt.identity = result.attempt.receipt_digest;
+        let estimator_bound = if state.actor_eligible == 1 {
+            self.prepared_completed_estimator_bound(
+                step,
+                bank,
+                &parent_header,
+                &task_ground.scoring_law,
+                &batch_receipt,
+                owner_identity,
+            )?
+        } else {
+            None
+        };
         let projection = SemanticCompletedActionProjectionMaterial {
             owner,
             initial_prefill,
@@ -17565,6 +17572,7 @@ impl SemanticTransitionSession {
             action_law: SemanticActionCatalogue::current().completed_material(),
             edit_codebook: self.codebooks.completed_material(),
             roster: self.codebooks.completed_roster_material(),
+            estimator_bound,
             predecessor_semantic_root_digest: parent_semantic_digest,
             predecessor: binding.0,
             successor,
@@ -17610,6 +17618,117 @@ impl SemanticTransitionSession {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         Ok(projection)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn prepared_completed_estimator_bound(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        parent: &PublicationHeader,
+        scoring_law: &SemanticCompletedStepWitnessMaterial,
+        batch_receipt: &SemanticCompletedStepWitnessMaterial,
+        owner_identity: Identity256,
+    ) -> Result<Option<SemanticCompletedStepWitnessMaterial>, SemanticTransitionError> {
+        let tape_index = self.completed_prepared_policy_tape(step)?;
+        let (original, storage, profile) = {
+            let owner = self.checked_prepared_step(step, false)?;
+            let inputs = owner.inputs.as_ref().expect("checked original inputs");
+            let policy = &self.policy_tapes[tape_index].policy;
+            let Some(profile) =
+                inputs.views[bank].get(&(SemanticStateRole::RuntimeContract as u64, 0))
+            else {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            };
+            (
+                Arc::clone(&policy.text_binding),
+                Arc::clone(&inputs.storage),
+                profile.clone(),
+            )
+        };
+        let Some(snapshot) = original.numerical_block_snapshot.as_ref() else {
+            return Ok(None);
+        };
+        let contract = original
+            .model_contract
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let contract = self.publication_read(contract.clone())?;
+        let layout = storage.contract_value.model_contract_layout;
+        let roster = model_physical_parameter_roster(&contract, layout)?
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let domain = self
+            .task_training_domain()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .identity();
+        let bounds = self.publication_read(snapshot.view())?;
+        if original.physical_blocks != roster.len() as u64
+            || storage.physical_parameter_roster.as_ref() != Some(&roster)
+            || roster.len().checked_mul(6) != Some(bounds.len())
+            || u64::from_le_bytes(
+                contract[layout.generation_offset as usize..layout.generation_offset as usize + 8]
+                    .try_into()
+                    .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+            ) != parent.model_generation
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        // The successful completed action authenticates the original preflight.
+        // Do not recompute its directed-rounding law on the host or read the
+        // mutable producer tensor in place of this retained pre-draw snapshot.
+        let profile = self.publication_read(profile)?;
+        let mut bytes = b"XLOG-ESTIMATOR-BOUND\0".to_vec();
+        material_u64(&mut bytes, 1);
+        material_u64(&mut bytes, 1); // Native preflight law version.
+        material_u64(&mut bytes, 100);
+        material_u64(&mut bytes, bank as u64);
+        encode_publication_identity(
+            &mut bytes,
+            SemanticPublishedIdentity {
+                instance: parent.instance,
+                word: parent.publication_word,
+                logical_digest: parent.logical_digest,
+                state_digest: parent.state_digest,
+            },
+        );
+        material_u64(&mut bytes, parent.model_generation);
+        bytes.extend_from_slice(parent.model_geometry_digest.as_bytes());
+        bytes.extend_from_slice(parent.model_numerical_digest.as_bytes());
+        bytes.extend_from_slice(domain.as_bytes());
+        bind_completed_material(&mut bytes, scoring_law);
+        bind_completed_material(&mut bytes, batch_receipt);
+        for offset in [layout.schema_digest_offset, layout.identity_offset] {
+            bytes.extend_from_slice(&contract[offset as usize..offset as usize + 32]);
+        }
+        for offset in [
+            layout.schema_begin,
+            layout.schema_bytes,
+            layout.schema_digest_offset,
+            layout.generation_offset,
+            layout.numerical_digest_offset,
+            layout.identity_offset,
+        ] {
+            material_u64(&mut bytes, offset);
+        }
+        for material in [&contract, &profile] {
+            material_u64(&mut bytes, material.len() as u64);
+            bytes.extend_from_slice(material);
+        }
+        material_u64(&mut bytes, roster.len() as u64);
+        for (name, block) in roster.iter().zip(bounds.chunks_exact(6)) {
+            material_u64(&mut bytes, name.len() as u64);
+            bytes.extend_from_slice(name.as_bytes());
+            for value in block {
+                material_u64(&mut bytes, value.to_bits());
+            }
+        }
+        Ok(Some(completed_action_child_material(
+            owner_identity,
+            b"estimator-bound",
+            0,
+            &bytes,
+        )))
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -17715,19 +17834,9 @@ impl SemanticTransitionSession {
             .result
             .view();
         let result = self.publication_read(result_view)?[0];
-        let bank = usize::try_from(result.header.neural_bank)
-            .ok()
-            .filter(|&value| value < 2)
-            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let tape_index = self.completed_prepared_policy_tape(step)?;
         let (scores_view, layout) = {
-            let policy = self.steps[&step.token]
-                .prepared
-                .as_ref()
-                .expect("checked completed step")
-                .branches[bank]
-                .policy
-                .as_ref()
-                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let policy = &self.policy_tapes[tape_index].policy;
             (policy.retained_scores.view(), policy.layout.clone())
         };
         let scores = self.publication_read(scores_view)?;
@@ -17808,19 +17917,8 @@ impl SemanticTransitionSession {
         };
         let header = self.publication_read(header_view)?[0];
         let result = self.publication_read(result_view)?[0];
-        let bank = usize::try_from(result.header.neural_bank)
-            .ok()
-            .filter(|&value| value < 2)
-            .ok_or(SemanticTransitionError::ObservationMismatch)?;
-        let receipt_view = self.steps[&step.token]
-            .prepared
-            .as_ref()
-            .expect("checked completed step")
-            .branches[bank]
-            .receipts
-            .as_ref()
-            .ok_or(SemanticTransitionError::ObservationMismatch)?
-            .view();
+        let tape_index = self.completed_prepared_policy_tape(step)?;
+        let receipt_view = self.policy_tapes[tape_index].receipts.view();
         let receipts = self.publication_read(receipt_view)?;
         if result.refusal != 0
             || result.advanced != 1
@@ -26913,6 +27011,33 @@ impl SemanticTransitionSession {
                     "prepared policy has no unconsumed original tape for this step",
                 )
             })
+    }
+
+    /// Completion moves the executed policy out of branch storage into its
+    /// original tape. Cold observations must follow that same one-use owner.
+    #[cfg(feature = "semantic-policy")]
+    fn completed_prepared_policy_tape(
+        &mut self,
+        step: &SemanticPreparedStep,
+    ) -> Result<usize, SemanticTransitionError> {
+        let header_view = self
+            .checked_prepared_step(step, false)?
+            .inputs
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .header
+            .view();
+        let parent = self.publication_read(header_view)?[0];
+        let index = self.checked_prepared_policy_tape(step, parent.rng_binding()?)?;
+        let tape = &self.policy_tapes[index];
+        // Publication banks select recorded branches. Model-weight banks
+        // advance only on Update and are not the original branch selector.
+        if tape.prepared_bank != Some((parent.publication_word & 1) as usize)
+            || tape.refusal.is_some()
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(index)
     }
 
     /// Authenticate the actual completed step and its unconsumed original tape

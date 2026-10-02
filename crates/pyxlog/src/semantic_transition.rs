@@ -8075,6 +8075,15 @@ impl PySemanticCompletedActionProjection {
     fn roster(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
         completed_action_material(py, &self.inner.roster)
     }
+    /// Original native pre-draw physical certificate, never a selected VJP bound.
+    #[getter]
+    fn estimator_bound(&self, py: Python<'_>) -> PyResult<Option<Py<PySemanticCompletedMaterial>>> {
+        self.inner
+            .estimator_bound
+            .as_ref()
+            .map(|material| completed_action_material(py, material))
+            .transpose()
+    }
     #[getter]
     fn predecessor_semantic_root_digest(&self, py: Python<'_>) -> Py<PyBytes> {
         PyBytes::new(py, self.inner.predecessor_semantic_root_digest.as_bytes()).unbind()

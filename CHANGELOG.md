@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- *(python)* expose the original native pre-draw physical certificate as immutable completed-action material, retaining its model, runtime profile, physical roster, task, and scoring bindings.
 - *(gpu)* [**breaking**] bind reusable materialized stores and retained session runtimes to the exact compiled `LogicProgram`. Cached evaluation and relation-delta cache parameters now use the opaque `LogicMaterializedStore` returned by `evaluate_with_relation_store_and_cache` or `evaluate_with_session_runtime`; use `as_relation_store` for read-only result inspection. Raw `RelationStore` values remain supported as authoritative input stores but can no longer be supplied as trusted derived caches.
 - *(runtime)* expose actual WCOJ-family fallback executions by attempted route, separately from pipeline-error declines.
 - *(configuration)* apply one strict boolean parser to production environment switches in runtime, build, diagnostics, benchmarks, solver tracing, and Python bindings.
@@ -13,6 +14,7 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- *(cuda)* read completed Proposal materials from their retained original policy tape and publication bank rather than moved branch buffers or the model-weight bank.
 - *(runtime)* encode each resident-route certificate node from its local fields once, avoiding repeated recursive plan formatting for deep unary plans while preserving exact expression constants and route identity.
 - *(runtime)* preserve nullary schemas when initializing mutually recursive predicates.
 - *(runtime)* serialize execution statistics through a JSON encoder so diagnostic text and operation names are escaped correctly.
