@@ -13223,11 +13223,10 @@ fn decode_canary_refusal(
                         || record.memory_used <= record.memory_limit
                 }
                 SemanticTrainingCanaryRefusalReason::WorkLimitExceeded => {
-                    !measurement.is_finite()
-                        || measurement < lower
-                        || measurement > upper
-                        || record.memory_used > record.memory_limit
-                        || record.work_used <= record.work_limit
+                    // The final work-limit pass can outrank an earlier retention
+                    // or goal refusal, which skipped bounds and memory checks.
+                    // Its original result therefore proves only this limit.
+                    record.work_used <= record.work_limit
                 }
                 SemanticTrainingCanaryRefusalReason::IncompleteOperands
                 | SemanticTrainingCanaryRefusalReason::ProtectedRetentionLost
