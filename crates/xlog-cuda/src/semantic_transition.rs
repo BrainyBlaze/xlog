@@ -6963,6 +6963,7 @@ fn publication_material_runtime() -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"xlog.publication.material-runtime.v1\0");
         hash.update(include_bytes!("semantic_transition.rs"));
+        hash.update(include_bytes!("semantic_transition/learning_phase.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
         let policy_identity: [u8; 32] =
             include!(concat!(env!("OUT_DIR"), "/semantic_policy_identity.rs"));
