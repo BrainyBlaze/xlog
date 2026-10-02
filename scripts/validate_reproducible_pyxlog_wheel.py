@@ -100,6 +100,13 @@ def build_wheel(
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(target_dir)
     env["SOURCE_DATE_EPOCH"] = source_date_epoch
+    # Build and stage kernels in this wheel's own target tree. An existing
+    # package tree can belong to another source revision or feature selection.
+    stage_command = ["bash", "scripts/stage_pyxlog_kernels.sh"]
+    if features and "semantic-policy" in features.replace(",", " ").split():
+        stage_command.extend(["--features", "semantic-policy"])
+    print(f"+ {shlex.join(stage_command)}", flush=True)
+    subprocess.run(stage_command, cwd=repo_root, env=env, check=True)
     command = [
         "maturin",
         "build",

@@ -197,12 +197,27 @@ def test_build_wheel_resolves_caller_relative_output_directory(
     caller.mkdir()
     repo_root.mkdir()
     monkeypatch.chdir(caller)
+    commands = []
 
     def completed_build(
         command: list[str], *, cwd: Path, env: dict[str, str], check: bool
     ) -> subprocess.CompletedProcess[str]:
         assert cwd == repo_root
         assert check
+        assert Path(env["CARGO_TARGET_DIR"]) == caller / "relative-target"
+        assert env["SOURCE_DATE_EPOCH"] == SOURCE_DATE_EPOCH
+        commands.append(command)
+        if command[0] == "bash":
+            assert command == [
+                "bash",
+                "scripts/stage_pyxlog_kernels.sh",
+                "--features",
+                "semantic-policy",
+            ]
+            return subprocess.CompletedProcess(command, 0)
+        assert len(commands) == 2
+        assert command[0] == "maturin"
+        assert command[-2:] == ["--features", "host-io,semantic-policy"]
         output = Path(command[command.index("--out") + 1])
         assert output == caller / "relative-wheelhouse"
         assert output.is_absolute()
@@ -217,9 +232,11 @@ def test_build_wheel_resolves_caller_relative_output_directory(
         Path("relative-target"),
         Path("relative-wheelhouse"),
         SOURCE_DATE_EPOCH,
+        features="host-io,semantic-policy",
     )
 
     assert wheel == caller / "relative-wheelhouse" / "pyxlog-test.whl"
+    assert len(commands) == 2
 
 
 def test_wheel_integrity_accepts_deterministic_sbom_and_record(
