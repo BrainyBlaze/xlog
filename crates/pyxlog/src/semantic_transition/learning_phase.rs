@@ -509,6 +509,10 @@ impl PySemanticTransitionController {
     #[pyo3(signature = (task_use, *, parent, recipe, consumer_streams, snapshot, scientific_owner,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
         snapshot_restored_model, refresh_snapshot))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the original task, scientific acceptance, durable destination and model owners are independent mandatory inputs"
+    )]
     fn prepare_learning_phase_transition(
         &self,
         py: Python<'_>,
