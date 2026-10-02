@@ -910,7 +910,7 @@ static_assert(sizeof(PublicationBank)==50360,"publication bank ABI");
 static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
 static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
 static_assert(sizeof(PendingContinuation)==336,"pending continuation ABI");
-static_assert(sizeof(ContinuationInputs)==184,"continuation input ABI");
+static_assert(sizeof(ContinuationInputs)==200,"continuation input ABI");
 static_assert(sizeof(TextRow)==16,"compact text row ABI");
 static_assert(sizeof(TextBinding)==24,"compact text binding ABI");
 static_assert(sizeof(ModelUpdateBinding)==32,"model update binding ABI");
