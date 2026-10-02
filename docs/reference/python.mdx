@@ -797,8 +797,11 @@ protected-retention, goal-chain, and resource refusals. The check's independent
 native `reason` is 0 for admissible, 1 non-finite, 2 outside bounds, 3 memory limit,
 4 work limit, 5 incomplete operands, 6 protected retention lost, 7 invalid goal
 witness, 8 work overflow, or 9 generation mismatch. `canary_refusal` separately
-retains the existing prioritized refusal report; `transition_status` and the
-original `execute_segment` refusal remain independent of individual availability.
+retains the prioritized native reason, identities, bounds and counters, with the
+same `availability` and optional `measurement_bits` as its original check. It
+does not expose a partial accumulator as a complete measurement. `transition_status`
+and the original `execute_segment` refusal remain independent of individual
+availability; the existing segment-row format is unchanged.
 
 `forward_receipts` contains the original baseline and candidate records in that
 order. Each has `role` (0 or 1), the same availability vocabulary, and `material`

@@ -1697,6 +1697,14 @@ fn update_measurements_report(
     }
     selection.set_item("origin", source)?;
     report.set_item("selection", selection)?;
+    let refusal_measurement = observation.canary_refusal.map(|refusal| {
+        let measured = observation
+            .canaries
+            .iter()
+            .find(|measured| measured.frozen.kind == refusal.kind)
+            .expect("native observation validated the refusal's original check");
+        (measured.availability, measured.measurement_bits)
+    });
     let mut canaries = Vec::with_capacity(5);
     for measured in observation.canaries {
         let frozen = measured.frozen;
@@ -1788,6 +1796,14 @@ fn update_measurements_report(
         })
         .transpose()?
         .flatten();
+    if let Some(ref refusal) = refusal {
+        let (status, bits) =
+            refusal_measurement.expect("native refusal retains its original measurement status");
+        refusal
+            .bind(py)
+            .set_item("availability", availability(status))?;
+        refusal.bind(py).set_item("measurement_bits", bits)?;
+    }
     report.set_item("canary_refusal", refusal)?;
     Ok(report.unbind())
 }
