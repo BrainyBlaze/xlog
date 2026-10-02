@@ -3428,10 +3428,12 @@ struct TextBinding {
 struct TextBindingStorage {
     inputs: Vec<PreparedSemanticTensor>,
     numerical_block_snapshot: Option<Arc<TrackedCudaSlice<f64>>>,
+    model_contract: Option<DeviceMemoryView<u8>>,
     physical_blocks: u64,
     model_schema_digest: Identity256,
     model_identity: Identity256,
     _witness: SemanticTensorContentWitness,
+    _model_content_witness: Option<SemanticTensorContentWitness>,
     consumer_stream: u64,
     parent: TextBindingParent,
 }
@@ -3474,6 +3476,9 @@ impl TextBindingStorage {
         if let Some(snapshot) = &self.numerical_block_snapshot {
             recorder.read(snapshot.as_ref());
         }
+        if let Some(contract) = &self.model_contract {
+            recorder.read(contract);
+        }
     }
 
     fn continuation_inputs(
@@ -3495,6 +3500,14 @@ impl TextBindingStorage {
             physical_blocks: self.physical_blocks,
             model_schema_digest: self.model_schema_digest,
             model_identity: self.model_identity,
+            model_contract: self
+                .model_contract
+                .as_ref()
+                .map_or(0, |contract| *contract.device_ptr()),
+            model_contract_bytes: self
+                .model_contract
+                .as_ref()
+                .map_or(0, |contract| contract.len() as u64),
             transition_kind: kind.code(),
             authority_bytes,
             training_selection,
@@ -4464,6 +4477,8 @@ struct ContinuationInputs {
     physical_blocks: u64,
     model_schema_digest: Identity256,
     model_identity: Identity256,
+    model_contract: u64,
+    model_contract_bytes: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -7754,23 +7769,25 @@ impl PublicationStorage {
         &self,
         kind: SemanticTransitionKind,
         input: &SemanticContinuationInput,
+        prepared: bool,
     ) -> Result<(Option<usize>, Identity256, Identity256), SemanticTransitionError> {
         let expected = if kind == SemanticTransitionKind::Proposal {
             self.physical_parameter_roster.as_ref().map(Vec::len)
         } else {
             None
         };
+        let host_identities = expected.is_some() && !prepared;
         if input.numerical_blocks.is_some() != expected.is_some()
-            || input.model_schema_digest.is_some() != expected.is_some()
-            || input.model_identity.is_some() != expected.is_some()
+            || input.model_schema_digest.is_some() != host_identities
+            || input.model_identity.is_some() != host_identities
         {
             return Err(publication_input_error(
-                "proposal block bounds require the exact original model roster and identities",
+                "proposal block bounds require their original roster; only acquired replay accepts host model identities",
             ));
         }
         let schema = input.model_schema_digest.unwrap_or_default();
         let identity = input.model_identity.unwrap_or_default();
-        if expected.is_some()
+        if host_identities
             && (schema == Identity256::default() || identity == Identity256::default())
         {
             return Err(publication_input_error(
@@ -9450,7 +9467,6 @@ struct PreparedStepStorage {
     witness: CudaFunction,
     content_guard: CudaFunction,
     inputs_recorded: bool,
-    #[cfg(feature = "semantic-policy")]
     model_content_recorded: u8,
     transition_recorded: u8,
     drain_recorded: bool,
@@ -12827,7 +12843,7 @@ content_kernel_parameter!(PolicyDescriptor);
 content_kernel_parameter!(PolicyUniformDescriptor);
 
 const _: () = assert!(size_of::<PendingContinuation>() == 336);
-const _: () = assert!(size_of::<ContinuationInputs>() == 184);
+const _: () = assert!(size_of::<ContinuationInputs>() == 200);
 const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 296);
 const _: () = assert!(size_of::<SemanticTaskFacts>() == 88);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3328);
@@ -15023,7 +15039,6 @@ impl SemanticTransitionSession {
                     witness: witness.clone(),
                     content_guard: content_guard.clone(),
                     inputs_recorded: false,
-                    #[cfg(feature = "semantic-policy")]
                     model_content_recorded: 0,
                     transition_recorded: 0,
                     drain_recorded: false,
@@ -18036,12 +18051,15 @@ impl SemanticTransitionSession {
     /// Bind original forward outputs after their private witness was recorded.
     /// Numerical copies and native continuation preparation are recorded later
     /// by the complete step body; fresh authority bytes are uploaded at submit.
+    /// Proposal blocks retain this bank's original model-content witness; their
+    /// schema and identity come from its acquired device snapshot on each replay.
     pub fn bind_prepared_continuation(
         &mut self,
         step: &SemanticPreparedStep,
         bank: usize,
         continuation: SemanticContinuationInput,
         witness: &SemanticTensorContentWitness,
+        model_content_witness: Option<&SemanticTensorContentWitness>,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
         self.check_prepared_content_stream(step, consumer_stream)?;
@@ -18080,7 +18098,34 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let kind = self.prepared_transition_kind(step)?;
         let (physical_blocks, model_schema_digest, model_identity) =
-            storage.continuation_block_contract(kind, &continuation)?;
+            storage.continuation_block_contract(kind, &continuation, true)?;
+        let model_contract = match (physical_blocks, model_content_witness) {
+            (None, None) => None,
+            (Some(_), Some(model_witness)) => {
+                self.checked_prepared_content_witness(step, model_witness)?;
+                let owner = &self.steps[&step.token];
+                let TensorContentSeals::Model(seals) = &owner.content[model_witness.index].seals else {
+                    return Err(publication_input_error(
+                        "prepared block bounds require their original model-content witness",
+                    ));
+                };
+                let prepared = owner.prepared.as_ref().expect("prepared model owner");
+                if seals.prepared.as_ref().is_none_or(|source| source.bank != bank)
+                    || prepared.model_content_recorded & (1 << bank) == 0
+                {
+                    return Err(publication_input_error(
+                        "prepared block bounds require the same bank's recorded model-content guard",
+                    ));
+                }
+                // This is the existing private role44 snapshot, refreshed by
+                // the original acquire guard before this bank's model reads.
+                // Retain its witness below; never read identities on the host.
+                Some(seals.contract.view())
+            }
+            _ => return Err(publication_input_error(
+                "prepared proposal blocks and their model-content witness must be supplied together",
+            )),
+        };
         let service_layouts =
             continuation_service_layouts(tensor_count, capacity, physical_blocks)?;
         let SemanticContinuationInput {
@@ -18161,10 +18206,12 @@ impl SemanticTransitionSession {
         let binding = Arc::new(TextBindingStorage {
             inputs: services,
             numerical_block_snapshot,
+            model_contract,
             physical_blocks: physical_blocks.unwrap_or(0) as u64,
             model_schema_digest,
             model_identity,
             _witness: witness.clone(),
+            _model_content_witness: model_content_witness.cloned(),
             consumer_stream,
             parent: TextBindingParent::Prepared(Arc::clone(
                 owner.inputs.as_ref().expect("fixed inputs"),
@@ -24322,7 +24369,7 @@ impl SemanticTransitionSession {
             .checked_add(32)
             .ok_or_else(|| publication_input_error("continuation active capacity overflow"))?;
         let (physical_blocks, model_schema_digest, model_identity) =
-            storage.continuation_block_contract(kind, continuation)?;
+            storage.continuation_block_contract(kind, continuation, false)?;
         let service_layouts =
             continuation_service_layouts(tensor_count, active_capacity, physical_blocks)?;
         if continuation.authority_decisions.is_empty() {
@@ -24400,10 +24447,12 @@ impl SemanticTransitionSession {
         let text_binding = Arc::new(TextBindingStorage {
             inputs: services,
             numerical_block_snapshot,
+            model_contract: None,
             physical_blocks: physical_blocks.unwrap_or(0) as u64,
             model_schema_digest,
             model_identity,
             _witness: witness.clone(),
+            _model_content_witness: None,
             consumer_stream,
             parent: TextBindingParent::Published {
                 bank: (lease.identity.word & 1) as usize,

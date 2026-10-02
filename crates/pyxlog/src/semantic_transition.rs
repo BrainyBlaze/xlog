@@ -14317,7 +14317,10 @@ impl PySemanticTransitionController {
     /// their original order followed by these services at role 0 indices
     /// N through N+5. A model with a sealed physical-parameter roster must
     /// also supply FP64[N_physical,2,3] numerical_blocks for Proposal/replay,
-    /// at index N+6, and the original schema digest and model identity. Both
+    /// at index N+6. Acquired replay supplies its verified schema digest and
+    /// model identity; a prepared branch instead supplies the same bank's
+    /// ``model_content_witness`` and no host identities. Native retains its
+    /// private acquired model-contract snapshot and reads it on each replay. Both
     /// actor-reference and full-objective rows contain B, ordinary and U;
     /// Update has no pre-draw block tensor. Model-content witnesses cannot
     /// substitute for this capture.
@@ -14326,7 +14329,7 @@ impl PySemanticTransitionController {
     /// generations before pending ranges enter the sole publication CAS. A
     /// prepared parent requires ``bank`` and retains a distinct continuation for
     /// each recorded branch; published parents reject it.
-    #[pyo3(signature = (task_use, *, parent, text_rows, text_row_count, selected_text, active_rows, active_row_count, numerical_admissibility, tensors, producer_witness, consumer_stream, bank=None, numerical_blocks=None, model_schema_digest=None, model_identity=None))]
+    #[pyo3(signature = (task_use, *, parent, text_rows, text_row_count, selected_text, active_rows, active_row_count, numerical_admissibility, tensors, producer_witness, consumer_stream, bank=None, numerical_blocks=None, model_schema_digest=None, model_identity=None, model_content_witness=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "continuation binding retains each typed producer and its witness"
@@ -14349,6 +14352,7 @@ impl PySemanticTransitionController {
         numerical_blocks: Option<&Bound<'_, PyAny>>,
         model_schema_digest: Option<&Bound<'_, PyAny>>,
         model_identity: Option<&Bound<'_, PyAny>>,
+        model_content_witness: Option<&PySemanticTensorContentWitness>,
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         self.require_read_issued(task_use)?;
@@ -14378,6 +14382,7 @@ impl PySemanticTransitionController {
                     numerical_blocks,
                     model_schema_digest,
                     model_identity,
+                    model_content_witness,
                 )
             }
             ContentStepOwner::Prepared(step) => {
@@ -14401,6 +14406,7 @@ impl PySemanticTransitionController {
                     numerical_blocks,
                     model_schema_digest,
                     model_identity,
+                    model_content_witness,
                 )
             }
         }
@@ -15469,6 +15475,7 @@ impl PySemanticTransitionController {
                     blocks,
                     schema,
                     identity,
+                    None,
                 )
             };
             if kind == SemanticTransitionKind::Proposal {
@@ -15786,6 +15793,7 @@ impl PySemanticTransitionController {
         numerical_blocks: Option<&Bound<'_, PyAny>>,
         model_schema_digest: Option<&Bound<'_, PyAny>>,
         model_identity: Option<&Bound<'_, PyAny>>,
+        model_content_witness: Option<&PySemanticTensorContentWitness>,
     ) -> PyResult<()> {
         match parent {
             ContentStepRef::Published(_) if prepared_bank.is_some() => {
@@ -15798,11 +15806,24 @@ impl PySemanticTransitionController {
             }
             _ => {}
         }
+        if model_content_witness.is_some() && matches!(parent, ContentStepRef::Published(_)) {
+            return Err(invalid("acquired continuation requires its verified host model identities, not a prepared model-content witness"));
+        }
+        if matches!(parent, ContentStepRef::Prepared(_))
+            && (model_schema_digest.is_some()
+                || model_identity.is_some()
+                || numerical_blocks.is_some() != model_content_witness.is_some())
+        {
+            return Err(invalid("prepared numerical blocks require their same-bank model-content witness and no host model identities"));
+        }
         let expected = {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
             let state = self.continuation_state(py, task_use, parent, &owner, import)?;
             self.require_continuation_witness(py, parent, producer_witness)?;
+            if let Some(model_witness) = model_content_witness {
+                self.require_continuation_witness(py, parent, model_witness)?;
+            }
             self.continuation_binding(&state, parent, import.is_some())?
         };
         let mut budget = 16 * 1024 * 1024;
@@ -15844,6 +15865,15 @@ impl PySemanticTransitionController {
                 .iter()
                 .map(|value| value.clone_ref(py)),
         );
+        if let Some(model_witness) = model_content_witness {
+            producer_owners.0.push(model_witness._inputs.clone_ref(py));
+            producer_owners.0.extend(
+                model_witness
+                    ._producers
+                    .iter()
+                    .map(|value| value.clone_ref(py)),
+            );
+        }
         producer_owners
             .0
             .extend(services.iter().map(|value| (*value).clone().unbind()));
@@ -15871,6 +15901,9 @@ impl PySemanticTransitionController {
         let mut owner = session.owner()?;
         let state = self.continuation_state(py, task_use, parent, &owner, import)?;
         self.require_continuation_witness(py, parent, producer_witness)?;
+        if let Some(model_witness) = model_content_witness {
+            self.require_continuation_witness(py, parent, model_witness)?;
+        }
         if self.continuation_binding(&state, parent, import.is_some())? != expected {
             return Err(invalid(
                 "task phase changed during continuation producer handoff",
@@ -15922,6 +15955,7 @@ impl PySemanticTransitionController {
                 prepared_bank.expect("validated prepared bank"),
                 input,
                 &producer_witness.inner,
+                model_content_witness.map(|witness| &witness.inner),
                 consumer_stream,
             ),
         }
@@ -18795,14 +18829,14 @@ assert tuple(continuation.parameters) == (
     'self', 'task_use', 'parent', 'text_rows', 'text_row_count', 'selected_text',
     'active_rows', 'active_row_count', 'numerical_admissibility', 'tensors',
     'producer_witness', 'consumer_stream', 'bank', 'numerical_blocks',
-    'model_schema_digest', 'model_identity')
+    'model_schema_digest', 'model_identity', 'model_content_witness')
 for name in tuple(continuation.parameters)[2:12]:
     parameter = continuation.parameters[name]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is inspect.Parameter.empty
 assert continuation.parameters['bank'].kind is inspect.Parameter.KEYWORD_ONLY
 assert continuation.parameters['bank'].default is None
-for name in ('numerical_blocks', 'model_schema_digest', 'model_identity'):
+for name in ('numerical_blocks', 'model_schema_digest', 'model_identity', 'model_content_witness'):
     assert continuation.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
     assert continuation.parameters[name].default is None
 assert hasattr(SemanticTensorContentWitness, 'verify')

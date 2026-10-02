@@ -216,6 +216,23 @@ import. A failed final-use call quarantines the original invocation, and uncerta
 completion prevents reader release. Import does not retry final use, repeat
 publication, or substitute a backward call.
 
+For a prepared Proposal with a sealed physical-parameter roster,
+`controller.bind_continuation(..., parent=step, bank=bank,
+numerical_blocks=blocks, model_content_witness=model_content)` consumes the
+original witness returned by `bind_model_content` for that same Session, step
+and bank. Omit `model_schema_digest` and `model_identity`: the original bank guard
+must already have recorded its private acquired model-contract snapshot before
+the model forward. Native retains that snapshot, the model witness and its
+producer owners; the existing CUDA continuation node reads its schema and
+generation identity on each replay before validating the acquired record. There
+is no host identity readback, recapture or certificate reassignment after Update.
+`producer_witness` remains the distinct transient witness covering the complete
+continuation tensor roster and all seven services, including the original
+FP64 `[N_physical,2,3]` blocks as the seventh service. Non-drawing prepared steps
+omit both blocks and the model witness. Acquired replay retains the verified host
+identity interface above and rejects a prepared model witness. These bindings do
+not establish scientific numerical acceptance or measured ZERO TRANSFER.
+
 The original nine policy operands are CUDA FP32 text logits `[32,V]`, Bool8
 product support, FP32 packed parameters `[P]`, FP32 component baselines
 `[1,136]`, FP64 pointwise errors `[P,2]` and `[1,136,2]`, then FP64 domains
