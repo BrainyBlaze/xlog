@@ -15279,6 +15279,32 @@ impl SemanticTransitionSession {
         build.requested_kind(step, &self.publication_issuer)
     }
 
+    /// Cold exports retain the original schedule after construction finishes.
+    /// This authenticates known completion without reopening graph recording.
+    #[cfg(feature = "semantic-policy")]
+    fn completed_prepared_transition_kind(
+        &self,
+        step: &SemanticPreparedStep,
+    ) -> Result<SemanticTransitionKind, SemanticTransitionError> {
+        let owner = self.checked_prepared_step(step, false)?;
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .expect("checked prepared scope");
+        if !build.completed
+            || !owner
+                .prepared
+                .as_ref()
+                .expect("checked prepared owner")
+                .observed
+        {
+            return Err(publication_input_error(
+                "completed schedule observation requires this step's known execution",
+            ));
+        }
+        build.requested_kind(step, &self.publication_issuer)
+    }
+
     fn check_prepared_cold(
         &self,
         step: &SemanticPreparedStep,
@@ -16457,7 +16483,7 @@ impl SemanticTransitionSession {
         consumer_streams: &[u64],
     ) -> Result<SemanticCompletedStepWitnessMaterial, SemanticTransitionError> {
         let binding = self.prepared_model_binding(step, consumer_streams)?;
-        let transition = match self.prepared_transition_kind(step)? {
+        let transition = match self.completed_prepared_transition_kind(step)? {
             SemanticTransitionKind::Proposal => 1,
             SemanticTransitionKind::Recompute => 2,
             SemanticTransitionKind::Update => 3,
@@ -16553,7 +16579,7 @@ impl SemanticTransitionSession {
         consumer_streams: &[u64],
     ) -> Result<SemanticCompletedStepWitnessMaterial, SemanticTransitionError> {
         let binding = self.prepared_model_binding(step, consumer_streams)?;
-        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
+        if self.completed_prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
             return Err(publication_input_error(
                 "completed action witnesses require an original Proposal",
             ));
@@ -16823,7 +16849,7 @@ impl SemanticTransitionSession {
         consumer_streams: &[u64],
     ) -> Result<SemanticCompletedActionProjectionMaterial, SemanticTransitionError> {
         let binding = self.prepared_model_binding(step, consumer_streams)?;
-        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
+        if self.completed_prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
             return Err(publication_input_error(
                 "completed action projection requires an original Proposal",
             ));
@@ -17825,7 +17851,7 @@ impl SemanticTransitionSession {
         consumer_streams: &[u64],
     ) -> Result<SemanticCompletedStepWitnessMaterial, SemanticTransitionError> {
         let binding = self.prepared_model_binding(step, consumer_streams)?;
-        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
+        if self.completed_prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
             return Err(publication_input_error(
                 "completed logits require an original Proposal",
             ));
@@ -17981,7 +18007,7 @@ impl SemanticTransitionSession {
         consumer_streams: &[u64],
     ) -> Result<Option<SemanticCompletedModelCarrierMaterial>, SemanticTransitionError> {
         let binding = self.prepared_model_binding(step, consumer_streams)?;
-        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal
+        if self.completed_prepared_transition_kind(step)? != SemanticTransitionKind::Proposal
             || binding.1.is_none()
         {
             return Ok(None);
