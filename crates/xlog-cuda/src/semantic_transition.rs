@@ -16941,10 +16941,13 @@ impl SemanticTransitionSession {
                 task.completed_result_material(),
             )
         };
+        // A hard-constraint refusal follows completed queries. Scope and
+        // program-resource refusals have no query result; their actual edit
+        // costs and refusal penalties remain checked by the scoring law.
         let executed_slots = [
             true,
-            state.task_evaluation.lane_refusal[0] != 1,
-            state.task_evaluation.lane_refusal[1] != 1,
+            matches!(state.task_evaluation.lane_refusal[0], 0 | 2),
+            matches!(state.task_evaluation.lane_refusal[1], 0 | 2),
         ];
         let expected_query_count =
             executed_slots.iter().filter(|executed| **executed).count() as u64 * 3;
@@ -17022,7 +17025,7 @@ impl SemanticTransitionSession {
                 .task_evaluation
                 .lane_refusal
                 .iter()
-                .any(|&code| code > 2)
+                .any(|&code| code > 4)
             || (state.task_evaluation.winner != 0
                 && state.task_evaluation.lane_refusal[state.task_evaluation.winner as usize - 1]
                     != 0)
