@@ -9634,11 +9634,9 @@ impl PySemanticPreparedStep {
             ));
         }
         let owner = session.owner()?;
-        if self.content_binding_with_owner(py, &owner)?.0.is_none() {
-            return Err(invalid(
-                "material capacity requires the admitted original operation",
-            ));
-        }
+        // Prepared task use has not activated an operation yet. Authenticate
+        // its original identity and recording scope, not completed authority.
+        self.content_binding_with_owner(py, &owner)?;
         let capacity = owner
             .prepared_completed_material_capacity(&self.inner)
             .map_err(xlog_err)?;
