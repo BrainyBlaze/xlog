@@ -443,6 +443,19 @@ an arbitrary acceptance flag as that result. The native checkpoint retains the
 full recipe, source identity, cumulative progress, original acceptance, grant,
 destination and authority binding.
 
+Destination acceptance must be derived from the original durable-training
+permission's resolved scope, never merely from the caller's destination string,
+grant reference, or purpose. The original owner checks controller/tenant,
+repository, confidentiality, purpose, retention/deletion, cross-request reuse,
+and revocation restrictions for the full checkpoint and all derived weights;
+sealed-evaluation material is excluded. Returning serialized callback inputs
+does not establish this acceptance. Alignment acceptance concerns the actual
+jointly trained generation. Entering consolidation authorizes that phase, not
+its future result. Returning from consolidation requires an already accepted
+slow generation with absorbed residual, neutral adapters, retained accepted
+heads and a complete cache of that generation. Copy/reset neither performs
+nor proves absorption or the scientific retention and causality criteria.
+
 Restoration uses the same native Session allocation and task admission path as
 ordinary restore. For this transition only, the trusted factory is called once
 as `restore_model(controller, task_use, parent, None)`: reconstruct from the
