@@ -5195,6 +5195,57 @@ pub struct SemanticCompletedActionProjectionMaterial {
     pub attempt_receipt: SemanticCompletedStepWitnessMaterial,
 }
 
+/// Cold capacity of every native material one original Proposal can export.
+/// Counts deliberately precede digest deduplication and outcome selection.
+#[cfg(feature = "semantic-policy")]
+#[derive(Default)]
+pub struct SemanticCompletedMaterialCapacity {
+    pub material_count: usize,
+    pub largest_material_bytes: usize,
+    pub total_material_bytes: usize,
+    /// Numerical realization, structural logits, and random state, in that order.
+    pub carrier_bytes: [usize; 3],
+    pub attempt_receipt_bytes: usize,
+    pub publication_evidence_bytes: usize,
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_material_extent(parts: &[usize]) -> Result<usize, SemanticTransitionError> {
+    parts.iter().try_fold(0usize, |total, &bytes| {
+        total.checked_add(bytes).ok_or_else(|| {
+            publication_input_error("completed material capacity exceeds host extent")
+        })
+    })
+}
+
+#[cfg(feature = "semantic-policy")]
+fn repeated_material_extent(count: usize, bytes: usize) -> Result<usize, SemanticTransitionError> {
+    count
+        .checked_mul(bytes)
+        .ok_or_else(|| publication_input_error("completed material capacity exceeds host extent"))
+}
+
+#[cfg(feature = "semantic-policy")]
+impl SemanticCompletedMaterialCapacity {
+    fn add(&mut self, bytes: usize) -> Result<(), SemanticTransitionError> {
+        self.material_count = completed_material_extent(&[self.material_count, 1])?;
+        self.total_material_bytes = completed_material_extent(&[self.total_material_bytes, bytes])?;
+        self.largest_material_bytes = self.largest_material_bytes.max(bytes);
+        Ok(())
+    }
+
+    fn child(&mut self, kind: &[u8], payload: usize) -> Result<usize, SemanticTransitionError> {
+        let bytes = completed_material_extent(&[
+            b"XLOG-COMPLETED-ACTION-CHILD\0".len(),
+            32 + 4 * size_of::<u64>(),
+            kind.len(),
+            payload,
+        ])?;
+        self.add(bytes)?;
+        Ok(bytes)
+    }
+}
+
 impl PublicationMaterialRange {
     fn into_feedback_record(
         self,
@@ -16838,6 +16889,343 @@ impl SemanticTransitionSession {
             0,
             &bytes,
         )))
+    }
+
+    /// Reserve the complete cold export before any execution chooses a bank or
+    /// action. Only frozen extents and captured launch metadata are inspected;
+    /// no tensor value, publication header, or future result is read.
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_completed_material_capacity(
+        &self,
+        step: &SemanticPreparedStep,
+    ) -> Result<SemanticCompletedMaterialCapacity, SemanticTransitionError> {
+        let owner = self.checked_prepared_step(step, false)?;
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .expect("checked prepared scope");
+        if !build.finished || build.capturing || build.active || build.submitted || build.completed
+        {
+            return Err(publication_input_error(
+                "completed material capacity requires finished capture before the first submit",
+            ));
+        }
+        if build.requested_kind(step, &self.publication_issuer)? != SemanticTransitionKind::Proposal
+        {
+            return Err(publication_input_error(
+                "completed material capacity requires an original Proposal",
+            ));
+        }
+        let prepared = owner.prepared.as_ref().expect("checked prepared owner");
+        let inputs = owner
+            .inputs
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let work = prepared
+            .model_work
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let launches = self
+            .captured
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .captured_launch_bindings();
+        if launches.is_empty()
+            || launches
+                .iter()
+                .any(|launch| launch.artifact_sha256.is_none())
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let task = &self
+            .task
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .0;
+        let mut capacity = SemanticCompletedMaterialCapacity::default();
+        let publication_identity_bytes = 3 * 32 + size_of::<u64>();
+        // These are the serialized fields, not the narrower private device ABI.
+        let component_receipt_bytes = (2 + 9 + 2 + 4 + 4 + 4 + 4 * 3 + 2) * 8 + 2 * 32;
+        let semantic_receipt_bytes = 42 * size_of::<u64>();
+        let action_bytes = completed_material_extent(&[
+            b"XLOG-COMPLETED-ACTION-WITNESSES\0".len(),
+            4 * 8,
+            2 * publication_identity_bytes,
+            size_of::<DeviceState>(),
+            repeated_material_extent(COMPONENT_COUNT, size_of::<SemanticTransitionReceipt>())?,
+        ])?;
+        capacity.add(action_bytes)?;
+        if let Some(saved) = &self.checkpoint_initial_prefill {
+            let referent = saved.recovery_referent.as_ref().map_or(0, Vec::len);
+            capacity.child(
+                b"initial-prefill",
+                completed_material_extent(&[
+                    b"XLOG-INITIAL-PREFILL\0".len(),
+                    8,
+                    2 * publication_identity_bytes,
+                    1,
+                    8,
+                    referent,
+                    saved.content.len(),
+                ])?,
+            )?;
+        } else if let Some(retained) = &self.retained_initial_prefill {
+            let record = &retained.record;
+            let mut content = completed_material_extent(&[
+                2 * 32,
+                2 * 8,
+                3 * 32,
+                2 * 8,
+                repeated_material_extent(record.tokens.len(), 8)?,
+                2 * 8,
+                repeated_material_extent(
+                    initial_prefill_seal_sources(&retained.model)?.len(),
+                    6 * 8,
+                )?,
+                repeated_material_extent(
+                    initial_prefill_seal_sources(&retained.output)?.len(),
+                    6 * 8,
+                )?,
+            ])?;
+            for row in &record.mapping {
+                content = completed_material_extent(&[content, 3 * 8, row.source.len()])?;
+            }
+            capacity.child(
+                b"initial-prefill",
+                completed_material_extent(&[
+                    b"XLOG-INITIAL-PREFILL\0".len(),
+                    8,
+                    2 * publication_identity_bytes,
+                    1,
+                    content,
+                ])?,
+            )?;
+        }
+        if let Some(root) = &self.cold_world_root {
+            capacity.add(root.bytes.len())?;
+        }
+        capacity.add(
+            self.graph
+                .admission()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
+                .schema_bytes()
+                .len(),
+        )?;
+        capacity.add(SemanticActionCatalogue::current().canonical_bytes().len())?;
+        capacity.add(repeated_material_extent(self.codebooks.words.len(), 8)?)?;
+        capacity.add(completed_material_extent(&[
+            b"xlog.semantic-action-roster.v1\0".len(),
+            32 + 8,
+            repeated_material_extent(self.codebooks.components.len(), 7 * 8)?,
+        ])?)?;
+        capacity.add(size_of::<SemanticActionBatchReceipt>())?;
+        capacity.add(task.completed_result_material().bytes.len())?;
+        for _ in 0..2 {
+            capacity.child(b"action-rng", 4 * 8)?;
+            capacity.child(b"logical-state", publication_identity_bytes)?;
+            capacity.child(b"lane-admission", semantic_receipt_bytes)?;
+            for _ in 0..2 {
+                capacity.child(b"hard-decode-receipt", semantic_receipt_bytes)?;
+            }
+        }
+        capacity.child(b"slot-zero-admission", semantic_receipt_bytes)?;
+        for component in &self.codebooks.components {
+            let mask = completed_material_extent(&[8, component.cardinality as usize])?;
+            capacity.child(b"final-mask", mask)?;
+            capacity.child(b"active-set", mask)?;
+            capacity.child(b"component-receipt", component_receipt_bytes)?;
+            capacity.child(b"pwl-cell", size_of::<SemanticPolicyPwlCell>())?;
+            capacity.child(b"vjp", size_of::<SemanticPolicySelectedScoreVjp>())?;
+        }
+        // Every edit slot may emit both a delta and its refusal/acceptance
+        // evidence. NULL, winner selection, and digest aliases cannot shrink
+        // the reservation before execution.
+        let editable_program = task.spec().program.editable_program().is_some();
+        let (delta_kind, evidence_kind, delta_bytes, evidence_prefix) = if editable_program {
+            (
+                b"theory-rule-delta".as_slice(),
+                b"theory-rule-delta-evidence".as_slice(),
+                b"XLOG-DECODED-RULE-INSERTION\0".len() + 8 + 2 * 32 + (18 + 10) * 4,
+                2 * 32 + 3 * 8,
+            )
+        } else {
+            (
+                b"theory-delta".as_slice(),
+                b"theory-delta-evidence".as_slice(),
+                b"XLOG-DECODED-SUPPORT-INSERTION\0".len() + 8 + 3 * 32 + (18 + 1 + 10) * 4,
+                32 + 3 * 8 + (1 + 10) * 4,
+            )
+        };
+        for _ in 0..4 {
+            capacity.child(delta_kind, delta_bytes)?;
+            capacity.child(
+                evidence_kind,
+                completed_material_extent(&[
+                    evidence_prefix,
+                    2 * semantic_receipt_bytes,
+                    18 * component_receipt_bytes,
+                ])?,
+            )?;
+        }
+        let mut ground = completed_material_extent(&[
+            b"XLOG-COMPLETED-TASK-GROUND\0".len(),
+            17 * 8,
+            10 * 32,
+            publication_identity_bytes,
+            3 * size_of::<SemanticTaskFacts>(),
+        ])?;
+        for level in task.priority_levels() {
+            ground = completed_material_extent(&[
+                ground,
+                8,
+                repeated_material_extent(level.goals.len(), 3 * 8)?,
+            ])?;
+        }
+        capacity.child(b"task-ground", ground)?;
+        capacity.child(
+            b"task-scoring-law",
+            task.spec()
+                .scoring
+                .completed_law_bytes(task.identity(), editable_program)?
+                .len(),
+        )?;
+        capacity.child(
+            b"edit-solution",
+            b"XLOG-COMPLETED-EDIT-SOLUTION\0".len() + 8 + 64 + 32 + 6 * 8 + 3 * 64 + 68 * 5 * 64,
+        )?;
+        capacity.attempt_receipt_bytes = capacity.child(b"attempt-receipt", 4 * 8 + 10 * 32)?;
+        if let Some(roster) = &inputs.storage.physical_parameter_roster {
+            let mut names = 0;
+            for name in roster {
+                names = completed_material_extent(&[names, name.len()])?;
+            }
+            let mut original_records = 0;
+            for bank in 0..2 {
+                let model = inputs.views[bank]
+                    .get(&(44, 0))
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?
+                    .len();
+                let profile = inputs.storage.bank_templates[bank]
+                    .iter()
+                    .find(|range| range.role == 43 && range.index == 0)
+                    .and_then(|range| usize::try_from(range.length_bytes).ok())
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                original_records =
+                    original_records.max(completed_material_extent(&[model, profile])?);
+            }
+            capacity.child(
+                b"estimator-bound",
+                completed_material_extent(&[
+                    b"XLOG-ESTIMATOR-BOUND\0".len(),
+                    4 * 8,
+                    publication_identity_bytes,
+                    8,
+                    3 * 32,
+                    2 * 64,
+                    2 * 32,
+                    6 * 8,
+                    3 * 8,
+                    original_records,
+                    repeated_material_extent(roster.len(), 7 * 8)?,
+                    names,
+                ])?,
+            )?;
+        }
+        let mut graph = b"XLOG-CAPTURED-CUDA-LAUNCH-BINDINGS\0".len() + 2 * 8;
+        for launch in launches {
+            graph = completed_material_extent(&[
+                graph,
+                13 * 8 + 32,
+                launch.module_name.len(),
+                launch.artifact_name.len(),
+                launch.function_name.len(),
+            ])?;
+        }
+        let work_bytes = completed_material_extent(&[
+            b"XLOG-COMPLETED-STEP-WITNESSES\0".len(),
+            15 * 8,
+            2 * publication_identity_bytes,
+            2 * 32,
+            repeated_material_extent(work.recording.events().len(), (4 + 8 + 3) * 8)?,
+        ])?;
+        let numerical = completed_material_extent(&[
+            b"XLOG-COMPLETED-NUMERICAL-REALIZATION\0".len(),
+            4 * 8,
+            graph,
+            work_bytes,
+            action_bytes,
+        ])?;
+        let mut logits = 0;
+        for branch in &prepared.branches {
+            let policy = branch
+                .policy
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let field_count = repeated_material_extent(policy.layout.fields.len(), 4)?;
+            let mut scores = 0;
+            for field in &policy.layout.fields {
+                scores = completed_material_extent(&[scores, field.cardinality])?;
+            }
+            logits = logits.max(completed_material_extent(&[
+                b"XLOG-COMPLETED-EDIT-LOGITS\0".len(),
+                2 * 8,
+                repeated_material_extent(field_count, 5 * 8)?,
+                repeated_material_extent(scores, 4 * 4)?,
+            ])?);
+        }
+        let random = b"XLOG-COMPLETED-RANDOM-STATE\0".len() + 11 * 8 + COMPONENT_COUNT * 12 * 8;
+        capacity.carrier_bytes = [numerical, logits, random];
+        for bytes in capacity.carrier_bytes {
+            capacity.add(bytes)?;
+        }
+        for plan in inputs
+            .plans
+            .iter()
+            .filter(|plan| matches!(plan.role, 15..=17))
+        {
+            let mut bytes = 0;
+            for bank in &plan.banks {
+                bytes = bytes.max(
+                    bank.span
+                        .end
+                        .checked_sub(bank.span.start)
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                );
+            }
+            capacity.add(bytes)?;
+        }
+        let mut evidence = REPLAY_EVIDENCE_MAGIC.len() + 2 * 4 + 32 + publication_identity_bytes;
+        for role in REPLAY_EVIDENCE_ROLES {
+            let mut bytes = 0;
+            for bank in &inputs.storage.bank_templates {
+                let range = bank
+                    .iter()
+                    .find(|range| range.role == role && range.index == 0)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let slot = usize::try_from(range.storage_slot)
+                    .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+                let offset = usize::try_from(range.offset_bytes)
+                    .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+                let allocation = inputs
+                    .storage
+                    .allocations
+                    .get(slot)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                bytes = bytes.max(
+                    allocation
+                        .len()
+                        .checked_sub(offset)
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                );
+            }
+            evidence = completed_material_extent(&[
+                evidence,
+                2 * 4 + size_of::<PublicationRange>() + 8,
+                bytes,
+            ])?;
+        }
+        capacity.publication_evidence_bytes = evidence;
+        Ok(capacity)
     }
 
     /// Project one completed Proposal into typed action-law values and canonical

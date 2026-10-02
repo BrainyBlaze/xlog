@@ -840,6 +840,29 @@ new model invocation.
 
 ### Completed-step action projection
 
+After capture finishes and before the first `execute_segment`, every original
+Proposal step exposes `completed_material_capacity`. It returns
+`((count, largest_bytes, total_bytes), (numerical_bytes, logits_bytes, random_bytes),
+attempt_receipt_bytes, publication_evidence_bytes)`, with every size in bytes.
+The first triple conservatively covers all projection children, the three raw
+model carriers, and every raw feedback, statement, and provenance record. It
+counts possible materials before digest deduplication, NULL choices, lane
+refusals, or winner selection, including every possible structural delta and its
+evidence, task ground, scoring law, edit solution, and physical certificate.
+Both frozen input banks and their original recorded policies are inspected;
+future values, selected results, and device tensor bytes are not read.
+
+The carrier lengths use the order numerical realization, structural logits,
+random state. An external codec must additionally bound its real wrappers and
+model-owned materials. The AttemptReceipt child is already in the first triple;
+its separate size also bounds consumers that store it as kit evidence. Full
+publication replay evidence has a different format and is reported separately,
+using all six native records' complete allocation capacities. Neither evidence
+value substitutes for the other. Combine this native capacity with all external
+materials, record lines, views, anchors, and indexes under the same writer caps
+before allowing any submit. This getter is unavailable during capture or after
+submission and does not execute a forward, authorize replay, or enable an actor.
+
 For a successfully published Proposal, call
 `completed_action_projection(consumer_streams=[...])` before consuming the
 original policy tape or retiring the segment. Completion moves the executed
