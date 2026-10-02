@@ -3515,6 +3515,7 @@ impl TextBindingStorage {
             model_update_binding_count: model_update.binding_count,
             model_update_admissibility: model_update.admissibility,
             model_update_refusal: model_update.refusal,
+            model_update_canary_results: model_update.canary_results,
         }
     }
 }
@@ -4453,6 +4454,7 @@ struct PendingContinuation {
     model_update_binding_count: u64,
     model_update_admissibility: u64,
     model_update_refusal: u64,
+    model_update_canary_results: u64,
     numerical_blocks: u64,
     physical_blocks: u64,
     model_schema_digest: Identity256,
@@ -4473,6 +4475,7 @@ struct ContinuationInputs {
     model_update_binding_count: u64,
     model_update_admissibility: u64,
     model_update_refusal: u64,
+    model_update_canary_results: u64,
     numerical_blocks: u64,
     physical_blocks: u64,
     model_schema_digest: Identity256,
@@ -4487,6 +4490,7 @@ struct ModelUpdateContinuationInputs {
     binding_count: u64,
     admissibility: u64,
     refusal: u64,
+    canary_results: u64,
 }
 
 #[repr(C)]
@@ -9607,13 +9611,6 @@ struct PreparedModelUpdate {
     forward_seals: TrackedCudaSlice<ModelForwardSealInput>,
     forward_receipts: TrackedCudaSlice<ModelForwardReceipt>,
     admissibility: TrackedCudaSlice<u8>,
-    #[cfg_attr(
-        not(feature = "semantic-policy"),
-        expect(
-            dead_code,
-            reason = "canary results are produced by the semantic-policy graph"
-        )
-    )]
     canary_results: TrackedCudaSlice<SemanticTrainingCanaryResultRecord>,
     refusal: TrackedCudaSlice<SemanticTrainingCanaryRefusalRecord>,
     output: Option<BoundModelUpdate>,
@@ -9682,6 +9679,7 @@ impl PreparedModelUpdate {
             binding_count: self.bindings.len() as u64,
             admissibility: self.admissibility.device_ptr_value(),
             refusal: self.refusal.device_ptr_value(),
+            canary_results: self.canary_results.device_ptr_value(),
         }
     }
 
@@ -9700,6 +9698,7 @@ impl PreparedModelUpdate {
         recorder.read_write(&self.forward_receipts);
         recorder.read_write(&self.admissibility);
         recorder.read_write(&self.refusal);
+        recorder.read(&self.canary_results);
         if let Some(output) = &self.output {
             for allocation in &output.allocations {
                 if let Some(source) = &allocation.source {
@@ -12933,8 +12932,8 @@ content_kernel_parameter!(PolicyDescriptor);
 #[cfg(feature = "semantic-policy")]
 content_kernel_parameter!(PolicyUniformDescriptor);
 
-const _: () = assert!(size_of::<PendingContinuation>() == 336);
-const _: () = assert!(size_of::<ContinuationInputs>() == 200);
+const _: () = assert!(size_of::<PendingContinuation>() == 344);
+const _: () = assert!(size_of::<ContinuationInputs>() == 208);
 const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 296);
 const _: () = assert!(size_of::<SemanticTaskFacts>() == 88);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3328);
