@@ -109,6 +109,8 @@ pub use semantic_transition::{
     SemanticCompletedLaneOutcomeMaterial, SemanticCompletedModelCarrierMaterial,
     SemanticCompletedStepWitnessMaterial, SemanticCompletedTaskGroundMaterial,
     SemanticCompletedTheoryDeltaMaterial, SemanticPolicyGradients, SemanticSelectedPolicyGradients,
+    SemanticUpdateCanaryMeasurement, SemanticUpdateForwardReceipt,
+    SemanticUpdateForwardReceiptMaterial, SemanticUpdateMeasurements,
 };
 pub use semantic_work::ModelWorkKind;
 

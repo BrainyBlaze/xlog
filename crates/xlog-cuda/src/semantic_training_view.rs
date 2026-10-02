@@ -315,8 +315,13 @@ unsafe impl DeviceRepr for SemanticTrainingCanaryRecord {}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SemanticTrainingCanaryResultRecord {
+    pub abi: u64,
     pub kind: u64,
     pub row_ordinal: u64,
+    /// Zero: not evaluated; one: evaluation started without a complete metric;
+    /// two: the complete original metric was obtained, including refused values.
+    pub availability: u64,
+    pub reason: u64,
     pub measurement_bits: u64,
     pub memory_used: u64,
     pub work_used: u64,
@@ -325,6 +330,8 @@ pub(crate) struct SemanticTrainingCanaryResultRecord {
 
 // SAFETY: the fixed CUDA ABI contains only u64 words.
 unsafe impl DeviceRepr for SemanticTrainingCanaryResultRecord {}
+
+const _: () = assert!(size_of::<SemanticTrainingCanaryResultRecord>() == 96);
 
 /// Closed device reason for refusing a candidate model update canary.
 #[repr(u64)]

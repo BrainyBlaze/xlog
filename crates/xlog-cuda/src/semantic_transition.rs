@@ -3515,6 +3515,7 @@ impl TextBindingStorage {
             model_update_binding_count: model_update.binding_count,
             model_update_admissibility: model_update.admissibility,
             model_update_refusal: model_update.refusal,
+            model_update_canary_results: model_update.canary_results,
         }
     }
 }
@@ -4453,6 +4454,7 @@ struct PendingContinuation {
     model_update_binding_count: u64,
     model_update_admissibility: u64,
     model_update_refusal: u64,
+    model_update_canary_results: u64,
     numerical_blocks: u64,
     physical_blocks: u64,
     model_schema_digest: Identity256,
@@ -4473,6 +4475,7 @@ struct ContinuationInputs {
     model_update_binding_count: u64,
     model_update_admissibility: u64,
     model_update_refusal: u64,
+    model_update_canary_results: u64,
     numerical_blocks: u64,
     physical_blocks: u64,
     model_schema_digest: Identity256,
@@ -4487,6 +4490,7 @@ struct ModelUpdateContinuationInputs {
     binding_count: u64,
     admissibility: u64,
     refusal: u64,
+    canary_results: u64,
 }
 
 #[repr(C)]
@@ -4520,6 +4524,7 @@ struct ModelForwardSealInput {
 #[derive(Clone, Copy, Default)]
 struct ModelForwardReceipt {
     abi: u64,
+    availability: u64,
     role: u64,
     generation: u64,
     work_sequence: u64,
@@ -4533,6 +4538,96 @@ struct ModelForwardReceipt {
     model_numerical_digest: Identity256,
     logits_digest: Identity256,
     identity: Identity256,
+}
+
+#[cfg(feature = "semantic-policy")]
+impl ModelForwardReceipt {
+    fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(size_of::<Self>());
+        for word in [
+            self.abi,
+            self.availability,
+            self.role,
+            self.generation,
+            self.work_sequence,
+            self.logits,
+            self.scalar_type,
+            self.row_count,
+            self.capacity,
+            self.vocabulary,
+        ]
+        .into_iter()
+        .chain(self.strides_bytes)
+        {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        for identity in [
+            self.model_geometry_digest,
+            self.model_numerical_digest,
+            self.logits_digest,
+            self.identity,
+        ] {
+            bytes.extend_from_slice(identity.as_bytes());
+        }
+        bytes
+    }
+}
+
+/// Original completed forward receipt, copied cold without retaining CUDA aliases.
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone, Debug)]
+pub struct SemanticUpdateForwardReceipt {
+    pub availability: u64,
+    /// None only when the original producer did not obtain a complete receipt.
+    pub material: Option<SemanticUpdateForwardReceiptMaterial>,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone, Debug)]
+pub struct SemanticUpdateForwardReceiptMaterial {
+    pub role: u64,
+    pub generation: u64,
+    pub work_sequence: u64,
+    pub scalar_type: u64,
+    pub dimensions: [u64; 3],
+    pub strides_bytes: [u64; 3],
+    pub model_geometry_digest: Identity256,
+    pub model_numerical_digest: Identity256,
+    pub logits_digest: Identity256,
+    pub identity: Identity256,
+    /// Exact private receipt words, including the original pointer value as data,
+    /// not a live address or execution grant. Its SHA-256 seal is the final 32 bytes.
+    pub canonical_bytes: Vec<u8>,
+}
+
+/// A frozen check and its device-authored execution/measurement availability.
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone, Debug)]
+pub struct SemanticUpdateCanaryMeasurement {
+    pub frozen: crate::SemanticTrainingCanaryRecord,
+    pub protected_positions: Vec<u64>,
+    pub availability: u64,
+    pub reason: u64,
+    pub measurement_bits: Option<u64>,
+    pub memory_used: u64,
+    pub work_used: u64,
+}
+
+/// Cold original Update observations. Acceptance is independent of availability.
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone, Debug)]
+pub struct SemanticUpdateMeasurements {
+    pub predecessor: SemanticPublishedIdentity,
+    pub successor: Option<SemanticPublishedIdentity>,
+    pub bank: u8,
+    pub model_generation: u64,
+    pub model_geometry_digest: Identity256,
+    pub model_numerical_digest: Identity256,
+    pub transition_status: u64,
+    pub selection: SemanticTrainingViewSelection,
+    pub canaries: Vec<SemanticUpdateCanaryMeasurement>,
+    pub forward_receipts: [SemanticUpdateForwardReceipt; 2],
+    pub canary_refusal: Option<SemanticTrainingCanaryRefusalRecord>,
 }
 
 #[repr(C)]
@@ -4876,7 +4971,7 @@ const _: () = assert!(size_of::<TextBinding>() == 24);
 const _: () = assert!(size_of::<ModelUpdateBinding>() == 32);
 const _: () = assert!(size_of::<ModelUpdateEvidenceSource>() == 48);
 const _: () = assert!(size_of::<ModelForwardSealInput>() == 32);
-const _: () = assert!(size_of::<ModelForwardReceipt>() == 224);
+const _: () = assert!(size_of::<ModelForwardReceipt>() == 232);
 const _: () = assert!(size_of::<ModelForwardReceiptInputs>() == 128);
 const _: () = assert!(size_of::<PublicationCommand>() == 24);
 const _: () = assert!(size_of::<PublicationDeliveryInput>() == 88);
@@ -9516,13 +9611,6 @@ struct PreparedModelUpdate {
     forward_seals: TrackedCudaSlice<ModelForwardSealInput>,
     forward_receipts: TrackedCudaSlice<ModelForwardReceipt>,
     admissibility: TrackedCudaSlice<u8>,
-    #[cfg_attr(
-        not(feature = "semantic-policy"),
-        expect(
-            dead_code,
-            reason = "canary results are produced by the semantic-policy graph"
-        )
-    )]
     canary_results: TrackedCudaSlice<SemanticTrainingCanaryResultRecord>,
     refusal: TrackedCudaSlice<SemanticTrainingCanaryRefusalRecord>,
     output: Option<BoundModelUpdate>,
@@ -9591,6 +9679,7 @@ impl PreparedModelUpdate {
             binding_count: self.bindings.len() as u64,
             admissibility: self.admissibility.device_ptr_value(),
             refusal: self.refusal.device_ptr_value(),
+            canary_results: self.canary_results.device_ptr_value(),
         }
     }
 
@@ -9609,6 +9698,7 @@ impl PreparedModelUpdate {
         recorder.read_write(&self.forward_receipts);
         recorder.read_write(&self.admissibility);
         recorder.read_write(&self.refusal);
+        recorder.read(&self.canary_results);
         if let Some(output) = &self.output {
             for allocation in &output.allocations {
                 if let Some(source) = &allocation.source {
@@ -12842,8 +12932,8 @@ content_kernel_parameter!(PolicyDescriptor);
 #[cfg(feature = "semantic-policy")]
 content_kernel_parameter!(PolicyUniformDescriptor);
 
-const _: () = assert!(size_of::<PendingContinuation>() == 336);
-const _: () = assert!(size_of::<ContinuationInputs>() == 200);
+const _: () = assert!(size_of::<PendingContinuation>() == 344);
+const _: () = assert!(size_of::<ContinuationInputs>() == 208);
 const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 296);
 const _: () = assert!(size_of::<SemanticTaskFacts>() == 88);
 const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3328);
@@ -13076,6 +13166,7 @@ impl SemanticTransitionRefusal {
 #[cfg(feature = "semantic-policy")]
 fn decode_canary_refusal(
     record: SemanticTrainingCanaryRefusalRecord,
+    results: &[SemanticTrainingCanaryResultRecord],
 ) -> Result<Option<SemanticTrainingCanaryRefusalRecord>, SemanticTransitionError> {
     if record.abi != 1 {
         return Err(SemanticTransitionError::ObservationMismatch);
@@ -13092,6 +13183,21 @@ fn decode_canary_refusal(
     let reason = record
         .reason()
         .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    let original = results
+        .iter()
+        .find(|result| result.kind == record.kind)
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    if original.abi != 1
+        || original.availability > 2
+        || original.reason != record.reason
+        || original.row_ordinal != record.row_ordinal
+        || original.identity != record.identity
+        || original.measurement_bits != record.measurement_bits
+        || original.memory_used != record.memory_used
+        || original.work_used != record.work_used
+    {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
     let lower = f64::from_bits(record.lower_bound_bits);
     let upper = f64::from_bits(record.upper_bound_bits);
     let measurement = f64::from_bits(record.measurement_bits);
@@ -13101,30 +13207,32 @@ fn decode_canary_refusal(
         || lower > upper
         || record.memory_limit == 0
         || record.work_limit == 0
-        || match reason {
-            SemanticTrainingCanaryRefusalReason::NonFiniteMeasurement => measurement.is_finite(),
-            SemanticTrainingCanaryRefusalReason::OutsideBounds => {
-                !measurement.is_finite() || (measurement >= lower && measurement <= upper)
-            }
-            SemanticTrainingCanaryRefusalReason::MemoryLimitExceeded => {
-                !measurement.is_finite()
-                    || measurement < lower
-                    || measurement > upper
-                    || record.memory_used <= record.memory_limit
-            }
-            SemanticTrainingCanaryRefusalReason::WorkLimitExceeded => {
-                !measurement.is_finite()
-                    || measurement < lower
-                    || measurement > upper
-                    || record.memory_used > record.memory_limit
-                    || record.work_used <= record.work_limit
-            }
-            SemanticTrainingCanaryRefusalReason::IncompleteOperands
-            | SemanticTrainingCanaryRefusalReason::ProtectedRetentionLost
-            | SemanticTrainingCanaryRefusalReason::GoalWitnessInvalid
-            | SemanticTrainingCanaryRefusalReason::WorkOverflow
-            | SemanticTrainingCanaryRefusalReason::GenerationMismatch => false,
-        }
+        || (original.availability == 2
+            && match reason {
+                SemanticTrainingCanaryRefusalReason::NonFiniteMeasurement => {
+                    measurement.is_finite()
+                }
+                SemanticTrainingCanaryRefusalReason::OutsideBounds => {
+                    !measurement.is_finite() || (measurement >= lower && measurement <= upper)
+                }
+                SemanticTrainingCanaryRefusalReason::MemoryLimitExceeded => {
+                    !measurement.is_finite()
+                        || measurement < lower
+                        || measurement > upper
+                        || record.memory_used <= record.memory_limit
+                }
+                SemanticTrainingCanaryRefusalReason::WorkLimitExceeded => {
+                    // The final work-limit pass can outrank an earlier retention
+                    // or goal refusal, which skipped bounds and memory checks.
+                    // Its original result therefore proves only this limit.
+                    record.work_used <= record.work_limit
+                }
+                SemanticTrainingCanaryRefusalReason::IncompleteOperands
+                | SemanticTrainingCanaryRefusalReason::ProtectedRetentionLost
+                | SemanticTrainingCanaryRefusalReason::GoalWitnessInvalid
+                | SemanticTrainingCanaryRefusalReason::WorkOverflow
+                | SemanticTrainingCanaryRefusalReason::GenerationMismatch => false,
+            })
     {
         return Err(SemanticTransitionError::ObservationMismatch);
     }
@@ -14050,12 +14158,13 @@ impl SemanticTransitionSession {
                     branch
                         .model_update
                         .as_ref()
-                        .map(|update| update.refusal.view()),
+                        .map(|update| (update.refusal.view(), update.canary_results.view())),
                 )
             };
             let canary_refusal = match (transition, update_refusal_view) {
-                (SemanticTransitionKind::Update, Some(view)) => {
-                    decode_canary_refusal(self.publication_read(view)?[0])?
+                (SemanticTransitionKind::Update, Some((view, results))) => {
+                    let results = self.publication_read(results)?;
+                    decode_canary_refusal(self.publication_read(view)?[0], &results)?
                 }
                 (SemanticTransitionKind::Update, None) | (_, Some(_)) => {
                     return Err(SemanticTransitionError::ObservationMismatch);
@@ -15901,6 +16010,315 @@ impl SemanticTransitionSession {
             parent.model_geometry_digest,
             parent.model_numerical_digest,
         ))
+    }
+
+    /// Read the original five Update checks and original forward receipts after
+    /// terminal completion. All returned data is host-owned; no reader is acquired
+    /// and no forward, metric, or candidate generation is reconstructed.
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_update_measurements(
+        &mut self,
+        step: &SemanticPreparedStep,
+    ) -> Result<Option<SemanticUpdateMeasurements>, SemanticTransitionError> {
+        let original = self.checked_prepared_step(step, false)?;
+        let mut streams = original.consumer_streams.clone();
+        if let Some(reader) = self.readers.get(&step.token) {
+            streams.extend(reader.consumer_streams.iter().copied());
+        }
+        let streams = streams.into_iter().collect::<Vec<_>>();
+        let binding = self.prepared_model_binding(step, &streams)?;
+        let observation = (|| {
+            let prepared = self.steps[&step.token]
+                .prepared
+                .as_ref()
+                .expect("checked owner");
+            let lease_view = prepared.reader.view();
+            let result_view = prepared.result.view();
+            let parent_view = self.steps[&step.token]
+                .inputs
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
+                .header
+                .view();
+            let parent = self.publication_read(parent_view)?[0];
+            let lease = self.publication_read(lease_view)?[0];
+            let result = self.publication_read(result_view)?[0];
+            let transition =
+                validate_prepared_completion(&lease, &parent, &result, parent.instance)?;
+            if transition != SemanticTransitionKind::Update {
+                return Ok(None);
+            }
+            let bank = usize::try_from(lease.bank)
+                .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+            let (
+                selection,
+                canaries,
+                rows,
+                protected,
+                results,
+                receipts,
+                refusal,
+                state,
+                logits,
+                work_count,
+            ) = {
+                let prepared = self.steps[&step.token]
+                    .prepared
+                    .as_ref()
+                    .expect("checked owner");
+                let view = prepared
+                    .training_view
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let branch = prepared
+                    .branches
+                    .get(bank)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let update = branch
+                    .model_update
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let output = update
+                    .output
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let work = prepared
+                    .model_work
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                (
+                    view.selection(),
+                    view.canaries(),
+                    view.roster_rows(),
+                    view.protected_members(),
+                    update.canary_results.view(),
+                    update.forward_receipts.view(),
+                    update.refusal.view(),
+                    branch.state.view(),
+                    [
+                        (output.baseline_logits.data, output.baseline_logits.layout),
+                        (output.candidate_logits.data, output.candidate_logits.layout),
+                    ],
+                    work.recording.events().len() as u64,
+                )
+            };
+            let selection = self.publication_read(selection)?[0];
+            let canaries = self.publication_read(canaries)?;
+            let rows = self.publication_read(rows)?;
+            let protected = self.publication_read(protected)?;
+            let results = self.publication_read(results)?;
+            let receipts = self.publication_read(receipts)?;
+            let refusal = decode_canary_refusal(self.publication_read(refusal)?[0], &results)?;
+            let state = self.publication_read(state)?[0];
+            if canaries.len() != 5
+                || results.len() != 5
+                || receipts.len() != 2
+                || selection.status > 3
+                || selection.row_count != rows.len() as u64
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            let mut observations = Vec::with_capacity(5);
+            for (index, (frozen, measured)) in canaries.into_iter().zip(&results).enumerate() {
+                let row = rows
+                    .get(
+                        usize::try_from(frozen.row_ordinal)
+                            .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+                    )
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let lower = f64::from_bits(frozen.lower_bound_bits);
+                let upper = f64::from_bits(frozen.upper_bound_bits);
+                let value = f64::from_bits(measured.measurement_bits);
+                let complete = measured.availability == 2;
+                let reason_valid = match measured.reason {
+                    0 => {
+                        complete
+                            && value.is_finite()
+                            && value >= lower
+                            && value <= upper
+                            && measured.memory_used <= frozen.memory_limit
+                            && measured.work_used <= frozen.work_limit
+                    }
+                    1 => measured.availability == 1 || (complete && !value.is_finite()),
+                    2 => complete && value.is_finite() && (value < lower || value > upper),
+                    3 => complete && measured.memory_used > frozen.memory_limit,
+                    4 => measured.work_used > frozen.work_limit,
+                    5 => !complete,
+                    6 => complete && frozen.kind == 2,
+                    7 => {
+                        (measured.availability == 1 && matches!(frozen.kind, 1 | 4))
+                            || (complete && frozen.kind == 4)
+                    }
+                    8 => true,
+                    9 => measured.availability == 0,
+                    _ => false,
+                };
+                if frozen.evaluator_abi != 3
+                    || frozen.kind != index as u64 + 1
+                    || frozen.task_identity
+                        != identity_words(
+                            *self
+                                .publication
+                                .as_ref()
+                                .expect("checked publication")
+                                .contract_value
+                                .task_identity
+                                .as_bytes(),
+                        )
+                    || row.ordinal != frozen.row_ordinal
+                    || row.identity != frozen.row_identity
+                    || row.content_identity != frozen.row_content_identity
+                    || measured.abi != 1
+                    || measured.kind != frozen.kind
+                    || measured.row_ordinal != frozen.row_ordinal
+                    || measured.identity != frozen.identity
+                    || measured.availability > 2
+                    || !reason_valid
+                    || !lower.is_finite()
+                    || !upper.is_finite()
+                    || lower > upper
+                    || frozen.memory_limit == 0
+                    || frozen.work_limit == 0
+                    || measured.memory_used != results[0].memory_used
+                    || measured.work_used != results[0].work_used
+                {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                let begin = usize::try_from(frozen.protected_member_offset)
+                    .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+                let count = usize::try_from(frozen.protected_member_count)
+                    .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+                let end = begin
+                    .checked_add(count)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let positions = protected
+                    .get(begin..end)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?
+                    .to_vec();
+                observations.push(SemanticUpdateCanaryMeasurement {
+                    frozen,
+                    protected_positions: positions,
+                    availability: measured.availability,
+                    reason: measured.reason,
+                    measurement_bits: complete.then_some(measured.measurement_bits),
+                    memory_used: measured.memory_used,
+                    work_used: measured.work_used,
+                });
+            }
+            let winning = results
+                .iter()
+                .filter(|check| check.reason != 0)
+                .min_by_key(|check| (check.reason, check.kind));
+            if winning.map(|check| (check.reason, check.kind))
+                != refusal.map(|record| (record.reason, record.kind))
+                || refusal.is_some_and(|record| {
+                    let frozen = &observations[(record.kind - 1) as usize].frozen;
+                    record.selection_identity != selection.identity
+                        || record.lower_bound_bits != frozen.lower_bound_bits
+                        || record.upper_bound_bits != frozen.upper_bound_bits
+                        || record.memory_limit != frozen.memory_limit
+                        || record.work_limit != frozen.work_limit
+                })
+                || (result.advanced == 1
+                    && (state.status != 0
+                        || refusal.is_some()
+                        || observations.iter().any(|check| check.availability != 2)))
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            let mut forwards = Vec::with_capacity(2);
+            for (role, receipt) in receipts.iter().enumerate() {
+                if receipt.availability > 2 {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                let bytes = receipt.canonical_bytes();
+                let material = if receipt.availability == 2 {
+                    let (address, layout) = logits[role];
+                    let digest: [u8; 32] = Sha256::digest(&bytes[..bytes.len() - 32]).into();
+                    if receipt.abi != 1
+                        || receipt.role != role as u64
+                        || receipt.work_sequence == 0
+                        || receipt.work_sequence > work_count
+                        || receipt.logits != address
+                        || receipt.scalar_type != layout.scalar_type
+                        || [receipt.row_count, receipt.capacity, receipt.vocabulary]
+                            != layout.dimensions[..3]
+                        || receipt.strides_bytes != layout.strides_bytes[..3]
+                        || receipt.model_geometry_digest != binding.3
+                        || receipt.identity != Identity256::from_bytes(digest)
+                        || receipt.model_numerical_digest == Identity256::default()
+                        || (role == 0
+                            && (receipt.generation != binding.2
+                                || receipt.model_numerical_digest != binding.4))
+                        || (role == 1
+                            && result.advanced == 1
+                            && (receipt.generation != result.header.model_generation
+                                || receipt.model_numerical_digest
+                                    != result.header.model_numerical_digest))
+                    {
+                        return Err(SemanticTransitionError::ObservationMismatch);
+                    }
+                    Some(SemanticUpdateForwardReceiptMaterial {
+                        role: receipt.role,
+                        generation: receipt.generation,
+                        work_sequence: receipt.work_sequence,
+                        scalar_type: receipt.scalar_type,
+                        dimensions: [receipt.row_count, receipt.capacity, receipt.vocabulary],
+                        strides_bytes: receipt.strides_bytes,
+                        model_geometry_digest: receipt.model_geometry_digest,
+                        model_numerical_digest: receipt.model_numerical_digest,
+                        logits_digest: receipt.logits_digest,
+                        identity: receipt.identity,
+                        canonical_bytes: bytes,
+                    })
+                } else {
+                    // An unexecuted one-shot receipt is the original zero allocation.
+                    // A started but incomplete producer cannot masquerade as a sealed receipt.
+                    let mut absent = *receipt;
+                    absent.availability = 0;
+                    if absent.canonical_bytes().iter().any(|&byte| byte != 0)
+                        || result.advanced == 1
+                    {
+                        return Err(SemanticTransitionError::ObservationMismatch);
+                    }
+                    None
+                };
+                forwards.push(SemanticUpdateForwardReceipt {
+                    availability: receipt.availability,
+                    material,
+                });
+            }
+            if receipts.iter().all(|receipt| receipt.availability == 2)
+                && (receipts[0].work_sequence >= receipts[1].work_sequence
+                    || receipts[0].identity == receipts[1].identity)
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            Ok(Some(SemanticUpdateMeasurements {
+                predecessor: binding.0,
+                successor: binding.1,
+                bank: bank as u8,
+                model_generation: binding.2,
+                model_geometry_digest: binding.3,
+                model_numerical_digest: binding.4,
+                transition_status: state.status,
+                selection,
+                canaries: observations,
+                forward_receipts: forwards
+                    .try_into()
+                    .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+                canary_refusal: refusal,
+            }))
+        })();
+        if observation.is_err() {
+            self.poisoned = true;
+        }
+        let observation = observation?;
+        if self.prepared_model_binding(step, &streams)? != binding {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(observation)
     }
 
     pub fn prepared_feedback(

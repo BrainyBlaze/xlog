@@ -20,6 +20,79 @@ __version__: str
 
 _Path = Union[str, PathLike[str]]
 
+_PublishedIdentity = tuple[bytes, int, bytes, bytes]
+_NativeIdentityWords = tuple[int, int, int, int]
+_MeasurementAvailability = Literal["not_executed", "incomplete", "obtained"]
+
+class _UpdateCanaryMeasurement(TypedDict):
+    evaluator_abi: int
+    kind: int
+    row_ordinal: int
+    availability: _MeasurementAvailability
+    reason: int
+    measurement_bits: Optional[int]
+    lower_bound_bits: int
+    upper_bound_bits: int
+    memory_used: int
+    memory_limit: int
+    work_used: int
+    work_limit: int
+    obligation_positions: tuple[int, int, int]
+    protected_member_offset: int
+    protected_member_count: int
+    protected_positions: tuple[int, ...]
+    row_identity: _NativeIdentityWords
+    row_content_identity: _NativeIdentityWords
+    task_identity: _NativeIdentityWords
+    identity: _NativeIdentityWords
+
+class _UpdateForwardReceiptMaterial(TypedDict):
+    role: int
+    generation: int
+    work_sequence: int
+    scalar_type: int
+    dimensions: tuple[int, int, int]
+    strides_bytes: tuple[int, int, int]
+    model_geometry_digest: bytes
+    model_numerical_digest: bytes
+    logits_digest: bytes
+    identity: bytes
+    canonical_bytes: bytes
+
+class _UpdateForwardReceipt(TypedDict):
+    role: int
+    availability: _MeasurementAvailability
+    material: Optional[_UpdateForwardReceiptMaterial]
+
+class _UpdateMeasurements(TypedDict):
+    schema: Literal[1]
+    predecessor: _PublishedIdentity
+    successor: Optional[_PublishedIdentity]
+    bank: int
+    model_generation: int
+    model_geometry_digest: bytes
+    model_numerical_digest: bytes
+    transition_status: int
+    selection: dict[str, Any]
+    canaries: tuple[_UpdateCanaryMeasurement, ...]
+    forward_receipts: tuple[_UpdateForwardReceipt, _UpdateForwardReceipt]
+    canary_refusal: Optional[dict[str, Any]]
+
+class SemanticPreparedStep:
+    """Session-issued original step; construction is not public."""
+
+    @property
+    def requested_transition(self) -> Literal["proposal", "recompute", "update"]: ...
+
+    @property
+    def update_measurements(self) -> Optional[_UpdateMeasurements]:
+        """Original accepted/refused Update observations before retirement."""
+        ...
+
+    def completed_model_binding(
+        self, *, consumer_streams: Sequence[int]
+    ) -> tuple[_PublishedIdentity, Optional[_PublishedIdentity], int, bytes, bytes, Any]: ...
+
 # ---------------------------------------------------------------------------
 # Native relation provenance
 # ---------------------------------------------------------------------------
