@@ -13,7 +13,6 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
-- *(python)* require and retain the original full scientific source checkpoint during native learning-phase preparation; verify it against the live native task and model without replacing its bytes under refreshed authority.
 - *(runtime)* encode each resident-route certificate node from its local fields once, avoiding repeated recursive plan formatting for deep unary plans while preserving exact expression constants and route identity.
 - *(runtime)* preserve nullary schemas when initializing mutually recursive predicates.
 - *(runtime)* serialize execution statistics through a JSON encoder so diagnostic text and operation names are escaped correctly.
