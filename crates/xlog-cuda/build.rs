@@ -258,10 +258,12 @@ fn write_semantic_policy_identity(out_dir: &Path, supplied: Option<([u8; 32], &s
 }
 
 fn push_semantic_policy_options(args: &mut Vec<String>, name: &str, enabled: bool) {
-    if name == "semantic_transition" && enabled {
+    if name == "semantic_transition" {
+        if enabled {
+            args.push("-DXLOG_SEMANTIC_POLICY=1".into());
+        }
         args.extend(
             [
-                "-DXLOG_SEMANTIC_POLICY=1",
                 "--fmad=false",
                 "--ftz=false",
                 "--prec-div=true",

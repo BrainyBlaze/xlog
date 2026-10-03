@@ -10,7 +10,7 @@ importable from Python.
 from __future__ import annotations
 
 from os import PathLike
-from typing import Any, Literal, Optional, Sequence, TypedDict, Union
+from typing import Any, Callable, Literal, Optional, Sequence, TypedDict, Union
 
 # ---------------------------------------------------------------------------
 # Module-level constant
@@ -78,6 +78,26 @@ class _UpdateMeasurements(TypedDict):
     forward_receipts: tuple[_UpdateForwardReceipt, _UpdateForwardReceipt]
     canary_refusal: Optional[dict[str, Any]]
 
+class SemanticCompletedMaterial:
+    """Native-owned original material; construction is not public."""
+
+    @property
+    def identity(self) -> bytes: ...
+    @property
+    def bytes(self) -> bytes: ...
+    @property
+    def bytes_sha256(self) -> bytes: ...
+
+class SemanticCompletedActionProjection:
+    """Immutable cold projection of one completed original Proposal."""
+
+    @property
+    def owner(self) -> SemanticCompletedMaterial: ...
+    @property
+    def initial_prefill(self) -> Optional[SemanticCompletedMaterial]: ...
+    @property
+    def pre_action_checkpoint(self) -> Optional[SemanticCompletedMaterial]: ...
+
 class SemanticPreparedStep:
     """Session-issued original step; construction is not public."""
 
@@ -92,6 +112,77 @@ class SemanticPreparedStep:
     def completed_model_binding(
         self, *, consumer_streams: Sequence[int]
     ) -> tuple[_PublishedIdentity, Optional[_PublishedIdentity], int, bytes, bytes, Any]: ...
+
+    def save_checkpoint(
+        self, *, consumer_streams: Sequence[int], snapshot_model_state: Callable[[], bytes]
+    ) -> bytes:
+        """Seal this late Proposal's full pre-action custody before retirement."""
+        ...
+
+    def completed_action_projection(
+        self, *, consumer_streams: Sequence[int]
+    ) -> SemanticCompletedActionProjection: ...
+
+class SemanticEvaluationCohort:
+    """Native-issued sealed original selection; no public constructor."""
+
+class _ModelEvaluationResult(TypedDict):
+    status: Literal[0, 1, 2]
+    loss_bits: tuple[int, int, int, int, int, int]
+    model_work: int
+    operation_count: int
+    work_bound: int
+    retained_allocation_bytes: int
+
+class SemanticModelEvaluation:
+    """Single read-only invocation on an authentic published parent."""
+
+    @property
+    def cohort(self) -> SemanticEvaluationCohort: ...
+    @property
+    def consumer_stream(self) -> int: ...
+    def training_view(self, *, consumer_stream: int) -> tuple[Any, ...]: ...
+    def model_work_buffer(self, *, consumer_stream: int) -> Any: ...
+    def begin(self) -> None: ...
+    def record_model_work(self, kind: int, dimensions: tuple[int, ...]) -> None: ...
+    def record_model_device_work(self, kind: int, upper_dimensions: tuple[int, ...]) -> int: ...
+    def finish(self, output_witness: Any, *, consumer_streams: Sequence[int]) -> _ModelEvaluationResult: ...
+    def cancel(self, *, consumer_streams: Sequence[int]) -> None: ...
+
+class SemanticTransitionTaskUse:
+    """Native-issued task; no public constructor."""
+
+    @property
+    def proposal_expense(self) -> tuple[int, int]:
+        """Original whole-task capacity and irreversible nominal places spent.
+
+        The bound is required at import. Expense is not an RNG coordinate
+        or proof that an admitted operation completed.
+        """
+        ...
+
+class SemanticTransitionController:
+    def import_task(
+        self, *, task_ref: Any, task_scope: Any, statement_records: Any,
+        allowed_support_records: Any, task_program_source: Any,
+        task_query_ordinals: Any, task_scoring: Any, task_priority_levels: Any,
+        admissible_truth_masks: Any, actor_eligible: Any, live_authorities: Any,
+        replay_rows: Any, training_objective: Any, training_domain: Any,
+        max_material_bytes: Any, max_total_material_bytes: Any,
+        max_evidence_bytes: Any, dependencies: Any, feedback_roots: Any,
+        publication_grants: Any, inference_grants: Any, training_grants: Any,
+        initial_sources: Any, source_mapping: Any, snapshot: Any,
+        replay_selection: Any, replay_operation: Any, restore_invocation: Any,
+        pack_policy: Any, finish_invocation: Any, refresh_snapshot: Any,
+        proposal_capacity: int,
+        resolve_checkpoint: Any = None, max_checkpoint_bytes: Any = None,
+        max_total_checkpoint_bytes: Any = None, retain_policy: bool = False,
+    ) -> Union[SemanticTransitionTaskUse, tuple[SemanticTransitionTaskUse, Any]]: ...
+
+    def prepare_model_evaluation(
+        self, task_use: Any, parent: Any, *, model_work_capacity: int,
+        cohort: Optional[SemanticEvaluationCohort] = None,
+    ) -> SemanticModelEvaluation: ...
 
 # ---------------------------------------------------------------------------
 # Native relation provenance

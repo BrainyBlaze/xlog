@@ -12,6 +12,8 @@ pub struct SemanticCompletedReplayMaterials {
     pub parent: Vec<u8>,
     pub provenance: Vec<u8>,
     pub evidence: Vec<u8>,
+    /// Canonical absent-prefill section for a late predecessor checkpoint.
+    pub checkpoint_initial_prefill: Vec<u8>,
 }
 
 #[repr(C)]
@@ -69,6 +71,10 @@ pub(super) struct PreparedReplayCustody {
     copy: CudaFunction,
     #[cfg(feature = "semantic-policy")]
     learning_phases: Vec<SemanticLearningPhaseRecord>,
+    #[cfg(feature = "semantic-policy")]
+    checkpoint_native_digest: Option<Identity256>,
+    #[cfg(feature = "semantic-policy")]
+    pub(super) checkpoint_child: Option<SemanticCompletedStepWitnessMaterial>,
 }
 
 fn replay_plan(
@@ -250,6 +256,10 @@ impl PreparedReplayCustody {
             copy,
             #[cfg(feature = "semantic-policy")]
             learning_phases: learning_phases.to_vec(),
+            #[cfg(feature = "semantic-policy")]
+            checkpoint_native_digest: None,
+            #[cfg(feature = "semantic-policy")]
+            checkpoint_child: None,
         })
     }
 
@@ -842,12 +852,78 @@ impl SemanticTransitionSession {
                 parent: material.encode()?,
                 provenance: provenance.encode()?,
                 evidence: evidence.encode()?,
+                checkpoint_initial_prefill: CheckpointInitialPrefill::encode_section(None)?,
             }))
         })();
         if observation.is_err() {
             self.poisoned = true;
         }
+        if let Ok(Some(material)) = &observation {
+            let digest = Identity256::from_bytes(Sha256::digest(&material.parent).into());
+            let custody = self
+                .steps
+                .get_mut(&step.token)
+                .and_then(|owner| owner.prepared.as_mut())
+                .and_then(|prepared| prepared.replay_custody.as_mut())
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            if custody
+                .checkpoint_native_digest
+                .is_some_and(|original| original != digest)
+            {
+                self.poisoned = true;
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            custody.checkpoint_native_digest = Some(digest);
+        }
         observation
+    }
+
+    /// Bind the complete checkpoint's compact record to the same immutable
+    /// pre-action material exported above, not the current publication bank.
+    #[cfg(feature = "semantic-policy")]
+    pub fn bind_prepared_checkpoint_referent(
+        &mut self,
+        step: &SemanticPreparedStep,
+        native_digest: Identity256,
+        referent: &[u8],
+        consumer_streams: &[u64],
+    ) -> Result<(), SemanticTransitionError> {
+        let projection = self.prepared_completed_action_projection(step, consumer_streams)?;
+        if projection.initial_prefill.is_some()
+            || referent.len() != Self::CHECKPOINT_REFERENT_BYTES
+            || referent.last() != Some(&3)
+        {
+            return Err(publication_input_error(
+                "late checkpoint requires its own pre-action-bound source",
+            ));
+        }
+        let child = completed_action_child_material(
+            projection.owner.identity,
+            b"pre-action-checkpoint",
+            0,
+            referent,
+        );
+        let custody = self
+            .steps
+            .get_mut(&step.token)
+            .and_then(|owner| owner.prepared.as_mut())
+            .and_then(|prepared| prepared.replay_custody.as_mut())
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if custody.checkpoint_native_digest != Some(native_digest) {
+            return Err(publication_input_error(
+                "checkpoint source differs from retained pre-action custody",
+            ));
+        }
+        if let Some(original) = &custody.checkpoint_child {
+            if original.identity != child.identity || original.bytes != child.bytes {
+                return Err(publication_input_error(
+                    "original action already owns another checkpoint referent",
+                ));
+            }
+        } else {
+            custody.checkpoint_child = Some(child);
+        }
+        Ok(())
     }
 }
 

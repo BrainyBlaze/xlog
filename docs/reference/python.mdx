@@ -428,6 +428,33 @@ the single runnable `SemanticTransitionRestoredCheckpoint`. A preparation
 failure leaves the source runnable only when it can still be revalidated; it
 never grants execution to the unfinished candidate.
 
+Task import requires `proposal_capacity=original_limit` to bind the original
+whole-task nonnegative U64 nominal Proposal limit. It has no omitted or `None`
+unbounded mode. A fresh Session has no task bound until import; re-import must
+provide the same original bound and retains its already spent places. Neither
+the limit nor expense is inferred from fuel or effective RNG draws. This is
+not a phase-program budget. The native-issued `task_use.proposal_expense`
+returns `(capacity, spent)`.
+The complete nominal Proposal roster is charged before segment construction
+enters any producer callback, not from successful RNG draws or published
+results. The single-transition admission path charges its nominal Proposal
+before native admission as well. Failed construction, refused/skipped slots,
+failed submission and abandoned private candidates do not refund expense.
+Cold arena and phase successors share that original expense owner; ordinary
+restore reconstructs the exact saved value. This cold accounting adds no
+host/device observation inside a captured resident loop.
+
+The full checkpoint's task capsule uses format 5 and carries the original
+bound, nominal expense and checkpoint-source registration, separately from
+paired RNG/model coordinates. Earlier formats lack some of this information
+and are not silently upgraded or assigned fabricated values. A coherent
+source/artifact migration is required
+before consuming checkpoints made by the earlier format. The getter alone
+does not prove execution or resolve an unknown admitted operation. Durable
+pre/post-operation persistence and full private-program recovery remain
+separate requirements; an older final-result Python counter is not their
+replacement.
+
 `SemanticLearningPhaseRecipe(*, source, target, phase_index,
 completed_updates_index, views)` describes a cold learning-phase boundary.
 The supported pairs are `alignment` to `fast`, `fast` to `consolidation`, and
@@ -445,12 +472,18 @@ role-21 master. Native code converts its exact finite value without rounding.
 Full backing allocations, padding, strides, and shared storage are retained;
 conflicting effects on aliases refuse the entire private candidate.
 
-`controller.prepare_learning_phase_transition(task_use, *, parent, recipe,
+`controller.prepare_learning_phase_transition(task_use, *, parent, recipe, source_checkpoint,
 consumer_streams, snapshot, scientific_owner, learning_grant_ref,
 checkpoint_destination, snapshot_model_state, restore_model,
-snapshot_restored_model, refresh_snapshot)` quiesces the exact successful
-recompute parent and seals the complete source with the ordinary checkpoint
-encoder. `learning_grant_ref` selects an original `durable-slow-consolidation`
+snapshot_restored_model, refresh_snapshot)` takes the exact builtin full
+`source_checkpoint` bytes already used by the original scientific owner. It
+quiesces the successful recompute parent and verifies the supplied native state,
+task capsule, original Proposal expense, Session configuration, initial prefill
+and complete live model against that source. The existing checkpoint decoder and
+task encoder enforce these bindings. Fresh authority must advance both the saved
+source snapshot and the current task snapshot; it does not replace the source
+bytes or their digest. No omitted-source or newly serialized-source fallback is
+provided. `learning_grant_ref` selects an original `durable-slow-consolidation`
 grant covering the complete dependency closure; fast-adaptation permission alone
 cannot authorize this durable full checkpoint. Fresh publication, data-use,
 retention and revocation checks remain independent of scientific acceptance.
@@ -483,7 +516,8 @@ as `restore_model(controller, task_use, parent, None)`: reconstruct from the
 actual private native bank, including its new phase and reset optimizer values,
 not from the old model bytes. `snapshot_restored_model(returned_model) -> bytes`
 must serialize that complete real model, including physical aliases, optimizer
-and phase state. `snapshot_model_state()` snapshots the unchanged source.
+and phase state. `snapshot_model_state()` verifies the unchanged source model
+against the supplied checkpoint; it does not create a replacement source.
 `refresh_snapshot()` supplies strictly newer original authority snapshots.
 These callbacks execute cold, on the creator thread, outside native/task locks.
 Both model snapshots and native banks are checked again before any handoff.
@@ -527,9 +561,34 @@ the complete checkpoint. The owner must check a retrieved
 source with `verify_checkpoint_referent(record, checkpoint)`; `restore_checkpoint`
 accepts `referent=record` and performs that same exact check before allocating a
 new owner.
-The complete checkpoint and compact referent retain version 2; the embedded task
-capsule uses version 3 to retain the original training domain. Older task capsules
-and version 1 checkpoint/referent sources are not accepted by this contract.
+The complete checkpoint uses version 3 and the compact referent remains version 2;
+the embedded task capsule uses version 5 to retain the original training domain,
+whole-task nominal Proposal expense and checkpoint-source registration.
+Older complete checkpoints, task capsules and version 1 referent sources are not
+accepted by this contract.
+
+Initial and recovered starts keep their original `initial_prefill` child and
+`initial-prefill-bound` referent (phase 2). For a completed late Proposal whose
+`completed_action_projection(consumer_streams=...).initial_prefill` is `None`,
+call `step.save_checkpoint(consumer_streams=..., snapshot_model_state=callback)`.
+The callback is the original model owner's historical serializer for that same
+retained step; it returns exact builtin `bytes`, not a snapshot of the current
+model or a new forward. The native checkpoint contains that step's complete
+pre-action publication, model allocations, random state, semantic arena and task
+capsule. The full task capsule retains its original segment operation; its compact
+record uses the distinct `pre-action-bound` phase 3 with the same version 2 field
+order and extent. It contains no initial-prefill section payload.
+
+Read `step.completed_action_projection(...)` again after saving. Its
+`pre_action_checkpoint` is the same action's native-owned completed child, kind
+`pre-action-checkpoint`, ordinal zero, with the compact record as its payload.
+This child and `initial_prefill` are mutually exclusive. Keep the returned full
+checkpoint bytes and persist them through the application's immutable source owner
+before retiring the step. Full checkpoint bytes do not enter the episode's material
+closure. An actor episode's `downstream-snapshot` must be exactly this child's
+payload, not the first step's referent. Rebinding one action to another checkpoint
+is rejected. Saving the checkpoint does not publish an actor episode or perform
+the actor's same-publication atomic append.
 
 When importing actor replay, pass one `resolve_checkpoint(digest_bytes,
 item_limit) -> bytes` callback plus `max_checkpoint_bytes` and
@@ -542,12 +601,45 @@ source are cold-path responsibilities; neither runs inside the resident segment.
 Missing or mismatched sources and revoked rights reject actor admission.
 This also applies when no replay row is selected: actor rows cannot enter the
 training arena until every resolved checkpoint has passed the fresh training-rights
-check. A fresh import without checkpoint-dependent rows still passes no refresh
-callback.
+check. A fresh import may also preregister the complete resolver, both finite
+positive byte limits and callable authority refresh before any draw. An empty
+checkpoint-dependent row set validates this group without reading a source or
+executing any callback. The same group remains available to a later arena
+admission; it does not grant replay, restoration or execution rights.
+Native retains the original registration, including its absence. Same-Session
+re-import, arena admission and phase restoration cannot replace or drop its resolver,
+change either byte limit, or add a previously absent group. These checks precede
+source reads and candidate-model construction; they do not rely on the caller's
+retained argument dictionary.
 
-The checkpoint carries content, not current permissions. Restore rechecks a fresh
-authority snapshot and the reconstructed native publication after the model factory
-returns. A callback error or final revalidation failure poisons the new native owner
+The same resolver also checks late children on non-actor rows: the resolved native
+section must equal that replay's full predecessor, including its original task
+identity and epoch. Late source rights use the original segment operation in that
+verified full task capsule, not an operation inferred from the Proposal opcode;
+actor rows additionally require current training rights.
+`admit_training_arena` and `prepare_learning_phase_transition`
+accept the same three resolver/limit arguments and use their existing
+`refresh_snapshot` callback. `SemanticTransitionSession.restore_checkpoint`
+accepts all four arguments to verify checkpoint-dependent rows retained inside the
+task capsule before creating a new CUDA owner. Pass the originally registered
+resolver and unchanged limits; these boundaries use the same checkpoint parser.
+With no referenced
+checkpoint sources, the complete preregistered group is allowed, or all source
+resolver/limit arguments may be absent. Partial groups are rejected.
+An already registered group remains required even when no source is referenced.
+Task capsule format 5 records the original registration and both byte limits along
+with nominal Proposal expense. Cold process restoration takes the trusted original
+file-owner callback with exactly those saved limits, validates them before any
+source read or CUDA-owner construction, and retains that callback for continuation.
+Python callables are not serialized. Earlier task capsules are not assigned new
+limits or rewritten implicitly; source, wheel and persisted-artifact migration must
+be coherent. The outer full-checkpoint format and compact referent format do not
+change.
+
+The checkpoint carries content, not current permissions. With `refresh_snapshot`,
+restore obtains another advancing authority snapshot after the model factory
+returns and checks the reconstructed native publication before activation. A callback
+error or final revalidation failure poisons the new native owner
 and returns no reachable carrier. Checkpoint creation and restoration are cold-path
 operations; they are not evidence of device-resident execution, training, or update
 publication.
@@ -2824,6 +2916,67 @@ for batch in data_loader:
     })
     # Process results...
 ```
+
+## Read-only semantic model evaluation
+
+The `semantic-policy` native build provides
+`SemanticTransitionController.prepare_model_evaluation(task_use, parent,
+model_work_capacity=..., cohort=None)` for an already admitted training operation
+and its genuine acquired parent. It does not construct an Update, run backward,
+draw randomness, update an optimizer, or publish a successor.
+
+The returned `SemanticModelEvaluation` owns one recording. Export its
+`training_view(consumer_stream=...)` and `model_work_buffer(consumer_stream=...)`
+before `begin()`, then use the existing model content scope on the same parent
+and the existing numerical/work registrar on the evaluation's `consumer_stream`.
+`record_model_work(kind, dimensions)` and
+`record_model_device_work(kind, upper_dimensions)` use the same native recording,
+geometry rules, scratch layout, and device work consumer as prepared execution.
+Saved-autograd-copy recording is intentionally unavailable: this invocation is
+forward/objective-only.
+
+Retain `evaluation.cohort` separately for later observations. Passing that native
+object as `cohort=` reuses the exact original seventeen ports and their private
+content seals, including across full checkpoint restoration; no final-model RNG
+selects another group. The cohort does not retain a Python Runtime or model.
+The trusted phase owner must still bind the original source checkpoint and all
+private branches; this API alone is not scientific phase acceptance.
+
+`finish(output_witness, consumer_streams=...)` consumes the original parent's
+native content witness containing exactly three tensor rows, with role zero and
+indices zero, one, and two: contiguous FP32 `[6]` losses in the numerical
+producer's canonical order, Bool `[1]` numerical admissibility, and the original
+contiguous UInt8 slab backing. Outputs must lie in that actual CUDA allocation,
+which must not alias publication storage. Native joins all consumers, validates
+the original cohort and witness, consumes actual work, and rechecks the complete
+original publication, including model allocations and RNG. It then returns
+`status`, six `loss_bits`, `model_work`, `operation_count`, `work_bound`, and
+`retained_allocation_bytes`. Status zero means the cohort, numerical outputs, and
+work recording passed their native checks. Status one is a completed refusal:
+the original selection refused, numerical admissibility is false, or at least
+one loss is nonfinite. Status two means work overflow, an incomplete event count,
+or a work-bound mismatch; it takes precedence over numerical refusal and does
+not certify complete work. Neither nonzero status is a loss certificate. Do not
+record status two as an ordinary numerical refusal or retry the invocation.
+Operation count is registrar occurrences, not model forward calls.
+
+These statuses exist only when `finish` returns its result. A witness validation,
+consumer join, content-integrity, or full-publication recheck exception is not a
+returned refusal status and does not establish reusable state or known completion.
+It retains the existing cancellation or quarantine requirements.
+
+Memory accounting includes the live native managers and the queried slab backing
+allocation. It is not a time-sampled whole-process peak and does not cover unrelated
+external allocations. The consumer's original bounded memory scope and full-system
+peak measurement remain necessary. Preparation and completion export full native
+material and metadata cold; neither belongs inside a claimed zero-transfer loop.
+
+Successful completion restores the original task phase without changing its
+authority snapshot. `cancel(consumer_streams=...)` does so only after joining actual
+consumers and revalidating the original full publication. Unknown completion keeps
+native buffers retained and blocks mutation/release. Dropping an unfinished owner
+quarantines its Session; it is not cancellation or proof of completion. Keep all
+Python producers and aliases alive until known completion and creator-thread cleanup.
 
 ## Limitations
 
