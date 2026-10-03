@@ -97,7 +97,7 @@ class SemanticEvaluationCohort:
     """Native-issued sealed original selection; no public constructor."""
 
 class _ModelEvaluationResult(TypedDict):
-    status: int
+    status: Literal[0, 1, 2]
     loss_bits: tuple[int, int, int, int, int, int]
     model_work: int
     operation_count: int

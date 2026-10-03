@@ -2859,8 +2859,19 @@ which must not alias publication storage. Native joins all consumers, validates
 the original cohort and witness, consumes actual work, and rechecks the complete
 original publication, including model allocations and RNG. It then returns
 `status`, six `loss_bits`, `model_work`, `operation_count`, `work_bound`, and
-`retained_allocation_bytes`. Nonzero status is a refused measurement, not a loss
-certificate. Operation count is registrar occurrences, not model forward calls.
+`retained_allocation_bytes`. Status zero means the cohort, numerical outputs, and
+work recording passed their native checks. Status one is a completed refusal:
+the original selection refused, numerical admissibility is false, or at least
+one loss is nonfinite. Status two means work overflow, an incomplete event count,
+or a work-bound mismatch; it takes precedence over numerical refusal and does
+not certify complete work. Neither nonzero status is a loss certificate. Do not
+record status two as an ordinary numerical refusal or retry the invocation.
+Operation count is registrar occurrences, not model forward calls.
+
+These statuses exist only when `finish` returns its result. A witness validation,
+consumer join, content-integrity, or full-publication recheck exception is not a
+returned refusal status and does not establish reusable state or known completion.
+It retains the existing cancellation or quarantine requirements.
 
 Memory accounting includes the live native managers and the queried slab backing
 allocation. It is not a time-sampled whole-process peak and does not cover unrelated

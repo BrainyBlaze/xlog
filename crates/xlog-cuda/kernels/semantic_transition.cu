@@ -282,7 +282,8 @@ extern "C" __global__ void semantic_model_evaluation_result(
     if(work.overflow || work.model_events!=count || work.model_bound!=bound)status=2;
     for(uint32_t i=0;i<6;++i) {
         const float value=values[i];
-        if(!isfinite(value))status=1;
+        // Numerical refusal must not hide an incomplete work certificate.
+        if(!isfinite(value) && status==0)status=1;
         output[i+1]=__float_as_uint(value);
     }
     output[0]=status;output[7]=work.model_once;output[8]=work.model_events;
