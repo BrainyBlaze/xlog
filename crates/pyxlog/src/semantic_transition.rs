@@ -1149,8 +1149,8 @@ impl PySemanticTransitionSession {
                     layout.scalar_type,
                     layout.rank,
                     layout.logical_axis,
-                    layout.dimensions,
-                    layout.strides_bytes,
+                    PyTuple::new(py, layout.dimensions)?,
+                    PyTuple::new(py, layout.strides_bytes)?,
                 ),
             )?;
             cache.set_item("identity", PyBytes::new(py, item.identity.as_bytes()))?;

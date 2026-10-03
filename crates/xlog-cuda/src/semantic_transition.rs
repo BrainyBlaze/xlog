@@ -15001,12 +15001,16 @@ impl SemanticTransitionSession {
         // codec has checked each sealed record's bytes and the exact row sizes.
         let prefix = prefix_material
             .bytes
-            .chunks_exact(size_of::<SemanticTextSlot>())
+            .as_chunks::<{ size_of::<SemanticTextSlot>() }>()
+            .0
+            .iter()
             .map(|bytes| unsafe { bytes.as_ptr().cast::<SemanticTextSlot>().read_unaligned() })
             .collect::<Vec<_>>();
         let records = provenance_material
             .bytes
-            .chunks_exact(size_of::<TokenProvenance>())
+            .as_chunks::<{ size_of::<TokenProvenance>() }>()
+            .0
+            .iter()
             .map(|bytes| unsafe { bytes.as_ptr().cast::<TokenProvenance>().read_unaligned() })
             .collect::<Vec<_>>();
         for (position, slot) in prefix.iter().enumerate() {
