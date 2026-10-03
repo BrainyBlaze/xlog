@@ -1,0 +1,358 @@
+# Rust API
+
+Generated rustdoc entry points for the xlog workspace, plus docs.rs fallbacks for published crates.
+
+This page links to the generated Rust API documentation for every crate in the xlog workspace, plus hosted fallbacks for the crates published to crates.io. "rustdoc" is Rust's standard tool for turning source comments into browsable HTML API reference.
+
+The docs build generates rustdoc for the full workspace in a temporary build directory, then attaches it to the exported site at `/generated/rust/` after the Mintlify export step. This keeps the generated Rustdoc HTML out of the Mintlify source tree while still publishing the generated API with the site. The CI docs build uses a rustdoc-only CUDA artifact mode: it documents the Rust API surface without compiling PTX or cubin files (the two compiled GPU-code formats that a release build would normally emit).
+
+<CardGroup cols={2}>
+  <Card title="Workspace rustdoc" href="https://xlog.md/generated/rust/index.html">
+    Generated index for every documented crate in the current checkout.
+  </Card>
+  <Card title="Python extension crate" href="https://xlog.md/generated/rust/pyxlog/index.html">
+    Native Rust layer used by the Python package.
+  </Card>
+</CardGroup>
+
+## Workspace Crates
+
+Every crate in the xlog source tree, with a link to its generated API docs and a one-line summary of what it owns. Terms in parentheses are the exact type or module names as they appear in the API.
+
+| Crate | Generated API | Responsibility |
+|-------|---------------|----------------|
+| `xlog-core` | [rustdoc](https://xlog.md/generated/rust/xlog_core/index.html) | Shared types (`ScalarType`, `Schema`, `AggOp`), strict configuration parsing, memory budgets, floating-point ordering, and common errors. |
+| `xlog-ir` | [rustdoc](https://xlog.md/generated/rust/xlog_ir/index.html) | Relational intermediate-representation nodes — the query plan xlog builds internally (`RirNode`) — plus expressions (`Expr`) and execution plans. |
+| `xlog-cuda` | [rustdoc](https://xlog.md/generated/rust/xlog_cuda/index.html) | CUDA provider, GPU buffers, PTX embedding (bundling compiled GPU code into the binary), Arrow IPC/C Data interop (exchanging Apache Arrow columnar data with other tools), and DLPack support (a standard for sharing tensors across frameworks). |
+| `xlog-stats` | [rustdoc](https://xlog.md/generated/rust/xlog_stats/index.html) | Runtime and compiler feedback through `StatsManager` and `StatsSnapshot`. |
+| `xlog-runtime` | [rustdoc](https://xlog.md/generated/rust/xlog_runtime/index.html) | Host-side executor, relation stores, profiling, incremental maintenance (updating results as data changes instead of recomputing), and join index caches. |
+| `xlog-logic` | [rustdoc](https://xlog.md/generated/rust/xlog_logic/index.html) | Parser, stratification (ordering rules into evaluation layers so negation and recursion are handled in the right sequence), AST-to-RIR lowering (translating the parsed syntax tree into the relational intermediate representation above), optimization, and neural predicate syntax. |
+| `xlog-solve` | [rustdoc](https://xlog.md/generated/rust/xlog_solve/index.html) | Solver services, including GPU CDCL verification (conflict-driven clause learning, the standard algorithm for deciding Boolean satisfiability) and CLS SAT/MaxSAT paths (SAT = is a Boolean formula satisfiable; MaxSAT = satisfy as many clauses as possible). |
+| `xlog-gpu` | [rustdoc](https://xlog.md/generated/rust/xlog_gpu/index.html) | High-level GPU execution API and integration buffers. |
+| `xlog-prob` | [rustdoc](https://xlog.md/generated/rust/xlog_prob/index.html) | Probabilistic provenance (tracking which input facts support each answer), CNF lowering (rewriting a formula into conjunctive normal form, a standard Boolean-formula shape), Decision-DNNF compilation (a compiled form of the formula that makes exact probability counting tractable), exact inference, and sampling. |
+| `xlog-cli` | [rustdoc](https://xlog.md/generated/rust/xlog/index.html) | Command-line execution surface for deterministic and probabilistic runs. The package renders under the Rust crate root `xlog`. |
+| `pyxlog` | [rustdoc](https://xlog.md/generated/rust/pyxlog/index.html) | Native Python extension crate. It is built for the Python package rather than published to crates.io. |
+| `xlog-neural` | [rustdoc](https://xlog.md/generated/rust/xlog_neural/index.html) | Neural-symbolic rule learning implementation. It is not a published crates.io package. |
+| `xlog-induce` | [rustdoc](https://xlog.md/generated/rust/xlog_induce/index.html) | Exact induction implementation. It is not a published crates.io package. |
+| `xlog-cuda-tests` | [rustdoc](https://xlog.md/generated/rust/xlog_cuda_tests/index.html) | CUDA-facing workspace test crate. It is not a published crates.io package. |
+| `xlog-integration` | [rustdoc](https://xlog.md/generated/rust/xlog_integration/index.html) | Integration test crate. It is not a published crates.io package. |
+
+## Accepted world-view evidence
+
+`xlog_prob::epistemic::AcceptedWorldViewEvidence` is the canonical boundary
+between an epistemic GPU execution and probabilistic conditioning. Construct it
+with `AcceptedWorldViewEvidence::from_gpu_execution_result`; construction
+validates provider identity, GPU dispatch certification, kernel evidence,
+transfer bounds, constraint results, and a non-empty accepted output. Invalid or
+empty execution results return a typed error and never reach probabilistic
+evaluation.
+
+Pass the validated value to an adapter method whose name ends in
+`_with_accepted_world_view`. Direct evaluation and reusable preparation share
+the same evidence contract:
+
+```rust
+let accepted = AcceptedWorldViewEvidence::from_gpu_execution_result(
+    &provider,
+    &epistemic_result,
+    Vec::new(), // derive accepted assumptions from the GPU result
+)?;
+
+let exact = adapter.compile_and_evaluate_conditioned_source_with_accepted_world_view(
+    probabilistic_source,
+    &accepted,
+)?;
+
+let prepared = adapter.prepare_conditioned_source_with_accepted_world_view(
+    probabilistic_source,
+    &accepted,
+)?;
+let (updated, trace) = prepared.evaluate()?;
+```
+
+An empty assumptions vector requests GPU-derived assumptions. Conditioned
+source, parsed-program, gradient, and reusable-preparation methods retain only
+derived assumptions that have a matching provenance formula in the target
+program. Caller-supplied assumptions are explicit and are not silently discarded.
+Both FAEEL and acyclic G91 evidence use this boundary; no
+unconditioned or CPU fallback is substituted when validation fails.
+
+## Semantic task programs
+
+`xlog_cuda::SemanticTaskEvaluationSpec` binds two ordered admitted statement
+records, their allowed supports, a native `SemanticTaskProgram`, explicit
+`SemanticTaskScoring` coefficients, ordered task-local priority levels, and
+three truth-eligibility masks. XLOG does
+not prescribe the statement predicate, arguments, task answers, or reward
+weights. The resident transition ABI has three query slots and two candidate
+lanes; this is a capacity limit, not a task definition.
+
+Use `xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)`
+for a self-contained XLOG source program with three selected zero-arity queries.
+Source facts provide its concrete inputs. During cold task binding, the native
+owner runs the canonical GPU evaluator and derives expected Boolean truth from
+the completed query results. Python cannot inject an expected-answer array.
+This adapter does not resolve imports or accept external relation buffers.
+
+Selection first excludes candidates outside the three hard truth masks. It then
+compares ordered `SemanticTaskPriorityLevel` values lexicographically. Each
+`SemanticTaskPriorityGoal` names one native query, target truth and positive
+weight; its normalized truth-match progress is the candidate's zero-or-one
+match minus the acquired base's match for the current step. At most three
+levels and three distinct query goals fit the bank. Predictive query agreement,
+lower measured work, then earlier candidate index break ties. The six
+`SemanticTaskScoring` coefficients remain measurement and return inputs, not
+priority levels: return separately prices improvement, refusals and spent work.
+They are required nonnegative `u32` values; combinations that can overflow the
+signed return are rejected.
+Each nonzero four-bit mask permits truth value `n` through bit `n`.
+
+Task identity binds the exact program source, query mapping, observed result
+bytes, expected truths, scoring, ordered priorities, masks, and admitted record
+selections.
+Cold binding also freezes `SemanticTaskObjectiveLaw`: the native scoring law's
+full signed return bound, its outward-rounded FP64 interval, the nine FP32
+objective coefficients, and the structural-cost unit/cap. The task and checkpoint
+scoring identities bind the exact interval and coefficient bits. Both initial
+training-arena admission and post-restore arena transfer reject a different law;
+training-group membership does not choose or refit it. This law alone does not
+bound future group geometry or certify physical model gradients.
+The proposal's original native preflight consumes that retained return bound and
+the original baseline domains to enclose the ordered raw FP32 sum of 136 squared
+differences. Upward reward conversion, subtraction-magnitude enclosure, squaring
+and addition cover every admitted baseline and legal-count mask before drawing.
+Nonrepresentable raw arithmetic follows the existing numerical refusal; a later
+denominator or small critic coefficient cannot repair it. This check is not an
+actor/full gradient-error certificate, and does not change either coefficient law.
+`SemanticTaskEvaluationSpec::training_domain` additionally retains
+`SemanticTrainingDomain`: the hash-sorted sealed manifest identities and all four
+caps, the original window/padding/mask/block geometry, batch size, mask permille,
+arbitrary-width decimal training seed, and mask-policy identity. Native binding
+validates and retains this domain before actions. `None` explicitly denotes no
+prospective arena; training admission cannot invent a domain afterwards.
+`task_training_domain()` reads the same retained owner without a device transfer.
+The task and checkpoint scoring identities seal the entire domain. Initial and
+restored arena admission check the real rows against its manifest/seed/mask and
+packed geometry, separate episode/anchor record bounds, and each group's actual
+nonempty member count. The record bound is the minimum original records-per-input
+cap, never a storage or byte capacity. The application remains responsible for
+validating the sealed manifests and their hash/cap association. This domain binds
+future geometry but does not establish a uniform physical numerical certificate.
+The scoring identity binds immutable content independently of task-use authority,
+so a cold arena transfer can advance authority while retaining the evaluator.
+Restoration re-executes the observer and checks this identity. Observer failures
+poison the session; previous bindings cannot be reused after such a failure.
+Cold observer reads are outside the resident transition loop, and must not be
+reported as measured zero-transfer execution.
+
+For an admitted `SemanticProgramAdmission`, the resident proposal can insert a
+range-restricted rule with exactly two binary body atoms in either edit slot.
+Its typed result is `SemanticTransitionLane::program_rules`; graph support
+insertions remain in `SemanticTransitionLane::edits`. A rule attempt is retained
+in `program_rules` even if its lane later fails a hard constraint. Graph support
+insertion is unavailable for editable-program tasks because it would not change
+their program closure. Three task queries are evaluated from each candidate's
+actual closure, with rule and query receipts checked at observation.
+
+### Supplied numerical policy
+
+The `semantic-policy` Cargo feature requires all three build inputs:
+
+- `XLOG_SEMANTIC_POLICY_HEADER`: the producer's self-contained numerical header.
+- `XLOG_SEMANTIC_POLICY_SHA256`: its expected 64-digit hexadecimal SHA-256.
+- `XLOG_SEMANTIC_POLICY_NAMESPACE`: its C++ namespace, for example
+  `policy_provider::numeric`.
+
+There is no default producer or digest. The build stages the verified header
+bytes and checks numerical ABI version 4: FP32 vectors of width 128, 18 fields,
+the field and adjoint layouts, and the five forward/derivative operations and
+their domain transfers. `PrimalEnvelope` has 24-byte stride: ordinary and
+underflow errors followed by an independent ideal magnitude. `DomainValue`
+has 32-byte stride in `(M,O,U,I)` order: actual magnitude, ordinary error,
+underflow error and independent ideal magnitude. `CoherentCotangent` has
+64-byte stride and carries actor/full labels alongside one actual FP32
+cotangent. Both labels use the rounding case of that full operation; the actor
+label is real-valued, not a second FP32 backward.
+
+These are explicit supported-ABI constraints, not support for an
+arbitrary model architecture. The selected header digest and namespace are
+included in restoration compatibility identity. Integrity and ABI checks do
+not establish numerical correctness or GPU equivalence. Older header versions
+and three-field domains are rejected, not converted.
+
+## Breaking changes
+
+Changes on this list stop downstream Rust code from compiling. Each entry names
+the release it landed in and the edit that fixes the call site.
+
+### 0.13.0 — `xlog-cuda`
+
+`LaunchRecorder` uses a consuming enqueue guard instead of exposing its manual
+preflight and commit protocol. Obtain the provider-owned runtime through
+`GpuMemoryManager::runtime`; this API requires `xlog-cuda` 0.13.0 or newer.
+
+```rust
+// Before: xlog-cuda 0.12.x
+let mut recorder = LaunchRecorder::new_strict(stream_id);
+recorder.read(&source).write(&destination);
+recorder
+    .preflight(runtime.as_ref())
+    .expect("launch preflight");
+stream
+    .memcpy_dtod(&source, &mut destination)
+    .expect("copy enqueue");
+recorder
+    .commit(runtime.as_ref())
+    .expect("launch commit");
+
+// After: xlog-cuda 0.13.0+; source and destination are tracked u32 slices.
+let runtime = Arc::clone(
+    provider
+        .memory()
+        .runtime()
+        .expect("provider-owned CUDA runtime"),
+);
+let mut recorder = LaunchRecorder::new_strict(stream_id);
+recorder.read(&source).write(&destination);
+assert!(destination.len() >= source.len());
+
+// SAFETY: every tracked allocation touched by the closure was recorded with
+// its exact access, and the closure enqueues only on the supplied stream.
+let enqueued = unsafe {
+    recorder.enqueue(&runtime, |enqueue| {
+        let result = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+            destination.device_ptr_value(),
+            source.device_ptr_value(),
+            source.len() * std::mem::size_of::<u32>(),
+            enqueue.stream().cu_stream(),
+        );
+        if result == cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+            Ok(())
+        } else {
+            Err(cudarc::driver::result::DriverError(result))
+        }
+    })
+}
+.expect("copy enqueue");
+enqueued.commit().expect("launch commit");
+```
+
+`enqueue` supplies a borrowed `CudaEnqueue` capability, not a bare stream.
+Nested kernels use `launch_in(enqueue, ...)` and nested graphs reuse the same
+capability; they must not start another admission inside the closure.
+`enqueue` is unsafe because Rust cannot verify that the recorder describes every
+allocation the closure touches or that the closure uses only its supplied
+capability. If the closure returns `Err(E)`, XLOG aborts automatically and returns
+the typed error as `LaunchEnqueueError::Operation(E)`; cleanup failures are
+reported together with the preparation or operation error. A successful call
+returns an opaque `EnqueuedLaunch`, which must be consumed by `commit` or
+`abort`.
+
+`ResidentExecutionDomain` no longer exposes the split `preflight`, `stream`, and
+`commit` methods. Consume its bound recorder with
+`domain.enqueue(recorder, |stream| ...)`, enqueue all work on the supplied
+stream, then consume the returned `ResidentEnqueuedLaunch` with `commit` or
+`abort`.
+
+The raw `XlogDeviceRuntime::prepare_block_use` and `finish_block_use` hooks are
+now crate-internal, and the `prepare_first_use` and `finish_first_use`
+convenience methods were removed. External callers should register each access
+on a `LaunchRecorder`, use its consuming `enqueue` method, and finish through
+the returned `EnqueuedLaunch` owner.
+
+### 0.12.0 — `xlog-runtime`
+
+`ExecutionStats` and `StratumStats` — the two structs behind `xlog run --stats` —
+are now `#[non_exhaustive]`. Code outside `xlog-runtime` can no longer build
+either one from a struct literal, and can no longer match all of its fields
+exhaustively.
+
+Two edits fix a call site:
+
+```rust
+// Construct: start from Default and override the fields you set.
+let stats = ExecutionStats { ..Default::default() };
+
+// Match: add a `..` arm so future fields do not break the pattern.
+let ExecutionStats { total_duration_us, .. } = stats;
+```
+
+In exchange, later releases can add counter fields without breaking the API
+again. The field names and values that `--stats` prints are unchanged, so
+anything that only reads the CLI output is unaffected.
+
+### 0.12.0 — `xlog-logic`
+
+Two public functions in `xlog_logic::epistemic` now return a fallible result
+instead of a bare `Program`:
+
+- `reduce_epistemic_program_to_ordinary(&Program) -> Result<Program>`
+- `reduce_epistemic_program_to_ordinary_for_stratified_schema(&Program) -> Result<Program>`
+
+Both previously returned `Program` directly. The reduction can now fail — for
+example when an augmenting modal cannot be resolved — and reports that instead of
+producing a program that would fail later. `Result` here is
+`xlog_core::Result`, whose error type is `XlogError`.
+
+One edit fixes a call site:
+
+```rust
+// Before: the reduced program came back directly.
+let reduced = reduce_epistemic_program_to_ordinary(&program);
+
+// After: propagate the error, or handle it.
+let reduced = reduce_epistemic_program_to_ordinary(&program)?;
+```
+
+### 0.12.0 — `xlog-prob`
+
+`ChoiceSource::choices` — on the struct re-exported at the `xlog_prob` crate
+root — is retyped from `Vec<(GroundAtom, f64)>` to
+`Arc<[(GroundAtom, f64)]>`. A k-head annotated disjunction now pays for one
+shared k-length slice rather than one clone per Bernoulli chain variable.
+
+Struct literals and any `Vec`-only method call (`push`, `truncate`,
+`extend`) stop compiling. Indexing, `len()`, `iter()`, and slice patterns are
+unaffected.
+
+Two edits fix a call site:
+
+```rust
+use std::sync::Arc;
+
+// Construct: convert the vector into the shared slice.
+let source = ChoiceSource {
+    choices: Arc::from(pairs),          // pairs: Vec<(GroundAtom, f64)>
+    choice_index,
+    source_id,
+};
+
+// Mutate: build the full vector first, then share it — the field is no
+// longer growable in place.
+let mut pairs = Vec::new();
+pairs.push((atom, p));
+let choices: Arc<[(GroundAtom, f64)]> = Arc::from(pairs);
+```
+
+## Published Crates
+
+These crates are published on crates.io and also have hosted docs.rs pages:
+
+| Crate | docs.rs |
+|-------|---------|
+| `xlog-core` | [docs.rs](https://docs.rs/xlog-core) |
+| `xlog-ir` | [docs.rs](https://docs.rs/xlog-ir) |
+| `xlog-cuda` | [docs.rs](https://docs.rs/xlog-cuda) |
+| `xlog-stats` | [docs.rs](https://docs.rs/xlog-stats) |
+| `xlog-runtime` | [docs.rs](https://docs.rs/xlog-runtime) |
+| `xlog-logic` | [docs.rs](https://docs.rs/xlog-logic) |
+| `xlog-solve` | [docs.rs](https://docs.rs/xlog-solve) |
+| `xlog-gpu` | [docs.rs](https://docs.rs/xlog-gpu) |
+| `xlog-prob` | [docs.rs](https://docs.rs/xlog-prob) |
+| `xlog-cli` | [docs.rs](https://docs.rs/xlog-cli) |
+
+<Note>
+  docs.rs builds can omit CUDA-gated modules because the hosted build environment has no CUDA toolkit or GPU. The generated site rustdoc is built from the current checkout with `XLOG_RUSTDOC_NO_CUDA=1 cargo doc --workspace --no-deps --locked`, so it is the reference API surface for this documentation site. Release builds still require `nvcc` and CUDA Toolkit 13.x to compile kernel artifacts.
+</Note>
+
+See the [architecture overview](/architecture/overview) for how these crates fit together, and the [CLI Reference](/reference/cli) for the command-line surface built on top of them.

@@ -1,0 +1,48 @@
+<!-- xlog diagram: WCOJ dispatch decision (light). Source: docs wcoj-architecture-guide + wcoj-tuning. Promoter recognizes a shape; a cost gate decides WCOJ vs binary-join fallback; both produce the identical row set. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 240" font-family="Inter, system-ui, sans-serif">
+  <rect width="900" height="240" fill="#FBFBFD"/>
+  <defs>
+    <marker id="aw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6B6880"/>
+    </marker>
+  </defs>
+
+  <text x="28" y="38" font-size="16" font-weight="600" fill="#1E1B2E">Worst-case-optimal join dispatch</text>
+  <text x="28" y="56" font-size="11" fill="#6B6880">A promoter recognizes join shapes; a cost gate chooses the multiway join or a binary-join fallback.</text>
+
+  <!-- Body -->
+  <rect x="28" y="100" width="132" height="54" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <rect x="29.5" y="102" width="3.5" height="50" rx="1.75" fill="#4F46E5"/>
+  <text x="94" y="123" text-anchor="middle" font-size="12" font-weight="600" fill="#1E1B2E">Join body</text>
+  <text x="94" y="138" text-anchor="middle" font-size="9.5" fill="#6B6880">positive relational</text>
+  <path d="M160,127 H186" stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#aw)"/>
+
+  <!-- Promoter -->
+  <rect x="188" y="100" width="152" height="54" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <rect x="189.5" y="102" width="3.5" height="50" rx="1.75" fill="#4F46E5"/>
+  <text x="264" y="123" text-anchor="middle" font-size="12" font-weight="600" fill="#1E1B2E">Promoter</text>
+  <text x="264" y="138" text-anchor="middle" font-size="9.5" fill="#6B6880">triangle &#183; 4-cycle &#183; clique</text>
+  <path d="M340,127 H380" stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#aw)"/>
+
+  <!-- cost gate diamond -->
+  <polygon points="430,91 480,127 430,163 380,127" fill="#F3F3F8" stroke="#4F46E5" stroke-width="1.25"/>
+  <text x="430" y="124" text-anchor="middle" font-size="10.5" font-weight="600" fill="#1E1B2E">cost</text>
+  <text x="430" y="137" text-anchor="middle" font-size="10.5" font-weight="600" fill="#1E1B2E">gate</text>
+
+  <!-- yes -> WCOJ -->
+  <path d="M480,120 H538" stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#aw)"/>
+  <text x="508" y="105" text-anchor="middle" font-size="9.5" fill="#6B6880">wins</text>
+  <path d="M540,88 H688 L700,100 V136 H540 Z" fill="#ECEBFB" stroke="#4F46E5" stroke-width="1.25"/>
+  <rect x="552" y="95" width="30" height="13" rx="6.5" fill="#10B981"/>
+  <text x="567" y="104.5" text-anchor="middle" font-size="7.5" font-weight="600" fill="#FFFFFF" font-family="'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace">GPU</text>
+  <text x="622" y="120" text-anchor="middle" font-size="12" font-weight="600" fill="#1E1B2E">WCOJ multiway join</text>
+
+  <!-- no -> fallback -->
+  <path d="M430,163 V178 H538" stroke="#6B6880" stroke-width="1.5" fill="none" marker-end="url(#aw)"/>
+  <text x="452" y="174" text-anchor="middle" font-size="9.5" fill="#6B6880">else</text>
+  <rect x="540" y="156" width="160" height="44" rx="7" fill="#F3F3F8" stroke="#1E1B2E" stroke-width="1.25"/>
+  <rect x="541.5" y="158" width="3.5" height="40" rx="1.75" fill="#4F46E5"/>
+  <text x="622" y="182" text-anchor="middle" font-size="12" font-weight="600" fill="#1E1B2E">Binary-join tree</text>
+
+  <text x="28" y="228" font-size="10.5" fill="#6B6880">The fallback produces the identical row set &#8212; dispatch is a performance choice, never a semantic one.</text>
+</svg>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AggregateLiftStatus","Value"],"fn":["extract_from_program","extract_from_source"],"struct":["AggregateLiftReport","ChoiceSource","GroundAtom","Provenance"]};

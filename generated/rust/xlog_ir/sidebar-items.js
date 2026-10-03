@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["eir","epistemic_plan","metadata","plan","rir"]};

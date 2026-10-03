@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["apply_query_vars_device","build_evidence_by_var_gpu","build_weights_gpu","map_nodes_to_vars_gpu","restore_query_vars_device"],"struct":["GpuWeights"]};

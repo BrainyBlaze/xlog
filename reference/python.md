@@ -1,0 +1,2740 @@
+# Python API (pyxlog)
+
+Reference for the pyxlog Python bindings: deterministic and probabilistic program APIs, DLPack interop, neural-symbolic training, and ILP rule learning.
+
+`pyxlog` lets you compile and run XLOG programs from Python and exchange CUDA
+tensors with PyTorch, CuPy, JAX, and TensorFlow through DLPack. Transient inputs
+and query-result handoffs share device allocations; persistent relation imports
+and stored-relation exports make device-to-device ownership copies so session
+state cannot be mutated through an external tensor.
+
+<Note>
+Always `import pyxlog`, never `pyxlog._native`. The package has two layers: a native
+PyO3 extension (`pyxlog._native`) and a pure-Python wrapper that re-exports it and adds
+convenience methods. Some documented methods — including `evaluate_async`,
+`evaluate_stream`, the relation callbacks, temporal provenance, and the `nn/4` lineage
+helpers — live only on the wrapped classes. Importing from `pyxlog._native` directly
+will make those methods appear missing.
+</Note>
+
+## Overview
+
+The `pyxlog` Python module provides:
+
+- Deterministic (ordinary, non-probabilistic) Datalog execution via `LogicProgram`
+- Probabilistic inference (facts and rules carry probabilities) via `Program`
+- Term embedding registration and lookup via `register_embedding` / `forward_embedding`
+- Differentiable inductive logic programming (ILP) — learning Datalog rules from
+  labeled examples — via `pyxlog.ilp`
+- Reusable diagnostics for downstream applications ("external consumers"):
+  learned-rule inventories, audits of the tight GPU inner loop ("hot loop"), and
+  grouped transfer metrics
+- DLPack GPU tensor exchange, with zero-copy transient inputs and query-result
+  handoffs plus owned persistent relation storage
+- Optional, experimental Apache Arrow C Device interop (enabled by a build feature)
+- Runtime introspection surfaces ("living-world diagnostics"): rule provenance,
+  proof traces, incremental relation-change ("delta") debugging, temporal relation
+  metadata, native whole-fact relation evidence, and neural hot-loop audits
+
+Convenience outputs that must be read on the host CPU (probabilities, gradients,
+confidence intervals) are behind a `host-io` Cargo build feature. Keeping them
+optional lets device-result code keep result buffers out of host memory. Individual
+routes can still observe bounded status or terminal-summary data; their documented
+transfer measurements, not the final tensor's device field alone, establish residency.
+For the full map of runtime introspection surfaces, see
+[Living-World Diagnostics](/guides/diagnostics).
+
+## Installation
+
+To install a published wheel:
+
+```bash
+pip install pyxlog
+```
+
+On import, `pyxlog` checks for bundled CUDA kernel artifacts under
+`pyxlog/kernels/` and, when present, exports that directory to
+`XLOG_CUBIN_DIR` automatically. Any pilot script, probe harness, or artifact
+replay that runs outside the packaged wheel layout should set
+`XLOG_CUBIN_DIR` explicitly before importing `pyxlog`, for example:
+
+```bash
+export XLOG_CUBIN_DIR=/path/to/xlog/crates/pyxlog/python/pyxlog/kernels
+python your_probe.py
+```
+
+This matters most for cold-start execution on saved inputs: without
+`XLOG_CUBIN_DIR`, startup can fail if the active install does not contain
+`pyxlog/kernels/`.
+
+For local development or an API present in this checkout but absent from the
+selected wheel:
+
+```bash
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python --user
+```
+
+Use the Python executable from the downstream project, not necessarily the
+Python from the xlog checkout. The helper stages generated CUDA artifacts,
+builds a wheel for that interpreter with `maturin build -i`, installs the wheel
+with the same interpreter's `pip`, and verifies that the installed package has
+`pyxlog/kernels/`. Generated `.ptx` and `.cubin` files remain build artifacts
+and are not tracked in git.
+
+### Build Features
+
+Build features are compile-time flags that turn optional API surfaces on:
+
+- `host-io`: enable host-read convenience APIs (e.g. `CompiledProgram.evaluate(...)`)
+- `arrow-device-import`: enable experimental Arrow C Device export/import helpers
+
+Example:
+
+```bash
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python \
+  --features extension-module,host-io,arrow-device-import
+```
+
+### Semantic task binding
+
+`SemanticTransitionColdTask` executes its admitted observer once during
+construction and exposes `task_content` before final task import. This read
+returns `(query_identity, theory_program_identity, result_identity, truths)`
+with three 32-byte identities and three truth codes (`0=Neither`, `1=True`,
+`2=False`, `3=Both`). It carries no use authority. Final import executes the
+observer again and must reproduce the same identities and truths; a mismatch
+refuses the native session. Cold content observation does not run the model or
+prefill its cache.
+
+The semantic controller's `task_observation_roots` and `import_task` methods
+share five explicit keyword arguments in addition to their admission and
+authority inputs. `import_task` also requires `task_priority_levels`:
+
+| Argument | Meaning |
+| --- | --- |
+| `task_program_source` | Complete authored XLOG source, including concrete input facts; imports and external relation inputs are not accepted by this adapter. |
+| `task_query_ordinals` | Three zero-based query ordinals, in admitted statement order; all queries must return zero-arity results. |
+| `task_scoring` | Six nonnegative `u32` coefficients in order: correct, all-correct, work, improvement, refusal, spent. |
+| `task_priority_levels` (`import_task` only) | Ordered tuple of levels; each level is a nonempty ordered tuple of `(query_ordinal, target_truth_code, weight)` goals. Truth codes are `0=Neither`, `1=True`, `2=False`, `3=Both`; weights are positive `u32`. At most three levels and three goals fit the three-query bank, and a query may occur only once. An explicit empty tuple is valid for tasks without a priority level. |
+| `admissible_truth_masks` | Three nonzero four-bit masks, one per query; bit `n` permits truth value `n`. |
+| `actor_eligible` | Required Boolean application decision, frozen into the task before any action draw; it is never inferred from the winner or result. |
+
+Import runs the authored program through XLOG's native GPU evaluator and derives
+expected Boolean answers from its completed results. There is no expected-answer
+argument or built-in task. Source, selected queries, observed results, scoring,
+ordered priorities, masks, and actor eligibility become part of the task identity
+checked during restoration. The imported `TaskUse.task_priority_levels()` returns
+the exact native order before Proposal; completed `task_ground.priority_levels`
+returns the same record after execution. `TaskUse.semantic_goal_root()` returns
+the existing bound 32-byte native goal root after import and before Proposal;
+completed task ground retains that exact root. The read requires the creator
+thread and current issued task use, and does not recompute the goal or grant
+execution authority. For each goal the native truth match is
+normalized to zero or one. Selection compares weighted progress against the
+acquired base of the current step, level by level; forbidden truth statuses
+exclude a candidate before ranking. Predictive query agreement, lower measured
+cost, then lowest candidate index break remaining ties. The six scoring
+coefficients still measure work and return; they are not priority levels. See the
+[Rust task contract](/reference/rust#semantic-task-programs) for scoring and
+numerical-policy build requirements. These inputs replace the former implicit
+task; there is no legacy fallback.
+
+### Semantic replay carrier
+
+Each nonempty `replay_rows` entry has this shape:
+
+```python
+row = (basis, identity, canonical_record_json, material_pairs, evidence_bytes)
+identity = (training_view, training_view_digest, record_sha256,
+            source_length, block_size, targets)
+```
+
+`basis` is `episode` or `anchor`. The adapter consumes the original producer's
+training identity: manifest hash, example identifier, split, tokenizer hash and
+revision, mask-policy hash, training seed, epoch and variant. These nine values
+and their original digest must match the canonical record. Integers remain exact,
+including values larger than 64 bits. No additional native identity projection or
+rewritten record is required.
+
+The transported material pairs retain the original ordered references and exact
+bytes (or an explicitly declared reconstruction). The training-view material
+uses the producer's `training-view/v2` bytes; the older v1 layout is not
+accepted or converted. Its 264-byte header binds identity, source, dimensions,
+answer boundary and three declared branch spans (all zero without branches).
+The row then contains token IDs, MASK labels and weights, autoregressive and
+causal-memory retention labels, branch labels and IDs, and the forest's source
+slots, logical positions, kinds and parents. The original bytes, dimensions,
+target coordinates and branch supervision are checked before device selection.
+
+An episode requires authentic native execution evidence. An anchor instead
+retains the original admission evidence and retention group; it cannot be
+selected as native execution replay or confer actor credit. Its record contains
+exactly `example_id`, `group`, `training_view`, `training_view_identity` and
+`content_sha256` (plus the three task-content identities for a symbolic anchor).
+An admitted live anchor must carry the exact envelope supplied in
+`live_authorities`, the train partition, the durable-slow-consolidation purpose,
+and both cross-request reuse and durable-checkpoint rights. The current snapshot
+checks expiry and revocation on import and subsequent use. Corpus and live
+anchors use the same row owner and wire domain; neither gains an invocation's
+model generation. Carrier integrity and admission do not replace the trusted
+application’s fresh use permissions. Importing a carrier does not establish that
+device-side training, Update publication or restoration has completed.
+
+`task_observation_roots` requires the same `task_scope` and `live_authorities`
+that will be passed to `import_task`. It binds a live anchor to that original
+authority before computing coverage; `import_task` still independently checks
+the current snapshot and use rights.
+
+During replay, `restore_invocation(task_use, restored_parent, full_row,
+transition)` returns `(original_model_output, finalize_continuation,
+consumer_stream)`. The callable retains the same original invocation; it does
+not return or seal the final continuation during restoration. For Proposal,
+the importer first consumes the original `pack_policy` result and snapshots all nine
+CUDA operands before binding the same parent's continuation. Native retains
+these pending banks and the original witness, joins the supplied consumer stream,
+and rechecks the original seals at continuation binding without replacing the
+snapshots. Pending snapshots cannot execute or draw until that join succeeds.
+The importer calls `finalize_continuation(task_use, restored_parent,
+original_model_output)` once after the policy handoff and before capture/launch,
+within the same guarded import read scope and without native locks. It returns
+`(text_rows, text_row_count, selected_text, active_rows, active_row_count,
+numerical_admissibility, numerical_blocks, model_schema_digest, model_identity,
+tensors, producer_witness)` for Proposal. Recompute and Drain omit the three
+physical-certificate fields and use the same delayed callback immediately before
+their continuation binding. The consumer stream is fixed by the first result;
+the final callback supplies the services and their final witness, not a new stream.
+This ordering does not supply a uniform numerical certificate or replace the
+required pre-draw admission. During proposal replay, the native importer owns
+final use of its original policy invocation and schedules native finalization before
+asking the Runtime to retire its temporary aliases; reader retirement then joins
+the named consumer streams. Full predecessor and successor comparisons remain
+required. The Runtime
+cleanup callback must not call public policy finish or backward methods during
+import. A failed final-use call quarantines the original invocation, and uncertain
+completion prevents reader release. Import does not retry final use, repeat
+publication, or substitute a backward call.
+
+For a prepared Proposal with a sealed physical-parameter roster,
+`controller.bind_continuation(..., parent=step, bank=bank,
+numerical_blocks=blocks, model_content_witness=model_content)` consumes the
+original witness returned by `bind_model_content` for that same Session, step
+and bank. Omit `model_schema_digest` and `model_identity`: the original bank guard
+must already have recorded its private acquired model-contract snapshot before
+the model forward. Native retains that snapshot, the model witness and its
+producer owners; the existing CUDA continuation node reads its schema and
+generation identity on each replay before validating the acquired record. There
+is no host identity readback, recapture or certificate reassignment after Update.
+`producer_witness` remains the distinct transient witness covering the complete
+continuation tensor roster and all seven services, including the original
+FP64 `[N_physical,2,3]` blocks as the seventh service. Non-drawing prepared steps
+omit both blocks and the model witness. Acquired replay retains the verified host
+identity interface above and rejects a prepared model witness. These bindings do
+not establish scientific numerical acceptance or measured ZERO TRANSFER.
+
+The original nine policy operands are CUDA FP32 text logits `[32,V]`, Bool8
+product support, FP32 packed parameters `[P]`, FP32 component baselines
+`[1,136]`, FP64 pointwise errors `[P,2]` and `[1,136,2]`, then FP64 domains
+`[P,4]`, `[32,V,4]` and `[1,136,4]`. Errors use `(O,U)` order; domains use
+`(M,O,U,I)` order. `I` bounds the ideal formula independently of actual magnitude
+and error radii. Domain O/U cover the allowed domain; they do not replace the
+pointwise errors. Supply the baseline's independent ideal bound from its
+original producer, with the same parent, step/bank, physical model roster,
+generation and consumer stream as the witnessed policy pack. The actor keeps
+the frozen original FP32 baseline exact; the critic retains its live envelope.
+
+Late policy differentiation returns nine capsules: three actual FP32 parameter,
+text and baseline cotangents, three full FP64 error arrays with trailing extent
+2, then contiguous FP64 domains `[2,P,4]`, `[2,32,V,4]` and `[2,1,136,4]`.
+The first axis is actor/full; each entry is `(M,O,U,I)`. Full errors and
+D.full.O/U come from the same result. Only the first three capsules enter the
+original GraphTask. These selected-tape bounds do not certify every allowed
+support or prefix before a draw, or the subsequent physical model accumulation.
+This replaces the former three-field layouts; existing compiled artifacts are
+not compatible with the new shapes.
+
+### Semantic runtime checkpoints
+
+The fresh parent's `acknowledgement_payload_capacity_bytes` reserves the full
+receipt bytes for every possible native intent. With `N = intent_entry_capacity`,
+`P = intent_payload_capacity_bytes`, and `E = len(intent_effect)`, it must be at
+least `169*N + P + (N-1)*E`. The native initializer checks this bound and owns
+the acknowledgement queue; callers cannot supply role 32 records. Proposal and
+Drain each reserve a continuation and a delivery-acknowledgement fuel unit.
+
+For an external effect, the trusted application binds its live receiver once
+with `controller.bind_delivery_receiver(task_use, recipient_id=bytes32,
+verification_key=bytes32, expected_effect=bytes)`. The key stays in the local
+rights store, not the checkpoint. After FINAL, the application saves a durable
+checkpoint, obtains its native intent, and sends its exact stable identity,
+effect and payload to the receiver. The receiver durably records those bytes
+before returning a receipt. The receipt is
+`b"xlog.delivery.receipt.v1\0" || stable_identity || recipient_id ||
+LE64(len(effect)) || effect || LE64(len(payload)) || payload || record_digest || mac`,
+where `record_digest` is SHA-256 of the same identity, recipient, length and
+content fields prefixed by `b"xlog.delivery.record.v1\0"`, and `mac` is
+HMAC-SHA256 of the receipt body under the bound key. Both domain terminators
+are single NUL bytes. A retry of the same stable identity must return the same
+stored receipt, without applying the effect again.
+
+`controller.acknowledge_delivery(task_use, parent=..., snapshot=...,
+receipt=...)` checks the fresh use rights and full receiver receipt against the
+actual FINAL intent, then appends it through the native publication CAS. It
+returns the new `(instance, word, logical_digest, state_digest)`; the caller
+must acquire that new parent and save a new checkpoint. The CAS does no model
+step and preserves the selected model allocation, text, theory, cache and RNG.
+The old parent cannot acknowledge again. After a cold restore, bind the same
+trusted receiver to the newly issued task use before invoking
+`controller.checkpoint_pending_output_intents(task_use, checkpoint)`. That
+projection verifies both sealed queues and every stored receipt MAC, returning
+only unacknowledged `(stable_identity, effect, payload)` rows. The older
+`checkpoint_output_intents(checkpoint)` remains an all-intents audit read, not
+a delivery queue. An exhausted FINAL parent cannot start an unacknowledged
+delivery; an already acknowledged terminal intent cannot be activated again.
+
+`SemanticTransitionController.save_checkpoint(task_use, *, parent,
+consumer_streams, snapshot, snapshot_model_state)` returns one sealed `bytes`
+value containing the selected native publication, the task capsule, the session
+allocation contract, and the application's exact model-state bytes. The controller
+joins every listed consumer stream before the cold native export. It then calls
+`snapshot_model_state()` exactly once on the creator thread without holding the
+native owner or task-state lock, and revalidates the task binding and acquired
+publication before sealing the result. The callback must return exact builtin
+`bytes`; failure or concurrent mutation returns no checkpoint.
+
+`SemanticTransitionSession.restore_checkpoint(checkpoint, *, device_ordinal,
+snapshot, restore_model, training_domain)` validates every section and the retained
+authority before allocating a fresh, never-reused native owner. `snapshot` must be newer than the
+snapshot sealed into the checkpoint. The application must project its original
+sealed input set and loader again into `training_domain`; it must exactly match
+the saved task capsule before allocation or any model callback. After restoring
+the selected native bank, the session creates one controller and task use,
+acquires their parent once, and invokes
+the trusted factory exactly once as
+`restore_model(controller, task_use, parent, exact_model_bytes)`. The application
+must return its reconstructed semantic runtime. The frozen
+`SemanticTransitionRestoredCheckpoint` exposes that same `session`, `controller`,
+`task_use`, `parent`, and returned `model` through read-only properties; none is a
+replacement or second acquisition.
+
+`task_use.task_objective_law()` returns
+`(scoring_law_identity, (evaluator_min_bits, evaluator_max_bits),
+coefficient_bits, (cost_unit_identity, cost_cap))` before any Proposal and after
+cold restore. Identities are 32-byte values; the evaluator endpoints are exact
+FP64 bit patterns and the nine coefficients are exact FP32 bit patterns. The
+native task freezes the proven signed return interval with outward rounding,
+then sets the first six and ninth coefficients to one, the actor coefficient
+to `RN32(1/M)` and the critic coefficient to `RN32(1/(M*M))`, where
+`M = max(1, abs(R_min), abs(R_max))` in FP64. Training arenas must retain these
+same bits and structural-cost law. Reading them grants no actor eligibility,
+selects no future denominator, and does not certify the full physical pullback.
+The scoring-law identity binds immutable task content, not the authority binding
+that a cold arena transfer must advance. Content, goal and authority checks
+remain separate. The projection follows the existing immutable TaskUse read
+scope, including the private arena's model-restore callback.
+Task identity now binds this frozen numerical law; older task identities are
+not accepted as restoration matches.
+
+`import_task`, `restore_checkpoint`, and `admit_training_arena` require the
+`training_domain` keyword. For prospective training, pass this exact primitive
+projection before the first Proposal, including when `replay_rows` is empty:
+
+```text
+(
+    ((manifest_hash, (max_entries, max_total_keys,
+                      max_records_per_input, max_record_bytes)), ...),
+    ((window, pad_id, mask_id, block_size), batch_size, mask_permille,
+     training_seed, mask_policy_hash),
+)
+```
+
+The manifest rows must be a nonempty, strictly hash-sorted, duplicate-free
+projection of the original sealed set, with each hash's own four caps. All hashes
+are lowercase SHA256 hex strings. Caps and loader counters/token IDs use exact
+nonnegative `u64` values (positive caps, window, block size and batch size;
+`1 <= mask_permille <= 1000`). The nonnegative integer seed is arbitrary-width
+and remains lossless. The trusted application validates the manifests and their
+cap/hash association; native code retains that projection, not an independent
+authentication of external data ownership. `None` explicitly binds no prospective
+training arena and cannot acquire one through later admission.
+
+The native task/checkpoint identities retain the entire domain. Its record
+bound is `R = min(max_records_per_input)` over the same manifests. Initial and
+restored arenas require at most `R` distinct episode rows and at most `R` distinct
+anchor rows, and every mandatory group keeps its actual, nonempty, nonrepeated
+membership and exact denominator in `[1,R]`. Regular task groups use episodes;
+retention groups use their corresponding anchor basis. Every packed view must
+name one of those manifests and retain the seed, mask-policy identity, window,
+block size and padding/mask tokens; its source extent must satisfy `2*L <= W`.
+The existing packed-view parser bounds branch geometry and target arrays by `W`.
+Byte caps and arena storage capacities are never substituted for `R`.
+
+`task_use.task_training_domain()` returns
+`(domain_identity_bytes, original_domain_projection)` in the same immutable read
+scope as `task_objective_law()`, or `None` for a task without prospective training.
+This is metadata custody, not a selected future denominator, actor grant or
+uniform physical numerical certificate. Task capsules now use version 3;
+version 2 capsules and older task/scoring identities cannot restore under the
+new binding. Restore and late arena admission require exact original-domain
+equality; changed manifests, caps or loader fields cannot enlarge it.
+
+`task_use.policy_numerical_domains(parent, bank, consumer_stream)` returns three
+owner-bearing FP64 DLPack capsules in parameter, full-MASK text, and baseline
+order, with shapes `[2,P,4]`, `[2,32,V,4]`, and `[2,1,136,4]`. Region zero is the
+actor label; region one is the full label. Coordinates are `(M,O,U,I)`, with an
+independent ideal bound and separate ordinary/underflow errors. These are native
+uniform pre-draw outputs, not the selected backward's late numerical arrays.
+
+For a prepared Proposal, pass its original step and bank `0` or `1`, after
+`bind_prepared_policy` has snapshotted all nine original operands, while its
+original model work is still recording and before freezing the continuation.
+During ordinary replay/restoration, pass the acquired parent and `bank=None`
+inside the original finalization callback, after those same snapshots. The
+producer joins supported category/prefix alternatives using the original policy
+primitives, the frozen task law, and all permissible training denominators. No
+selected receipt or second forward/backward supplies this domain.
+
+Consume the capsules in the same retained model numerical owner and keep every
+view alive through final use. The declared stream is ordered after the producer
+without a host result read. Export aliases are not authoritative: native retains
+the original coherent labels and checks the exports before draw. Changed bytes
+are content corruption; nonfinite bounds refuse the original proposal before
+its first draw. Reading these outputs grants neither actor eligibility nor a
+physical certificate: the original model consumer must still propagate both
+labels, accumulate all required loss groups into the actual physical parameters,
+and supply both independent physical-block checks.
+
+`SemanticTransitionController.admit_training_arena(task_use, *, parent,
+consumer_streams, snapshot, snapshot_model_state, restore_model, replay_rows,
+training_objective, training_domain, dependencies, publication_grants, inference_grants,
+training_grants, capacities, memory_bytes, max_material_bytes,
+max_total_material_bytes, max_evidence_bytes, refresh_snapshot)` performs a
+cold structural transfer from the selected, successfully recomputed inference
+publication. The source must already hold valid inference and training rights,
+and `replay_rows` must retain its existing rows. The method quiesces and seals
+the complete native/task/model checkpoint, restores it into a private session,
+then binds the larger training arena and current authority there. It preserves
+the saved model and historical native records; the new authority binding and
+publication have new identities and digests. `restore_model` has the same
+four-argument factory contract as ordinary restore. After that factory returns,
+`refresh_snapshot()` must return a newer authorized snapshot. Only after both
+sessions pass revalidation does the method revoke the source task use and return
+the single runnable `SemanticTransitionRestoredCheckpoint`. A preparation
+failure leaves the source runnable only when it can still be revalidated; it
+never grants execution to the unfinished candidate.
+
+`SemanticLearningPhaseRecipe(*, source, target, phase_index,
+completed_updates_index, views)` describes a cold learning-phase boundary.
+The supported pairs are `alignment` to `fast`, `fast` to `consolidation`, and
+`consolidation` to `fast`; construction grants no scientific acceptance.
+`views` must cover every actual model/learning view in native `(role, index)`
+order, exactly once. Each row is `(role, index, operation, source_role,
+source_index)`. Operations are `preserve`, `zero`, `master-from-effective`,
+and `phase`. Unused source coordinates are zero. The producer supplies the
+actual phase and cumulative-progress scalar indices, not assumed ordinals.
+`phase` addresses that role-23 I64 scalar. `zero` is restricted to optimizer,
+gradient, and gradient-delivery views; it cannot reset cumulative progress,
+masks, rates, loss scale, effective weights, replay cursor, RNG, or budgets.
+`master-from-effective` names a matching BF16 effective view and its FP32
+role-21 master. Native code converts its exact finite value without rounding.
+Full backing allocations, padding, strides, and shared storage are retained;
+conflicting effects on aliases refuse the entire private candidate.
+
+`controller.prepare_learning_phase_transition(task_use, *, parent, recipe,
+consumer_streams, snapshot, scientific_owner, learning_grant_ref,
+checkpoint_destination, snapshot_model_state, restore_model,
+snapshot_restored_model, refresh_snapshot)` quiesces the exact successful
+recompute parent and seals the complete source with the ordinary checkpoint
+encoder. `learning_grant_ref` selects an original `durable-slow-consolidation`
+grant covering the complete dependency closure; fast-adaptation permission alone
+cannot authorize this durable full checkpoint. Fresh publication, data-use,
+retention and revocation checks remain independent of scientific acceptance.
+The trusted original scientific owner must implement
+`accept_learning_phase(parent, recipe, source_checkpoint, original_grant,
+destination, snapshot) -> bytes`. Its nonempty exact builtin bytes must contain
+the original frozen criteria, result, model lineage and destination acceptance.
+The owner must verify those inputs against its genuine scientific result; this
+privileged boundary is not a cryptographic issuer verifier and never interprets
+an arbitrary acceptance flag as that result. The native checkpoint retains the
+full recipe, source identity, cumulative progress, original acceptance, grant,
+destination and authority binding.
+
+Destination acceptance must be derived from the original durable-training
+permission's resolved scope, never merely from the caller's destination string,
+grant reference, or purpose. The original owner checks controller/tenant,
+repository, confidentiality, purpose, retention/deletion, cross-request reuse,
+and revocation restrictions for the full checkpoint and all derived weights;
+sealed-evaluation material is excluded. Returning serialized callback inputs
+does not establish this acceptance. Alignment acceptance concerns the actual
+jointly trained generation. Entering consolidation authorizes that phase, not
+its future result. Returning from consolidation requires an already accepted
+slow generation with absorbed residual, neutral adapters, retained accepted
+heads and a complete cache of that generation. Copy/reset neither performs
+nor proves absorption or the scientific retention and causality criteria.
+
+Restoration uses the same native Session allocation and task admission path as
+ordinary restore. For this transition only, the trusted factory is called once
+as `restore_model(controller, task_use, parent, None)`: reconstruct from the
+actual private native bank, including its new phase and reset optimizer values,
+not from the old model bytes. `snapshot_restored_model(returned_model) -> bytes`
+must serialize that complete real model, including physical aliases, optimizer
+and phase state. `snapshot_model_state()` snapshots the unchanged source.
+`refresh_snapshot()` supplies strictly newer original authority snapshots.
+These callbacks execute cold, on the creator thread, outside native/task locks.
+Both model snapshots and native banks are checked again before any handoff.
+
+The returned native-issued `SemanticLearningPhaseTransition` retains both
+owners privately. A fast successor resumes inference; consolidation resumes
+training, subject to its original rights. A later fast training segment requires
+`current-request-fast-adaptation` grants, while consolidation requires
+`durable-slow-consolidation` grants. Phase adoption does not issue those rights
+or make the resident fast Update a durable consolidation commit.
+The original Session blocks further import, execution and abort until resolution.
+`controller.pending_learning_phase_transition()` recovers that same retained
+object if the application loses its reference.
+
+Call `pending.commit_checkpoint(durable_owner)` exactly once. That original
+owner implements `commit(destination, complete_checkpoint, sha256) -> bytes`
+and `resolve(destination, sha256) -> bytes | None | False`. `commit` must
+atomically persist the full checkpoint in the accepted destination and return
+its exact durable readback. Only after readback and fresh revalidation does
+native code revoke the source task use and return the single runnable
+`SemanticTransitionRestoredCheckpoint`. Any uncertain completion leaves
+`pending.status == "unknown"`, retains both owners and forbids another commit.
+`pending.resolve_checkpoint()` only calls the same retained resolver: `None`
+remains unknown; exact checkpoint bytes allow activation; `False` must prove
+the write did not commit and permits revalidated source continuation.
+`pending.abandon_prepared()` is allowed only before a commit attempt.
+Ordinary save/restore and resident Update preserve this phase history and
+cumulative progress. The embedded native publication material uses version 2;
+older native material is not accepted by this phase-owning contract.
+
+For actor replay, retain the complete original pre-action checkpoint with its
+application owner and call `SemanticTransitionSession.checkpoint_referent(checkpoint)`
+to obtain the compact native record. Store the exact record bytes as the episode's
+`downstream-snapshot` material. `inspect_checkpoint_referent(record)` exposes its
+checkpoint SHA-256 and length, original publication, model and task identities,
+content and scoring identities, authority scope, the native `authority_root`,
+and saved phase. This root is the original task goal witness's domain-separated
+authority identity, not a raw hash of authority bytes. Referent records use
+version 2; version 1 records are rejected. The record is not a replacement for
+the complete checkpoint. The owner must check a retrieved
+source with `verify_checkpoint_referent(record, checkpoint)`; `restore_checkpoint`
+accepts `referent=record` and performs that same exact check before allocating a
+new owner.
+The complete checkpoint and compact referent retain version 2; the embedded task
+capsule uses version 3 to retain the original training domain. Older task capsules
+and version 1 checkpoint/referent sources are not accepted by this contract.
+
+When importing actor replay, pass one `resolve_checkpoint(digest_bytes,
+item_limit) -> bytes` callback plus `max_checkpoint_bytes` and
+`max_total_checkpoint_bytes` to `SemanticTransitionController.import_task`.
+The native importer checks both limits before calling the resolver, validates the
+complete source against the record and the episode's original predecessor, then
+calls the existing `refresh_snapshot()` callback after each external read. That
+fresh snapshot must advance and still permit training. The callback and retained
+source are cold-path responsibilities; neither runs inside the resident segment.
+Missing or mismatched sources and revoked rights reject actor admission.
+This also applies when no replay row is selected: actor rows cannot enter the
+training arena until every resolved checkpoint has passed the fresh training-rights
+check. A fresh import without checkpoint-dependent rows still passes no refresh
+callback.
+
+The checkpoint carries content, not current permissions. Restore rechecks a fresh
+authority snapshot and the reconstructed native publication after the model factory
+returns. A callback error or final revalidation failure poisons the new native owner
+and returns no reachable carrier. Checkpoint creation and restoration are cold-path
+operations; they are not evidence of device-resident execution, training, or update
+publication.
+
+### Acquired model numerical identity
+
+The existing acquired parent's `model_context(consumer_stream=...)` returns
+`(parent_identity, descriptor_digest, semantic_root, prefix, ring, generations,
+contracts, capacities, numerical_state)`. Its final pair contains two 32-byte
+identities from the same acquisition: complete model memory geometry, and the
+device-sealed numerical state. Geometry includes allocation extents, independent
+storage objects, view-to-storage offsets and all model tensor layouts. The
+numerical identity folds that geometry with the typed-view and full-backing
+seals of model roles 18 through 25, including optimizer and gradient-presence
+state. It is independent of physical bank addresses.
+Cold restoration checks the stored geometry against the complete saved map and
+compares the device-recomputed numerical identity with the original saved value;
+it does not replace the saved identity to accept a different state.
+
+The numerical fold excludes the enclosing parent identity and ModelContract;
+the full ModelContract remains covered by the parent identity. Consequently this
+pair is not a replacement for model architecture, names, executable attributes,
+Tensor-object/version-counter classes, or their complete restoration contract.
+It confers no independent authority. This is a cold acquired-context projection,
+not a host read permitted inside the measured resident loop.
+
+For cold execution reconstruction, the same acquired parent also exposes
+`terminal_state(consumer_stream=...)`: a single-consumer CUDA DLPack capsule of
+dtype `U64`, shape `(1,)` and element stride `(1,)`. It contains the original
+acquired terminal flag (`0` active, `1` requires Drain), not a value inferred
+from tokens or supplied by the model. It shares the native private step-input
+owner used by `source()` and `model_context()`; it does not acquire another
+parent or change the nine-field context tuple. Keep the imported tensor alive
+until final use, treat its bytes as read-only and name all final consumer streams
+when releasing the parent. The existing current-task, live-reader and consumer
+stream checks apply. This export enables the existing model reconstruction
+consumer; it does not establish complete restoration or Update execution.
+
+Initial `bind_parent` metadata also requires `model_contract_layout`, the six
+byte coordinates `(S_begin, S_bytes, S_digest_offset, generation_offset,
+N_offset, identity_offset)` in the single producer-owned ModelContract (role 44).
+`S` contains the complete immutable model schema; XLOG does not parse its format.
+The schema span and four output spans must be nonempty, disjoint and bounded by
+the actual record length. Digests occupy 32 raw bytes, and the generation is an
+eight-byte little-endian integer; no alignment is required. The layout is retained
+in the existing native runtime contract and publication material.
+
+For a fresh parent, `task_use.initial_source_layout(prefix_capacity=...,
+feedback_capacity=..., max_position=..., pad_token=...,
+provenance_capacity_records=...)` returns `(source, prefix, prefill_tokens,
+ring_head)`. The source and prefix contain the eight-field rows accepted by
+`bind_parent`; `prefill_tokens` is the exact ordered admitted portion preceding
+the 32-row active ring. The task's observed payload and source mapping, not a
+second caller token list, determine these rows. Missing tokens, invalid mapping,
+capacity and text geometry are rejected. Use `ring_head` in initial metadata.
+
+When `prefill_tokens` is nonempty, instead issue the one-use
+`task_use.begin_initial_prefill(...)` with the same geometry and the actual
+`model_generation`; its `source_layout()` supplies the same tuple. At the
+original model wrapper boundary, call
+`stage.bind_model_content(tensors=..., model_allocations=..., consumer_stream=...)`
+before the forward and retain its model-content witness. The first rows
+are the exact role 18–25 model tensors, followed by role-zero backing allocations
+in the same order later passed to `bind_parent`. After model binding and before
+the forward, `stage.capture_tensor_content(tensors=..., consumer_stream=...)`
+may seal the original pre-call boundary and execution inputs. Their witnesses
+may be verified immediately, but do not replace input registration or authorize
+the forward. At the model's actual pre-hook, call
+`stage.record_input(token_tensor=..., consumer_stream=...)` on the contiguous
+I64 `[1, len(prefill_tokens)]` tensor passed to the model. Native checks its
+admitted token values on device and completes that check before returning.
+Verify the pre-call witnesses again before the first model embedding. During
+that one original forward, use `stage.capture_tensor_content(tensors=...,
+consumer_stream=...)` to seal each transient or autograd-saved roster at its
+original production point and retain the returned content witness. Before each
+dependent read, call `witness.verify(tensors=..., consumer_stream=...)` with the
+same original tensor storage, layout and interval and the actual dependent
+consumer stream; native events join it to the guard even when it differs from
+the prefill stream. The model witness verifies
+the complete pre-forward model roster; no witness may establish a new baseline
+after output recording. Execute the original model prefill once on that stream;
+at the final post-detach
+hook, call `stage.record_outputs(tensors=..., consumer_stream=...)` with all
+original cache, recurrent and accumulator tensors (roles 4–13). It returns a
+`SemanticInitialPrefillReceipt`. Pass that exact receipt as
+`prefill_receipt=...` to `controller.bind_parent` for the same task and Session,
+along with the original tensor and allocation rosters. The receipt is consumed
+once; a changed source, generation, tensor owner or sealed content is rejected.
+The native receipt authenticates the tensors observed at these wrapper hooks;
+it does not independently execute or audit the external model forward. A
+nonempty prefix cannot bind without it. An empty prefix needs no receipt. The
+one-use stage retires after the completed parent copy and publication join, but
+the Session retains the original model and transient seals for verification
+through the dependent backward reads. Retain the Python witnesses, stage,
+original producers and saved autograd graph until creator-thread cleanup.
+
+After sealing the numerical model ranges, native initialization computes
+`S_digest = SHA256(S)` and
+`identity = SHA256(b"xlog.semantic.model-identity.v1\0" + S_digest +
+LE64(actual_model_generation) + N)`. It fills those four output fields before
+sealing the complete ModelContract and parent. There is no separate record serial.
+The sampler's `u32` generation must equal the actual native model generation;
+conversion cannot truncate or wrap.
+
+Each publication bank owns a separate record-44 destination. The existing
+prepared-input producer copies the acquired record into private fixed storage,
+which `prepared_record` exports and the retained content guard checks. Ordinary
+model-preserving continuations copy the original record into the unpublished
+bank before the same finalizer and sole publication. Cold restore instead compares
+all saved fields against the device-recomputed values without rewriting them.
+The separate Update execution, producer restoration and subsequent forward still
+require their connected runtime implementation and full GPU evidence.
+
+### Original model work recording
+
+`controller.build_segment` requires the frozen `tensor_content_capacity`,
+`model_work_capacity`, `segment_capacity_bytes`, and
+`other_external_cuda_bytes` alongside the transition schedule and producer.
+The last two values bound the producer's CUDA slab and all later external
+CUDA allocation classes, respectively. Native compares their combined declared
+claim with free CUDA memory before the first segment allocation, then retains
+the logical reservation through segment retirement. The snapshot is a necessary
+cold refusal check. The instantiated graph is uploaded and completion-fenced on
+the original stream before installation; upload failure refuses the segment
+before draw. CUDA may later remap graph memory, so this does not establish a
+permanent graph-memory upper bound, bound external-library allocations, or prove
+that the full peak fits.
+Numerical domain payload and scratch are not included in this interface yet,
+so this claim alone does not admit a complete numerical execution.
+
+The prepared producer records logical work on its original `SemanticPreparedStep`.
+After the original `memory_scope.__enter__` succeeds and before graph capture,
+the builder calls `prepared.prepare_unpublished_successors()` exactly once on
+the creator thread. It must return `None` and create every unpublished Update
+successor and its retained learning inputs inside that same private allocation
+scope; preparing them before the scope would put their backing outside the
+required slab. A callback failure exits the scope through the original cleanup
+path and aborts the segment; the builder never retries it.
+Call `step.reserve_tensor_content(tensor_content_capacity)` and
+`step.reserve_model_work(model_work_capacity)` during `prepare_segment`, before
+capture. Each positive capacity must exactly match its frozen segment value.
+Native allocates both buffers from the retained segment claim, not separate
+late reservations. The work capacity bounds event occurrences, including every
+saved tensor; native does not run the model to discover a capacity.
+
+During the original `enqueue_step`, call
+`step.record_model_work(kind, dimensions)` for each executed operator occurrence.
+`kind` and every dimension must be exact unsigned integers, excluding booleans.
+The geometry contains at most eight factors; their checked product is the number
+of units. An empty geometry describes one scalar unit; any zero factor gives zero.
+
+| Kind | Unit |
+| --- | --- |
+| 1: pointwise | Result coordinates |
+| 2: reduction; 3: scan | Input elements |
+| 4: fill | Filled coordinates |
+| 5: contraction | Summands in one opaque linear, matrix, einsum or convolution operation |
+| 6: softmax; 7: log-softmax; 8: log-sum-exp | Input elements of one compound operation |
+| 9: scatter | Source elements |
+| 10: gather | Selected output elements |
+| 11: copy | Destination bytes; include element width in the geometry |
+| 12: cast | Converted coordinates |
+| 13: sort | Input keys, not internal comparisons |
+| 14: bucket queries | Query elements, not internal comparisons |
+
+For each original autograd save clone, call
+`step.record_saved_tensor_work(witness)` with that occurrence's original native
+content witness. Native derives shape and element width from its retained tensors.
+Different save occurrences count independently even when storage is shared;
+the same witness/tensor occurrence cannot be charged twice. Kind 15 is reserved
+for this witness-bound method and cannot be submitted as an ordinary operation.
+Views are not copies; masks do not discount executed dense geometry. Do not count
+an opaque operation and its assumed internal decomposition together.
+
+When `enqueue_step` returns, the native transition freezes the roster and checks
+its exact, nonzero model-work sum. An empty or entirely zero-work recording is
+not a valid model body. The immutable geometry is uploaded after capture,
+before submission, and consumed once inside the original executed IF body.
+Skipped bodies incur no model charge; later numerical refusal does not erase
+the forward. Counter overflow returns `work_counter_overflow` without publishing
+a successor. The original step retains the roster and allocation through
+completion and retirement. This port excludes cold preparation and later Update.
+
+This checked model-work sum is not the full attempt bound. Complete native-event
+accounting, its proved total bound, the full return consumer, and path-specific
+GPU evidence remain unfinished. The model receiver does not establish those gates.
+
+### Completed-step model inputs
+
+Before retiring a completed segment, call its original step's
+`completed_model_binding(consumer_streams=[...])` to authenticate that step's
+retained model inputs. With the semantic-policy feature enabled, the result is
+`(predecessor_identity, successor_identity_or_None, model_generation,
+model_geometry_digest, model_numerical_digest, carrier_or_None)`. Each identity
+has the four fields returned by `PublishedParent.identity()`. The generation and
+both 32-byte digests belong to the acquired predecessor, not the final segment
+bank.
+
+For a successfully published Proposal, `carrier_or_None` is a frozen
+`SemanticCompletedModelCarrier`. Its `numerical_realization`, `logits`, and
+`random_state` properties are three separate immutable
+`(native_owner_identity, canonical_bytes)` pairs. The first pair binds the
+completed step and action realization to the CUDA execution and typed launch
+identities that produced it. The second carries the retained conditional edit
+FP32 distributions and their placement from that execution; it never recomputes
+logits or runs a second forward. The third carries the invocation and training
+RNG header followed by the ordered native draw-receipt records.
+
+The carrier is a cold observation owned by the original completed step. It
+retains that step's native owners only until retirement; it neither reacquires a
+publication nor grants execution or publication authority. Native code validates
+the same completed binding before and after serializing the carrier. Recompute,
+Update, Drain, and refused steps return `None` for the carrier; a completed
+numerical refusal also has no successor. A skipped step, an uncompleted segment,
+or uncertain execution cannot return a binding. When the semantic-policy feature
+is disabled, the method raises its typed feature-required error instead of
+returning a six-field tuple with a fabricated `None` carrier.
+
+### Original Update measurements
+
+Before retirement, read `step.update_measurements` on the original completed
+step, between the original and repeated `completed_model_binding` checks. It
+returns a host-only dictionary for **both accepted and refused Updates**. A
+completed non-Update returns `None`; skipped, uncompleted, unknown, retired, or
+custody-invalid steps raise an error. This observation joins the original
+registered consumer streams and never reacquires a publication, runs a forward,
+recomputes a metric, or grants candidate execution authority.
+
+The dictionary contains `schema=1`, `predecessor`, `successor`, `bank`, the
+acquired `model_generation`, `model_geometry_digest`, `model_numerical_digest`,
+the original native `transition_status`, `selection`, `canaries`,
+`forward_receipts`, and `canary_refusal`. The identities and acquired model fields
+must equal the same completed binding; a refused Update has no successor.
+`selection` retains the native status, roster/selected-row coordinates, identities,
+training RNG and complete original replay-origin record.
+
+`canaries` is the original five-check tuple, in native kind order: symbolic utility,
+retained behavior, logit drift, goal chain, resource limits. Each check retains
+`evaluator_abi`, `kind`, `row_ordinal`, `identity`, `row_identity`,
+`row_content_identity`, `task_identity`, exact `lower_bound_bits` and
+`upper_bound_bits`, integer `memory_used`, `memory_limit`, `work_used`,
+`work_limit`, `obligation_positions`, `protected_member_offset`,
+`protected_member_count`, and `protected_positions`. These are original frozen
+inputs and original device counters, not phase acceptance thresholds.
+
+Each check's device-authored `availability` is `"not_executed"`, `"incomplete"`,
+or `"obtained"`. `measurement_bits` is an unsigned integer containing the
+original FP64 bits only for `"obtained"`; otherwise it is `None`, never an initial
+zero or a partial accumulator. An obtained measurement survives bounds,
+protected-retention, goal-chain, and resource refusals. The check's independent
+native `reason` is 0 for admissible, 1 non-finite, 2 outside bounds, 3 memory limit,
+4 work limit, 5 incomplete operands, 6 protected retention lost, 7 invalid goal
+witness, 8 work overflow, or 9 generation mismatch. `canary_refusal` separately
+retains the prioritized native reason, identities, bounds and counters, with the
+same `availability` and optional `measurement_bits` as its original check. It
+does not expose a partial accumulator as a complete measurement. `transition_status`
+and the original `execute_segment` refusal remain independent of individual
+availability; the existing segment-row format is unchanged.
+
+`forward_receipts` contains the original baseline and candidate records in that
+order. Each has `role` (0 or 1), the same availability vocabulary, and `material`
+(`None` if no complete receipt was obtained). Obtained material contains `role`,
+the **actual receipt's** `generation`, `work_sequence`, `scalar_type`, `dimensions`,
+`strides_bytes`, `model_geometry_digest`, `model_numerical_digest`, `logits_digest`,
+`identity`, and `canonical_bytes`. Native code validates the original logits
+owner/layout, receipt SHA-256, baseline binding, receipt order, and published
+candidate binding when present. The candidate generation is read from its receipt,
+not reconstructed as acquired generation plus one. Canonical bytes are the exact
+232-byte little-endian private receipt: ten scalar words, three stride words,
+then four 32-byte digests (geometry, numerics, logits, identity). The last digest
+seals the preceding 200 bytes. The original pointer word is inert evidence, not a
+CUDA alias or a replay capability. All returned dictionaries, tuples and bytes
+are host-owned and may outlive retirement; the getter itself may not.
+
+This port does not change the six native `execute_segment` row fields, objective
+reductions, canary algorithms, scientific acceptance, or the lifetime required
+for an unpublished multi-Update candidate.
+
+Use the same step's `record(44, 0, consumer_stream=...)`, `tensor(...)` and
+`tensor_allocation(...)` exports to serialize the original model contract and
+complete model backings. Their private storage is preallocated before capture
+and populated by that step's recorded acquisition. The observation does not
+acquire an old publication bank or allocate another history of model states.
+Treat every export as read-only, retain it until final
+use, and include every original consumer stream in the binding call. Recheck the
+binding after serialization to authenticate the same original seals. Input
+corruption or unknown completion prevents further use of the session.
+
+This method joins consumers and reads device metadata on the host. Call it only
+outside capture and the measured resident loop, before `retire_segment`. It does
+not finish policy use or retire the step. Its returned identities are not live
+readers, complete predecessor/successor replay materials, or authorization for a
+new model invocation.
+
+### Completed-step action projection
+
+For a successfully published Proposal, call
+`completed_action_projection(consumer_streams=[...])` before consuming the
+original policy tape or retiring the segment. Completion moves the executed
+policy and receipts into that tape; the projection follows its original
+publication bank, not the independently advancing model-weight bank. This
+export authenticates the retained completed schedule; it does not reopen the
+construction-only transition API or permit another capture. The
+typed cold projection returns the authenticated predecessor and
+successor, logical-state materials, proposal/stream/family/action-law/model
+coordinates, native winner and pre-draw actor eligibility, exact signed-return
+bits, the device-sealed batch receipt and root, the retained task-result material,
+and distinct action RNG base and successor materials. It exposes the native
+predecessor semantic-root digest but does not turn an application's source-text
+identity into that digest.
+
+`schema_generation` contains the exact retained admission-schema preimage;
+its SHA-256 is the native schema-generation identity. `action_law` is the
+generated catalogue's canonical declaration bytes with its
+SHA-256 catalogue identity. `edit_codebook` is the exact native codebook byte
+image used by this admission and completed action, with its admission-derived
+binding identity. `roster` is the canonical little-endian encoding of the 136
+actual components, including their admission-derived cardinalities and offsets;
+its bytes bind the codebook identity and hash to the roster identity. All four
+use the same byte-backed material interface as the other
+projection children (`identity`, `bytes`, and `bytes_sha256`). The codebook image
+is opaque: consumers bind its bytes and identity but must not decode private
+device offsets from it. Neither material claims that target, behavior, CDF,
+Philox, and hard-decode laws have separate native identities.
+`world_root` is the canonical native root export retained at cold task binding,
+with the root digest as its identity. It is present only when that digest still
+matches the completed Proposal's actual predecessor semantic root; after a
+different root is acquired, it is `None` rather than a reconstructed predecessor.
+`predecessor_semantic_root_digest` always names the root in the authenticated
+predecessor publication header; it is distinct from the logical-state digest
+and from an application's source-text theory identity.
+
+`initial_prefill` is a completed-action child material for the original cold
+parent's nonempty model prefix. It is `None` for an empty prefix, a later
+predecessor, or a restored parent; none of those cases gains an inferred prefill
+witness. The native owner retains the prefill stage consumed by `bind_parent`,
+including its original model and output tensor seals. The material is bound to
+this completed action's `owner` and authenticates the same `predecessor`,
+semantic-root digest, model generation, task use, and three task-content
+identities. Its byte-backed interface is `identity`, `bytes`, and
+`bytes_sha256`; consumers must retain all three and reference the material
+from their durable episode record, not merely check it during live export.
+The child envelope uses `XLOG-COMPLETED-ACTION-CHILD\0`, version 1, owner
+identity, the length-prefixed `initial-prefill` kind, ordinal zero, and a
+length-prefixed payload. The payload is little-endian
+`XLOG-INITIAL-PREFILL\0`, version 1, the 104-byte predecessor publication
+identity (instance, word, logical digest, state digest), semantic-root digest,
+model generation, task-use identity and epoch, and query, theory-program, and
+result content identities. It then contains a token count and that many `u64`
+prefill tokens, a mapping count and that many `(UTF-8 source identity length,
+source identity bytes, token offset, logical position)` rows, followed by two
+tensor-seal groups: original model content and original output content. Each
+group has a count and `(role, index, four u64 digest words)` rows. Mapping rows
+are ordered by logical position, and the native parent join checks the full
+source-provenance ledger in addition to the original device input and tensor
+owners. This is a cold export; it adds no host transfer to the resident step.
+
+`estimator_bound` is the original pre-draw physical certificate for an
+actor-eligible Proposal with a physical parameter roster. It uses the same
+immutable `identity`, `bytes`, and `bytes_sha256` interface. Non-actor actions
+and models without that roster return `None`; refused or skipped Proposals and
+failed preflight do not produce a projection. A learned-lane refusal after a
+successful preflight does not remove this certificate. The native owner reads
+the retained FP64 snapshot, never the mutable producer tensor or a selected
+backward bound. The existing device preflight checks all six values per block
+for finiteness and nonnegativity and checks upward-rounded `100 * ordinary <=
+budget` separately for actor and full-step areas. A zero budget requires zero
+ordinary error; the separate underflow value is not forced to zero. Export
+neither changes that law nor enables actor eligibility.
+
+The completed-action child envelope has kind `estimator-bound` and ordinal
+zero. Its native identity binds the original completed-action owner and that
+kind; `bytes_sha256` independently hashes the complete envelope. The payload
+is little-endian `XLOG-ESTIMATOR-BOUND\0`, followed by `u64` format version 1,
+preflight-law version 1, multiplier 100, and original publication bank. Next
+come the 104-byte predecessor publication identity, model generation (`u64`),
+32-byte model geometry, model numerics, and native training-domain identities;
+then scoring-law and batch-receipt references, each consisting of its 32-byte
+native identity and 32-byte SHA-256 of its exact bytes. The batch receipt binds
+the original task content and successful completed-action preflight.
+
+The next two 32-byte fields are the original model-contract schema digest and
+model identity. Six `u64` model-contract layout fields follow in this order:
+schema begin, schema byte length, schema-digest offset, generation offset,
+numerical-digest offset, and identity offset. Two length-prefixed byte strings
+contain the complete original model-contract record and native runtime-contract
+profile. Finally, a `u64` physical-block count precedes rows in the original
+sorted physical-parameter order. Each row contains a `u64` UTF-8 name length,
+name bytes, and six original FP64 bit patterns encoded as `u64`: actor budget,
+ordinary error, underflow, then full-step budget, ordinary error, underflow.
+The block count and names are checked against the same frozen native model
+roster, including physical parameters but not buffers. Consumers retain the
+whole certificate in their episode or replay material, not just its identity.
+Its complete encoded size is `632 + M + P + 56*N + sum(name_utf8_bytes)`,
+where `M` and `P` are the original model-contract and runtime-profile byte
+lengths and `N` is the physical-parameter count. This is the certificate size,
+not a capacity bound for all other Proposal materials.
+
+`theory_deltas` contains one entry for each actual native insertion attempt,
+ordered by learned lane then edit slot. No-edit choices and actions stopped
+before insertion produce no entry. A duplicate graph support attachment is
+still an attempted edit. Each entry has `delta` (canonical owner-bound decoded
+insertion bytes), `verdict` (`accepted` or `rejected` for the whole lane), and
+`evidence` (the native hard-decode, lane-admission, and selected component
+receipts). `lane` and `slot` retain the native source coordinates. A losing
+admitted lane remains `accepted`; a later lane refusal does not erase an
+insertion attempt.
+
+For an editable positive binary program, `INSERT_RULE` decodes one
+range-restricted rule with exactly two binary body atoms. Its `kind="rule"`
+delta binds all ten rule fields and any preceding rule edit in that lane;
+`theory_generation` binds the admitted program and preceding rule. The task's
+three queries are evaluated against the resulting program closure on device.
+Graph support insertion is not offered in this mode because it does not alter
+that program closure. For a graph-support edit, `kind="fact"` and
+`theory_generation` names the acquired predecessor semantic-root digest.
+Neither mode currently emits a forest delta. The invocation's `result` also
+contains `program_rules`: two lanes of two optional flat ten-field rule tuples,
+including attempted rules in a lane rejected by a hard constraint. These are
+distinct from graph-support edit results. Its `truths` and `correct` entries
+each contain three ordered triples: base, first candidate, and second
+candidate, with all three task queries in every triple.
+
+The current semantic engine generation is the catalogue generation, so
+`engine_generation` returns the same material as `action_law`. `observation`
+returns the same native four-valued task-result material as `result_material`;
+its bytes bind the observer query and program identities, actual result bytes,
+and three expected truth values. These aliases do not mint new identities.
+
+The projection's `task_ground` is the one typed semantic ground retained by the
+same completed Proposal owner. It binds acquired base `B`, ordered query identity
+`Q`, expected observer results, the three actual base/no-op truth codes, and the
+bound goal-authority closure. Its two ordered lane outcomes are tagged
+`EXECUTED`, with the three actual lane truth codes, or `REFUSED`, with the
+canonical native refusal kind. `task_ground.facts` retains all three ordered
+truth-code vectors together with native agreement, eligibility, value, and work
+facts; a refused lane's terminal tag remains authoritative.
+Candidate program-closure exhaustion is typed as `fact-capacity` or
+`fuel-exhausted`; it does not discard the completed base or turn a native
+infrastructure failure into a task refusal.
+
+`task_ground.scoring_law` is a canonical native material bound to this
+completed owner, original task identity, and versioned structural-cost law.
+Its six `scoring_weights` are, in order, correct-query, all-correct,
+measured-work, improvement, refusal, and
+spent-work coefficients. For each candidate, measured work is the count of
+actual edit commands plus added supports (new materialized facts for an editable
+program) plus defined-truth changes; candidate
+value is `correct_weight * correct_count + all_correct_weight *
+solves_expected_truths - work_weight * measured_work`. Eligible candidates are
+selected by ordered task-priority progress, then exact query agreement, then
+lower measured work, retaining the earlier slot on ties. Value measures the
+return; it does not override this selection order.
+The final return is `improvement_weight * (selected_value - base_value) -
+refusal_weight * refused_lanes - spent_weight * spent_work`, where spent work is
+the executed query count plus edit-command and defined-truth-change counts for
+discarded lanes. `return_bound` is the admitted symmetric signed bound for
+this task return, using the resident fact capacity for an editable program
+instead of the smaller graph-support cap. It is not a bound for an external
+training objective. Cold projection
+checks these equations against the retained native facts and work counters
+before exposing the material.
+
+`controller.structural_cost_descriptor` returns `(unit_identity_bytes, cap)`
+before `import_task`: the native versioned structural-work law for this
+Session's graph-only or editable-program mode. The graph-only cap is 6; the
+editable-program cap is 4101, including at most 4096 new materialized facts.
+The unit is independent of task identity and sampled outcomes. Use
+`unit_identity_bytes.hex()` and `cap` as the objective's cost pair. Native cold
+binding rejects any different pair for the actual bound task. The completed
+`task_ground.structural_cost_descriptor` exposes the same pair for checking the
+terminal ground; slot-zero work is zero, while candidate raw work is exactly
+`edit_commands + added_supports + defined_truth_changes`.
+
+Learned attempted requests are not duplicated in the ground. Read them from the
+same projection's lane `decoded_text_actions` and `decoded_edit_actions`. The
+optional `edit_solution` is present only for the lowest-numbered admitted lane
+with a nonempty effective support delta that satisfies the complete bound goal
+while the base does not. It binds that lane's complete original 68-component
+prefix, both native decode receipts, sealed resulting-state receipt, actual
+truths, catalogue, and device-forward component materials. Its half-open edit
+component interval is `32..68` for lane 1 or `100..136` for lane 2; policy winner
+and score do not determine membership.
+
+For an authenticated episode row in the supervised-edit objective,
+`temporal_update_vjp(...)` derives that same minimal decisive lane on device from
+the original completed Proposal state and bound goal closure. Its direct edit
+cotangent covers only the selected lane's 36 edit components. Text components
+and the other lane receive zero direct edit cotangent; the native backward still
+walks the complete original edit recurrence and original categorical choices,
+masks, catalogue, and decode-bound tape. It does not resample, consume a
+historical score array, or invoke the model a second time.
+
+The projection also contains the admitted slot-zero record, learned lane slots 1
+and 2 with their native admission or refusal, exact non-NULL text actions and
+hard-decoded edits, and exactly
+136 ordered component objects. Each component retains its selected category,
+legal and active counts, exact 192-bit probability and cumulative-mass values,
+CDF interval, draw, rank, Philox address, and byte-backed final-mask, PWL-cell,
+active-set, selected-score VJP, component-receipt, and applicable hard-decode
+receipt materials. PWL-cell and VJP bytes are original device-forward records,
+not host reconstructions. The successor publication's native `AttemptReceipt`
+remains a separate evidence material.
+
+The method joins declared consumers and reads retained device storage outside
+the resident loop. Its opaque owner is the original retained completed-step
+carrier; typed children do not reinterpret that private ABI. It never runs a
+second forward or reacquires a current publication. Native rechecks the
+same completed binding after serialization; a changed owner, non-Proposal step,
+refusal, unknown completion, or malformed retained law closes the call.
+
+### Completed-step raw feedback
+
+Call the same retained step's
+`completed_feedback_records(consumer_streams=[...])` outside capture and the
+measured resident loop. It returns
+`(predecessor_identity, successor_identity_or_None, records)`, using the same
+identity and completion rules as `completed_model_binding`. The native input
+guard brackets the readback and joins the declared consumers. The call neither
+acquires another bank nor runs a new encoder or semantic query.
+
+Records are ordered by `(role, index)`. Each tuple contains
+`(role, index, generation, capacity_bytes, logical_begin, logical_end,
+native_identity, raw_bytes)`. Role 15 contains the complete fixed-capacity raw
+feedback slots, including validity and native query receipts; its logical extent
+retains the original occupied interval. Role 16 contains each original statement's
+bytes. Role 17 contains the original provenance records. These records are copied
+by the original device acquisition into preallocated private step storage and
+remain available until step retirement, independently of publication-bank reuse.
+
+Keep each native identity: it is the original role/index/extent/content seal,
+not SHA-256 of `raw_bytes` alone. A canonical carrier stores the byte hash
+separately. Do not replace the model identity from record 44 with a new hash of
+these records. The six tensors returned by `feedback()` are separate encoded
+features and projected service values, not this raw feedback material. This
+raw-feedback export does not supply the canonical logits or complete RNG state
+carried by `completed_model_binding`, does not supply complete
+predecessor/successor replay material, and grants no new execution authority.
+
+## Package Details
+
+| Attribute | Value |
+|-----------|-------|
+| Package name | `pyxlog` |
+| Build system | PyO3 + maturin |
+| Platform | Linux x86_64 + CUDA only |
+| Interop | DLPack capsules (framework-agnostic) |
+
+## API Reference
+
+### LogicProgram (Deterministic)
+
+Compiles and runs an ordinary (non-probabilistic) Datalog program on the GPU and
+returns each query's answer as DLPack columns (one tensor per column).
+
+```python
+import pyxlog
+import torch
+
+# Compile a deterministic program
+program = pyxlog.LogicProgram.compile("""
+    pred edge(u32, u32).
+    pred reach(u32, u32).
+
+    edge(1, 2). edge(2, 3). edge(3, 4).
+
+    reach(X, Y) :- edge(X, Y).
+    reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+    ?- reach(1, N).
+""")
+
+# Execute and get results
+result = program.evaluate()
+
+# Results are a list of query outputs (relations) with per-column DLPack tensors
+for q in result.queries:
+    print(q.relation_name, q.columns, q.num_rows, q.is_true)
+    cols = [torch.from_dlpack(t) for t in q.tensors]
+    print(cols)
+```
+
+#### Supplying Input Relations (DLPack)
+
+`CompiledLogicProgram.evaluate(dlpack_inputs=...)` accepts a dict mapping relation name to a
+sequence of DLPack columns.
+
+```python
+import pyxlog
+import torch
+
+program = pyxlog.LogicProgram.compile("""
+    pred edge(u32, u32).
+    pred reach(u32, u32).
+    reach(X, Y) :- edge(X, Y).
+    ?- reach(1, N).
+""")
+
+# Two 1D columns, not a 2D tensor.
+edge_a = torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32)
+edge_b = torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32)
+
+result = program.evaluate(dlpack_inputs={"edge": [edge_a, edge_b]})
+```
+
+#### Persistent Named Relations (DLPack)
+
+For repeated evaluation with long-lived GPU relations, create a persistent session instead of
+re-supplying `dlpack_inputs` on every call.
+
+```python
+import pyxlog
+import torch
+
+program = pyxlog.LogicProgram.compile("""
+    pred edge(i32, i32).
+    pred reach(i32, i32).
+    reach(X, Y) :- edge(X, Y).
+    ?- reach(X, Y).
+""")
+
+session = program.session()
+
+edge_a = torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32)
+edge_b = torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32)
+
+session.put_relation("edge", [edge_a, edge_b])   # register or replace
+result = session.evaluate()                      # reuse stored relations
+exported = session.export_relation("edge")       # DLPack columns
+
+session.remove_relation("edge")
+session.clear_relations()
+```
+
+The persistent session path is additive:
+
+- `evaluate(dlpack_inputs=...)` remains the stateless one-shot API
+- `session()` exposes a mutable named relation store with schema-checked DLPack import/export
+
+#### Persistent Relation Deltas
+
+A delta is an incremental change to a relation — rows to add or remove — applied
+without recomputing the whole program. Persistent sessions accept DLPack-backed
+deltas so a caller can update its data in a loop.
+
+`insert_relation(...)`, `delete_relation(...)`, and `apply_relation_delta(...)`
+update the session's stored relations through the runtime's incremental-recompute
+path (`RelationDelta` / `apply_deltas_and_recompute`). Updates that only insert
+rows into a mutually-recursive relation group (a strongly connected component, or
+SCC) reuse previously computed output where the plan allows. Updates that delete
+rows clear and recompute the affected groups so results stay correct.
+
+```python
+session.put_relation("edge", [row_id, parent_id])
+session.evaluate()
+
+delta = session.insert_relation("edge", [new_row_id, new_parent_id])
+result = session.evaluate()          # returns the delta-updated cached store
+print(session.delta_stats(), delta)
+
+session.apply_relation_delta(
+    "edge",
+    insert_columns=[added_row_id, added_parent_id],
+    delete_columns=[removed_row_id, removed_parent_id],
+)
+
+session.apply_relation_delta_batch([
+    {"name": "edge", "insert_columns": [row_a, parent_a]},
+    {"name": "edge", "delete_columns": [row_b, parent_b]},
+])
+
+debug = session.apply_relation_delta_debug(
+    [{"name": "edge", "insert_columns": [row_c, parent_c]}],
+    check_equivalence=True,
+)
+```
+
+The delta stats dictionary contains `changed_relations`, `insert_rows`,
+`delete_rows`, `affected_sccs`, `recomputed_sccs`, `incremental_sccs`,
+`input_delta_count`, `coalesced_insert_rows`, `coalesced_delete_rows`, and
+`canceled_rows`. Delta debug output also includes
+`changed_relation_names`, `equivalent_to_full_recompute`, `debug_trace`, and
+nested `planner_telemetry`. Planner telemetry reports `cache_reused`,
+`fallback_decision`, affected/recomputed/incremental SCC counts,
+`estimated_delta_speedup`, `measured_delta_speedup`, and `planner_advice`.
+`equivalent_to_full_recompute` is `None` unless the caller opts into
+`check_equivalence=True`.
+
+Batch updates merge repeated changes to the same relation before the runtime
+recomputes, using device-resident set operations. Update dictionaries reject
+unknown keys before any relation is changed. A batch whose inserts and deletes
+cancel completely is a semantic no-op: `changed_relations` is `0`, no runtime
+version or callback generation advances, and no callback fires for the canceled
+relation. Callback and diagnostic code must not copy relation rows down to the
+host.
+
+If a delta operation fails before commit but after preparation takes ownership
+of cached derived state, the authoritative relation rows and evidence remain
+unchanged, but XLOG discards the derived cache and retained runtime. The next
+`evaluate()` rebuilds them. This makes failure recovery safe at the cost of
+losing cache-hit and incremental-planner continuity for that attempt.
+
+Calling `put_relation`, `remove_relation`, or `clear_relations` directly
+invalidates the cached runtime store. The next `evaluate()` then does a full plan
+run before later deltas can reuse it.
+
+Persistent sessions keep their runtime executor across `evaluate()` and
+delta recompute calls, so persistent hash indexes can be reused through public
+pyxlog mutation loops. `session.join_index_cache_stats()` returns the retained
+executor's `lookups`, `hits`, `misses`, `builds`, invalidation counters,
+background-build counters, `entries`, and `total_bytes`.
+
+`session.wcoj_dispatch_stats()` separates successful specialized dispatches
+from actual fallbacks. Its `wcoj_fallback` object reports `total` and the
+`chain`, `dedicated_multiway`, `free_join`, `planned_hash`, `factorized_delta`,
+and `groupby_fusion` routes. `wcoj_error_decline_count` is narrower: it counts
+pipeline errors that declined to a fallback, not ordinary eligibility or cost
+decisions.
+
+#### Relation Change Callbacks
+
+Persistent sessions expose opt-in metadata callbacks for relation delta
+commits:
+
+```python
+def register_relation_callback(callback) -> int: ...
+def unregister_relation_callback(callback_id: int) -> bool: ...
+
+events = []
+callback_id = session.register_relation_callback(events.append)
+session.apply_relation_delta_batch([
+    {"name": "edge", "insert_columns": [row_a, parent_a]},
+])
+session.unregister_relation_callback(callback_id)
+```
+
+Callbacks fire only after a delta commit succeeds. A failed or rolled-back
+delta does not invoke registered callbacks. The callback payload is a
+metadata-only dictionary with `relation`, `generation`, `input_delta_count`,
+`insert_rows`, `delete_rows`, `has_deletes`, `coalesced_insert_rows`,
+`coalesced_delete_rows`, `canceled_rows`, `affected_sccs`,
+`recomputed_sccs`, `incremental_sccs`, and nested `telemetry`.
+
+Callbacks are invoked synchronously while the pyxlog method holds the Python
+GIL. Registration order is callback order, and relation events are emitted in
+the caller's update order after duplicate relation names are coalesced. This
+ordering is deterministic: a regression fixture confirms that 100 repeated runs
+produce identical callback sequences. Relations whose net batch update cancels
+completely are omitted from mixed-batch callback sequences and do not consume a
+generation number. Building a callback payload does not export DLPack tensors or
+download relation data rows; use explicit `evaluate()` or `export_relation()`
+when you actually need the rows materialized.
+
+#### Rule, proof, temporal, and relation provenance
+
+Compiled logic/probabilistic programs and sessions can report where their results
+came from (provenance):
+
+```python
+def rule_provenance() -> list[dict]: ...
+def proof_traces() -> list[dict]: ...
+```
+
+`rule_provenance()` returns stable `rule_id`, `source_kind`,
+`generation_trace_hash`, `support_relation_ids`, and
+`counterexample_relation_ids` fields. `proof_traces()` returns each query's
+answer relation, deriving rule ids, source facts, and rejected alternatives.
+
+Temporal stream loads can keep provenance metadata next to the relation:
+
+```python
+session.put_temporal_relation(
+    "stream_row",
+    columns,
+    timestamp_column="event_ts",
+    dataset_id="hf-live",
+    row_hashes=row_hashes,
+    field_hashes=field_hashes,
+    uncertainty=uncertainty,
+    stream_id="camera-a",
+    order_column="seq",
+    source="hf://dataset/split",
+    process_boundary="observation_process",
+    temporal_order=["seq"],
+)
+session.temporal_provenance("stream_row")
+
+pyxlog.put_temporal_relation(
+    session,
+    "stream_row_copy",
+    columns,
+    timestamp_column="event_ts",
+    dataset_id="hf-live",
+    row_hashes=row_hashes,
+    field_hashes=field_hashes,
+    uncertainty=uncertainty,
+    stream_id="camera-a",
+    order_column="seq",
+    source="hf://dataset/split",
+    process_boundary="observation_process",
+    temporal_order=["seq"],
+)
+pyxlog.temporal_provenance(session, "stream_row_copy")
+```
+
+The temporal metadata shape preserves `timestamp_column`, `dataset_id`,
+`row_hashes`, `field_hashes`, `uncertainty`, `stream_id`, `source`,
+`order_column`, `process_boundary`, and `temporal_order`. Temporal metadata is a
+Python helper facility; it is separate from the native whole-fact evidence API
+below.
+
+Native relation evidence binds ordered semantic roles and provenance records to
+complete facts of any positive arity. The role order must match the compiled
+predicate argument order, and each fact is identified by all of its cells:
+
+<Warning>
+**Breaking in 0.12.0.** Five relation APIs changed shape, so code written against
+0.11.0 needs edits:
+
+- `put_relation_with_provenance` is now native and requires keyword-only `roles=`
+  and `facts=`. The old `source_path`, `source_hash`, `row_hashes`,
+  `accepted_count`, and `decision_counts` keyword arguments are gone, and the
+  call returns a native snapshot instead of that flat sidecar dictionary.
+- `evidence()` returns `{program_hash, relations}` and raises `KeyError` for a
+  name it does not hold, instead of returning `{}`.
+- `relation(name)` returns a frozen native `RelationEvidence` and raises
+  `KeyError` for an unstored relation, instead of a wrapper whose `provenance()`
+  returned `{}`.
+- `RelationEvidence` is an immutable native class. The old
+  `RelationEvidence(session, name)` constructor no longer exists.
+- `apply_relation_delta_batch` and `apply_relation_delta_debug` reject unknown
+  keys in an update dictionary that they previously ignored. Both route through
+  the same parser, so both raise `ValueError` where 0.11.0 silently dropped the
+  extra key.
+
+See [Migrating from Python-side relation evidence](#migrating-from-python-side-relation-evidence)
+for the field-by-field mapping.
+</Warning>
+
+```python
+program = pyxlog.LogicProgram.compile("""
+    domain party: u32.
+    domain asset: u32.
+    pred transfer(giver: party, receiver: party, asset: asset, event_time: i64).
+""")
+session = program.session()
+
+snapshot = session.put_relation_with_provenance(
+    "transfer",
+    [giver, receiver, asset, event_time],
+    roles=[
+        {"name": "giver", "sort": "party", "type": "u32"},
+        {"name": "receiver", "sort": "party", "type": "u32"},
+        {"name": "asset", "sort": "asset", "type": "u32"},
+        {"name": "event_time", "type": "i64"},
+    ],
+    facts=[{
+        "tuple": [10, 20, 7, 1_700_000_000],
+        "provenance": [
+            {
+                "source": "extractor-output",
+                "document": "document-42",
+                "span": {"start": 18, "end": 41},
+                "content_hash": "sha256:...",
+                "kind": "assertion",
+                "polarity": "positive",
+            },
+            {"source": "manual-review", "kind": "confirmation"},
+        ],
+    }],
+)
+same_snapshot = session.relation("transfer").provenance()
+all_evidence = session.evidence()
+```
+
+Each role input requires `name`; optional `sort` and `type` fields, when present,
+must match the compiled schema. Returned snapshots resolve all three fields.
+Source-named predicate arguments require their compiled names. Positional
+arguments accept application-defined role names on the first metadata-bearing
+load, then enforce that role contract on later metadata-bearing replacements and
+manifest imports. A plain `put_relation`, a manifest import with
+`metadata_present=False`, `remove_relation`, or `clear_relations` removes that
+positional role contract. A later metadata-bearing load may then register new
+positional names. Source-named arguments always remain bound to their compiled
+names.
+
+A fact supplies exactly one of `tuple` or `cells`. `tuple` is the convenient
+Python representation. `cells` is a sequence of exact
+`{"type": ..., "hex": ...}` values for bit-preserving values such as NaNs and
+signed zero. Provenance records may contain `source`, `document`, `span`,
+`content_hash`, `kind`, and `polarity`; at least one field must be non-null. Two
+different records for the same complete tuple remain distinct. Replacement rows
+retain their stored multiplicity, so `row_count` includes duplicate rows. Evidence
+is keyed by the distinct complete typed tuple rather than by row offset: duplicate
+stored rows share one fact entry, repeated fact entries merge their records, exact
+duplicate records collapse, and facts and records are returned in deterministic
+canonical order.
+
+Evidence follows the native relation lifecycle atomically:
+
+- `put_relation_with_provenance` replaces both rows and evidence;
+- plain `put_relation` replaces the rows and clears old evidence and any
+  positional role contract;
+- `insert_relation(..., facts=...)` and
+  `apply_relation_delta(..., insert_facts=...)` add evidence for inserted facts;
+- batch and debug updates accept `insert_facts` in each update dictionary;
+- deleting a complete fact deletes its evidence, and coalesced or canceled batch
+  updates cannot leave stale evidence; and
+- metadata-free manifest replacement, `remove_relation`, and `clear_relations`
+  remove the matching evidence and positional role contract.
+
+Insert evidence has stricter preconditions than a metadata-free insert. `facts`
+or `insert_facts` requires insert columns for the same update, a positive-arity
+relation, and a role contract previously registered by a metadata-bearing
+replacement or manifest import. Every annotated fact must occur in that specific
+insert buffer; being present only in the session's existing rows is not enough.
+Passing an empty `facts=[]` or `insert_facts=[]` still opts into these contract
+checks, although it performs no membership-mask transfer. Duplicate or already
+stored inserted rows may add distinct provenance records when the annotated fact
+is present in the insert buffer.
+
+All role, type, arity, evidence-tuple membership, and batch validation completes
+before mutation. A validation or pre-commit preparation failure leaves relation
+rows, evidence, delta statistics, callback generations, and callbacks unchanged.
+Nullary relations support plain `put_relation`, metadata-free inserts, deletes,
+deltas, evaluation, `relation`, and `evidence`. They reject
+`put_relation_with_provenance`, every `put_relation_from_manifest` and
+`export_relation_with_provenance` call, and any insert, combined delta, batch, or
+debug update that supplies `facts` or `insert_facts` (including an empty list).
+
+Persistent replacement methods take a device-to-device snapshot of imported
+DLPack columns before committing them. Mutating a retained producer tensor after
+`put_relation`, `put_relation_with_provenance`, or
+`put_relation_from_manifest` therefore cannot change stored rows behind the
+session's versions, callbacks, or evidence. This is an owned GPU snapshot, not a
+zero-copy persistent import. Transient `evaluate(dlpack_inputs=...)` inputs and
+the handoff of query-result buffers to a DLPack consumer remain zero-copy.
+
+For each tensor-like input, XLOG calls `__dlpack_device__()` exactly once. Only
+CUDA device memory (`kDLCUDA`) is accepted; another device raises `BufferError`
+before XLOG requests or consumes a capsule. XLOG then calls
+`__dlpack__(stream=1)` exactly once so the CUDA producer orders pending work
+before consumption on the legacy default stream. If the producer rejects that
+stream argument, the exception propagates; XLOG does not retry without a stream.
+Raw capsules bypass both protocol calls. The caller must create each capsule for
+stream `1` or synchronize its producer first, and must pass it to only one
+consumer. The native importer still validates the capsule's device header.
+
+**Breaking in 0.12.0.** This device gate is new, and it applies to every pyxlog
+entry point that accepts a `__dlpack__` object. A CPU tensor that previously
+travelled some distance into XLOG before failing now raises `BufferError`
+immediately, at import.
+
+Membership is checked as complete tuples on the GPU. For a non-empty evidence
+set, the runtime downloads one boolean membership mask in a single transfer—one
+byte per distinct fact—not the relation rows. Role-only metadata and
+metadata-free manifests need no membership transfer. Use
+`set_strict_deterministic_d2h(True)` to reject even this deterministic mask
+transfer; `deterministic_d2h_violation_count()` reports rejected attempts, and a
+rejection is atomic.
+
+`relation(name)` returns a frozen native `RelationEvidence` captured at that
+call. Later session changes do not alter it, and each `provenance()` call returns
+fresh Python dictionaries and lists whose mutation cannot change the captured
+snapshot. `evidence(name=None)` returns a deterministic `program_hash` and a
+`relations` mapping of packed snapshot dictionaries. With `evidence(name)`, XLOG
+still computes `program_hash` over every stored relation in the session and only
+then filters the returned `relations` mapping to `name`; named and unfiltered
+reads therefore share the same hash at the same session state. These are native
+session snapshots, not Python package sidecar records.
+
+Invalid role, whole-fact provenance, insert-evidence, or manifest input raises
+`pyxlog.RelationMetadataError`, a `ValueError` subclass. Looking up an unstored
+relation with `relation(name)` or `evidence(name)` raises `KeyError`. Without
+`pyxlog._native`, the package-level `RelationMetadataError` and
+`RelationEvidence` names remain importable. The fallback metadata error still
+subclasses `ValueError`; constructing the fallback `RelationEvidence` raises
+`RuntimeError` because it has no native snapshot. Native evidence instances and
+all session operations require the extension. Source builds that compile the
+extension expose this API; for a packaged build, determine availability from that
+release's notes.
+
+#### Provenance manifest round trips
+
+Use the paired DLPack-and-manifest API to reconstruct rows and native evidence in
+another compatible session:
+
+```python
+exported = session.export_relation_with_provenance("transfer")
+
+fresh = program.session()
+restored = fresh.put_relation_from_manifest(
+    "transfer",
+    exported["columns"],
+    exported["manifest"],
+)
+```
+
+The manifest is the exact `xlog.relation-provenance` version `1` shape. Its
+required top-level fields are `format`, `version`, `predicate`, `row_count`,
+`metadata_present`, `roles`, and `facts`. `predicate` contains `name`, `arity`,
+and the compiled `schema_sha256`. Manifest facts contain `identity`, exact
+`cells`, and fixed-shape `provenance` records; they intentionally omit the
+friendly `tuple`. Every dictionary level rejects missing or unknown fields.
+`version`, `arity`, and `row_count` must be non-negative Python integers, not
+booleans, and `metadata_present` must be an actual Python `bool`. If it is false,
+both `roles` and `facts` must be empty and importing the manifest resets any
+registered positional role contract.
+
+Each exact cell contains only `type` and `hex`. Its type must match the compiled
+column, and its lowercase hexadecimal value must encode exactly that scalar
+type's little-endian byte width; a boolean cell is exactly `00` or `01`. Manifest
+provenance records contain all six fields (`source`, `document`, `span`,
+`content_hash`, `kind`, and `polarity`), using `None` for absent values. A
+non-null span contains exactly `start` and `end`; both are non-negative Python
+integers rather than booleans, both must be representable as `u64`, and
+`start <= end`.
+
+The schema fingerprint includes the predicate name and arity plus every compiled
+column's name, scalar type, and optional source-domain sort. A fact identity
+includes the predicate name and arity plus each cell's type code, byte length,
+and exact bytes; it does not include provenance records. Both hashes use
+domain-separated SHA-256 inputs. Fact identity is independent of row position
+and role labels, and import recomputes both hashes instead of trusting the
+supplied strings.
+
+Import validates static manifest structure, compiled schema identity, and column
+count before consuming a DLPack capsule. Once column import starts, all supplied
+capsules are consumed before dtype, equal-column-length, manifest row-count, and
+whole-fact membership validation completes. A failure at any of those stages
+still leaves the target relation and evidence unchanged, but the spent source
+capsules cannot be reused. Successful import consumes every column once.
+Fact and record order and exact duplicates are normalized deterministically.
+The DLPack columns are process-local, single-consumer ownership objects; the
+manifest may be serialized as data, but it does not contain the relation columns
+and is not a cross-process persistence format. Keep the exported columns alive
+until import consumes them. For portable storage, use a host-serialized relation
+format and treat native manifest reconstruction as a separate in-process
+operation.
+
+#### Migrating from Python-side relation evidence
+
+The native API replaces the earlier Python helper contract. The old
+`relation_schema`, `source_path`, `source_hash`, `row_hashes`, `field_hashes`,
+`accepted_count`, `rejected_count`, `output_path`, `output_hash`, and
+`decision_counts` keyword arguments are not accepted by
+`put_relation_with_provenance`. Pass ordered `roles` and complete `facts`
+instead. A per-fact source location can map to a record's `source` or `document`,
+and a per-fact source digest can map to `content_hash`; XLOG derives exact fact
+identities from the typed cells. Row/field hash collections, output locations and
+hashes, and aggregate acceptance, rejection, and decision counters remain
+application-level data rather than native whole-fact evidence. The returned
+snapshot and `evidence()` payload contain native roles and facts, and unknown
+named reads raise `KeyError` instead of returning an empty sidecar record.
+
+#### Runtime controls and diagnostics
+
+Long-running callers can submit logic or probabilistic evaluations to a
+background Python worker with `evaluate_async(...)`. The returned
+`AsyncEvaluation` is awaitable and also exposes `done()`, `cancel()`,
+`exception()`, and `result(timeout=None)` for synchronous orchestration.
+
+```python
+handle = session.evaluate_async(memory_mb=512)
+result = handle.result(timeout=30)
+```
+
+Large logic outputs can be consumed as DLPack-compatible CUDA tensor chunks:
+
+```python
+for chunk in session.evaluate_stream(memory_mb=512, chunk_rows=1024):
+    cols = chunk.tensors  # torch CUDA tensor views, DLPack-compatible
+    print(chunk.relation_name, chunk.offset, chunk.num_rows, cols)
+```
+
+The same chunking is available from an already materialized result:
+
+```python
+result = session.evaluate()
+for chunk in result.iter_query_chunks(chunk_rows=1024):
+    ...
+```
+
+Per-call `memory_mb` is accepted by `CompiledLogicProgram.evaluate`,
+`LogicRelationSession.evaluate`, `CompiledProgram.evaluate`, and
+`CompiledProgram.evaluate_device`. A zero limit raises `ValueError`; a limit
+below the provider's current tracked allocation raises `MemoryError` before the
+evaluation starts. The provider-level compile-time budget remains the hard GPU
+allocator budget.
+
+Runtime progress and diagnostics are exposed as stable dictionaries:
+
+```python
+session.progress_stats()
+session.memory_stats()
+session.host_transfer_stats()
+session.cuda_graph_stats()
+
+program.progress_stats()
+program.memory_stats()
+program.host_transfer_stats()
+program.cuda_graph_stats()
+def neural_hot_loop_diagnostics() -> dict: ...
+program.neural_hot_loop_diagnostics()
+```
+
+`memory_stats()` reports `allocated_bytes`, `memory_limit_bytes`,
+`peak_memory_bytes`, and `status`. `peak_memory_bytes` is the high-water mark of
+successful reservations recorded by the shared provider's memory manager. It
+spans the provider lifetime (or the window after an explicit quiescent reset),
+so it is not reset between evaluations or executors that reuse that provider.
+It is not physical/NVML usage, and direct CUDA allocations that bypass the
+manager are not included. CUDA Graph stats report
+`csm_cuda_graph_captures`, `csm_cuda_graph_launches`,
+`csm_cuda_graph_fallbacks`, and `csm_cuda_graph_cache_hits`. If an environment
+cannot supply a given diagnostic, it reports an explicit unavailable status or
+error rather than a fabricated zero.
+
+`neural_hot_loop_diagnostics()` is the single audit surface for the neural inner
+loop. (`nn/4` is a neural predicate declared with four arguments — the
+classification form, which carries a list of output labels.) It reports
+`post_load_dtoh_bytes`, `post_load_htod_bytes`,
+`control_plane_bytes_per_iteration`, `scalar_sync_checks`, nested
+`cuda_graph`, and nested `circuit_cache` diagnostics from the same runtime API.
+When this runtime cannot yet provide a separate control-plane or scalar-sync
+counter, the corresponding value is `None` and a `*_status` field explains why.
+The top-level `pyxlog` wrapper also carries `nn/4` training lineage:
+
+```python
+program.register_network(
+    "mnist_net",
+    net,
+    optimizer,
+    checkpoint_hash="sha256:...",
+    split_hashes={"train": "sha256:...", "validation": "sha256:..."},
+    calibration_metrics={"ece": 0.03},
+    cuda_device=0,
+    influence_audit={"calibration_set": "heldout-a"},
+)
+program.record_nn4_influence(
+    "mnist_net",
+    query="addition(0, 1, 1)",
+    changed_acceptance=True,
+    before=False,
+    after=True,
+)
+program.nn4_lineage()
+program.neural_hot_loop_diagnostics()["nn4_lineage"]
+```
+
+The lineage payload contains `checkpoint_hash`, `split_hashes`,
+`calibration_metrics`, and `cuda_device`. Its `influence_audit` object keeps
+registration metadata under `registration` and copied event snapshots under
+`records`; each event includes the `changed_acceptance` evidence recorded through
+`record_nn4_influence(...)`. Reading named lineage or recording an event for an
+unregistered network is an error.
+
+`register_network` also accepts three keyword-only arguments that record and
+check the network's typed signature. All three are available since 0.11.0:
+
+```python
+program.register_network(
+    "mnist_net",
+    net,
+    optimizer,
+    arity=2,
+    arg_sorts=[3, 9],
+    artifact_hash="sha256:...",
+)
+```
+
+- `arity=` is the declared argument count. XLOG validates it against every `nn/4`
+  declaration bound to that network name in the program rather than trusting it;
+  a disagreement raises `ValueError`.
+- `arg_sorts=` is a sequence of integer sort ids, one per argument. It requires
+  `arity` and must have exactly that length. A `bool` element is rejected
+  outright — Python's `bool` is an `int` subclass, so `True` would otherwise be
+  read as sort id `1`.
+- `artifact_hash=` records the checkpoint identity.
+
+`program.network_metadata("mnist_net")` reads that back, together with what the
+program itself declares:
+
+```python
+program.network_metadata("mnist_net")
+# {"arity": ..., "arg_sorts": [...], "artifact_hash": ...,
+#  "declared": [{"predicate": ..., "predicate_arity": ..., "input_arity": ..., "labels": [...]}]}
+```
+
+It covers classification networks only. A name declared as an embedding is
+refused, because embeddings carry no registration metadata. Available since
+0.11.0.
+
+#### Epistemic evidence -> exact probability
+
+`CompiledLogicProgram.evaluate_conditioned(prob_source)` runs a compiled epistemic
+program (`know` / `possible`) on the GPU and conditions an exact probabilistic query
+on its accepted world view. Only facts declared in the epistemic program's own
+source feed that world view.
+
+**Limitation:** unlike `evaluate`, this method does not accept `dlpack_inputs`.
+Caller-supplied input relations are NOT consulted. If the epistemic program depends
+on a relation that would normally be supplied at call time via
+`evaluate(dlpack_inputs=...)`, that relation is empty here, no world view is
+accepted, and `evaluate_conditioned` **raises `RuntimeError`**:
+
+```
+RuntimeError: Unsupported epistemic construct: accepted GPU world-view evidence
+(probabilistic evidence requires non-empty accepted GPU final output)
+```
+
+It does **not** fall back to the unconditioned prior. This is fail-closed by
+design: a conditioned query that silently became unconditioned would return a
+plausible number with nothing in the result marking it as unconditioned, which is
+exactly the failure the trace counters exist to prevent. To probe for the state
+without catching an exception, call `epistemic_evidence()` first -- it reports
+`accepted_world_views == 0` and does not raise.
+
+```python
+import pyxlog
+
+known = pyxlog.LogicProgram.compile("""
+pred fact().
+pred accepted().
+
+fact().
+
+accepted() :- know fact().
+""")
+
+result = known.evaluate_conditioned("0.6::fact().\nquery(fact()).\n")
+result.log_z_e                                       # ln(0.6) ~= -0.5108256, log P(evidence)
+result.trace["gpu_conditioned_evidence_facts"]        # >= 1 when evidence conditioned the circuit
+result.trace["gpu_conditioned_know_evidence_facts"]   # the `know` share of that total
+result.trace["accepted_gpu_production_path_events"]   # positive observed GPU work
+result.trace["gpu_exact_query_evaluations"]            # positive GPU exact execution evidence
+```
+
+When the circuit structure stays fixed and only independent fact priors change,
+prepare it once and reuse the returned handle:
+
+```python
+prepared = known.prepare_conditioned(
+    "0.5::target().\n0.6::fact().\nquery(target()).\nquery(fact()).\n"
+)
+target_var = next(
+    var for var, info in enumerate(prepared.prob_var_map())
+    if info.get("atom") == "target()"
+)
+
+for prior in (0.5, 0.9, 0.1):
+    prepared.set_fact_probabilities({target_var: prior})
+    result = prepared.evaluate()
+    assert result.trace["gpu_exact_source_compiles"] == 0
+    assert result.trace["gpu_exact_program_compiles"] == 0
+    assert result.trace["gpu_conditioned_circuit_reuses"] == 1
+    assert result.trace["gpu_conditioned_circuit_materializations"] == 1
+    assert (
+        result.trace["gpu_conditioned_circuit_preparation_compiles"]
+        + result.trace["gpu_conditioned_circuit_disk_cache_restores"]
+        + result.trace["gpu_conditioned_circuit_gpu_cache_hits"]
+    ) == 1
+```
+
+`gpu_conditioned_circuit_preparation_compiles` counts actual GPU circuit
+compiler invocations owned by that prepared handle: it is `1` after a fresh
+compile and `0` after a verified disk-cache restoration or GPU-cache hit. The
+three origin counters above are mutually exclusive for the handle's single
+materialization. Every later evaluation reports zero source/program compile
+deltas.
+
+For an independent lifetime-reuse check, compare the
+`gpu_conditioned_circuit_generation` and `gpu_conditioned_circuit_cache_slot`
+trace pair across evaluations. It is derived from the retained exact state and
+cache handle and must remain unchanged as priors are updated. The generation is
+opaque and process-local; do not persist it or compare it between processes.
+These reuse keys are present on every `EpistemicEvalResult`. Results returned
+directly by `evaluate_conditioned()` carry zeroes for the reuse fields;
+`gpu_conditioned_circuit_generation == 0` is the sentinel that no prepared
+circuit identity is attached. A prepared evaluation always reports a positive
+generation.
+
+`set_fact_probabilities()` validates the complete mapping before one serialized
+state change. Each variable id is its `prob_var_map()` list index. Index `0` is
+unused padding with `kind == "other"`, not a mutable variable id, and only
+entries with `kind == "fact"` are mutable. Annotated-disjunction choices,
+compiler-introduced entries, Monte Carlo and count-lift programs, non-finite
+probabilities, and values outside `[0, 1]` are rejected without a partial update.
+When a mutable fact is itself fixed by accepted evidence, changing its prior keeps
+the evidence assignment fixed and changes the evidence likelihood (`log_z_e`),
+matching a fresh conditioned compilation at the new prior.
+Evaluations and setters on the same prepared handle serialize. Coordinate access
+at a higher level when an application needs an update and its following evaluation
+to behave as one larger transaction.
+
+Waiting for the prepared handle's shared native state, including in
+`prob_var_map()`, releases the Python GIL. The Python dictionaries are constructed
+only after the native metadata snapshot completes. A failed device write is rolled
+back before `set_fact_probabilities()` returns. If that rollback also fails, the
+prepared circuit is permanently invalidated: every later evaluation, gradient,
+metadata read, or setter through that handle or any clone fails closed rather than
+using potentially partial device weights.
+
+On a CUDA device, conditioning `0.6::fact(). query(fact()).` on `know fact()` raises
+`P(fact())` from the unconditioned `0.6` to the exact `1.0`: the epistemic layer
+already accepted `fact()` into its world view before the probabilistic query ran, so
+`result.log_z_e` is `ln(0.6)`, not `0.0`.
+
+`result.log_z_e` is log P(evidence): the exact log-probability of the conditioned
+evidence under the probabilistic program's distribution, computed by weighted model
+counting over the compiled circuit, not the log-evidence of the whole query program.
+Query probabilities are `exp(log_z_eq - log_z_e)`. When the conditioned atoms are
+independent root facts it coincides with the log of the product of their priors --
+measured on GPU, one known atom at prior 0.6 gives `log_z_e == ln(0.6)` and two known
+atoms each at prior 0.5 give `log_z_e == ln(0.25)` -- but that is the independent-root
+special case, not the definition. Evidence on a derived atom (`0.6::a(). b() :- a().`
+with `know b()` gives `ln(0.6)` though `b` has no prior), on atoms sharing an ancestor,
+or negated evidence all depart from the product form.
+
+**Trace invariant.** Conditioning reached the GPU exact path when
+`gpu_conditioned_evidence_facts` -- the total the engine itself validates -- is
+non-zero. A direct result also requires the GPU exact, PIR/CNF, and
+knowledge-compilation event counters to be positive; a prepared result instead requires
+the prepared-circuit reuse counter to be positive, reports one materialization, and
+identifies exactly one compile/cache origin. The four evidence classes
+(`gpu_conditioned_know_evidence_facts`, `gpu_conditioned_possible_evidence_facts`,
+`gpu_conditioned_not_known_evidence_facts`,
+`gpu_conditioned_not_possible_evidence_facts`) decompose that total; a `possible`-only
+or negated-evidence program conditions correctly with the `know` class at `0`, so
+check the total rather than the `know` class alone.
+
+`EpistemicEvalResult` carries `atoms`, `prob` and `log_prob` (DLPack capsules, like
+`EvalResult`), `log_z_e`, and `trace`. `CompiledLogicProgram.epistemic_evidence()`
+runs the same epistemic program and returns an `EpistemicEvidence` with the
+accepted-world-view counters alone (`epistemic_mode`, `know_operator_count`,
+`possible_operator_count`, `accepted_candidates`, `rejected_candidates`,
+`accepted_world_views`, `final_output_rows`), without touching the probabilistic
+tier. Like `evaluate_conditioned`, it only ever sees facts declared in the
+program's own source -- but a program that depends on a caller-supplied relation
+reports `accepted_world_views == 0` (with `accepted_candidates` and
+`final_output_rows` at `0`) here rather than raising. `know_operator_count` and
+`possible_operator_count` are plan-level censuses and stay non-zero even then, so the
+state to check is the accepted/consumed family, not "every counter".
+
+**Which plans are accepted.** Only single-component epistemic plans are supported;
+split, stratified and WFS plans raise instead of being silently reduced. Both
+epistemic modes reach this surface: FAEEL programs and non-recursive
+`#pragma epistemic_mode = g91` programs both lower to a single-component epistemic
+plan and condition normally. `epistemic_evidence().epistemic_mode` names the mode, and
+the trace's `accepted_faeel_world_view_evidence_consumed` /
+`accepted_g91_world_view_evidence_consumed` pair says which one supplied the evidence.
+Only the *recursive* G91 shapes -- positive `possible` cycles that need tuple-level
+compatibility -- compile to a dedicated G91-compatibility plan and are rejected at
+planning.
+
+Rejection also covers one case that reads like a false negative: an admissible
+recursive modal program such as `reach(X, Z) :- reach(X, Y), know link(Y, Z).` is
+reduced to ordinary recursion at compile time (the `ordinary_recursive_modal_reduction`
+provenance class). The reduction erases the world-view machinery, so there is no
+accepted world view left to condition on and the program is rejected as "ordinary"
+despite being full of `know`. That is deliberate, not a compiler bug. A real CUDA
+device is required.
+
+### Program (Probabilistic)
+
+Compiles and runs a probabilistic Datalog program — facts and rules annotated
+with probabilities, such as `0.3::rain` — and computes query probabilities. The
+`prob_engine` argument selects the inference method: `"exact_ddnnf"` compiles the
+program to a Boolean circuit (a deterministic, decomposable negation normal form,
+or d-DNNF) that makes exact probability and gradient computation tractable, while
+`"mc"` estimates probabilities by Monte Carlo sampling.
+
+```python
+import pyxlog
+
+# Compile with exact inference
+program = pyxlog.Program.compile("""
+    0.3::rain.
+    0.7::sprinkler.
+
+    wet :- rain.
+    wet :- sprinkler.
+
+    evidence(sprinkler, false).
+    query(wet).
+""", prob_engine="exact_ddnnf")
+
+```
+
+#### Host Outputs (Requires `host-io`)
+
+When built with `--features host-io`, you can call `CompiledProgram.evaluate(...)` to get host-derived
+probability outputs as device tensors (DLPack):
+
+```python
+result = program.evaluate()
+import torch
+prob = torch.from_dlpack(result.prob)       # f64 CUDA tensor, shape [num_queries]
+log_prob = torch.from_dlpack(result.log_prob)
+print(list(zip(result.atoms, prob.tolist())))  # host read for printing
+
+# If you need a single host scalar (e.g., for logging), read it explicitly:
+p0 = float(prob[0].item())  # host read
+print(f"P(wet | not sprinkler) = {p0}")
+
+# With gradients (exact engine only; per-query grad vectors are DLPack too)
+result = program.evaluate(return_grads=True)
+grad_true0 = torch.from_dlpack(result.grad_true[0])   # f64 CUDA tensor, shape [num_vars]
+grad_false0 = torch.from_dlpack(result.grad_false[0]) # f64 CUDA tensor, shape [num_vars]
+```
+
+#### Monte Carlo Inference (Device-Only)
+
+For device-result workflows, prefer `CompiledProgram.evaluate_device(...)`: result
+buffers stay on the GPU, while the runtime may still observe its bounded terminal
+status and convergence summary.
+The optional `samples`, `seed`, `confidence`, `sampling_method`, and
+`max_nonmonotone_iterations` arguments override the corresponding source pragmas only
+when supplied. When an argument is omitted, Python uses `#pragma prob_samples`,
+`prob_seed`, `prob_confidence`, `prob_method`, or
+`prob_max_nonmonotone_iterations`; if neither layer supplies a value, the documented
+language default applies. This is the same source-then-explicit-override precedence as
+the CLI. Supplying any of these Monte Carlo options, or `allow_cpu_oracle=True`, to an
+exact-engine `evaluate(...)` call is an error; the binding does not silently ignore them.
+
+```python
+program = pyxlog.Program.compile(source, prob_engine="mc")
+
+device_result = program.evaluate_device(
+    samples=10000,
+    seed=42,
+    confidence=0.95,
+)
+
+import torch
+query_counts = torch.from_dlpack(device_result.query_counts)       # int32 CUDA tensor, shape [num_queries]
+evidence_count = torch.from_dlpack(device_result.evidence_count)   # int32 CUDA tensor, shape [1]
+print(device_result.total_samples, device_result.seed, device_result.confidence)
+```
+
+#### Monte Carlo Inference (Host Outputs, Requires `host-io`)
+
+When built with `--features host-io`, `CompiledProgram.evaluate(...)` computes probabilities and
+confidence intervals and uploads them as device tensors (DLPack):
+
+```python
+program = pyxlog.Program.compile(source, prob_engine="mc")
+
+result = program.evaluate(
+    samples=10000,
+    seed=42,
+    confidence=0.95
+)
+
+import torch
+prob = torch.from_dlpack(result.prob)
+stderr = torch.from_dlpack(result.stderr)
+ci_low = torch.from_dlpack(result.ci_low)
+ci_high = torch.from_dlpack(result.ci_high)
+print(f"P(query) = {float(prob[0].item())} ± {float(stderr[0].item())}")  # host reads
+print(f"95% CI: [{float(ci_low[0].item())}, {float(ci_high[0].item())}]") # host reads
+```
+
+### Experimental Arrow C Device Interop (Feature `arrow-device-import`)
+
+These helpers bridge XLOG's DLPack columns to Apache Arrow's C Device interface —
+a standard for sharing columnar data that already lives on a device (GPU) —
+without host copies. When built with `--features arrow-device-import`, `pyxlog`
+exposes:
+
+- `pyxlog.export_arrow_device(...) -> PyCapsule` (name `arrow_device_array`)
+- `pyxlog.import_arrow_device(...) -> (dlpack_tensors, names, num_rows)`
+
+This is experimental and currently rejects nulls; import does not yet support bit-packed
+`Bool`.
+
+### JointConstraintCarrier (joint constraint solving)
+
+`pyxlog.JointConstraintCarrier` picks one label per entity subject to pairwise
+constraints, entirely on the GPU. Its result buffers are handed back as DLPack
+capsules, so a caller never copies them to the host. Available since 0.11.0.
+
+```python
+import pyxlog
+
+carrier = pyxlog.JointConstraintCarrier(
+    device=0,
+    entities=1024,
+    domain_lanes=4,
+    candidates=16,
+    labels=8,
+    fuel_limit=1_000_000,
+)
+carrier.register_schema(catalog_sha, pyxlog.SOLVER_ABI_IDENTITY)
+carrier.bind_signatures(head_masks, tail_masks)
+
+carrier.solve_label_feasibility(abstain_label=7)
+carrier.solve_label_map_top2()
+carrier.solve_components_exact(comp_offsets, comp_indices)
+
+buffer = carrier.export_buffer("map_results") # zero-copy DLPack capsule
+print(carrier.fuel_spent)                     # property, not a call
+```
+
+- `register_schema(catalog_sha, solver_identity)` must be given
+  `pyxlog.SOLVER_ABI_IDENTITY` — a module-level string naming the solver ABI this
+  build speaks — so a carrier cannot be driven by a mismatched client.
+- `bind_signatures(head_masks, tail_masks)` must run before any solve.
+- `note_producer_stream(...)` and `note_consumer_stream(...)` perform the CUDA
+  stream handoff when the buffers cross into or out of another library's stream.
+- `fuel_spent` is a read-only property reporting how much of `fuel_limit` the
+  solves consumed.
+
+Every precondition is enforced, not assumed: a violated one raises
+`pyxlog.CarrierRefused`, and running out of `fuel_limit` raises
+`pyxlog.SolverResourceExhausted`. See [Error Handling](#error-handling).
+
+## Term Embeddings
+
+The `register_embedding` / `forward_embedding` API enables explicit PyTorch-side embedding training
+through the logic program. Embedding predicates use the label-free `nn/3`
+declaration form (a neural predicate declared with three arguments and no output
+label list).
+
+### Embedding Registration
+
+```python
+program = pyxlog.Program.compile("""
+    nn(entity_embed, [X], E) :: embed(X, E).
+""")
+
+# Trainable nn.Embedding — autograd graph preserved
+embedding = torch.nn.Embedding(100, 64).cuda()
+program.register_embedding("entity_embed", embedding, trainable=True)
+
+# Frozen torch.Tensor — detached at registration, no gradient flow
+weights = torch.randn(100, 64).cuda()
+program.register_embedding("entity_embed", weights, trainable=False)
+```
+
+### Forward Lookup
+
+```python
+# Returns [n, dim] tensor on same device as embedding
+vectors = program.forward_embedding("entity_embed", [0, 5, 42])
+
+# For trainable nn.Embedding: vectors.requires_grad == True
+# For frozen torch.Tensor: vectors.requires_grad == False
+```
+
+### Cross-Registration Validation
+
+- Embedding declarations (`nn/3`, no labels) reject `register_network()` — error directs to `register_embedding()`
+- Classification declarations (`nn/4`, with labels) reject `register_embedding()` — error directs to `register_network()`
+- Same network name as both embedding and classification → compile-time error
+
+### Constraints
+
+- `trainable=True` requires `nn.Embedding`; raw `torch.Tensor` with `trainable=True` raises `ValueError`
+- Raw tensors with `requires_grad=True` are detached at registration (frozen contract enforced)
+- Integer IDs only (symbol/string lookup keys deferred)
+- Optimizer ownership is user-managed; classification-network optimizer helpers
+  do not cover embeddings
+- Inference through rules (dot/cosine evaluation, grounded query API) is
+  deferred to future embedding-rule integration
+
+---
+
+## Training Loop API (Neural-Symbolic)
+
+For neural-symbolic training with neural predicates (`nn/k` — a predicate backed
+by a neural network), `Program` exposes loss computation, optimizer stepping,
+gradient clipping, learning-rate control, and batched training loops, in addition
+to the single-query `forward_backward*` helpers.
+
+### Loss computation
+
+The `nll_loss*` helpers compute a negative log-likelihood (NLL) loss — the
+standard training objective that penalizes low predicted probability for the
+target answer.
+
+```python
+loss = program.nll_loss("addition(0, 1, 7)")
+loss = program.nll_loss_batch(queries)
+loss = program.nll_loss_mean(queries)
+
+loss_t = program.nll_loss_tensor("addition(0, 1, 7)")
+batch_t = program.nll_loss_batch_tensor(queries)
+avg_loss = program.evaluate_loss(queries)
+```
+
+### External Consumer Bridge Helpers
+
+These helpers keep a four-valued evidence model (Belnap logic) in the Python/ML
+layer: each candidate carries separate `pro` (evidence for), `contra` (evidence
+against), and `quarantine` (held-out) scores. The GPU structural kernels never see
+those channels. The helper surfaces operate on PyTorch tensors and preserve
+autograd unless the caller explicitly detaches inputs.
+
+```python
+top = program.deterministic_topk(scores, k=4)
+stats = program.neural_cache_stats()
+
+terms = program.belnap_loss(
+    pro=pro_scores,
+    contra=contra_scores,
+    quarantine=quarantine_scores,
+    pro_reward=1.0,
+    contra_penalty=2.0,
+    quarantine_penalty=0.5,
+)
+
+semantic = program.semantic_loss_tensor(violations, weight=1.5)
+mse = program.mse_loss_tensor(pred, target)
+info = program.infoloss_tensor(prob)
+```
+
+`deterministic_topk(...)` resolves ties by lower input index. `neural_cache_stats()`
+reports circuit-cache size, hit/miss counters, template compile count,
+query-signature cache size, and registered-network cache/top-k/deterministic
+configuration. `belnap_loss(...)` returns a dictionary containing `loss`,
+`pro_reward`, `contra_penalty`, `quarantine_penalty`, `cfr_regret_proxy`, and
+the formula string.
+
+Registered-network output modes reuse the existing `register_network(..., k=N,
+det=True)` configuration. `forward_backward_tensor(...)`,
+`forward_backward(...)`, and batched neural-query training apply the configured
+stable top-k or deterministic top-1 mode before NLL loss and cached circuit
+probability import. Deterministic mode picks a single hard top-1 value on the
+forward pass, then routes gradients straight through the selected probability on
+the backward pass (a straight-through estimator, so the discrete choice still
+trains).
+
+### Optimizer and scheduler control
+
+```python
+program.zero_grad()
+program.optimizer_step()
+program.clip_grad_norms(max_norm=1.0)
+
+program.scheduler_step()
+program.scheduler_step(network_name="mnist_net")
+
+lr = program.get_lr("mnist_net")
+program.set_lr("mnist_net", 1e-4)
+```
+
+### Batched training epoch
+
+```python
+stats = program.train_epoch(queries, batch_size=32, max_grad_norm=1.0)
+stats = program.train_epoch_tensor(queries, batch_size=32, max_grad_norm=1.0)
+```
+
+### Profiling
+
+```python
+profile = program.warmup_breakdown()
+```
+
+---
+
+## ILP Training (dILP Beta)
+
+The `pyxlog.ilp` subpackage provides differentiable ILP (Inductive Logic
+Programming): it learns Datalog rules from labeled positive and negative examples
+by gradient descent, treating rule choice as something that can be optimized like
+neural weights. This surface is beta.
+
+### Training API
+
+```python
+from pyxlog.ilp import train_only, train_and_promote, TrainConfig, LearnedArtifact
+
+# Define a learnable program
+source = """
+    edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5).
+    learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+"""
+pos = [("reach", [1, 3]), ("reach", [2, 4])]
+neg = [("reach", [1, 1])]
+
+# Configure training
+config = TrainConfig(
+    step_budget_per_attempt=150,   # steps per attempt
+    max_attempts=5,                # multi-start attempts
+    tau_start=2.0,                 # initial temperature
+    tau_floor=0.05,                # minimum temperature
+    seed=42,                       # reproducibility
+)
+
+# Train only (no promotion gates)
+result = train_only(source, "W", pos, neg, config)
+assert result.converged
+print(result.discovered_rule)      # e.g., "reach(X,Y) :- edge(X,Z), edge(Z,Y)."
+
+# Train and promote (with gates)
+config = TrainConfig(check_ambiguity=True, max_novel_rate=0.05)
+promotion = train_and_promote(source, "W", pos, neg, config)
+print(promotion.status)            # PromotionStatus.PROMOTED
+```
+
+### Artifact Persistence
+
+```python
+# Save learned artifact
+result.artifact.save("artifact.json")
+
+# Load with hash verification
+loaded = LearnedArtifact.load("artifact.json", verify_hash=True)
+print(loaded.discovered_rule)
+print(loaded.logits)
+```
+
+### TrainConfig Fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `step_budget_per_attempt` | 150 | Max gradient steps per attempt |
+| `max_attempts` | 5 | Multi-start attempts |
+| `tau_start` | 2.0 | Initial Gumbel-softmax temperature |
+| `tau_floor` | 0.05 | Minimum temperature |
+| `allow_recursive_candidates` | False | Enable body-references-head candidates |
+| `check_ambiguity` | False | Run ambiguity scan on convergence |
+| `max_novel_rate` | 0.0 | Max fraction of novel (non-example) derivations |
+| `debug_dense_mask` | False | Force dense mask backend (for parity testing) |
+| `seed` | None | Random seed for reproducibility |
+| `device` | 0 | CUDA device index |
+| `memory_mb` | 512 | GPU memory limit |
+
+The temperature fields (`tau_start`, `tau_floor`) control a Gumbel-softmax
+relaxation — a technique that makes discrete rule choices differentiable so they
+can be trained by gradient descent. Training starts hot (`tau_start`, soft and
+exploratory) and anneals toward `tau_floor` (sharp, near-discrete).
+
+### Result Types
+
+```python
+# TrainResult
+result.converged          # bool
+result.discovered_rule    # str | None
+result.attempt_count      # int
+result.total_steps        # int
+result.precision          # float
+result.recall             # float
+result.holdout_f1         # float | None
+result.artifact           # LearnedArtifact
+
+# PromotionResult
+promotion.status          # PromotionStatus (PROMOTED, GATE_FAILED, etc.)
+promotion.gates           # list[GateResult]
+promotion.novel_count     # int | None
+promotion.novel_rate      # float | None
+promotion.committed_source # str | None
+promotion.rule_inventory  # RuleInventory | None
+```
+
+### External Consumer Diagnostics
+
+These helpers package the ILP audit surface for downstream applications ("external
+consumers") as reusable pyxlog utilities:
+
+```python
+from pyxlog.ilp.neurosymbolic import (
+    NeuroSymbolicTrainingConfig,
+    train_neurosymbolic_program,
+)
+from pyxlog.runtime_audit import CudaExecutionAudit
+from pyxlog.transfer_diagnostics import PredictionRecord, compute_transfer_diagnostics
+
+trained = train_neurosymbolic_program(
+    source,
+    networks={"ranker": model},
+    examples=rows,
+    config=NeuroSymbolicTrainingConfig(steps=16),
+)
+inventory = trained.learned_rule_inventory
+
+with CudaExecutionAudit(forbid_host_materialization=True) as audit:
+    scores = model(batch)
+    audit.record_nn4_scores("ranker", scores, device_resident=True)
+
+diagnostics = compute_transfer_diagnostics(
+    [PredictionRecord(domain="d0", variant="clean", y_true=1, y_pred=1)],
+    required_domains=("d0",),
+    required_variants=("clean",),
+)
+assert diagnostics.passed
+```
+
+A `NeuralBodySpec` carries an opt-in `train_phi_gradient` flag, default `False`.
+Left at the default, the entity features φ(x) are detached on the training
+upload, and the uploaded values are byte-identical to earlier releases. Set it to
+`True` to leave φ(x) attached, so gradients flow back into whatever produced the
+features (backbone coupling). Only the autograd linkage changes — never the
+values that are uploaded. Available since 0.12.0.
+
+`train_and_promote(...)` accepts transfer-audit metadata through
+`training_fold`, `held_out_domains`, `base_kernel_checksum_before`, and
+`base_kernel_checksum_after`. The returned `PromotionResult.rule_inventory`
+records those values with selected and rejected clauses, scores, and gate
+outcomes.
+
+### Device Query APIs
+
+For GPU-native ILP workflows, `CompiledIlpProgram` exposes device-resident query
+helpers (results stay on the GPU) alongside the existing host-returning helpers:
+
+```python
+import torch
+
+prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=512)
+
+# Device membership: bool CUDA tensor, one row per queried fact.
+mask = torch.from_dlpack(
+    prog.batch_fact_membership_device("edge", [[1, 2], [9, 9], [2, 3]])
+)
+assert mask.device.type == "cuda"
+assert mask.dtype == torch.bool
+
+# Device tagged credit: CSR-style CUDA outputs.
+credit = prog.batch_tagged_credit_device("reach", [[1, 3], [2, 4]])
+row_offsets = torch.from_dlpack(credit.fact_row_offsets)   # int32 CUDA tensor
+entry_indices = torch.from_dlpack(credit.entry_indices)    # int32 CUDA tensor
+entry_i = torch.from_dlpack(credit.entry_i)                # int32 CUDA tensor
+entry_j = torch.from_dlpack(credit.entry_j)                # int32 CUDA tensor
+entry_k = torch.from_dlpack(credit.entry_k)                # int32 CUDA tensor
+```
+
+Contract notes (CSR here means compressed sparse row — a compact layout that
+stores per-row offsets plus a flat list of entries):
+
+- `batch_fact_membership()` and `batch_tagged_credit()` remain available for host-materialized Python outputs
+- `batch_fact_membership_device()` returns a DLPack bool tensor on CUDA
+- `batch_tagged_credit_device()` returns CSR-style device outputs:
+  `fact_row_offsets`, `entry_indices`, `entry_i`, `entry_j`, `entry_k`
+- The device query path avoids semantic-loop device-to-host transfers; inspect
+  `host_transfer_stats()` / `reset_host_transfer_stats()` when enforcing that contract in tests
+- Unsigned metadata/count tensors are exported as DLPack `int32` for broad framework compatibility
+
+### Bounded Exact Induction API
+
+Bounded exact induction searches a bounded space of candidate rules and scores
+each one exactly on the GPU, rather than optimizing rule choice by gradient
+descent. `pyxlog.ilp.induce_exact(..., backend="native")` is the GPU-native
+scorer. The public entry point returns an `ExactInductionResult` containing
+`ScoredCandidate` rows grouped by join shape (topology): `chain`, `star`,
+`fanout`, then `fanin`.
+
+```python
+from pyxlog.ilp import induce_exact
+
+result = induce_exact(
+    prog,
+    head_relation="p_A",
+    candidate_relations=["p_B", "p_C", "p_D"],
+    positive_arg0=pos_a0,
+    positive_arg1=pos_a1,
+    negative_arg0=neg_a0,
+    negative_arg1=neg_a1,
+    k_per_topology=2,
+    deterministic=True,
+    backend="native",
+)
+```
+
+The native backend scores each topology independently in one batched CUDA
+pass. The Python reference can be used for parity checks with
+`backend="python", strict_per_topology=True`; leaving `strict_per_topology`
+at its default preserves legacy prototype behavior and is not semantically
+equivalent to native scoring.
+
+Exact induction accepts pair relations whose two columns share one of these
+scalar types: `u64`, `u32`, or `symbol`. Generated `ilp_exact.portable.ptx` and
+`.cubin` files are packaged build artifacts, not checked-in source files.
+
+### Sparse Mask APIs
+
+A rule mask selects which candidate rules are active during training. Sparse mask
+setters let you pass only the selected candidates instead of a full dense vector.
+`CompiledIlpProgram` exposes two:
+
+- `set_rule_mask_sparse(name, candidate_ids, soft_probs, budget, allow_recursive=False)`
+  is the legacy compatibility path. Rust receives the full candidate soft-probability vector and
+  ranks it internally.
+- `set_rule_mask_sparse_selected(name, selected_candidate_ids, selected_soft_probs, allow_recursive=False)`
+  is the preferred inner-loop path. Python/Torch performs ranking on CUDA, then Rust consumes only
+  the selected subset and preserves that order as the sparse active-rule list.
+
+Prefer the selected-candidate path when you need zero device-to-host transfer on
+the provider side during mask setup.
+
+### GPU-Native Contract
+
+For Python consumers that need an auditable GPU-native ILP inner loop, the intended contract is:
+
+- Zero provider-tracked device-to-host transfer inside the semantic loop:
+  `set_rule_mask_sparse_selected(...)`,
+  `batch_fact_membership_device(...)`,
+  `batch_tagged_credit_device(...)`,
+  and `compute_ilp_loss_grad_gpu(...)`
+- Metadata/control-plane reads may still occur behind public runtime/provider helpers such as
+  cached row-count access; these are not relation-column materializations
+- Compatibility paths that are not suitable for a strict GPU-native inner loop:
+  `set_rule_mask_sparse(...)`,
+  `batch_fact_membership(...)`,
+  `batch_tagged_credit(...)`,
+  and any host-output API gated behind `host-io`
+- Use `host_transfer_stats()` / `reset_host_transfer_stats()` to audit the provider-tracked
+  transfer behavior of the chosen path
+
+---
+
+## DLPack integration
+
+XLOG accepts CUDA-backed DLPack producer objects and returns single-consumer
+capsules. Transient input imports and framework wrapping of query-result capsules
+are zero-copy. Persistent relation replacement takes an owned device-to-device
+snapshot, and stored-relation export leaves a device-to-device clone in the
+session before transferring the exported allocation. Compatible CUDA-backed
+producers include:
+
+- PyTorch
+- CuPy
+- JAX
+- TensorFlow
+- Any CUDA-backed DLPack-compatible library
+
+### Input via DLPack
+
+Your producer's `__dlpack_device__()` must return an exact two-item tuple
+`(device_type, device_id)`. The device type accepts an integer enum such as
+PyTorch's CUDA tag, or another `int` instance with value `2`; `bool` is rejected.
+The device id must be an exact Python `int` in `0..=2147483647` and match the
+selected native device. XLOG reads the integer payload without calling custom
+`__int__` or `__index__` methods. This device-specific reader does not relax
+general metadata validation or replace validation of the actual DLPack capsule.
+
+```python
+import torch
+import pyxlog
+
+# Create GPU columns
+edge_a = torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32)
+edge_b = torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32)
+
+# Pass as input (relation name -> sequence of columns)
+program = pyxlog.LogicProgram.compile(source)
+result = program.evaluate(dlpack_inputs={"edge": [edge_a, edge_b]})
+```
+
+### Output via DLPack
+
+```python
+result = program.evaluate()
+
+# Convert to PyTorch
+import torch
+for q in result.queries:
+    cols = [torch.from_dlpack(t) for t in q.tensors]
+
+# Convert to CuPy
+import cupy
+for q in result.queries:
+    cols = [cupy.from_dlpack(t) for t in q.tensors]
+```
+
+### dlpack_roundtrip helper
+
+`dlpack_roundtrip` sends a CUDA tensor into XLOG and returns it as a fresh DLPack
+capsule — a quick way to verify zero-copy interop end to end. All three arguments are
+required:
+
+```python
+import torch
+from pyxlog import dlpack_roundtrip
+
+tensor = torch.arange(8, dtype=torch.int32, device="cuda")
+capsule = dlpack_roundtrip(tensor, device=0, memory_mb=1024)
+restored = torch.from_dlpack(capsule)
+assert torch.equal(tensor, restored)
+```
+
+## Compile Options
+
+### LogicProgram.compile()
+
+```python
+program = pyxlog.LogicProgram.compile(
+    source,                    # str: Datalog source code
+    device=0,                  # int: CUDA device index
+    memory_mb=32768,          # int: GPU memory limit in megabytes
+)
+```
+
+### Program.compile() (Probabilistic)
+
+```python
+program = pyxlog.Program.compile(
+    source,                    # str: Probabilistic Datalog source
+    prob_engine=None,          # Optional[str]: explicit "exact_ddnnf"/"mc" override;
+                               # otherwise use #pragma prob_engine, then exact_ddnnf
+    device=0,                  # int: CUDA device index
+    memory_mb=32768,          # int: GPU memory limit in megabytes
+)
+```
+
+## Result Objects
+
+### Deterministic Results
+
+```python
+result = program.evaluate()
+
+result.queries             # list[LogicQueryResult]
+result.queries[0].tensors  # list[PyCapsule] (DLPack), one per column
+result.queries[0].columns  # list[str]
+result.queries[0].num_rows # int
+result.queries[0].is_true  # bool
+```
+
+### Probabilistic Results
+
+```python
+result = program.evaluate()  # requires host-io
+result.atoms         # list[str]: query atoms (stringified)
+result.prob          # PyCapsule: DLPack f64 vector of probabilities (len = num_queries)
+result.log_prob      # PyCapsule: DLPack f64 vector of log-probabilities (len = num_queries)
+result.num_vars      # int: number of CNF variables in the compiled program
+result.log_z_e       # Optional[float]: exact log-evidence log Z_E (None for Monte Carlo)
+
+# Exact-only, independent of return_grads: what each CNF variable stands for.
+# Length equals result.num_vars, i.e. the encoder's variable capacity, so entry i lines up
+# with grad_true/grad_false position i when return_grads=True. Index 0 and every slot that
+# holds no assigned variable are padding ("other"); the length is NOT a count of random vars.
+# "choice" entries carry both "probs" (the disjunction's declared, marginal probabilities —
+# display context only) and "prob" (the conditional Bernoulli parameter actually assigned to
+# this variable's weight; use prob*(1-prob), not probs[choice_index]*(1-probs[choice_index]),
+# as the grad_true/grad_false Jacobian). Raises ValueError for MC programs and for exact
+# programs compiled through the GPU count-lift fast path (no CNF encoding is built there).
+program.prob_var_map() # list[dict]: {"kind": "fact"|"choice"|"other", ...} per CNF variable
+
+# Exact-only (when return_grads=True):
+result.grad_true     # Optional[list[PyCapsule]]: per-query DLPack f64 vector (len = num_vars)
+result.grad_false    # Optional[list[PyCapsule]]: per-query DLPack f64 vector (len = num_vars)
+
+# Monte Carlo only:
+result.stderr        # Optional[PyCapsule]: DLPack f64 vector (len = num_queries)
+result.ci_low        # Optional[PyCapsule]: DLPack f64 vector (len = num_queries)
+result.ci_high       # Optional[PyCapsule]: DLPack f64 vector (len = num_queries)
+result.samples       # Optional[int]
+result.evidence_samples # Optional[int]
+result.seed          # Optional[int]
+result.confidence    # Optional[float]
+```
+
+### Device-Only MC Results
+
+```python
+device_result = program.evaluate_device(...)
+device_result.query_counts    # PyCapsule: DLPack int32 vector (len = num_queries)
+device_result.evidence_count  # PyCapsule: DLPack int32 vector (len = 1)
+device_result.total_samples   # int
+device_result.seed            # int
+device_result.confidence      # float
+```
+
+## Error Handling
+
+Python exceptions are raised for errors:
+
+```python
+try:
+    session.put_relation_with_provenance(
+        "transfer", columns, roles=roles, facts=facts
+    )
+except pyxlog.RelationMetadataError as e:
+    print(f"Relation metadata rejected: {e}")
+except KeyError as e:
+    print(f"Stored relation not found: {e}")
+except ValueError as e:
+    print(f"Invalid input: {e}")
+except RuntimeError as e:
+    print(f"XLOG error: {e}")
+```
+
+`relation(name)` and `evidence(name)` use `KeyError` for an unstored relation.
+`export_relation_with_provenance(name)` uses `ValueError` for the same condition.
+
+The joint-constraint carrier raises two exceptions of its own, both
+`RuntimeError` subclasses, available since 0.11.0:
+
+- `pyxlog.CarrierRefused` — every typed refusal: a schema or ABI mismatch, a
+  zero-capacity dimension, use before `register_schema`, rebinding already-bound
+  signature masks, a signature-mask shape mismatch, solving before
+  `bind_signatures`, running the top-two stage before feasibility has solved, a
+  malformed component plan, an out-of-range abstain label index, or an
+  unavailable joint-solve kernel.
+- `pyxlog.SolverResourceExhausted` — a solve used up its `fuel_limit`, with the
+  message `solver fuel exhausted: spent {fuel_spent} of {fuel_limit} node
+  expansions`. The fuel meter lives in the carrier session, so a retry reproduces
+  the identical refusal instead of making partial progress; build a new carrier
+  with a larger `fuel_limit`.
+
+## Memory Management
+
+- An unconsumed output capsule owns its exported GPU buffer and releases it when
+  garbage collected.
+- A framework conversion such as `torch.from_dlpack(capsule)` consumes that
+  capsule exactly once and takes over its managed-tensor ownership.
+- Passing a CUDA tensor object lets XLOG request a fresh capsule through the
+  producer protocol. Do not manufacture or reuse raw input capsules unless you
+  also satisfy the stream-ordering and single-consumer contract.
+- Persistent relation replacement and stored-relation export use owned
+  device-to-device copies rather than mutable views of session storage.
+
+## Thread Safety
+
+- `compile()` is thread-safe
+- `evaluate()` is NOT thread-safe on the same program instance
+- Use separate program instances for concurrent execution
+
+## Examples
+
+### Integration with PyTorch
+
+```python
+import torch
+import pyxlog
+
+# Neural-symbolic training loop:
+# - neural predicate outputs (CUDA tensors) are imported via DLPack
+# - XLOG computes NLL gradients on GPU and calls output.backward(grad) internally
+
+source = """
+nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+addition(X, Y, Z) :- digit(X, LeftDigit), digit(Y, RightDigit), Z is LeftDigit + RightDigit.
+"""
+program = pyxlog.Program.compile(source, prob_engine="exact_ddnnf")
+
+net = torch.nn.Sequential(
+    torch.nn.Flatten(),
+    torch.nn.Linear(28 * 28, 10),
+    torch.nn.Softmax(dim=-1),
+).cuda()
+optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+program.register_network("mnist_net", net, optimizer)
+
+images = torch.randn(128, 1, 28, 28, device="cuda")
+program.add_tensor_source("train", images)
+
+program.zero_grad()
+loss = program.forward_backward_tensor("addition(0, 1, 7)")  # CUDA scalar tensor (no host reads required)
+program.optimizer_step()
+
+# Optional host read for logging:
+print(float(loss.item()))
+```
+
+### Batch Processing
+
+```python
+# Process multiple inputs
+for batch in data_loader:
+    edge_rows = batch["edges"].to(device="cuda")
+    edge_src = edge_rows[:, 0].contiguous()
+    edge_dst = edge_rows[:, 1].contiguous()
+    results = program.evaluate(dlpack_inputs={
+        "edge": [edge_src, edge_dst],
+    })
+    # Process results...
+```
+
+## Limitations
+
+- Linux x86_64 + CUDA only
+- Source builds that compile the PyO3 extension expose the documented native
+  API. For prebuilt packages, use the release notes for that package version to
+  determine which surfaces it contains.
+- Pure-Python helper modules can import without `pyxlog._native`, but
+  native-backed compile, evaluate, and session APIs still require the extension.
+  `RelationEvidence` and `RelationMetadataError` remain importable for annotations
+  and exception handling in source-only mode. The fallback
+  `RelationMetadataError` is a `ValueError` subclass, while constructing fallback
+  `RelationEvidence` raises `RuntimeError` because its state is native-owned.
+
+## See Also
+
+- [Living-World Diagnostics](/guides/diagnostics) — Rule
+  provenance, proof traces, delta debug, temporal metadata, and nn/4 hot-loop
+  audit surface
+- [dILP Training Architecture](/neural/rule-learning) — System design, mask backends, promotion pipeline
+- [Data Interoperability](/guides/interop) — DLPack and Arrow details
+- [Probabilistic Tier](/probabilistic/engines) — Inference engine details
+- [CLI Reference](/reference/cli) — Command-line alternative

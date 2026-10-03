@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PredictedWinner"],"fn":["plan_kclique_var_order"],"struct":["AppearanceOrder","CostPredictionRecord","FullVariableOrder","KCliqueEdge","KCliqueShape","VariableShare"],"trait":["StatsSource","VariableOrder"]};

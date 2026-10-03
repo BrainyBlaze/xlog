@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["EirBodyLiteral","EirEpistemicMode","EirEpistemicOp","EirTerm"],"struct":["EirAtom","EirConstraint","EirEpistemicLiteral","EirProgram","EirRule"]};

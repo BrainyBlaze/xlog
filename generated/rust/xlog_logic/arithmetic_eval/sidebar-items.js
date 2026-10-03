@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ArithmeticValue"],"fn":["compare_arithmetic_values","evaluate_arithmetic_expression"]};

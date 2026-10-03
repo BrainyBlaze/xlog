@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["MagicSetStatus"],"fn":["rewrite_magic_sets","rewrite_magic_sets_owned"],"struct":["MagicSetReport","MagicSetRewrite"]};

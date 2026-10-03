@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RuleSourceKind","Topology"],"struct":["ExactInductionConfig","ExactInductionResult","InducedRuleProvenance","InducedRuleRegistry","InductionAlternative","InductionSupportRow","ScoredCandidate"]};
