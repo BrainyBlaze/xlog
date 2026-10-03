@@ -9618,6 +9618,46 @@ impl PySemanticPreparedStep {
         }
     }
 
+    /// Action-independent cold export capacity, before the first submit.
+    /// This reads only the original frozen geometry and capture metadata.
+    #[cfg(feature = "semantic-policy")]
+    #[getter]
+    fn completed_material_capacity(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        if session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "material capacity cannot overlap recording, import or retirement",
+            ));
+        }
+        let owner = session.owner()?;
+        // Prepared task use has not activated an operation yet. Authenticate
+        // its original identity and recording scope, not completed authority.
+        self.content_binding_with_owner(py, &owner)?;
+        let capacity = owner
+            .prepared_completed_material_capacity(&self.inner)
+            .map_err(xlog_err)?;
+        Ok((
+            (
+                capacity.material_count,
+                capacity.largest_material_bytes,
+                capacity.total_material_bytes,
+            ),
+            (
+                capacity.carrier_bytes[0],
+                capacity.carrier_bytes[1],
+                capacity.carrier_bytes[2],
+            ),
+            capacity.attempt_receipt_bytes,
+            capacity.publication_evidence_bytes,
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+
     /// Typed cold projection of the exact completed Proposal action. The
     /// returned owner, component, admission, RNG, logical-state, VJP and attempt
     /// materials all come from this retained step; no private device ABI is
