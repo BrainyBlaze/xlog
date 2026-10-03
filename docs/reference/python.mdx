@@ -897,6 +897,37 @@ existing replay format. Pass `full_p`, `native_provenance`, and
 logical-state child nor an AttemptReceipt replaces any of them. This export does
 not issue a use grant, invoke a model, or retire the original step.
 
+Use `SemanticTransitionSession.inspect_publication_material(full_p)` to inspect
+the same complete native material without creating a CUDA session or introducing
+another parser. The host-only dictionary has `schema=1`, the original
+`publication=(instance, word, logical_digest, state_digest)`, `semantic_root`,
+`model_generation`, `model_geometry_digest`, `model_numerical_digest`,
+`neural_generation`, `cache_generation`, `prefix_extent`, `ring_head`, and
+`prefix_identity`. Identities are exact 32-byte values, not hexadecimal strings.
+
+`prefix` contains exactly the committed extent and `source` the 32 physical ring
+slots. Each row is `(token, logical_position, kind, provenance, valid, committed,
+recomputed, provenance_record)`. `token_provenance` preserves the complete native
+ledger in original order. Its dictionaries retain `source_slot`,
+`logical_position`, `token`, `base_word`, `proposal`, `ordinal`,
+`authority_generation`, `action_receipt_digest`, `origin_logical_digest`,
+`authority_closure_digest`, and `record_digest`. Filled rows must resolve to their
+original token and position. SOURCE and GENERATED remain distinct; generated
+origins are not rewritten as admitted observations.
+
+`cache` is the complete original role/index roster for cache and running-state
+roles 4–13. Each dictionary retains `role`, `index`, `capacity_bytes`,
+`logical_begin`, `logical_end`, `identity`, `layout`, and `logical_bytes`.
+`layout` is `(role, index, element_bytes, scalar_type, rank, logical_axis,
+dimensions, strides_bytes)`, with both final fields four-element tuples.
+`logical_bytes` traverses logical coordinates, excluding padding and unused
+capacity, and is checked against the original CUDA tensor seal. The model owner
+must compare its actual source/cache operands and entry-boundary generations
+against this projection through its existing model codec. Historical origin
+records still require the original execution closure and rights checks; this
+inspection neither proves past publication nor enables an actor. Initial-prefill
+evidence remains separate and must not be discarded or fabricated.
+
 After known completion, the existing `tensor` and `tensor_allocation` getters
 read that Proposal's private acquired model backings, not the reused publication
 banks. They preserve the original allocation-sharing partition, complete backing

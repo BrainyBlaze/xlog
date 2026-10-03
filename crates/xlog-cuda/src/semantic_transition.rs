@@ -3580,6 +3580,56 @@ pub struct SemanticCheckpointNativeProjection {
     pub model_generation: u64,
 }
 
+/// Read-only original inputs projected through the complete publication codec.
+/// These content records are not proof of historical execution or use authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticPublicationInputProjection {
+    pub publication: SemanticPublishedIdentity,
+    pub semantic_root: Identity256,
+    pub model_generation: u64,
+    pub model_geometry_digest: Identity256,
+    pub model_numerical_digest: Identity256,
+    pub neural_generation: u64,
+    pub cache_generation: u64,
+    pub prefix_extent: u64,
+    pub ring_head: u64,
+    pub prefix_identity: Identity256,
+    pub prefix: Vec<SemanticTextSlot>,
+    pub source: [SemanticTextSlot; 32],
+    pub token_provenance: Vec<SemanticTokenProvenance>,
+    pub cache: Vec<SemanticPublicationTensorProjection>,
+}
+
+/// Original cache geometry and logical bytes under the native tensor seal.
+/// Logical bytes exclude stride gaps and unused capacity, exactly as the seal does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticPublicationTensorProjection {
+    pub layout: SemanticTensorLayout,
+    pub capacity_bytes: u64,
+    pub logical_begin: u64,
+    pub logical_end: u64,
+    pub identity: Identity256,
+    pub logical_bytes: Vec<u8>,
+}
+
+/// Original token origin projected from the native append-only source ledger.
+/// A generated token retains its publication, draw and receipt coordinates;
+/// none of these fields independently grants authority or proves publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticTokenProvenance {
+    pub source_slot: u64,
+    pub logical_position: u64,
+    pub token: u64,
+    pub base_word: u64,
+    pub proposal: u64,
+    pub ordinal: u64,
+    pub action_receipt_digest: Identity256,
+    pub authority_generation: u64,
+    pub origin_logical_digest: Identity256,
+    pub authority_closure_digest: Identity256,
+    pub record_digest: Identity256,
+}
+
 /// Model metadata projected from one acquired publication, not supplied by the
 /// model. Content identities grant no authority independently of that reader.
 pub struct SemanticModelContext {
@@ -5291,7 +5341,7 @@ impl PublicationMaterialRange {
         self.record_digest(&self.bytes)
     }
 
-    fn record_digest(&self, bytes: &[u8]) -> Identity256 {
+    fn digest_prefix(&self) -> [u64; 16] {
         let mut prefix = [0u64; 16];
         prefix[..5].copy_from_slice(&[
             0x786c6f6772616e31,
@@ -5300,12 +5350,108 @@ impl PublicationMaterialRange {
             self.range.logical_begin,
             self.range.logical_end,
         ]);
+        prefix
+    }
+
+    fn record_digest(&self, bytes: &[u8]) -> Identity256 {
         let mut hash = Sha256::new();
-        for word in prefix {
+        for word in self.digest_prefix() {
             hash.update(word.to_le_bytes());
         }
         hash.update(bytes);
         Identity256::from_bytes(hash.finalize().into())
+    }
+
+    /// Cold form of publication_content_view for the original cache roster.
+    /// This traverses the same logical coordinates as CUDA, not storage padding.
+    fn cache_projection(
+        &self,
+        layout: SemanticTensorLayout,
+    ) -> Result<SemanticPublicationTensorProjection, SemanticTransitionError> {
+        tensor_layout_bytes(&layout)?;
+        if !matches!(layout.role, 4..=13)
+            || (layout.role, layout.index) != (self.range.role, self.range.index)
+            || layout.strides_bytes[..layout.rank as usize]
+                .iter()
+                .any(|stride| !stride.is_multiple_of(layout.element_bytes))
+        {
+            return Err(publication_input_error(
+                "cache material has another tensor layout",
+            ));
+        }
+        let mut dimensions = layout.dimensions;
+        if layout.logical_axis != u64::MAX {
+            let axis = layout.logical_axis as usize;
+            dimensions[axis] = self.range.logical_end - self.range.logical_begin;
+            if dimensions[axis] > layout.dimensions[axis] {
+                return Err(publication_input_error(
+                    "cache interval exceeds its original layout",
+                ));
+            }
+        }
+        let cells =
+            dimensions[..layout.rank as usize]
+                .iter()
+                .try_fold(1u64, |cells, &dimension| {
+                    cells
+                        .checked_mul(dimension)
+                        .ok_or(SemanticTransitionError::GenerationExhausted)
+                })?;
+        let length = cells
+            .checked_mul(layout.element_bytes)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .filter(|&bytes| bytes <= self.bytes.len())
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let mut logical_bytes = Vec::with_capacity(length);
+        for cell in 0..cells {
+            let mut coordinate = cell;
+            let mut offset = 0u64;
+            for axis in (0..layout.rank as usize).rev() {
+                let at = coordinate % dimensions[axis];
+                coordinate /= dimensions[axis];
+                offset = at
+                    .checked_mul(layout.strides_bytes[axis])
+                    .and_then(|bytes| offset.checked_add(bytes))
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            }
+            let start = usize::try_from(offset)
+                .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+            let end = offset
+                .checked_add(layout.element_bytes)
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            logical_bytes.extend_from_slice(
+                self.bytes
+                    .get(start..end)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+            );
+        }
+        let mut prefix = self.digest_prefix();
+        prefix[5..9].copy_from_slice(&[
+            layout.element_bytes,
+            layout.scalar_type,
+            layout.rank,
+            layout.logical_axis,
+        ]);
+        prefix[9..13].copy_from_slice(&dimensions);
+        let mut hash = Sha256::new();
+        for word in prefix {
+            hash.update(word.to_le_bytes());
+        }
+        hash.update(&logical_bytes);
+        if Identity256::from_bytes(hash.finalize().into()) != self.range.digest {
+            return Err(publication_input_error(
+                "cache bytes differ from their original native seal",
+            ));
+        }
+        Ok(SemanticPublicationTensorProjection {
+            layout,
+            capacity_bytes: self.capacity as u64,
+            logical_begin: self.range.logical_begin,
+            logical_end: self.range.logical_end,
+            identity: self.range.digest,
+            logical_bytes,
+        })
     }
 
     fn attempt(&self) -> Result<AttemptReceipt, SemanticTransitionError> {
@@ -14815,6 +14961,149 @@ impl SemanticTransitionSession {
             },
             semantic_root: header.semantic_digest,
             model_generation: header.model_generation,
+        })
+    }
+
+    /// Inspect original source and cache operands through the sole full-state
+    /// decoder, without a CUDA owner or a new historical execution claim.
+    pub fn state_material_input_projection(
+        bytes: &[u8],
+    ) -> Result<SemanticPublicationInputProjection, SemanticTransitionError> {
+        let material = PublicationMaterial::decode(bytes)?;
+        let header = material.bank.header;
+        let range = |role| {
+            material
+                .ranges
+                .iter()
+                .find(|item| (item.range.role, item.range.index) == (role, 0))
+                .ok_or(SemanticTransitionError::ObservationMismatch)
+        };
+        let prefix_material = range(1)?;
+        let provenance_material = range(2)?;
+        if prefix_material.range.logical_begin != 0
+            || prefix_material.range.logical_end != header.prefix_extent
+            || header
+                .prefix_extent
+                .checked_mul(size_of::<SemanticTextSlot>() as u64)
+                != Some(prefix_material.bytes.len() as u64)
+            || !provenance_material
+                .bytes
+                .len()
+                .is_multiple_of(size_of::<TokenProvenance>())
+            || header.prefix_extent > material.contract.prefix_capacity
+            || header.ring_head >= 32
+        {
+            return Err(publication_input_error(
+                "publication text material has inconsistent extents",
+            ));
+        }
+        // SAFETY: fixed, padding-free, all-bit-valid integral ABI records. The
+        // codec has checked each sealed record's bytes and the exact row sizes.
+        let prefix = prefix_material
+            .bytes
+            .chunks_exact(size_of::<SemanticTextSlot>())
+            .map(|bytes| unsafe { bytes.as_ptr().cast::<SemanticTextSlot>().read_unaligned() })
+            .collect::<Vec<_>>();
+        let records = provenance_material
+            .bytes
+            .chunks_exact(size_of::<TokenProvenance>())
+            .map(|bytes| unsafe { bytes.as_ptr().cast::<TokenProvenance>().read_unaligned() })
+            .collect::<Vec<_>>();
+        for (position, slot) in prefix.iter().enumerate() {
+            if slot.logical_position != position as u64
+                || slot.kind != 1
+                || slot.valid != 1
+                || slot.committed != 1
+                || slot.recomputed != 1
+            {
+                return Err(publication_input_error(
+                    "publication prefix is not the exact committed ordered prefix",
+                ));
+            }
+        }
+        for slot in prefix.iter().chain(&material.bank.source) {
+            if slot.kind != 1 {
+                if slot.provenance != 0 || slot.provenance_record != 0 {
+                    return Err(publication_input_error(
+                        "unfilled source carries token provenance",
+                    ));
+                }
+                continue;
+            }
+            let record = usize::try_from(slot.provenance_record)
+                .ok()
+                .and_then(|index| records.get(index))
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            if !matches!(slot.provenance, 1 | 2)
+                || record.logical_position != slot.logical_position
+                || record.token != slot.token
+                || record.origin_logical_digest == Identity256::default()
+                || record.authority_closure_digest == Identity256::default()
+                || record.record_digest == Identity256::default()
+                || (slot.provenance == 1)
+                    != (record.action_receipt_digest == Identity256::default())
+            {
+                return Err(publication_input_error(
+                    "publication token differs from its original source or generated origin",
+                ));
+            }
+        }
+        let prefix_identity = Identity256::from_bytes(
+            range(3)?
+                .bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+        );
+        let cache = material
+            .ranges
+            .iter()
+            .filter(|item| matches!(item.range.role, 4..=13))
+            .map(|item| {
+                item.cache_projection(
+                    *material
+                        .layouts
+                        .get(&(item.range.role, item.range.index))
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let token_provenance = records
+            .into_iter()
+            .map(|record| SemanticTokenProvenance {
+                source_slot: record.source_slot,
+                logical_position: record.logical_position,
+                token: record.token,
+                base_word: record.base_word,
+                proposal: record.proposal,
+                ordinal: record.ordinal,
+                action_receipt_digest: record.action_receipt_digest,
+                authority_generation: record.authority_generation,
+                origin_logical_digest: record.origin_logical_digest,
+                authority_closure_digest: record.authority_closure_digest,
+                record_digest: record.record_digest,
+            })
+            .collect();
+        Ok(SemanticPublicationInputProjection {
+            publication: SemanticPublishedIdentity {
+                instance: header.instance,
+                word: header.publication_word,
+                logical_digest: header.logical_digest,
+                state_digest: header.state_digest,
+            },
+            semantic_root: header.semantic_digest,
+            model_generation: header.model_generation,
+            model_geometry_digest: header.model_geometry_digest,
+            model_numerical_digest: header.model_numerical_digest,
+            neural_generation: header.neural_generation,
+            cache_generation: header.cache_generation,
+            prefix_extent: header.prefix_extent,
+            ring_head: header.ring_head,
+            prefix_identity,
+            prefix,
+            source: material.bank.source,
+            token_provenance,
+            cache,
         })
     }
 

@@ -1055,6 +1055,112 @@ impl PySemanticTransitionSession {
         Ok(PyBytes::new(py, &record.encode()))
     }
 
+    /// Inspect the original full publication through the canonical native codec.
+    /// Host-only content projections grant no execution or historical authority.
+    #[staticmethod]
+    fn inspect_publication_material<'py>(
+        py: Python<'py>,
+        full_p: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if !full_p.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "publication inspection requires exact builtin full-state bytes",
+            ));
+        }
+        let original = SemanticTransitionSession::state_material_input_projection(
+            full_p.cast::<PyBytes>()?.as_bytes(),
+        )
+        .map_err(xlog_err)?;
+        let fields = PyDict::new(py);
+        fields.set_item("schema", 1)?;
+        fields.set_item(
+            "publication",
+            completed_publication_identity(py, original.publication)?,
+        )?;
+        for (name, identity) in [
+            ("semantic_root", original.semantic_root),
+            ("model_geometry_digest", original.model_geometry_digest),
+            ("model_numerical_digest", original.model_numerical_digest),
+            ("prefix_identity", original.prefix_identity),
+        ] {
+            fields.set_item(name, PyBytes::new(py, identity.as_bytes()))?;
+        }
+        for (name, value) in [
+            ("model_generation", original.model_generation),
+            ("neural_generation", original.neural_generation),
+            ("cache_generation", original.cache_generation),
+            ("prefix_extent", original.prefix_extent),
+            ("ring_head", original.ring_head),
+        ] {
+            fields.set_item(name, value)?;
+        }
+        fields.set_item(
+            "prefix",
+            PyTuple::new(py, original.prefix.iter().map(text_slot_fields))?,
+        )?;
+        fields.set_item(
+            "source",
+            PyTuple::new(py, original.source.iter().map(text_slot_fields))?,
+        )?;
+        let mut origins = Vec::with_capacity(original.token_provenance.len());
+        for record in original.token_provenance {
+            let origin = PyDict::new(py);
+            for (name, value) in [
+                ("source_slot", record.source_slot),
+                ("logical_position", record.logical_position),
+                ("token", record.token),
+                ("base_word", record.base_word),
+                ("proposal", record.proposal),
+                ("ordinal", record.ordinal),
+                ("authority_generation", record.authority_generation),
+            ] {
+                origin.set_item(name, value)?;
+            }
+            for (name, identity) in [
+                ("action_receipt_digest", record.action_receipt_digest),
+                ("origin_logical_digest", record.origin_logical_digest),
+                ("authority_closure_digest", record.authority_closure_digest),
+                ("record_digest", record.record_digest),
+            ] {
+                origin.set_item(name, PyBytes::new(py, identity.as_bytes()))?;
+            }
+            origins.push(origin);
+        }
+        fields.set_item("token_provenance", PyTuple::new(py, origins)?)?;
+        let mut caches = Vec::with_capacity(original.cache.len());
+        for item in original.cache {
+            let cache = PyDict::new(py);
+            let layout = item.layout;
+            for (name, value) in [
+                ("role", layout.role),
+                ("index", layout.index),
+                ("capacity_bytes", item.capacity_bytes),
+                ("logical_begin", item.logical_begin),
+                ("logical_end", item.logical_end),
+            ] {
+                cache.set_item(name, value)?;
+            }
+            cache.set_item(
+                "layout",
+                (
+                    layout.role,
+                    layout.index,
+                    layout.element_bytes,
+                    layout.scalar_type,
+                    layout.rank,
+                    layout.logical_axis,
+                    layout.dimensions,
+                    layout.strides_bytes,
+                ),
+            )?;
+            cache.set_item("identity", PyBytes::new(py, item.identity.as_bytes()))?;
+            cache.set_item("logical_bytes", PyBytes::new(py, &item.logical_bytes))?;
+            caches.push(cache);
+        }
+        fields.set_item("cache", PyTuple::new(py, caches)?)?;
+        Ok(fields)
+    }
+
     /// Decode the one native record for data-kit assembly without a second parser.
     #[staticmethod]
     fn inspect_checkpoint_referent<'py>(
