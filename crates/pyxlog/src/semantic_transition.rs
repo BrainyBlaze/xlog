@@ -13647,10 +13647,11 @@ impl PySemanticTransitionController {
         }
         let selected_seed = task_use.checkpoint.clone();
         let selected_phase = checkpoint_task_phase(&*task_use.state()?)?;
-        if !matches!(&selected_phase, CheckpointTaskPhase::Segment(operation) if operation == "inference")
+        if !matches!(&selected_phase, CheckpointTaskPhase::Segment(operation)
+            if operation == "inference" || operation == "training")
         {
             return Err(invalid(
-                "training arena admission requires a selected published inference segment",
+                "training arena admission requires a selected published inference or training segment",
             ));
         }
         let (source_capacities, admission_limits, device_ordinal, source_memory_bytes) = {

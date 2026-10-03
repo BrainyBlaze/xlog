@@ -410,12 +410,16 @@ consumer_streams, snapshot, snapshot_model_state, restore_model, replay_rows,
 training_objective, training_domain, dependencies, publication_grants, inference_grants,
 training_grants, capacities, memory_bytes, max_material_bytes,
 max_total_material_bytes, max_evidence_bytes, refresh_snapshot)` performs a
-cold structural transfer from the selected, successfully recomputed inference
-publication. The source must already hold valid inference and training rights,
-and `replay_rows` must retain its existing rows. The method quiesces and seals
+cold structural transfer from the current, successfully recomputed inference
+or training publication. This same transition can append original episodes to
+an already trained session; it does not reset the learning phase or parameters.
+The source must hold its original operation rights and training rights, and
+`replay_rows` must retain the complete existing roster as an unchanged prefix.
+The original pre-action `training_domain` must be unchanged. The method quiesces and seals
 the complete native/task/model checkpoint, restores it into a private session,
 then binds the larger training arena and current authority there. It preserves
-the saved model and historical native records; the new authority binding and
+the saved model, optimizer, RNG, cache, learning-phase history, and native records;
+the new authority binding and
 publication have new identities and digests. `restore_model` has the same
 four-argument factory contract as ordinary restore. After that factory returns,
 `refresh_snapshot()` must return a newer authorized snapshot. Only after both
