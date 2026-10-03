@@ -1,7 +1,7 @@
 //! Canonical creator-thread construction for one fresh semantic task parent.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 
 use pyo3::prelude::*;
@@ -13,7 +13,9 @@ use xlog_cuda::{
     SemanticRecordRole, SemanticTypedRecord,
 };
 
-use super::{invalid, xlog_err, PySemanticTransitionController, PySemanticTransitionSession};
+use super::{
+    invalid, xlog_err, ProposalExpense, PySemanticTransitionController, PySemanticTransitionSession,
+};
 
 const MAX_POSITION: u64 = 262_144;
 const STATEMENT_RECORDS: (u32, u32, u32) = (0, 1, 2);
@@ -412,6 +414,10 @@ impl PySemanticTransitionColdTask {
             admission_limits,
             device_ordinal,
             memory_bytes,
+            Arc::new(Mutex::new(ProposalExpense {
+                capacity: None,
+                spent: 0,
+            })),
         )?;
         if let Some(editable) = native_session.editable_program.as_ref() {
             program = program.with_editable_program(Arc::clone(editable));

@@ -657,6 +657,7 @@ impl PySemanticTransitionController {
                 max_checkpoint_bytes,
                 max_total_checkpoint_bytes,
                 Some(refresh_snapshot),
+                Some(&task.checkpoint.proposal_expense),
             )?;
             restored = Some(candidate.clone_ref(py));
             let candidate_model = candidate.borrow(py).model.clone_ref(py);

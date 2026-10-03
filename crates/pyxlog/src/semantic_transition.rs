@@ -115,6 +115,7 @@ pub(crate) struct PySemanticTransitionSession {
     learning_preparing: AtomicBool,
     learning_transition: Mutex<Option<Py<learning_phase::PySemanticLearningPhaseTransition>>>,
     issuance: Arc<AtomicU64>,
+    proposal_expense: Arc<Mutex<ProposalExpense>>,
     owner_thread: ThreadId,
     device_ordinal: usize,
     capacities: (u32, u32, u32, u32),
@@ -194,6 +195,7 @@ impl PySemanticTransitionSession {
         admission_limits: (u32, u32, u32, usize),
         device_ordinal: usize,
         memory_bytes: u64,
+        proposal_expense: Arc<Mutex<ProposalExpense>>,
     ) -> PyResult<Self> {
         let editable_source = cold_task::editable_source_from_admission(&records)?;
         let native_capacities = SemanticHypergraphCapacities::try_new(
@@ -249,6 +251,7 @@ impl PySemanticTransitionSession {
             learning_preparing: AtomicBool::new(false),
             learning_transition: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
+            proposal_expense,
             owner_thread: std::thread::current().id(),
             device_ordinal,
             capacities,
@@ -1097,6 +1100,10 @@ impl PySemanticTransitionSession {
             admission_limits,
             device_ordinal,
             memory_bytes,
+            Arc::new(Mutex::new(ProposalExpense {
+                capacity: None,
+                spent: 0,
+            })),
         )
     }
 
@@ -1384,6 +1391,7 @@ impl PySemanticTransitionSession {
             max_checkpoint_bytes,
             max_total_checkpoint_bytes,
             refresh_snapshot,
+            None,
         )
     }
 }
@@ -1406,6 +1414,7 @@ impl PySemanticTransitionSession {
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         refresh_snapshot: Option<&Bound<'_, PyAny>>,
+        shared_proposal_expense: Option<&Arc<Mutex<ProposalExpense>>>,
     ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
         if !checkpoint.is_exact_instance_of::<PyBytes>() {
             return Err(invalid("checkpoint restore requires exact builtin bytes"));
@@ -1432,8 +1441,20 @@ impl PySemanticTransitionSession {
         }
         let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
         let config = SemanticCheckpointSessionConfig::decode(&manifest.session)?;
-        let (seed, saved_snapshot, phase, saved_binding) =
+        let (mut seed, saved_snapshot, phase, saved_binding) =
             TaskCheckpointSeed::decode(&manifest.task)?;
+        if let Some(shared) = shared_proposal_expense {
+            let saved = seed.proposal_expense()?;
+            let current = *shared
+                .lock()
+                .map_err(|_| invalid("nominal Proposal expense owner mutex is poisoned"))?;
+            if saved.capacity != current.capacity || saved.spent > current.spent {
+                return Err(invalid(
+                    "private restore changed its original Proposal limit or irreversible expense",
+                ));
+            }
+            seed.proposal_expense = Arc::clone(shared);
+        }
         let mut domain_budget = 16 * 1024 * 1024;
         if ColdValue::read(training_domain, &mut domain_budget, 0)? != seed.training_domain {
             return Err(invalid(
@@ -1546,6 +1567,7 @@ impl PySemanticTransitionSession {
             config.admission_limits,
             device_ordinal,
             config.memory_bytes,
+            Arc::clone(&seed.proposal_expense),
         )?;
         let session = Py::new(py, restored_session)?;
         session
@@ -6346,6 +6368,40 @@ struct TaskUseState {
     snapshot: AuthoritySnapshot,
 }
 
+/// Irreversible nominal places, independent of RNG draws or publication success.
+/// Cold arena/phase successors share the same owner; ordinary restore decodes
+/// the complete saved owner rather than deriving expense from effective draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProposalExpense {
+    capacity: Option<u64>,
+    spent: u64,
+}
+
+impl ProposalExpense {
+    fn bind_capacity(&mut self, capacity: Option<u64>) -> PyResult<()> {
+        let Some(capacity) = capacity else {
+            return Ok(());
+        };
+        if self.capacity.is_some_and(|original| original != capacity) || self.spent > capacity {
+            return Err(invalid(
+                "task import cannot change its original nominal Proposal limit or refund expense",
+            ));
+        }
+        self.capacity = Some(capacity);
+        Ok(())
+    }
+
+    fn charge(&mut self, count: u64) -> PyResult<()> {
+        let spent = self
+            .spent
+            .checked_add(count)
+            .filter(|spent| self.capacity.is_none_or(|capacity| *spent <= capacity))
+            .ok_or_else(|| invalid("original whole-task nominal Proposal limit is exhausted"))?;
+        self.spent = spent;
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct TaskCheckpointSeed {
     authority: Vec<ColdValue>,
@@ -6355,6 +6411,7 @@ struct TaskCheckpointSeed {
     initial_sources: ColdValue,
     source_mapping: ColdValue,
     replay_selection: ColdValue,
+    proposal_expense: Arc<Mutex<ProposalExpense>>,
 }
 
 /// An arena admission may append sources and replay history, never reinterpret
@@ -6408,6 +6465,20 @@ fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> 
 }
 
 impl TaskCheckpointSeed {
+    fn proposal_expense(&self) -> PyResult<ProposalExpense> {
+        self.proposal_expense
+            .lock()
+            .map(|expense| *expense)
+            .map_err(|_| invalid("nominal Proposal expense owner mutex is poisoned"))
+    }
+
+    fn charge_proposals(&self, count: u64) -> PyResult<()> {
+        self.proposal_expense
+            .lock()
+            .map_err(|_| invalid("nominal Proposal expense owner mutex is poisoned"))?
+            .charge(count)
+    }
+
     fn encode(
         &self,
         snapshot: &AuthoritySnapshot,
@@ -6422,6 +6493,7 @@ impl TaskCheckpointSeed {
                 ("segment", ColdValue::Text(operation.clone()))
             }
         };
+        let expense = self.proposal_expense()?;
         Ok(checkpoint_cold_value_bytes(&ColdValue::Sequence(vec![
             ColdValue::Sequence(self.authority.clone()),
             ColdValue::Sequence(self.evaluation.clone()),
@@ -6434,6 +6506,10 @@ impl TaskCheckpointSeed {
             operation,
             ColdValue::Bytes(Arc::from(binding.encode())),
             self.training_domain.clone(),
+            expense.capacity.map_or(ColdValue::None, |capacity| {
+                ColdValue::Integer(capacity.to_string())
+            }),
+            ColdValue::Integer(expense.spent.to_string()),
         ])))
     }
 
@@ -6446,7 +6522,17 @@ impl TaskCheckpointSeed {
         TaskCheckpointBinding,
     )> {
         let value = checkpoint_cold_value(bytes)?;
-        let fields = value.fields(11)?;
+        let fields = value.fields(13)?;
+        let capacity = match &fields[11] {
+            ColdValue::None => None,
+            value => Some(value.unsigned()?),
+        };
+        let spent = fields[12].unsigned()?;
+        if capacity.is_some_and(|capacity| spent > capacity) {
+            return Err(invalid(
+                "checkpoint has an invalid nominal Proposal expense owner",
+            ));
+        }
         let phase = match fields[7].text()? {
             "imported" if fields[8] == ColdValue::None => CheckpointTaskPhase::Imported,
             "initial-prefill-bound" if fields[8] == ColdValue::None => {
@@ -6467,6 +6553,7 @@ impl TaskCheckpointSeed {
                 initial_sources: fields[3].clone(),
                 source_mapping: fields[4].clone(),
                 replay_selection: fields[5].clone(),
+                proposal_expense: Arc::new(Mutex::new(ProposalExpense { capacity, spent })),
             },
             AuthoritySnapshot::parse(&fields[6])?,
             phase,
@@ -6505,7 +6592,7 @@ fn checkpoint_cold_value_bytes(value: &ColdValue) -> Vec<u8> {
         }
     }
     let mut bytes = b"XLOG-CHECKPOINT-TASK\0".to_vec();
-    bytes.extend_from_slice(&3u32.to_le_bytes());
+    bytes.extend_from_slice(&4u32.to_le_bytes());
     append(value, &mut bytes);
     bytes
 }
@@ -6584,7 +6671,7 @@ fn checkpoint_cold_value(bytes: &[u8]) -> PyResult<ColdValue> {
 
     let mut remaining = bytes;
     if take(&mut remaining, 21)? != b"XLOG-CHECKPOINT-TASK\0"
-        || u32::from_le_bytes(take(&mut remaining, 4)?.try_into().unwrap()) != 3
+        || u32::from_le_bytes(take(&mut remaining, 4)?.try_into().unwrap()) != 4
     {
         return Err(invalid(
             "checkpoint task capsule has another domain or version",
@@ -7083,6 +7170,19 @@ impl PySemanticTransitionTaskUse {
             pad_token,
         )
         .map_err(xlog_err)
+    }
+}
+
+#[pymethods]
+impl PySemanticTransitionTaskUse {
+    /// Original whole-task bound and irreversible nominal places. Available
+    /// after a failed launch too; reading expense does not prove completion.
+    #[getter]
+    fn proposal_expense(&self, py: Python<'_>) -> PyResult<(Option<u64>, u64)> {
+        self.session.borrow(py).require_creator()?;
+        self.issuance.require_current()?;
+        let expense = self.checkpoint.proposal_expense()?;
+        Ok((expense.capacity, expense.spent))
     }
 }
 
@@ -9892,7 +9992,15 @@ impl PySemanticPreparedStep {
                 "completed checkpoint requires the original historical model serializer",
             ));
         }
-        let (binding, model_binding, task_binding, native, initial_prefill, config) = {
+        let (
+            binding,
+            model_binding,
+            task_binding,
+            native,
+            initial_prefill,
+            config,
+            proposal_expense,
+        ) = {
             let session = self.session.borrow(py);
             let mut owner = session.owner()?;
             let binding = self.content_binding_with_owner(py, &owner)?;
@@ -9935,6 +10043,7 @@ impl PySemanticPreparedStep {
                     admission_limits: session.admission_limits,
                     memory_bytes: session.memory_bytes,
                 },
+                self.task_use.borrow(py).checkpoint.proposal_expense()?,
             )
         };
         // The original serializer reads this step's retained model allocations.
@@ -9951,6 +10060,7 @@ impl PySemanticPreparedStep {
             let session = self.session.borrow(py);
             let mut owner = session.owner()?;
             if self.content_binding_with_owner(py, &owner)? != binding
+                || self.task_use.borrow(py).checkpoint.proposal_expense()? != proposal_expense
                 || TaskCheckpointBinding::from_owner(&owner)? != task_binding
                 || owner
                     .prepared_model_binding(&self.inner, &streams)
@@ -12867,6 +12977,17 @@ impl PySemanticTransitionController {
                 issued.require_learning_operation(&owner, &operation)?;
             }
             let scope = state.begin_build()?;
+            let nominal_proposals = transitions
+                .clone()
+                .filter(|kind| *kind == SemanticTransitionKind::Proposal)
+                .count();
+            // Reserve the complete original roster before allocation or any
+            // producer callback. Failed builds, refusals and skipped graph
+            // slots do not refund these places or turn them into RNG draws.
+            issued.checkpoint.charge_proposals(
+                u64::try_from(nominal_proposals)
+                    .map_err(|_| invalid("nominal Proposal roster exceeds u64"))?,
+            )?;
             let handles = owner
                 .prepare_segment_steps(transitions, cold_capacity)
                 .map_err(xlog_err)?;
@@ -13753,7 +13874,7 @@ impl PySemanticTransitionController {
     /// Only then does this same TaskUse become Imported. Any failed import
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
-    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, live_authorities, replay_rows, training_objective, training_domain, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
+    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, live_authorities, replay_rows, training_objective, training_domain, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false, proposal_capacity=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "task import binds the complete authority, replay, and callback contract"
@@ -13796,11 +13917,20 @@ impl PySemanticTransitionController {
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         retain_policy: bool,
+        proposal_capacity: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
         let mut import = ColdImportGuard::begin(&session, None)?;
         let mut budget = 16 * 1024 * 1024;
+        let proposal_capacity = proposal_capacity
+            .map(|capacity| ColdValue::read(capacity, &mut 128, 0)?.unsigned())
+            .transpose()?;
+        session
+            .proposal_expense
+            .lock()
+            .map_err(|_| invalid("native nominal Proposal expense owner mutex is poisoned"))?
+            .bind_capacity(proposal_capacity)?;
         let [material_limit, total_material_limit, evidence_limit] = read_task_replay_limits(
             max_material_bytes,
             max_total_material_bytes,
@@ -13994,6 +14124,7 @@ impl PySemanticTransitionController {
                     initial_sources,
                     source_mapping,
                     replay_selection,
+                    proposal_expense: Arc::clone(&session.proposal_expense),
                 },
                 state: Mutex::new(TaskUseState { phase, snapshot }),
                 delivery: Mutex::new(None),
@@ -14341,6 +14472,7 @@ impl PySemanticTransitionController {
                     admission_limits,
                     device_ordinal,
                     candidate_memory_bytes,
+                    Arc::clone(&selected_seed.proposal_expense),
                 )?,
             )?;
             candidate_session = Some(successor.clone_ref(py));
@@ -14416,6 +14548,7 @@ impl PySemanticTransitionController {
                         initial_sources: selected_seed.initial_sources,
                         source_mapping: selected_seed.source_mapping,
                         replay_selection: selected_seed.replay_selection,
+                        proposal_expense: selected_seed.proposal_expense,
                     },
                     state: Mutex::new(TaskUseState {
                         phase: TaskUsePhase::ArenaPreparing(Box::new(original_phase)),
@@ -14601,7 +14734,7 @@ impl PySemanticTransitionController {
             ));
         }
         let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
-        let (identity, task_binding, prior_snapshot, phase, config) = {
+        let (identity, task_binding, prior_snapshot, phase, config, proposal_expense) = {
             let session = self.session.borrow(py);
             if session.importing.load(Ordering::Acquire)
                 || session.recording.load(Ordering::Acquire)
@@ -14642,6 +14775,7 @@ impl PySemanticTransitionController {
                     admission_limits: session.admission_limits,
                     memory_bytes: session.memory_bytes,
                 },
+                task_use.checkpoint.proposal_expense()?,
             )
         };
         let model = snapshot_model_state.call0().and_then(|model| {
@@ -14659,6 +14793,7 @@ impl PySemanticTransitionController {
             let state = task_use.state()?;
             if state.snapshot.canonical != prior_snapshot
                 || checkpoint_task_phase(&state)? != phase
+                || task_use.checkpoint.proposal_expense()? != proposal_expense
                 || task_use.task_identity != task_binding.identity
                 || task_use.task_epoch != task_binding.epoch
                 || TaskCheckpointBinding::from_owner(&owner)? != task_binding
@@ -14904,6 +15039,12 @@ impl PySemanticTransitionController {
         task_use.require_learning_operation(&owner, &operation)?;
         let mut state = task_use.state()?;
         state.admit_segment(&task_use.authority, operation, snapshot)?;
+        if kind == SemanticTransitionKind::Proposal {
+            if let Err(error) = task_use.checkpoint.charge_proposals(1) {
+                state.phase = TaskUsePhase::Refused;
+                return Err(error);
+            }
+        }
         if let Err(error) = owner.admit_transition(&*parent.lease()?, kind) {
             state.phase = TaskUsePhase::Refused;
             return Err(xlog_err(error));
@@ -17316,6 +17457,10 @@ mod tests {
             learning_preparing: AtomicBool::new(false),
             learning_transition: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
+            proposal_expense: Arc::new(Mutex::new(super::ProposalExpense {
+                capacity: None,
+                spent: 0,
+            })),
             owner_thread: std::thread::current().id(),
             device_ordinal: 0,
             capacities: (0, 0, 0, 0),
@@ -17423,6 +17568,10 @@ mod tests {
             initial_sources: ColdValue::None,
             source_mapping: ColdValue::None,
             replay_selection: ColdValue::None,
+            proposal_expense: std::sync::Arc::new(std::sync::Mutex::new(super::ProposalExpense {
+                capacity: None,
+                spent: 0,
+            })),
         };
         let bytes = seed
             .encode(

@@ -428,6 +428,32 @@ the single runnable `SemanticTransitionRestoredCheckpoint`. A preparation
 failure leaves the source runnable only when it can still be revalidated; it
 never grants execution to the unfinished candidate.
 
+Task import accepts `proposal_capacity=original_limit` to bind the original
+whole-task nonnegative U64 nominal Proposal limit. A fresh Session starts
+without that bound; `None` preserves the existing bound on re-import. A bound
+cannot be changed, and adding a bound cannot discard previously spent places.
+Re-import on the same native Session retains the original expense owner;
+this is not a phase-program budget. The native
+issued `task_use.proposal_expense` returns `(capacity_or_None, spent)`.
+The complete nominal Proposal roster is charged before segment construction
+enters any producer callback, not from successful RNG draws or published
+results. The single-transition admission path charges its nominal Proposal
+before native admission as well. Failed construction, refused/skipped slots,
+failed submission and abandoned private candidates do not refund expense.
+Cold arena and phase successors share that original expense owner; ordinary
+restore reconstructs the exact saved value. This cold accounting adds no
+host/device observation inside a captured resident loop.
+
+The full checkpoint's task capsule uses format 4 and carries the original
+bound and nominal expense, separately from paired RNG/model coordinates.
+Format 3 does not contain this information and is not silently upgraded or
+assigned a fabricated zero. A coherent source/artifact migration is required
+before consuming checkpoints made by the earlier format. The getter alone
+does not prove execution or resolve an unknown admitted operation. Durable
+pre/post-operation persistence and full private-program recovery remain
+separate requirements; an older final-result Python counter is not their
+replacement.
+
 `SemanticLearningPhaseRecipe(*, source, target, phase_index,
 completed_updates_index, views)` describes a cold learning-phase boundary.
 The supported pairs are `alignment` to `fast`, `fast` to `consolidation`, and
@@ -528,7 +554,8 @@ source with `verify_checkpoint_referent(record, checkpoint)`; `restore_checkpoin
 accepts `referent=record` and performs that same exact check before allocating a
 new owner.
 The complete checkpoint uses version 3 and the compact referent remains version 2;
-the embedded task capsule uses version 3 to retain the original training domain.
+the embedded task capsule uses version 4 to retain the original training domain
+and whole-task nominal Proposal expense.
 Older complete checkpoints, task capsules and version 1 referent sources are not
 accepted by this contract.
 

@@ -149,7 +149,36 @@ class SemanticModelEvaluation:
     def finish(self, output_witness: Any, *, consumer_streams: Sequence[int]) -> _ModelEvaluationResult: ...
     def cancel(self, *, consumer_streams: Sequence[int]) -> None: ...
 
+class SemanticTransitionTaskUse:
+    """Native-issued task; no public constructor."""
+
+    @property
+    def proposal_expense(self) -> tuple[Optional[int], int]:
+        """Original whole-task capacity and irreversible nominal places spent.
+
+        None capacity declares no whole-task bound. Expense is not an RNG
+        coordinate or proof that an admitted operation completed.
+        """
+        ...
+
 class SemanticTransitionController:
+    def import_task(
+        self, *, task_ref: Any, task_scope: Any, statement_records: Any,
+        allowed_support_records: Any, task_program_source: Any,
+        task_query_ordinals: Any, task_scoring: Any, task_priority_levels: Any,
+        admissible_truth_masks: Any, actor_eligible: Any, live_authorities: Any,
+        replay_rows: Any, training_objective: Any, training_domain: Any,
+        max_material_bytes: Any, max_total_material_bytes: Any,
+        max_evidence_bytes: Any, dependencies: Any, feedback_roots: Any,
+        publication_grants: Any, inference_grants: Any, training_grants: Any,
+        initial_sources: Any, source_mapping: Any, snapshot: Any,
+        replay_selection: Any, replay_operation: Any, restore_invocation: Any,
+        pack_policy: Any, finish_invocation: Any, refresh_snapshot: Any,
+        resolve_checkpoint: Any = None, max_checkpoint_bytes: Any = None,
+        max_total_checkpoint_bytes: Any = None, retain_policy: bool = False,
+        proposal_capacity: Optional[int] = None,
+    ) -> Union[SemanticTransitionTaskUse, tuple[SemanticTransitionTaskUse, Any]]: ...
+
     def prepare_model_evaluation(
         self, task_use: Any, parent: Any, *, model_work_capacity: int,
         cohort: Optional[SemanticEvaluationCohort] = None,
