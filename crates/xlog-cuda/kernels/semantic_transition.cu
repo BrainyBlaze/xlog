@@ -794,6 +794,7 @@ struct Descriptor {
 
 using ReplayCopyDescriptor=Descriptor::PreparedReplayDescriptor::Copy;
 __device__ PublicationBank* publication_acquired_bank(const PublicationControl&,const PublicationLease&);
+__device__ bool publication_model_cache_ready(const PublicationControl&,const PublicationBank&);
 struct ReplayCopyRow {
     uint64_t role,index,model,slots[2],offsets[2],bytes[2],destination,capacity;
 };
@@ -1222,6 +1223,89 @@ __device__ void publication_store(uint64_t& value,uint64_t next) {
     std::atomic_ref<uint64_t>(value).store(next,std::memory_order_release);
 #endif
 }
+struct LearningFoldAssignment {
+    uint64_t original,scratch,expected,source,up,down,count,mode,phase,scale_bits,serial_scatter;
+    PublicationTensorLayout layout,source_layout,up_layout,down_layout;
+};
+static_assert(sizeof(LearningFoldAssignment)==536,"learning absorption launch ABI");
+__device__ uint64_t learning_fold_offset(PublicationTensorLayout layout,uint64_t ordinal) {
+    uint64_t offset=0;
+    for(uint64_t axis=layout.rank;axis>0;--axis) {
+        offset+=(ordinal%layout.dimensions[axis-1])*layout.strides_bytes[axis-1];
+        ordinal/=layout.dimensions[axis-1];
+    }
+    return offset;
+}
+__device__ float learning_fold_float(uint64_t pointer,PublicationTensorLayout layout,uint64_t ordinal) {
+    const auto* bytes=reinterpret_cast<const uint8_t*>(pointer)+learning_fold_offset(layout,ordinal);
+    uint32_t bits=0;
+    for(uint64_t i=0;i<layout.element_bytes;++i)bits|=uint32_t(bytes[i])<<(8*i);
+    return __uint_as_float(layout.scalar_type==5 ? bits<<16 : bits);
+}
+// A cold operation on original native-owned allocations. Numerical expectations
+// precede all candidate writes; full physical aliases are checked byte-for-byte.
+extern "C" __global__ void semantic_learning_fold(LearningFoldAssignment assignment,
+        uint64_t stage,uint64_t status_ptr) {
+    auto& status=*reinterpret_cast<uint64_t*>(status_ptr);
+    if(publication_load(status))return;
+    const uint64_t thread=uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+    const bool serial=stage==2 && assignment.serial_scatter;
+    if(serial && thread)return;
+    const uint64_t stride=serial ? 1 : uint64_t(gridDim.x)*blockDim.x;
+    for(uint64_t ordinal=serial ? 0 : thread;ordinal<assignment.count;ordinal+=stride) {
+        const uint64_t offset=learning_fold_offset(assignment.layout,ordinal);
+        const uint64_t width=assignment.layout.element_bytes;
+        auto* expected=reinterpret_cast<uint8_t*>(assignment.expected+ordinal*width);
+        if(stage<=1) {
+            uint64_t bits=0;
+            if(assignment.mode==2) {
+                const float value=learning_fold_float(assignment.source,assignment.source_layout,ordinal);
+                if(!isfinite(value)) { publication_compare_exchange(status,0,1);return; }
+                bits=__float_as_uint(value);
+            } else if(assignment.mode==3)bits=assignment.phase;
+            else if(assignment.mode==4) {
+                const uint64_t columns=assignment.layout.dimensions[1];
+                const uint64_t rank=assignment.down_layout.dimensions[0];
+                const uint64_t row=ordinal/columns,column=ordinal%columns;
+                const float weight=learning_fold_float(assignment.original,assignment.layout,ordinal);
+                float sum=__uint_as_float(0);
+                if(!isfinite(weight)) { publication_compare_exchange(status,0,1);return; }
+                for(uint64_t j=0;j<rank;++j) {
+                    const float up=learning_fold_float(assignment.up,assignment.up_layout,row*rank+j);
+                    const float down=learning_fold_float(assignment.down,assignment.down_layout,j*columns+column);
+                    if(!isfinite(up) || !isfinite(down)) { publication_compare_exchange(status,0,1);return; }
+                    const float product=__fmul_rn(up,down);
+                    sum=__fadd_rn(sum,product);
+                    if(!isfinite(product) || !isfinite(sum)) { publication_compare_exchange(status,0,1);return; }
+                }
+                const float delta=__fmul_rn(__uint_as_float(uint32_t(assignment.scale_bits)),sum);
+                const float value=__fadd_rn(weight,delta);
+                if(!isfinite(delta) || !isfinite(value)) { publication_compare_exchange(status,0,1);return; }
+                const uint32_t fp32=__float_as_uint(value);
+                bits=assignment.layout.scalar_type==5 ? uint64_t((fp32+0x7fff+((fp32>>16)&1))>>16) : fp32;
+                if(assignment.layout.scalar_type==5 && (bits&0x7f80)==0x7f80) {
+                    publication_compare_exchange(status,0,1);return;
+                }
+            } else if(assignment.mode==5) {
+                const auto* source=reinterpret_cast<const uint8_t*>(assignment.source)+learning_fold_offset(assignment.source_layout,ordinal);
+                if(!isfinite(learning_fold_float(assignment.source,assignment.source_layout,ordinal))) {
+                    publication_compare_exchange(status,0,1);return;
+                }
+                for(uint64_t i=0;i<width;++i)bits|=uint64_t(source[i])<<(8*i);
+            }
+            for(uint64_t i=0;i<width;++i)expected[i]=uint8_t(bits>>(8*i));
+        } else if(stage==2) {
+            auto* scratch=reinterpret_cast<uint8_t*>(assignment.scratch)+offset;
+            for(uint64_t i=0;i<width;++i)scratch[i]=expected[i];
+        } else {
+            const auto* original=reinterpret_cast<const uint8_t*>(assignment.original)+offset;
+            const auto* scratch=reinterpret_cast<const uint8_t*>(assignment.scratch)+offset;
+            for(uint64_t i=0;i<width;++i)if(scratch[i]!=(assignment.mode ? expected[i] : original[i])) {
+                publication_compare_exchange(status,0,1);return;
+            }
+        }
+    }
+}
 __device__ bool publication_identity_equal(const uint64_t* a,const uint64_t* b) {
     for(uint32_t i=0;i<4;++i)if(a[i]!=b[i])return false;
     return true;
@@ -1259,6 +1343,9 @@ __device__ uint64_t publication_header_eligibility(const PublicationControl& con
     if(bank.header.terminal>1)return 4;
     if(transition_kind<1 || transition_kind>4 ||
        (bank.header.terminal==1)!=(transition_kind==3))return 1;
+    // Absorption changes the effective model generation without pretending to
+    // recompute old caches. Only the real Recompute can make them usable again.
+    if(transition_kind!=2 && !publication_model_cache_ready(control,bank))return 1;
     return bank.header.fuel<((transition_kind==1 || transition_kind==3) ? 2 : 1) ? 5 : 0;
 }
 __device__ uint64_t publication_acquire(PublicationControl& control,PublicationLease& lease,
@@ -1352,6 +1439,15 @@ __device__ const PublicationRange* publication_find_range(const PublicationRange
         uint64_t role,uint64_t index=0) {
     for(uint64_t i=0;i<count;++i)if(ranges[i].role==role && ranges[i].index==index)return &ranges[i];
     return nullptr;
+}
+__device__ bool publication_model_cache_ready(const PublicationControl& control,const PublicationBank& bank) {
+    const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[bank.header.publication_word&1]);
+    const auto* range=publication_find_range(ranges,bank.header.range_count,14);
+    if(!range || range->length_bytes!=sizeof(CompletionCoverage))return false;
+    const auto* bytes=publication_range_bytes(control,*range);
+    if(!bytes)return false;
+    const auto& coverage=*reinterpret_cast<const CompletionCoverage*>(bytes);
+    return coverage.abi==1 && coverage.model_generation==bank.header.model_generation;
 }
 __device__ bool publication_model_block_identity(const PublicationControl& control,
         const PublicationBank& bank,const PublicationContract& contract,
@@ -5034,7 +5130,7 @@ __device__ uint64_t publication_initialize(const Descriptor& descriptor,Publicat
     // representation, then invalidate it on any refusal before releasing that
     // gate; no reader can acquire this intermediate bank.
     bank.header.abi=1;
-    if(publication_seal_ranges(control,bank,nullptr,restored) || publication_logical_digest(control,bank) ||
+    if(publication_seal_ranges(control,bank,nullptr,operation==4) || publication_logical_digest(control,bank) ||
        publication_descriptor_digest(control,bank)){bank.header.abi=0;return 1;}
     // Exact restore requires the saved roots. A private structural transfer
     // instead seals new current roots after preserving historical ranges.
@@ -5183,7 +5279,7 @@ __device__ void publication_command(const Descriptor& descriptor) {
     auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
     uint64_t status=1;
     if(descriptor.publication.operation==1 || descriptor.publication.operation==4 ||
-       descriptor.publication.operation==5) {
+       descriptor.publication.operation==5 || descriptor.publication.operation==7) {
         if(!publication_compare_exchange(control.reader_gate,0,1))status=2;
         else {status=publication_initialize(descriptor,control,descriptor.publication.operation);publication_store(control.reader_gate,0);}
     } else if(descriptor.publication.operation==6 && descriptor.publication.lease) {

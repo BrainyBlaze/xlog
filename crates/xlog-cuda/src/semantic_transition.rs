@@ -3349,13 +3349,11 @@ fn continuation_service_layouts(
     Ok(layouts)
 }
 
-/// Derive the ordered, unique physical parameter owners from the same sealed
-/// schema bytes that the model contract hashes. Other model schema formats
-/// remain valid, but cannot claim this block-bound admission contract.
-fn model_physical_parameter_roster(
+/// Decode the retained versioned schema from the original ModelContract slice.
+fn retained_model_schema(
     record: &[u8],
     layout: SemanticModelContractLayout,
-) -> Result<Option<Vec<String>>, SemanticTransitionError> {
+) -> Result<Option<serde_json::Value>, SemanticTransitionError> {
     layout.validate(record.len() as u64)?;
     let begin = layout.schema_begin as usize;
     let end = begin + layout.schema_bytes as usize;
@@ -3369,6 +3367,18 @@ fn model_physical_parameter_roster(
     {
         return Ok(None);
     }
+    Ok(Some(schema))
+}
+
+/// Derive unique physical parameter owners from that same authenticated schema.
+/// Other schema formats cannot claim this block-bound admission contract.
+fn model_physical_parameter_roster(
+    record: &[u8],
+    layout: SemanticModelContractLayout,
+) -> Result<Option<Vec<String>>, SemanticTransitionError> {
+    let Some(schema) = retained_model_schema(record, layout)? else {
+        return Ok(None);
+    };
     let model = schema
         .get("model")
         .ok_or_else(|| publication_input_error("versioned model schema lacks its model owner"))?;
@@ -7347,6 +7357,8 @@ fn publication_material_runtime() -> [u8; 32] {
         hash.update(include_bytes!("semantic_transition.rs"));
         hash.update(include_bytes!("semantic_transition/learning_phase.rs"));
         hash.update(include_bytes!("semantic_transition/prepared_replay.rs"));
+        #[cfg(feature = "semantic-policy")]
+        hash.update(include_bytes!("semantic_transition/model_evaluation.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
         let policy_identity: [u8; 32] =
             include!(concat!(env!("OUT_DIR"), "/semantic_policy_identity.rs"));
@@ -7800,7 +7812,28 @@ impl PublicationMaterial {
     // This proves the selected publication has the recompute form without
     // inventing an application-side completion flag or retaining an old GPU
     // reader. Historical provenance still belongs to the trusted importer.
+    fn require_current_model_caches(&self) -> Result<(), SemanticTransitionError> {
+        let coverage = self
+            .ranges
+            .iter()
+            .find(|r| (r.range.role, r.range.index) == (14, 0))
+            .filter(|r| r.bytes.len() == size_of::<CompletionCoverage>())
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        // SAFETY: the exact-size, decoded native ABI contains integer records
+        // only and permits unaligned retained checkpoint bytes.
+        let coverage = unsafe {
+            std::ptr::read_unaligned(coverage.bytes.as_ptr().cast::<CompletionCoverage>())
+        };
+        if coverage.abi != 1 || coverage.model_generation != self.bank.header.model_generation {
+            return Err(publication_input_error(
+                "effective model changed; original caches require a full recompute before use",
+            ));
+        }
+        Ok(())
+    }
+
     fn require_successful_recompute(&self) -> Result<(), SemanticTransitionError> {
+        self.require_current_model_caches()?;
         let header = self.bank.header;
         let next_word = (header.base_word >> 1)
             .checked_add(1)
@@ -13348,6 +13381,7 @@ content_kernel_parameter!(SemanticTensorLayout);
 content_kernel_parameter!(ContinuationInputs);
 content_kernel_parameter!(PolicyDescriptor);
 content_kernel_parameter!(prepared_replay::ReplayCopyDescriptor);
+content_kernel_parameter!(learning_phase::FoldDeviceAssignment);
 #[cfg(feature = "semantic-policy")]
 content_kernel_parameter!(PolicyUniformDescriptor);
 
@@ -22199,6 +22233,7 @@ impl SemanticTransitionSession {
             &parent.role_counts,
             parent.rng,
             1,
+            None,
         );
         if result.is_err() {
             self.poisoned = true;
@@ -22275,10 +22310,26 @@ impl SemanticTransitionSession {
         }
         let mut material = PublicationMaterial::decode(bytes)?;
         let header = material.bank.header;
-        let rng = header.rng_binding()?;
+        let mut rng = header.rng_binding()?;
+        let mut fold = None;
         if let Some(transition) = transition {
-            let record = transition.apply(&mut material)?;
+            let (record, absorption) = transition.apply(&mut material)?;
             material.learning_phases.push(record);
+            fold = absorption;
+        }
+        if fold.is_some() {
+            let generation = header
+                .model_generation
+                .checked_add(1)
+                .filter(|n| *n <= u64::from(u32::MAX))
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            material.bank.header.model_generation = generation;
+            material.bank.header.neural_generation = header
+                .neural_generation
+                .checked_add(1)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            material.bank.state.model_generation = generation as u32;
+            rng.model_generation = generation as u32;
         }
         if header.authority_generation == 0 {
             return Err(publication_input_error(
@@ -22415,7 +22466,14 @@ impl SemanticTransitionSession {
                 &material.terminals,
                 &material.role_counts,
                 rng,
-                if transition.is_some() { 5 } else { 4 },
+                if fold.is_some() {
+                    7
+                } else if transition.is_some() {
+                    5
+                } else {
+                    4
+                },
+                fold.as_ref(),
             )?;
             if transition.is_none()
                 && (restored.logical_digest != header.logical_digest
@@ -22633,6 +22691,7 @@ impl SemanticTransitionSession {
                 &material.role_counts,
                 original.rng_binding()?,
                 5,
+                None,
             )?;
             if published.logical_digest == original.logical_digest
                 || published.state_digest == original.state_digest
@@ -22819,6 +22878,7 @@ impl SemanticTransitionSession {
         role_counts: &[u64; 55],
         rng: SemanticRngBinding,
         operation: u64,
+        fold: Option<&learning_phase::LearningFoldPlan>,
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
         let storage = Arc::clone(
             self.publication
@@ -22900,6 +22960,9 @@ impl SemanticTransitionSession {
                 }
             }
         }
+        if let Some(fold) = fold {
+            self.apply_learning_fold(fold)?;
+        }
         upload_publication(&self.provider, &[bank], &storage.banks[0])?;
         upload_publication(&self.provider, &[bank], &storage.banks[1])?;
         for bank in 0..2 {
@@ -22977,7 +23040,7 @@ impl SemanticTransitionSession {
             || header.publication_word != 0
             || control.word != 0
             || header.model_geometry_digest != bank.header.model_geometry_digest
-            || (operation != 1
+            || (operation == 4
                 && header.model_numerical_digest != bank.header.model_numerical_digest)
         {
             return Err(SemanticTransitionError::ObservationMismatch);

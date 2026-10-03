@@ -76,8 +76,9 @@ impl SemanticTransitionSession {
             .0
             .content_identity();
         let device = self.provider.device().ordinal();
-        let source_material =
-            Identity256::from_bytes(Sha256::digest(self.published_state_material(lease)?).into());
+        let source_bytes = self.published_state_material(lease)?;
+        PublicationMaterial::decode(&source_bytes)?.require_current_model_caches()?;
+        let source_material = Identity256::from_bytes(Sha256::digest(&source_bytes).into());
         let cohort = if let Some(original) = cohort {
             if original.domain != domain || original.task != task || original.device != device {
                 return Err(publication_input_error("evaluation cohort differs from the original admitted task, domain or CUDA device"));

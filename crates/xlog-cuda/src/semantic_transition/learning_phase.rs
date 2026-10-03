@@ -121,7 +121,8 @@ impl SemanticLearningPhaseTransition {
     pub(super) fn apply(
         &self,
         material: &mut PublicationMaterial,
-    ) -> Result<SemanticLearningPhaseRecord, SemanticTransitionError> {
+    ) -> Result<(SemanticLearningPhaseRecord, Option<LearningFoldPlan>), SemanticTransitionError>
+    {
         if !matches!(
             (self.source, self.target),
             (
@@ -187,68 +188,83 @@ impl SemanticLearningPhaseTransition {
         {
             return Err(publication_input_error("copy/reset recipe must cover every model and learning view exactly once in native order"));
         }
-        let original = &material.model_allocations;
-        let mut allocations = original.clone();
-        for operation in &self.recipe {
-            if matches!(operation, SemanticLearningCopyReset::Preserve { .. }) {
-                continue;
+        let fold = if self.source == SemanticLearningPhase::Fast
+            && self.target == SemanticLearningPhase::Consolidation
+        {
+            Some(LearningFoldPlan::prepare(material, self)?)
+        } else {
+            None
+        };
+        // Absorption reads the original effective factors on the device. In
+        // particular, its masters must not be reset from pre-absorption values.
+        if fold.is_none() {
+            let original = &material.model_allocations;
+            let mut allocations = original.clone();
+            for operation in &self.recipe {
+                if matches!(operation, SemanticLearningCopyReset::Preserve { .. }) {
+                    continue;
+                }
+                visit_expected_values(
+                    material,
+                    operation,
+                    self.target,
+                    self.phase_index,
+                    |allocation, offset, value| {
+                        allocations[allocation][offset..offset + value.len()]
+                            .copy_from_slice(value);
+                        Ok(())
+                    },
+                )?;
             }
-            visit_expected_values(
-                material,
-                operation,
-                self.target,
-                self.phase_index,
-                |allocation, offset, value| {
-                    allocations[allocation][offset..offset + value.len()].copy_from_slice(value);
-                    Ok(())
-                },
-            )?;
-        }
-        for operation in &self.recipe {
-            visit_expected_values(
-                material,
-                operation,
-                self.target,
-                self.phase_index,
-                |allocation, offset, value| {
-                    if allocations[allocation][offset..offset + value.len()] != *value {
-                        return Err(publication_input_error(
+            for operation in &self.recipe {
+                visit_expected_values(
+                    material,
+                    operation,
+                    self.target,
+                    self.phase_index,
+                    |allocation, offset, value| {
+                        if allocations[allocation][offset..offset + value.len()] != *value {
+                            return Err(publication_input_error(
                             "copy/reset recipe has conflicting effects on shared physical views",
                         ));
-                    }
-                    Ok(())
-                },
-            )?;
-        }
-        material.model_allocations = allocations;
-        for range in &mut material.ranges {
-            if matches!(range.range.role, 18..=25) {
-                let (allocation, offset) = material
-                    .model_memory
-                    .location(range.range.role, range.range.index)?;
-                range.bytes = material.model_allocations[allocation]
-                    [offset..offset + range.bytes.len()]
-                    .to_vec();
+                        }
+                        Ok(())
+                    },
+                )?;
+            }
+            material.model_allocations = allocations;
+            for range in &mut material.ranges {
+                if matches!(range.range.role, 18..=25) {
+                    let (allocation, offset) = material
+                        .model_memory
+                        .location(range.range.role, range.range.index)?;
+                    range.bytes = material.model_allocations[allocation]
+                        [offset..offset + range.bytes.len()]
+                        .to_vec();
+                }
             }
         }
         let header = material.bank.header;
-        Ok(SemanticLearningPhaseRecord {
-            source: self.source,
-            target: self.target,
-            phase_index: self.phase_index,
-            completed_updates_index: self.completed_updates_index,
-            predecessor: SemanticPublishedIdentity {
-                instance: header.instance,
-                word: header.publication_word,
-                logical_digest: header.logical_digest,
-                state_digest: header.state_digest,
+        Ok((
+            SemanticLearningPhaseRecord {
+                source: self.source,
+                target: self.target,
+                phase_index: self.phase_index,
+                completed_updates_index: self.completed_updates_index,
+                predecessor: SemanticPublishedIdentity {
+                    instance: header.instance,
+                    word: header.publication_word,
+                    logical_digest: header.logical_digest,
+                    state_digest: header.state_digest,
+                },
+                model_generation: header.model_generation,
+                completed_updates: updates as u64,
+                recipe_digest: self.recipe_digest(),
+                recipe: self.recipe.clone(),
+                acceptance: self.acceptance.clone(),
             },
-            model_generation: header.model_generation,
-            completed_updates: updates as u64,
-            recipe_digest: self.recipe_digest(),
-            recipe: self.recipe.clone(),
-            acceptance: self.acceptance.clone(),
-        })
+            fold,
+        ))
     }
 }
 
@@ -401,6 +417,712 @@ fn visit_expected_values(
         visit(allocation, offset, expected)?;
     }
     Ok(())
+}
+
+struct FoldAssignment {
+    key: (u64, u64),
+    mode: u64,
+    source: Option<(u64, u64)>,
+    factors: Option<((u64, u64), (u64, u64))>,
+}
+
+/// Derived only from the complete original ModelContract and native memory map.
+/// This is an ephemeral launch plan, not a new producer roster or wire format.
+pub(super) struct LearningFoldPlan {
+    assignments: Vec<FoldAssignment>,
+    scale_bits: u32,
+    phase: u64,
+}
+
+fn fold_error() -> SemanticTransitionError {
+    publication_input_error(
+        "adapter absorption differs from its original model contract or physical views",
+    )
+}
+
+fn schema_array(
+    value: &serde_json::Value,
+) -> Result<&Vec<serde_json::Value>, SemanticTransitionError> {
+    value.as_array().ok_or_else(fold_error)
+}
+
+fn tagged<'a>(
+    value: &'a serde_json::Value,
+    tag: &str,
+) -> Result<&'a serde_json::Value, SemanticTransitionError> {
+    let pair = schema_array(value)?;
+    if pair.len() != 2 || pair[0].as_str() != Some(tag) {
+        return Err(fold_error());
+    }
+    Ok(&pair[1])
+}
+
+fn original_float(value: &serde_json::Value) -> Result<f32, SemanticTransitionError> {
+    // Python's canonical float.hex encoding, not a caller-provided decimal or
+    // a replacement scale inferred from target names.
+    let text = tagged(value, "float")?.as_str().ok_or_else(fold_error)?;
+    let (negative, text) = text.strip_prefix('-').map_or((false, text), |s| (true, s));
+    let (mantissa, exponent) = text
+        .strip_prefix("0x")
+        .and_then(|s| s.split_once('p'))
+        .ok_or_else(fold_error)?;
+    let (whole, fraction) = mantissa.split_once('.').ok_or_else(fold_error)?;
+    if whole.len() != 1 || fraction.is_empty() || fraction.len() > 13 {
+        return Err(fold_error());
+    }
+    let significand =
+        u64::from_str_radix(&format!("{whole}{fraction}"), 16).map_err(|_| fold_error())?;
+    let exponent = exponent.parse::<i32>().map_err(|_| fold_error())?;
+    if !(-1022..=1023).contains(&exponent) || significand > (1u64 << 53) - 1 {
+        return Err(fold_error());
+    }
+    let value = (significand as f64 / (1u64 << (4 * fraction.len())) as f64) * 2f64.powi(exponent);
+    let value = if negative { -value } else { value } as f32;
+    if !value.is_finite() {
+        return Err(fold_error());
+    }
+    Ok(value)
+}
+
+fn view_key(
+    value: &serde_json::Value,
+    material: &PublicationMaterial,
+) -> Result<(u64, u64), SemanticTransitionError> {
+    let fields = schema_array(&value["layout"])?;
+    if fields.len() != 8 {
+        return Err(fold_error());
+    }
+    let word = |i: usize| fields[i].as_u64().ok_or_else(fold_error);
+    let key = (word(0)?, word(1)?);
+    let layout = material.layouts.get(&key).ok_or_else(fold_error)?;
+    if [
+        layout.role,
+        layout.index,
+        layout.element_bytes,
+        layout.scalar_type,
+        layout.rank,
+        layout.logical_axis,
+    ] != [word(0)?, word(1)?, word(2)?, word(3)?, word(4)?, word(5)?]
+        || !matches!(key.0, 18..=25)
+    {
+        return Err(fold_error());
+    }
+    for (field, expected) in [(6, layout.dimensions), (7, layout.strides_bytes)] {
+        let actual = schema_array(&fields[field])?;
+        if actual.len() != 4
+            || actual
+                .iter()
+                .zip(expected)
+                .any(|(v, n)| v.as_u64() != Some(n))
+        {
+            return Err(fold_error());
+        }
+    }
+    Ok(key)
+}
+
+impl LearningFoldPlan {
+    fn prepare(
+        material: &PublicationMaterial,
+        transition: &SemanticLearningPhaseTransition,
+    ) -> Result<Self, SemanticTransitionError> {
+        let record = material
+            .ranges
+            .iter()
+            .find(|r| (r.range.role, r.range.index) == (44, 0))
+            .ok_or_else(fold_error)?;
+        let schema = retained_model_schema(&record.bytes, material.contract.model_contract_layout)?
+            .ok_or_else(fold_error)?;
+        let model = &schema["model"];
+        let physical = model["physical"].as_object().ok_or_else(fold_error)?;
+        let learning = &model["learning"];
+        let views = schema_array(&learning["views"])?;
+        let keys = views
+            .iter()
+            .map(|v| view_key(v, material))
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected = material
+            .layouts
+            .keys()
+            .filter(|(role, _)| matches!(role, 18..=25))
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if keys.iter().copied().collect::<BTreeSet<_>>() != expected || keys.len() != expected.len()
+        {
+            return Err(fold_error());
+        }
+        let mut allocation_classes = BTreeMap::new();
+        let mut storage_classes = BTreeMap::new();
+        for (view, key) in views.iter().zip(&keys) {
+            let geometry = &view["geometry"];
+            let layout = material.layouts[key];
+            let native_view = material
+                .model_memory
+                .views
+                .iter()
+                .find(|v| (v.role, v.index) == *key)
+                .ok_or_else(fold_error)?;
+            let storage = &material.model_memory.storages[native_view.storage as usize];
+            let word = |name: &str| geometry[name].as_u64().ok_or_else(fold_error);
+            let allocation = geometry["allocation"].as_str().ok_or_else(fold_error)?;
+            let storage_class = geometry["storage"].as_str().ok_or_else(fold_error)?;
+            let dimensions = schema_array(&geometry["shape"])?;
+            let strides = schema_array(&geometry["stride"])?;
+            let dtype = match geometry["dtype"].as_str() {
+                Some("torch.uint8") => (1, 1),
+                Some("torch.uint32") => (2, 4),
+                Some("torch.uint64") => (3, 8),
+                Some("torch.float16") => (4, 2),
+                Some("torch.bfloat16") => (5, 2),
+                Some("torch.float32") => (6, 4),
+                Some("torch.int64") => (7, 8),
+                Some("torch.bool") => (8, 1),
+                _ => return Err(fold_error()),
+            };
+            if dimensions.len() != layout.rank as usize
+                || dtype != (layout.scalar_type, layout.element_bytes)
+                || strides.len() != dimensions.len()
+                || dimensions
+                    .iter()
+                    .zip(layout.dimensions)
+                    .any(|(d, n)| d.as_u64() != Some(n))
+                || strides.iter().zip(layout.strides_bytes).any(|(s, n)| {
+                    s.as_u64().and_then(|s| s.checked_mul(layout.element_bytes)) != Some(n)
+                })
+                || word("offset")?.checked_mul(layout.element_bytes)
+                    != Some(native_view.byte_offset)
+                || word("span_bytes")? != storage.span_bytes
+                || word("allocation_byte_offset")? != storage.byte_offset
+                || word("allocation_span_bytes")?
+                    != material.model_memory.allocation_bytes[storage.allocation as usize]
+                || allocation_classes
+                    .insert(allocation, storage.allocation)
+                    .is_some_and(|a| a != storage.allocation)
+                || storage_classes
+                    .insert(storage_class, native_view.storage)
+                    .is_some_and(|s| s != native_view.storage)
+            {
+                return Err(fold_error());
+            }
+        }
+        if allocation_classes
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != allocation_classes.len()
+            || storage_classes
+                .values()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != storage_classes.len()
+        {
+            return Err(fold_error());
+        }
+        let key_at = |value: &serde_json::Value| {
+            value
+                .as_u64()
+                .and_then(|i| usize::try_from(i).ok())
+                .and_then(|i| keys.get(i))
+                .copied()
+                .ok_or_else(fold_error)
+        };
+        let mut aliases = BTreeMap::new();
+        let mut owner_aliases = BTreeMap::new();
+        let mut masters = BTreeMap::new();
+        let mut owners = BTreeSet::new();
+        if key_at(&learning["shared"]["phase"])? != (23, transition.phase_index)
+            || key_at(&learning["shared"]["completed_updates"])?
+                != (23, transition.completed_updates_index)
+        {
+            return Err(fold_error());
+        }
+        for leaf in schema_array(&learning["leaves"])? {
+            let key = key_at(&leaf["effective"])?;
+            let view = &views[leaf["effective"].as_u64().ok_or_else(fold_error)? as usize];
+            let owner = view["owner"].as_str().ok_or_else(fold_error)?;
+            let entry = physical.get(owner).ok_or_else(fold_error)?;
+            if !owners.insert(owner) {
+                return Err(fold_error());
+            }
+            if entry["kind"].as_str() != Some("parameter")
+                || entry["geometry"] != view["geometry"]
+                || entry["aliases"] != leaf["aliases"]
+                || !(18..=20).contains(&key.0)
+            {
+                return Err(fold_error());
+            }
+            let names = schema_array(&leaf["aliases"])?;
+            if names.is_empty() || owner_aliases.insert(key, names.clone()).is_some() {
+                return Err(fold_error());
+            }
+            for name in names {
+                if aliases
+                    .insert(name.as_str().ok_or_else(fold_error)?.to_owned(), key)
+                    .is_some()
+                {
+                    return Err(fold_error());
+                }
+            }
+            if !leaf["master"].is_null() {
+                if masters.insert(key_at(&leaf["master"])?, key).is_some() {
+                    return Err(fold_error());
+                }
+            }
+        }
+        for buffer in schema_array(&learning["buffers"])? {
+            let key = key_at(&buffer["tensor"])?;
+            let view = &views[buffer["tensor"].as_u64().ok_or_else(fold_error)? as usize];
+            let entry = physical
+                .get(view["owner"].as_str().ok_or_else(fold_error)?)
+                .ok_or_else(fold_error)?;
+            if !owners.insert(view["owner"].as_str().ok_or_else(fold_error)?) {
+                return Err(fold_error());
+            }
+            if entry["kind"].as_str() != Some("buffer")
+                || entry["geometry"] != view["geometry"]
+                || entry["aliases"] != buffer["aliases"]
+            {
+                return Err(fold_error());
+            }
+            for name in schema_array(&buffer["aliases"])? {
+                if aliases
+                    .insert(name.as_str().ok_or_else(fold_error)?.to_owned(), key)
+                    .is_some()
+                {
+                    return Err(fold_error());
+                }
+            }
+        }
+        if owners != physical.keys().map(String::as_str).collect::<BTreeSet<_>>() {
+            return Err(fold_error());
+        }
+        let state = schema_array(&model["roots"]["adapter"]["modules"][""][1])?;
+        let mut fields = BTreeMap::new();
+        for field in state {
+            let field = schema_array(field)?;
+            if field.len() != 2
+                || fields
+                    .insert(field[0].as_str().ok_or_else(fold_error)?, &field[1])
+                    .is_some()
+            {
+                return Err(fold_error());
+            }
+        }
+        let field = |name: &str| fields.get(name).copied().ok_or_else(fold_error);
+        let targets = schema_array(tagged(field("target_names")?, "tuple")?)?;
+        let shapes = schema_array(tagged(field("target_shapes")?, "tuple")?)?;
+        let rank = tagged(field("rank")?, "int")?
+            .as_u64()
+            .filter(|r| *r > 0)
+            .ok_or_else(fold_error)?;
+        let scale = original_float(field("scale")?)?;
+        if targets.is_empty()
+            || targets.len() != shapes.len()
+            || original_float(field("dropout")?)? != 0.0
+            || tagged(field("initialization_identity")?, "str")?
+                .as_str()
+                .is_none_or(str::is_empty)
+        {
+            return Err(fold_error());
+        }
+        let mut assignments = Vec::new();
+        for operation in &transition.recipe {
+            let key = operation.key();
+            let source = match *operation {
+                SemanticLearningCopyReset::MasterFromEffective {
+                    effective_role,
+                    effective_index,
+                    ..
+                } => {
+                    let effective = (effective_role, effective_index);
+                    if masters.get(&key) != Some(&effective) {
+                        return Err(fold_error());
+                    }
+                    let layout = material.layouts[&key];
+                    let original = material.layouts.get(&effective).ok_or_else(fold_error)?;
+                    if key.0 != 21
+                        || layout.scalar_type != 6
+                        || layout.element_bytes != 4
+                        || original.scalar_type != 5
+                        || original.element_bytes != 2
+                        || layout.rank != original.rank
+                        || layout.dimensions != original.dimensions
+                    {
+                        return Err(fold_error());
+                    }
+                    Some(effective)
+                }
+                SemanticLearningCopyReset::Zero { role, .. } if !matches!(role, 21 | 24 | 25) => {
+                    return Err(fold_error())
+                }
+                SemanticLearningCopyReset::Phase { index } if index != transition.phase_index => {
+                    return Err(fold_error())
+                }
+                _ => None,
+            };
+            assignments.push(FoldAssignment {
+                key,
+                mode: match operation {
+                    SemanticLearningCopyReset::Preserve { .. } => 0,
+                    SemanticLearningCopyReset::Zero { .. } => 1,
+                    SemanticLearningCopyReset::MasterFromEffective { .. } => 2,
+                    SemanticLearningCopyReset::Phase { .. } => 3,
+                },
+                source,
+                factors: None,
+            });
+        }
+        if masters
+            .keys()
+            .any(|key| !assignments.iter().any(|a| a.key == *key && a.mode == 2))
+        {
+            return Err(fold_error());
+        }
+        for leaf in schema_array(&learning["leaves"])? {
+            for field in ["m", "v", "t", "gradient", "presence"] {
+                if !leaf[field].is_null() {
+                    let key = key_at(&leaf[field])?;
+                    if !assignments.iter().any(|a| a.key == key && a.mode == 1) {
+                        return Err(fold_error());
+                    }
+                }
+            }
+        }
+        let accumulation = key_at(&learning["shared"]["accumulation"])?;
+        if !assignments
+            .iter()
+            .any(|a| a.key == accumulation && a.mode == 1)
+        {
+            return Err(fold_error());
+        }
+        let mut replaced = BTreeSet::new();
+        let mut adapted_aliases = BTreeSet::new();
+        let mut previous = None;
+        for (index, (target, shape)) in targets.iter().zip(shapes).enumerate() {
+            let target = tagged(target, "str")?.as_str().ok_or_else(fold_error)?;
+            if previous.is_some_and(|p| p >= target) {
+                return Err(fold_error());
+            }
+            previous = Some(target);
+            let shape = schema_array(tagged(shape, "tuple")?)?;
+            if shape.len() != 2 {
+                return Err(fold_error());
+            }
+            let rows = tagged(&shape[0], "int")?
+                .as_u64()
+                .filter(|n| *n > 0)
+                .ok_or_else(fold_error)?;
+            let columns = tagged(&shape[1], "int")?
+                .as_u64()
+                .filter(|n| *n > 0)
+                .ok_or_else(fold_error)?;
+            let names = [
+                format!("model.{target}.weight"),
+                format!("adapter.residuals.{index}.down"),
+                format!("adapter.residuals.{index}.up"),
+                format!("adapter.residuals.{index}.neutral_down"),
+            ];
+            let actual = names
+                .iter()
+                .map(|name| aliases.get(name).copied().ok_or_else(fold_error))
+                .collect::<Result<Vec<_>, _>>()?;
+            let [weight, down, up, neutral] = actual.as_slice() else {
+                return Err(fold_error());
+            };
+            for (key, dims, role) in [
+                (*weight, [rows, columns, 0, 0], 18),
+                (*down, [rank, columns, 0, 0], 19),
+                (*up, [rows, rank, 0, 0], 19),
+                (*neutral, [rank, columns, 0, 0], 19),
+            ] {
+                let layout = material.layouts[&key];
+                if key.0 != role
+                    || layout.rank != 2
+                    || layout.dimensions != dims
+                    || !matches!((layout.scalar_type, layout.element_bytes), (5, 2) | (6, 4))
+                    || (key == *neutral && layout.scalar_type != material.layouts[down].scalar_type)
+                    || !transition
+                        .recipe
+                        .contains(&SemanticLearningCopyReset::Preserve {
+                            role: key.0,
+                            index: key.1,
+                        })
+                {
+                    return Err(fold_error());
+                }
+            }
+            for key in [*weight, *down, *up] {
+                replaced.insert(key);
+            }
+            for name in &names[..3] {
+                adapted_aliases.insert(name.clone());
+            }
+            assignments.push(FoldAssignment {
+                key: *weight,
+                mode: 4,
+                source: None,
+                factors: Some((*up, *down)),
+            });
+            assignments.push(FoldAssignment {
+                key: *down,
+                mode: 5,
+                source: Some(*neutral),
+                factors: None,
+            });
+            assignments.push(FoldAssignment {
+                key: *up,
+                mode: 1,
+                source: None,
+                factors: None,
+            });
+        }
+        assignments.retain(|a| {
+            a.mode != 0
+                || !replaced.contains(&a.key)
+                || owner_aliases.get(&a.key).is_some_and(|names| {
+                    names
+                        .iter()
+                        .any(|n| n.as_str().is_none_or(|n| !adapted_aliases.contains(n)))
+                })
+        });
+        Ok(Self {
+            assignments,
+            scale_bits: scale.to_bits(),
+            phase: transition.target as u64,
+        })
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(super) struct FoldDeviceAssignment {
+    original: u64,
+    scratch: u64,
+    expected: u64,
+    source: u64,
+    up: u64,
+    down: u64,
+    count: u64,
+    mode: u64,
+    phase: u64,
+    scale_bits: u64,
+    serial_scatter: u64,
+    layout: SemanticTensorLayout,
+    source_layout: SemanticTensorLayout,
+    up_layout: SemanticTensorLayout,
+    down_layout: SemanticTensorLayout,
+}
+
+unsafe impl DeviceRepr for FoldDeviceAssignment {}
+const _: () = assert!(size_of::<FoldDeviceAssignment>() == 536);
+
+fn packed_layout(
+    mut layout: SemanticTensorLayout,
+) -> Result<SemanticTensorLayout, SemanticTransitionError> {
+    let mut stride = layout.element_bytes;
+    for axis in (0..layout.rank as usize).rev() {
+        layout.strides_bytes[axis] = stride;
+        stride = stride
+            .checked_mul(layout.dimensions[axis])
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+    }
+    Ok(layout)
+}
+
+impl SemanticTransitionSession {
+    pub(super) fn apply_learning_fold(
+        &mut self,
+        plan: &LearningFoldPlan,
+    ) -> Result<(), SemanticTransitionError> {
+        let storage = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let pointer = |key: (u64, u64), bank: usize| {
+            let (allocation, offset) = storage.model_memory.location(key.0, key.1)?;
+            storage.allocations[storage.model_slots[allocation][bank]]
+                .device_ptr_value()
+                .checked_add(offset as u64)
+                .ok_or(SemanticTransitionError::GenerationExhausted)
+        };
+        let mut outputs = Vec::new();
+        let mut effective_outputs = BTreeMap::new();
+        for assignment in &plan.assignments {
+            let layout = storage.layouts[&assignment.key];
+            let count =
+                layout.dimensions[..layout.rank as usize]
+                    .iter()
+                    .try_fold(1u64, |n, &d| {
+                        n.checked_mul(d)
+                            .ok_or(SemanticTransitionError::GenerationExhausted)
+                    })?;
+            let bytes = count
+                .checked_mul(layout.element_bytes)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            let output = if assignment.mode == 0 || bytes == 0 {
+                None
+            } else {
+                Some(allocate_publication::<u8>(&self.provider, bytes)?)
+            };
+            if matches!(assignment.mode, 1 | 4 | 5) {
+                effective_outputs.entry(assignment.key).or_insert_with(|| {
+                    output
+                        .as_ref()
+                        .map_or(0, TrackedCudaSlice::device_ptr_value)
+                });
+            }
+            outputs.push(output);
+        }
+        let mut descriptors = Vec::new();
+        for (assignment, output) in plan.assignments.iter().zip(&outputs) {
+            let layout = storage.layouts[&assignment.key];
+            let mut descriptor = FoldDeviceAssignment {
+                original: pointer(assignment.key, 0)?,
+                scratch: pointer(assignment.key, 1)?,
+                expected: output
+                    .as_ref()
+                    .map_or(0, TrackedCudaSlice::device_ptr_value),
+                mode: assignment.mode,
+                phase: plan.phase,
+                scale_bits: u64::from(plan.scale_bits),
+                layout,
+                ..Default::default()
+            };
+            descriptor.count =
+                layout.dimensions[..layout.rank as usize]
+                    .iter()
+                    .try_fold(1u64, |n, &d| {
+                        n.checked_mul(d)
+                            .ok_or(SemanticTransitionError::GenerationExhausted)
+                    })?;
+            if let Some(source) = assignment.source {
+                descriptor.source_layout = storage.layouts[&source];
+                if assignment.mode == 2 && effective_outputs.contains_key(&source) {
+                    descriptor.source = effective_outputs[&source];
+                    descriptor.source_layout = packed_layout(descriptor.source_layout)?;
+                } else {
+                    descriptor.source = pointer(source, 0)?;
+                }
+            }
+            if let Some((up, down)) = assignment.factors {
+                descriptor.up = pointer(up, 0)?;
+                descriptor.down = pointer(down, 0)?;
+                descriptor.up_layout = storage.layouts[&up];
+                descriptor.down_layout = storage.layouts[&down];
+            }
+            // Parallel scatter is safe only for provably disjoint cells. A
+            // deliberately overlapping stride uses the same byte-exact law in
+            // serial order; the subsequent all-view check still detects conflict.
+            let mut axes = (0..layout.rank as usize)
+                .filter(|&i| layout.dimensions[i] > 1)
+                .collect::<Vec<_>>();
+            axes.sort_unstable_by_key(|&i| layout.strides_bytes[i]);
+            let mut span = layout.element_bytes;
+            for axis in axes {
+                if layout.strides_bytes[axis] < span {
+                    descriptor.serial_scatter = 1;
+                }
+                span = span
+                    .checked_add(
+                        (layout.dimensions[axis] - 1)
+                            .checked_mul(layout.strides_bytes[axis])
+                            .ok_or(SemanticTransitionError::GenerationExhausted)?,
+                    )
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            }
+            descriptors.push(descriptor);
+        }
+        let status = allocate_publication::<u64>(&self.provider, 1)?;
+        upload_publication(&self.provider, &[0u64], &status)?;
+        let execute = self
+            .provider
+            .device()
+            .inner()
+            .get_func("xlog_semantic_transition", "semantic_learning_fold")
+            .ok_or_else(|| runtime_error("kernel lookup", "learning absorption unavailable"))?;
+        let mut recorder = self.domain.new_strict_recorder();
+        storage.record(&mut recorder);
+        recorder.read_write(&status);
+        for output in outputs.iter().flatten() {
+            recorder.read_write(output);
+        }
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            // Every expectation is computed before scatter. Masters consume the
+            // already-rounded effective outputs, never an unrounded accumulator.
+            for stage in 0..4u64 {
+                for descriptor in &descriptors {
+                    if descriptor.count == 0
+                        || (stage == 0 && matches!(descriptor.mode, 0 | 2))
+                        || (stage == 1 && descriptor.mode != 2)
+                        || (stage == 2 && descriptor.mode == 0)
+                    {
+                        continue;
+                    }
+                    let blocks = descriptor.count.div_ceil(256).min(65535) as u32;
+                    // SAFETY: original, scratch, expectation and all factor
+                    // spans are derived from the complete retained native map;
+                    // their owners were recorded before this enqueue boundary.
+                    unsafe {
+                        execute.clone().launch_in(
+                            enqueue,
+                            LaunchConfig {
+                                grid_dim: (blocks, 1, 1),
+                                block_dim: (256, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (*descriptor, stage, status.device_ptr_value()),
+                        )
+                    }
+                    .map_err(|error| XlogError::Kernel(error.to_string()))?;
+                }
+            }
+            Ok::<(), XlogError>(())
+        })?;
+        wait_on_stream(
+            &self.stream,
+            &mut self.poisoned,
+            &mut self.stream_waits,
+            "cold adapter absorption and physical alias check",
+            CudaStream::synchronize,
+        )?;
+        if self.publication_read(status.view())?[0] != 0 {
+            return Err(publication_input_error("adapter absorption encountered nonfinite numerics or conflicting physical alias bytes"));
+        }
+        let mut recorder = self.domain.new_strict_recorder();
+        storage.record(&mut recorder);
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            for slots in &storage.model_slots {
+                let destination = &storage.allocations[slots[0]];
+                if destination.is_empty() {
+                    continue;
+                }
+                // SAFETY: the complete unsealed scratch allocation passed every
+                // original view before this first candidate-bank assignment.
+                unsafe {
+                    sys::cuMemcpyDtoDAsync_v2(
+                        destination.device_ptr_value(),
+                        storage.allocations[slots[1]].device_ptr_value(),
+                        destination.len(),
+                        enqueue.stream().cu_stream(),
+                    )
+                }
+                .result()
+                .map_err(|error| XlogError::Kernel(error.to_string()))?;
+            }
+            Ok::<(), XlogError>(())
+        })?;
+        wait_on_stream(
+            &self.stream,
+            &mut self.poisoned,
+            &mut self.stream_waits,
+            "cold absorbed candidate assignment",
+            CudaStream::synchronize,
+        )
+    }
 }
 
 pub(super) fn encode_history(
