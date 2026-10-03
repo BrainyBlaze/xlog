@@ -841,8 +841,13 @@ new model invocation.
 ### Completed-step action projection
 
 For a successfully published Proposal, call
-`completed_action_projection(consumer_streams=[...])` before retiring the
-segment. This typed cold projection returns the authenticated predecessor and
+`completed_action_projection(consumer_streams=[...])` before consuming the
+original policy tape or retiring the segment. Completion moves the executed
+policy and receipts into that tape; the projection follows its original
+publication bank, not the independently advancing model-weight bank. This
+export authenticates the retained completed schedule; it does not reopen the
+construction-only transition API or permit another capture. The
+typed cold projection returns the authenticated predecessor and
 successor, logical-state materials, proposal/stream/family/action-law/model
 coordinates, native winner and pre-draw actor eligibility, exact signed-return
 bits, the device-sealed batch receipt and root, the retained task-result material,
@@ -895,6 +900,47 @@ group has a count and `(role, index, four u64 digest words)` rows. Mapping rows
 are ordered by logical position, and the native parent join checks the full
 source-provenance ledger in addition to the original device input and tensor
 owners. This is a cold export; it adds no host transfer to the resident step.
+
+`estimator_bound` is the original pre-draw physical certificate for an
+actor-eligible Proposal with a physical parameter roster. It uses the same
+immutable `identity`, `bytes`, and `bytes_sha256` interface. Non-actor actions
+and models without that roster return `None`; refused or skipped Proposals and
+failed preflight do not produce a projection. A learned-lane refusal after a
+successful preflight does not remove this certificate. The native owner reads
+the retained FP64 snapshot, never the mutable producer tensor or a selected
+backward bound. The existing device preflight checks all six values per block
+for finiteness and nonnegativity and checks upward-rounded `100 * ordinary <=
+budget` separately for actor and full-step areas. A zero budget requires zero
+ordinary error; the separate underflow value is not forced to zero. Export
+neither changes that law nor enables actor eligibility.
+
+The completed-action child envelope has kind `estimator-bound` and ordinal
+zero. Its native identity binds the original completed-action owner and that
+kind; `bytes_sha256` independently hashes the complete envelope. The payload
+is little-endian `XLOG-ESTIMATOR-BOUND\0`, followed by `u64` format version 1,
+preflight-law version 1, multiplier 100, and original publication bank. Next
+come the 104-byte predecessor publication identity, model generation (`u64`),
+32-byte model geometry, model numerics, and native training-domain identities;
+then scoring-law and batch-receipt references, each consisting of its 32-byte
+native identity and 32-byte SHA-256 of its exact bytes. The batch receipt binds
+the original task content and successful completed-action preflight.
+
+The next two 32-byte fields are the original model-contract schema digest and
+model identity. Six `u64` model-contract layout fields follow in this order:
+schema begin, schema byte length, schema-digest offset, generation offset,
+numerical-digest offset, and identity offset. Two length-prefixed byte strings
+contain the complete original model-contract record and native runtime-contract
+profile. Finally, a `u64` physical-block count precedes rows in the original
+sorted physical-parameter order. Each row contains a `u64` UTF-8 name length,
+name bytes, and six original FP64 bit patterns encoded as `u64`: actor budget,
+ordinary error, underflow, then full-step budget, ordinary error, underflow.
+The block count and names are checked against the same frozen native model
+roster, including physical parameters but not buffers. Consumers retain the
+whole certificate in their episode or replay material, not just its identity.
+Its complete encoded size is `632 + M + P + 56*N + sum(name_utf8_bytes)`,
+where `M` and `P` are the original model-contract and runtime-profile byte
+lengths and `N` is the physical-parameter count. This is the certificate size,
+not a capacity bound for all other Proposal materials.
 
 `theory_deltas` contains one entry for each actual native insertion attempt,
 ordered by learned lane then edit slot. No-edit choices and actions stopped

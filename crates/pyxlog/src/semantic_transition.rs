@@ -8075,6 +8075,15 @@ impl PySemanticCompletedActionProjection {
     fn roster(&self, py: Python<'_>) -> PyResult<Py<PySemanticCompletedMaterial>> {
         completed_action_material(py, &self.inner.roster)
     }
+    /// Original native pre-draw physical certificate, never a selected VJP bound.
+    #[getter]
+    fn estimator_bound(&self, py: Python<'_>) -> PyResult<Option<Py<PySemanticCompletedMaterial>>> {
+        self.inner
+            .estimator_bound
+            .as_ref()
+            .map(|material| completed_action_material(py, material))
+            .transpose()
+    }
     #[getter]
     fn predecessor_semantic_root_digest(&self, py: Python<'_>) -> Py<PyBytes> {
         PyBytes::new(py, self.inner.predecessor_semantic_root_digest.as_bytes()).unbind()
@@ -12259,6 +12268,10 @@ impl PySemanticTransitionController {
     /// original model continuation without a policy or backward obligation.
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (task_use, *, transitions, producer, tensor_content_capacity, model_work_capacity, segment_capacity_bytes, other_external_cuda_bytes))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "cold recording binds the original producer and four independent capacity obligations"
+    )]
     fn build_segment(
         &self,
         py: Python<'_>,
@@ -12287,14 +12300,10 @@ impl PySemanticTransitionController {
                 ColdValue::read(model_work_capacity, &mut 128, 0)?.unsigned()?,
             )
             .map_err(|_| invalid("model work capacity exceeds native address space"))?,
-            segment_capacity_bytes: u64::try_from(
-                ColdValue::read(segment_capacity_bytes, &mut 128, 0)?.unsigned()?,
-            )
-            .map_err(|_| invalid("segment slab capacity exceeds native byte range"))?,
-            other_external_cuda_bytes: u64::try_from(
-                ColdValue::read(other_external_cuda_bytes, &mut 128, 0)?.unsigned()?,
-            )
-            .map_err(|_| invalid("external CUDA upper bound exceeds native byte range"))?,
+            segment_capacity_bytes: ColdValue::read(segment_capacity_bytes, &mut 128, 0)?
+                .unsigned()?,
+            other_external_cuda_bytes: ColdValue::read(other_external_cuda_bytes, &mut 128, 0)?
+                .unsigned()?,
         };
         if session.importing.load(Ordering::Acquire)
             || session.retiring.load(Ordering::Acquire)
