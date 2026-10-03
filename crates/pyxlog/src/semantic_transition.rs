@@ -17606,6 +17606,7 @@ mod tests {
                 capacity: None,
                 spent: 0,
             })),
+            checkpoint_sources: Arc::new(Mutex::new(super::CheckpointSources::default())),
             owner_thread: std::thread::current().id(),
             device_ordinal: 0,
             capacities: (0, 0, 0, 0),
