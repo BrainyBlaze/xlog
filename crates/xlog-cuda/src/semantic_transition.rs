@@ -8680,6 +8680,7 @@ struct PreparedStepInputs {
     private: Vec<TrackedCudaSlice<u8>>,
     execute: CudaFunction,
     guard: CudaFunction,
+    completed_guard: CudaFunction,
 }
 
 impl PreparedStepInputs {
@@ -8767,6 +8768,14 @@ impl PreparedStepInputs {
                 runtime_error("kernel lookup", "publication step input guard unavailable")
             })?;
         let mut private = Vec::new();
+        let completed_guard = provider
+            .device()
+            .inner()
+            .get_func(
+                "xlog_semantic_transition",
+                "semantic_completed_step_input_guard",
+            )
+            .ok_or_else(|| runtime_error("kernel lookup", "completed input guard unavailable"))?;
         let mut views = [BTreeMap::new(), BTreeMap::new()];
         let mut binding_values = [
             Vec::with_capacity(plans.len()),
@@ -8853,6 +8862,7 @@ impl PreparedStepInputs {
             binding_values,
             execute,
             guard,
+            completed_guard,
         };
         owner.validate_output_regions()?;
         Ok(owner)
@@ -9021,6 +9031,25 @@ impl PreparedStepInputs {
         domain: &ResidentExecutionDomain,
         poisoned: &mut bool,
     ) -> Result<(), SemanticTransitionError> {
+        self.verify_basis(domain, poisoned, None, false)
+    }
+
+    fn verify_completed(
+        &self,
+        domain: &ResidentExecutionDomain,
+        poisoned: &mut bool,
+        custody: Option<&PreparedReplayCustody>,
+    ) -> Result<(), SemanticTransitionError> {
+        self.verify_basis(domain, poisoned, custody, true)
+    }
+
+    fn verify_basis(
+        &self,
+        domain: &ResidentExecutionDomain,
+        poisoned: &mut bool,
+        custody: Option<&PreparedReplayCustody>,
+        completed: bool,
+    ) -> Result<(), SemanticTransitionError> {
         let mut recorder = domain.new_strict_recorder();
         recorder.read(&self.header);
         recorder.read(&self.source);
@@ -9038,21 +9067,51 @@ impl PreparedStepInputs {
         for allocation in &self.private {
             recorder.read(allocation);
         }
+        let bindings = if let Some(custody) = custody {
+            if !custody.owns_inputs(self) {
+                return Err(publication_input_error(
+                    "retained input guard belongs to another original step",
+                ));
+            }
+            let bindings = custody.input_bindings();
+            recorder.read(bindings);
+            for input in &self.plans {
+                if matches!(input.role, 1 | 4 | 5 | 18..=25) {
+                    let view = custody.input_view(input.role, input.index)?.0;
+                    recorder.read(&view);
+                    if matches!(input.role, 18..=25) {
+                        recorder.read(
+                            &view
+                                .allocation_view()
+                                .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                        );
+                    }
+                }
+            }
+            [bindings, bindings]
+        } else {
+            [&self.bindings[0], &self.bindings[1]]
+        };
         let arguments = (
             *self.reader.device_ptr(),
             self.header.device_ptr_value(),
             self.source.device_ptr_value(),
-            self.bindings[0].device_ptr_value(),
-            self.bindings[1].device_ptr_value(),
-            self.bindings[0].len() as u64,
+            bindings[0].device_ptr_value(),
+            bindings[1].device_ptr_value(),
+            bindings[0].len() as u64,
             self.ranges.device_ptr_value(),
             self.metadata_digests.device_ptr_value(),
         );
+        let guard = if completed {
+            &self.completed_guard
+        } else {
+            &self.guard
+        };
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
             // SAFETY: private producer snapshots and original shared aliases are
             // retained. No later bank or digest can replace this original basis.
             unsafe {
-                self.guard.clone().launch_in(
+                guard.clone().launch_in(
                     enqueue,
                     LaunchConfig {
                         grid_dim: (1, 1, 1),
@@ -10650,6 +10709,18 @@ impl TensorContentBuffers {
         execute: &CudaFunction,
         verify: bool,
     ) -> Result<(), SemanticTransitionError> {
+        self.enqueue_with_custody(domain, poisoned, execute, verify, None, false)
+    }
+
+    fn enqueue_with_custody(
+        &self,
+        domain: &ResidentExecutionDomain,
+        poisoned: &mut bool,
+        execute: &CudaFunction,
+        verify: bool,
+        custody: Option<&PreparedReplayCustody>,
+        completed: bool,
+    ) -> Result<(), SemanticTransitionError> {
         if let TensorContentSeals::Model(model) = &self.seals {
             if !verify || model.ranges.len() != self.tensors.len() + 1 {
                 return Err(SemanticTransitionError::ObservationMismatch);
@@ -10661,13 +10732,47 @@ impl TensorContentBuffers {
                 if let CapturedTensorDigest::Publication(inputs) = &digests[ordinal] {
                     if !digests[..ordinal].iter().any(|digest| matches!(digest,
                         CapturedTensorDigest::Publication(previous) if Arc::ptr_eq(inputs, previous))) {
-                        inputs.verify(domain, poisoned)?;
+                        if completed {
+                            inputs.verify_completed(domain, poisoned, custody)?;
+                        } else {
+                            inputs.verify(domain, poisoned)?;
+                        }
                     }
                     // The full-capacity alias may have a shorter original
                     // logical interval. Its original device range is the basis.
                     continue;
                 }
             }
+            // Keep the caller's original tensor owners in `self.tensors` for
+            // every ownership check. Only completed prepared model verification
+            // reads the pre-mutation native backing under its original seal.
+            let retained;
+            let retained_view = match (&self.seals, custody) {
+                (TensorContentSeals::Model(model), Some(custody)) => {
+                    let bank = model
+                        .prepared
+                        .as_ref()
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?
+                        .bank;
+                    custody.model_content_view(tensor, bank)?
+                }
+                _ => None,
+            };
+            let tensor = if let Some((view, layout)) = retained_view {
+                if layout != tensor.layout {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                retained = PreparedSemanticTensor {
+                    layout,
+                    data: *view.device_ptr(),
+                    native_allocation: view.allocation_provenance(),
+                    source: Some(view),
+                    ..tensor.clone()
+                };
+                &retained
+            } else {
+                tensor
+            };
             let (pointer, bytes) = tensor
                 .source
                 .as_ref()
@@ -15213,6 +15318,7 @@ impl SemanticTransitionSession {
                         Some(PreparedReplayCustody::allocate(
                             &self.provider,
                             &storage,
+                            &inputs,
                             self.graph.transition_arena_view().len(),
                             &mut reservation,
                             &self.learning_phases,
@@ -15950,7 +16056,7 @@ impl SemanticTransitionSession {
     }
 
     fn prepared_tensor_view(
-        &self,
+        &mut self,
         step: &SemanticPreparedStep,
         role: SemanticStateRole,
         index: u64,
@@ -15961,6 +16067,19 @@ impl SemanticTransitionSession {
             return Err(publication_input_error(
                 "prepared tensor bank must be zero or one",
             ));
+        }
+        let retained = self
+            .prepared_segment
+            .as_ref()
+            .expect("checked prepared scope")
+            .finished;
+        if retained {
+            let actual_bank = self.prepared_completed_parent_bank(step.token)?;
+            if actual_bank != bank {
+                return Err(publication_input_error(
+                    "completed tensor requires the original executed branch bank",
+                ));
+            }
         }
         let inputs = self.steps[&step.token]
             .inputs
@@ -15973,10 +16092,20 @@ impl SemanticTransitionSession {
             .ok_or_else(|| {
                 publication_input_error("prepared tensor has no fixed original input owner")
             })?;
-        Ok((
-            inputs.views[bank][&(role as u64, index)].clone(),
-            plan.layout,
-        ))
+        let custody = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("checked prepared owner")
+            .replay_custody
+            .as_ref();
+        let view = if let Some(custody) =
+            custody.filter(|_| retained && matches!(role as u64, 1 | 4 | 5 | 18..=25))
+        {
+            custody.input_view(role as u64, index)?.0
+        } else {
+            inputs.views[bank][&(role as u64, index)].clone()
+        };
+        Ok((view, plan.layout))
     }
 
     pub fn prepared_terminal(
@@ -16098,7 +16227,13 @@ impl SemanticTransitionSession {
                 runtime_error("completed model observation stream admission", error)
             })?;
         self.complete_step_consumers_by_token(step.token, consumer_streams)?;
-        inputs.verify(&self.domain, &mut self.poisoned)?;
+        let custody = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("checked prepared owner")
+            .replay_custody
+            .as_ref();
+        inputs.verify_completed(&self.domain, &mut self.poisoned, custody)?;
         let parent = self.publication_read(inputs.header.view())?[0];
         let reader = self.publication_read(reader)?[0];
         let result = self.publication_read(result)?[0];
@@ -23379,8 +23514,43 @@ impl SemanticTransitionSession {
             .map_err(|e| runtime_error("tensor content stream admission", e))?;
         let result = (|| {
             self.order_step_content_inputs(witness.reader_token, consumer_stream)?;
+            let step_owner = &self.steps[&witness.reader_token];
+            let retained = self
+                .prepared_segment
+                .as_ref()
+                .is_some_and(|build| build.completed)
+                && step_owner
+                    .prepared
+                    .as_ref()
+                    .is_some_and(|prepared| prepared.observed);
+            let custody = if retained {
+                let bank = self.prepared_completed_parent_bank(witness.reader_token)?;
+                let content = &self.steps[&witness.reader_token].content[witness.index];
+                if matches!(&content.seals, TensorContentSeals::Model(seals)
+                    if seals.prepared.as_ref().is_none_or(|source| source.bank != bank))
+                {
+                    return Err(publication_input_error(
+                        "completed model witness requires its original executed branch bank",
+                    ));
+                }
+                self.steps[&witness.reader_token]
+                    .prepared
+                    .as_ref()
+                    .expect("checked prepared owner")
+                    .replay_custody
+                    .as_ref()
+            } else {
+                None
+            };
             let content = &self.steps[&witness.reader_token].content[witness.index];
-            content.enqueue(&self.domain, &mut self.poisoned, &execute, verify)?;
+            content.enqueue_with_custody(
+                &self.domain,
+                &mut self.poisoned,
+                &execute,
+                verify,
+                custody,
+                retained,
+            )?;
             self.order_content_consumers(consumer_stream)
         })();
         if result.is_err() {

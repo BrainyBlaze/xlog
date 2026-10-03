@@ -63,6 +63,9 @@ struct ReplaySnapshot {
 pub(super) struct PreparedReplayCustody {
     parent: ReplaySnapshot,
     successor: ReplaySnapshot,
+    input_bindings: TrackedCudaSlice<PublicationStepInput>,
+    input_views: BTreeMap<(u64, u64), (DeviceMemoryView<u8>, SemanticTensorLayout)>,
+    original_inputs: Arc<PreparedStepInputs>,
     copy: CudaFunction,
     #[cfg(feature = "semantic-policy")]
     learning_phases: Vec<SemanticLearningPhaseRecord>,
@@ -152,14 +155,20 @@ impl PreparedReplayCustody {
         let count = storage.bank_templates[0].len();
         let parent = snapshot_allocation_bytes(&replay_plan(storage, true)?, count, arena_words)?;
         let successor = snapshot_allocation_bytes(&replay_plan(storage, false)?, count, 0)?;
+        let input_bytes = PreparedStepInputs::plan(storage)?
+            .len()
+            .checked_mul(size_of::<PublicationStepInput>())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
         parent
             .checked_add(successor)
+            .and_then(|bytes| bytes.checked_add(input_bytes as u64))
             .ok_or(SemanticTransitionError::GenerationExhausted)
     }
 
     pub(super) fn allocate(
         provider: &CudaKernelProvider,
         storage: &PublicationStorage,
+        inputs: &Arc<PreparedStepInputs>,
         arena_words: usize,
         reservation: &mut GpuMemoryReservation,
         learning_phases: &[SemanticLearningPhaseRecord],
@@ -174,14 +183,63 @@ impl PreparedReplayCustody {
             .ok_or_else(|| runtime_error("kernel lookup", "prepared replay custody unavailable"))?;
         #[cfg(not(feature = "semantic-policy"))]
         let _ = learning_phases;
+        let parent = ReplaySnapshot::allocate(
+            provider,
+            replay_plan(storage, true)?,
+            storage.bank_templates[0].len(),
+            arena_words,
+            reservation,
+        )?;
+        let mut input_views = BTreeMap::new();
+        let mut values = inputs.binding_values[0].clone();
+        for binding in &mut values {
+            if !matches!(binding.role, 1 | 4 | 5 | 18..=25) {
+                continue;
+            }
+            let model = matches!(binding.role, 18..=25);
+            let (row, offset) = if model {
+                let (allocation, offset) =
+                    storage.model_memory.location(binding.role, binding.index)?;
+                (allocation, offset)
+            } else {
+                (
+                    parent
+                        .plan
+                        .iter()
+                        .position(|row| (row.role, row.index) == (binding.role, binding.index))
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                    0,
+                )
+            };
+            let backing = parent.backings[row].view();
+            let end = offset
+                .checked_add(binding.capacity_bytes as usize)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            let view = backing
+                .try_slice(offset..end)
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            binding.destination = *view.device_ptr();
+            binding.backing = if model {
+                *backing.device_ptr()
+            } else {
+                *view.device_ptr()
+            };
+            binding.backing_bytes = if model {
+                backing.len() as u64
+            } else {
+                view.len() as u64
+            };
+            input_views.insert((binding.role, binding.index), (view, binding.layout));
+        }
+        let input_bindings = reservation
+            .alloc(values.len())
+            .map_err(|error| runtime_error("retained input guard reservation", error))?;
+        upload_publication(provider, &values, &input_bindings)?;
         Ok(Self {
-            parent: ReplaySnapshot::allocate(
-                provider,
-                replay_plan(storage, true)?,
-                storage.bank_templates[0].len(),
-                arena_words,
-                reservation,
-            )?,
+            parent,
+            input_bindings,
+            input_views,
+            original_inputs: Arc::clone(inputs),
             successor: ReplaySnapshot::allocate(
                 provider,
                 replay_plan(storage, false)?,
@@ -193,6 +251,40 @@ impl PreparedReplayCustody {
             #[cfg(feature = "semantic-policy")]
             learning_phases: learning_phases.to_vec(),
         })
+    }
+
+    pub(super) fn input_view(
+        &self,
+        role: u64,
+        index: u64,
+    ) -> Result<(DeviceMemoryView<u8>, SemanticTensorLayout), SemanticTransitionError> {
+        self.input_views
+            .get(&(role, index))
+            .cloned()
+            .ok_or(SemanticTransitionError::ObservationMismatch)
+    }
+
+    pub(super) fn input_bindings(&self) -> &TrackedCudaSlice<PublicationStepInput> {
+        &self.input_bindings
+    }
+
+    pub(super) fn owns_inputs(&self, inputs: &PreparedStepInputs) -> bool {
+        std::ptr::eq(inputs, Arc::as_ptr(&self.original_inputs))
+    }
+
+    pub(super) fn model_content_view(
+        &self,
+        tensor: &PreparedSemanticTensor,
+        bank: usize,
+    ) -> Result<Option<(DeviceMemoryView<u8>, SemanticTensorLayout)>, SemanticTransitionError> {
+        // A separately owned model operand still verifies its own original
+        // bytes. Only authentic aliases of the reused native bank are replaced
+        // by the private copy taken before that bank's first original read.
+        if !self.original_inputs.owns_bank_model_tensor(bank, tensor)? {
+            return Ok(None);
+        }
+        self.input_view(tensor.layout.role, tensor.layout.index)
+            .map(Some)
     }
 
     pub(super) fn descriptor(&self) -> PreparedReplayDescriptor {
@@ -475,6 +567,60 @@ impl RetainedSnapshot {
 }
 
 impl SemanticTransitionSession {
+    pub(super) fn prepared_completed_parent_bank(
+        &mut self,
+        token: u64,
+    ) -> Result<usize, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        let original = self
+            .steps
+            .get(&token)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let prepared = original
+            .prepared
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if !prepared.observed
+            || !self
+                .prepared_segment
+                .as_ref()
+                .is_some_and(|build| build.completed && build.tokens.contains(&token))
+        {
+            return Err(publication_input_error(
+                "retained input requires this step's known completed execution",
+            ));
+        }
+        let inputs = original
+            .inputs
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let header = inputs.header.view();
+        let lease = prepared.reader.view();
+        let result = prepared.result.view();
+        let custody = prepared
+            .replay_custody
+            .as_ref()
+            .map(|custody| (custody.parent.bank.view(), custody.parent.actual.view()));
+        let header = self.publication_read(header)?[0];
+        let lease = self.publication_read(lease)?[0];
+        let result = self.publication_read(result)?[0];
+        if validate_prepared_completion(&lease, &header, &result, header.instance).is_err() {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        if let Some((bank, actual)) = custody {
+            let actual = self.publication_read(actual)?;
+            if actual[2] != 1
+                || actual[1] != header.publication_word
+                || self.publication_read(bank)?[0].header != header
+            {
+                self.poisoned = true;
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+        }
+        usize::try_from(lease.bank).map_err(|_| SemanticTransitionError::ObservationMismatch)
+    }
+
     /// Decode the actual acquired root from this step's pre-mutation arena copy.
     #[cfg(feature = "semantic-policy")]
     pub(super) fn prepared_parent_root_material(

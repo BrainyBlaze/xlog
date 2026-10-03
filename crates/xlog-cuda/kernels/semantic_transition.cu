@@ -3677,9 +3677,9 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
 // This verification runs before release against the device-selected resident
 // aliases and retained private copies. Shared append-only arenas are hashed only
 // through the original logical interval.
-extern "C" __global__ void semantic_publication_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
-        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
-    if(blockIdx.x || threadIdx.x)return;
+__device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr,
+        uint64_t expected_active) {
     uint64_t binding_bytes=0,range_bytes=0;
     if(!publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease)) ||
        !publication_pointer_span(header_ptr,sizeof(PublicationHeader),alignof(PublicationHeader)) ||
@@ -3693,13 +3693,15 @@ extern "C" __global__ void semantic_publication_step_input_guard(uint64_t lease_
         semantic_content_integrity_trap();return;
     }
     const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
-    if(lease.abi!=1 || lease.status || lease.active!=1 || lease.bank>1) {
+    if(lease.abi!=1 || lease.status || lease.active!=expected_active || lease.bank>1 ||
+       lease.bank!=(lease.word&1) || lease.epoch!=(lease.word>>1)) {
         semantic_content_integrity_trap();return;
     }
     const auto& header=*reinterpret_cast<const PublicationHeader*>(header_ptr);
     uint64_t actual[2][4];
     const auto* expected=reinterpret_cast<const uint64_t*>(metadata_digests_ptr);
-    if(header.abi!=1 || binding_count<9 || binding_count>header.range_count ||
+    if(header.abi!=1 || header.publication_word!=lease.word || header.sealed_epoch!=lease.epoch ||
+       !publication_identity_equal(header.instance,lease.instance) || binding_count<9 || binding_count>header.range_count ||
        publication_step_metadata_digest(header,reinterpret_cast<const SourceSlot*>(source_ptr),binding_count,actual) ||
        !publication_identity_equal(actual[0],expected) || !publication_identity_equal(actual[1],expected+4)) {
         semantic_content_integrity_trap();return;
@@ -3762,6 +3764,20 @@ extern "C" __global__ void semantic_publication_step_input_guard(uint64_t lease_
         }
     }
     if(fixed_role!=14 || ranges[binding_count-1].role!=44 || ranges[binding_count-1].index)semantic_content_integrity_trap();
+}
+extern "C" __global__ void semantic_publication_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
+    if(blockIdx.x || threadIdx.x)return;
+    publication_step_input_guard(lease_ptr,header_ptr,source_ptr,bindings0_ptr,bindings1_ptr,binding_count,
+        ranges_ptr,metadata_digests_ptr,1);
+}
+// Cold verification authenticates a completed original lease, never a current
+// acquired bank. Its fixed bindings point into the private pre-mutation copy.
+extern "C" __global__ void semantic_completed_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
+    if(blockIdx.x || threadIdx.x)return;
+    publication_step_input_guard(lease_ptr,header_ptr,source_ptr,bindings0_ptr,bindings1_ptr,binding_count,
+        ranges_ptr,metadata_digests_ptr,0);
 }
 __device__ void publication_intent_identity(const IntentEntry& entry,uint64_t* identity) {
     uint64_t words[25];words[0]=0x786c6f67696e7431ULL;
