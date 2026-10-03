@@ -15131,10 +15131,6 @@ impl SemanticTransitionSession {
             .iter()
             .filter(|kind| **kind == SemanticTransitionKind::Update)
             .count();
-        let proposal_count = transitions
-            .iter()
-            .filter(|kind| **kind == SemanticTransitionKind::Proposal)
-            .count();
         let training_view = if update_count == 0 {
             None
         } else {
@@ -15164,7 +15160,7 @@ impl SemanticTransitionSession {
             &storage,
             self.graph.transition_arena_view().len(),
         )?
-        .checked_mul(proposal_count as u64)
+        .checked_mul(transition_bound as u64)
         .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let bound = u64::try_from(transition_bound)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
@@ -15607,18 +15603,16 @@ impl SemanticTransitionSession {
                 step.feedback.push(feedback);
                 step.prepared = Some(PreparedStepStorage {
                     reader,
-                    replay_custody: if *kind == SemanticTransitionKind::Proposal {
-                        Some(PreparedReplayCustody::allocate(
-                            &self.provider,
-                            &storage,
-                            &inputs,
-                            self.graph.transition_arena_view().len(),
-                            &mut reservation,
-                            &self.learning_phases,
-                        )?)
-                    } else {
-                        None
-                    },
+                    // Every executed step's completed binding keeps its own
+                    // acquired inputs after later transitions reuse either bank.
+                    replay_custody: Some(PreparedReplayCustody::allocate(
+                        &self.provider,
+                        &storage,
+                        &inputs,
+                        self.graph.transition_arena_view().len(),
+                        &mut reservation,
+                        &self.learning_phases,
+                    )?),
                     branches,
                     digests: None,
                     next_digest: 0,

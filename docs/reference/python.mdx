@@ -929,7 +929,7 @@ inspection neither proves past publication nor enables an actor. Initial-prefill
 evidence remains separate and must not be discarded or fabricated.
 
 After known completion, the existing `tensor` and `tensor_allocation` getters
-read that Proposal's private acquired model backings, not the reused publication
+read that step's private acquired model backings, not the reused publication
 banks. They preserve the original allocation-sharing partition, complete backing
 capacity, typed layout, and byte offsets. The supplied bank must be the branch
 that actually executed. Prefix and cache aliases use the same custody in cold
@@ -939,6 +939,12 @@ continues to require the exact original tensor owners, layouts, and intervals;
 for authentic native model aliases it checks the saved bytes against the
 original publication seals. Separately owned operands continue to verify their
 own retained bytes. No new baseline is sealed during cold observation.
+
+Original input custody belongs to every prepared Proposal, Recompute, and Update,
+not just exported Proposals. Later transitions cannot replace an earlier step's
+completed binding or Update measurement basis. Admission reserves all of these
+step owners before capture, including their full backing and semantic arena
+copies; actual device copies count as native work.
 
 For a successfully published Proposal, call
 `completed_action_projection(consumer_streams=[...])` before consuming the
