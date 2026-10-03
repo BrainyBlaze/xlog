@@ -240,6 +240,74 @@ fn check_learning_grant<'a>(
     Ok(grant)
 }
 
+fn verify_phase_native(
+    py: Python<'_>,
+    task: &PySemanticTransitionTaskUse,
+    parent: &PySemanticPublishedParent,
+    expected: &[u8],
+    recompute: bool,
+) -> PyResult<()> {
+    let session = task.session.borrow(py);
+    let mut owner = session.owner()?;
+    task.require_current(&owner)?;
+    parent.require_task(py, task)?;
+    if !matches!(task.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
+        return Err(invalid(
+            "learning-phase owner escaped its retained preparation",
+        ));
+    }
+    let lease = parent.lease()?;
+    let actual = if recompute {
+        owner.current_recompute_state_material(&lease)
+    } else {
+        owner.published_state_material(&lease)
+    }
+    .map_err(xlog_err)?;
+    if actual != expected {
+        return Err(invalid("retained learning-phase native state changed"));
+    }
+    Ok(())
+}
+
+fn verify_original_source(
+    py: Python<'_>,
+    task: &PySemanticTransitionTaskUse,
+    parent: &PySemanticPublishedParent,
+    manifest: &SemanticCheckpointManifest,
+    saved_snapshot: &AuthoritySnapshot,
+) -> PyResult<()> {
+    verify_phase_native(py, task, parent, &manifest.native, true)?;
+    let session = task.session.borrow(py);
+    let mut owner = session.owner()?;
+    task.require_current(&owner)?;
+    let phase = checkpoint_task_phase(&*task.state()?)?;
+    let binding = TaskCheckpointBinding::from_owner(&owner)?;
+    if task.checkpoint.encode(saved_snapshot, &phase, &binding)? != manifest.task {
+        return Err(invalid(
+            "phase source checkpoint differs from its original live task capsule",
+        ));
+    }
+    let config = SemanticCheckpointSessionConfig {
+        capacities: session.capacities,
+        admission_limits: session.admission_limits,
+        memory_bytes: session.memory_bytes,
+    };
+    if config.encode()? != manifest.session {
+        return Err(invalid(
+            "phase source checkpoint differs from its original Session configuration",
+        ));
+    }
+    let (initial_prefill, _) = owner
+        .checkpoint_initial_prefill_material(&*parent.lease()?)
+        .map_err(xlog_err)?;
+    if initial_prefill != manifest.initial_prefill {
+        return Err(invalid(
+            "phase source checkpoint differs from its original initial prefill",
+        ));
+    }
+    Ok(())
+}
+
 impl PySemanticLearningPhaseTransition {
     fn status_lock(&self) -> PyResult<MutexGuard<'_, Completion>> {
         self.completion
@@ -258,10 +326,10 @@ impl PySemanticLearningPhaseTransition {
         snapshot.newer_than(&task.state()?.snapshot)?;
         check_learning_grant(&task, &self.grant_reference, &snapshot)?;
         let source_manifest = SemanticCheckpointManifest::decode(&self.source_checkpoint)?;
-        self.verify_native(py, &task, &parent, &source_manifest.native, true)?;
+        verify_phase_native(py, &task, &parent, &source_manifest.native, true)?;
         let model = self.source_serializer.bind(py).call0()?;
         require_model_bytes(&model, &source_manifest.model)?;
-        self.verify_native(py, &task, &parent, &source_manifest.native, true)?;
+        verify_phase_native(py, &task, &parent, &source_manifest.native, true)?;
         if include_candidate {
             let candidate = self.candidate.borrow(py);
             let issued = candidate.task_use.borrow(py);
@@ -269,46 +337,16 @@ impl PySemanticLearningPhaseTransition {
             check_learning_grant(&issued, &self.grant_reference, &snapshot)?;
             let acquired = candidate.parent.borrow(py);
             let manifest = SemanticCheckpointManifest::decode(&self.checkpoint)?;
-            self.verify_native(py, &issued, &acquired, &manifest.native, false)?;
+            verify_phase_native(py, &issued, &acquired, &manifest.native, false)?;
             let model = self
                 .candidate_serializer
                 .bind(py)
                 .call1((candidate.model.clone_ref(py),))?;
             require_model_bytes(&model, &manifest.model)?;
-            self.verify_native(py, &issued, &acquired, &manifest.native, false)?;
+            verify_phase_native(py, &issued, &acquired, &manifest.native, false)?;
             issued.state()?.snapshot = snapshot.clone();
         }
         task.state()?.snapshot = snapshot;
-        Ok(())
-    }
-
-    fn verify_native(
-        &self,
-        py: Python<'_>,
-        task: &PySemanticTransitionTaskUse,
-        parent: &PySemanticPublishedParent,
-        expected: &[u8],
-        recompute: bool,
-    ) -> PyResult<()> {
-        let session = task.session.borrow(py);
-        let mut owner = session.owner()?;
-        task.require_current(&owner)?;
-        parent.require_task(py, task)?;
-        if !matches!(task.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
-            return Err(invalid(
-                "learning-phase owner escaped its retained preparation",
-            ));
-        }
-        let lease = parent.lease()?;
-        let actual = if recompute {
-            owner.current_recompute_state_material(&lease)
-        } else {
-            owner.published_state_material(&lease)
-        }
-        .map_err(xlog_err)?;
-        if actual != expected {
-            return Err(invalid("retained learning-phase native state changed"));
-        }
         Ok(())
     }
 
@@ -506,7 +544,7 @@ impl PySemanticTransitionController {
         Ok(pending)
     }
 
-    #[pyo3(signature = (task_use, *, parent, recipe, consumer_streams, snapshot, scientific_owner,
+    #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
         snapshot_restored_model, refresh_snapshot, resolve_checkpoint=None,
         max_checkpoint_bytes=None, max_total_checkpoint_bytes=None))]
@@ -520,6 +558,7 @@ impl PySemanticTransitionController {
         task_use: Py<PySemanticTransitionTaskUse>,
         parent: Py<PySemanticPublishedParent>,
         recipe: Py<PySemanticLearningPhaseRecipe>,
+        source_checkpoint: &Bound<'_, PyAny>,
         consumer_streams: &Bound<'_, PyAny>,
         snapshot: &Bound<'_, PyAny>,
         scientific_owner: Py<PyAny>,
@@ -539,6 +578,16 @@ impl PySemanticTransitionController {
         let acquired = parent.borrow(py);
         self.require_issued(&task)?;
         acquired.require_task(py, &task)?;
+        if !source_checkpoint.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "phase preparation requires the exact original full source checkpoint bytes",
+            ));
+        }
+        let checkpoint = source_checkpoint.cast::<PyBytes>()?.as_bytes();
+        let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
+        let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
+        task.authority.check_snapshot(&saved_snapshot)?;
+        let streams = checkpoint_consumer_streams(consumer_streams, &mut (16 * 1024 * 1024))?;
         let grant_value = ColdValue::read(learning_grant_ref, &mut (16 * 1024 * 1024), 0)?;
         let learning_grant_ref = grant_value.text()?;
         let destination_value =
@@ -554,7 +603,9 @@ impl PySemanticTransitionController {
         }
         let initial =
             AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut (16 * 1024 * 1024), 0)?)?;
-        initial.newer_than(&task.state()?.snapshot)?;
+        let prior_snapshot = task.state()?.snapshot.clone();
+        initial.newer_than(&prior_snapshot)?;
+        initial.newer_than(&saved_snapshot)?;
         let grant = check_learning_grant(&task, learning_grant_ref, &initial)?;
         let grant_value = task.checkpoint.authority[8]
             .sequence()?
@@ -583,25 +634,28 @@ impl PySemanticTransitionController {
         let mut saved_source: Option<Vec<u8>> = None;
         let mut restored: Option<Py<PySemanticTransitionRestoredCheckpoint>> = None;
         let result = (|| -> PyResult<Py<PySemanticLearningPhaseTransition>> {
-            let checkpoint = self.save_checkpoint(
-                py,
-                &task,
-                &acquired,
-                consumer_streams,
-                snapshot,
-                snapshot_model_state,
-            )?;
-            let checkpoint = checkpoint.bind(py).as_bytes().to_vec();
-            saved_source = Some(checkpoint.clone());
-            let manifest = SemanticCheckpointManifest::decode(&checkpoint)?;
-            if source
-                .owner()?
-                .current_recompute_state_material(&*acquired.lease()?)
-                .map_err(xlog_err)?
-                != manifest.native
             {
+                if source.importing.load(Ordering::Acquire)
+                    || source.recording.load(Ordering::Acquire)
+                    || source.retiring.load(Ordering::Acquire)
+                {
+                    return Err(invalid(
+                        "phase preparation cannot overlap recording, import or retirement",
+                    ));
+                }
+                let mut owner = source.owner()?;
+                task.require_current(&owner)?;
+                owner
+                    .quiesce_published_reader(&*acquired.lease()?, &streams)
+                    .map_err(xlog_err)?;
+            }
+            verify_original_source(py, &task, &acquired, &manifest, &saved_snapshot)?;
+            saved_source = Some(checkpoint.to_vec());
+            require_model_bytes(&snapshot_model_state.call0()?, &manifest.model)?;
+            verify_original_source(py, &task, &acquired, &manifest, &saved_snapshot)?;
+            if task.state()?.snapshot.canonical != prior_snapshot.canonical {
                 return Err(invalid(
-                    "phase transition requires the exact successful quiescent recompute parent",
+                    "phase source authority changed during model verification",
                 ));
             }
             let acceptance = scientific_owner.bind(py).getattr("accept_learning_phase")?;
@@ -613,7 +667,7 @@ impl PySemanticTransitionController {
             let accepted = acceptance.call1((
                 parent.clone_ref(py),
                 recipe.clone_ref(py),
-                PyBytes::new(py, &checkpoint),
+                source_checkpoint,
                 grant_value.python_value(py)?,
                 checkpoint_destination,
                 snapshot,
@@ -625,7 +679,7 @@ impl PySemanticTransitionController {
             }
             let mut transition = recipe.borrow(py).inner.clone();
             let mut retained = b"xlog.learning-phase.acceptance.v1\0".to_vec();
-            retained.extend_from_slice(&Sha256::digest(&checkpoint));
+            retained.extend_from_slice(&Sha256::digest(checkpoint));
             retained.extend_from_slice(transition.recipe_digest().as_bytes());
             for bytes in [
                 task.authority.canonical.as_slice(),
@@ -646,7 +700,7 @@ impl PySemanticTransitionController {
             task.state()?.snapshot = initial.clone();
             let candidate = PySemanticTransitionSession::restore_checkpoint_impl(
                 py,
-                PyBytes::new(py, &checkpoint).as_any(),
+                source_checkpoint,
                 source.device_ordinal,
                 &fresh,
                 restore_model,
@@ -731,6 +785,7 @@ impl PySemanticTransitionController {
                     0,
                 )?)?;
                 current.newer_than(&initial)?;
+                current.newer_than(&task.state()?.snapshot)?;
                 check_learning_grant(&task, learning_grant_ref, &current)?;
                 task.require_current(&*source.owner()?)?;
                 if let Some(saved) = &saved_source {

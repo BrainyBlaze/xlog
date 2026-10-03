@@ -1104,6 +1104,28 @@ struct SemanticCheckpointSessionConfig {
     memory_bytes: u64,
 }
 
+fn checkpoint_consumer_streams(
+    consumer_streams: &Bound<'_, PyAny>,
+    budget: &mut usize,
+) -> PyResult<Vec<u64>> {
+    let streams = ColdValue::read(consumer_streams, budget, 0)?;
+    let streams = streams
+        .sequence()?
+        .iter()
+        .map(ColdValue::unsigned)
+        .collect::<PyResult<Vec<_>>>()?;
+    if streams.is_empty()
+        || streams
+            .iter()
+            .any(|&stream| stream == 0 || stream == 2 || stream > i64::MAX as u64)
+    {
+        return Err(invalid(
+            "checkpoint save requires exact supported consumer streams",
+        ));
+    }
+    Ok(streams)
+}
+
 impl SemanticCheckpointSessionConfig {
     fn encode(self) -> PyResult<Vec<u8>> {
         let mut bytes = b"XLOG-CHECKPOINT-SESSION\0".to_vec();
@@ -14863,21 +14885,7 @@ impl PySemanticTransitionController {
             ));
         }
         let mut budget = 16 * 1024 * 1024;
-        let streams = ColdValue::read(consumer_streams, &mut budget, 0)?;
-        let streams = streams
-            .sequence()?
-            .iter()
-            .map(ColdValue::unsigned)
-            .collect::<PyResult<Vec<_>>>()?;
-        if streams.is_empty()
-            || streams
-                .iter()
-                .any(|&stream| stream == 0 || stream == 2 || stream > i64::MAX as u64)
-        {
-            return Err(invalid(
-                "checkpoint save requires exact supported consumer streams",
-            ));
-        }
+        let streams = checkpoint_consumer_streams(consumer_streams, &mut budget)?;
         let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
         let (identity, task_binding, prior_snapshot, phase, config, proposal_expense) = {
             let session = self.session.borrow(py);

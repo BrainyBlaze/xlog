@@ -472,12 +472,18 @@ role-21 master. Native code converts its exact finite value without rounding.
 Full backing allocations, padding, strides, and shared storage are retained;
 conflicting effects on aliases refuse the entire private candidate.
 
-`controller.prepare_learning_phase_transition(task_use, *, parent, recipe,
+`controller.prepare_learning_phase_transition(task_use, *, parent, recipe, source_checkpoint,
 consumer_streams, snapshot, scientific_owner, learning_grant_ref,
 checkpoint_destination, snapshot_model_state, restore_model,
-snapshot_restored_model, refresh_snapshot)` quiesces the exact successful
-recompute parent and seals the complete source with the ordinary checkpoint
-encoder. `learning_grant_ref` selects an original `durable-slow-consolidation`
+snapshot_restored_model, refresh_snapshot)` takes the exact builtin full
+`source_checkpoint` bytes already used by the original scientific owner. It
+quiesces the successful recompute parent and verifies the supplied native state,
+task capsule, original Proposal expense, Session configuration, initial prefill
+and complete live model against that source. The existing checkpoint decoder and
+task encoder enforce these bindings. Fresh authority must advance both the saved
+source snapshot and the current task snapshot; it does not replace the source
+bytes or their digest. No omitted-source or newly serialized-source fallback is
+provided. `learning_grant_ref` selects an original `durable-slow-consolidation`
 grant covering the complete dependency closure; fast-adaptation permission alone
 cannot authorize this durable full checkpoint. Fresh publication, data-use,
 retention and revocation checks remain independent of scientific acceptance.
@@ -510,7 +516,8 @@ as `restore_model(controller, task_use, parent, None)`: reconstruct from the
 actual private native bank, including its new phase and reset optimizer values,
 not from the old model bytes. `snapshot_restored_model(returned_model) -> bytes`
 must serialize that complete real model, including physical aliases, optimizer
-and phase state. `snapshot_model_state()` snapshots the unchanged source.
+and phase state. `snapshot_model_state()` verifies the unchanged source model
+against the supplied checkpoint; it does not create a replacement source.
 `refresh_snapshot()` supplies strictly newer original authority snapshots.
 These callbacks execute cold, on the creator thread, outside native/task locks.
 Both model snapshots and native banks are checked again before any handoff.
