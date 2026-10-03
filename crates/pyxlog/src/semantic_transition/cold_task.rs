@@ -14,7 +14,8 @@ use xlog_cuda::{
 };
 
 use super::{
-    invalid, xlog_err, ProposalExpense, PySemanticTransitionController, PySemanticTransitionSession,
+    invalid, xlog_err, CheckpointSources, ProposalExpense, PySemanticTransitionController,
+    PySemanticTransitionSession,
 };
 
 const MAX_POSITION: u64 = 262_144;
@@ -418,6 +419,7 @@ impl PySemanticTransitionColdTask {
                 capacity: None,
                 spent: 0,
             })),
+            Arc::new(Mutex::new(CheckpointSources::default())),
         )?;
         if let Some(editable) = native_session.editable_program.as_ref() {
             program = program.with_editable_program(Arc::clone(editable));
