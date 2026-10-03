@@ -7412,7 +7412,6 @@ fn completed_action_material(
     )
 }
 
-#[cfg(feature = "semantic-policy")]
 fn completed_publication_identity(
     py: Python<'_>,
     value: xlog_cuda::SemanticPublishedIdentity,
