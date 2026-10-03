@@ -6,10 +6,16 @@
 
 use crate::semantic_work::{ExecutionWork, ModelWorkEvent, ModelWorkKind, ModelWorkRecording};
 mod learning_phase;
+#[cfg(feature = "semantic-policy")]
+mod model_evaluation;
 mod prepared_replay;
 pub use learning_phase::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseRecord,
     SemanticLearningPhaseTransition,
+};
+#[cfg(feature = "semantic-policy")]
+pub use model_evaluation::{
+    SemanticEvaluationCohort, SemanticModelEvaluation, SemanticModelEvaluationResult,
 };
 #[cfg(feature = "semantic-policy")]
 pub use prepared_replay::SemanticCompletedReplayMaterials;
@@ -9556,6 +9562,8 @@ struct StepContentStorage {
     #[cfg(feature = "semantic-policy")]
     policy_vjp_workspaces: Vec<Arc<PolicyVjpWorkspace>>,
     prepared: Option<PreparedStepStorage>,
+    #[cfg(feature = "semantic-policy")]
+    evaluation: Option<model_evaluation::EvaluationStorage>,
 }
 
 impl StepContentStorage {
@@ -9572,6 +9580,8 @@ impl StepContentStorage {
             #[cfg(feature = "semantic-policy")]
             policy_vjp_workspaces: Vec::new(),
             prepared: None,
+            #[cfg(feature = "semantic-policy")]
+            evaluation: None,
         }
     }
 }
@@ -10142,6 +10152,7 @@ struct PreparedModelWork {
     reset: CudaFunction,
     capture_bank: Option<usize>,
     replay_cursor: usize,
+    evaluation_recording: bool,
 }
 
 const PREPARED_TRANSITION_BANKS: u8 = 0b11;
@@ -10231,6 +10242,36 @@ impl crate::cuda_compat::IntoKernelParamStorage for ModelUpdateCanaryInputs {
 }
 
 impl PreparedModelWork {
+    fn allocate(
+        provider: &Arc<CudaKernelProvider>,
+        reservation: &mut crate::memory::GpuMemoryReservation,
+        capacity: usize,
+    ) -> Result<Self, SemanticTransitionError> {
+        let recording = ModelWorkRecording::new(capacity).map_err(publication_input_error)?;
+        let reset = provider
+            .device()
+            .inner()
+            .get_func("xlog_semantic_transition", "semantic_model_work_reset")
+            .ok_or_else(|| runtime_error("kernel lookup", "model work reset unavailable"))?;
+        Ok(Self {
+            recording,
+            device: reservation
+                .alloc(capacity)
+                .map_err(|error| runtime_error("original model work allocation", error))?,
+            actual: reservation
+                .alloc(
+                    capacity
+                        .checked_mul(3)
+                        .ok_or(SemanticTransitionError::GenerationExhausted)?,
+                )
+                .map_err(|error| runtime_error("original device work allocation", error))?,
+            reset,
+            capture_bank: None,
+            replay_cursor: 0,
+            evaluation_recording: false,
+        })
+    }
+
     #[cfg(feature = "semantic-policy")]
     fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
         let mut allocations = Vec::new();
@@ -10247,7 +10288,7 @@ impl PreparedModelWork {
 
     #[cfg(feature = "semantic-policy")]
     fn begin_capture(&mut self, bank: usize, recorded: u8) -> Result<(), &'static str> {
-        if bank > 1 || self.capture_bank.is_some() {
+        if bank > 1 || self.capture_bank.is_some() || self.evaluation_recording {
             return Err("model work capture requires one inactive bank recording");
         }
         if (bank == 0 && (recorded != 0 || self.recording.frozen_bound().is_some()))
@@ -10264,6 +10305,7 @@ impl PreparedModelWork {
         match self.capture_bank {
             Some(0) => Ok(self.recording.events().len()),
             Some(1) => Ok(self.replay_cursor),
+            None if self.evaluation_recording => Ok(self.recording.events().len()),
             _ => Err("model work event requires an active prepared bank capture"),
         }
     }
@@ -10272,6 +10314,7 @@ impl PreparedModelWork {
         let slot = self.next_slot()?;
         match self.capture_bank {
             Some(0) => self.recording.push(event)?,
+            None if self.evaluation_recording => self.recording.push(event)?,
             Some(1) => {
                 if self.recording.events().get(slot) != Some(&event) {
                     return Err("second model branch differs from original work geometry");
@@ -15894,14 +15937,7 @@ impl SemanticTransitionSession {
             .map_err(|error| runtime_error("model work reservation stream admission", error))?;
         let bytes = build.cold_capacity.model_work_bytes()?;
         let floor = build.cold_capacity.external_floor()?;
-        let recording = ModelWorkRecording::new(event_capacity).map_err(publication_input_error)?;
-        let reset = self
-            .provider
-            .device()
-            .inner()
-            .get_func("xlog_semantic_transition", "semantic_model_work_reset")
-            .ok_or_else(|| runtime_error("kernel lookup", "model work reset unavailable"))?;
-        let (device, actual) = {
+        let work = {
             let reservation = self
                 .prepared_segment
                 .as_mut()
@@ -15916,21 +15952,7 @@ impl SemanticTransitionSession {
             {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
-            let device = reservation
-                .alloc(event_capacity)
-                .map_err(|error| runtime_error("original model work allocation", error))?;
-            let actual = reservation
-                .alloc(event_capacity * 3)
-                .map_err(|error| runtime_error("original device work allocation", error))?;
-            (device, actual)
-        };
-        let work = PreparedModelWork {
-            recording,
-            device,
-            actual,
-            reset,
-            capture_bank: None,
-            replay_cursor: 0,
+            PreparedModelWork::allocate(&self.provider, reservation, event_capacity)?
         };
         // Initialize the complete exported scratch allocation cold. Each real
         // producer occurrence additionally records its own reset before use.
@@ -25552,6 +25574,8 @@ impl SemanticTransitionSession {
         lease: &mut SemanticPublishedLease,
         consumer_streams: &[u64],
     ) -> Result<(), SemanticTransitionError> {
+        #[cfg(feature = "semantic-policy")]
+        self.require_closed_evaluations()?;
         // This public cold boundary waits and reads completion metadata. Keep
         // the entire call outside capture, including the final bank decrement.
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
@@ -25624,6 +25648,8 @@ impl SemanticTransitionSession {
         lease: &mut SemanticPublishedLease,
         consumer_streams: &[u64],
     ) -> Result<(), SemanticTransitionError> {
+        #[cfg(feature = "semantic-policy")]
+        self.require_closed_evaluations()?;
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("step retirement stream admission", error))?;
         self.quiesce_step_content(lease, consumer_streams)?;
@@ -25713,6 +25739,8 @@ impl SemanticTransitionSession {
         lease: &SemanticPublishedLease,
         kind: SemanticTransitionKind,
     ) -> Result<(), SemanticTransitionError> {
+        #[cfg(feature = "semantic-policy")]
+        self.require_closed_evaluations()?;
         self.checked_reader(lease)?;
         if kind == SemanticTransitionKind::Update {
             return Err(publication_input_error(
@@ -30347,6 +30375,8 @@ impl SemanticTransitionSession {
 
     fn ensure_rebindable_with_prefill(&self) -> Result<(), SemanticTransitionError> {
         self.ensure_quiescent()?;
+        #[cfg(feature = "semantic-policy")]
+        self.require_closed_evaluations()?;
         validate_rebinding_ownership(
             self.prepared_segment.as_ref(),
             self.steps.values().any(|step| step.identity.is_none()),

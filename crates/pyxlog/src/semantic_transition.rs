@@ -47,6 +47,8 @@ use crate::types::{val_err, xlog_err};
 
 pub(crate) mod cold_task;
 pub(crate) mod learning_phase;
+#[cfg(feature = "semantic-policy")]
+pub(crate) mod model_evaluation;
 
 type PredicateInput = (u32, String, Vec<(String, u8, String)>, Vec<usize>);
 type RecordInput = (u32, Vec<(u8, Py<PyAny>)>, Vec<u32>);
@@ -6122,6 +6124,7 @@ enum TaskUsePhase {
     },
     Segment(String),
     ArenaPreparing(Box<TaskUsePhase>),
+    Evaluating(Box<TaskUsePhase>),
     Refused,
 }
 
@@ -6602,6 +6605,7 @@ impl TaskUseState {
             | TaskUsePhase::InitialPrefillBound
             | TaskUsePhase::Segment(_)
             | TaskUsePhase::ArenaPreparing(_)
+            | TaskUsePhase::Evaluating(_)
             | TaskUsePhase::Importing { reads: true, .. } => Ok(()),
             _ => Err(invalid(
                 "task use is not available outside its controlled import",
@@ -6647,14 +6651,16 @@ impl TaskUseState {
                 operation,
                 reads: true,
             } => operation,
-            TaskUsePhase::ArenaPreparing(original) => match original.as_ref() {
-                TaskUsePhase::Segment(operation) => operation,
-                _ => {
-                    return Err(invalid(
-                        "tensor content requires an admitted segment or controlled import",
-                    ))
+            TaskUsePhase::ArenaPreparing(original) | TaskUsePhase::Evaluating(original) => {
+                match original.as_ref() {
+                    TaskUsePhase::Segment(operation) => operation,
+                    _ => {
+                        return Err(invalid(
+                            "tensor content requires an admitted segment or controlled import",
+                        ))
+                    }
                 }
-            },
+            }
             _ => {
                 return Err(invalid(
                     "tensor content requires an admitted segment or controlled import",
@@ -8944,25 +8950,7 @@ impl PySemanticPreparedStep {
         py: Python<'_>,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyTuple>> {
-        let ports = [
-            SemanticTrainingViewPort::Selection,
-            SemanticTrainingViewPort::RosterRows,
-            SemanticTrainingViewPort::Objective,
-            SemanticTrainingViewPort::ObjectiveGroups,
-            SemanticTrainingViewPort::ObjectiveGroupMembers,
-            SemanticTrainingViewPort::Canaries,
-            SemanticTrainingViewPort::TokenIds,
-            SemanticTrainingViewPort::MaskLabels,
-            SemanticTrainingViewPort::MaskWeights,
-            SemanticTrainingViewPort::AutoregressiveLabels,
-            SemanticTrainingViewPort::RetentionLabels,
-            SemanticTrainingViewPort::BranchLabels,
-            SemanticTrainingViewPort::BranchIds,
-            SemanticTrainingViewPort::SourceSlots,
-            SemanticTrainingViewPort::LogicalPositions,
-            SemanticTrainingViewPort::Kinds,
-            SemanticTrainingViewPort::Parents,
-        ];
+        let ports = SemanticTrainingViewPort::ALL;
         let mut values = Vec::with_capacity(ports.len());
         for port in ports {
             values.push(self.export(py, consumer_stream, |owner, step, stream| {

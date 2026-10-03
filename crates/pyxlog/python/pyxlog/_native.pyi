@@ -93,6 +93,38 @@ class SemanticPreparedStep:
         self, *, consumer_streams: Sequence[int]
     ) -> tuple[_PublishedIdentity, Optional[_PublishedIdentity], int, bytes, bytes, Any]: ...
 
+class SemanticEvaluationCohort:
+    """Native-issued sealed original selection; no public constructor."""
+
+class _ModelEvaluationResult(TypedDict):
+    status: int
+    loss_bits: tuple[int, int, int, int, int, int]
+    model_work: int
+    operation_count: int
+    work_bound: int
+    retained_allocation_bytes: int
+
+class SemanticModelEvaluation:
+    """Single read-only invocation on an authentic published parent."""
+
+    @property
+    def cohort(self) -> SemanticEvaluationCohort: ...
+    @property
+    def consumer_stream(self) -> int: ...
+    def training_view(self, *, consumer_stream: int) -> tuple[Any, ...]: ...
+    def model_work_buffer(self, *, consumer_stream: int) -> Any: ...
+    def begin(self) -> None: ...
+    def record_model_work(self, kind: int, dimensions: tuple[int, ...]) -> None: ...
+    def record_model_device_work(self, kind: int, upper_dimensions: tuple[int, ...]) -> int: ...
+    def finish(self, output_witness: Any, *, consumer_streams: Sequence[int]) -> _ModelEvaluationResult: ...
+    def cancel(self, *, consumer_streams: Sequence[int]) -> None: ...
+
+class SemanticTransitionController:
+    def prepare_model_evaluation(
+        self, task_use: Any, parent: Any, *, model_work_capacity: int,
+        cohort: Optional[SemanticEvaluationCohort] = None,
+    ) -> SemanticModelEvaluation: ...
+
 # ---------------------------------------------------------------------------
 # Native relation provenance
 # ---------------------------------------------------------------------------

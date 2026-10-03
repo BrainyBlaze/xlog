@@ -268,6 +268,26 @@ __device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& wo
     }
     if(declared_bound!=input.bound) { semantic_content_integrity_trap();return; }
 }
+// Cold observation only: no Update, RNG, optimizer or publication side effect.
+extern "C" __global__ void semantic_model_evaluation_result(
+    uint64_t events,uint64_t count,uint64_t bound,uint64_t selection,
+    uint64_t losses,uint64_t admissible,uint64_t retained_bytes,uint64_t result) {
+    if(blockIdx.x || threadIdx.x)return;
+    auto* output=reinterpret_cast<uint64_t*>(result);
+    ExecutionWork work{};
+    consume_model_work(ModelWorkInput{events,count,bound},work);
+    const auto* values=reinterpret_cast<const float*>(losses);
+    const auto* selected=reinterpret_cast<const uint64_t*>(selection);
+    uint64_t status=selected[0] || !*reinterpret_cast<const uint8_t*>(admissible) ? 1 : 0;
+    if(work.overflow || work.model_events!=count || work.model_bound!=bound)status=2;
+    for(uint32_t i=0;i<6;++i) {
+        const float value=values[i];
+        if(!isfinite(value))status=1;
+        output[i+1]=__float_as_uint(value);
+    }
+    output[0]=status;output[7]=work.model_once;output[8]=work.model_events;
+    output[9]=work.model_bound;output[10]=retained_bytes;
+}
 struct TaskFacts {
     uint64_t truth[3],correct[3],g,p,c;
     int64_t v;
