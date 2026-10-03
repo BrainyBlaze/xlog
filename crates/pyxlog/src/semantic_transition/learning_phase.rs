@@ -508,7 +508,8 @@ impl PySemanticTransitionController {
 
     #[pyo3(signature = (task_use, *, parent, recipe, consumer_streams, snapshot, scientific_owner,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
-        snapshot_restored_model, refresh_snapshot))]
+        snapshot_restored_model, refresh_snapshot, resolve_checkpoint=None,
+        max_checkpoint_bytes=None, max_total_checkpoint_bytes=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the original task, scientific acceptance, durable destination and model owners are independent mandatory inputs"
@@ -528,6 +529,9 @@ impl PySemanticTransitionController {
         restore_model: &Bound<'_, PyAny>,
         snapshot_restored_model: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
+        resolve_checkpoint: Option<&Bound<'_, PyAny>>,
+        max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
+        max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PySemanticLearningPhaseTransition>> {
         let source = self.session.borrow(py);
         source.require_creator()?;
@@ -649,6 +653,10 @@ impl PySemanticTransitionController {
                 task.checkpoint.training_domain.python_value(py)?.bind(py),
                 None,
                 Some(&transition),
+                resolve_checkpoint,
+                max_checkpoint_bytes,
+                max_total_checkpoint_bytes,
+                Some(refresh_snapshot),
             )?;
             restored = Some(candidate.clone_ref(py));
             let candidate_model = candidate.borrow(py).model.clone_ref(py);

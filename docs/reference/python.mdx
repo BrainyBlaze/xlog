@@ -527,9 +527,33 @@ the complete checkpoint. The owner must check a retrieved
 source with `verify_checkpoint_referent(record, checkpoint)`; `restore_checkpoint`
 accepts `referent=record` and performs that same exact check before allocating a
 new owner.
-The complete checkpoint and compact referent retain version 2; the embedded task
-capsule uses version 3 to retain the original training domain. Older task capsules
-and version 1 checkpoint/referent sources are not accepted by this contract.
+The complete checkpoint uses version 3 and the compact referent remains version 2;
+the embedded task capsule uses version 3 to retain the original training domain.
+Older complete checkpoints, task capsules and version 1 referent sources are not
+accepted by this contract.
+
+Initial and recovered starts keep their original `initial_prefill` child and
+`initial-prefill-bound` referent (phase 2). For a completed late Proposal whose
+`completed_action_projection(consumer_streams=...).initial_prefill` is `None`,
+call `step.save_checkpoint(consumer_streams=..., snapshot_model_state=callback)`.
+The callback is the original model owner's historical serializer for that same
+retained step; it returns exact builtin `bytes`, not a snapshot of the current
+model or a new forward. The native checkpoint contains that step's complete
+pre-action publication, model allocations, random state, semantic arena and task
+capsule. The full task capsule retains its original segment operation; its compact
+record uses the distinct `pre-action-bound` phase 3 with the same version 2 field
+order and extent. It contains no initial-prefill section payload.
+
+Read `step.completed_action_projection(...)` again after saving. Its
+`pre_action_checkpoint` is the same action's native-owned completed child, kind
+`pre-action-checkpoint`, ordinal zero, with the compact record as its payload.
+This child and `initial_prefill` are mutually exclusive. Keep the returned full
+checkpoint bytes and persist them through the application's immutable source owner
+before retiring the step. Full checkpoint bytes do not enter the episode's material
+closure. An actor episode's `downstream-snapshot` must be exactly this child's
+payload, not the first step's referent. Rebinding one action to another checkpoint
+is rejected. Saving the checkpoint does not publish an actor episode or perform
+the actor's same-publication atomic append.
 
 When importing actor replay, pass one `resolve_checkpoint(digest_bytes,
 item_limit) -> bytes` callback plus `max_checkpoint_bytes` and
@@ -542,12 +566,31 @@ source are cold-path responsibilities; neither runs inside the resident segment.
 Missing or mismatched sources and revoked rights reject actor admission.
 This also applies when no replay row is selected: actor rows cannot enter the
 training arena until every resolved checkpoint has passed the fresh training-rights
-check. A fresh import without checkpoint-dependent rows still passes no refresh
-callback.
+check. A fresh import may also preregister the complete resolver, both finite
+positive byte limits and callable authority refresh before any draw. An empty
+checkpoint-dependent row set validates this group without reading a source or
+executing any callback. The same group remains available to a later arena
+admission; it does not grant replay, restoration or execution rights.
 
-The checkpoint carries content, not current permissions. Restore rechecks a fresh
-authority snapshot and the reconstructed native publication after the model factory
-returns. A callback error or final revalidation failure poisons the new native owner
+The same resolver also checks late children on non-actor rows: the resolved native
+section must equal that replay's full predecessor, including its original task
+identity and epoch. Late source rights use the original segment operation in that
+verified full task capsule, not an operation inferred from the Proposal opcode;
+actor rows additionally require current training rights.
+`admit_training_arena` and `prepare_learning_phase_transition`
+accept the same three resolver/limit arguments and use their existing
+`refresh_snapshot` callback. `SemanticTransitionSession.restore_checkpoint`
+accepts all four arguments to verify checkpoint-dependent rows retained inside the
+task capsule before creating a new CUDA owner. Pass the originally registered
+resolver and unchanged limits; these boundaries use the same checkpoint parser.
+With no referenced
+checkpoint sources, the complete preregistered group is allowed, or all source
+resolver/limit arguments may be absent. Partial groups are rejected.
+
+The checkpoint carries content, not current permissions. With `refresh_snapshot`,
+restore obtains another advancing authority snapshot after the model factory
+returns and checks the reconstructed native publication before activation. A callback
+error or final revalidation failure poisons the new native owner
 and returns no reachable carrier. Checkpoint creation and restoration are cold-path
 operations; they are not evidence of device-resident execution, training, or update
 publication.

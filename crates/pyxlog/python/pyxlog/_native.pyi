@@ -10,7 +10,7 @@ importable from Python.
 from __future__ import annotations
 
 from os import PathLike
-from typing import Any, Literal, Optional, Sequence, TypedDict, Union
+from typing import Any, Callable, Literal, Optional, Sequence, TypedDict, Union
 
 # ---------------------------------------------------------------------------
 # Module-level constant
@@ -78,6 +78,26 @@ class _UpdateMeasurements(TypedDict):
     forward_receipts: tuple[_UpdateForwardReceipt, _UpdateForwardReceipt]
     canary_refusal: Optional[dict[str, Any]]
 
+class SemanticCompletedMaterial:
+    """Native-owned original material; construction is not public."""
+
+    @property
+    def identity(self) -> bytes: ...
+    @property
+    def bytes(self) -> bytes: ...
+    @property
+    def bytes_sha256(self) -> bytes: ...
+
+class SemanticCompletedActionProjection:
+    """Immutable cold projection of one completed original Proposal."""
+
+    @property
+    def owner(self) -> SemanticCompletedMaterial: ...
+    @property
+    def initial_prefill(self) -> Optional[SemanticCompletedMaterial]: ...
+    @property
+    def pre_action_checkpoint(self) -> Optional[SemanticCompletedMaterial]: ...
+
 class SemanticPreparedStep:
     """Session-issued original step; construction is not public."""
 
@@ -92,6 +112,16 @@ class SemanticPreparedStep:
     def completed_model_binding(
         self, *, consumer_streams: Sequence[int]
     ) -> tuple[_PublishedIdentity, Optional[_PublishedIdentity], int, bytes, bytes, Any]: ...
+
+    def save_checkpoint(
+        self, *, consumer_streams: Sequence[int], snapshot_model_state: Callable[[], bytes]
+    ) -> bytes:
+        """Seal this late Proposal's full pre-action custody before retirement."""
+        ...
+
+    def completed_action_projection(
+        self, *, consumer_streams: Sequence[int]
+    ) -> SemanticCompletedActionProjection: ...
 
 class SemanticEvaluationCohort:
     """Native-issued sealed original selection; no public constructor."""

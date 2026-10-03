@@ -5217,6 +5217,9 @@ pub struct SemanticCompletedActionProjectionMaterial {
     /// Original cold parent prefill only; later and restored parents have no
     /// stage-owned input/output witness to export.
     pub initial_prefill: Option<SemanticCompletedStepWitnessMaterial>,
+    /// This action's own late pre-action checkpoint reference, sealed against
+    /// retained custody. Never present alongside an initial-prefill child.
+    pub pre_action_checkpoint: Option<SemanticCompletedStepWitnessMaterial>,
     /// Exact cold-exported predecessor root when its native digest still matches
     /// this Proposal's acquired parent. Later changed roots are not invented.
     pub world_root: Option<SemanticCompletedStepWitnessMaterial>,
@@ -6524,12 +6527,13 @@ struct ReplayInitialPrefill {
 }
 
 impl SemanticReplayMaterial {
-    fn read_initial_prefill_child(
+    fn completed_child_payload<'a>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
+        kind: &[u8],
         expected_identity: Identity256,
         expected_owner: Identity256,
-    ) -> Result<ReplayInitialPrefill, SemanticTransitionError> {
+    ) -> Result<&'a [u8], SemanticTransitionError> {
         let mut reader = SemanticMaterialReader::new(bytes);
         let magic = b"XLOG-COMPLETED-ACTION-CHILD\0";
         if reader
@@ -6539,16 +6543,15 @@ impl SemanticReplayMaterial {
             || reader.u64().map_err(SemanticTransitionError::Semantic)? != 1
         {
             return Err(publication_input_error(
-                "initial prefill child has another envelope",
+                "completed action child has another envelope",
             ));
         }
         let owner = reader.take(32).map_err(SemanticTransitionError::Semantic)?;
         if owner != expected_owner.as_bytes() {
             return Err(publication_input_error(
-                "initial prefill child belongs to another action",
+                "completed action child belongs to another action",
             ));
         }
-        let kind = b"initial-prefill";
         if reader.u64().map_err(SemanticTransitionError::Semantic)? != kind.len() as u64
             || reader
                 .take(kind.len())
@@ -6557,7 +6560,7 @@ impl SemanticReplayMaterial {
             || reader.u64().map_err(SemanticTransitionError::Semantic)? != 0
         {
             return Err(publication_input_error(
-                "initial prefill child has another kind or ordinal",
+                "completed action child has another kind or ordinal",
             ));
         }
         let mut binding = b"xlog.completed-action-child.v1\0".to_vec();
@@ -6567,15 +6570,30 @@ impl SemanticReplayMaterial {
         material_u64(&mut binding, 0);
         if Identity256::from_bytes(Sha256::digest(binding).into()) != expected_identity {
             return Err(publication_input_error(
-                "initial prefill child identity differs from its owner",
+                "completed action child identity differs from its owner",
             ));
         }
         let length = usize::try_from(reader.u64().map_err(SemanticTransitionError::Semantic)?)
-            .map_err(|_| publication_input_error("initial prefill child exceeds this host"))?;
+            .map_err(|_| publication_input_error("completed action child exceeds this host"))?;
         let payload = reader
             .take(length)
             .map_err(SemanticTransitionError::Semantic)?;
         reader.finish().map_err(SemanticTransitionError::Semantic)?;
+        Ok(payload)
+    }
+
+    fn read_initial_prefill_child(
+        &self,
+        bytes: &[u8],
+        expected_identity: Identity256,
+        expected_owner: Identity256,
+    ) -> Result<ReplayInitialPrefill, SemanticTransitionError> {
+        let payload = self.completed_child_payload(
+            bytes,
+            b"initial-prefill",
+            expected_identity,
+            expected_owner,
+        )?;
         let mut payload = SemanticMaterialReader::new(payload);
         let magic = b"XLOG-INITIAL-PREFILL\0";
         if payload
@@ -6682,6 +6700,50 @@ impl SemanticReplayMaterial {
         Ok(self
             .read_initial_prefill_child(child, child_identity, action_identity)?
             .recovery_referent)
+    }
+
+    /// Read the late action's compact record through the same child envelope.
+    /// The binding layer verifies every referent field and resolves its complete
+    /// checkpoint through the existing bounded source resolver.
+    pub fn pre_action_checkpoint_referent(
+        &self,
+        child: &[u8],
+        child_identity: Identity256,
+        action_identity: Identity256,
+    ) -> Result<Vec<u8>, SemanticTransitionError> {
+        let payload = self.completed_child_payload(
+            child,
+            b"pre-action-checkpoint",
+            child_identity,
+            action_identity,
+        )?;
+        if payload.len() != SemanticTransitionSession::CHECKPOINT_REFERENT_BYTES
+            || payload.last() != Some(&3)
+        {
+            return Err(publication_input_error(
+                "late checkpoint child has another pre-action phase or extent",
+            ));
+        }
+        Ok(payload.to_vec())
+    }
+
+    /// Full resolved late source must equal this original replay's own acquired
+    /// publication, including all model allocations, random state and arena.
+    pub fn verify_pre_action_checkpoint_source(
+        &self,
+        native: &[u8],
+        task_identity: Identity256,
+        task_epoch: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        if self.predecessor.contract.task_identity != task_identity
+            || self.predecessor.bank.header.authority_generation != task_epoch
+            || native != self.predecessor.encode()?
+        {
+            return Err(publication_input_error(
+                "late checkpoint differs from this action's complete predecessor custody",
+            ));
+        }
+        Ok(())
     }
 
     /// The compact reference is useful only if the full original checkpoint
@@ -14988,6 +15050,21 @@ impl SemanticTransitionSession {
             .map_err(SemanticTransitionError::Semantic)
     }
 
+    /// Fixed compact checkpoint v2 extent, also reserved by the cold exporter.
+    pub const CHECKPOINT_REFERENT_BYTES: usize = b"XLOG-CHECKPOINT-REFERENT\0".len()
+        + 4
+        + 32
+        + 8
+        + 104
+        + 32
+        + 8
+        + 32
+        + 32
+        + 8
+        + 3 * 32
+        + 5 * 32
+        + 1;
+
     /// Decode the original sealed material once and project its selected publication.
     /// This performs no CUDA allocation and does not create a runnable owner.
     pub fn state_material_projection(
@@ -17712,6 +17789,7 @@ impl SemanticTransitionSession {
         )?;
         capacity.add(parent)?;
         capacity.add(provenance)?;
+        capacity.child(b"pre-action-checkpoint", Self::CHECKPOINT_REFERENT_BYTES)?;
         Ok(capacity)
     }
 
@@ -18465,6 +18543,16 @@ impl SemanticTransitionSession {
         let projection = SemanticCompletedActionProjectionMaterial {
             owner,
             initial_prefill,
+            pre_action_checkpoint: self
+                .checked_prepared_step(step, false)?
+                .prepared
+                .as_ref()
+                .expect("checked prepared owner")
+                .replay_custody
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
+                .checkpoint_child
+                .clone(),
             world_root: Some(world_root),
             schema_generation,
             action_law: SemanticActionCatalogue::current().completed_material(),
