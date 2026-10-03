@@ -475,6 +475,62 @@ impl RetainedSnapshot {
 }
 
 impl SemanticTransitionSession {
+    /// Decode the actual acquired root from this step's pre-mutation arena copy.
+    #[cfg(feature = "semantic-policy")]
+    pub(super) fn prepared_parent_root_material(
+        &mut self,
+        step: &SemanticPreparedStep,
+        header: &PublicationHeader,
+    ) -> Result<SemanticRootMaterial, SemanticTransitionError> {
+        let original = self.checked_prepared_step(step, false)?;
+        let prepared = original.prepared.as_ref().expect("checked original owner");
+        if !prepared.observed
+            || !self
+                .prepared_segment
+                .as_ref()
+                .expect("checked prepared scope")
+                .completed
+        {
+            return Err(publication_input_error(
+                "retained root requires this step's known completed execution",
+            ));
+        }
+        let parent = &prepared
+            .replay_custody
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .parent;
+        let bank = parent.bank.view();
+        let actual = parent.actual.view();
+        let arena = parent
+            .arena
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .view();
+        let actual = self.publication_read(actual)?;
+        if actual[2] != 1
+            || actual[1] != header.publication_word
+            || self.publication_read(bank)?[0].header != *header
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let arena = self.publication_read(arena)?;
+        self.graph
+            .export_retained_transition_root(
+                &arena,
+                header.semantic_owner,
+                header.semantic_slot,
+                header.semantic_generation,
+                *header.semantic_digest.as_bytes(),
+                header.semantic_extents,
+            )
+            .map_err(|error| {
+                self.poisoned = true;
+                SemanticTransitionError::Semantic(error)
+            })
+    }
+
     /// Canonical cold replay tuple for this original, known completed Proposal.
     /// Later publication-bank reuse cannot change these private native snapshots.
     #[cfg(feature = "semantic-policy")]
@@ -535,24 +591,7 @@ impl SemanticTransitionSession {
             if bank.header != header {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
-            let arena = self.publication_read(
-                parent
-                    .arena
-                    .as_ref()
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?
-                    .clone(),
-            )?;
-            let graph = self
-                .graph
-                .export_retained_transition_root(
-                    &arena,
-                    header.semantic_owner,
-                    header.semantic_slot,
-                    header.semantic_generation,
-                    *header.semantic_digest.as_bytes(),
-                    header.semantic_extents,
-                )
-                .map_err(SemanticTransitionError::Semantic)?;
+            let graph = self.prepared_parent_root_material(step, &header)?;
             for range in &directory {
                 if matches!(range.role, 18..=25) {
                     let (allocation, offset) =

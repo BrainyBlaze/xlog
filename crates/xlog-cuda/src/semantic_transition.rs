@@ -13660,8 +13660,6 @@ pub struct SemanticTransitionSession {
     initial_prefill: Option<InitialPrefillStage>,
     retained_initial_prefill: Option<RetainedInitialPrefillContent>,
     checkpoint_initial_prefill: Option<CheckpointInitialPrefill>,
-    #[cfg(feature = "semantic-policy")]
-    cold_world_root: Option<SemanticCompletedStepWitnessMaterial>,
     training_views: Option<Arc<SemanticTrainingViewArena>>,
     training_origins: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
     task_epoch: u64,
@@ -17032,9 +17030,11 @@ impl SemanticTransitionSession {
                 ])?,
             )?;
         }
-        if let Some(root) = &self.cold_world_root {
-            capacity.add(root.bytes.len())?;
-        }
+        capacity.add(
+            self.graph
+                .transition_root_material_capacity()
+                .map_err(SemanticTransitionError::Semantic)?,
+        )?;
         capacity.add(
             self.graph
                 .admission()
@@ -17315,13 +17315,13 @@ impl SemanticTransitionSession {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         let parent_semantic_digest = parent_header.semantic_digest;
-        let cold_extents = self.base_snapshot.extents();
-        let cold_world_root_matches = parent_header.semantic_extents
-            == [
-                u64::from(cold_extents.statements()),
-                u64::from(cold_extents.supports()),
-                u64::from(cold_extents.versions()),
-            ];
+        let world_root = self.prepared_parent_root_material(step, &parent_header)?;
+        let world_root = SemanticCompletedStepWitnessMaterial {
+            identity: Identity256::from_bytes(world_root.digest),
+            bytes: world_root
+                .encode()
+                .map_err(SemanticTransitionError::Semantic)?,
+        };
         let tape_index = self.completed_prepared_policy_tape(step)?;
         let bank = self.policy_tapes[tape_index]
             .prepared_bank
@@ -18021,13 +18021,7 @@ impl SemanticTransitionSession {
         let projection = SemanticCompletedActionProjectionMaterial {
             owner,
             initial_prefill,
-            world_root: self
-                .cold_world_root
-                .as_ref()
-                .filter(|material| {
-                    cold_world_root_matches && material.identity == parent_semantic_digest
-                })
-                .cloned(),
+            world_root: Some(world_root),
             schema_generation,
             action_law: SemanticActionCatalogue::current().completed_material(),
             edit_codebook: self.codebooks.completed_material(),
@@ -25653,8 +25647,6 @@ impl SemanticTransitionSession {
             initial_prefill: None,
             retained_initial_prefill: None,
             checkpoint_initial_prefill: None,
-            #[cfg(feature = "semantic-policy")]
-            cold_world_root: None,
             training_views: None,
             training_origins: None,
             task_epoch: 0,
@@ -25854,7 +25846,7 @@ impl SemanticTransitionSession {
             ));
         }
         #[cfg(feature = "semantic-policy")]
-        let cold_world_root = {
+        {
             let material = self
                 .graph
                 .export_transition_root(self.root)
@@ -25863,13 +25855,7 @@ impl SemanticTransitionSession {
                 self.poisoned = true;
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
-            SemanticCompletedStepWitnessMaterial {
-                identity: Identity256::from_bytes(material.digest),
-                bytes: material
-                    .encode()
-                    .map_err(SemanticTransitionError::Semantic)?,
-            }
-        };
+        }
         let words = binding.words(self.graph.transition_arena()[1]);
         let mut reservation = self
             .provider
@@ -25884,10 +25870,6 @@ impl SemanticTransitionSession {
         self.captured = None;
         let identity = binding.identity();
         self.task = Some((binding, device));
-        #[cfg(feature = "semantic-policy")]
-        {
-            self.cold_world_root = Some(cold_world_root);
-        }
         let (_, device) = self.task.as_mut().expect("private task installed above");
         self.provider
             .htod_sync_copy_into_tracked(&words, device)

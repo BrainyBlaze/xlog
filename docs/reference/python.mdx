@@ -921,10 +921,12 @@ projection children (`identity`, `bytes`, and `bytes_sha256`). The codebook imag
 is opaque: consumers bind its bytes and identity but must not decode private
 device offsets from it. Neither material claims that target, behavior, CDF,
 Philox, and hard-decode laws have separate native identities.
-`world_root` is the canonical native root export retained at cold task binding,
-with the root digest as its identity. It is present only when that digest still
-matches the completed Proposal's actual predecessor semantic root; after a
-different root is acquired, it is `None` rather than a reconstructed predecessor.
+`world_root` is the canonical native root material decoded from this original
+step's private pre-mutation semantic arena. Every saved published Proposal has
+its actual acquired root, including after Update, Recompute, and later requests;
+its identity equals `predecessor_semantic_root_digest`. The same decoder produces
+the graph in `completed_replay_materials`' full parent. This is not the initial
+admission's theory relabeled as a later predecessor.
 `predecessor_semantic_root_digest` always names the root in the authenticated
 predecessor publication header; it is distinct from the logical-state digest
 and from an application's source-text theory identity.
