@@ -410,12 +410,16 @@ consumer_streams, snapshot, snapshot_model_state, restore_model, replay_rows,
 training_objective, training_domain, dependencies, publication_grants, inference_grants,
 training_grants, capacities, memory_bytes, max_material_bytes,
 max_total_material_bytes, max_evidence_bytes, refresh_snapshot)` performs a
-cold structural transfer from the selected, successfully recomputed inference
-publication. The source must already hold valid inference and training rights,
-and `replay_rows` must retain its existing rows. The method quiesces and seals
+cold structural transfer from the current, successfully recomputed inference
+or training publication. This same transition can append original episodes to
+an already trained session; it does not reset the learning phase or parameters.
+The source must hold its original operation rights and training rights, and
+`replay_rows` must retain the complete existing roster as an unchanged prefix.
+The original pre-action `training_domain` must be unchanged. The method quiesces and seals
 the complete native/task/model checkpoint, restores it into a private session,
 then binds the larger training arena and current authority there. It preserves
-the saved model and historical native records; the new authority binding and
+the saved model, optimizer, RNG, cache, learning-phase history, and native records;
+the new authority binding and
 publication have new identities and digests. `restore_model` has the same
 four-argument factory contract as ordinary restore. After that factory returns,
 `refresh_snapshot()` must return a newer authorized snapshot. Only after both
@@ -845,7 +849,8 @@ Proposal step exposes `completed_material_capacity`. It returns
 `((count, largest_bytes, total_bytes), (numerical_bytes, logits_bytes, random_bytes),
 attempt_receipt_bytes, publication_evidence_bytes)`, with every size in bytes.
 The first triple conservatively covers all projection children, the three raw
-model carriers, and every raw feedback, statement, and provenance record. It
+model carriers, every raw feedback, statement, and provenance record, the complete
+predecessor publication, and its native reconstruction provenance. It
 counts possible materials before digest deduplication, NULL choices, lane
 refusals, or winner selection, including every possible structural delta and its
 evidence, task ground, scoring law, edit solution, and physical certificate.
@@ -855,13 +860,91 @@ future values, selected results, and device tensor bytes are not read.
 The carrier lengths use the order numerical realization, structural logits,
 random state. An external codec must additionally bound its real wrappers and
 model-owned materials. The AttemptReceipt child is already in the first triple;
-its separate size also bounds consumers that store it as kit evidence. Full
-publication replay evidence has a different format and is reported separately,
+its separate size bounds consumers that retain that child. Replay-kit evidence
+must instead use full publication replay evidence, reported separately,
 using all six native records' complete allocation capacities. Neither evidence
 value substitutes for the other. Combine this native capacity with all external
 materials, record lines, views, anchors, and indexes under the same writer caps
 before allowing any submit. This getter is unavailable during capture or after
 submission and does not execute a forward, authorize replay, or enable an actor.
+
+### Replay materials from completed proposals
+
+Use `step.completed_replay_materials(consumer_streams=[...])` when you need to
+replay an earlier published Proposal after later steps have reused its device
+banks. Call it outside capture and the measured resident loop, after known
+completion and before retiring the original segment:
+
+```python
+materials = step.completed_replay_materials(consumer_streams=original_streams)
+if materials is not None:
+    p_identity, s_identity, full_p, native_provenance, publication_evidence = materials
+```
+
+The tuple has the same format as `Controller.export_replay_materials` for held
+adjacent readers. These identities and bytes belong to this exact step, not the
+first parent or final successor of the segment. Native custody copies the full
+semantic arena and the selected model backings before reuse. It retains the
+successor's original records inside its publisher before publication. The full
+allocation roster is reserved before capture and its byte copies are charged as
+native work. An unpublished refusal returns `None`; unknown completion does not
+return material. A scheduled Proposal that actually publishes another transition
+must be handled using its observed transition, not exported as a Proposal.
+
+For every saved published Proposal, retain all five tuple parts using your
+existing replay format. Pass `full_p`, `native_provenance`, and
+`publication_evidence` to the corresponding replay roots. Neither the compact
+logical-state child nor an AttemptReceipt replaces any of them. This export does
+not issue a use grant, invoke a model, or retire the original step.
+
+Use `SemanticTransitionSession.inspect_publication_material(full_p)` to inspect
+the same complete native material without creating a CUDA session or introducing
+another parser. The host-only dictionary has `schema=1`, the original
+`publication=(instance, word, logical_digest, state_digest)`, `semantic_root`,
+`model_generation`, `model_geometry_digest`, `model_numerical_digest`,
+`neural_generation`, `cache_generation`, `prefix_extent`, `ring_head`, and
+`prefix_identity`. Identities are exact 32-byte values, not hexadecimal strings.
+
+`prefix` contains exactly the committed extent and `source` the 32 physical ring
+slots. Each row is `(token, logical_position, kind, provenance, valid, committed,
+recomputed, provenance_record)`. `token_provenance` preserves the complete native
+ledger in original order. Its dictionaries retain `source_slot`,
+`logical_position`, `token`, `base_word`, `proposal`, `ordinal`,
+`authority_generation`, `action_receipt_digest`, `origin_logical_digest`,
+`authority_closure_digest`, and `record_digest`. Filled rows must resolve to their
+original token and position. SOURCE and GENERATED remain distinct; generated
+origins are not rewritten as admitted observations.
+
+`cache` is the complete original role/index roster for cache and running-state
+roles 4–13. Each dictionary retains `role`, `index`, `capacity_bytes`,
+`logical_begin`, `logical_end`, `identity`, `layout`, and `logical_bytes`.
+`layout` is `(role, index, element_bytes, scalar_type, rank, logical_axis,
+dimensions, strides_bytes)`, with both final fields four-element tuples.
+`logical_bytes` traverses logical coordinates, excluding padding and unused
+capacity, and is checked against the original CUDA tensor seal. The model owner
+must compare its actual source/cache operands and entry-boundary generations
+against this projection through its existing model codec. Historical origin
+records still require the original execution closure and rights checks; this
+inspection neither proves past publication nor enables an actor. Initial-prefill
+evidence remains separate and must not be discarded or fabricated.
+
+After known completion, the existing `tensor` and `tensor_allocation` getters
+read that step's private acquired model backings, not the reused publication
+banks. They preserve the original allocation-sharing partition, complete backing
+capacity, typed layout, and byte offsets. The supplied bank must be the branch
+that actually executed. Prefix and cache aliases use the same custody in cold
+exports and input guards. During original construction these getters still
+expose the declared resident bank operands for capture. Content verification
+continues to require the exact original tensor owners, layouts, and intervals;
+for authentic native model aliases it checks the saved bytes against the
+original publication seals. Separately owned operands continue to verify their
+own retained bytes. No new baseline is sealed during cold observation.
+
+Original input custody belongs to every prepared Proposal, Recompute, and Update,
+not just exported Proposals. Later transitions cannot replace an earlier step's
+completed binding or Update measurement basis. Admission reserves all of these
+step owners before capture, including their full backing and semantic arena
+copies; actual device copies count as native work.
 
 For a successfully published Proposal, call
 `completed_action_projection(consumer_streams=[...])` before consuming the
@@ -891,10 +974,12 @@ projection children (`identity`, `bytes`, and `bytes_sha256`). The codebook imag
 is opaque: consumers bind its bytes and identity but must not decode private
 device offsets from it. Neither material claims that target, behavior, CDF,
 Philox, and hard-decode laws have separate native identities.
-`world_root` is the canonical native root export retained at cold task binding,
-with the root digest as its identity. It is present only when that digest still
-matches the completed Proposal's actual predecessor semantic root; after a
-different root is acquired, it is `None` rather than a reconstructed predecessor.
+`world_root` is the canonical native root material decoded from this original
+step's private pre-mutation semantic arena. Every saved published Proposal has
+its actual acquired root, including after Update, Recompute, and later requests;
+its identity equals `predecessor_semantic_root_digest`. The same decoder produces
+the graph in `completed_replay_materials`' full parent. This is not the initial
+admission's theory relabeled as a later predecessor.
 `predecessor_semantic_root_digest` always names the root in the authenticated
 predecessor publication header; it is distinct from the logical-state digest
 and from an application's source-text theory identity.
