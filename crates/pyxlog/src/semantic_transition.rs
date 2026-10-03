@@ -9503,6 +9503,60 @@ impl PySemanticPreparedStep {
             .unbind())
     }
 
+    /// Cold canonical full P, native provenance and publication evidence from
+    /// this original Proposal. Private device custody survives later bank reuse.
+    /// An unpublished refusal returns None, never an invented successor.
+    #[pyo3(signature = (*, consumer_streams))]
+    fn completed_replay_materials(
+        &self,
+        py: Python<'_>,
+        consumer_streams: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Py<PyTuple>>> {
+        let streams = self.completed_observation_streams(py, consumer_streams)?;
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = streams;
+            Err(invalid(
+                "completed replay export requires the semantic-policy feature",
+            ))
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            let session = self.session.borrow(py);
+            let mut owner = session.owner()?;
+            let binding = self.content_binding_with_owner(py, &owner)?;
+            let material = owner
+                .prepared_completed_replay_materials(&self.inner, &streams)
+                .map_err(xlog_err)?;
+            if self.content_binding_with_owner(py, &owner)? != binding {
+                return Err(invalid(
+                    "original Proposal authority changed during replay export",
+                ));
+            }
+            material
+                .map(|material| {
+                    let identity = |value: xlog_cuda::SemanticPublishedIdentity| {
+                        (
+                            PyBytes::new(py, value.instance.as_bytes()),
+                            value.word,
+                            PyBytes::new(py, value.logical_digest.as_bytes()),
+                            PyBytes::new(py, value.state_digest.as_bytes()),
+                        )
+                    };
+                    Ok((
+                        identity(material.predecessor),
+                        identity(material.successor),
+                        PyBytes::new(py, &material.parent),
+                        PyBytes::new(py, &material.provenance),
+                        PyBytes::new(py, &material.evidence),
+                    )
+                        .into_pyobject(py)?
+                        .unbind())
+                })
+                .transpose()
+        }
+    }
+
     /// Cold authenticated binding of this completed step's original model.
     /// Returns (predecessor_identity, successor_identity_or_None, model_generation,
     /// model_geometry_digest, model_numerical_digest, carrier_or_None). The

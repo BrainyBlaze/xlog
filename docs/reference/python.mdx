@@ -845,7 +845,8 @@ Proposal step exposes `completed_material_capacity`. It returns
 `((count, largest_bytes, total_bytes), (numerical_bytes, logits_bytes, random_bytes),
 attempt_receipt_bytes, publication_evidence_bytes)`, with every size in bytes.
 The first triple conservatively covers all projection children, the three raw
-model carriers, and every raw feedback, statement, and provenance record. It
+model carriers, every raw feedback, statement, and provenance record, the complete
+predecessor publication, and its native reconstruction provenance. It
 counts possible materials before digest deduplication, NULL choices, lane
 refusals, or winner selection, including every possible structural delta and its
 evidence, task ground, scoring law, edit solution, and physical certificate.
@@ -855,13 +856,42 @@ future values, selected results, and device tensor bytes are not read.
 The carrier lengths use the order numerical realization, structural logits,
 random state. An external codec must additionally bound its real wrappers and
 model-owned materials. The AttemptReceipt child is already in the first triple;
-its separate size also bounds consumers that store it as kit evidence. Full
-publication replay evidence has a different format and is reported separately,
+its separate size bounds consumers that retain that child. Replay-kit evidence
+must instead use full publication replay evidence, reported separately,
 using all six native records' complete allocation capacities. Neither evidence
 value substitutes for the other. Combine this native capacity with all external
 materials, record lines, views, anchors, and indexes under the same writer caps
 before allowing any submit. This getter is unavailable during capture or after
 submission and does not execute a forward, authorize replay, or enable an actor.
+
+### Replay materials from completed proposals
+
+Use `step.completed_replay_materials(consumer_streams=[...])` when you need to
+replay an earlier published Proposal after later steps have reused its device
+banks. Call it outside capture and the measured resident loop, after known
+completion and before retiring the original segment:
+
+```python
+materials = step.completed_replay_materials(consumer_streams=original_streams)
+if materials is not None:
+    p_identity, s_identity, full_p, native_provenance, publication_evidence = materials
+```
+
+The tuple has the same format as `Controller.export_replay_materials` for held
+adjacent readers. These identities and bytes belong to this exact step, not the
+first parent or final successor of the segment. Native custody copies the full
+semantic arena and the selected model backings before reuse. It retains the
+successor's original records inside its publisher before publication. The full
+allocation roster is reserved before capture and its byte copies are charged as
+native work. An unpublished refusal returns `None`; unknown completion does not
+return material. A scheduled Proposal that actually publishes another transition
+must be handled using its observed transition, not exported as a Proposal.
+
+For every saved published Proposal, retain all five tuple parts using your
+existing replay format. Pass `full_p`, `native_provenance`, and
+`publication_evidence` to the corresponding replay roots. Neither the compact
+logical-state child nor an AttemptReceipt replaces any of them. This export does
+not issue a use grant, invoke a model, or retire the original step.
 
 For a successfully published Proposal, call
 `completed_action_projection(consumer_streams=[...])` before consuming the

@@ -6,10 +6,14 @@
 
 use crate::semantic_work::{ExecutionWork, ModelWorkEvent, ModelWorkKind, ModelWorkRecording};
 mod learning_phase;
+mod prepared_replay;
 pub use learning_phase::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseRecord,
     SemanticLearningPhaseTransition,
 };
+#[cfg(feature = "semantic-policy")]
+pub use prepared_replay::SemanticCompletedReplayMaterials;
+use prepared_replay::{PreparedReplayCustody, PreparedReplayDescriptor};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -7128,6 +7132,7 @@ fn publication_material_runtime() -> [u8; 32] {
         hash.update(b"xlog.publication.material-runtime.v1\0");
         hash.update(include_bytes!("semantic_transition.rs"));
         hash.update(include_bytes!("semantic_transition/learning_phase.rs"));
+        hash.update(include_bytes!("semantic_transition/prepared_replay.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
         let policy_identity: [u8; 32] =
             include!(concat!(env!("OUT_DIR"), "/semantic_policy_identity.rs"));
@@ -9596,6 +9601,7 @@ impl PreparedSegmentState {
 
 struct PreparedStepStorage {
     reader: TrackedCudaSlice<PublicationLease>,
+    replay_custody: Option<PreparedReplayCustody>,
     branches: [PreparedBranchStorage; 2],
     digests: Option<Arc<TrackedCudaSlice<u64>>>,
     next_digest: usize,
@@ -11948,6 +11954,7 @@ struct Descriptor {
     publication: PublicationCommand,
     text: TextBinding,
     model_work: ModelWorkInput,
+    replay: PreparedReplayDescriptor,
 }
 
 #[derive(Clone, Copy)]
@@ -11984,6 +11991,7 @@ struct TransitionKernelIo<'a> {
     text: Option<&'a TextBindingStorage>,
     lease: Option<&'a TrackedCudaSlice<PublicationLease>>,
     model_work: Option<&'a PreparedModelWork>,
+    replay_custody: Option<&'a PreparedReplayCustody>,
     model_update: Option<&'a PreparedModelUpdate>,
     training_selection: Option<&'a DeviceMemoryView<SemanticTrainingViewSelection>>,
     #[cfg(feature = "semantic-policy")]
@@ -12983,6 +12991,7 @@ content_kernel_parameter!(PublicationRange);
 content_kernel_parameter!(SemanticTensorLayout);
 content_kernel_parameter!(ContinuationInputs);
 content_kernel_parameter!(PolicyDescriptor);
+content_kernel_parameter!(prepared_replay::ReplayCopyDescriptor);
 #[cfg(feature = "semantic-policy")]
 content_kernel_parameter!(PolicyUniformDescriptor);
 
@@ -12998,7 +13007,7 @@ const _: () = assert!(size_of::<PolicyUniformDescriptor>() == 160);
 const _: () = assert!(size_of::<PolicyAdjointNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 776);
 const _: () = assert!(size_of::<PolicyBackward>() == 256);
-const _: () = assert!(size_of::<Descriptor>() == 1240);
+const _: () = assert!(size_of::<Descriptor>() == 1368);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -14726,6 +14735,10 @@ impl SemanticTransitionSession {
             .iter()
             .filter(|kind| **kind == SemanticTransitionKind::Update)
             .count();
+        let proposal_count = transitions
+            .iter()
+            .filter(|kind| **kind == SemanticTransitionKind::Proposal)
+            .count();
         let training_view = if update_count == 0 {
             None
         } else {
@@ -14751,6 +14764,12 @@ impl SemanticTransitionSession {
                 .ok_or(SemanticTransitionError::NotBound)?,
         );
         let transition_bound = transitions.len();
+        let replay_bytes = PreparedReplayCustody::allocation_bytes(
+            &storage,
+            self.graph.transition_arena_view().len(),
+        )?
+        .checked_mul(proposal_count as u64)
+        .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let bound = u64::try_from(transition_bound)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
         let end = self
@@ -14841,6 +14860,7 @@ impl SemanticTransitionSession {
                         .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
                 )
                 .and_then(|bytes| bytes.checked_add(update_binding_bytes))
+                .and_then(|bytes| bytes.checked_add(replay_bytes))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
         // Each model-bearing prepared branch binds the complete roster once. Its
         // ranges, contract snapshot, and roster are native cold allocations,
@@ -15191,6 +15211,17 @@ impl SemanticTransitionSession {
                 step.feedback.push(feedback);
                 step.prepared = Some(PreparedStepStorage {
                     reader,
+                    replay_custody: if *kind == SemanticTransitionKind::Proposal {
+                        Some(PreparedReplayCustody::allocate(
+                            &self.provider,
+                            &storage,
+                            self.graph.transition_arena_view().len(),
+                            &mut reservation,
+                            &self.learning_phases,
+                        )?)
+                    } else {
+                        None
+                    },
                     branches,
                     digests: None,
                     next_digest: 0,
@@ -17225,6 +17256,18 @@ impl SemanticTransitionSession {
             ])?;
         }
         capacity.publication_evidence_bytes = evidence;
+        let custody = prepared
+            .replay_custody
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let (parent, provenance) = custody.material_capacity(
+            &inputs.storage,
+            self.graph
+                .transition_root_material_capacity()
+                .map_err(SemanticTransitionError::Semantic)?,
+        )?;
+        capacity.add(parent)?;
+        capacity.add(provenance)?;
         Ok(capacity)
     }
 
@@ -19911,6 +19954,20 @@ impl SemanticTransitionSession {
             .as_ref()
             .expect("fixed input owner")
             .enqueue(&self.domain, &mut self.poisoned)?;
+        if let Some(custody) = &owner
+            .prepared
+            .as_ref()
+            .expect("prepared owner")
+            .replay_custody
+        {
+            custody.enqueue_parent(
+                &self.domain,
+                &mut self.poisoned,
+                self.publication.as_ref().expect("prepared publication"),
+                &owner.prepared.as_ref().expect("prepared owner").reader,
+                &self.graph,
+            )?;
+        }
         owner.feedback[0].enqueue(
             &self.domain,
             &mut self.poisoned,
@@ -20393,6 +20450,13 @@ impl SemanticTransitionSession {
                     "original model work was not frozen by its transition",
                 ));
             }
+            if let Some(custody) = &prepared.replay_custody {
+                work.recording
+                    .frozen_bound()
+                    .expect("checked frozen original work")
+                    .checked_add(custody.copy_work_bound()?)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            }
             let mut destination = work.device.view().slice(..work.recording.events().len());
             self.provider
                 .htod_launch_metadata_sync_copy_into(work.recording.events(), &mut destination)
@@ -20504,6 +20568,9 @@ impl SemanticTransitionSession {
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
             recorder.read_write(&prepared.reader);
             recorder.write(&prepared.result);
+            if let Some(custody) = &prepared.replay_custody {
+                custody.record(&mut recorder);
+            }
             if let Some(work) = &prepared.model_work {
                 recorder.read(&work.device);
                 recorder.read_write(&work.actual);
@@ -28736,6 +28803,7 @@ impl SemanticTransitionSession {
             lease: None,
             model_work: None,
             model_update: None,
+            replay_custody: None,
             training_selection: None,
         };
         let task = match input {
@@ -29868,6 +29936,7 @@ impl SemanticTransitionSession {
             state: &self.state,
             text,
             model_work: None,
+            replay_custody: None,
             model_update: None,
             lease: self
                 .admitted_transition
@@ -29932,6 +30001,7 @@ impl SemanticTransitionSession {
             lease: Some(&prepared.reader),
             policy,
             model_work: prepared.model_work.as_ref(),
+            replay_custody: prepared.replay_custody.as_ref(),
             model_update: branch.model_update.as_ref(),
             training_selection: branch
                 .continuation
@@ -29979,6 +30049,7 @@ impl SemanticTransitionSession {
             model_work: None,
             model_update: None,
             training_selection: None,
+            replay_custody: None,
         })
     }
 
@@ -30026,6 +30097,10 @@ impl SemanticTransitionSession {
             },
             text: TextBinding::default(),
             model_work: ModelWorkInput::default(),
+            replay: io.replay_custody.map_or(
+                PreparedReplayDescriptor::default(),
+                PreparedReplayCustody::descriptor,
+            ),
         }
         .with_transition(TransitionKernelPointers {
             logits: io.logits.device_ptr_value(),
@@ -30191,12 +30266,17 @@ impl SemanticTransitionSession {
     }
 
     fn kernel_recorder_with(&self, io: &TransitionKernelIo<'_>) -> LaunchRecorder {
+        // Replay custody is never exposed as a numerical alias. Retain all
+        // original private destinations for the complete captured transaction.
         let mut recorder = self.domain.new_strict_recorder();
         recorder.read(io.logits);
         recorder.read(io.support);
         if let Some(work) = io.model_work {
             recorder.read(&work.device);
             recorder.read(&work.actual);
+        }
+        if let Some(custody) = io.replay_custody {
+            custody.record(&mut recorder);
         }
         if let Some(update) = io.model_update {
             update.record(&mut recorder);
@@ -30452,6 +30532,7 @@ mod tests {
             },
             text: TextBinding::default(),
             model_work: ModelWorkInput::default(),
+            replay: PreparedReplayDescriptor::default(),
         };
         let original = |base| TransitionKernelPointers {
             logits: base,

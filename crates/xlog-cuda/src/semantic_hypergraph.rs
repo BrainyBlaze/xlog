@@ -389,68 +389,7 @@ impl SemanticRootMaterial {
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>, SemanticHypergraphError> {
         self.validate_symbol_indices()?;
-        let mut out = b"XLOGROOT".to_vec();
-        material_u32(&mut out, 2);
-        material_count(&mut out, self.records.predicates.len())?;
-        for predicate in &self.records.predicates {
-            material_u32(&mut out, predicate.predicate.0);
-            out.push(predicate.role.code());
-            material_count(&mut out, predicate.schema.columns.len())?;
-            for ((name, scalar), label) in predicate
-                .schema
-                .columns
-                .iter()
-                .zip(predicate.schema.sort_labels())
-            {
-                material_bytes(&mut out, name.as_bytes())?;
-                out.push(scalar.to_code());
-                material_bytes(&mut out, label.as_bytes())?;
-            }
-            material_count(&mut out, predicate.schema.key_columns.len())?;
-            for &column in &predicate.schema.key_columns {
-                material_count(&mut out, column)?;
-            }
-        }
-        material_count(&mut out, self.records.records.len())?;
-        for record in &self.records.records {
-            material_u32(&mut out, record.predicate.0);
-            material_count(&mut out, record.arguments.len())?;
-            for argument in &record.arguments {
-                out.push(argument_type(*argument).to_code());
-                match argument {
-                    SemanticArgument::U32(value)
-                    | SemanticArgument::F32Bits(value)
-                    | SemanticArgument::Symbol(value) => material_u32(&mut out, *value),
-                    SemanticArgument::U64(value) | SemanticArgument::F64Bits(value) => {
-                        material_u64(&mut out, *value)
-                    }
-                    SemanticArgument::I32(value) => material_u32(&mut out, *value as u32),
-                    SemanticArgument::I64(value) => material_u64(&mut out, *value as u64),
-                    SemanticArgument::Bool(value) => out.push(u8::from(*value)),
-                }
-            }
-            material_count(&mut out, record.qualifiers.len())?;
-            for &qualifier in &record.qualifiers {
-                material_u32(&mut out, qualifier);
-            }
-        }
-        material_count(&mut out, self.records.supports.len())?;
-        for support in &self.records.supports {
-            material_u32(&mut out, support.statement);
-            out.push(support.polarity.code() as u8);
-            for value in [
-                support.provenance,
-                support.source,
-                support.context,
-                support.scope,
-            ] {
-                material_u32(&mut out, value);
-            }
-        }
-        material_count(&mut out, self.symbols.len())?;
-        for symbol in &self.symbols {
-            material_bytes(&mut out, symbol.as_bytes())?;
-        }
+        let mut out = Self::encode_admission(&self.records, &self.symbols)?;
         material_count(&mut out, self.insertions.len())?;
         for insertion in &self.insertions {
             if insertion.statement.is_some() && insertion.reconstruction != [0; 10] {
@@ -475,6 +414,75 @@ impl SemanticRootMaterial {
         out.extend_from_slice(&self.admission_base_digest);
         for extent in self.admission_base_extents {
             material_u32(&mut out, extent);
+        }
+        Ok(out)
+    }
+
+    fn encode_admission(
+        records: &SemanticAdmissionRecords,
+        symbols: &[String],
+    ) -> Result<Vec<u8>, SemanticHypergraphError> {
+        let mut out = b"XLOGROOT".to_vec();
+        material_u32(&mut out, 2);
+        material_count(&mut out, records.predicates.len())?;
+        for predicate in &records.predicates {
+            material_u32(&mut out, predicate.predicate.0);
+            out.push(predicate.role.code());
+            material_count(&mut out, predicate.schema.columns.len())?;
+            for ((name, scalar), label) in predicate
+                .schema
+                .columns
+                .iter()
+                .zip(predicate.schema.sort_labels())
+            {
+                material_bytes(&mut out, name.as_bytes())?;
+                out.push(scalar.to_code());
+                material_bytes(&mut out, label.as_bytes())?;
+            }
+            material_count(&mut out, predicate.schema.key_columns.len())?;
+            for &column in &predicate.schema.key_columns {
+                material_count(&mut out, column)?;
+            }
+        }
+        material_count(&mut out, records.records.len())?;
+        for record in &records.records {
+            material_u32(&mut out, record.predicate.0);
+            material_count(&mut out, record.arguments.len())?;
+            for argument in &record.arguments {
+                out.push(argument_type(*argument).to_code());
+                match argument {
+                    SemanticArgument::U32(value)
+                    | SemanticArgument::F32Bits(value)
+                    | SemanticArgument::Symbol(value) => material_u32(&mut out, *value),
+                    SemanticArgument::U64(value) | SemanticArgument::F64Bits(value) => {
+                        material_u64(&mut out, *value)
+                    }
+                    SemanticArgument::I32(value) => material_u32(&mut out, *value as u32),
+                    SemanticArgument::I64(value) => material_u64(&mut out, *value as u64),
+                    SemanticArgument::Bool(value) => out.push(u8::from(*value)),
+                }
+            }
+            material_count(&mut out, record.qualifiers.len())?;
+            for &qualifier in &record.qualifiers {
+                material_u32(&mut out, qualifier);
+            }
+        }
+        material_count(&mut out, records.supports.len())?;
+        for support in &records.supports {
+            material_u32(&mut out, support.statement);
+            out.push(support.polarity.code() as u8);
+            for value in [
+                support.provenance,
+                support.source,
+                support.context,
+                support.scope,
+            ] {
+                material_u32(&mut out, value);
+            }
+        }
+        material_count(&mut out, symbols.len())?;
+        for symbol in symbols {
+            material_bytes(&mut out, symbol.as_bytes())?;
         }
         Ok(out)
     }
@@ -2583,6 +2591,69 @@ impl SemanticHypergraph {
             self.capacities.versions as u64,
             self.arena_words,
         ]
+    }
+
+    pub(crate) fn transition_arena_view(&self) -> crate::memory::DeviceMemoryView<u64> {
+        self.arena.view()
+    }
+
+    /// Decode the original root from its private, completed device snapshot.
+    /// No current arena slot is consulted after a later step can retire it.
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn export_retained_transition_root(
+        &self,
+        arena: &[u64],
+        owner: u64,
+        slot: u64,
+        generation: u64,
+        digest: [u8; 32],
+        extents: [u64; 3],
+    ) -> Result<SemanticRootMaterial, SemanticHypergraphError> {
+        self.ensure_not_poisoned()?;
+        if owner != self.owner {
+            return Err(SemanticHypergraphError::ForeignHandle {
+                kind: SemanticHandleKind::Root,
+            });
+        }
+        let extents = extents.map(u32::try_from);
+        let [statements, supports, versions] = extents;
+        let snapshot = SemanticRootSnapshot::new(
+            SemanticRootDigest(digest),
+            SemanticExtents::new(
+                statements.map_err(|_| size_overflow())?,
+                supports.map_err(|_| size_overflow())?,
+                versions.map_err(|_| size_overflow())?,
+            ),
+        );
+        let slot = checked_receipt_slot(slot, SemanticHandleKind::Root, self.capacities.roots)?;
+        material_from_arena(
+            arena,
+            self.capacities,
+            SemanticRootHandle::new(owner, slot, generation),
+            snapshot,
+            self.admission
+                .as_ref()
+                .ok_or_else(|| admission_error("retained root requires typed admission"))?,
+        )
+    }
+
+    /// The canonical admission prefix plus the maximum reachable insertion roster.
+    /// This inspects immutable admitted meanings and capacities, never a device value.
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn transition_root_material_capacity(
+        &self,
+    ) -> Result<usize, SemanticHypergraphError> {
+        let admission = self
+            .admission
+            .as_ref()
+            .ok_or_else(|| admission_error("root capacity requires typed admission"))?;
+        let (records, symbols) = normalized_material_admission(admission)?;
+        let prefix = SemanticRootMaterial::encode_admission(&records, &symbols)?.len();
+        (self.capacities.versions as usize)
+            .checked_mul(1 + 4 + 10 * 4 + 4 + 32)
+            .and_then(|bytes| bytes.checked_add(prefix))
+            .and_then(|bytes| bytes.checked_add(4 + 2 * 32 + 2 * 3 * 4))
+            .ok_or_else(size_overflow)
     }
 
     pub(crate) fn enter_transition(&mut self) {

@@ -107,10 +107,11 @@ pub use semantic_transition::{
     SemanticCompletedActionComponentMaterial, SemanticCompletedActionLaneMaterial,
     SemanticCompletedActionProjectionMaterial, SemanticCompletedEditSolutionMaterial,
     SemanticCompletedLaneOutcomeMaterial, SemanticCompletedMaterialCapacity,
-    SemanticCompletedModelCarrierMaterial, SemanticCompletedStepWitnessMaterial,
-    SemanticCompletedTaskGroundMaterial, SemanticCompletedTheoryDeltaMaterial,
-    SemanticPolicyGradients, SemanticSelectedPolicyGradients, SemanticUpdateCanaryMeasurement,
-    SemanticUpdateForwardReceipt, SemanticUpdateForwardReceiptMaterial, SemanticUpdateMeasurements,
+    SemanticCompletedModelCarrierMaterial, SemanticCompletedReplayMaterials,
+    SemanticCompletedStepWitnessMaterial, SemanticCompletedTaskGroundMaterial,
+    SemanticCompletedTheoryDeltaMaterial, SemanticPolicyGradients, SemanticSelectedPolicyGradients,
+    SemanticUpdateCanaryMeasurement, SemanticUpdateForwardReceipt,
+    SemanticUpdateForwardReceiptMaterial, SemanticUpdateMeasurements,
 };
 pub use semantic_work::ModelWorkKind;
 
