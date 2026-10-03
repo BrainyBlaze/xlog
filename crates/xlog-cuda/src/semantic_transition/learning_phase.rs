@@ -665,10 +665,9 @@ impl LearningFoldPlan {
                     return Err(fold_error());
                 }
             }
-            if !leaf["master"].is_null() {
-                if masters.insert(key_at(&leaf["master"])?, key).is_some() {
-                    return Err(fold_error());
-                }
+            if !leaf["master"].is_null() && masters.insert(key_at(&leaf["master"])?, key).is_some()
+            {
+                return Err(fold_error());
             }
         }
         for buffer in schema_array(&learning["buffers"])? {

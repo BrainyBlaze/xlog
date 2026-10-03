@@ -11138,9 +11138,12 @@ impl TensorContentBuffers {
 }
 
 #[cfg(feature = "semantic-policy")]
+type InitialPrefillSealSource = (u64, u64, Arc<TrackedCudaSlice<u64>>, usize);
+
+#[cfg(feature = "semantic-policy")]
 fn initial_prefill_seal_sources(
     content: &TensorContentBuffers,
-) -> Result<Vec<(u64, u64, Arc<TrackedCudaSlice<u64>>, usize)>, SemanticTransitionError> {
+) -> Result<Vec<InitialPrefillSealSource>, SemanticTransitionError> {
     let TensorContentSeals::Captured(digests) = &content.seals else {
         return Err(SemanticTransitionError::ObservationMismatch);
     };
@@ -17298,10 +17301,6 @@ impl SemanticTransitionSession {
     }
 
     #[cfg(feature = "semantic-policy")]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the original parent and completed action bindings must all be checked"
-    )]
     fn original_initial_prefill_content(
         &mut self,
         predecessor: SemanticPublishedIdentity,
@@ -18736,7 +18735,7 @@ impl SemanticTransitionSession {
             bytes.extend_from_slice(material);
         }
         material_u64(&mut bytes, roster.len() as u64);
-        for (name, block) in roster.iter().zip(bounds.chunks_exact(6)) {
+        for (name, block) in roster.iter().zip(bounds.as_chunks::<6>().0) {
             material_u64(&mut bytes, name.len() as u64);
             bytes.extend_from_slice(name.as_bytes());
             for value in block {
@@ -19241,6 +19240,10 @@ impl SemanticTransitionSession {
     }
 
     #[cfg(feature = "semantic-policy")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "gradient delivery retains the destination bank, original source reader and exact member invocation"
+    )]
     pub fn bind_imported_group_gradient_delivery(
         &mut self,
         step: &SemanticPreparedStep,
@@ -22235,11 +22238,9 @@ impl SemanticTransitionSession {
             1,
             None,
         );
-        if result.is_err() {
-            self.poisoned = true;
-        } else {
+        if let Ok(_predecessor) = &result {
             #[cfg(feature = "semantic-policy")]
-            let predecessor = *result.as_ref().expect("successful parent publication");
+            let predecessor = *_predecessor;
             // Publication joins the original model and output snapshots. Only
             // their one-use stage closes: the model and transient seals remain
             // owned by this Session for late original-forward/autograd reads.
@@ -22270,6 +22271,8 @@ impl SemanticTransitionSession {
                         },
                         captured: stage.captured_content,
                     });
+        } else {
+            self.poisoned = true;
         }
         result
     }

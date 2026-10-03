@@ -6378,10 +6378,7 @@ struct ProposalExpense {
 }
 
 impl ProposalExpense {
-    fn bind_capacity(&mut self, capacity: Option<u64>) -> PyResult<()> {
-        let Some(capacity) = capacity else {
-            return Ok(());
-        };
+    fn bind_capacity(&mut self, capacity: u64) -> PyResult<()> {
         if self.capacity.is_some_and(|original| original != capacity) || self.spent > capacity {
             return Err(invalid(
                 "task import cannot change its original nominal Proposal limit or refund expense",
@@ -6392,10 +6389,13 @@ impl ProposalExpense {
     }
 
     fn charge(&mut self, count: u64) -> PyResult<()> {
+        let capacity = self
+            .capacity
+            .ok_or_else(|| invalid("task has no original nominal Proposal limit"))?;
         let spent = self
             .spent
             .checked_add(count)
-            .filter(|spent| self.capacity.is_none_or(|capacity| *spent <= capacity))
+            .filter(|spent| *spent <= capacity)
             .ok_or_else(|| invalid("original whole-task nominal Proposal limit is exhausted"))?;
         self.spent = spent;
         Ok(())
@@ -6494,6 +6494,9 @@ impl TaskCheckpointSeed {
             }
         };
         let expense = self.proposal_expense()?;
+        let capacity = expense
+            .capacity
+            .ok_or_else(|| invalid("task checkpoint has no original nominal Proposal limit"))?;
         Ok(checkpoint_cold_value_bytes(&ColdValue::Sequence(vec![
             ColdValue::Sequence(self.authority.clone()),
             ColdValue::Sequence(self.evaluation.clone()),
@@ -6506,9 +6509,7 @@ impl TaskCheckpointSeed {
             operation,
             ColdValue::Bytes(Arc::from(binding.encode())),
             self.training_domain.clone(),
-            expense.capacity.map_or(ColdValue::None, |capacity| {
-                ColdValue::Integer(capacity.to_string())
-            }),
+            ColdValue::Integer(capacity.to_string()),
             ColdValue::Integer(expense.spent.to_string()),
         ])))
     }
@@ -6523,12 +6524,9 @@ impl TaskCheckpointSeed {
     )> {
         let value = checkpoint_cold_value(bytes)?;
         let fields = value.fields(13)?;
-        let capacity = match &fields[11] {
-            ColdValue::None => None,
-            value => Some(value.unsigned()?),
-        };
+        let capacity = fields[11].unsigned()?;
         let spent = fields[12].unsigned()?;
-        if capacity.is_some_and(|capacity| spent > capacity) {
+        if spent > capacity {
             return Err(invalid(
                 "checkpoint has an invalid nominal Proposal expense owner",
             ));
@@ -6553,7 +6551,10 @@ impl TaskCheckpointSeed {
                 initial_sources: fields[3].clone(),
                 source_mapping: fields[4].clone(),
                 replay_selection: fields[5].clone(),
-                proposal_expense: Arc::new(Mutex::new(ProposalExpense { capacity, spent })),
+                proposal_expense: Arc::new(Mutex::new(ProposalExpense {
+                    capacity: Some(capacity),
+                    spent,
+                })),
             },
             AuthoritySnapshot::parse(&fields[6])?,
             phase,
@@ -7178,11 +7179,16 @@ impl PySemanticTransitionTaskUse {
     /// Original whole-task bound and irreversible nominal places. Available
     /// after a failed launch too; reading expense does not prove completion.
     #[getter]
-    fn proposal_expense(&self, py: Python<'_>) -> PyResult<(Option<u64>, u64)> {
+    fn proposal_expense(&self, py: Python<'_>) -> PyResult<(u64, u64)> {
         self.session.borrow(py).require_creator()?;
         self.issuance.require_current()?;
         let expense = self.checkpoint.proposal_expense()?;
-        Ok((expense.capacity, expense.spent))
+        Ok((
+            expense
+                .capacity
+                .ok_or_else(|| invalid("issued task has no original nominal Proposal limit"))?,
+            expense.spent,
+        ))
     }
 }
 
@@ -7748,7 +7754,7 @@ fn completed_publication_identity(
 #[cfg(feature = "semantic-policy")]
 fn completed_u192(py: Python<'_>, limbs: [u64; 3]) -> PyResult<Py<PyAny>> {
     let mut bytes = [0u8; 24];
-    for (chunk, limb) in bytes.chunks_exact_mut(8).zip(limbs) {
+    for (chunk, limb) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(limbs) {
         chunk.copy_from_slice(&limb.to_le_bytes());
     }
     Ok(py
@@ -13874,7 +13880,7 @@ impl PySemanticTransitionController {
     /// Only then does this same TaskUse become Imported. Any failed import
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
-    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, live_authorities, replay_rows, training_objective, training_domain, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false, proposal_capacity=None))]
+    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, live_authorities, replay_rows, training_objective, training_domain, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, proposal_capacity, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
     #[expect(
         clippy::too_many_arguments,
         reason = "task import binds the complete authority, replay, and callback contract"
@@ -13913,19 +13919,17 @@ impl PySemanticTransitionController {
         pack_policy: &Bound<'_, PyAny>,
         finish_invocation: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
+        proposal_capacity: &Bound<'_, PyAny>,
         resolve_checkpoint: Option<&Bound<'_, PyAny>>,
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         retain_policy: bool,
-        proposal_capacity: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
         let mut import = ColdImportGuard::begin(&session, None)?;
         let mut budget = 16 * 1024 * 1024;
-        let proposal_capacity = proposal_capacity
-            .map(|capacity| ColdValue::read(capacity, &mut 128, 0)?.unsigned())
-            .transpose()?;
+        let proposal_capacity = ColdValue::read(proposal_capacity, &mut 128, 0)?.unsigned()?;
         session
             .proposal_expense
             .lock()
@@ -17569,7 +17573,7 @@ mod tests {
             source_mapping: ColdValue::None,
             replay_selection: ColdValue::None,
             proposal_expense: std::sync::Arc::new(std::sync::Mutex::new(super::ProposalExpense {
-                capacity: None,
+                capacity: Some(0),
                 spent: 0,
             })),
         };
@@ -20946,6 +20950,7 @@ session = SemanticTransitionSession(
     device_ordinal=0, memory_bytes=512*1024*1024)
 controller = SemanticTransitionController(session)
 arguments = dict(task_ref=inputs[0], task_scope=inputs[1],
+    proposal_capacity=0,
     statement_records=(0,1), allowed_support_records=(),
     task_program_source='pred rainfall(u32). rainfall(8). ?- rainfall(8). ?- rainfall(2).',
     task_query_ordinals=(0,1), task_scoring=(14,7,1,45,15,1), admissible_truth_masks=(7,7),

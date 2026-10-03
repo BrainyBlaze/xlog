@@ -428,13 +428,13 @@ the single runnable `SemanticTransitionRestoredCheckpoint`. A preparation
 failure leaves the source runnable only when it can still be revalidated; it
 never grants execution to the unfinished candidate.
 
-Task import accepts `proposal_capacity=original_limit` to bind the original
-whole-task nonnegative U64 nominal Proposal limit. A fresh Session starts
-without that bound; `None` preserves the existing bound on re-import. A bound
-cannot be changed, and adding a bound cannot discard previously spent places.
-Re-import on the same native Session retains the original expense owner;
-this is not a phase-program budget. The native
-issued `task_use.proposal_expense` returns `(capacity_or_None, spent)`.
+Task import requires `proposal_capacity=original_limit` to bind the original
+whole-task nonnegative U64 nominal Proposal limit. It has no omitted or `None`
+unbounded mode. A fresh Session has no task bound until import; re-import must
+provide the same original bound and retains its already spent places. Neither
+the limit nor expense is inferred from fuel or effective RNG draws. This is
+not a phase-program budget. The native-issued `task_use.proposal_expense`
+returns `(capacity, spent)`.
 The complete nominal Proposal roster is charged before segment construction
 enters any producer callback, not from successful RNG draws or published
 results. The single-transition admission path charges its nominal Proposal

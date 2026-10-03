@@ -153,11 +153,11 @@ class SemanticTransitionTaskUse:
     """Native-issued task; no public constructor."""
 
     @property
-    def proposal_expense(self) -> tuple[Optional[int], int]:
+    def proposal_expense(self) -> tuple[int, int]:
         """Original whole-task capacity and irreversible nominal places spent.
 
-        None capacity declares no whole-task bound. Expense is not an RNG
-        coordinate or proof that an admitted operation completed.
+        The bound is required at import. Expense is not an RNG coordinate
+        or proof that an admitted operation completed.
         """
         ...
 
@@ -174,9 +174,9 @@ class SemanticTransitionController:
         initial_sources: Any, source_mapping: Any, snapshot: Any,
         replay_selection: Any, replay_operation: Any, restore_invocation: Any,
         pack_policy: Any, finish_invocation: Any, refresh_snapshot: Any,
+        proposal_capacity: int,
         resolve_checkpoint: Any = None, max_checkpoint_bytes: Any = None,
         max_total_checkpoint_bytes: Any = None, retain_policy: bool = False,
-        proposal_capacity: Optional[int] = None,
     ) -> Union[SemanticTransitionTaskUse, tuple[SemanticTransitionTaskUse, Any]]: ...
 
     def prepare_model_evaluation(
