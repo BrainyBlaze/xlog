@@ -162,7 +162,10 @@ class SemanticTransitionTaskUse:
         ...
 
 class SemanticCompletedSegmentPending(RuntimeError):
-    """Retain the original Runtime; resolve the native result, never resubmit."""
+    """Native execute/pending resolver handoff; not a cold getter retry signal.
+
+    Retain the original Runtime and resolve its result, never resubmit.
+    """
 
 class SemanticTransitionController:
     def import_task(

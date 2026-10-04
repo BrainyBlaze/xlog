@@ -58,6 +58,18 @@ pyo3::create_exception!(
     "A fully retained original segment result awaits fresh-authority delivery; never resubmit it."
 );
 
+#[cfg(feature = "semantic-policy")]
+fn completed_segment_pending(py: Python<'_>, original: PyErr) -> PyErr {
+    if original.is_instance_of::<SemanticCompletedSegmentPending>(py) {
+        return original;
+    }
+    let pending = SemanticCompletedSegmentPending::new_err(
+        "original segment completed; retain its Runtime and resolve_completed_segment instead of aborting or resubmitting",
+    );
+    pending.set_cause(py, Some(original));
+    pending
+}
+
 type PredicateInput = (u32, String, Vec<(String, u8, String)>, Vec<usize>);
 type RecordInput = (u32, Vec<(u8, Py<PyAny>)>, Vec<u32>);
 type SupportInput = (u32, String, u32, u32, u32, u32);
@@ -13665,13 +13677,7 @@ impl PySemanticTransitionController {
         drop(issued);
         drop(session);
         self.resolve_completed_segment(py, task_use, refresh_snapshot)
-            .map_err(|original| {
-                let pending = SemanticCompletedSegmentPending::new_err(
-                    "original segment completed; retain its Runtime and resolve_completed_segment instead of aborting or resubmitting",
-                );
-                pending.set_cause(py, Some(original));
-                pending
-            })
+            .map_err(|original| completed_segment_pending(py, original))
     }
 
     /// Return only the SAME retained final parent and complete ordered rows.
@@ -13794,16 +13800,32 @@ impl PySemanticTransitionController {
                 )),
             }
         };
-        let fresh = recording_callback(check, || refresh_snapshot.call0())?;
-        let fresh =
-            AuthoritySnapshot::parse(&ColdValue::read(&fresh, &mut (16 * 1024 * 1024), 0)?)?;
         check()?;
-        let mut state = issued.state()?;
-        fresh.newer_than(&state.snapshot)?;
-        issued.authority.check_use(&operation, &fresh, false)?;
-        state.snapshot = fresh;
-        state.phase = TaskUsePhase::Segment(operation);
-        Ok(result)
+        let pending_delivery =
+            matches!(issued.state()?.phase, TaskUsePhase::CompletedPending { .. });
+        let delivery = (|| -> PyResult<Py<PyTuple>> {
+            let fresh = recording_callback(check, || refresh_snapshot.call0())?;
+            let fresh =
+                AuthoritySnapshot::parse(&ColdValue::read(&fresh, &mut (16 * 1024 * 1024), 0)?)?;
+            check()?;
+            let mut state = issued.state()?;
+            fresh.newer_than(&state.snapshot)?;
+            issued.authority.check_use(&operation, &fresh, false)?;
+            state.snapshot = fresh;
+            state.phase = TaskUsePhase::Segment(operation.clone());
+            Ok(result.clone_ref(py))
+        })();
+        // An original pending handoff remains pending if another fresh-rights
+        // observation fails. The Runtime must retain it rather than routing an
+        // ordinary callback error through its abort path. Wrong owners, missing
+        // rosters and cold getter errors do not receive this completion signal.
+        delivery.map_err(|original| {
+            if pending_delivery {
+                completed_segment_pending(py, original)
+            } else {
+                original
+            }
+        })
     }
 
     /// Creator-thread terminal cleanup after every original backward/final-use.

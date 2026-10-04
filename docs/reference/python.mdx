@@ -927,7 +927,11 @@ or retire its producers. `execute_segment` raises the native
 `SemanticCompletedSegmentPending` exception with the original exception as its
 cause. The owning Runtime must retain its producers and result-collection state
 instead of using its permanent abort path for this exception. Constructing that
-exception in Python grants no result or execution rights. Resolution refreshes
+exception in Python grants no result or execution rights. A further authority
+callback or snapshot failure while resolving that same pending handoff raises
+the same native exception and leaves the original task pending. Wrong-owner,
+missing-roster and cold getter failures do not gain this continuation signal.
+Resolution refreshes
 original rights and returns those
 same owners; it does not launch, collect another device outcome, invoke model
 producers, reserve nominal Proposals, or reconstruct missing results. Returned
