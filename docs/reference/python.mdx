@@ -918,6 +918,26 @@ This port does not change the six native `execute_segment` row fields, objective
 reductions, canary algorithms, scientific acceptance, or the lifetime required
 for an unpublished multi-Update candidate.
 
+`controller.resolve_completed_segment(task_use, *, refresh_snapshot)` retrieves
+the original final parent and complete six-field ordered rows retained by the
+same `execute_segment`. Native retains them before refreshing authority for
+handoff. If that callback fails, the task remains in a private pending-result
+phase: it cannot submit another segment, publish, save an ordinary checkpoint,
+or retire its producers. `execute_segment` raises the native
+`SemanticCompletedSegmentPending` exception with the original exception as its
+cause. The owning Runtime must retain its producers and result-collection state
+instead of using its permanent abort path for this exception. Constructing that
+exception in Python grants no result or execution rights. Resolution refreshes
+original rights and returns those
+same owners; it does not launch, collect another device outcome, invoke model
+producers, reserve nominal Proposals, or reconstruct missing results. Returned
+refusal dictionaries are checked against the retained native evidence again.
+Only successful reconciliation of the entire original roster, work evidence,
+publication lineage and reader release establishes known completion. An
+integrity failure after a completed CUDA stream remains unknown and cannot use
+this resolver. These retained in-process results are not durable admission,
+private-program recovery, scientific acceptance, or process-restart evidence.
+
 Use the same step's `record(44, 0, consumer_stream=...)`, `tensor(...)` and
 `tensor_allocation(...)` exports to serialize the original model contract and
 complete model backings. Their private storage is preallocated before capture

@@ -161,6 +161,9 @@ class SemanticTransitionTaskUse:
         """
         ...
 
+class SemanticCompletedSegmentPending(RuntimeError):
+    """Retain the original Runtime; resolve the native result, never resubmit."""
+
 class SemanticTransitionController:
     def import_task(
         self, *, task_ref: Any, task_scope: Any, statement_records: Any,
@@ -183,6 +186,21 @@ class SemanticTransitionController:
         self, task_use: Any, parent: Any, *, model_work_capacity: int,
         cohort: Optional[SemanticEvaluationCohort] = None,
     ) -> SemanticModelEvaluation: ...
+
+    def execute_segment(
+        self, task_use: SemanticTransitionTaskUse, *, operation: str,
+        snapshot: Any, refresh_snapshot: Callable[[], Any],
+    ) -> tuple[SemanticPublishedParent, tuple[
+        tuple[SemanticPreparedStep, Optional[str], int, Optional[dict[str, Any]], Any, Optional[int]], ...
+    ]]: ...
+
+    def resolve_completed_segment(
+        self, task_use: SemanticTransitionTaskUse, *, refresh_snapshot: Callable[[], Any],
+    ) -> tuple[SemanticPublishedParent, tuple[
+        tuple[SemanticPreparedStep, Optional[str], int, Optional[dict[str, Any]], Any, Optional[int]], ...
+    ]]:
+        """Deliver the same retained complete native roster with fresh rights; no execution."""
+        ...
 
 # ---------------------------------------------------------------------------
 # Native relation provenance

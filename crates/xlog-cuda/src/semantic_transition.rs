@@ -13547,7 +13547,7 @@ mod task_state_contract {
 
 /// Completed device outcome. A refusal carries no successor, selected-score
 /// receipts, or derivative authority; it is not a successful observation.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[expect(
     clippy::large_enum_variant,
     reason = "published outcomes retain the original invocation owner without another allocation"
@@ -13788,7 +13788,7 @@ fn refused_root_cleanup(
     Ok(())
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SemanticTransitionObservation {
     pub components: Vec<SemanticTransitionReceipt>,
     pub root_handle: SemanticRootHandle,
@@ -13836,7 +13836,7 @@ pub struct SemanticTaskEvaluation {
 
 /// Device terminal and both ordered edit results. A refused lane has no root;
 /// successful edit receipts preceding rollback are not published graph state.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticTransitionLane {
     /// No sealed root is produced for a task-local refusal. An owner refusal
     /// remains an actual owner error, distinct from an evaluator decision.
@@ -14098,7 +14098,7 @@ pub struct SemanticTransitionSession {
 /// owns no numerical invocation, selected receipts, or derivative authority.
 /// Intermediate root records are historical receipts; a later step may retire
 /// their slots. Acquire the canonical final reader for the current publication.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[expect(
     clippy::large_enum_variant,
     reason = "completed outcomes retain their original invocation and step owners"
@@ -14490,8 +14490,9 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
-    /// True only after the actual graph stream completed successfully. This
-    /// remains available when a later observation or integrity check fails.
+    /// True only after the full ordered roster, work certificates, publication
+    /// lineage and terminal reader release have been reconciled successfully.
+    /// Stream completion alone does not establish a recoverable result.
     pub fn prepared_segment_completion_known(&self) -> bool {
         self.prepared_segment
             .as_ref()
@@ -14537,10 +14538,6 @@ impl SemanticTransitionSession {
             "prepared graph terminal wait",
             CudaStream::synchronize,
         )?;
-        self.prepared_segment
-            .as_mut()
-            .expect("submitted segment")
-            .completed = true;
         let handles = self
             .prepared_segment
             .as_ref()
@@ -14706,6 +14703,10 @@ impl SemanticTransitionSession {
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
+        self.prepared_segment
+            .as_mut()
+            .expect("submitted segment")
+            .completed = true;
         Ok(outcomes)
     }
 

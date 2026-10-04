@@ -50,6 +50,14 @@ pub(crate) mod learning_phase;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod model_evaluation;
 
+#[cfg(feature = "semantic-policy")]
+pyo3::create_exception!(
+    pyxlog._native,
+    SemanticCompletedSegmentPending,
+    PyRuntimeError,
+    "A fully retained original segment result awaits fresh-authority delivery; never resubmit it."
+);
+
 type PredicateInput = (u32, String, Vec<(String, u8, String)>, Vec<usize>);
 type RecordInput = (u32, Vec<(u8, Py<PyAny>)>, Vec<u32>);
 type SupportInput = (u32, String, u32, u32, u32, u32);
@@ -2379,6 +2387,19 @@ struct PreparedPythonSegment {
     steps: Vec<Py<PySemanticPreparedStep>>,
     resources: Arc<PreparedProducerResources>,
     producers_retired: bool,
+    // Retain the entire native roster before entering any post-completion
+    // Python callback. Neither a lost return nor callback failure resubmits it.
+    #[cfg(feature = "semantic-policy")]
+    outcomes: Option<Vec<xlog_cuda::SemanticPreparedStepOutcome>>,
+    #[cfg(feature = "semantic-policy")]
+    completion: Option<PreparedSegmentCompletion>,
+}
+
+#[cfg(feature = "semantic-policy")]
+struct PreparedSegmentCompletion {
+    operation: String,
+    admission_snapshot: Vec<u8>,
+    result: Py<PyTuple>,
 }
 
 struct PreparedBuildGuard<'a> {
@@ -6485,6 +6506,10 @@ enum TaskUsePhase {
         scope: Arc<()>,
         operation: Option<String>,
     },
+    CompletedPending {
+        scope: Arc<()>,
+        operation: String,
+    },
     Segment(String),
     ArenaPreparing(Box<TaskUsePhase>),
     Evaluating(Box<TaskUsePhase>),
@@ -7064,6 +7089,7 @@ impl TaskUseState {
             | TaskUsePhase::InitialPrefillBound
             | TaskUsePhase::Segment(_)
             | TaskUsePhase::ArenaPreparing(_)
+            | TaskUsePhase::CompletedPending { .. }
             | TaskUsePhase::Evaluating(_)
             | TaskUsePhase::Importing { reads: true, .. } => Ok(()),
             _ => Err(invalid(
@@ -13189,6 +13215,10 @@ impl PySemanticTransitionController {
                 steps: steps.iter().map(|step| step.clone_ref(py)).collect(),
                 resources: Arc::clone(&resources),
                 producers_retired: false,
+                #[cfg(feature = "semantic-policy")]
+                outcomes: None,
+                #[cfg(feature = "semantic-policy")]
+                completion: None,
             });
         let check = || self.check_recording(py, &issued, &scope, &snapshot);
         let kwargs = PyDict::new(py);
@@ -13508,6 +13538,19 @@ impl PySemanticTransitionController {
             let mut owner = shared.witness_owner()?;
             owner.complete_prepared_segment().map_err(xlog_err)
         })?;
+        {
+            let mut retained = session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let retained = retained
+                .as_mut()
+                .ok_or_else(|| invalid("completed segment lost its original owner"))?;
+            if retained.outcomes.is_some() || outcomes.len() != steps.len() {
+                return Err(invalid("native completion changed the original step count"));
+            }
+            retained.outcomes = Some(outcomes.clone());
+        }
         let check = || -> PyResult<()> {
             self.require_read_issued(&issued)?;
             let owner = session.owner()?;
@@ -13521,18 +13564,16 @@ impl PySemanticTransitionController {
             }
             Ok(())
         };
-        let fresh = recording_callback(check, || refresh_snapshot.call0())?;
-        let fresh = AuthoritySnapshot::parse(&ColdValue::read(&fresh, &mut budget, 0)?)?;
+        check()?;
         let lease = {
             let mut owner = session.owner()?;
             issued.require_identity(&owner)?;
-            let mut state = issued.state()?;
+            let state = issued.state()?;
             if Self::execution_binding(&state, false)? != expected {
                 return Err(invalid(
                     "completion snapshot no longer belongs to this original operation",
                 ));
             }
-            state.revalidate_activation(&issued.authority, fresh)?;
             owner.acquire().map_err(xlog_err)?
         };
         let parent = Py::new(
@@ -13544,11 +13585,17 @@ impl PySemanticTransitionController {
                 continuation_producers: Mutex::new(Vec::new()),
             },
         )?;
-        if outcomes.len() != steps.len() {
-            return Err(invalid("native completion changed the original step count"));
-        }
         let mut rows = Vec::with_capacity(steps.len());
         for (step, completed) in steps.into_iter().zip(outcomes) {
+            let native_step = match &completed {
+                xlog_cuda::SemanticPreparedStepOutcome::Skipped { step, .. }
+                | xlog_cuda::SemanticPreparedStepOutcome::Completed { step, .. } => step,
+            };
+            if !step.borrow(py).inner.same_handle(native_step) {
+                return Err(invalid(
+                    "native completion changed its original ordered step",
+                ));
+            }
             let (transition, status, refusal, invocation, bank) = match completed {
                 xlog_cuda::SemanticPreparedStepOutcome::Skipped { status, .. } => {
                     (None, status, None, py.None(), None)
@@ -13595,7 +13642,167 @@ impl PySemanticTransitionController {
         let result = (parent, PyTuple::new(py, rows)?)
             .into_pyobject(py)?
             .unbind();
+        {
+            let mut retained = session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let retained = retained
+                .as_mut()
+                .ok_or_else(|| invalid("completed segment lost its original owner"))?;
+            retained.completion = Some(PreparedSegmentCompletion {
+                operation: operation.clone(),
+                admission_snapshot: expected.1,
+                result,
+            });
+            issued.state()?.phase = TaskUsePhase::CompletedPending { scope, operation };
+        }
+        // The complete native/Python roster is now retained. An authority
+        // callback failure must quarantine this delivery, not abort the known
+        // completed graph or discard results needed by the original resolver.
         guard.committed = true;
+        drop(guard);
+        drop(issued);
+        drop(session);
+        self.resolve_completed_segment(py, task_use, refresh_snapshot)
+            .map_err(|original| {
+                let pending = SemanticCompletedSegmentPending::new_err(
+                    "original segment completed; retain its Runtime and resolve_completed_segment instead of aborting or resubmitting",
+                );
+                pending.set_cause(py, Some(original));
+                pending
+            })
+    }
+
+    /// Return only the SAME retained final parent and complete ordered rows.
+    /// This path performs no launch, completion readback, producer execution,
+    /// nominal reservation or result reconstruction. Fresh rights remain
+    /// mandatory. Unknown/incomplete native observations cannot enter it.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (task_use, *, refresh_snapshot))]
+    fn resolve_completed_segment(
+        &self,
+        py: Python<'_>,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        refresh_snapshot: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let issued = task_use.borrow(py);
+        self.require_read_issued(&issued)?;
+        if !refresh_snapshot.is_callable()
+            || session.importing.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+            || session.recording.swap(true, Ordering::AcqRel)
+        {
+            return Err(invalid(
+                "completed result resolution requires its original idle Session and fresh authority owner",
+            ));
+        }
+        let _resolution = PreparedRetirementGuard(&session.recording);
+        let (scope, operation, admission_snapshot, result) = {
+            let retained = session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let retained = retained
+                .as_ref()
+                .ok_or_else(|| invalid("no original completed segment to resolve"))?;
+            if retained.task_use.as_ptr() != task_use.as_ptr() || retained.outcomes.is_none() {
+                return Err(invalid("completed result belongs to another task use"));
+            }
+            let completion = retained.completion.as_ref().ok_or_else(|| {
+                invalid("native completion has no complete retained result roster")
+            })?;
+            (
+                Arc::clone(&retained.scope),
+                completion.operation.clone(),
+                completion.admission_snapshot.clone(),
+                completion.result.clone_ref(py),
+            )
+        };
+        let retained_parent = result.bind(py).get_item(0)?;
+        let retained_parent = retained_parent.extract::<Py<PySemanticPublishedParent>>()?;
+        let check = || -> PyResult<()> {
+            self.require_read_issued(&issued)?;
+            let owner = session.owner()?;
+            issued.require_identity(&owner)?;
+            let parent = retained_parent.borrow(py);
+            parent.require_task(py, &issued)?;
+            owner
+                .published_identity(&*parent.lease()?)
+                .map_err(xlog_err)?;
+            if !owner.prepared_segment_completion_known() {
+                return Err(invalid(
+                    "native result roster has not been fully reconciled",
+                ));
+            }
+            let retained = session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let retained = retained
+                .as_ref()
+                .ok_or_else(|| invalid("completed result owner disappeared during resolution"))?;
+            let outcomes = retained
+                .outcomes
+                .as_ref()
+                .ok_or_else(|| invalid("completed result lost its original native observations"))?;
+            let rows = result.bind(py).get_item(1)?;
+            let rows = rows.cast::<PyTuple>()?;
+            if rows.len() != outcomes.len() {
+                return Err(invalid(
+                    "retained result changed its original ordered roster",
+                ));
+            }
+            // A refusal is the one mutable Python value in a returned row.
+            // Re-read the original native evidence, never a consumer-edited
+            // report, before delivering a previously returned tuple again.
+            for (row, outcome) in rows.iter().zip(outcomes) {
+                let row = row.cast::<PyTuple>()?;
+                let observed = row.get_item(3)?;
+                let original = match outcome {
+                    xlog_cuda::SemanticPreparedStepOutcome::Skipped { .. } => None,
+                    xlog_cuda::SemanticPreparedStepOutcome::Completed { outcome, .. } => {
+                        transition_refusal_report(py, outcome)?
+                    }
+                };
+                let original = original.map_or_else(|| py.None(), Py::into_any);
+                let mut budget = 16 * 1024 * 1024;
+                if ColdValue::read(&observed, &mut budget, 0)?.canonical_bytes()
+                    != ColdValue::read(original.bind(py), &mut budget, 0)?.canonical_bytes()
+                {
+                    return Err(invalid(
+                        "consumer changed the retained native refusal report",
+                    ));
+                }
+            }
+            let state = issued.state()?;
+            match &state.phase {
+                TaskUsePhase::CompletedPending {
+                    scope: original,
+                    operation: original_operation,
+                } if Arc::ptr_eq(original, &scope)
+                    && original_operation == &operation
+                    && state.snapshot.canonical == admission_snapshot =>
+                {
+                    Ok(())
+                }
+                TaskUsePhase::Segment(original) if original == &operation => Ok(()),
+                _ => Err(invalid(
+                    "completed result lost its original task delivery phase",
+                )),
+            }
+        };
+        let fresh = recording_callback(check, || refresh_snapshot.call0())?;
+        let fresh =
+            AuthoritySnapshot::parse(&ColdValue::read(&fresh, &mut (16 * 1024 * 1024), 0)?)?;
+        check()?;
+        let mut state = issued.state()?;
+        fresh.newer_than(&state.snapshot)?;
+        issued.authority.check_use(&operation, &fresh, false)?;
+        state.snapshot = fresh;
+        state.phase = TaskUsePhase::Segment(operation);
         Ok(result)
     }
 
@@ -13615,6 +13822,7 @@ impl PySemanticTransitionController {
         let session = self.session.borrow(py);
         session.require_creator()?;
         self.require_read_issued(&task_use.borrow(py))?;
+        task_use.borrow(py).state()?.require_public_use()?;
         if session.importing.load(Ordering::Acquire)
             || session.recording.load(Ordering::Acquire)
             || session.retiring.swap(true, Ordering::AcqRel)
