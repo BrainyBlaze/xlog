@@ -542,7 +542,12 @@ native code revoke the source task use and return the single runnable
 `pending.status == "unknown"`, retains both owners and forbids another commit.
 `pending.resolve_checkpoint()` only calls the same retained resolver: `None`
 remains unknown; exact checkpoint bytes allow activation; `False` must prove
-the write did not commit and permits revalidated source continuation.
+the write did not commit and permits revalidated source continuation only if
+native code has never observed exact durable readback. Once either callback has
+returned the complete original checkpoint bytes, that knowledge is retained
+before fresh authority and model/native revalidation. A later `False` is a
+contradiction: it leaves the same owners unknown, cannot authorize abandonment
+or source continuation, and does not refund expense or repeat the write.
 `pending.abandon_prepared()` is allowed only before a commit attempt.
 Ordinary save/restore and resident Update preserve this phase history and
 cumulative progress. The embedded native publication material uses version 2;

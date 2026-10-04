@@ -160,6 +160,7 @@ enum Completion {
     Unknown {
         _owner: Py<PyAny>,
         resolve: Py<PyAny>,
+        readback_observed: bool,
     },
     Committed,
     Abandoned,
@@ -313,6 +314,22 @@ impl PySemanticLearningPhaseTransition {
         self.completion
             .lock()
             .map_err(|_| invalid("learning-phase completion owner mutex is poisoned"))
+    }
+
+    fn retain_durable_readback(&self) -> PyResult<()> {
+        let mut completion = self.status_lock()?;
+        let Completion::Unknown {
+            readback_observed, ..
+        } = &mut *completion
+        else {
+            return Err(invalid(
+                "durable phase readback lost its original pending owner",
+            ));
+        };
+        // Exact readback remains known even if subsequent fresh authority or
+        // native/model verification fails. A later absence cannot undo it.
+        *readback_observed = true;
+        Ok(())
     }
 
     fn verify(&self, py: Python<'_>, include_candidate: bool) -> PyResult<()> {
@@ -477,6 +494,7 @@ impl PySemanticLearningPhaseTransition {
         *self.status_lock()? = Completion::Unknown {
             _owner: durable_owner.clone_ref(py),
             resolve: resolve.unbind(),
+            readback_observed: false,
         };
         let readback = commit.call1((
             &self.destination,
@@ -484,19 +502,25 @@ impl PySemanticLearningPhaseTransition {
             PyBytes::new(py, &Sha256::digest(&self.checkpoint)),
         ))?;
         require_model_bytes(&readback, &self.checkpoint)?;
+        self.retain_durable_readback()?;
         self.activate(py)
     }
 
     /// Resolve through the SAME retained durable owner; never repeats commit.
-    /// None is still unknown, False proves absence, exact bytes prove readback.
+    /// None is still unknown. False can prove absence only before any exact
+    /// readback; it cannot discard an already observed durable checkpoint.
     fn resolve_checkpoint(
         &self,
         py: Python<'_>,
     ) -> PyResult<Option<Py<PySemanticTransitionRestoredCheckpoint>>> {
         let _operation = PhaseOperation::begin(&self.operating)?;
         self.source.borrow(py).require_creator()?;
-        let resolve = match &*self.status_lock()? {
-            Completion::Unknown { resolve, .. } => resolve.clone_ref(py),
+        let (resolve, readback_observed) = match &*self.status_lock()? {
+            Completion::Unknown {
+                resolve,
+                readback_observed,
+                ..
+            } => (resolve.clone_ref(py), *readback_observed),
             _ => return Err(invalid("only an unknown phase checkpoint needs resolution")),
         };
         let result = resolve.bind(py).call1((
@@ -507,10 +531,16 @@ impl PySemanticLearningPhaseTransition {
             return Ok(None);
         }
         if result.is_exact_instance_of::<PyBool>() && !result.extract::<bool>()? {
+            if readback_observed {
+                return Err(invalid(
+                    "phase resolver contradicted the original exact durable readback; retain the same pending owners",
+                ));
+            }
             self.abandon(py)?;
             return Ok(None);
         }
         require_model_bytes(&result, &self.checkpoint)?;
+        self.retain_durable_readback()?;
         self.activate(py).map(Some)
     }
 
