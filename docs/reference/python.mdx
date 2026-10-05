@@ -490,7 +490,7 @@ conflicting effects on aliases refuse the entire private candidate.
 `controller.prepare_learning_phase_transition(task_use, *, parent, recipe, source_checkpoint,
 consumer_streams, snapshot, scientific_owner, learning_grant_ref,
 checkpoint_destination, snapshot_model_state, restore_model,
-snapshot_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits,
+snapshot_restored_model, retire_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits,
 frozen_program_bytes)` takes the exact builtin full
 `source_checkpoint` bytes already used by the original scientific owner. It
 quiesces the successful recompute parent and verifies the supplied native state,
@@ -545,6 +545,22 @@ against the supplied checkpoint; it does not create a replacement source.
 `refresh_snapshot()` supplies strictly newer original authority snapshots.
 These callbacks execute cold, on the creator thread, outside native/task locks.
 Both model snapshots and native banks are checked again before any handoff.
+
+`retire_restored_model(returned_model) -> None` is the original model/runtime
+owner's mandatory retirement callback, retained before the factory is entered.
+Abandonment calls it once with the exact factory model while source use is still
+private. It must retire known completed segment/evaluation consumers and the
+original held residency through their canonical release paths, relinquishing its
+native/model ownership. Native then positively verifies the original lease has
+no reader, retained step, unfinished evaluation or captured executable; `abort`,
+reader-only release and a failed identity lookup do not establish retirement.
+Only after known retirement does native drop its candidate owners and resume the
+unchanged source, without refunding expense. The full candidate checkpoint remains
+available as cold material. A callback failure or uncertain native release retains
+the same pending and candidate with `unknown` status; neither the callback nor a
+factory is repeated. If retirement is known but later source authority validation
+fails, resolution may finish that source validation without repeating retirement
+or the durable resolver. This is not fresh-process or frozen-program recovery.
 
 The source retains the native pending owner **before** its first serializer,
 scientific callback or restoration operation. During preparation its status is

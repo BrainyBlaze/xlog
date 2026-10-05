@@ -23338,6 +23338,34 @@ impl SemanticTransitionSession {
         Ok(lease.identity)
     }
 
+    /// Prove full consumer retirement of this original publication owner.
+    /// A retired bank alone, an abort, or a failed identity lookup is not proof
+    /// that its retained steps, evaluations and captured executables are gone.
+    pub fn require_retired_publication(
+        &self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        #[cfg(feature = "semantic-policy")]
+        self.require_closed_evaluations()?;
+        if self.is_poisoned() {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        if !Arc::ptr_eq(&lease.issuer, &self.publication_issuer)
+            || lease.active
+            || !self.readers.is_empty()
+            || !self.steps.is_empty()
+            || self.captured.is_some()
+            || self.prepared_segment.is_some()
+            || !self.prepared_resources.is_empty()
+        {
+            return Err(publication_input_error(
+                "private publication requires known full retirement of its original consumers",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn published_identity(
         &self,
         lease: &SemanticPublishedLease,
