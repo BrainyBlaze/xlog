@@ -1884,18 +1884,24 @@ impl PySemanticTransitionSession {
         } else {
             None
         };
-        let model = restore_model
-            .call1((
-                controller.clone_ref(py),
-                task_use.clone_ref(py),
-                parent.clone_ref(py),
-                if learning_transition.is_some() {
-                    py.None()
-                } else {
-                    PyBytes::new(py, &manifest.model).into_any().unbind()
-                },
-            ))
-            .map(|model| model.unbind());
+        let model = (|| {
+            let restored = session.borrow(py);
+            let issued = task_use.borrow(py);
+            let acquired = parent.borrow(py);
+            let _reads = ImportReadScope::checkpoint(&restored, &issued, &acquired, py)?;
+            restore_model
+                .call1((
+                    controller.clone_ref(py),
+                    task_use.clone_ref(py),
+                    parent.clone_ref(py),
+                    if learning_transition.is_some() {
+                        py.None()
+                    } else {
+                        PyBytes::new(py, &manifest.model).into_any().unbind()
+                    },
+                ))
+                .map(Bound::unbind)
+        })();
         let model = match model {
             Ok(model) => model,
             Err(error) => {
@@ -6591,6 +6597,10 @@ enum TaskUsePhase {
     Segment(String),
     ArenaPreparing(Box<TaskUsePhase>),
     Evaluating(Box<TaskUsePhase>),
+    CheckpointReading {
+        scope: Arc<()>,
+        original: Box<TaskUsePhase>,
+    },
     Refused,
 }
 
@@ -6682,10 +6692,12 @@ enum CheckpointTaskPhase {
 }
 
 fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> {
-    let phase = match &state.phase {
-        TaskUsePhase::ArenaPreparing(original) => original.as_ref(),
-        phase => phase,
-    };
+    let mut phase = &state.phase;
+    while let TaskUsePhase::ArenaPreparing(original)
+    | TaskUsePhase::CheckpointReading { original, .. } = phase
+    {
+        phase = original.as_ref();
+    }
     match phase {
         TaskUsePhase::Imported => Ok(CheckpointTaskPhase::Imported),
         TaskUsePhase::InitialPrefillBound => Ok(CheckpointTaskPhase::InitialPrefillBound),
@@ -7169,6 +7181,7 @@ impl TaskUseState {
             | TaskUsePhase::ArenaPreparing(_)
             | TaskUsePhase::CompletedPending { .. }
             | TaskUsePhase::Evaluating(_)
+            | TaskUsePhase::CheckpointReading { .. }
             | TaskUsePhase::Importing { reads: true, .. } => Ok(()),
             _ => Err(invalid(
                 "task use is not available outside its controlled import",
@@ -7177,7 +7190,12 @@ impl TaskUseState {
     }
 
     fn require_read_during_import(&self, importing: bool) -> PyResult<()> {
-        if importing != matches!(&self.phase, TaskUsePhase::Importing { .. }) {
+        if importing
+            != matches!(
+                &self.phase,
+                TaskUsePhase::Importing { .. } | TaskUsePhase::CheckpointReading { .. }
+            )
+        {
             return Err(invalid(
                 "task reader does not belong to the active import state",
             ));
@@ -7207,7 +7225,14 @@ impl TaskUseState {
         Ok(())
     }
 
-    fn content_handoff_binding(&self) -> PyResult<(String, Vec<u8>)> {
+    fn content_handoff_binding(&self) -> PyResult<(Option<String>, Vec<u8>)> {
+        if matches!(self.phase, TaskUsePhase::CheckpointReading { .. }) {
+            let operation = match checkpoint_task_phase(self)? {
+                CheckpointTaskPhase::Segment(operation) => Some(operation),
+                CheckpointTaskPhase::Imported | CheckpointTaskPhase::InitialPrefillBound => None,
+            };
+            return Ok((operation, self.snapshot.canonical.clone()));
+        }
         let operation = match &self.phase {
             TaskUsePhase::Segment(operation)
             | TaskUsePhase::Importing {
@@ -7220,17 +7245,17 @@ impl TaskUseState {
                     _ => {
                         return Err(invalid(
                             "tensor content requires an admitted segment or controlled import",
-                        ))
+                        ));
                     }
                 }
             }
             _ => {
                 return Err(invalid(
                     "tensor content requires an admitted segment or controlled import",
-                ))
+                ));
             }
         };
-        Ok((operation.clone(), self.snapshot.canonical.clone()))
+        Ok((Some(operation.clone()), self.snapshot.canonical.clone()))
     }
 
     fn admit_segment(
@@ -7823,6 +7848,7 @@ impl Drop for ColdImportGuard<'_> {
 /// every normal/error/unwind exit; a refused phase cannot be resurrected.
 struct ImportReadScope<'a> {
     task_use: &'a PySemanticTransitionTaskUse,
+    checkpoint: Option<(&'a PySemanticTransitionSession, Arc<()>)>,
 }
 
 impl<'a> ImportReadScope<'a> {
@@ -7832,12 +7858,74 @@ impl<'a> ImportReadScope<'a> {
             return Err(invalid("controlled import reads require an active import"));
         }
         task_use.state()?.set_import_reads(true)?;
-        Ok(Self { task_use })
+        Ok(Self {
+            task_use,
+            checkpoint: None,
+        })
+    }
+
+    /// Read the actual checkpoint's model through the same controlled-reader
+    /// boundary as replay import. No inferred inference/training operation or
+    /// public execution phase is issued for an Imported checkpoint.
+    fn checkpoint(
+        session: &'a PySemanticTransitionSession,
+        task_use: &'a PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        py: Python<'_>,
+    ) -> PyResult<Self> {
+        session.require_creator()?;
+        parent.require_task(py, task_use)?;
+        if !Arc::ptr_eq(&session.importing, &task_use.importing)
+            || session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "checkpoint model reads cannot overlap import, recording or retirement",
+            ));
+        }
+        let owner = session.owner()?;
+        task_use.require_current(&owner)?;
+        owner
+            .published_identity(&*parent.lease()?)
+            .map_err(xlog_err)?;
+        let mut state = task_use.state()?;
+        checkpoint_task_phase(&state)?;
+        session
+            .importing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| invalid("checkpoint model read scope cannot be nested"))?;
+        let scope = Arc::new(());
+        state.phase = TaskUsePhase::CheckpointReading {
+            scope: Arc::clone(&scope),
+            original: Box::new(state.phase.clone()),
+        };
+        Ok(Self {
+            task_use,
+            checkpoint: Some((session, scope)),
+        })
     }
 }
 
 impl Drop for ImportReadScope<'_> {
     fn drop(&mut self) {
+        if let Some((session, scope)) = &self.checkpoint {
+            if let Ok(mut state) = self.task_use.state() {
+                if matches!(&state.phase, TaskUsePhase::CheckpointReading { scope: current, .. }
+                    if Arc::ptr_eq(current, scope))
+                {
+                    let phase = std::mem::replace(&mut state.phase, TaskUsePhase::Refused);
+                    if self.task_use.issuance.require_current().is_ok() {
+                        let TaskUsePhase::CheckpointReading { original, .. } = phase else {
+                            unreachable!("checked original checkpoint reader scope");
+                        };
+                        state.phase = *original;
+                    }
+                }
+            }
+            session.importing.store(false, Ordering::Release);
+            return;
+        }
         if let Ok(mut state) = self.task_use.state() {
             if let TaskUsePhase::Importing { reads, .. } = &mut state.phase {
                 *reads = false;
@@ -10809,7 +10897,7 @@ impl ContentStepOwner {
                 } else {
                     parent.content_binding_with_owner(py, owner)?
                 };
-                Ok((Some(operation), snapshot))
+                Ok((operation, snapshot))
             }
             Self::Prepared(step) => step.borrow(py).content_binding_with_owner(py, owner),
         }
@@ -10904,7 +10992,7 @@ impl PySemanticTensorContentWitness {
                 task_use.require_current(&owner)?;
                 let state = task_use.state()?;
                 let (operation, snapshot) = state.content_handoff_binding()?;
-                if (Some(operation), snapshot) != binding {
+                if (operation, snapshot) != binding {
                     return Err(invalid(
                         "tensor content authority changed during producer handoff",
                     ));
@@ -11888,7 +11976,13 @@ impl PySemanticPolicyInvocation {
                     .map_err(xlog_err)?;
                 let state = task_use.state()?;
                 state.require_public_use()?;
-                state.content_handoff_binding()?
+                let (operation, snapshot) = state.content_handoff_binding()?;
+                (
+                    operation.ok_or_else(|| {
+                        invalid("policy final use requires actual admitted execution")
+                    })?,
+                    snapshot,
+                )
             }
             ContentStepOwner::Prepared(step) => {
                 let step = step.borrow(py);
@@ -12054,7 +12148,7 @@ impl PySemanticPublishedParent {
         &self,
         py: Python<'_>,
         owner: &SemanticTransitionSession,
-    ) -> PyResult<(String, Vec<u8>)> {
+    ) -> PyResult<(Option<String>, Vec<u8>)> {
         let task_use = self.task_use.borrow(py);
         task_use.require_current(owner)?;
         owner
@@ -12068,7 +12162,7 @@ impl PySemanticPublishedParent {
         &self,
         py: Python<'_>,
         owner: &SemanticTransitionSession,
-    ) -> PyResult<(String, Vec<u8>)> {
+    ) -> PyResult<(Option<String>, Vec<u8>)> {
         let task_use = self.task_use.borrow(py);
         task_use.require_current(owner)?;
         owner
@@ -12086,11 +12180,22 @@ impl PySemanticPublishedParent {
     ) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
-        if session.importing.load(Ordering::Acquire) {
-            return Err(invalid(
-                "public parent release cannot interrupt a native import",
-            ));
-        }
+        let check_release = || -> PyResult<()> {
+            if session.importing.load(Ordering::Acquire) {
+                let issued = self.task_use.borrow(py);
+                issued.issuance.require_current()?;
+                if !matches!(
+                    issued.state()?.phase,
+                    TaskUsePhase::CheckpointReading { .. }
+                ) {
+                    return Err(invalid(
+                        "public parent release cannot interrupt a native import",
+                    ));
+                }
+            }
+            Ok(())
+        };
+        check_release()?;
         let mut budget = 4096;
         let streams = ColdValue::read(consumer_streams, &mut budget, 0)?;
         let streams = streams
@@ -12098,12 +12203,8 @@ impl PySemanticPublishedParent {
             .iter()
             .map(ColdValue::unsigned)
             .collect::<PyResult<Vec<_>>>()?;
+        check_release()?;
         let mut owner = session.owner()?;
-        if session.importing.load(Ordering::Acquire) {
-            return Err(invalid(
-                "public parent release cannot interrupt a native import",
-            ));
-        }
         // Cleanup uses the opaque original lease, not a new use grant. Bank
         // retirement preserves Python producers and their original graph until
         // native final release confirms all late consumers have completed.
@@ -14832,13 +14933,17 @@ impl PySemanticTransitionController {
                     ));
                 }
             }
-            let model = snapshot_model_state.call0()?;
-            if !model.is_exact_instance_of::<PyBytes>()
-                || model.cast::<PyBytes>()?.as_bytes() != manifest.model
             {
-                return Err(invalid(
-                    "selected model state changed during cold arena preparation",
-                ));
+                let source = self.session.borrow(py);
+                let _reads = ImportReadScope::checkpoint(&source, task_use, parent, py)?;
+                let model = snapshot_model_state.call0()?;
+                if !model.is_exact_instance_of::<PyBytes>()
+                    || model.cast::<PyBytes>()?.as_bytes() != manifest.model
+                {
+                    return Err(invalid(
+                        "selected model state changed during cold arena preparation",
+                    ));
+                }
             }
             {
                 let source = self.session.borrow(py);
@@ -15046,14 +15151,20 @@ impl PySemanticTransitionController {
                     .map_err(xlog_err)?;
                 material
             };
-            let model = restore_model
-                .call1((
-                    controller.clone_ref(py),
-                    candidate_task.clone_ref(py),
-                    candidate_parent.clone_ref(py),
-                    PyBytes::new(py, &manifest.model),
-                ))?
-                .unbind();
+            let model = {
+                let session = successor.borrow(py);
+                let issued = candidate_task.borrow(py);
+                let acquired = candidate_parent.borrow(py);
+                let _reads = ImportReadScope::checkpoint(&session, &issued, &acquired, py)?;
+                restore_model
+                    .call1((
+                        controller.clone_ref(py),
+                        candidate_task.clone_ref(py),
+                        candidate_parent.clone_ref(py),
+                        PyBytes::new(py, &manifest.model),
+                    ))?
+                    .unbind()
+            };
             {
                 let issued = candidate_task.borrow(py);
                 let acquired = candidate_parent.borrow(py);
@@ -15228,7 +15339,12 @@ impl PySemanticTransitionController {
                 task_use.checkpoint.proposal_expense()?,
             )
         };
-        let model = snapshot_model_state.call0().and_then(|model| {
+        let model = (|| {
+            let session = self.session.borrow(py);
+            let _reads = ImportReadScope::checkpoint(&session, task_use, parent, py)?;
+            snapshot_model_state.call0()
+        })()
+        .and_then(|model| {
             if !model.is_exact_instance_of::<PyBytes>() {
                 return Err(invalid(
                     "checkpoint model-state serializer must return exact builtin bytes",
@@ -15512,7 +15628,13 @@ impl PySemanticTransitionController {
     ) -> PyResult<PySemanticPublishedParent> {
         self.session.borrow(py).require_creator()?;
         let issued = task_use.borrow(py);
-        self.require_issued(&issued)?;
+        self.require_read_issued(&issued)?;
+        if !matches!(
+            issued.state()?.phase,
+            TaskUsePhase::CheckpointReading { .. }
+        ) {
+            issued.state()?.require_public_use()?;
+        }
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         issued.require_current(&owner)?;
@@ -16582,7 +16704,7 @@ impl PySemanticTransitionController {
             ContentStepOwner::Published(acquired) => {
                 let acquired = acquired.borrow(py);
                 let (operation, snapshot) = state.content_handoff_binding()?;
-                if (Some(operation), snapshot) != binding {
+                if (operation, snapshot) != binding {
                     return Err(invalid(
                         "tensor content authority changed during producer handoff",
                     ));

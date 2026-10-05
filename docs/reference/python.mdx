@@ -302,6 +302,14 @@ joins every listed consumer stream before the cold native export. It then calls
 native owner or task-state lock, and revalidates the task binding and acquired
 publication before sealing the result. The callback must return exact builtin
 `bytes`; failure or concurrent mutation returns no checkpoint.
+The serializer runs inside native's temporary controlled-reader scope for that
+actual parent. It can bind and verify the selected model against the original
+publication even when the stable task is `Imported`. Native does not invent an
+inference/training operation for that state. Reader acquisition and release are
+allowed for the original serializer's aliases; build, execution, nested import,
+and nested checkpoint save remain unavailable. The scope closes on return,
+exception, or unwind before the post-callback checks. A saved task reference
+does not retain that temporary permission.
 
 `SemanticTransitionSession.restore_checkpoint(checkpoint, *, device_ordinal,
 snapshot, restore_model, training_domain)` validates every section and the retained
@@ -317,6 +325,13 @@ must return its reconstructed semantic runtime. The frozen
 `SemanticTransitionRestoredCheckpoint` exposes that same `session`, `controller`,
 `task_use`, `parent`, and returned `model` through read-only properties; none is a
 replacement or second acquisition.
+The same controlled-reader owner encloses the factory and the existing cold
+arena/learning-phase model callbacks. It permits authentic native tensor/content
+reads, not segment execution or public activation of a private candidate. After
+the factory returns, native closes the scope and checks the original task phase,
+authority and actual selected bank. Failure retains the existing abort or
+private-pending custody; closing a reader scope is not phase acceptance or
+permission to retry an unknown operation.
 
 `task_use.task_objective_law()` returns
 `(scoring_law_identity, (evaluator_min_bits, evaluator_max_bits),
