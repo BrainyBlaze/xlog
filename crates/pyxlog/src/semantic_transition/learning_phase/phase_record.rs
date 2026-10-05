@@ -140,6 +140,22 @@ impl PhaseRecords {
         Ok(())
     }
 
+    /// A confirmed original pin may still precede the first admission write.
+    /// An unresolved write is not permission to issue a second one.
+    pub(super) fn preparation_admission_needed(&self) -> PyResult<bool> {
+        if !self.pin_attempted
+            || !self.issuer_pinned
+            || self.attempt.is_some()
+            || self.preparation_outcome_known
+            || self.ordinal > 1
+        {
+            return Err(invalid(
+                "preparation continuation requires the original confirmed issuer and no unresolved record write",
+            ));
+        }
+        Ok(self.ordinal == 0)
+    }
+
     pub(super) fn check_payload_length(&self, payload_length: usize) -> PyResult<u64> {
         let length = (payload_length as u64)
             .checked_add(RECORD_OVERHEAD as u64)

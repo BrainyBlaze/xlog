@@ -590,7 +590,7 @@ The signature covers the complete versioned record, not merely its payload diges
 Exact readback is verified against the original native key before progress advances.
 
 An issuer/store exception or nonexact readback keeps that same pending `unknown`.
-Use only `pending.resolve_checkpoint()`: native selects early preparation-record
+Use `pending.resolve_checkpoint()` for readback: native selects early preparation-record
 readback or attempted final-checkpoint resolution from its retained state. The
 application must not guess the stage from `status == "unknown"`, try two resolvers,
 or select a fallback from an exception. Early readback uses only the captured
@@ -600,6 +600,19 @@ or resume the source. Only exact readback of the retained full preparation outco
 can restore `prepared`; `None` remains unknown and early `False` never proves
 nonexecution. The public pending owner has no separate phase-record resolver.
 The store's `resolve_phase_record` callback is unchanged.
+
+For the same live pending, `pending.continue_preparation()` is a separate deliberate
+action, not part of resolution. Native permits it only after exact readback of the
+original issuer pin, with no unresolved record write and proof that preparation has
+not entered native/model work. It writes the initial Admission only if that original
+write was never attempted; a confirmed Admission is not written again. Both initial
+preparation and continuation use the same captured inputs, callbacks, immutable limits,
+store and shared irreversible expense. Fresh original data-use rights are checked
+before the remaining Admission or any native/model preparation. Successful continuation
+returns the identical pending in `prepared`, not a runnable checkpoint; publication
+remains a separate action. A failure after preparation entry retains `unknown` and
+forbids continuation even if no complete candidate was returned. This live-owner path
+does not implement recovery after process loss or prove absence of earlier GPU work.
 
 The canonical resolver returns these distinct result/status pairs:
 
