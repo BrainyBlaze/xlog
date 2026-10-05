@@ -116,91 +116,6 @@ static void install_fatal_signal_backtraces() {
     }
 }
 
-static void device_step_admission_preserves_refused_publications() {
-    for(uint64_t scenario=0;scenario<12;++scenario) {
-        PublicationBank banks[2]{};PublicationControl control{};PublicationLease lease{};
-        control.abi=1;control.word=2;control.instance[0]=41;
-        for(uint64_t bank=0;bank<2;++bank) {
-            control.banks[bank]=reinterpret_cast<uint64_t>(&banks[bank]);
-            banks[bank].header.abi=1;banks[bank].header.instance[0]=41;
-            banks[bank].header.publication_word=bank ? 1 : 2;
-            banks[bank].header.sealed_epoch=bank ? 0 : 1;banks[bank].header.fuel=3;
-        }
-        uint64_t requested_kind=1,expected=0,conditional=1;
-        if(scenario==0){control.reader_gate=1;expected=2;}
-        if(scenario==1){control.reader_counts[1]=1;expected=2;}
-        if(scenario==2){banks[0].header.sealed_epoch=0;expected=3;}
-        if(scenario==3){banks[0].header.terminal=2;expected=4;}
-        if(scenario==4){control.word=UINT64_MAX-1;banks[0].header.publication_word=control.word;
-            banks[0].header.sealed_epoch=control.word>>1;expected=5;}
-        if(scenario==5){banks[0].header.fuel=1;expected=5;}
-        if(scenario==6){banks[0].header.terminal=1;banks[0].header.fuel=0;expected=5;}
-        if(scenario==7){requested_kind=5;expected=1;}
-        if(scenario==8){requested_kind=3;expected=1;}
-        if(scenario==9){requested_kind=0;expected=1;}
-        if(scenario==10){control.reader_counts[0]=UINT64_MAX;expected=1;}
-        if(scenario==11){banks[0].header.terminal=1;banks[0].header.fuel=1;expected=5;}
-        const auto before_control=control;std::array<PublicationBank,2> before_banks{banks[0],banks[1]};
-        semantic_publication_step_admit(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease),
-            requested_kind,reinterpret_cast<uint64_t>(&conditional),0);
-        require(conditional==0 && control.refusal==expected && lease.status==expected,
-            "refused device step did not clear its conditional and preserve its typed refusal");
-        require(!lease.active && !lease.transition_kind && control.word==before_control.word &&
-            control.reader_gate==before_control.reader_gate &&
-            control.reader_counts[0]==before_control.reader_counts[0] &&
-            control.reader_counts[1]==before_control.reader_counts[1] &&
-            std::memcmp(banks,before_banks.data(),sizeof(banks))==0,
-            "refused device step acquired a reader or mutated publication content");
-    }
-}
-
-static void device_step_lease_tracks_current_parent_and_drain() {
-    PublicationBank banks[2]{};PublicationControl control{};PublicationLease lease{};
-    control.abi=1;control.instance[0]=73;
-    for(uint64_t bank=0;bank<2;++bank) {
-        control.banks[bank]=reinterpret_cast<uint64_t>(&banks[bank]);
-        banks[bank].header.abi=1;banks[bank].header.instance[0]=73;
-        banks[bank].header.publication_word=bank ? 3 : 0;
-        banks[bank].header.sealed_epoch=bank ? 1 : 0;banks[bank].header.fuel=2;
-    }
-    for(uint64_t invocation=0;invocation<4;++invocation) {
-        if(invocation){control.word=3;banks[1].header.terminal=invocation==2 ? 1 : 0;}
-        if(invocation==3)banks[1].header.fuel=1;
-        uint64_t conditional=0;
-        semantic_publication_step_admit(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease),
-            invocation==3 ? 2 : 1,reinterpret_cast<uint64_t>(&conditional),0);
-        const uint64_t bank=control.word&1,kind=invocation==2 ? 3 : (invocation==3 ? 2 : 1);
-        require(conditional==1 && !control.refusal && !lease.status && lease.active==1 &&
-            lease.word==control.word && lease.bank==bank && lease.transition_kind==kind &&
-            control.reader_counts[bank]==1 && !control.reader_counts[bank^1],
-            "device step failed to acquire the actual parent and effective transition kind");
-        require(publication_acquired_bank(control,lease)==&banks[bank],
-            "device step lease is not a real canonical publication reader");
-        semantic_publication_step_release(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease));
-        require(!lease.active && !lease.status && !control.reader_counts[0] && !control.reader_counts[1] &&
-            lease.transition_kind==kind,"device step release lost its retained mode or leaked ownership");
-    }
-}
-
-static void publication_rejects_a_mode_different_from_device_admission() {
-    PublicationBank banks[2]{};PublicationControl control{};PublicationLease lease{};
-    PublicationContract contract{};PendingContinuation pending{};Descriptor descriptor{};State state{};
-    std::array<uint64_t,27> task{};uint64_t conditional=0;
-    control.abi=1;control.contract=reinterpret_cast<uint64_t>(&contract);control.continuation=reinterpret_cast<uint64_t>(&pending);
-    for(uint64_t bank=0;bank<2;++bank)control.banks[bank]=reinterpret_cast<uint64_t>(&banks[bank]);
-    banks[0].header.abi=1;banks[0].header.fuel=3;
-    semantic_publication_step_admit(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease),
-        1,reinterpret_cast<uint64_t>(&conditional),0);
-    require(conditional==1,"mode mismatch fixture did not admit the original proposal");
-    pending.transition_kind=2;descriptor.task=reinterpret_cast<uint64_t>(task.data());
-    descriptor.publication.control=reinterpret_cast<uint64_t>(&control);descriptor.publication.lease=reinterpret_cast<uint64_t>(&lease);
-    PublicationBank* acquired=nullptr;uint64_t word=0,end=0;bool held=false,staged=false;
-    require(publication_begin(descriptor,&state,&acquired,&word,&end,&held,&staged)==3 && held && !staged,
-        "late publication accepted a continuation mode different from its admitted lease");
-    publication_store(control.reader_gate,0);
-    semantic_publication_step_release(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease));
-}
-
 template<typename Operation>
 static void require_content_trap(Operation operation,
         const char* message="changed sealed content did not reach the actual integrity trap") {
@@ -1215,6 +1130,89 @@ struct StepPublicationFixture {
             "step fixture next reader refused");
     }
 };
+
+static void device_step_admission_preserves_refused_publications() {
+    for(uint64_t scenario=0;scenario<12;++scenario) {
+        StepPublicationFixture fixture;
+        auto& banks=fixture.banks;auto& control=fixture.control;auto& lease=fixture.lease;
+        require(publication_release(control,lease)==0,"admission fixture initial reader release refused");
+        lease={};control.word=2;
+        for(uint64_t bank=0;bank<2;++bank) {
+            banks[bank].header.publication_word=bank ? 1 : 2;
+            banks[bank].header.sealed_epoch=bank ? 0 : 1;banks[bank].header.fuel=3;
+        }
+        uint64_t requested_kind=1,expected=0,conditional=1;
+        if(scenario==0){control.reader_gate=1;expected=2;}
+        if(scenario==1){control.reader_counts[1]=1;expected=2;}
+        if(scenario==2){banks[0].header.sealed_epoch=0;expected=3;}
+        if(scenario==3){banks[0].header.terminal=2;expected=4;}
+        if(scenario==4){control.word=UINT64_MAX-1;banks[0].header.publication_word=control.word;
+            banks[0].header.sealed_epoch=control.word>>1;expected=5;}
+        if(scenario==5){banks[0].header.fuel=1;expected=5;}
+        if(scenario==6){banks[0].header.terminal=1;banks[0].header.fuel=0;expected=5;}
+        if(scenario==7){requested_kind=5;expected=1;}
+        if(scenario==8){requested_kind=3;expected=1;}
+        if(scenario==9){requested_kind=0;expected=1;}
+        if(scenario==10){control.reader_counts[0]=UINT64_MAX;expected=1;}
+        if(scenario==11){banks[0].header.terminal=1;banks[0].header.fuel=1;expected=5;}
+        const auto before_control=control;std::array<PublicationBank,2> before_banks{banks[0],banks[1]};
+        semantic_publication_step_admit(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease),
+            requested_kind,reinterpret_cast<uint64_t>(&conditional),0);
+        require(conditional==0 && control.refusal==expected && lease.status==expected,
+            "refused device step did not clear its conditional and preserve its typed refusal");
+        require(!lease.active && !lease.transition_kind && control.word==before_control.word &&
+            control.reader_gate==before_control.reader_gate &&
+            control.reader_counts[0]==before_control.reader_counts[0] &&
+            control.reader_counts[1]==before_control.reader_counts[1] &&
+            std::memcmp(banks,before_banks.data(),sizeof(banks))==0,
+            "refused device step acquired a reader or mutated publication content");
+    }
+}
+
+static void device_step_lease_tracks_current_parent_and_drain() {
+    StepPublicationFixture fixture;
+    fixture.publish();
+    auto& banks=fixture.banks;auto& control=fixture.control;auto& lease=fixture.lease;
+    require(publication_release(control,lease)==0,"admission fixture initial reader release refused");
+    lease={};control.word=0;
+    for(uint64_t bank=0;bank<2;++bank) {
+        banks[bank].header.fuel=2;
+    }
+    for(uint64_t invocation=0;invocation<4;++invocation) {
+        if(invocation){control.word=3;banks[1].header.terminal=invocation==2 ? 1 : 0;}
+        if(invocation==3)banks[1].header.fuel=1;
+        uint64_t conditional=0;
+        semantic_publication_step_admit(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease),
+            invocation==3 ? 2 : 1,reinterpret_cast<uint64_t>(&conditional),0);
+        const uint64_t bank=control.word&1,kind=invocation==2 ? 3 : (invocation==3 ? 2 : 1);
+        require(conditional==1 && !control.refusal && !lease.status && lease.active==1 &&
+            lease.word==control.word && lease.bank==bank && lease.transition_kind==kind &&
+            control.reader_counts[bank]==1 && !control.reader_counts[bank^1],
+            "device step failed to acquire the actual parent and effective transition kind");
+        require(publication_acquired_bank(control,lease)==&banks[bank],
+            "device step lease is not a real canonical publication reader");
+        semantic_publication_step_release(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease));
+        require(!lease.active && !lease.status && !control.reader_counts[0] && !control.reader_counts[1] &&
+            lease.transition_kind==kind,"device step release lost its retained mode or leaked ownership");
+    }
+}
+
+static void publication_rejects_a_mode_different_from_device_admission() {
+    StepPublicationFixture fixture;
+    auto& control=fixture.control;auto& lease=fixture.lease;
+    auto& pending=fixture.pending;auto& descriptor=fixture.execution.descriptor;State state{};
+    require(publication_release(control,lease)==0,"admission fixture initial reader release refused");
+    lease={};uint64_t conditional=0;
+    semantic_publication_step_admit(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease),
+        1,reinterpret_cast<uint64_t>(&conditional),0);
+    require(conditional==1,"mode mismatch fixture did not admit the original proposal");
+    pending.transition_kind=2;descriptor.publication.lease=reinterpret_cast<uint64_t>(&lease);
+    PublicationBank* acquired=nullptr;uint64_t word=0,end=0;bool held=false,staged=false;
+    require(publication_begin(descriptor,&state,&acquired,&word,&end,&held,&staged)==3 && held && !staged,
+        "late publication accepted a continuation mode different from its admitted lease");
+    publication_store(control.reader_gate,0);
+    semantic_publication_step_release(reinterpret_cast<uint64_t>(&control),reinterpret_cast<uint64_t>(&lease));
+}
 
 template<typename Value,uint64_t scalar_type>
 static void original_content_seal_accepts_equal_strided_producer_for_type() {
