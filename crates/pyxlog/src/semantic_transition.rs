@@ -1524,6 +1524,7 @@ impl PySemanticTransitionSession {
             refresh_snapshot,
             None,
             None,
+            None,
         )
     }
 }
@@ -1548,7 +1549,13 @@ impl PySemanticTransitionSession {
         refresh_snapshot: Option<&Bound<'_, PyAny>>,
         shared_proposal_expense: Option<&Arc<Mutex<ProposalExpense>>>,
         shared_checkpoint_sources: Option<&Arc<Mutex<CheckpointSources>>>,
+        learning_owner: Option<&Py<learning_phase::PySemanticLearningPhaseTransition>>,
     ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
+        if learning_transition.is_some() != learning_owner.is_some() {
+            return Err(invalid(
+                "private phase restoration requires its original native pending owner",
+            ));
+        }
         if !checkpoint.is_exact_instance_of::<PyBytes>() {
             return Err(invalid("checkpoint restore requires exact builtin bytes"));
         }
@@ -1722,6 +1729,9 @@ impl PySemanticTransitionSession {
             .borrow(py)
             .learning_preparing
             .store(learning_transition.is_some(), Ordering::Release);
+        if let Some(pending) = learning_owner {
+            pending.borrow(py).retain_restore_session(py, &session)?;
+        }
         let native_binding = (|| -> PyResult<TaskCheckpointBinding> {
             let restored = session.borrow(py);
             let mut owner = restored.owner()?;
@@ -1814,6 +1824,15 @@ impl PySemanticTransitionSession {
                 },
             )?
         };
+        if let Some(pending) = learning_owner {
+            pending.borrow(py).retain_restore_handles(
+                py,
+                &session,
+                &controller,
+                &task_use,
+                &parent,
+            )?;
+        }
         let restored_native = if learning_transition.is_some() {
             let acquired = parent.borrow(py);
             let native = session
@@ -1840,15 +1859,20 @@ impl PySemanticTransitionSession {
         let model = match model {
             Ok(model) => model,
             Err(error) => {
-                if let Ok(mut owner) = session.borrow(py).owner() {
-                    owner.abort();
-                }
-                if let Ok(mut state) = task_use.borrow(py).state() {
-                    state.phase = TaskUsePhase::Refused;
+                if learning_owner.is_none() {
+                    if let Ok(mut owner) = session.borrow(py).owner() {
+                        owner.abort();
+                    }
+                    if let Ok(mut state) = task_use.borrow(py).state() {
+                        state.phase = TaskUsePhase::Refused;
+                    }
                 }
                 return Err(error);
             }
         };
+        if let Some(pending) = learning_owner {
+            pending.borrow(py).retain_restored_model(py, &model)?;
+        }
         let verified = (|| -> PyResult<()> {
             let refreshed = refresh_snapshot
                 .map(|callback| -> PyResult<AuthoritySnapshot> {
@@ -1917,11 +1941,13 @@ impl PySemanticTransitionSession {
             Ok(())
         })();
         if let Err(error) = verified {
-            if let Ok(mut owner) = session.borrow(py).owner() {
-                owner.abort();
-            }
-            if let Ok(mut state) = task_use.borrow(py).state() {
-                state.phase = TaskUsePhase::Refused;
+            if learning_owner.is_none() {
+                if let Ok(mut owner) = session.borrow(py).owner() {
+                    owner.abort();
+                }
+                if let Ok(mut state) = task_use.borrow(py).state() {
+                    state.phase = TaskUsePhase::Refused;
+                }
             }
             return Err(error);
         }
