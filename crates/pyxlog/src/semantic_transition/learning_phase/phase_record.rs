@@ -43,11 +43,11 @@ impl RecordLimits {
 
     fn encode(self) -> [u8; 24] {
         let mut bytes = [0; 24];
-        for (target, value) in
-            bytes
-                .chunks_exact_mut(8)
-                .zip([self.record_bytes, self.total_bytes, self.records])
-        {
+        for (target, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip([
+            self.record_bytes,
+            self.total_bytes,
+            self.records,
+        ]) {
             target.copy_from_slice(&value.to_le_bytes());
         }
         bytes
