@@ -764,7 +764,114 @@ struct Descriptor {
     PublicationCommand publication;
     TextBinding text;
     ModelWorkInput model_work;
+    struct PreparedReplayDescriptor {
+        struct Copy {
+            uint64_t rows,count,bank,directory,directory_count,arena,arena_words,actual;
+        } parent,successor;
+    } replay;
 };
+
+using ReplayCopyDescriptor=Descriptor::PreparedReplayDescriptor::Copy;
+__device__ PublicationBank* publication_acquired_bank(const PublicationControl&,const PublicationLease&);
+struct ReplayCopyRow {
+    uint64_t role,index,model,slots[2],offsets[2],bytes[2],destination,capacity;
+};
+static_assert(sizeof(ReplayCopyRow)==88 && sizeof(ReplayCopyDescriptor)==64,
+    "private replay custody ABI");
+
+// A logical model allocation can select a different bank from PublicationWord.
+// Resolve its original directory references, never the most recently used bank.
+__device__ uint64_t replay_copy_source(const PublicationControl& control,
+        const PublicationBank& bank,const ReplayCopyRow& row,uint64_t* count) {
+    if(row.model>1 || (row.capacity && !row.destination) || row.capacity<row.bytes[0] || row.capacity<row.bytes[1] ||
+       row.slots[0]>=control.storage_count || row.slots[1]>=control.storage_count)
+        { semantic_content_integrity_trap();return 0; }
+    const auto* directory=reinterpret_cast<const PublicationRange*>(control.directories[bank.header.publication_word&1]);
+    uint64_t selected=bank.header.publication_word&1;
+    bool found=false;
+    for(uint64_t i=0;i<bank.header.range_count;++i) {
+        const auto& range=directory[i];
+        const bool match=row.model ? range.role>=18 && range.role<=25 &&
+            (range.storage_slot==row.slots[0] || range.storage_slot==row.slots[1]) :
+            range.role==row.role && range.index==row.index;
+        if(!match)continue;
+        uint64_t candidate;
+        if(range.storage_slot==row.slots[0] && (row.model || range.offset_bytes==row.offsets[0]))candidate=0;
+        else if(range.storage_slot==row.slots[1] && (row.model || range.offset_bytes==row.offsets[1]))candidate=1;
+        else { semantic_content_integrity_trap();return 0; }
+        if(found && candidate!=selected) { semantic_content_integrity_trap();return 0; }
+        selected=candidate;found=true;
+        if(!row.model && range.length_bytes>row.bytes[selected]) { semantic_content_integrity_trap();return 0; }
+    }
+    if(!row.model && !found) { semantic_content_integrity_trap();return 0; }
+    const auto& allocation=reinterpret_cast<const PublicationStorageEntry*>(control.storage)[row.slots[selected]];
+    if(row.offsets[selected]>allocation.bytes || row.bytes[selected]!=allocation.bytes-row.offsets[selected] ||
+       (allocation.bytes && !allocation.pointer) || allocation.pointer>UINT64_MAX-allocation.bytes ||
+       row.destination>UINT64_MAX-row.capacity) { semantic_content_integrity_trap();return 0; }
+    *count=row.bytes[selected];
+    return allocation.pointer+row.offsets[selected];
+}
+
+__device__ uint64_t replay_copy_extent(const PublicationControl& control,
+        const PublicationBank& bank,const ReplayCopyDescriptor& copy) {
+    if(!copy.rows || !copy.count || !copy.bank || !copy.directory || !copy.actual ||
+       copy.count>UINT64_MAX/sizeof(ReplayCopyRow) || bank.header.range_count!=copy.directory_count ||
+       copy.directory_count>UINT64_MAX/sizeof(PublicationRange) || copy.arena_words>UINT64_MAX/8 ||
+       (copy.arena_words && !copy.arena)) { semantic_content_integrity_trap();return 0; }
+    uint64_t bytes=sizeof(PublicationBank)+3*sizeof(uint64_t);
+    const uint64_t directory_bytes=copy.directory_count*sizeof(PublicationRange),arena_bytes=copy.arena_words*8;
+    if(directory_bytes>UINT64_MAX-bytes || arena_bytes>UINT64_MAX-bytes-directory_bytes)
+        { semantic_content_integrity_trap();return 0; }
+    bytes+=directory_bytes+arena_bytes;
+    const auto* rows=reinterpret_cast<const ReplayCopyRow*>(copy.rows);
+    for(uint64_t i=0;i<copy.count;++i) {
+        uint64_t count=0;replay_copy_source(control,bank,rows[i],&count);
+        if(count>UINT64_MAX-bytes) { semantic_content_integrity_trap();return 0; }
+        bytes+=count;
+    }
+    return bytes;
+}
+
+__device__ void replay_copy_snapshot(const PublicationControl& control,
+        const PublicationBank& bank,const ReplayCopyDescriptor& copy,uint64_t source_arena,
+        uint64_t first,uint64_t stride) {
+    const auto* rows=reinterpret_cast<const ReplayCopyRow*>(copy.rows);
+    for(uint64_t row=0;row<copy.count;++row) {
+        uint64_t count=0;
+        const auto* source=reinterpret_cast<const uint8_t*>(replay_copy_source(control,bank,rows[row],&count));
+        auto* destination=reinterpret_cast<uint8_t*>(rows[row].destination);
+        for(uint64_t i=first;i<count;i+=stride)destination[i]=source[i];
+    }
+    const auto* source=reinterpret_cast<const uint8_t*>(&bank);
+    auto* destination=reinterpret_cast<uint8_t*>(copy.bank);
+    for(uint64_t i=first;i<sizeof(PublicationBank);i+=stride)destination[i]=source[i];
+    source=reinterpret_cast<const uint8_t*>(control.directories[bank.header.publication_word&1]);
+    destination=reinterpret_cast<uint8_t*>(copy.directory);
+    for(uint64_t i=first;i<copy.directory_count*sizeof(PublicationRange);i+=stride)destination[i]=source[i];
+    if(copy.arena_words) {
+        if(!source_arena) { semantic_content_integrity_trap();return; }
+        const auto* arena=reinterpret_cast<const uint64_t*>(source_arena);
+        auto* saved=reinterpret_cast<uint64_t*>(copy.arena);
+        for(uint64_t i=first;i<copy.arena_words;i+=stride)saved[i]=arena[i];
+    }
+}
+
+extern "C" __global__ void semantic_prepared_replay_parent(uint64_t control_ptr,
+        uint64_t lease_ptr,uint64_t arena,ReplayCopyDescriptor copy) {
+    const auto& control=*reinterpret_cast<const PublicationControl*>(control_ptr);
+    const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
+    const auto* bank=publication_acquired_bank(control,lease);
+    if(!bank) { semantic_content_integrity_trap();return; }
+    __shared__ uint64_t bytes;
+    if(threadIdx.x==0)bytes=replay_copy_extent(control,*bank,copy);
+    __syncthreads();
+    replay_copy_snapshot(control,*bank,copy,arena,threadIdx.x,blockDim.x);
+    __syncthreads();
+    if(threadIdx.x==0) {
+        auto* actual=reinterpret_cast<uint64_t*>(copy.actual);
+        actual[0]=bytes;actual[1]=bank->header.publication_word;actual[2]=1;
+    }
+}
 
 struct TaskProgramBank {
     semantic_program::Bank program;
@@ -950,7 +1057,7 @@ static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
 static_assert(sizeof(AcknowledgementQueueHeader)==72,"acknowledgement queue ABI");
 static_assert(sizeof(AcknowledgementEntry)==136,"acknowledgement entry ABI");
-static_assert(sizeof(Descriptor)==1240,"launch ABI");
+static_assert(sizeof(Descriptor)==1368,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 #ifdef XLOG_SEMANTIC_POLICY
 #include "semantic_policy_domains.cuh"
@@ -3570,9 +3677,9 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
 // This verification runs before release against the device-selected resident
 // aliases and retained private copies. Shared append-only arenas are hashed only
 // through the original logical interval.
-extern "C" __global__ void semantic_publication_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
-        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
-    if(blockIdx.x || threadIdx.x)return;
+__device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr,
+        uint64_t expected_active) {
     uint64_t binding_bytes=0,range_bytes=0;
     if(!publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease)) ||
        !publication_pointer_span(header_ptr,sizeof(PublicationHeader),alignof(PublicationHeader)) ||
@@ -3586,13 +3693,15 @@ extern "C" __global__ void semantic_publication_step_input_guard(uint64_t lease_
         semantic_content_integrity_trap();return;
     }
     const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
-    if(lease.abi!=1 || lease.status || lease.active!=1 || lease.bank>1) {
+    if(lease.abi!=1 || lease.status || lease.active!=expected_active || lease.bank>1 ||
+       lease.bank!=(lease.word&1) || lease.epoch!=(lease.word>>1)) {
         semantic_content_integrity_trap();return;
     }
     const auto& header=*reinterpret_cast<const PublicationHeader*>(header_ptr);
     uint64_t actual[2][4];
     const auto* expected=reinterpret_cast<const uint64_t*>(metadata_digests_ptr);
-    if(header.abi!=1 || binding_count<9 || binding_count>header.range_count ||
+    if(header.abi!=1 || header.publication_word!=lease.word || header.sealed_epoch!=lease.epoch ||
+       !publication_identity_equal(header.instance,lease.instance) || binding_count<9 || binding_count>header.range_count ||
        publication_step_metadata_digest(header,reinterpret_cast<const SourceSlot*>(source_ptr),binding_count,actual) ||
        !publication_identity_equal(actual[0],expected) || !publication_identity_equal(actual[1],expected+4)) {
         semantic_content_integrity_trap();return;
@@ -3655,6 +3764,20 @@ extern "C" __global__ void semantic_publication_step_input_guard(uint64_t lease_
         }
     }
     if(fixed_role!=14 || ranges[binding_count-1].role!=44 || ranges[binding_count-1].index)semantic_content_integrity_trap();
+}
+extern "C" __global__ void semantic_publication_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
+    if(blockIdx.x || threadIdx.x)return;
+    publication_step_input_guard(lease_ptr,header_ptr,source_ptr,bindings0_ptr,bindings1_ptr,binding_count,
+        ranges_ptr,metadata_digests_ptr,1);
+}
+// Cold verification authenticates a completed original lease, never a current
+// acquired bank. Its fixed bindings point into the private pre-mutation copy.
+extern "C" __global__ void semantic_completed_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
+    if(blockIdx.x || threadIdx.x)return;
+    publication_step_input_guard(lease_ptr,header_ptr,source_ptr,bindings0_ptr,bindings1_ptr,binding_count,
+        ranges_ptr,metadata_digests_ptr,0);
 }
 __device__ void publication_intent_identity(const IntentEntry& entry,uint64_t* identity) {
     uint64_t words[25];words[0]=0x786c6f67696e7431ULL;
@@ -5301,6 +5424,16 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
     } else if(publication_write_feedback(descriptor,control,next,root,false,&state->execution_work))return 1;
     // Feedback queries and root retirement belong to this attempt even when
     // they follow candidate selection. Snapshot their actual accumulated work.
+    uint64_t replay_bytes=0;
+    if(descriptor.replay.successor.rows) {
+        replay_bytes=replay_copy_extent(control,next,descriptor.replay.successor);
+        // The serial publisher owns every source until CAS. Charge the exact
+        // byte-copy occurrence which executes below, including its original
+        // header and directory. This is native work, not model geometry.
+        semantic_graph::NativeWorkTally copy_work{};
+        semantic_graph::charge_native(&copy_work,semantic_graph::NativeWorkEvent::CanonicalByte,replay_bytes);
+        execution_work_merge_native(state->execution_work,copy_work);
+    }
     next.state.execution_work=state->execution_work;
     if(!no_draw) {
         if(publication_seal_action_batch(control,base,next,*state))return 1;
@@ -5318,6 +5451,11 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
     // No host selector, retry, rebase, or secondary canonical success flag. All
     // winning text, caches, semantics, receipts and RNG become visible together.
     if(state->execution_work.overflow) { state->status=11;return 1; }
+    if(descriptor.replay.successor.rows) {
+        replay_copy_snapshot(control,next,descriptor.replay.successor,0,0,1);
+        auto* actual=reinterpret_cast<uint64_t*>(descriptor.replay.successor.actual);
+        actual[0]=replay_bytes;actual[1]=next.header.publication_word;actual[2]=1;
+    }
     if(!publication_compare_exchange(control.word,word,next.header.publication_word))return 3;
     state->next_proposal=next.header.proposal;
     return 0;
@@ -5532,6 +5670,15 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
     __shared__ uint32_t inserted_counts[2],baseline_derived,candidate_derived[2];
     __shared__ semantic_graph::Receipt candidate;
     if(threadIdx.x==0)state->execution_work=ExecutionWork{};
+    __syncthreads();
+    if(threadIdx.x==0 && descriptor.replay.parent.actual) {
+        const auto* actual=reinterpret_cast<const uint64_t*>(descriptor.replay.parent.actual);
+        const auto& lease=*reinterpret_cast<const PublicationLease*>(descriptor.publication.lease);
+        if(actual[2]!=1 || actual[1]!=lease.word) { semantic_content_integrity_trap();return; }
+        semantic_graph::NativeWorkTally copy_work{};
+        semantic_graph::charge_native(&copy_work,semantic_graph::NativeWorkEvent::CanonicalByte,actual[0]);
+        execution_work_merge_native(state->execution_work,copy_work);
+    }
     __syncthreads();
     bool uniform_admissible=true;
 #ifdef XLOG_SEMANTIC_POLICY

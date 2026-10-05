@@ -679,7 +679,9 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             #[cfg(feature = "semantic-policy")]
             "semantic_policy_uniform_domains",
             "semantic_publication_step_inputs",
+            "semantic_prepared_replay_parent",
             "semantic_publication_step_input_guard",
+            "semantic_completed_step_input_guard",
             "semantic_publication_step_admit",
             "semantic_publication_step_kind_gate",
             "semantic_publication_step_kind_bank_gate",
