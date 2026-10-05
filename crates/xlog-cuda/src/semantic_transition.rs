@@ -13443,7 +13443,7 @@ mod task_state_contract {
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
         assert_eq!(size_of::<DeviceState>(), 7568);
-        assert_eq!(size_of::<Descriptor>(), 1240);
+        assert_eq!(size_of::<Descriptor>(), 1368);
     }
 
     #[test]
@@ -35761,12 +35761,17 @@ mod text_parent_tests {
     #[test]
     fn selected_recompute_requires_the_current_sealed_native_attempt() {
         let (mut selected, mut evidence) = replay_material_sample();
+        let current_coverage = CompletionCoverage {
+            abi: 1,
+            model_generation: selected.bank.header.model_generation,
+            ..CompletionCoverage::default()
+        };
         let coverage_range = selected
             .ranges
             .iter_mut()
             .find(|item| item.range.role == 14)
             .unwrap();
-        coverage_range.bytes = publication_abi_bytes(&[CompletionCoverage::default()]);
+        coverage_range.bytes = publication_abi_bytes(&[current_coverage]);
         coverage_range.capacity = coverage_range.bytes.len();
         coverage_range.range.length_bytes = coverage_range.bytes.len() as u64;
         coverage_range.range.digest = coverage_range.original_record_digest();
