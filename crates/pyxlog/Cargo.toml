@@ -18,6 +18,7 @@ doctest = false
 pyo3 = { workspace = true, features = ["multiple-pymethods"] }
 cudarc = { workspace = true }
 rand = "0.8"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 sha2 = "0.11"
 serde_json = { workspace = true, features = ["arbitrary_precision", "raw_value"] }
 xlog-core.workspace = true

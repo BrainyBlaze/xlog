@@ -475,7 +475,8 @@ conflicting effects on aliases refuse the entire private candidate.
 `controller.prepare_learning_phase_transition(task_use, *, parent, recipe, source_checkpoint,
 consumer_streams, snapshot, scientific_owner, learning_grant_ref,
 checkpoint_destination, snapshot_model_state, restore_model,
-snapshot_restored_model, refresh_snapshot)` takes the exact builtin full
+snapshot_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits,
+frozen_program_bytes)` takes the exact builtin full
 `source_checkpoint` bytes already used by the original scientific owner. It
 quiesces the successful recompute parent and verifies the supplied native state,
 task capsule, original Proposal expense, Session configuration, initial prefill
@@ -539,11 +540,61 @@ is provided for an incomplete preparation. Final-checkpoint resolution and
 `abandon_prepared()` cannot resolve an unknown preparation, because absence of a
 final checkpoint does not prove that private operations did not execute.
 
-This retained in-process custody is not an authenticated durable operation journal,
-early durable admission, cold continuation or a full private learning executor.
-Those capabilities are not supplied by this interface. In particular, the current
-six-argument acceptance callback above does not execute a frozen scientific program
-or establish final whole-state scientific acceptance.
+The original application must supply `phase_record_owner` before preparation, with
+the explicit tuple `phase_record_limits=(max_record_bytes, max_total_record_bytes,
+max_records)` from its original run document. There are no default limits. Native
+requires `0 < max_record_bytes <= max_total_record_bytes <= sys.maxsize` and
+`0 < max_records <= sys.maxsize`, checks the complete initial record before copying
+its payload, and reserves a complete bounded preparation-outcome slot before
+admission. These storage bounds are not checkpoint-source limits, learning rights,
+or whole-execution resource accounting.
+
+Native binds the original complete source checkpoint, `frozen_program_bytes`, full
+five-field recipe, original grant, destination and exact storage limits to a
+deterministic 32-byte `pending.phase_id`. The same inputs identify the same attempt.
+`frozen_program_bytes` must exactly match the scientific owner's `program_bytes`;
+native neither synthesizes a program nor interprets a shorter program as equivalent.
+`pending.issuer_anchor` exposes only its independently generated Ed25519 public key;
+the private key remains in native memory and is never exported in a phase record.
+`pending.phase_record_limits` returns the exact original tuple.
+
+The same trusted store must implement:
+
+- `pin_phase_issuer(destination, phase_id, native_pending) -> bytes`: independently
+  pin the public key read from the actual native-issued pending under the original
+  exclusive lock, and return the exact durably read-back 32-byte public key. Enforce
+  the original run/attempt mapping; a new namespace cannot evade an unresolved attempt.
+- `resolve_phase_issuer(destination, phase_id) -> bytes | None`: read that same
+  original pin without repeating its write. A key taken only from submitted signed
+  bytes is not an independent anchor.
+- `commit_phase_record(destination, phase_id, ordinal, complete_native_bytes, sha256)
+  -> bytes`: single-attempt append-only storage and exact durable readback.
+- `resolve_phase_record(destination, phase_id, ordinal, expected_sha256)
+  -> bytes | None | False`: read the original attempt, never rewrite or replay it.
+
+The native owner captures these original callables once, before model or preparation
+callbacks. Before entering preparation it requires the independent issuer readback
+and exact readback of ordinal 0, the full signed admission. Ordinal 1 is the signed
+preparation outcome containing the actual complete candidate checkpoint and the
+scientific owner's full `history_bytes`. Each record binds its phase ID, issuer,
+ordinal, predecessor digest, cumulative serialized bytes and immutable limits.
+The signature covers the complete versioned record, not merely its payload digest.
+Exact readback is verified against the original native key before progress advances.
+
+An issuer/store exception or nonexact readback keeps that same pending `unknown`.
+`pending.resolve_phase_record()` uses only its captured issuer/record resolvers and
+returns `unknown` or `prepared`. It never repeats a pin, write, serializer, factory
+or restoration. Resolving admission alone cannot prove completion of preparation
+or resume the source. Only exact readback of the retained full preparation outcome
+can restore `prepared`; `None` remains unknown and `False` never proves nonexecution.
+Final checkpoint publication must use this same original `phase_record_owner`.
+
+This interface supplies signed admission/outcome custody for preparation, not a
+complete frozen-program operation journal, cold continuation, issuer rotation, or
+a full private learning executor. It does not establish whole-chain freshness,
+executor/GPU fencing, all-branch storage capacity or whole-execution resource usage.
+The current six-argument acceptance callback above still does not execute a frozen
+scientific program or establish final eleven-argument whole-state scientific acceptance.
 
 The returned native-issued `SemanticLearningPhaseTransition` retains both
 owners privately. A fast successor resumes inference; consolidation resumes
