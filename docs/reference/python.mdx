@@ -488,6 +488,12 @@ provided. `learning_grant_ref` selects an original `durable-slow-consolidation`
 grant covering the complete dependency closure; fast-adaptation permission alone
 cannot authorize this durable full checkpoint. Fresh publication, data-use,
 retention and revocation checks remain independent of scientific acceptance.
+The private candidate uses the actual source Session's allocation provider and
+unchanged `memory_bytes` limit. Its graph and native state allocations share the
+source's live resource stack; a clone does not receive a second native allocation
+budget. This owner is acquired only after exact durable readback of the original
+signed admission. This native allocation bound is not whole-phase work, model
+allocation or cold-continuation qualification.
 The trusted original scientific owner must implement
 `accept_learning_phase(parent, recipe, source_checkpoint, original_grant,
 destination, snapshot) -> bytes`. Its nonempty exact builtin bytes must contain

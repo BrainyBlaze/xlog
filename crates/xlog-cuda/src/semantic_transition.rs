@@ -15075,6 +15075,16 @@ impl Drop for SemanticTransitionSession {
 }
 
 impl SemanticTransitionSession {
+    /// Retain the actual allocation owner for a private checkpoint successor.
+    /// Source and successor allocations remain charged to this same provider's
+    /// resource stack; constructing a successor does not grant a fresh budget.
+    pub fn checkpoint_allocation_provider(
+        &self,
+    ) -> Result<Arc<CudaKernelProvider>, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        Ok(Arc::clone(&self.provider))
+    }
+
     /// Decode and validate one complete native material before allocating a new
     /// CUDA owner, returning only the original immutable admission needed to
     /// construct that fresh owner. This is the same state codec consumed by

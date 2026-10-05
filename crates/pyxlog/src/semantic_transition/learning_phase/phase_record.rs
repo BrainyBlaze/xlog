@@ -131,6 +131,15 @@ impl PhaseRecords {
         self.key.verifying_key().to_bytes()
     }
 
+    pub(super) fn require_preparation_admission(&self) -> PyResult<()> {
+        if !self.issuer_pinned || self.ordinal != 1 || self.attempt.is_some() {
+            return Err(invalid(
+                "private phase allocation requires exact durable readback of its original signed admission",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn check_payload_length(&self, payload_length: usize) -> PyResult<u64> {
         let length = (payload_length as u64)
             .checked_add(RECORD_OVERHEAD as u64)
