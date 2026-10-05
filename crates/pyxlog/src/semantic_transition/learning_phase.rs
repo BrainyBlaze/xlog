@@ -6,6 +6,34 @@ use xlog_cuda::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseTransition,
 };
 
+mod phase_record;
+use phase_record::{PhaseRecords, RecordKind, RecordLimits};
+
+struct PhaseRecordStore {
+    pin: Py<PyAny>,
+    resolve_issuer: Py<PyAny>,
+    commit: Py<PyAny>,
+    resolve: Py<PyAny>,
+}
+
+impl PhaseRecordStore {
+    fn capture(owner: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let callback = |name| -> PyResult<Py<PyAny>> {
+            let callback = owner.getattr(name)?;
+            if !callback.is_callable() {
+                return Err(invalid("early phase store requires its original issuer pin/readback and phase record commit/readback callbacks"));
+            }
+            Ok(callback.unbind())
+        };
+        Ok(Self {
+            pin: callback("pin_phase_issuer")?,
+            resolve_issuer: callback("resolve_phase_issuer")?,
+            commit: callback("commit_phase_record")?,
+            resolve: callback("resolve_phase_record")?,
+        })
+    }
+}
+
 fn phase(value: &str) -> PyResult<SemanticLearningPhase> {
     match value {
         "alignment" => Ok(SemanticLearningPhase::Alignment),
@@ -205,6 +233,9 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     refresh_snapshot: Py<PyAny>,
     grant_reference: String,
     destination: String,
+    phase_record_owner: Py<PyAny>,
+    phase_store: Mutex<Option<PhaseRecordStore>>,
+    phase_records: Mutex<PhaseRecords>,
     completion: Mutex<Completion>,
     operating: AtomicBool,
 }
@@ -329,6 +360,175 @@ fn verify_original_source(
 }
 
 impl PySemanticLearningPhaseTransition {
+    fn finish_preparation_readback(&self, py: Python<'_>) -> PyResult<&'static str> {
+        if !self.records()?.preparation_outcome_known {
+            return Ok("unknown");
+        }
+        // The complete candidate was retained and verified before issuing this
+        // outcome. Readback never re-enters its factory or preparation callbacks.
+        self.candidate(py)?;
+        let construction = self.private_restore()?.take();
+        drop(construction);
+        *self.status_lock()? = Completion::Prepared;
+        Ok("prepared")
+    }
+
+    /// Read only the same retained attempt. Knowing admission durability alone
+    /// never authorizes replay of a preparation whose execution is unknown.
+    fn resolve_preparation_record(&self, py: Python<'_>) -> PyResult<&'static str> {
+        if !matches!(*self.status_lock()?, Completion::PreparationUnknown) {
+            return Err(invalid(
+                "only unknown early phase preparation requires phase record resolution",
+            ));
+        }
+        let (phase_id, issuer, pinned, pin_attempted) = {
+            let records = self.records()?;
+            (
+                records.phase_id,
+                records.issuer(),
+                records.issuer_pinned,
+                records.pin_attempted,
+            )
+        };
+        if !pin_attempted {
+            return Err(invalid(
+                "early phase preparation has no attempted issuer pin",
+            ));
+        }
+        if !pinned {
+            let resolve = self
+                .store()?
+                .as_ref()
+                .ok_or_else(|| invalid("phase issuer resolution lost its original store"))?
+                .resolve_issuer
+                .clone_ref(py);
+            let readback = resolve
+                .bind(py)
+                .call1((&self.destination, PyBytes::new(py, &phase_id)))?;
+            if readback.is_none() {
+                return Ok("unknown");
+            }
+            require_model_bytes(&readback, &issuer)?;
+            self.records()?.issuer_pinned = true;
+        }
+        let attempt = self
+            .records()?
+            .attempt
+            .as_ref()
+            .map(|attempt| (attempt.ordinal, attempt.digest, attempt.readback_observed));
+        let Some((ordinal, digest, observed)) = attempt else {
+            // A confirmed pin or a completed admission is not proof of a
+            // completed factory/native restoration. Do not resume either owner.
+            return self.finish_preparation_readback(py);
+        };
+        let resolve = self
+            .store()?
+            .as_ref()
+            .ok_or_else(|| invalid("phase record resolution lost its original store"))?
+            .resolve
+            .clone_ref(py);
+        let readback = resolve.bind(py).call1((
+            &self.destination,
+            PyBytes::new(py, &phase_id),
+            ordinal,
+            PyBytes::new(py, &digest),
+        ))?;
+        if readback.is_none() {
+            return Ok("unknown");
+        }
+        if readback.is_exact_instance_of::<PyBool>() && !readback.extract::<bool>()? {
+            return Err(invalid(if observed {
+                "phase resolver contradicted an observed exact durable record; retain the original pending owners"
+            } else {
+                "absence of a phase record does not resolve execution; retain the original pending owners"
+            }));
+        }
+        {
+            let mut records = self.records()?;
+            records.confirm(&readback)?;
+            records.advance()?;
+        }
+        self.finish_preparation_readback(py)
+    }
+
+    fn records(&self) -> PyResult<MutexGuard<'_, PhaseRecords>> {
+        self.phase_records
+            .lock()
+            .map_err(|_| invalid("native phase record custody mutex is poisoned"))
+    }
+
+    fn store(&self) -> PyResult<MutexGuard<'_, Option<PhaseRecordStore>>> {
+        self.phase_store
+            .lock()
+            .map_err(|_| invalid("original early phase store mutex is poisoned"))
+    }
+
+    fn pin_issuer(
+        &self,
+        py: Python<'_>,
+        pending: &Py<PySemanticLearningPhaseTransition>,
+    ) -> PyResult<()> {
+        let (phase_id, issuer) = {
+            let mut records = self.records()?;
+            if records.pin_attempted {
+                return Err(invalid(
+                    "native phase issuer pin is single-attempt; read back the original pin instead",
+                ));
+            }
+            records.pin_attempted = true;
+            (records.phase_id, records.issuer())
+        };
+        let pin = self
+            .store()?
+            .as_ref()
+            .ok_or_else(|| invalid("native phase issuer lost its original early store"))?
+            .pin
+            .clone_ref(py);
+        let readback = pin.bind(py).call1((
+            &self.destination,
+            PyBytes::new(py, &phase_id),
+            pending.clone_ref(py),
+        ))?;
+        require_model_bytes(&readback, &issuer)?;
+        self.records()?.issuer_pinned = true;
+        Ok(())
+    }
+
+    fn append_phase_record(
+        &self,
+        py: Python<'_>,
+        kind: RecordKind,
+        payload: &[u8],
+    ) -> PyResult<()> {
+        let (phase_id, ordinal, bytes, digest) = {
+            let mut records = self.records()?;
+            records.begin(kind, payload)?;
+            let attempt = records.attempt.as_ref().expect("retained original record");
+            (
+                records.phase_id,
+                attempt.ordinal,
+                Arc::clone(&attempt.bytes),
+                attempt.digest,
+            )
+        };
+        let commit = self
+            .store()?
+            .as_ref()
+            .ok_or_else(|| invalid("phase record lost its original early store"))?
+            .commit
+            .clone_ref(py);
+        let readback = commit.bind(py).call1((
+            &self.destination,
+            PyBytes::new(py, &phase_id),
+            ordinal,
+            PyBytes::new(py, &bytes),
+            PyBytes::new(py, &digest),
+        ))?;
+        let mut records = self.records()?;
+        records.confirm(&readback)?;
+        records.advance()
+    }
+
     fn status_lock(&self) -> PyResult<MutexGuard<'_, Completion>> {
         self.completion
             .lock()
@@ -595,6 +795,22 @@ fn require_model_bytes(model: &Bound<'_, PyAny>, expected: &[u8]) -> PyResult<()
 #[pymethods]
 impl PySemanticLearningPhaseTransition {
     #[getter]
+    fn phase_id(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
+        Ok(PyBytes::new(py, &self.records()?.phase_id).unbind())
+    }
+
+    #[getter]
+    fn issuer_anchor(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
+        Ok(PyBytes::new(py, &self.records()?.issuer()).unbind())
+    }
+
+    #[getter]
+    fn phase_record_limits(&self) -> PyResult<(u64, u64, u64)> {
+        let limits = self.records()?.limits;
+        Ok((limits.record_bytes, limits.total_bytes, limits.records))
+    }
+
+    #[getter]
     fn status(&self) -> PyResult<&'static str> {
         Ok(match &*self.status_lock()? {
             Completion::Preparing => "preparing",
@@ -621,6 +837,11 @@ impl PySemanticLearningPhaseTransition {
     ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
         let _operation = PhaseOperation::begin(&self.operating)?;
         self.source.borrow(py).require_creator()?;
+        if durable_owner.as_ptr() != self.phase_record_owner.as_ptr() {
+            return Err(invalid(
+                "final phase publication requires the same original early durable store",
+            ));
+        }
         if !matches!(*self.status_lock()?, Completion::Prepared) {
             return Err(invalid(
                 "phase checkpoint commit is single-attempt; resolve unknown completion instead",
@@ -652,24 +873,27 @@ impl PySemanticLearningPhaseTransition {
         self.activate(py)
     }
 
-    /// Resolve through the SAME retained durable owner; never repeats commit.
-    /// None is still unknown. False can prove absence only before any exact
-    /// readback; it cannot discard an already observed durable checkpoint.
+    /// Native selects the original preparation or final publication readback.
+    /// A known preparation stays private; resolution never commits or abandons it.
+    /// Final absence permits source continuation only before exact readback.
     fn resolve_checkpoint(
         &self,
         py: Python<'_>,
     ) -> PyResult<Option<Py<PySemanticTransitionRestoredCheckpoint>>> {
         let _operation = PhaseOperation::begin(&self.operating)?;
         self.source.borrow(py).require_creator()?;
+        let preparation_unknown = matches!(*self.status_lock()?, Completion::PreparationUnknown);
+        if preparation_unknown {
+            self.resolve_preparation_record(py)?;
+            return Ok(None);
+        }
         let (resolve, readback_observed) = match &*self.status_lock()? {
             Completion::Unknown {
                 resolve,
                 readback_observed,
                 ..
             } => (resolve.clone_ref(py), *readback_observed),
-            Completion::PreparationUnknown => {
-                return Err(invalid("private preparation outcome is unknown; final checkpoint resolution cannot prove that its operations did not execute"));
-            }
+            Completion::Prepared => return Ok(None),
             _ => return Err(invalid("only an unknown phase checkpoint needs resolution")),
         };
         let (_, checkpoint) = self.candidate(py)?;
@@ -726,7 +950,7 @@ impl PySemanticTransitionController {
 
     #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
-        snapshot_restored_model, refresh_snapshot, resolve_checkpoint=None,
+        snapshot_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, resolve_checkpoint=None,
         max_checkpoint_bytes=None, max_total_checkpoint_bytes=None))]
     #[expect(
         clippy::too_many_arguments,
@@ -748,6 +972,9 @@ impl PySemanticTransitionController {
         restore_model: &Bound<'_, PyAny>,
         snapshot_restored_model: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
+        phase_record_owner: Py<PyAny>,
+        phase_record_limits: &Bound<'_, PyAny>,
+        frozen_program_bytes: &Bound<'_, PyAny>,
         resolve_checkpoint: Option<&Bound<'_, PyAny>>,
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
@@ -764,6 +991,17 @@ impl PySemanticTransitionController {
             ));
         }
         let checkpoint = source_checkpoint.cast::<PyBytes>()?.as_bytes();
+        if !frozen_program_bytes.is_exact_instance_of::<PyBytes>()
+            || frozen_program_bytes
+                .cast::<PyBytes>()?
+                .as_bytes()
+                .is_empty()
+        {
+            return Err(invalid(
+                "phase admission requires the complete original frozen program bytes",
+            ));
+        }
+        let record_limits = RecordLimits::read(phase_record_limits)?;
         let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
         let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
         task.authority.check_snapshot(&saved_snapshot)?;
@@ -799,6 +1037,33 @@ impl PySemanticTransitionController {
             })
             .ok_or_else(|| invalid("original learning grant disappeared from its task capsule"))?
             .clone();
+        let recipe_owner = recipe.borrow(py);
+        let recipe_values = PyTuple::new(
+            py,
+            [
+                recipe_owner.source().into_pyobject(py)?.into_any(),
+                recipe_owner.target().into_pyobject(py)?.into_any(),
+                recipe_owner.phase_index().into_pyobject(py)?.into_any(),
+                recipe_owner
+                    .completed_updates_index()
+                    .into_pyobject(py)?
+                    .into_any(),
+                recipe_owner.views(py)?.into_bound(py).into_any(),
+            ],
+        )?;
+        let recipe_material =
+            ColdValue::read(recipe_values.as_any(), &mut (16 * 1024 * 1024), 0)?.canonical_bytes();
+        drop(recipe_owner);
+        let phase_records = PhaseRecords::new(
+            &[
+                checkpoint,
+                frozen_program_bytes.cast::<PyBytes>()?.as_bytes(),
+                &recipe_material,
+                &grant_value.canonical_bytes(),
+                checkpoint_destination.as_bytes(),
+            ],
+            record_limits,
+        )?;
         let pending = Py::new(
             py,
             PySemanticLearningPhaseTransition {
@@ -816,6 +1081,9 @@ impl PySemanticTransitionController {
                 refresh_snapshot: refresh_snapshot.clone().unbind(),
                 grant_reference: learning_grant_ref.to_owned(),
                 destination: checkpoint_destination.to_owned(),
+                phase_record_owner,
+                phase_store: Mutex::new(None),
+                phase_records: Mutex::new(phase_records),
                 completion: Mutex::new(Completion::Preparing),
                 operating: AtomicBool::new(false),
             },
@@ -843,6 +1111,17 @@ impl PySemanticTransitionController {
         let retained_owner = pending.borrow(py);
         let operation = PhaseOperation::begin(&retained_owner.operating)?;
         let result = (|| -> PyResult<()> {
+            *retained_owner.store()? = Some(PhaseRecordStore::capture(
+                retained_owner.phase_record_owner.bind(py),
+            )?);
+            retained_owner.pin_issuer(py, &pending)?;
+            let initial_material = Arc::clone(&retained_owner.records()?.inputs);
+            retained_owner.append_phase_record(py, RecordKind::Admission, &initial_material)?;
+            let original_program = scientific_owner.bind(py).getattr("program_bytes")?;
+            require_model_bytes(
+                &original_program,
+                frozen_program_bytes.cast::<PyBytes>()?.as_bytes(),
+            )?;
             {
                 if source.importing.load(Ordering::Acquire)
                     || source.recording.load(Ordering::Acquire)
@@ -954,6 +1233,25 @@ impl PySemanticTransitionController {
                     checkpoint: checkpoint.into(),
                 });
             retained_owner.verify(py, true)?;
+            let history = scientific_owner.bind(py).getattr("history_bytes")?;
+            if !history.is_exact_instance_of::<PyBytes>() {
+                return Err(invalid("phase preparation outcome requires the original complete scientific history bytes"));
+            }
+            let (_, checkpoint) = retained_owner.candidate(py)?;
+            let outcome_length = checkpoint
+                .len()
+                .checked_add(history.cast::<PyBytes>()?.as_bytes().len())
+                .and_then(|length| length.checked_add(16))
+                .ok_or_else(|| invalid("complete phase preparation outcome size overflowed"))?;
+            retained_owner
+                .records()?
+                .check_payload_length(outcome_length)?;
+            let mut outcome = Vec::new();
+            for material in [checkpoint.as_ref(), history.cast::<PyBytes>()?.as_bytes()] {
+                outcome.extend_from_slice(&(material.len() as u64).to_le_bytes());
+                outcome.extend_from_slice(material);
+            }
+            retained_owner.append_phase_record(py, RecordKind::PreparationOutcome, &outcome)?;
             // The complete checkpoint now owns all of the actual restored
             // handles. Release only the redundant construction references.
             let construction = retained_owner.private_restore()?.take();
