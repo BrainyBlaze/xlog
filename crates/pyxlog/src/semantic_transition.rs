@@ -19,6 +19,8 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyList, PyString, PyTuple};
 use sha2::{Digest, Sha256};
 use xlog_core::{RelId, ScalarType, Schema};
 use xlog_cuda::memory::DeviceAllocationProvenance;
+use xlog_cuda::provider::resident_schedule::ResidentExecutionDomain;
+use xlog_cuda::CudaKernelProvider;
 #[cfg(feature = "semantic-policy")]
 use xlog_cuda::SemanticSegmentColdCapacity;
 use xlog_cuda::{
@@ -210,6 +212,10 @@ impl PySemanticTransitionSession {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "canonical admission preserves the original device, storage bounds, expense and optional shared allocation owner"
+    )]
     fn from_admission(
         records: SemanticAdmissionRecords,
         capacities: (u32, u32, u32, u32),
@@ -218,6 +224,7 @@ impl PySemanticTransitionSession {
         memory_bytes: u64,
         proposal_expense: Arc<Mutex<ProposalExpense>>,
         checkpoint_sources: Arc<Mutex<CheckpointSources>>,
+        allocation_domain: Option<(Arc<CudaKernelProvider>, ResidentExecutionDomain)>,
     ) -> PyResult<Self> {
         let editable_source = cold_task::editable_source_from_admission(&records)?;
         let native_capacities = SemanticHypergraphCapacities::try_new(
@@ -233,14 +240,34 @@ impl PySemanticTransitionSession {
             max_references: admission_limits.2,
             max_utf8_bytes: admission_limits.3,
         };
-        let mut config = GpuConfig::default();
-        config.device_ordinal = device_ordinal;
-        config.memory_bytes = memory_bytes;
-        let provider = Arc::new(crate::provider_from_config(config).map_err(xlog_err)?);
+        let (provider, original_domain) = match allocation_domain {
+            Some((provider, domain)) => {
+                if provider.device().ordinal() != device_ordinal
+                    || provider.memory().budget_limit_bytes() != memory_bytes
+                {
+                    return Err(invalid(
+                        "private checkpoint allocation cannot change its original device or memory budget",
+                    ));
+                }
+                (provider, Some(domain))
+            }
+            None => {
+                let mut config = GpuConfig::default();
+                config.device_ordinal = device_ordinal;
+                config.memory_bytes = memory_bytes;
+                (
+                    Arc::new(crate::provider_from_config(config).map_err(xlog_err)?),
+                    None,
+                )
+            }
+        };
         let runtime = provider.memory().runtime().cloned().ok_or_else(|| {
             PyRuntimeError::new_err("native semantic session requires a CUDA runtime")
         })?;
-        let stream_id = runtime.stream_pool().acquire().map_err(xlog_err)?;
+        let stream_id = match original_domain {
+            Some(domain) => domain.stream_id(),
+            None => runtime.stream_pool().acquire().map_err(xlog_err)?,
+        };
         let stream = runtime.stream_pool().resolve(stream_id).ok_or_else(|| {
             PyRuntimeError::new_err("native semantic session stream is unavailable")
         })?;
@@ -1235,6 +1262,7 @@ impl PySemanticTransitionSession {
                 spent: 0,
             })),
             Arc::new(Mutex::new(CheckpointSources::default())),
+            None,
         )
     }
 
@@ -1715,6 +1743,15 @@ impl PySemanticTransitionSession {
         if let CheckpointTaskPhase::Segment(operation) = &restored_phase {
             authority.check_use(operation, &current_snapshot, false)?;
         }
+        let allocation_domain = learning_owner
+            .map(|pending| {
+                pending.borrow(py).restore_allocation_domain(
+                    py,
+                    device_ordinal,
+                    config.memory_bytes,
+                )
+            })
+            .transpose()?;
         let restored_session = Self::from_admission(
             admission,
             config.capacities,
@@ -1723,6 +1760,7 @@ impl PySemanticTransitionSession {
             config.memory_bytes,
             Arc::clone(&seed.proposal_expense),
             Arc::clone(&seed.checkpoint_sources),
+            allocation_domain,
         )?;
         let session = Py::new(py, restored_session)?;
         session
@@ -14897,6 +14935,7 @@ impl PySemanticTransitionController {
                     candidate_memory_bytes,
                     Arc::clone(&selected_seed.proposal_expense),
                     Arc::clone(&selected_seed.checkpoint_sources),
+                    None,
                 )?,
             )?;
             candidate_session = Some(successor.clone_ref(py));

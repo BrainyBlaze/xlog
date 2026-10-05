@@ -420,6 +420,7 @@ impl PySemanticTransitionColdTask {
                 spent: 0,
             })),
             Arc::new(Mutex::new(CheckpointSources::default())),
+            None,
         )?;
         if let Some(editable) = native_session.editable_program.as_ref() {
             program = program.with_editable_program(Arc::clone(editable));

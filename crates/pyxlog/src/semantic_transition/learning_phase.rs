@@ -360,6 +360,31 @@ fn verify_original_source(
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(super) fn restore_allocation_domain(
+        &self,
+        py: Python<'_>,
+        device_ordinal: usize,
+        memory_bytes: u64,
+    ) -> PyResult<(Arc<CudaKernelProvider>, ResidentExecutionDomain)> {
+        let source = self.source.borrow(py);
+        source.require_creator()?;
+        if !matches!(*self.status_lock()?, Completion::Preparing)
+            || self.private_restore()?.is_some()
+            || source.device_ordinal != device_ordinal
+            || source.memory_bytes != memory_bytes
+        {
+            return Err(invalid(
+                "private phase allocation requires its original unused preparation and unchanged Session bounds",
+            ));
+        }
+        self.records()?.require_preparation_admission()?;
+        let domain = source
+            .owner()?
+            .checkpoint_allocation_domain()
+            .map_err(xlog_err)?;
+        Ok(domain)
+    }
+
     fn finish_preparation_readback(&self, py: Python<'_>) -> PyResult<&'static str> {
         if !self.records()?.preparation_outcome_known {
             return Ok("unknown");
