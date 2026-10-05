@@ -16,7 +16,7 @@ pub(crate) struct PySemanticModelEvaluation {
     parent: Py<PySemanticPublishedParent>,
     inner: SemanticModelEvaluation,
     cohort: Py<PySemanticEvaluationCohort>,
-    binding: (String, Vec<u8>),
+    binding: (Option<String>, Vec<u8>),
     closed: AtomicBool,
     output: Mutex<Option<Py<PySemanticTensorContentWitness>>>,
 }

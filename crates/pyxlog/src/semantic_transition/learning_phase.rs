@@ -465,7 +465,10 @@ impl PySemanticLearningPhaseTransition {
                 .map_err(xlog_err)?;
         }
         verify_original_source(py, &task, &acquired, &manifest, &saved_snapshot)?;
-        require_model_bytes(&snapshot_model_state.call0()?, &manifest.model)?;
+        {
+            let _reads = ImportReadScope::checkpoint(&source, &task, &acquired, py)?;
+            require_model_bytes(&snapshot_model_state.call0()?, &manifest.model)?;
+        }
         verify_original_source(py, &task, &acquired, &manifest, &saved_snapshot)?;
         if task.state()?.snapshot.canonical != prior_snapshot.canonical {
             return Err(invalid(
@@ -934,8 +937,11 @@ impl PySemanticLearningPhaseTransition {
         check_learning_grant(&task, &self.grant_reference, &snapshot)?;
         let source_manifest = SemanticCheckpointManifest::decode(&self.source_checkpoint)?;
         verify_phase_native(py, &task, &parent, &source_manifest.native, true)?;
-        let model = self.source_serializer.bind(py).call0()?;
-        require_model_bytes(&model, &source_manifest.model)?;
+        {
+            let _reads = ImportReadScope::checkpoint(&source, &task, &parent, py)?;
+            let model = self.source_serializer.bind(py).call0()?;
+            require_model_bytes(&model, &source_manifest.model)?;
+        }
         verify_phase_native(py, &task, &parent, &source_manifest.native, true)?;
         if include_candidate {
             let (candidate, checkpoint) = self.candidate(py)?;
@@ -946,11 +952,15 @@ impl PySemanticLearningPhaseTransition {
             let acquired = candidate.parent.borrow(py);
             let manifest = SemanticCheckpointManifest::decode(&checkpoint)?;
             verify_phase_native(py, &issued, &acquired, &manifest.native, false)?;
-            let model = self
-                .candidate_serializer
-                .bind(py)
-                .call1((candidate.model.clone_ref(py),))?;
-            require_model_bytes(&model, &manifest.model)?;
+            {
+                let successor = candidate.session.borrow(py);
+                let _reads = ImportReadScope::checkpoint(&successor, &issued, &acquired, py)?;
+                let model = self
+                    .candidate_serializer
+                    .bind(py)
+                    .call1((candidate.model.clone_ref(py),))?;
+                require_model_bytes(&model, &manifest.model)?;
+            }
             verify_phase_native(py, &issued, &acquired, &manifest.native, false)?;
             issued.state()?.snapshot = snapshot.clone();
         }
