@@ -1262,6 +1262,16 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<semantic_transition::PyNativeTensorAllocation>()?;
     m.add_class::<semantic_transition::PySemanticPreparedStep>()?;
     #[cfg(feature = "semantic-policy")]
+    {
+        m.add(
+            "SemanticCompletedSegmentPending",
+            m.py()
+                .get_type::<semantic_transition::SemanticCompletedSegmentPending>(),
+        )?;
+        m.add_class::<semantic_transition::model_evaluation::PySemanticEvaluationCohort>()?;
+        m.add_class::<semantic_transition::model_evaluation::PySemanticModelEvaluation>()?;
+    }
+    #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticCompletedModelCarrier>()?;
     #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticCompletedMaterial>()?;

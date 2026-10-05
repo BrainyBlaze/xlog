@@ -115,6 +115,10 @@ pub use semantic_transition::{
     SemanticUpdateCanaryMeasurement, SemanticUpdateForwardReceipt,
     SemanticUpdateForwardReceiptMaterial, SemanticUpdateMeasurements,
 };
+#[cfg(feature = "semantic-policy")]
+pub use semantic_transition::{
+    SemanticEvaluationCohort, SemanticModelEvaluation, SemanticModelEvaluationResult,
+};
 pub use semantic_work::ModelWorkKind;
 
 pub use wcoj_metadata::{

@@ -601,6 +601,29 @@ pub enum SemanticTrainingViewPort {
     Parents,
 }
 
+impl SemanticTrainingViewPort {
+    /// Canonical public order of the complete selected roster.
+    pub const ALL: [Self; 17] = [
+        Self::Selection,
+        Self::RosterRows,
+        Self::Objective,
+        Self::ObjectiveGroups,
+        Self::ObjectiveGroupMembers,
+        Self::Canaries,
+        Self::TokenIds,
+        Self::MaskLabels,
+        Self::MaskWeights,
+        Self::AutoregressiveLabels,
+        Self::RetentionLabels,
+        Self::BranchLabels,
+        Self::BranchIds,
+        Self::SourceSlots,
+        Self::LogicalPositions,
+        Self::Kinds,
+        Self::Parents,
+    ];
+}
+
 impl SemanticSelectedTrainingView {
     pub fn capacity(&self) -> usize {
         self.arena.capacity
@@ -1117,6 +1140,11 @@ pub(crate) struct SemanticTrainingViewArena {
 }
 
 impl SemanticTrainingViewArena {
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn training_domain_identity(&self) -> Identity256 {
+        self.training_domain.identity()
+    }
+
     pub(crate) fn selection_bytes(&self) -> Result<usize, SemanticTransitionError> {
         let roster_bytes = self
             .row_count
