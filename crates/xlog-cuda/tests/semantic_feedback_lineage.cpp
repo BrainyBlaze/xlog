@@ -44,6 +44,8 @@ static double __dadd_rn(double a, double b) { return a+b; }
 static double __dsub_rn(double a, double b) { return a-b; }
 static double __ddiv_rn(double a, double b) { return a/b; }
 static double __dmul_rn(double a, double b) { return a*b; }
+static float __fadd_rn(float a, float b) { return a+b; }
+static float __fmul_rn(float a, float b) { return a*b; }
 template<typename Result,typename Operation>
 static Result host_rounded(int rounding,Operation operation) {
     const int original = std::fegetround();
@@ -76,9 +78,7 @@ static double __ll2double_rn(long long value) { return static_cast<double>(value
 static float __ll2float_rn(long long value) { return static_cast<float>(value); }
 static float __ull2float_rn(uint64_t value) { return static_cast<float>(value); }
 static float __double2float_rn(double value) { return static_cast<float>(value); }
-static float __fadd_rn(float a, float b) { return a+b; }
 static float __fsub_rn(float a, float b) { return a-b; }
-static float __fmul_rn(float a, float b) { return a*b; }
 static float __fdiv_rn(float a, float b) { return a/b; }
 #endif
 template<typename T,typename Value> T atomicAdd(T* target, Value value) { T old=*target; *target+=T(value); return old; }
