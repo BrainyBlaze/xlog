@@ -549,9 +549,9 @@ Both model snapshots and native banks are checked again before any handoff.
 `retire_restored_model(returned_model) -> None` is the original model/runtime
 owner's mandatory retirement callback, retained before the factory is entered.
 Abandonment calls it once with the exact factory model while source use is still
-private. It must retire known completed segment/evaluation consumers and the
-original held residency through their canonical release paths, relinquishing its
-native/model ownership. Native then positively verifies the original lease has
+private. It requires already canonically retired segment/evaluation consumers,
+then releases the original held residency and its native/model ownership.
+Native then positively verifies the original lease has
 no reader, retained step, unfinished evaluation or captured executable; `abort`,
 reader-only release and a failed identity lookup do not establish retirement.
 Only after known retirement does native drop its candidate owners and resume the
