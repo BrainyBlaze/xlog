@@ -19,7 +19,7 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyList, PyString, PyTuple};
 use sha2::{Digest, Sha256};
 use xlog_core::{RelId, ScalarType, Schema};
 use xlog_cuda::memory::DeviceAllocationProvenance;
-use xlog_cuda::provider::ResidentExecutionDomain;
+use xlog_cuda::provider::resident_schedule::ResidentExecutionDomain;
 use xlog_cuda::CudaKernelProvider;
 #[cfg(feature = "semantic-policy")]
 use xlog_cuda::SemanticSegmentColdCapacity;
