@@ -1143,6 +1143,9 @@ impl PySemanticLearningPhaseTransition {
         let construction = self.private_restore()?.take();
         drop(retired);
         drop(construction);
+        // Released Python owners can run finalizers against the source. Verify
+        // its original live checkpoint again before unwrapping its task phase.
+        self.verify(py, false)?;
         let mut retention = source
             .learning_transition
             .lock()
