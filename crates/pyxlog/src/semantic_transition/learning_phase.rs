@@ -360,12 +360,12 @@ fn verify_original_source(
 }
 
 impl PySemanticLearningPhaseTransition {
-    pub(super) fn restore_allocation_provider(
+    pub(super) fn restore_allocation_domain(
         &self,
         py: Python<'_>,
         device_ordinal: usize,
         memory_bytes: u64,
-    ) -> PyResult<Arc<CudaKernelProvider>> {
+    ) -> PyResult<(Arc<CudaKernelProvider>, ResidentExecutionDomain)> {
         let source = self.source.borrow(py);
         source.require_creator()?;
         if !matches!(*self.status_lock()?, Completion::Preparing)
@@ -378,11 +378,11 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         self.records()?.require_preparation_admission()?;
-        let provider = source
+        let domain = source
             .owner()?
-            .checkpoint_allocation_provider()
+            .checkpoint_allocation_domain()
             .map_err(xlog_err)?;
-        Ok(provider)
+        Ok(domain)
     }
 
     fn finish_preparation_readback(&self, py: Python<'_>) -> PyResult<&'static str> {

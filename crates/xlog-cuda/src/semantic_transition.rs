@@ -15075,14 +15075,15 @@ impl Drop for SemanticTransitionSession {
 }
 
 impl SemanticTransitionSession {
-    /// Retain the actual allocation owner for a private checkpoint successor.
+    /// Retain the actual allocation owner and serial stream for a private successor.
     /// Source and successor allocations remain charged to this same provider's
-    /// resource stack; constructing a successor does not grant a fresh budget.
-    pub fn checkpoint_allocation_provider(
+    /// resource stack; constructing a successor does not grant a fresh budget
+    /// or consume another permanent stream-pool slot.
+    pub fn checkpoint_allocation_domain(
         &self,
-    ) -> Result<Arc<CudaKernelProvider>, SemanticTransitionError> {
+    ) -> Result<(Arc<CudaKernelProvider>, ResidentExecutionDomain), SemanticTransitionError> {
         self.ensure_quiescent()?;
-        Ok(Arc::clone(&self.provider))
+        Ok((Arc::clone(&self.provider), self.domain.clone()))
     }
 
     /// Decode and validate one complete native material before allocating a new
