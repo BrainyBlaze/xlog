@@ -522,6 +522,29 @@ against the supplied checkpoint; it does not create a replacement source.
 These callbacks execute cold, on the creator thread, outside native/task locks.
 Both model snapshots and native banks are checked again before any handoff.
 
+The source retains the native pending owner **before** its first serializer,
+scientific callback or restoration operation. During preparation its status is
+`preparing`; completion methods cannot be nested from those callbacks. Canonical
+restore retains the actual private Session before native phase writes, then its
+Controller, task use, parent and returned model as they are constructed. A callback,
+restore or verification exception leaves that same pending owner `unknown`, with
+the original callbacks and all constructed owners retained. It does not abort the
+private bank, repeat a callback, refund the shared original Proposal expense or
+resume the source merely because the source still matches its checkpoint. The
+application must recover the same object through
+`controller.pending_learning_phase_transition()` after an exception and retain its
+original model/runtime lifetime even when no complete candidate exists yet.
+`checkpoint_sha256` requires a complete candidate checkpoint; no synthetic digest
+is provided for an incomplete preparation. Final-checkpoint resolution and
+`abandon_prepared()` cannot resolve an unknown preparation, because absence of a
+final checkpoint does not prove that private operations did not execute.
+
+This retained in-process custody is not an authenticated durable operation journal,
+early durable admission, cold continuation or a full private learning executor.
+Those capabilities are not supplied by this interface. In particular, the current
+six-argument acceptance callback above does not execute a frozen scientific program
+or establish final whole-state scientific acceptance.
+
 The returned native-issued `SemanticLearningPhaseTransition` retains both
 owners privately. A fast successor resumes inference; consolidation resumes
 training, subject to its original rights. A later fast training segment requires

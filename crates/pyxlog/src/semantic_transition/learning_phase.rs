@@ -156,6 +156,8 @@ impl PySemanticLearningPhaseRecipe {
 }
 
 enum Completion {
+    Preparing,
+    PreparationUnknown,
     Prepared,
     Unknown {
         _owner: Py<PyAny>,
@@ -164,6 +166,21 @@ enum Completion {
     },
     Committed,
     Abandoned,
+}
+
+struct PreparedCandidate {
+    owner: Py<PySemanticTransitionRestoredCheckpoint>,
+    checkpoint: Arc<[u8]>,
+}
+
+/// Retain each actual owner before the next potentially asynchronous operation.
+/// An incomplete construction is not a restored checkpoint or a runnable task.
+struct PrivateRestoreOwners {
+    session: Py<PySemanticTransitionSession>,
+    controller: Option<Py<PySemanticTransitionController>>,
+    task_use: Option<Py<PySemanticTransitionTaskUse>>,
+    parent: Option<Py<PySemanticPublishedParent>>,
+    model: Option<Py<PyAny>>,
 }
 
 /// Native-issued pending owner. No candidate owner escapes before durable commit.
@@ -177,10 +194,12 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     source: Py<PySemanticTransitionSession>,
     task_use: Py<PySemanticTransitionTaskUse>,
     parent: Py<PySemanticPublishedParent>,
-    candidate: Py<PySemanticTransitionRestoredCheckpoint>,
+    candidate: Mutex<Option<PreparedCandidate>>,
+    private_restore: Mutex<Option<PrivateRestoreOwners>>,
     source_checkpoint: Vec<u8>,
-    checkpoint: Vec<u8>,
     _scientific_owner: Py<PyAny>,
+    _recipe: Py<PySemanticLearningPhaseRecipe>,
+    _restore_model: Py<PyAny>,
     source_serializer: Py<PyAny>,
     candidate_serializer: Py<PyAny>,
     refresh_snapshot: Py<PyAny>,
@@ -316,6 +335,126 @@ impl PySemanticLearningPhaseTransition {
             .map_err(|_| invalid("learning-phase completion owner mutex is poisoned"))
     }
 
+    fn candidate(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(Py<PySemanticTransitionRestoredCheckpoint>, Arc<[u8]>)> {
+        let candidate = self
+            .candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?;
+        let candidate = candidate.as_ref().ok_or_else(|| {
+            invalid("learning-phase preparation has no complete verified candidate checkpoint")
+        })?;
+        Ok((
+            candidate.owner.clone_ref(py),
+            Arc::clone(&candidate.checkpoint),
+        ))
+    }
+
+    fn private_restore(&self) -> PyResult<MutexGuard<'_, Option<PrivateRestoreOwners>>> {
+        self.private_restore
+            .lock()
+            .map_err(|_| invalid("learning-phase private restore owner mutex is poisoned"))
+    }
+
+    pub(super) fn retain_restore_session(
+        &self,
+        py: Python<'_>,
+        session: &Py<PySemanticTransitionSession>,
+    ) -> PyResult<()> {
+        if !matches!(*self.status_lock()?, Completion::Preparing) {
+            return Err(invalid(
+                "private restoration lost its original preparing owner",
+            ));
+        }
+        let mut retained = self.private_restore()?;
+        if retained.is_some() {
+            return Err(invalid("private learning restoration cannot be repeated"));
+        }
+        *retained = Some(PrivateRestoreOwners {
+            session: session.clone_ref(py),
+            controller: None,
+            task_use: None,
+            parent: None,
+            model: None,
+        });
+        Ok(())
+    }
+
+    pub(super) fn retain_restore_controller(
+        &self,
+        py: Python<'_>,
+        session: &Py<PySemanticTransitionSession>,
+        controller: &Py<PySemanticTransitionController>,
+    ) -> PyResult<()> {
+        let mut retained = self.private_restore()?;
+        let retained = retained
+            .as_mut()
+            .ok_or_else(|| invalid("private restoration lost its actual retained Session"))?;
+        if retained.session.as_ptr() != session.as_ptr()
+            || retained.controller.is_some()
+            || retained.task_use.is_some()
+            || retained.parent.is_some()
+        {
+            return Err(invalid(
+                "private restoration substituted or repeated its actual owners",
+            ));
+        }
+        retained.controller = Some(controller.clone_ref(py));
+        Ok(())
+    }
+
+    pub(super) fn retain_restore_task(
+        &self,
+        py: Python<'_>,
+        task_use: &Py<PySemanticTransitionTaskUse>,
+    ) -> PyResult<()> {
+        let mut retained = self.private_restore()?;
+        let retained = retained
+            .as_mut()
+            .ok_or_else(|| invalid("private restoration lost its actual retained Session"))?;
+        if retained.controller.is_none() || retained.task_use.is_some() {
+            return Err(invalid(
+                "private restoration lost or repeated its task owner",
+            ));
+        }
+        retained.task_use = Some(task_use.clone_ref(py));
+        Ok(())
+    }
+
+    pub(super) fn retain_restore_parent(
+        &self,
+        py: Python<'_>,
+        parent: &Py<PySemanticPublishedParent>,
+    ) -> PyResult<()> {
+        let mut retained = self.private_restore()?;
+        let retained = retained
+            .as_mut()
+            .ok_or_else(|| invalid("private restoration lost its actual retained Session"))?;
+        if retained.task_use.is_none() || retained.parent.is_some() {
+            return Err(invalid(
+                "private restoration lost or repeated its parent owner",
+            ));
+        }
+        retained.parent = Some(parent.clone_ref(py));
+        Ok(())
+    }
+
+    pub(super) fn retain_restored_model(&self, py: Python<'_>, model: &Py<PyAny>) -> PyResult<()> {
+        let mut retained = self.private_restore()?;
+        let retained = retained
+            .as_mut()
+            .ok_or_else(|| invalid("private restoration lost its actual retained Session"))?;
+        if retained.parent.is_none() || retained.model.is_some() {
+            return Err(invalid(
+                "private restoration lost or repeated its model factory owners",
+            ));
+        }
+        retained.model = Some(model.clone_ref(py));
+        Ok(())
+    }
+
     fn retain_durable_readback(&self) -> PyResult<()> {
         let mut completion = self.status_lock()?;
         let Completion::Unknown {
@@ -348,12 +487,13 @@ impl PySemanticLearningPhaseTransition {
         require_model_bytes(&model, &source_manifest.model)?;
         verify_phase_native(py, &task, &parent, &source_manifest.native, true)?;
         if include_candidate {
-            let candidate = self.candidate.borrow(py);
+            let (candidate, checkpoint) = self.candidate(py)?;
+            let candidate = candidate.borrow(py);
             let issued = candidate.task_use.borrow(py);
             snapshot.newer_than(&issued.state()?.snapshot)?;
             check_learning_grant(&issued, &self.grant_reference, &snapshot)?;
             let acquired = candidate.parent.borrow(py);
-            let manifest = SemanticCheckpointManifest::decode(&self.checkpoint)?;
+            let manifest = SemanticCheckpointManifest::decode(&checkpoint)?;
             verify_phase_native(py, &issued, &acquired, &manifest.native, false)?;
             let model = self
                 .candidate_serializer
@@ -369,7 +509,8 @@ impl PySemanticLearningPhaseTransition {
 
     fn activate(&self, py: Python<'_>) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
         self.verify(py, true)?;
-        let candidate = self.candidate.borrow(py);
+        let (candidate_owner, _) = self.candidate(py)?;
+        let candidate = candidate_owner.borrow(py);
         let task = self.task_use.borrow(py);
         let issued = candidate.task_use.borrow(py);
         let source = self.source.borrow(py);
@@ -402,13 +543,14 @@ impl PySemanticLearningPhaseTransition {
         drop(completion);
         drop(retention);
         drop(retained);
-        Ok(self.candidate.clone_ref(py))
+        Ok(candidate_owner.clone_ref(py))
     }
 
     fn abandon(&self, py: Python<'_>) -> PyResult<()> {
         self.verify(py, false)?;
         let source = self.source.borrow(py);
-        let candidate = self.candidate.borrow(py);
+        let (candidate, _) = self.candidate(py)?;
+        let candidate = candidate.borrow(py);
         let successor = candidate.session.borrow(py);
         let task = self.task_use.borrow(py);
         let issued = candidate.task_use.borrow(py);
@@ -455,6 +597,8 @@ impl PySemanticLearningPhaseTransition {
     #[getter]
     fn status(&self) -> PyResult<&'static str> {
         Ok(match &*self.status_lock()? {
+            Completion::Preparing => "preparing",
+            Completion::PreparationUnknown => "unknown",
             Completion::Prepared => "prepared",
             Completion::Unknown { .. } => "unknown",
             Completion::Committed => "committed",
@@ -463,8 +607,9 @@ impl PySemanticLearningPhaseTransition {
     }
 
     #[getter]
-    fn checkpoint_sha256(&self, py: Python<'_>) -> Py<PyBytes> {
-        PyBytes::new(py, &Sha256::digest(&self.checkpoint)).unbind()
+    fn checkpoint_sha256(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
+        let (_, checkpoint) = self.candidate(py)?;
+        Ok(PyBytes::new(py, &Sha256::digest(&checkpoint)).unbind())
     }
 
     /// The trusted durable owner implements commit(destination, bytes, sha256)
@@ -482,6 +627,7 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         self.verify(py, true)?;
+        let (_, checkpoint) = self.candidate(py)?;
         let commit = durable_owner.bind(py).getattr("commit")?;
         let resolve = durable_owner.bind(py).getattr("resolve")?;
         if !commit.is_callable() || !resolve.is_callable() {
@@ -498,10 +644,10 @@ impl PySemanticLearningPhaseTransition {
         };
         let readback = commit.call1((
             &self.destination,
-            PyBytes::new(py, &self.checkpoint),
-            PyBytes::new(py, &Sha256::digest(&self.checkpoint)),
+            PyBytes::new(py, &checkpoint),
+            PyBytes::new(py, &Sha256::digest(&checkpoint)),
         ))?;
-        require_model_bytes(&readback, &self.checkpoint)?;
+        require_model_bytes(&readback, &checkpoint)?;
         self.retain_durable_readback()?;
         self.activate(py)
     }
@@ -521,11 +667,15 @@ impl PySemanticLearningPhaseTransition {
                 readback_observed,
                 ..
             } => (resolve.clone_ref(py), *readback_observed),
+            Completion::PreparationUnknown => {
+                return Err(invalid("private preparation outcome is unknown; final checkpoint resolution cannot prove that its operations did not execute"));
+            }
             _ => return Err(invalid("only an unknown phase checkpoint needs resolution")),
         };
+        let (_, checkpoint) = self.candidate(py)?;
         let result = resolve.bind(py).call1((
             &self.destination,
-            PyBytes::new(py, &Sha256::digest(&self.checkpoint)),
+            PyBytes::new(py, &Sha256::digest(&checkpoint)),
         ))?;
         if result.is_none() {
             return Ok(None);
@@ -539,7 +689,7 @@ impl PySemanticLearningPhaseTransition {
             self.abandon(py)?;
             return Ok(None);
         }
-        require_model_bytes(&result, &self.checkpoint)?;
+        require_model_bytes(&result, &checkpoint)?;
         self.retain_durable_readback()?;
         self.activate(py).map(Some)
     }
@@ -649,7 +799,32 @@ impl PySemanticTransitionController {
             })
             .ok_or_else(|| invalid("original learning grant disappeared from its task capsule"))?
             .clone();
-        if source.learning_preparing.swap(true, Ordering::AcqRel) {
+        let pending = Py::new(
+            py,
+            PySemanticLearningPhaseTransition {
+                source: self.session.clone_ref(py),
+                task_use: task_use.clone_ref(py),
+                parent: parent.clone_ref(py),
+                candidate: Mutex::new(None),
+                private_restore: Mutex::new(None),
+                source_checkpoint: checkpoint.to_vec(),
+                _scientific_owner: scientific_owner.clone_ref(py),
+                _recipe: recipe.clone_ref(py),
+                _restore_model: restore_model.clone().unbind(),
+                source_serializer: snapshot_model_state.clone().unbind(),
+                candidate_serializer: snapshot_restored_model.clone().unbind(),
+                refresh_snapshot: refresh_snapshot.clone().unbind(),
+                grant_reference: learning_grant_ref.to_owned(),
+                destination: checkpoint_destination.to_owned(),
+                completion: Mutex::new(Completion::Preparing),
+                operating: AtomicBool::new(false),
+            },
+        )?;
+        let mut retention = source
+            .learning_transition
+            .lock()
+            .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?;
+        if retention.is_some() || source.learning_preparing.swap(true, Ordering::AcqRel) {
             return Err(invalid(
                 "Session already retains a learning-phase preparation",
             ));
@@ -661,9 +836,13 @@ impl PySemanticTransitionController {
             source.learning_preparing.store(false, Ordering::Release);
             return Err(error);
         }
-        let mut saved_source: Option<Vec<u8>> = None;
-        let mut restored: Option<Py<PySemanticTransitionRestoredCheckpoint>> = None;
-        let result = (|| -> PyResult<Py<PySemanticLearningPhaseTransition>> {
+        // Retain the same native-issued owner before serializers, scientific
+        // callbacks, native restoration or the model factory can perform work.
+        *retention = Some(pending.clone_ref(py));
+        drop(retention);
+        let retained_owner = pending.borrow(py);
+        let operation = PhaseOperation::begin(&retained_owner.operating)?;
+        let result = (|| -> PyResult<()> {
             {
                 if source.importing.load(Ordering::Acquire)
                     || source.recording.load(Ordering::Acquire)
@@ -680,7 +859,6 @@ impl PySemanticTransitionController {
                     .map_err(xlog_err)?;
             }
             verify_original_source(py, &task, &acquired, &manifest, &saved_snapshot)?;
-            saved_source = Some(checkpoint.to_vec());
             require_model_bytes(&snapshot_model_state.call0()?, &manifest.model)?;
             verify_original_source(py, &task, &acquired, &manifest, &saved_snapshot)?;
             if task.state()?.snapshot.canonical != prior_snapshot.canonical {
@@ -743,8 +921,8 @@ impl PySemanticTransitionController {
                 Some(refresh_snapshot),
                 Some(&task.checkpoint.proposal_expense),
                 Some(&task.checkpoint.checkpoint_sources),
+                Some(&pending),
             )?;
-            restored = Some(candidate.clone_ref(py));
             let candidate_model = candidate.borrow(py).model.clone_ref(py);
             let serializer = snapshot_restored_model.clone().unbind();
             let snapshot_candidate =
@@ -767,80 +945,31 @@ impl PySemanticTransitionController {
                 )?;
                 blob.bind(py).as_bytes().to_vec()
             };
-            let pending = Py::new(
-                py,
-                PySemanticLearningPhaseTransition {
-                    source: self.session.clone_ref(py),
-                    task_use: task_use.clone_ref(py),
-                    parent: parent.clone_ref(py),
-                    candidate,
-                    source_checkpoint: saved_source.clone().expect("saved phase source"),
-                    checkpoint,
-                    _scientific_owner: scientific_owner.clone_ref(py),
-                    source_serializer: snapshot_model_state.clone().unbind(),
-                    candidate_serializer: snapshot_restored_model.clone().unbind(),
-                    refresh_snapshot: refresh_snapshot.clone().unbind(),
-                    grant_reference: learning_grant_ref.to_owned(),
-                    destination: checkpoint_destination.to_owned(),
-                    completion: Mutex::new(Completion::Prepared),
-                    operating: AtomicBool::new(false),
-                },
-            )?;
-            pending.borrow(py).verify(py, true)?;
-            *source
-                .learning_transition
+            *retained_owner
+                .candidate
                 .lock()
-                .map_err(|_| invalid("learning-phase retention mutex is poisoned"))? =
-                Some(pending.clone_ref(py));
-            Ok(pending)
+                .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))? =
+                Some(PreparedCandidate {
+                    owner: candidate,
+                    checkpoint: checkpoint.into(),
+                });
+            retained_owner.verify(py, true)?;
+            // The complete checkpoint now owns all of the actual restored
+            // handles. Release only the redundant construction references.
+            let construction = retained_owner.private_restore()?.take();
+            drop(construction);
+            *retained_owner.status_lock()? = Completion::Prepared;
+            Ok(())
         })();
-        if result.is_err() {
-            if let Some(candidate) = restored {
-                if let Ok(mut owner) = candidate.borrow(py).session.borrow(py).owner() {
-                    owner.abort();
-                }
-                candidate.borrow(py).task_use.borrow(py).state()?.phase = TaskUsePhase::Refused;
-                candidate
-                    .borrow(py)
-                    .session
-                    .borrow(py)
-                    .learning_preparing
-                    .store(false, Ordering::Release);
-            }
-            let safe = (|| -> PyResult<AuthoritySnapshot> {
-                let fresh = refresh_snapshot.call0()?;
-                let current = AuthoritySnapshot::parse(&ColdValue::read(
-                    &fresh,
-                    &mut (16 * 1024 * 1024),
-                    0,
-                )?)?;
-                current.newer_than(&initial)?;
-                current.newer_than(&task.state()?.snapshot)?;
-                check_learning_grant(&task, learning_grant_ref, &current)?;
-                task.require_current(&*source.owner()?)?;
-                if let Some(saved) = &saved_source {
-                    let manifest = SemanticCheckpointManifest::decode(saved)?;
-                    require_model_bytes(&snapshot_model_state.call0()?, &manifest.model)?;
-                    if source
-                        .owner()?
-                        .published_state_material(&*acquired.lease()?)
-                        .map_err(xlog_err)?
-                        != manifest.native
-                    {
-                        return Err(invalid("phase failure changed the original native state"));
-                    }
-                }
-                Ok(current)
-            })();
-            let mut state = task.state()?;
-            if let Ok(snapshot) = safe {
-                state.snapshot = snapshot;
-                state.finish_arena_preparation()?;
-            } else {
-                state.phase = TaskUsePhase::Refused;
-            }
-            source.learning_preparing.store(false, Ordering::Release);
+        if let Err(error) = result {
+            // Source equality does not prove that an external operation did
+            // not execute. Keep the same callbacks, native/model owners and
+            // irreversible expense; never abort or resume by that assumption.
+            *retained_owner.status_lock()? = Completion::PreparationUnknown;
+            return Err(error);
         }
-        result
+        drop(operation);
+        drop(retained_owner);
+        Ok(pending)
     }
 }
