@@ -373,6 +373,84 @@ impl PySemanticLearningPhaseTransition {
         Ok("prepared")
     }
 
+    /// Read only the same retained attempt. Knowing admission durability alone
+    /// never authorizes replay of a preparation whose execution is unknown.
+    fn resolve_preparation_record(&self, py: Python<'_>) -> PyResult<&'static str> {
+        if !matches!(*self.status_lock()?, Completion::PreparationUnknown) {
+            return Err(invalid(
+                "only unknown early phase preparation requires phase record resolution",
+            ));
+        }
+        let (phase_id, issuer, pinned, pin_attempted) = {
+            let records = self.records()?;
+            (
+                records.phase_id,
+                records.issuer(),
+                records.issuer_pinned,
+                records.pin_attempted,
+            )
+        };
+        if !pin_attempted {
+            return Err(invalid(
+                "early phase preparation has no attempted issuer pin",
+            ));
+        }
+        if !pinned {
+            let resolve = self
+                .store()?
+                .as_ref()
+                .ok_or_else(|| invalid("phase issuer resolution lost its original store"))?
+                .resolve_issuer
+                .clone_ref(py);
+            let readback = resolve
+                .bind(py)
+                .call1((&self.destination, PyBytes::new(py, &phase_id)))?;
+            if readback.is_none() {
+                return Ok("unknown");
+            }
+            require_model_bytes(&readback, &issuer)?;
+            self.records()?.issuer_pinned = true;
+        }
+        let attempt = self
+            .records()?
+            .attempt
+            .as_ref()
+            .map(|attempt| (attempt.ordinal, attempt.digest, attempt.readback_observed));
+        let Some((ordinal, digest, observed)) = attempt else {
+            // A confirmed pin or a completed admission is not proof of a
+            // completed factory/native restoration. Do not resume either owner.
+            return self.finish_preparation_readback(py);
+        };
+        let resolve = self
+            .store()?
+            .as_ref()
+            .ok_or_else(|| invalid("phase record resolution lost its original store"))?
+            .resolve
+            .clone_ref(py);
+        let readback = resolve.bind(py).call1((
+            &self.destination,
+            PyBytes::new(py, &phase_id),
+            ordinal,
+            PyBytes::new(py, &digest),
+        ))?;
+        if readback.is_none() {
+            return Ok("unknown");
+        }
+        if readback.is_exact_instance_of::<PyBool>() && !readback.extract::<bool>()? {
+            return Err(invalid(if observed {
+                "phase resolver contradicted an observed exact durable record; retain the original pending owners"
+            } else {
+                "absence of a phase record does not resolve execution; retain the original pending owners"
+            }));
+        }
+        {
+            let mut records = self.records()?;
+            records.confirm(&readback)?;
+            records.advance()?;
+        }
+        self.finish_preparation_readback(py)
+    }
+
     fn records(&self) -> PyResult<MutexGuard<'_, PhaseRecords>> {
         self.phase_records
             .lock()
@@ -732,86 +810,6 @@ impl PySemanticLearningPhaseTransition {
         Ok((limits.record_bytes, limits.total_bytes, limits.records))
     }
 
-    /// Read only the same retained attempt. Knowing admission durability alone
-    /// never authorizes replay of a preparation whose execution is unknown.
-    fn resolve_phase_record(&self, py: Python<'_>) -> PyResult<&'static str> {
-        let _operation = PhaseOperation::begin(&self.operating)?;
-        self.source.borrow(py).require_creator()?;
-        if !matches!(*self.status_lock()?, Completion::PreparationUnknown) {
-            return Err(invalid(
-                "only unknown early phase preparation requires phase record resolution",
-            ));
-        }
-        let (phase_id, issuer, pinned, pin_attempted) = {
-            let records = self.records()?;
-            (
-                records.phase_id,
-                records.issuer(),
-                records.issuer_pinned,
-                records.pin_attempted,
-            )
-        };
-        if !pin_attempted {
-            return Err(invalid(
-                "early phase preparation has no attempted issuer pin",
-            ));
-        }
-        if !pinned {
-            let resolve = self
-                .store()?
-                .as_ref()
-                .ok_or_else(|| invalid("phase issuer resolution lost its original store"))?
-                .resolve_issuer
-                .clone_ref(py);
-            let readback = resolve
-                .bind(py)
-                .call1((&self.destination, PyBytes::new(py, &phase_id)))?;
-            if readback.is_none() {
-                return Ok("unknown");
-            }
-            require_model_bytes(&readback, &issuer)?;
-            self.records()?.issuer_pinned = true;
-        }
-        let attempt = self
-            .records()?
-            .attempt
-            .as_ref()
-            .map(|attempt| (attempt.ordinal, attempt.digest, attempt.readback_observed));
-        let Some((ordinal, digest, observed)) = attempt else {
-            // A confirmed pin or a completed admission is not proof of a
-            // completed factory/native restoration. Do not resume either owner.
-            return self.finish_preparation_readback(py);
-        };
-        let resolve = self
-            .store()?
-            .as_ref()
-            .ok_or_else(|| invalid("phase record resolution lost its original store"))?
-            .resolve
-            .clone_ref(py);
-        let readback = resolve.bind(py).call1((
-            &self.destination,
-            PyBytes::new(py, &phase_id),
-            ordinal,
-            PyBytes::new(py, &digest),
-        ))?;
-        if readback.is_none() {
-            return Ok("unknown");
-        }
-        if readback.is_exact_instance_of::<PyBool>() && !readback.extract::<bool>()? {
-            return Err(invalid(if observed {
-                "phase resolver contradicted an observed exact durable record; retain the original pending owners"
-            } else {
-                "absence of a phase record does not resolve execution; retain the original pending owners"
-            }));
-        }
-        {
-            let mut records = self.records()?;
-            records.confirm(&readback)?;
-            records.advance()?;
-        }
-        self.finish_preparation_readback(py)
-    }
-
     #[getter]
     fn status(&self) -> PyResult<&'static str> {
         Ok(match &*self.status_lock()? {
@@ -875,24 +873,27 @@ impl PySemanticLearningPhaseTransition {
         self.activate(py)
     }
 
-    /// Resolve through the SAME retained durable owner; never repeats commit.
-    /// None is still unknown. False can prove absence only before any exact
-    /// readback; it cannot discard an already observed durable checkpoint.
+    /// Native selects the original preparation or final publication readback.
+    /// A known preparation stays private; resolution never commits or abandons it.
+    /// Final absence permits source continuation only before exact readback.
     fn resolve_checkpoint(
         &self,
         py: Python<'_>,
     ) -> PyResult<Option<Py<PySemanticTransitionRestoredCheckpoint>>> {
         let _operation = PhaseOperation::begin(&self.operating)?;
         self.source.borrow(py).require_creator()?;
+        let preparation_unknown = matches!(*self.status_lock()?, Completion::PreparationUnknown);
+        if preparation_unknown {
+            self.resolve_preparation_record(py)?;
+            return Ok(None);
+        }
         let (resolve, readback_observed) = match &*self.status_lock()? {
             Completion::Unknown {
                 resolve,
                 readback_observed,
                 ..
             } => (resolve.clone_ref(py), *readback_observed),
-            Completion::PreparationUnknown => {
-                return Err(invalid("private preparation outcome is unknown; final checkpoint resolution cannot prove that its operations did not execute"));
-            }
+            Completion::Prepared => return Ok(None),
             _ => return Err(invalid("only an unknown phase checkpoint needs resolution")),
         };
         let (_, checkpoint) = self.candidate(py)?;

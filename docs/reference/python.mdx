@@ -536,9 +536,9 @@ application must recover the same object through
 `controller.pending_learning_phase_transition()` after an exception and retain its
 original model/runtime lifetime even when no complete candidate exists yet.
 `checkpoint_sha256` requires a complete candidate checkpoint; no synthetic digest
-is provided for an incomplete preparation. Final-checkpoint resolution and
-`abandon_prepared()` cannot resolve an unknown preparation, because absence of a
-final checkpoint does not prove that private operations did not execute.
+is provided for an incomplete preparation. The resolver never treats absence of a
+final checkpoint as proof that private operations did not execute.
+`abandon_prepared()` cannot resolve an unknown preparation.
 
 The original application must supply `phase_record_owner` before preparation, with
 the explicit tuple `phase_record_limits=(max_record_bytes, max_total_record_bytes,
@@ -582,11 +582,35 @@ The signature covers the complete versioned record, not merely its payload diges
 Exact readback is verified against the original native key before progress advances.
 
 An issuer/store exception or nonexact readback keeps that same pending `unknown`.
-`pending.resolve_phase_record()` uses only its captured issuer/record resolvers and
-returns `unknown` or `prepared`. It never repeats a pin, write, serializer, factory
-or restoration. Resolving admission alone cannot prove completion of preparation
+Use only `pending.resolve_checkpoint()`: native selects early preparation-record
+readback or attempted final-checkpoint resolution from its retained state. The
+application must not guess the stage from `status == "unknown"`, try two resolvers,
+or select a fallback from an exception. Early readback uses only the captured
+issuer/record resolvers. It never repeats a pin, write, serializer, factory or
+restoration. Resolving admission alone cannot prove completion of preparation
 or resume the source. Only exact readback of the retained full preparation outcome
-can restore `prepared`; `None` remains unknown and `False` never proves nonexecution.
+can restore `prepared`; `None` remains unknown and early `False` never proves
+nonexecution. The public pending owner has no separate phase-record resolver.
+The store's `resolve_phase_record` callback is unchanged.
+
+The canonical resolver returns these distinct result/status pairs:
+
+| Result | `pending.status` | Meaning and required retention |
+| --- | --- | --- |
+| `None` | `unknown` | Keep the same pending, store, source, private owners and recovery fence; neither owner is runnable. |
+| `None` | `prepared` | The preparation outcome is known, but no model handoff or final publication occurred. Keep all owners and the fence. Repeated resolution returns the same pair without callbacks, commit or abandonment. |
+| `None` | `abandoned` | Native has revalidated and resumed the source after the retained final resolver proved absence before any exact durable checkpoint readback. Cleanup is permitted; expense is not refunded. |
+| `SemanticTransitionRestoredCheckpoint` | `committed` | The exact original controller/task/parent/model successor is durably published and activated. Retain this handoff before fallible application cleanup. |
+
+`prepared` permits a separate deliberate initial `commit_checkpoint` with the
+same original early store, or `abandon_prepared` before any final write attempt.
+Reading resolution must not choose either action. After a final write attempt,
+native never returns to `prepared` or permits another commit or explicit abandonment.
+If the original call raised before returning a candidate/model, those actual owners
+remain private in the same native pending; only durable activation returns their
+complete `SemanticTransitionRestoredCheckpoint`. Never reconstruct them from a
+digest or manufacture a replacement candidate. Exceptions preserve the original
+pending and owners, and inconsistent result/status pairs do not authorize cleanup.
 Final checkpoint publication must use this same original `phase_record_owner`.
 
 This interface supplies signed admission/outcome custody for preparation, not a
@@ -614,8 +638,9 @@ its exact durable readback. Only after readback and fresh revalidation does
 native code revoke the source task use and return the single runnable
 `SemanticTransitionRestoredCheckpoint`. Any uncertain completion leaves
 `pending.status == "unknown"`, retains both owners and forbids another commit.
-`pending.resolve_checkpoint()` only calls the same retained resolver: `None`
-remains unknown; exact checkpoint bytes allow activation; `False` must prove
+For an attempted final publication, `pending.resolve_checkpoint()` only calls the
+same retained final resolver: `None` remains unknown; exact checkpoint bytes allow
+activation; `False` must prove
 the write did not commit and permits revalidated source continuation only if
 native code has never observed exact durable readback. Once either callback has
 returned the complete original checkpoint bytes, that knowledge is retained
