@@ -382,13 +382,11 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
-    pub(super) fn retain_restore_handles(
+    pub(super) fn retain_restore_controller(
         &self,
         py: Python<'_>,
         session: &Py<PySemanticTransitionSession>,
         controller: &Py<PySemanticTransitionController>,
-        task_use: &Py<PySemanticTransitionTaskUse>,
-        parent: &Py<PySemanticPublishedParent>,
     ) -> PyResult<()> {
         let mut retained = self.private_restore()?;
         let retained = retained
@@ -404,7 +402,41 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         retained.controller = Some(controller.clone_ref(py));
+        Ok(())
+    }
+
+    pub(super) fn retain_restore_task(
+        &self,
+        py: Python<'_>,
+        task_use: &Py<PySemanticTransitionTaskUse>,
+    ) -> PyResult<()> {
+        let mut retained = self.private_restore()?;
+        let retained = retained
+            .as_mut()
+            .ok_or_else(|| invalid("private restoration lost its actual retained Session"))?;
+        if retained.controller.is_none() || retained.task_use.is_some() {
+            return Err(invalid(
+                "private restoration lost or repeated its task owner",
+            ));
+        }
         retained.task_use = Some(task_use.clone_ref(py));
+        Ok(())
+    }
+
+    pub(super) fn retain_restore_parent(
+        &self,
+        py: Python<'_>,
+        parent: &Py<PySemanticPublishedParent>,
+    ) -> PyResult<()> {
+        let mut retained = self.private_restore()?;
+        let retained = retained
+            .as_mut()
+            .ok_or_else(|| invalid("private restoration lost its actual retained Session"))?;
+        if retained.task_use.is_none() || retained.parent.is_some() {
+            return Err(invalid(
+                "private restoration lost or repeated its parent owner",
+            ));
+        }
         retained.parent = Some(parent.clone_ref(py));
         Ok(())
     }

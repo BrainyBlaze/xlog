@@ -1776,6 +1776,11 @@ impl PySemanticTransitionSession {
                 identity: Arc::clone(&controller_identity),
             },
         )?;
+        if let Some(pending) = learning_owner {
+            pending
+                .borrow(py)
+                .retain_restore_controller(py, &session, &controller)?;
+        }
         let issuance = {
             let restored = session.borrow(py);
             TaskIssuance::issue(Arc::clone(&restored.issuance))?
@@ -1808,6 +1813,9 @@ impl PySemanticTransitionSession {
                 delivery: Mutex::new(None),
             },
         )?;
+        if let Some(pending) = learning_owner {
+            pending.borrow(py).retain_restore_task(py, &task_use)?;
+        }
         let parent = {
             let issued = task_use.borrow(py);
             let restored = session.borrow(py);
@@ -1825,13 +1833,7 @@ impl PySemanticTransitionSession {
             )?
         };
         if let Some(pending) = learning_owner {
-            pending.borrow(py).retain_restore_handles(
-                py,
-                &session,
-                &controller,
-                &task_use,
-                &parent,
-            )?;
+            pending.borrow(py).retain_restore_parent(py, &parent)?;
         }
         let restored_native = if learning_transition.is_some() {
             let acquired = parent.borrow(py);
