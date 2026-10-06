@@ -1,7 +1,7 @@
 //! Cold phase ownership through the canonical checkpoint and restoration path.
 
 use super::*;
-use pyo3::types::PyCFunction;
+use pyo3::types::{PyCFunction, PyCapsule, PyCapsuleMethods};
 use xlog_cuda::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseTransition,
 };
@@ -21,7 +21,9 @@ impl PhaseRecordStore {
         let callback = |name| -> PyResult<Py<PyAny>> {
             let callback = owner.getattr(name)?;
             if !callback.is_callable() {
-                return Err(invalid("early phase store requires its original issuer pin/readback and phase record commit/readback callbacks"));
+                return Err(invalid(
+                    "early phase store requires its original issuer pin/readback and phase record commit/readback callbacks",
+                ));
             }
             Ok(callback.unbind())
         };
@@ -114,7 +116,7 @@ impl PySemanticLearningPhaseRecipe {
                     _ => {
                         return Err(invalid(
                             "copy/reset view has an invalid operation or unused source fields",
-                        ))
+                        ));
                     }
                 })
             })
@@ -207,6 +209,10 @@ struct PreparedCandidate {
 /// Immutable inputs retained before the first external issuer/store callback.
 /// Continuation consumes these same inputs, never a replacement registration.
 struct PreparationInputs {
+    source_model: Py<PyAny>,
+    execute_phase_instruction: Py<PyAny>,
+    resource_observer: Py<PyCapsule>,
+    feedback_interventions: Py<PyTuple>,
     consumer_streams: ColdValue,
     snapshot: ColdValue,
     prior_snapshot: AuthoritySnapshot,
@@ -215,6 +221,65 @@ struct PreparationInputs {
     resolve_checkpoint: Option<Py<PyAny>>,
     max_checkpoint_bytes: Option<ColdValue>,
     max_total_checkpoint_bytes: Option<ColdValue>,
+}
+
+/// The two original immutable materials, in real/control order. Reading this
+/// closed transport does not decode or reconstruct the scientific program.
+fn feedback_materials<'py>(value: &Bound<'py, PyAny>) -> PyResult<[Bound<'py, PyBytes>; 2]> {
+    const DOMAIN: &[u8] = b"xlog.learning-feedback-intervention.v1\0";
+    if !value.is_exact_instance_of::<PyTuple>() {
+        return Err(invalid(
+            "feedback interventions require the original exact builtin tuple of real and control bytes",
+        ));
+    }
+    let pair = value.cast::<PyTuple>()?;
+    if pair.len() != 2 {
+        return Err(invalid(
+            "feedback interventions require exactly the original real/control pair",
+        ));
+    }
+    let material = |index| -> PyResult<Bound<'py, PyBytes>> {
+        let value = pair.get_item(index)?;
+        if !value.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "feedback intervention material requires exact builtin bytes",
+            ));
+        }
+        let bytes = value.cast_into::<PyBytes>()?;
+        let raw = bytes.as_bytes();
+        if raw.len() != DOMAIN.len() + 1
+            || !raw.starts_with(DOMAIN)
+            || raw[DOMAIN.len()] != index as u8
+        {
+            return Err(invalid(
+                "feedback interventions require the original real identity and control positive-zero materials in that order",
+            ));
+        }
+        Ok(bytes)
+    };
+    Ok([material(0)?, material(1)?])
+}
+
+impl PreparationInputs {
+    fn require_program(&self, py: Python<'_>, scientific_owner: &Py<PyAny>) -> PyResult<()> {
+        let original_program = scientific_owner.bind(py).getattr("program_bytes")?;
+        require_model_bytes(&original_program, &self.frozen_program)
+    }
+
+    fn require_execution_inputs(&self, py: Python<'_>) -> PyResult<()> {
+        if self.source_model.bind(py).is_none()
+            || !self.execute_phase_instruction.bind(py).is_callable()
+        {
+            return Err(invalid(
+                "phase preparation requires its original source model and instruction execution owner",
+            ));
+        }
+        self.resource_observer
+            .bind(py)
+            .pointer_checked(Some(c"xlog.resource_observer.v1"))?;
+        feedback_materials(self.feedback_interventions.bind(py).as_any())?;
+        Ok(())
+    }
 }
 
 /// Retain each actual owner before the next potentially asynchronous operation.
@@ -386,7 +451,9 @@ impl PySemanticLearningPhaseTransition {
         source.require_creator()?;
         let admission_needed = self.records()?.preparation_admission_needed()?;
         if self.preparation_entered.load(Ordering::Acquire) {
-            return Err(invalid("the original preparation has already entered execution; retain and resolve its outcome"));
+            return Err(invalid(
+                "the original preparation has already entered execution; retain and resolve its outcome",
+            ));
         }
         let task = self.task_use.borrow(py);
         let acquired = self.parent.borrow(py);
@@ -396,6 +463,7 @@ impl PySemanticLearningPhaseTransition {
         let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
         let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
         let inputs = &self.preparation_inputs;
+        inputs.require_execution_inputs(py)?;
         let stream_values = inputs.consumer_streams.python_value(py)?;
         let consumer_streams = stream_values.bind(py);
         let streams = checkpoint_consumer_streams(consumer_streams, &mut (16 * 1024 * 1024))?;
@@ -404,7 +472,6 @@ impl PySemanticLearningPhaseTransition {
         let initial = AuthoritySnapshot::parse(&inputs.snapshot)?;
         let prior_snapshot = &inputs.prior_snapshot;
         let grant_value = &inputs.grant;
-        let frozen_program_bytes = PyBytes::new(py, &inputs.frozen_program).into_any();
         let scientific_owner = &self.scientific_owner;
         let recipe = &self.recipe;
         let parent = &self.parent;
@@ -438,21 +505,31 @@ impl PySemanticLearningPhaseTransition {
         authority.newer_than(&initial)?;
         authority.newer_than(&task.state()?.snapshot)?;
         check_learning_grant(&task, learning_grant_ref, &authority)?;
+        inputs.require_program(py, scientific_owner)?;
         if admission_needed {
             let inputs = Arc::clone(&self.records()?.inputs);
             self.append_phase_record(py, RecordKind::Admission, &inputs)?;
         }
         self.records()?.require_preparation_admission()?;
+        // The original store callbacks can fail or change external authority.
+        // Durable admission does not waive verification before execution.
+        inputs.require_execution_inputs(py)?;
+        inputs.require_program(py, scientific_owner)?;
+        let refreshed = refresh_snapshot.call0()?;
+        let admitted_authority =
+            AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut (16 * 1024 * 1024), 0)?)?;
+        admitted_authority.newer_than(&authority)?;
+        admitted_authority.newer_than(&task.state()?.snapshot)?;
+        check_learning_grant(&task, learning_grant_ref, &admitted_authority)?;
+        // Refresh is external code too: recheck the retained inputs after it,
+        // before marking execution entered or touching native/model state.
+        inputs.require_execution_inputs(py)?;
+        inputs.require_program(py, scientific_owner)?;
         // No native/model preparation is entered before the original signed
         // admission is known durable. This marker is never cleared on failure.
         self.preparation_entered
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| invalid("the original preparation has already entered execution; retain and resolve its outcome"))?;
-        let original_program = scientific_owner.bind(py).getattr("program_bytes")?;
-        require_model_bytes(
-            &original_program,
-            frozen_program_bytes.cast::<PyBytes>()?.as_bytes(),
-        )?;
         {
             if source.importing.load(Ordering::Acquire)
                 || source.recording.load(Ordering::Acquire)
@@ -496,7 +573,9 @@ impl PySemanticLearningPhaseTransition {
         if !accepted.is_exact_instance_of::<PyBytes>()
             || accepted.cast::<PyBytes>()?.as_bytes().is_empty()
         {
-            return Err(invalid("scientific owner must return its complete original accepted criteria and result, not an acceptance flag"));
+            return Err(invalid(
+                "scientific owner must return its complete original accepted criteria and result, not an acceptance flag",
+            ));
         }
         let mut transition = recipe.borrow(py).inner.clone();
         let mut retained = b"xlog.learning-phase.acceptance.v1\0".to_vec();
@@ -1073,7 +1152,7 @@ impl PySemanticLearningPhaseTransition {
                 _ => {
                     return Err(invalid(
                         "private candidate retirement is single-attempt; unknown consumer completion retains its original owners",
-                    ))
+                    ));
                 }
             }
         }
@@ -1158,7 +1237,7 @@ impl PySemanticLearningPhaseTransition {
                 _ => {
                     return Err(invalid(
                         "private retirement lost its original candidate task",
-                    ))
+                    ));
                 }
             }
             successor.learning_preparing.store(false, Ordering::Release);
@@ -1450,6 +1529,7 @@ impl PySemanticTransitionController {
     }
 
     #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner,
+        source_model, execute_phase_instruction, resource_observer, feedback_interventions,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
         snapshot_restored_model, retire_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, resolve_checkpoint=None,
         max_checkpoint_bytes=None, max_total_checkpoint_bytes=None))]
@@ -1467,6 +1547,10 @@ impl PySemanticTransitionController {
         consumer_streams: &Bound<'_, PyAny>,
         snapshot: &Bound<'_, PyAny>,
         scientific_owner: Py<PyAny>,
+        source_model: Py<PyAny>,
+        execute_phase_instruction: &Bound<'_, PyAny>,
+        resource_observer: &Bound<'_, PyAny>,
+        feedback_interventions: &Bound<'_, PyAny>,
         learning_grant_ref: &Bound<'_, PyAny>,
         checkpoint_destination: &Bound<'_, PyAny>,
         snapshot_model_state: &Bound<'_, PyAny>,
@@ -1504,6 +1588,14 @@ impl PySemanticTransitionController {
             ));
         }
         let record_limits = RecordLimits::read(phase_record_limits)?;
+        let feedback_materials = feedback_materials(feedback_interventions)?;
+        if source_model.bind(py).is_none() || !execute_phase_instruction.is_callable() {
+            return Err(invalid(
+                "phase preparation requires its original source model and instruction execution owner",
+            ));
+        }
+        let resource_observer = resource_observer.cast::<PyCapsule>()?;
+        resource_observer.pointer_checked(Some(c"xlog.resource_observer.v1"))?;
         let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
         let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
         task.authority.check_snapshot(&saved_snapshot)?;
@@ -1520,7 +1612,9 @@ impl PySemanticTransitionController {
             || !retire_restored_model.is_callable()
             || !refresh_snapshot.is_callable()
         {
-            return Err(invalid("phase preparation requires its original destination, serializers, restore and authority owner"));
+            return Err(invalid(
+                "phase preparation requires its original destination, serializers, restore and authority owner",
+            ));
         }
         let snapshot_value = ColdValue::read(snapshot, &mut (16 * 1024 * 1024), 0)?;
         let initial = AuthoritySnapshot::parse(&snapshot_value)?;
@@ -1564,10 +1658,16 @@ impl PySemanticTransitionController {
                 &recipe_material,
                 &grant_value.canonical_bytes(),
                 checkpoint_destination.as_bytes(),
+                feedback_materials[0].as_bytes(),
+                feedback_materials[1].as_bytes(),
             ],
             record_limits,
         )?;
         let preparation_inputs = PreparationInputs {
+            source_model,
+            execute_phase_instruction: execute_phase_instruction.clone().unbind(),
+            resource_observer: resource_observer.clone().unbind(),
+            feedback_interventions: feedback_interventions.cast::<PyTuple>()?.clone().unbind(),
             consumer_streams: ColdValue::read(consumer_streams, &mut (16 * 1024 * 1024), 0)?,
             snapshot: snapshot_value,
             prior_snapshot,
