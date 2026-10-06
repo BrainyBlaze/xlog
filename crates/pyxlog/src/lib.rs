@@ -1270,6 +1270,8 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticEvaluationCohort>()?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticModelEvaluation>()?;
+        m.add_class::<semantic_transition::PySemanticCompletedExecutionObservation>()?;
+        m.add_class::<semantic_transition::model_evaluation::PySemanticCompletedModelEvaluation>()?;
     }
     #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticCompletedModelCarrier>()?;

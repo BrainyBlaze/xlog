@@ -9056,6 +9056,44 @@ impl PySemanticCompletedActionProjection {
     }
 }
 
+/// Original completed work, with CPU-only native custody. Python cannot create
+/// or replace it, and retaining it does not retain its retired CUDA owners.
+#[pyclass(
+    name = "SemanticCompletedExecutionObservation",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedExecutionObservation {
+    #[cfg(feature = "semantic-policy")]
+    inner: xlog_cuda::SemanticCompletedExecutionObservation,
+    #[cfg(feature = "semantic-policy")]
+    binding: (Option<String>, Vec<u8>),
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticCompletedExecutionObservation {
+    #[getter]
+    fn device_work(&self) -> u64 {
+        self.inner.quantities()[0]
+    }
+
+    #[getter]
+    fn model_work(&self) -> u64 {
+        self.inner.quantities()[1]
+    }
+
+    #[getter]
+    fn native_work(&self) -> u64 {
+        self.inner.quantities()[2]
+    }
+
+    #[getter]
+    fn model_calls(&self) -> u64 {
+        self.inner.quantities()[3]
+    }
+}
+
 /// Session-issued storage for one bounded recorded step, not an acquired parent.
 /// No host publication identity is available before device execution. The
 /// original Runtime retains this handle and its producers through backward.
@@ -10533,7 +10571,10 @@ impl PySemanticPreparedStep {
     /// Original joined step work and CUDA-executed model-call markers. This is
     /// not preparation expenditure or a physical memory/resource-unit result.
     #[getter]
-    fn execution_measurements(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+    fn execution_measurements(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Py<PySemanticCompletedExecutionObservation>> {
         let session = self.session.borrow(py);
         session.require_creator()?;
         if session.importing.load(Ordering::Acquire)
@@ -10555,7 +10596,7 @@ impl PySemanticPreparedStep {
         }
         #[cfg(feature = "semantic-policy")]
         {
-            let (device_work, model_work, native_work, model_calls) = owner
+            let inner = owner
                 .prepared_execution_measurements(&self.inner)
                 .map_err(xlog_err)?;
             if self.content_binding_with_owner(py, &owner)? != binding {
@@ -10563,12 +10604,10 @@ impl PySemanticPreparedStep {
                     "original operation authority changed during execution observation",
                 ));
             }
-            let report = PyDict::new(py);
-            report.set_item("device_work", device_work)?;
-            report.set_item("model_work", model_work)?;
-            report.set_item("native_work", native_work)?;
-            report.set_item("model_calls", model_calls)?;
-            Ok(report.unbind())
+            Py::new(
+                py,
+                PySemanticCompletedExecutionObservation { inner, binding },
+            )
         }
     }
 

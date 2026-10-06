@@ -15,7 +15,8 @@ pub use learning_phase::{
 };
 #[cfg(feature = "semantic-policy")]
 pub use model_evaluation::{
-    SemanticEvaluationCohort, SemanticModelEvaluation, SemanticModelEvaluationResult,
+    SemanticCompletedModelEvaluation, SemanticEvaluationCohort, SemanticModelEvaluation,
+    SemanticModelEvaluationResult,
 };
 #[cfg(feature = "semantic-policy")]
 pub use prepared_replay::SemanticCompletedReplayMaterials;
@@ -9698,6 +9699,39 @@ impl SemanticPreparedStep {
     }
 }
 
+/// Immutable CPU custody of one joined original step observation. The issued
+/// step contains identity tokens only, not CUDA storage, graphs or readers.
+#[cfg(feature = "semantic-policy")]
+pub struct SemanticCompletedExecutionObservation {
+    original: SemanticPreparedStep,
+    predecessor: Option<SemanticPublishedIdentity>,
+    successor: Option<SemanticPublishedIdentity>,
+    quantities: [u64; 4],
+}
+
+#[cfg(feature = "semantic-policy")]
+impl SemanticCompletedExecutionObservation {
+    pub fn quantities(&self) -> [u64; 4] {
+        self.quantities
+    }
+
+    pub fn same_execution(&self, other: &Self) -> bool {
+        self.original.same_handle(&other.original)
+    }
+
+    pub fn belongs_to(&self, session: &SemanticTransitionSession) -> bool {
+        Arc::ptr_eq(&self.original.issuer, &session.publication_issuer)
+    }
+
+    pub fn predecessor(&self) -> Option<SemanticPublishedIdentity> {
+        self.predecessor
+    }
+
+    pub fn successor(&self) -> Option<SemanticPublishedIdentity> {
+        self.successor
+    }
+}
+
 /// Lexical native graph construction. The caller owns this outside any Session
 /// mutex while invoking original model producers and instantiating the graph.
 pub struct SemanticPreparedSegmentCapture {
@@ -16815,7 +16849,7 @@ impl SemanticTransitionSession {
     pub fn prepared_execution_measurements(
         &mut self,
         step: &SemanticPreparedStep,
-    ) -> Result<(u64, u64, u64, u64), SemanticTransitionError> {
+    ) -> Result<SemanticCompletedExecutionObservation, SemanticTransitionError> {
         let original = self.checked_prepared_step(step, false)?;
         if !self
             .prepared_segment
@@ -16867,7 +16901,12 @@ impl SemanticTransitionSession {
                     .as_ref()
                     .expect("original work checked above")
                     .completed_model_calls(&actual, false)?;
-                return Ok((0, 0, 0, 0));
+                return Ok(SemanticCompletedExecutionObservation {
+                    original: step.clone(),
+                    predecessor: None,
+                    successor: None,
+                    quantities: [0; 4],
+                });
             }
             let parent = self.steps[&step.token]
                 .inputs
@@ -16921,7 +16960,18 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .expect("original work checked above")
                 .completed_model_calls(&actual, transition != SemanticTransitionKind::Drain)?;
-            Ok((work.raw, work.model_once, work.native_attempt, calls))
+            let identity = |header: PublicationHeader| SemanticPublishedIdentity {
+                instance: header.instance,
+                word: header.publication_word,
+                logical_digest: header.logical_digest,
+                state_digest: header.state_digest,
+            };
+            Ok(SemanticCompletedExecutionObservation {
+                original: step.clone(),
+                predecessor: Some(identity(parent)),
+                successor: (result.advanced == 1).then(|| identity(result.header)),
+                quantities: [work.raw, work.model_once, work.native_attempt, calls],
+            })
         })();
         if observation.is_err() {
             self.poisoned = true;

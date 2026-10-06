@@ -17,6 +17,7 @@ pub struct SemanticEvaluationCohort {
 #[derive(Clone)]
 pub struct SemanticModelEvaluation {
     issuer: Arc<()>,
+    invocation: Arc<()>,
     token: u64,
     cohort: Arc<SemanticEvaluationCohort>,
 }
@@ -40,7 +41,35 @@ pub struct SemanticModelEvaluationResult {
     pub model_calls: u64,
 }
 
+/// Original completed result with CPU-only issuance and parent custody. No
+/// selected cohort, model, reader or CUDA allocation survives through this type.
+pub struct SemanticCompletedModelEvaluation {
+    issuer: Arc<()>,
+    invocation: Arc<()>,
+    parent: SemanticPublishedIdentity,
+    result: SemanticModelEvaluationResult,
+}
+
+impl SemanticCompletedModelEvaluation {
+    pub fn result(&self) -> SemanticModelEvaluationResult {
+        self.result
+    }
+
+    pub fn same_invocation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.invocation, &other.invocation)
+    }
+
+    pub fn belongs_to(&self, session: &SemanticTransitionSession) -> bool {
+        Arc::ptr_eq(&self.issuer, &session.publication_issuer)
+    }
+
+    pub fn parent(&self) -> SemanticPublishedIdentity {
+        self.parent
+    }
+}
+
 pub(super) struct EvaluationStorage {
+    invocation: Arc<()>,
     cohort: Arc<SemanticEvaluationCohort>,
     work: PreparedModelWork,
     report: TrackedCudaSlice<u64>,
@@ -167,6 +196,7 @@ impl SemanticTransitionSession {
             .map_err(|error| runtime_error("evaluation report allocation", error))?;
         let handle = SemanticModelEvaluation {
             issuer: Arc::clone(&self.publication_issuer),
+            invocation: Arc::new(()),
             token: lease.token,
             cohort: Arc::clone(&cohort),
         };
@@ -174,6 +204,7 @@ impl SemanticTransitionSession {
             .get_mut(&lease.token)
             .expect("checked acquired step")
             .evaluation = Some(EvaluationStorage {
+            invocation: Arc::clone(&handle.invocation),
             cohort,
             work,
             report,
@@ -205,10 +236,11 @@ impl SemanticTransitionSession {
                 publication_input_error("evaluation has no retained original invocation")
             })?;
         if !Arc::ptr_eq(&handle.issuer, &self.publication_issuer)
+            || !Arc::ptr_eq(&handle.invocation, &evaluation.invocation)
             || !Arc::ptr_eq(&handle.cohort, &evaluation.cohort)
         {
             return Err(publication_input_error(
-                "evaluation belongs to another Session or original cohort",
+                "evaluation belongs to another Session, invocation or original cohort",
             ));
         }
         Ok(evaluation)
@@ -381,8 +413,9 @@ impl SemanticTransitionSession {
         handle: &SemanticModelEvaluation,
         witness: &SemanticTensorContentWitness,
         streams: &[u64],
-    ) -> Result<SemanticModelEvaluationResult, SemanticTransitionError> {
+    ) -> Result<SemanticCompletedModelEvaluation, SemanticTransitionError> {
         self.checked_evaluation_parent(lease, handle)?;
+        let parent = self.published_identity(lease)?;
         self.checked_content_witness(lease, witness)?;
         let output = &self.steps[&lease.token].content[witness.index];
         if output.tensors.len() != 3 {
@@ -569,7 +602,12 @@ impl SemanticTransitionSession {
                 "incomplete evaluation expenditure retains its original invocation; no completed numerical result is available",
             ));
         }
-        Ok(result)
+        Ok(SemanticCompletedModelEvaluation {
+            issuer: Arc::clone(&handle.issuer),
+            invocation: Arc::clone(&handle.invocation),
+            parent,
+            result,
+        })
     }
 
     /// Cancellation joins actual consumers before allowing the original parent
