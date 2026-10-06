@@ -521,6 +521,10 @@ impl PySemanticLearningPhaseTransition {
         admitted_authority.newer_than(&authority)?;
         admitted_authority.newer_than(&task.state()?.snapshot)?;
         check_learning_grant(&task, learning_grant_ref, &admitted_authority)?;
+        // Refresh is external code too: recheck the retained inputs after it,
+        // before marking execution entered or touching native/model state.
+        inputs.require_execution_inputs(py)?;
+        inputs.require_program(py, scientific_owner)?;
         // No native/model preparation is entered before the original signed
         // admission is known durable. This marker is never cleared on failure.
         self.preparation_entered
