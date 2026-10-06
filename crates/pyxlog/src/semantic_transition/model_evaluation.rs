@@ -302,6 +302,11 @@ impl PySemanticModelEvaluation {
         let inner = owner
             .finish_model_evaluation(&*parent.lease()?, &self.inner, &witness.inner, &streams)
             .map_err(xlog_err)?;
+        if !inner.belongs_to_cohort(self.cohort.borrow(py).inner.as_ref()) {
+            return Err(invalid(
+                "completed evaluation changed its original native cohort",
+            ));
+        }
         drop(owner);
         // Native finish returns only a complete expenditure certificate, including
         // a known numerical refusal. An incomplete invocation errors above and

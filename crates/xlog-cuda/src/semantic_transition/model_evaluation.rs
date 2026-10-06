@@ -5,6 +5,7 @@ use super::*;
 /// Original selection and its immutable device content, independent of the
 /// source Runtime's lifetime. Final evaluations borrow this same allocation.
 pub struct SemanticEvaluationCohort {
+    issuance: Arc<()>,
     selected: SemanticSelectedTrainingView,
     content: TensorContentBuffers,
     domain: Identity256,
@@ -46,6 +47,7 @@ pub struct SemanticModelEvaluationResult {
 pub struct SemanticCompletedModelEvaluation {
     issuer: Arc<()>,
     invocation: Arc<()>,
+    cohort_issuance: Arc<()>,
     parent: SemanticPublishedIdentity,
     result: SemanticModelEvaluationResult,
 }
@@ -61,6 +63,12 @@ impl SemanticCompletedModelEvaluation {
 
     pub fn belongs_to(&self, session: &SemanticTransitionSession) -> bool {
         Arc::ptr_eq(&self.issuer, &session.publication_issuer)
+    }
+
+    /// Same original selection, not another cohort with equal serialized data.
+    /// The CPU token retains none of the cohort's device storage or provider.
+    pub fn belongs_to_cohort(&self, cohort: &SemanticEvaluationCohort) -> bool {
+        Arc::ptr_eq(&self.cohort_issuance, &cohort.issuance)
     }
 
     pub fn parent(&self) -> SemanticPublishedIdentity {
@@ -173,6 +181,7 @@ impl SemanticTransitionSession {
                 })?;
             content.enqueue(&self.domain, &mut self.poisoned, &seal, false)?;
             Arc::new(SemanticEvaluationCohort {
+                issuance: Arc::new(()),
                 selected,
                 content,
                 domain,
@@ -605,6 +614,7 @@ impl SemanticTransitionSession {
         Ok(SemanticCompletedModelEvaluation {
             issuer: Arc::clone(&handle.issuer),
             invocation: Arc::clone(&handle.invocation),
+            cohort_issuance: Arc::clone(&handle.cohort.issuance),
             parent,
             result,
         })

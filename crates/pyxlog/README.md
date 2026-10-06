@@ -93,3 +93,7 @@ The step observation also retains its original native-reconciled transition,
 skip or refusal, selected bank, and parent/model binding as CPU-only evidence.
 Those facts remain tied to the original issuance after prepared storage retires;
 an editable cold record cannot replace them or keep retired model owners alive.
+The completed evaluation retains a CPU-only issuance token for its original
+cohort, not the cohort itself. The original `SemanticEvaluationCohort` must be
+retained separately and passed unchanged to subsequent paired evaluations;
+reselecting equal inputs or reconstructing their digest is not the same owner.
