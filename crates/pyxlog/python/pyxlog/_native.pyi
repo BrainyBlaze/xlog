@@ -98,11 +98,17 @@ class SemanticCompletedActionProjection:
     @property
     def pre_action_checkpoint(self) -> Optional[SemanticCompletedMaterial]: ...
 
-class _ExecutionMeasurements(TypedDict):
-    device_work: int
-    model_work: int
-    native_work: int
-    model_calls: int
+class SemanticCompletedExecutionObservation:
+    """Native-issued immutable joined result; no constructor or CUDA ownership."""
+
+    @property
+    def device_work(self) -> int: ...
+    @property
+    def model_work(self) -> int: ...
+    @property
+    def native_work(self) -> int: ...
+    @property
+    def model_calls(self) -> int: ...
 
 class SemanticPreparedStep:
     """Session-issued original step; construction is not public."""
@@ -111,7 +117,7 @@ class SemanticPreparedStep:
     def requested_transition(self) -> Literal["proposal", "recompute", "update"]: ...
 
     @property
-    def execution_measurements(self) -> _ExecutionMeasurements:
+    def execution_measurements(self) -> SemanticCompletedExecutionObservation:
         """Joined step execution only, not preparation or a physical peak."""
         ...
 
@@ -141,14 +147,23 @@ class SemanticPreparedStep:
 class SemanticEvaluationCohort:
     """Native-issued sealed original selection; no public constructor."""
 
-class _ModelEvaluationResult(TypedDict):
-    status: Literal[0, 1, 2]
-    loss_bits: tuple[int, int, int, int, int, int]
-    model_work: int
-    model_calls: int
-    operation_count: int
-    work_bound: int
-    retained_allocation_bytes: int
+class SemanticCompletedModelEvaluation:
+    """Native-issued original completed result, without model/cohort/reader ownership."""
+
+    @property
+    def status(self) -> Literal[0, 1]: ...
+    @property
+    def loss_bits(self) -> tuple[int, int, int, int, int, int]: ...
+    @property
+    def model_work(self) -> int: ...
+    @property
+    def model_calls(self) -> int: ...
+    @property
+    def operation_count(self) -> int: ...
+    @property
+    def work_bound(self) -> int: ...
+    @property
+    def retained_allocation_bytes(self) -> int: ...
 
 class SemanticModelEvaluation:
     """Single read-only invocation on an authentic published parent."""
@@ -163,7 +178,7 @@ class SemanticModelEvaluation:
     def record_model_invocation(self) -> None: ...
     def record_model_work(self, kind: int, dimensions: tuple[int, ...]) -> None: ...
     def record_model_device_work(self, kind: int, upper_dimensions: tuple[int, ...]) -> int: ...
-    def finish(self, output_witness: Any, *, consumer_streams: Sequence[int]) -> _ModelEvaluationResult:
+    def finish(self, output_witness: Any, *, consumer_streams: Sequence[int]) -> SemanticCompletedModelEvaluation:
         """Incomplete expenditure raises without a result and retains the original owner/fence."""
         ...
     def cancel(self, *, consumer_streams: Sequence[int]) -> None: ...

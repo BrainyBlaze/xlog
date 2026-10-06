@@ -1,7 +1,59 @@
 //! Native read-only ownership at the existing model content/work boundary.
 
 use super::*;
-use xlog_cuda::{SemanticEvaluationCohort, SemanticModelEvaluation};
+use xlog_cuda::{
+    SemanticCompletedModelEvaluation, SemanticEvaluationCohort, SemanticModelEvaluation,
+};
+
+/// Immutable completed observation, deliberately independent of the temporary
+/// evaluation's original model, selected cohort, reader and CUDA allocations.
+#[pyclass(
+    name = "SemanticCompletedModelEvaluation",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticCompletedModelEvaluation {
+    inner: SemanticCompletedModelEvaluation,
+    binding: (Option<String>, Vec<u8>),
+}
+
+#[pymethods]
+impl PySemanticCompletedModelEvaluation {
+    #[getter]
+    fn status(&self) -> u64 {
+        self.inner.result().status
+    }
+
+    #[getter]
+    fn loss_bits(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        Ok(PyTuple::new(py, self.inner.result().loss_bits)?.unbind())
+    }
+
+    #[getter]
+    fn model_work(&self) -> u64 {
+        self.inner.result().model_work
+    }
+
+    #[getter]
+    fn model_calls(&self) -> u64 {
+        self.inner.result().model_calls
+    }
+
+    #[getter]
+    fn operation_count(&self) -> u64 {
+        self.inner.result().operation_count
+    }
+
+    #[getter]
+    fn work_bound(&self) -> u64 {
+        self.inner.result().work_bound
+    }
+
+    #[getter]
+    fn retained_allocation_bytes(&self) -> u64 {
+        self.inner.result().retained_allocation_bytes
+    }
+}
 
 /// Retains only the original selected device roster and its native seals.
 /// It does not retain a source Runtime, grant or mutable model generation.
@@ -219,7 +271,7 @@ impl PySemanticModelEvaluation {
         py: Python<'_>,
         output_witness: Py<PySemanticTensorContentWitness>,
         consumer_streams: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyDict>> {
+    ) -> PyResult<Py<PySemanticCompletedModelEvaluation>> {
         let streams = ColdValue::read(consumer_streams, &mut 4096, 0)?;
         let streams = streams
             .sequence()?
@@ -247,28 +299,24 @@ impl PySemanticModelEvaluation {
         drop(retained);
         let mut owner = session.owner()?;
         self.check(py, &owner)?;
-        let result = owner
+        let inner = owner
             .finish_model_evaluation(&*parent.lease()?, &self.inner, &witness.inner, &streams)
             .map_err(xlog_err)?;
         drop(owner);
         // Native finish returns only a complete expenditure certificate, including
         // a known numerical refusal. An incomplete invocation errors above and
         // retains this original phase/output/owner without reopening admission.
-        if matches!(result.status, 0 | 1) {
-            self.restore_phase(py)?;
-        }
-        let value = PyDict::new(py);
-        value.set_item("status", result.status)?;
-        value.set_item("loss_bits", PyTuple::new(py, result.loss_bits)?)?;
-        value.set_item("model_work", result.model_work)?;
-        value.set_item("model_calls", result.model_calls)?;
-        value.set_item("operation_count", result.operation_count)?;
-        value.set_item("work_bound", result.work_bound)?;
-        value.set_item(
-            "retained_allocation_bytes",
-            result.retained_allocation_bytes,
+        // Allocate the immutable CPU receipt before reopening the original
+        // phase. If allocation fails, this same submitted owner stays retained.
+        let observation = Py::new(
+            py,
+            PySemanticCompletedModelEvaluation {
+                inner,
+                binding: self.binding.clone(),
+            },
         )?;
-        Ok(value.unbind())
+        self.restore_phase(py)?;
+        Ok(observation)
     }
 
     /// Rejoin consumers and revalidate full source before restoring its phase.

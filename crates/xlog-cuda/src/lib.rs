@@ -108,16 +108,17 @@ pub use semantic_transition::{
 pub use semantic_transition::{
     SemanticCompletedActionComponentMaterial, SemanticCompletedActionLaneMaterial,
     SemanticCompletedActionProjectionMaterial, SemanticCompletedEditSolutionMaterial,
-    SemanticCompletedLaneOutcomeMaterial, SemanticCompletedMaterialCapacity,
-    SemanticCompletedModelCarrierMaterial, SemanticCompletedReplayMaterials,
-    SemanticCompletedStepWitnessMaterial, SemanticCompletedTaskGroundMaterial,
-    SemanticCompletedTheoryDeltaMaterial, SemanticPolicyGradients, SemanticSelectedPolicyGradients,
-    SemanticUpdateCanaryMeasurement, SemanticUpdateForwardReceipt,
-    SemanticUpdateForwardReceiptMaterial, SemanticUpdateMeasurements,
+    SemanticCompletedExecutionObservation, SemanticCompletedLaneOutcomeMaterial,
+    SemanticCompletedMaterialCapacity, SemanticCompletedModelCarrierMaterial,
+    SemanticCompletedReplayMaterials, SemanticCompletedStepWitnessMaterial,
+    SemanticCompletedTaskGroundMaterial, SemanticCompletedTheoryDeltaMaterial,
+    SemanticPolicyGradients, SemanticSelectedPolicyGradients, SemanticUpdateCanaryMeasurement,
+    SemanticUpdateForwardReceipt, SemanticUpdateForwardReceiptMaterial, SemanticUpdateMeasurements,
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{
-    SemanticEvaluationCohort, SemanticModelEvaluation, SemanticModelEvaluationResult,
+    SemanticCompletedModelEvaluation, SemanticEvaluationCohort, SemanticModelEvaluation,
+    SemanticModelEvaluationResult,
 };
 pub use semantic_work::ModelWorkKind;
 
