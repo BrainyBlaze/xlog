@@ -5,6 +5,13 @@ use xlog_cuda::{
     SemanticCompletedModelEvaluation, SemanticEvaluationCohort, SemanticModelEvaluation,
 };
 
+pyo3::create_exception!(
+    pyxlog._native,
+    SemanticModelEvaluationPending,
+    PyRuntimeError,
+    "An original submitted evaluation awaits cold completion; retain its owners and never resubmit."
+);
+
 /// Immutable completed observation, deliberately independent of the temporary
 /// evaluation's original model, selected cohort, reader and CUDA allocations.
 #[pyclass(
@@ -71,9 +78,55 @@ pub(crate) struct PySemanticModelEvaluation {
     binding: (Option<String>, Vec<u8>),
     closed: AtomicBool,
     output: Mutex<Option<Py<PySemanticTensorContentWitness>>>,
+    completed: Mutex<Option<Py<PySemanticCompletedModelEvaluation>>>,
 }
 
 impl PySemanticModelEvaluation {
+    fn completion_error(&self, py: Python<'_>, original: PyErr) -> PyErr {
+        let parent = self.parent.borrow(py);
+        let session = parent.session.borrow(py);
+        let Ok(owner) = session.owner() else {
+            return original;
+        };
+        if !owner.model_evaluation_completion_pending(&self.inner) {
+            return original;
+        }
+        let pending = SemanticModelEvaluationPending::new_err(
+            "original evaluation was submitted; retain its Runtime and resolve_completion without another forward or finish",
+        );
+        pending.set_cause(py, Some(original));
+        pending
+    }
+
+    fn publish_observation(
+        &self,
+        py: Python<'_>,
+        inner: SemanticCompletedModelEvaluation,
+    ) -> PyResult<Py<PySemanticCompletedModelEvaluation>> {
+        if !inner.belongs_to_cohort(self.cohort.borrow(py).inner.as_ref()) {
+            return Err(invalid(
+                "completed evaluation changed its original native cohort",
+            ));
+        }
+        // Allocate and retain the immutable CPU receipt before reopening the
+        // original phase. A late failure resolves this same observation, not
+        // another recording or another Python result object.
+        let observation = Py::new(
+            py,
+            PySemanticCompletedModelEvaluation {
+                inner,
+                binding: self.binding.clone(),
+            },
+        )?;
+        *self
+            .completed
+            .lock()
+            .map_err(|_| invalid("evaluation completed observation owner is poisoned"))? =
+            Some(observation.clone_ref(py));
+        self.restore_phase(py)?;
+        Ok(observation)
+    }
+
     fn check(&self, py: Python<'_>, owner: &SemanticTransitionSession) -> PyResult<()> {
         if self.closed.load(Ordering::Acquire) {
             return Err(invalid("read-only evaluation is already closed"));
@@ -299,29 +352,49 @@ impl PySemanticModelEvaluation {
         drop(retained);
         let mut owner = session.owner()?;
         self.check(py, &owner)?;
-        let inner = owner
+        let result = owner
             .finish_model_evaluation(&*parent.lease()?, &self.inner, &witness.inner, &streams)
-            .map_err(xlog_err)?;
-        if !inner.belongs_to_cohort(self.cohort.borrow(py).inner.as_ref()) {
-            return Err(invalid(
-                "completed evaluation changed its original native cohort",
-            ));
-        }
+            .map_err(xlog_err);
         drop(owner);
-        // Native finish returns only a complete expenditure certificate, including
-        // a known numerical refusal. An incomplete invocation errors above and
-        // retains this original phase/output/owner without reopening admission.
-        // Allocate the immutable CPU receipt before reopening the original
-        // phase. If allocation fails, this same submitted owner stays retained.
-        let observation = Py::new(
-            py,
-            PySemanticCompletedModelEvaluation {
-                inner,
-                binding: self.binding.clone(),
-            },
-        )?;
-        self.restore_phase(py)?;
-        Ok(observation)
+        result
+            .and_then(|inner| self.publish_observation(py, inner))
+            .map_err(|original| self.completion_error(py, original))
+    }
+
+    /// Resolve only this original submitted result. No new output, stream,
+    /// forward, recording or result kernel is accepted or executed here.
+    fn resolve_completion(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Py<PySemanticCompletedModelEvaluation>> {
+        let result = (|| {
+            let parent = self.parent.borrow(py);
+            let session = parent.session.borrow(py);
+            session.require_creator()?;
+            let observed = self
+                .completed
+                .lock()
+                .map_err(|_| invalid("evaluation completed observation owner is poisoned"))?
+                .as_ref()
+                .map(|original| original.clone_ref(py));
+            if let Some(observed) = observed {
+                if !self.closed.load(Ordering::Acquire) {
+                    let owner = session.owner()?;
+                    self.check(py, &owner)?;
+                    drop(owner);
+                    self.restore_phase(py)?;
+                }
+                return Ok(observed);
+            }
+            let mut owner = session.owner()?;
+            self.check(py, &owner)?;
+            let inner = owner
+                .resolve_model_evaluation(&*parent.lease()?, &self.inner)
+                .map_err(xlog_err)?;
+            drop(owner);
+            self.publish_observation(py, inner)
+        })();
+        result.map_err(|original| self.completion_error(py, original))
     }
 
     /// Rejoin consumers and revalidate full source before restoring its phase.
@@ -338,6 +411,16 @@ impl PySemanticModelEvaluation {
         let session = parent.session.borrow(py);
         let mut owner = session.owner()?;
         self.check(py, &owner)?;
+        if self
+            .output
+            .lock()
+            .map_err(|_| invalid("evaluation output owner is poisoned"))?
+            .is_some()
+        {
+            return Err(invalid(
+                "submitted evaluation must resolve its original result, not cancel",
+            ));
+        }
         owner
             .cancel_model_evaluation(&*parent.lease()?, &self.inner, &streams)
             .map_err(xlog_err)?;
@@ -435,6 +518,7 @@ impl PySemanticTransitionController {
                 binding,
                 closed: AtomicBool::new(false),
                 output: Mutex::new(None),
+                completed: Mutex::new(None),
             },
         )
     }

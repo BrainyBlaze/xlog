@@ -84,6 +84,14 @@ and `model_calls` as read-only attributes, not dictionary keys.
 observation; an incomplete or unknown invocation raises and retains its original
 owner instead of returning measurement values.
 
+If a submitted evaluation's late cold completion remains resolvable,
+`SemanticModelEvaluationPending` requires retaining its original Runtime,
+objective and output owners. Call `evaluation.resolve_completion()` without
+arguments, never another forward or `finish`. The native owner retains the
+original consumer streams and report; resolution cannot resubmit its result
+kernel. Once issued, it returns the same immutable observation object. Fatal
+CUDA quarantine and known incomplete work remain retained without this signal.
+
 Neither completed type has a public constructor or retains the retired model,
 selected cohort, CUDA storage, or reader. Retain the original object when passing
 native execution custody; a cold dictionary projection is only a serialization,

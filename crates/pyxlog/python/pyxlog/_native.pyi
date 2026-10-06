@@ -165,6 +165,13 @@ class SemanticCompletedModelEvaluation:
     @property
     def retained_allocation_bytes(self) -> int: ...
 
+class SemanticModelEvaluationPending(RuntimeError):
+    """Original submitted evaluation awaits resolution, never a second forward or finish.
+
+    Retain its Runtime, objective, native evaluation and original output owners.
+    Fatal CUDA quarantine and known incomplete work do not carry this signal.
+    """
+
 class SemanticModelEvaluation:
     """Single read-only invocation on an authentic published parent."""
 
@@ -180,6 +187,13 @@ class SemanticModelEvaluation:
     def record_model_device_work(self, kind: int, upper_dimensions: tuple[int, ...]) -> int: ...
     def finish(self, output_witness: Any, *, consumer_streams: Sequence[int]) -> SemanticCompletedModelEvaluation:
         """Incomplete expenditure raises without a result and retains the original owner/fence."""
+        ...
+    def resolve_completion(self) -> SemanticCompletedModelEvaluation:
+        """Resolve the same submitted report and original streams without resubmitting.
+
+        Returns the identical native-issued observation after successful issuance.
+        A late unpoisoned completion failure raises SemanticModelEvaluationPending.
+        """
         ...
     def cancel(self, *, consumer_streams: Sequence[int]) -> None: ...
 
