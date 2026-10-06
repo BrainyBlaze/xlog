@@ -97,7 +97,7 @@ jobs:
           if ((${#files[@]})); then
             shellcheck "${files[@]}"
           fi
-          ignored=$(git ls-files -ci --exclude-standard)
+          ignored=$(git -c safe.directory="$GITHUB_WORKSPACE" ls-files -ci --exclude-standard)
           if [[ -n "$ignored" ]]; then
             printf 'Tracked files match ignore rules:\n%s\n' "$ignored" >&2
             exit 1
