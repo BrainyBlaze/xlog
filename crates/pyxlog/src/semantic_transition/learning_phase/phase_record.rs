@@ -4,7 +4,7 @@ use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 
-const INPUT_DOMAIN: &[u8] = b"xlog.learning-phase.inputs.v1\0";
+const INPUT_DOMAIN: &[u8] = b"xlog.learning-phase.inputs.v2\0";
 const RECORD_DOMAIN: &[u8] = b"xlog.learning-phase.record.v1\0";
 const RECORD_OVERHEAD: usize = RECORD_DOMAIN.len() + 1 + 32 + 32 + 8 + 32 + 8 + 24 + 8 + 64;
 
@@ -36,7 +36,9 @@ impl RecordLimits {
             || limits.records == 0
             || limits.records > isize::MAX as u64
         {
-            return Err(invalid("phase record limits require explicit positive record/total/count bounds within the platform index range"));
+            return Err(invalid(
+                "phase record limits require explicit positive record/total/count bounds within the platform index range",
+            ));
         }
         Ok(limits)
     }
@@ -106,7 +108,9 @@ impl PhaseRecords {
                 .checked_add(limits.record_bytes)
                 .is_none_or(|required| required > limits.total_bytes)
         {
-            return Err(invalid("phase record bounds cannot retain the full initial admission and its complete preparation outcome"));
+            return Err(invalid(
+                "phase record bounds cannot retain the full initial admission and its complete preparation outcome",
+            ));
         }
         let mut inputs = INPUT_DOMAIN.to_vec();
         append_fields(&mut inputs, fields)?;
@@ -174,7 +178,9 @@ impl PhaseRecords {
 
     pub(super) fn begin(&mut self, kind: RecordKind, payload: &[u8]) -> PyResult<()> {
         if !self.issuer_pinned || self.attempt.is_some() {
-            return Err(invalid("phase record requires its independently pinned issuer and resolution of the original write"));
+            return Err(invalid(
+                "phase record requires its independently pinned issuer and resolution of the original write",
+            ));
         }
         if self.ordinal >= self.limits.records {
             return Err(invalid("original phase record count is exhausted"));

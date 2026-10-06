@@ -488,7 +488,8 @@ Full backing allocations, padding, strides, and shared storage are retained;
 conflicting effects on aliases refuse the entire private candidate.
 
 `controller.prepare_learning_phase_transition(task_use, *, parent, recipe, source_checkpoint,
-consumer_streams, snapshot, scientific_owner, learning_grant_ref,
+consumer_streams, snapshot, scientific_owner, source_model, execute_phase_instruction,
+resource_observer, feedback_interventions, learning_grant_ref,
 checkpoint_destination, snapshot_model_state, restore_model,
 snapshot_restored_model, retire_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits,
 frozen_program_bytes)` takes the exact builtin full
@@ -503,6 +504,15 @@ provided. `learning_grant_ref` selects an original `durable-slow-consolidation`
 grant covering the complete dependency closure; fast-adaptation permission alone
 cannot authorize this durable full checkpoint. Fresh publication, data-use,
 retention and revocation checks remain independent of scientific acceptance.
+The pending owner retains the exact original `source_model`, callable
+`execute_phase_instruction`, named `xlog.resource_observer.v1` capsule and
+`feedback_interventions` tuple before entering the original issuer/store callbacks.
+The tuple contains exactly two builtin bytes objects in real/control order, each
+`b"xlog.learning-feedback-intervention.v1\0"` followed by one byte: `0` for
+real identity, `1` for control positive zero. Both original materials enter the
+signed admission; native does not decode the scientific program to reconstruct them.
+Admission of this transport does not by itself select a private branch, apply a
+numerical intervention, certify observer coverage or establish final acceptance.
 The private candidate uses the actual source Session's allocation provider and
 unchanged `memory_bytes` limit. Its graph and native state allocations share the
 source's live resource stack and serial stream; a clone does not receive a second
@@ -589,9 +599,11 @@ admission. These storage bounds are not checkpoint-source limits, learning right
 or whole-execution resource accounting.
 
 Native binds the original complete source checkpoint, `frozen_program_bytes`, full
-five-field recipe, original grant, destination and exact storage limits to a
+five-field recipe, original grant, destination, both original feedback intervention
+materials and exact storage limits to a
 deterministic 32-byte `pending.phase_id`. The same inputs identify the same attempt.
-`frozen_program_bytes` must exactly match the scientific owner's `program_bytes`;
+`frozen_program_bytes` must exactly match the scientific owner's `program_bytes`
+before the signed admission is issued;
 native neither synthesizes a program nor interprets a shorter program as equivalent.
 `pending.issuer_anchor` exposes only its independently generated Ed25519 public key;
 the private key remains in native memory and is never exported in a phase record.
