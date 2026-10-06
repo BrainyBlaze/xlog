@@ -634,15 +634,22 @@ The store's `resolve_phase_record` callback is unchanged.
 
 For the same live pending, `pending.continue_preparation()` is a separate deliberate
 action, not part of resolution. Native permits it only after exact readback of the
-original issuer pin, with no unresolved record write and proof that preparation has
-not entered native/model work. It writes the initial Admission only if that original
-write was never attempted; a confirmed Admission is not written again. Both initial
-preparation and continuation use the same captured inputs, callbacks, immutable limits,
+original issuer pin, with no unresolved record write. Before native/model entry it
+writes the initial Admission only if that original write was never attempted; a
+confirmed Admission is not written again. Both initial preparation and continuation
+use the same captured inputs, callbacks, immutable limits,
 store and shared irreversible expense. Fresh original data-use rights are checked
 before the remaining Admission or any native/model preparation. Successful continuation
 returns the identical pending in `prepared`, not a runnable checkpoint; publication
-remains a separate action. A failure after preparation entry retains `unknown` and
-forbids continuation even if no complete candidate was returned. This live-owner path
+remains a separate action. After entry, continuation is allowed only when the
+canonical save returned the complete original candidate and native retained its
+immutable checkpoint/history outcome before a late cold verification failure.
+It repeats fresh source/candidate verification and issues that original outcome
+once, without invoking the restore factory or scientific acceptance again. An
+already attempted outcome write must instead use the existing readback resolver;
+continuation cannot sign or send a replacement. Partial restoration, unknown model
+execution, or failure before the complete outcome was retained stays `unknown`
+and cannot be continued by this path. This live-owner path
 does not implement recovery after process loss or prove absence of earlier GPU work.
 
 The canonical resolver returns these distinct result/status pairs:

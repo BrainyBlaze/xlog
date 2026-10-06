@@ -201,6 +201,7 @@ enum Completion {
 struct PreparedCandidate {
     owner: Option<Py<PySemanticTransitionRestoredCheckpoint>>,
     checkpoint: Arc<[u8]>,
+    preparation_outcome: Option<Arc<[u8]>>,
 }
 
 /// Immutable inputs retained before the first external issuer/store callback.
@@ -378,8 +379,8 @@ fn verify_original_source(
 }
 
 impl PySemanticLearningPhaseTransition {
-    /// Admit the remaining preparation using the same captured inputs and store.
-    /// A failure after native entry has an unknown outcome, not retry rights.
+    /// Admit preparation using the same captured inputs and store. Unknown
+    /// native/model execution never grants rights to repeat that execution.
     fn prepare_candidate(&self, py: Python<'_>, pending: &Py<Self>) -> PyResult<()> {
         let source = self.source.borrow(py);
         source.require_creator()?;
@@ -563,8 +564,8 @@ impl PySemanticLearningPhaseTransition {
             Some(PreparedCandidate {
                 owner: Some(candidate),
                 checkpoint: checkpoint.into(),
+                preparation_outcome: None,
             });
-        self.verify(py, true)?;
         let history = scientific_owner.bind(py).getattr("history_bytes")?;
         if !history.is_exact_instance_of::<PyBytes>() {
             return Err(invalid(
@@ -583,6 +584,38 @@ impl PySemanticLearningPhaseTransition {
             outcome.extend_from_slice(&(material.len() as u64).to_le_bytes());
             outcome.extend_from_slice(material);
         }
+        // The canonical save has returned the complete original candidate.
+        // Freeze its outcome before fallible fresh-authority verification; a
+        // late cold failure must not discard it or re-enter model preparation.
+        self.candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?
+            .as_mut()
+            .ok_or_else(|| invalid("phase preparation lost its original complete candidate"))?
+            .preparation_outcome = Some(outcome.into());
+        self.finish_preparation(py)
+    }
+
+    fn preparation_outcome(&self) -> PyResult<Arc<[u8]>> {
+        self.candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?
+            .as_ref()
+            .and_then(|candidate| candidate.preparation_outcome.as_ref())
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                invalid("preparation continuation lacks its original complete retained outcome; unknown native/model work cannot be repeated")
+            })
+    }
+
+    /// Finish only the already known cold result. Its checkpoint and history
+    /// are immutable; neither the factory nor scientific acceptance is repeated.
+    fn finish_preparation(&self, py: Python<'_>) -> PyResult<()> {
+        let outcome = self.preparation_outcome()?;
+        // An attempted signed write belongs exclusively to its resolver, even
+        // when the candidate and the unsigned outcome are already known.
+        self.records()?.require_preparation_admission()?;
+        self.verify(py, true)?;
         self.append_phase_record(py, RecordKind::PreparationOutcome, &outcome)?;
         // The complete checkpoint now owns all of the actual restored
         // handles. Release only the redundant construction references.
@@ -1317,16 +1350,29 @@ impl PySemanticLearningPhaseTransition {
         self.activate(py).map(Some)
     }
 
-    /// Deliberately consume the remaining rights of the same live attempt.
+    /// Deliberately continue the same live attempt: enter only from proven
+    /// nonentry, or finish its retained known cold outcome without re-execution.
     /// Record readback itself never enters preparation or repeats a write.
     fn continue_preparation(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<Self>> {
         let pending = slf.borrow(py);
         let operation = PhaseOperation::begin(&pending.operating)?;
         let source = pending.source.borrow(py);
         source.require_creator()?;
-        if !matches!(*pending.status_lock()?, Completion::PreparationUnknown)
-            || pending.preparation_entered.load(Ordering::Acquire)
-            || pending.private_restore()?.is_some()
+        if !matches!(*pending.status_lock()?, Completion::PreparationUnknown) {
+            return Err(invalid(
+                "preparation continuation requires the original unknown pending owner",
+            ));
+        }
+        let entered = pending.preparation_entered.load(Ordering::Acquire);
+        if entered {
+            // A successful canonical save plus the complete frozen outcome
+            // proves completed construction for this cold finalization, not
+            // full scientific execution or resource usage. Partial restoration
+            // cannot manufacture this state from checkpoint absence.
+            pending.preparation_outcome()?;
+            pending.candidate(py)?;
+            pending.records()?.require_preparation_admission()?;
+        } else if pending.private_restore()?.is_some()
             || pending
                 .candidate
                 .lock()
@@ -1358,7 +1404,11 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         *pending.status_lock()? = Completion::Preparing;
-        let result = pending.prepare_candidate(py, &slf);
+        let result = if entered {
+            pending.finish_preparation(py)
+        } else {
+            pending.prepare_candidate(py, &slf)
+        };
         if let Err(error) = result {
             *pending.status_lock()? = Completion::PreparationUnknown;
             return Err(error);
