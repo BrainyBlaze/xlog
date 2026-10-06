@@ -564,6 +564,11 @@ impl SemanticTransitionSession {
             model_calls: words[11],
         };
         evaluation.result = Some(result);
+        if !matches!(result.status, 0 | 1) {
+            return Err(publication_input_error(
+                "incomplete evaluation expenditure retains its original invocation; no completed numerical result is available",
+            ));
+        }
         Ok(result)
     }
 
@@ -576,6 +581,15 @@ impl SemanticTransitionSession {
         streams: &[u64],
     ) -> Result<(), SemanticTransitionError> {
         self.checked_evaluation_parent(lease, handle)?;
+        if self
+            .evaluation(handle)?
+            .result
+            .is_some_and(|result| !matches!(result.status, 0 | 1))
+        {
+            return Err(publication_input_error(
+                "incomplete evaluation expenditure retains its original invocation; cancellation cannot reopen admission",
+            ));
+        }
         self.complete_step_consumers(lease, streams)?;
         self.guard_evaluation_cohort(handle)?;
         let material =
@@ -595,9 +609,11 @@ impl SemanticTransitionSession {
 
     pub(super) fn require_closed_evaluations(&self) -> Result<(), SemanticTransitionError> {
         if self.steps.values().any(|step| {
-            step.evaluation
-                .as_ref()
-                .is_some_and(|evaluation| evaluation.result.is_none())
+            step.evaluation.as_ref().is_some_and(|evaluation| {
+                evaluation
+                    .result
+                    .is_none_or(|result| !matches!(result.status, 0 | 1))
+            })
         }) {
             return Err(publication_input_error(
                 "state-changing work or release cannot interrupt an original read-only evaluation",

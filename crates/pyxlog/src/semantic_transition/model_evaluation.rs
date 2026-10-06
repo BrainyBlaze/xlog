@@ -251,7 +251,12 @@ impl PySemanticModelEvaluation {
             .finish_model_evaluation(&*parent.lease()?, &self.inner, &witness.inner, &streams)
             .map_err(xlog_err)?;
         drop(owner);
-        self.restore_phase(py)?;
+        // Native finish returns only a complete expenditure certificate, including
+        // a known numerical refusal. An incomplete invocation errors above and
+        // retains this original phase/output/owner without reopening admission.
+        if matches!(result.status, 0 | 1) {
+            self.restore_phase(py)?;
+        }
         let value = PyDict::new(py);
         value.set_item("status", result.status)?;
         value.set_item("loss_bits", PyTuple::new(py, result.loss_bits)?)?;
