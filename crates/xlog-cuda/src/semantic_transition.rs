@@ -10519,18 +10519,26 @@ impl PreparedModelWork {
     }
 
     #[cfg(feature = "semantic-policy")]
-    fn completed_model_calls(&self, actual: &[u64]) -> Result<u64, SemanticTransitionError> {
+    fn completed_model_calls(
+        &self,
+        actual: &[u64],
+        executed: bool,
+    ) -> Result<u64, SemanticTransitionError> {
         if actual.len() != self.actual.len() || self.recording.frozen_bound().is_none() {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         let mut calls = 0u64;
+        let mut original_markers = 0u64;
         for (slot, event) in self.recording.events().iter().enumerate() {
             if event.kind != ModelWorkKind::ModelInvocation as u64 {
                 continue;
             }
+            original_markers = original_markers
+                .checked_add(1)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
             let value = &actual[slot * 3..slot * 3 + 3];
             match value {
-                [0, 0, 0] => (), // The selected graph never entered this call.
+                [0, 0, 0] if !executed => (),
                 [1, 0, 1] => {
                     calls = calls
                         .checked_add(1)
@@ -10538,6 +10546,14 @@ impl PreparedModelWork {
                 }
                 _ => return Err(SemanticTransitionError::ObservationMismatch),
             }
+        }
+        // Scratch is exported to the model and may retain writable aliases.
+        // A complete original receipt certifies consumption of every frozen
+        // event; an erased marker cannot turn that execution into zero calls.
+        if (executed && (original_markers == 0 || calls != original_markers))
+            || (!executed && calls != 0)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
         }
         Ok(calls)
     }
@@ -16835,23 +16851,22 @@ impl SemanticTransitionSession {
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
             let actual = work.actual.view();
             let actual = self.publication_read(actual)?;
-            let calls = self.steps[&step.token]
-                .prepared
-                .as_ref()
-                .expect("retained original step")
-                .model_work
-                .as_ref()
-                .expect("original work checked above")
-                .completed_model_calls(&actual)?;
             if result.abi == 0 {
                 if lease.active != 0
                     || lease.abi != 0
                     || lease.transition_kind != 0
                     || !matches!(lease.status, 1..=5 | 7)
-                    || calls != 0
                 {
                     return Err(SemanticTransitionError::ObservationMismatch);
                 }
+                self.steps[&step.token]
+                    .prepared
+                    .as_ref()
+                    .expect("retained original step")
+                    .model_work
+                    .as_ref()
+                    .expect("original work checked above")
+                    .completed_model_calls(&actual, false)?;
                 return Ok((0, 0, 0, 0));
             }
             let parent = self.steps[&step.token]
@@ -16895,10 +16910,17 @@ impl SemanticTransitionSession {
                             .recording,
                         false,
                     ))
-                || (transition == SemanticTransitionKind::Drain && calls != 0)
             {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
+            let calls = self.steps[&step.token]
+                .prepared
+                .as_ref()
+                .expect("retained original step")
+                .model_work
+                .as_ref()
+                .expect("original work checked above")
+                .completed_model_calls(&actual, transition != SemanticTransitionKind::Drain)?;
             Ok((work.raw, work.model_once, work.native_attempt, calls))
         })();
         if observation.is_err() {
