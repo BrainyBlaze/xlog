@@ -6,7 +6,6 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- *(python)* [**breaking**] return native-issued immutable semantic execution and model-evaluation observations instead of mutable dictionaries. Read their quantities through read-only attributes; retaining a completed observation does not retain the retired model, selected cohort, CUDA storage, or reader. These quantities are not whole-process physical memory peaks.
 - *(gpu)* [**breaking**] bind reusable materialized stores and retained session runtimes to the exact compiled `LogicProgram`. Cached evaluation and relation-delta cache parameters now use the opaque `LogicMaterializedStore` returned by `evaluate_with_relation_store_and_cache` or `evaluate_with_session_runtime`; use `as_relation_store` for read-only result inspection. Raw `RelationStore` values remain supported as authoritative input stores but can no longer be supplied as trusted derived caches.
 - *(runtime)* expose actual WCOJ-family fallback executions by attempted route, separately from pipeline-error declines.
 - *(configuration)* apply one strict boolean parser to production environment switches in runtime, build, diagnostics, benchmarks, solver tracing, and Python bindings.

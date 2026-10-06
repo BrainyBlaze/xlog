@@ -68,3 +68,24 @@ same Python interpreter your downstream project uses:
 ```bash
 python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python --user
 ```
+
+## Completed semantic observations
+
+With the `semantic-policy` build feature, the native prepared step's
+`execution_measurements` returns `SemanticCompletedExecutionObservation` after
+the original segment completes and its receipts and work are validated. Obtain
+it before step retirement and read `device_work`, `model_work`, `native_work`,
+and `model_calls` as read-only attributes, not dictionary keys.
+
+`SemanticModelEvaluation.finish` similarly returns
+`SemanticCompletedModelEvaluation`. Its read-only attributes are `status`,
+`loss_bits`, `model_work`, `model_calls`, `operation_count`, `work_bound`, and
+`retained_allocation_bytes`. A known numerical refusal still has a completed
+observation; an incomplete or unknown invocation raises and retains its original
+owner instead of returning measurement values.
+
+Neither completed type has a public constructor or retains the retired model,
+selected cohort, CUDA storage, or reader. Retain the original object when passing
+native execution custody; a cold dictionary projection is only a serialization,
+not a replacement for that object. These observations describe the original
+execution, not preparation expenditure or a whole-process physical memory peak.
