@@ -10245,6 +10245,7 @@ struct PreparedModelWork {
     device: TrackedCudaSlice<ModelWorkEvent>,
     actual: TrackedCudaSlice<u64>,
     reset: CudaFunction,
+    invocation: CudaFunction,
     capture_bank: Option<usize>,
     replay_cursor: usize,
     evaluation_recording: bool,
@@ -10348,6 +10349,11 @@ impl PreparedModelWork {
             .inner()
             .get_func("xlog_semantic_transition", "semantic_model_work_reset")
             .ok_or_else(|| runtime_error("kernel lookup", "model work reset unavailable"))?;
+        let invocation = provider
+            .device()
+            .inner()
+            .get_func("xlog_semantic_transition", "semantic_model_invocation")
+            .ok_or_else(|| runtime_error("kernel lookup", "model invocation marker unavailable"))?;
         Ok(Self {
             recording,
             device: reservation
@@ -10361,6 +10367,7 @@ impl PreparedModelWork {
                 )
                 .map_err(|error| runtime_error("original device work allocation", error))?,
             reset,
+            invocation,
             capture_bank: None,
             replay_cursor: 0,
             evaluation_recording: false,
@@ -10427,6 +10434,7 @@ impl PreparedModelWork {
             return Err("prepared transition differs from its active model work bank");
         }
         if bank == 0 {
+            self.recording.require_model_invocations()?;
             self.recording.freeze()?;
         } else if self.replay_cursor != self.recording.events().len() {
             return Err("second model branch omitted original work occurrences");
@@ -10469,6 +10477,85 @@ impl PreparedModelWork {
             }
             .map_err(|error| XlogError::Kernel(error.to_string()))
         })
+    }
+
+    fn record_invocation(
+        &mut self,
+        domain: &ResidentExecutionDomain,
+        poisoned: &mut bool,
+    ) -> Result<(), SemanticTransitionError> {
+        let slot = self.next_slot().map_err(publication_input_error)?;
+        if slot >= self.actual.len() / 3 {
+            return Err(publication_input_error(
+                "model invocation exceeds its original cold event capacity",
+            ));
+        }
+        let actual = self
+            .actual
+            .device_ptr_value()
+            .checked_add((slot * 3 * size_of::<u64>()) as u64)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let event = ModelWorkEvent::invocation(actual).map_err(publication_input_error)?;
+        self.record_event(event).map_err(publication_input_error)?;
+        self.reset_slots(domain, poisoned, slot, 1)?;
+        let mut recorder = domain.new_strict_recorder();
+        recorder.write(&self.actual);
+        enqueue_recorded(domain, poisoned, recorder, |enqueue| {
+            // SAFETY: this scalar slot is retained by the original invocation;
+            // reset, marker and model execution share its actual capture stream.
+            unsafe {
+                self.invocation.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (actual,),
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn completed_model_calls(
+        &self,
+        actual: &[u64],
+        executed: bool,
+    ) -> Result<u64, SemanticTransitionError> {
+        if actual.len() != self.actual.len() || self.recording.frozen_bound().is_none() {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let mut calls = 0u64;
+        let mut original_markers = 0u64;
+        for (slot, event) in self.recording.events().iter().enumerate() {
+            if event.kind != ModelWorkKind::ModelInvocation as u64 {
+                continue;
+            }
+            original_markers = original_markers
+                .checked_add(1)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            let value = &actual[slot * 3..slot * 3 + 3];
+            match value {
+                [0, 0, 0] if !executed => (),
+                [1, 0, 1] => {
+                    calls = calls
+                        .checked_add(1)
+                        .ok_or(SemanticTransitionError::GenerationExhausted)?;
+                }
+                _ => return Err(SemanticTransitionError::ObservationMismatch),
+            }
+        }
+        // Scratch is exported to the model and may retain writable aliases.
+        // A complete original receipt certifies consumption of every frozen
+        // event; an erased marker cannot turn that execution into zero calls.
+        if (executed && (original_markers == 0 || calls != original_markers))
+            || (!executed && calls != 0)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(calls)
     }
 
     fn descriptor(&self) -> ModelWorkInput {
@@ -16212,6 +16299,34 @@ impl SemanticTransitionSession {
         result
     }
 
+    /// Record at the original model-call site, within its active bank capture.
+    /// A marker executes only in the selected graph, not once per cold capture.
+    pub fn record_model_invocation(
+        &mut self,
+        step: &SemanticPreparedStep,
+    ) -> Result<(), SemanticTransitionError> {
+        self.check_prepared_content_stream(step, self.stream.cu_stream() as u64)?;
+        let result = self
+            .steps
+            .get_mut(&step.token)
+            .expect("checked original step")
+            .prepared
+            .as_mut()
+            .expect("prepared owner")
+            .model_work
+            .as_mut()
+            .ok_or_else(|| {
+                publication_input_error(
+                    "model invocation requires its original cold work reservation",
+                )
+            })?
+            .record_invocation(&self.domain, &mut self.poisoned);
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
     /// Charge each original saved clone from its retained native tensor layout.
     /// A repeated storage still costs another copy when a new witness records
     /// another save occurrence. Reusing the same occurrence is rejected.
@@ -16691,6 +16806,127 @@ impl SemanticTransitionSession {
             parent.model_geometry_digest,
             parent.model_numerical_digest,
         ))
+    }
+
+    /// Joined execution quantities for this original step, including known
+    /// skips and refusals. These exclude cold preparation and are not a whole
+    /// resource-unit or physical memory certificate. Overflow is not a value.
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_execution_measurements(
+        &mut self,
+        step: &SemanticPreparedStep,
+    ) -> Result<(u64, u64, u64, u64), SemanticTransitionError> {
+        let original = self.checked_prepared_step(step, false)?;
+        if !self
+            .prepared_segment
+            .as_ref()
+            .expect("checked prepared scope")
+            .completed
+        {
+            return Err(publication_input_error(
+                "execution measurements require the original segment's known completion",
+            ));
+        }
+        let prepared = original.prepared.as_ref().expect("checked original step");
+        let reader = prepared.reader.view();
+        let result = prepared.result.view();
+        let mut streams = original.consumer_streams.clone();
+        if let Some(reader) = self.readers.get(&step.token) {
+            streams.extend(reader.consumer_streams.iter().copied());
+        }
+        let observation = (|| {
+            self.complete_step_consumers_by_token(
+                step.token,
+                &streams.into_iter().collect::<Vec<_>>(),
+            )?;
+            let lease = self.publication_read(reader)?[0];
+            let result = self.publication_read(result)?[0];
+            let prepared = self.steps[&step.token]
+                .prepared
+                .as_ref()
+                .expect("retained original step");
+            let work = prepared
+                .model_work
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let actual = work.actual.view();
+            let actual = self.publication_read(actual)?;
+            if result.abi == 0 {
+                if lease.active != 0
+                    || lease.abi != 0
+                    || lease.transition_kind != 0
+                    || !matches!(lease.status, 1..=5 | 7)
+                {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                self.steps[&step.token]
+                    .prepared
+                    .as_ref()
+                    .expect("retained original step")
+                    .model_work
+                    .as_ref()
+                    .expect("original work checked above")
+                    .completed_model_calls(&actual, false)?;
+                return Ok((0, 0, 0, 0));
+            }
+            let parent = self.steps[&step.token]
+                .inputs
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
+                .header
+                .view();
+            let parent = self.publication_read(parent)?[0];
+            let transition =
+                validate_prepared_completion(&lease, &parent, &result, parent.instance)?;
+            let prepared = self.steps[&step.token]
+                .prepared
+                .as_ref()
+                .expect("retained original step");
+            if !prepared.observed {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            let state = prepared
+                .branches
+                .get(
+                    usize::try_from(lease.bank)
+                        .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+                )
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
+                .state
+                .view();
+            let state = self.publication_read(state)?[0];
+            let work = state.execution_work;
+            if work.overflow != 0
+                || work.model_once.checked_add(work.native_attempt) != Some(work.raw)
+                || (transition != SemanticTransitionKind::Drain
+                    && !work.validate_model(
+                        &self.steps[&step.token]
+                            .prepared
+                            .as_ref()
+                            .expect("retained original step")
+                            .model_work
+                            .as_ref()
+                            .expect("original work checked above")
+                            .recording,
+                        false,
+                    ))
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            let calls = self.steps[&step.token]
+                .prepared
+                .as_ref()
+                .expect("retained original step")
+                .model_work
+                .as_ref()
+                .expect("original work checked above")
+                .completed_model_calls(&actual, transition != SemanticTransitionKind::Drain)?;
+            Ok((work.raw, work.model_once, work.native_attempt, calls))
+        })();
+        if observation.is_err() {
+            self.poisoned = true;
+        }
+        observation
     }
 
     /// Read the original five Update checks and original forward receipts after

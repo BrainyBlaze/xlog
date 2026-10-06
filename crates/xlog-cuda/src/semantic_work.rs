@@ -23,6 +23,8 @@ pub enum ModelWorkKind {
     SortKeys = 13,
     BucketQueries = 14,
     SavedCopyBytes = 15,
+    /// An executed model-call marker, separate from logical device work.
+    ModelInvocation = 16,
 }
 
 impl ModelWorkKind {
@@ -43,6 +45,7 @@ impl ModelWorkKind {
             13 => Self::SortKeys,
             14 => Self::BucketQueries,
             15 => Self::SavedCopyBytes,
+            16 => Self::ModelInvocation,
             _ => return None,
         })
     }
@@ -70,8 +73,13 @@ const _: () = assert!(std::mem::size_of::<ModelWorkEvent>() == 104);
 
 impl ModelWorkEvent {
     pub(crate) fn operation(kind: ModelWorkKind, dimensions: &[u64]) -> Result<Self, &'static str> {
-        if kind == ModelWorkKind::SavedCopyBytes {
-            return Err("saved-copy work requires its original tensor witness");
+        if matches!(
+            kind,
+            ModelWorkKind::SavedCopyBytes | ModelWorkKind::ModelInvocation
+        ) {
+            return Err(
+                "saved copies and model invocations require their original native producers",
+            );
         }
         Self::new(kind, u64::MAX, u64::MAX, dimensions)
     }
@@ -113,6 +121,19 @@ impl ModelWorkEvent {
         )
     }
 
+    pub(crate) fn invocation(actual: u64) -> Result<Self, &'static str> {
+        let event = Self {
+            kind: ModelWorkKind::ModelInvocation as u64,
+            witness: u64::MAX,
+            tensor: u64::MAX,
+            rank: 0,
+            dimensions: [0; 8],
+            actual,
+        };
+        event.units()?;
+        Ok(event)
+    }
+
     fn new(
         kind: ModelWorkKind,
         witness: u64,
@@ -151,6 +172,17 @@ impl ModelWorkEvent {
                 && (self.witness != u64::MAX || self.tensor != u64::MAX))
         {
             return Err("model work event has noncanonical geometry or occurrence coordinates");
+        }
+        if kind == ModelWorkKind::ModelInvocation {
+            if self.rank != 0
+                || self.actual == 0
+                || !self.actual.is_multiple_of(8)
+                || self.actual > u64::MAX - 24
+            {
+                return Err("model invocation requires its original scalar native device slot");
+            }
+            // A call is its own resource quantity, not another work tariff.
+            return Ok(0);
         }
         let dimensions = &self.dimensions[..self.rank as usize];
         if dimensions.contains(&0) {
@@ -231,6 +263,18 @@ impl ModelWorkRecording {
         }
         self.frozen = true;
         Ok(self.bound)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn require_model_invocations(&self) -> Result<(), &'static str> {
+        if !self
+            .events
+            .iter()
+            .any(|event| event.kind == ModelWorkKind::ModelInvocation as u64)
+        {
+            return Err("model work lacks its original executed-call marker; zero is not an unobserved call count");
+        }
+        Ok(())
     }
 
     pub(crate) fn events(&self) -> &[ModelWorkEvent] {

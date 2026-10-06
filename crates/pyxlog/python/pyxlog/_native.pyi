@@ -98,11 +98,26 @@ class SemanticCompletedActionProjection:
     @property
     def pre_action_checkpoint(self) -> Optional[SemanticCompletedMaterial]: ...
 
+class _ExecutionMeasurements(TypedDict):
+    device_work: int
+    model_work: int
+    native_work: int
+    model_calls: int
+
 class SemanticPreparedStep:
     """Session-issued original step; construction is not public."""
 
     @property
     def requested_transition(self) -> Literal["proposal", "recompute", "update"]: ...
+
+    @property
+    def execution_measurements(self) -> _ExecutionMeasurements:
+        """Joined step execution only, not preparation or a physical peak."""
+        ...
+
+    def record_model_invocation(self) -> None:
+        """Record the CUDA marker at the actual forward's original capture site."""
+        ...
 
     @property
     def update_measurements(self) -> Optional[_UpdateMeasurements]:
@@ -130,6 +145,7 @@ class _ModelEvaluationResult(TypedDict):
     status: Literal[0, 1, 2]
     loss_bits: tuple[int, int, int, int, int, int]
     model_work: int
+    model_calls: int
     operation_count: int
     work_bound: int
     retained_allocation_bytes: int
@@ -144,9 +160,12 @@ class SemanticModelEvaluation:
     def training_view(self, *, consumer_stream: int) -> tuple[Any, ...]: ...
     def model_work_buffer(self, *, consumer_stream: int) -> Any: ...
     def begin(self) -> None: ...
+    def record_model_invocation(self) -> None: ...
     def record_model_work(self, kind: int, dimensions: tuple[int, ...]) -> None: ...
     def record_model_device_work(self, kind: int, upper_dimensions: tuple[int, ...]) -> int: ...
-    def finish(self, output_witness: Any, *, consumer_streams: Sequence[int]) -> _ModelEvaluationResult: ...
+    def finish(self, output_witness: Any, *, consumer_streams: Sequence[int]) -> _ModelEvaluationResult:
+        """Incomplete expenditure raises without a result and retains the original owner/fence."""
+        ...
     def cancel(self, *, consumer_streams: Sequence[int]) -> None: ...
 
 class SemanticTransitionTaskUse:

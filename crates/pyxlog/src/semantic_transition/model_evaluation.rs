@@ -166,6 +166,17 @@ impl PySemanticModelEvaluation {
             .map_err(xlog_err)
     }
 
+    /// Record on the original invocation stream at the real model forward site.
+    fn record_model_invocation(&self, py: Python<'_>) -> PyResult<()> {
+        let parent = self.parent.borrow(py);
+        let session = parent.session.borrow(py);
+        let mut owner = session.owner()?;
+        self.check(py, &owner)?;
+        owner
+            .record_evaluation_model_invocation(&self.inner)
+            .map_err(xlog_err)
+    }
+
     fn record_model_work(
         &self,
         py: Python<'_>,
@@ -240,11 +251,17 @@ impl PySemanticModelEvaluation {
             .finish_model_evaluation(&*parent.lease()?, &self.inner, &witness.inner, &streams)
             .map_err(xlog_err)?;
         drop(owner);
-        self.restore_phase(py)?;
+        // Native finish returns only a complete expenditure certificate, including
+        // a known numerical refusal. An incomplete invocation errors above and
+        // retains this original phase/output/owner without reopening admission.
+        if matches!(result.status, 0 | 1) {
+            self.restore_phase(py)?;
+        }
         let value = PyDict::new(py);
         value.set_item("status", result.status)?;
         value.set_item("loss_bits", PyTuple::new(py, result.loss_bits)?)?;
         value.set_item("model_work", result.model_work)?;
+        value.set_item("model_calls", result.model_calls)?;
         value.set_item("operation_count", result.operation_count)?;
         value.set_item("work_bound", result.work_bound)?;
         value.set_item(

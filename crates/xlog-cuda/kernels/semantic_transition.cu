@@ -158,6 +158,14 @@ extern "C" __global__ void semantic_model_work_reset(uint64_t actual,uint64_t wo
     for(uint64_t i=threadIdx.x;i<words;i+=blockDim.x)values[i]=0;
 }
 
+// Recorded at the original model-call site. CUDA graph recording alone never
+// writes a call: only execution of the selected branch reaches this node.
+extern "C" __global__ void semantic_model_invocation(uint64_t actual) {
+    if(blockIdx.x || threadIdx.x)return;
+    auto* values=reinterpret_cast<uint64_t*>(actual);
+    values[0]=1;values[1]=0;values[2]=1;
+}
+
 // One owning thread appends actual logical work. Failure never wraps either
 // the contribution or the common accumulator and is checked before publication.
 __device__ bool execution_work_add(ExecutionWork& work,uint64_t units,bool model) {
@@ -210,7 +218,8 @@ __device__ void execution_work_merge_parallel(ExecutionWork& work,semantic_graph
     __syncthreads();
 }
 
-__device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& work) {
+__device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& work,
+        uint64_t* model_calls=nullptr) {
     if(!input.events && !input.count && !input.bound)return;
     // A prepared state is cold-initialized and submitted once. Preserve native
     // charges from preceding input/guard work; never reset the attempt here.
@@ -231,7 +240,9 @@ __device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& wo
     for(uint64_t i=0;i<input.count;++i) {
         const auto& event=events[i];
         const bool saved=event.kind==15;
-        if(event.kind<1 || event.kind>15 || event.rank>8 ||
+        const bool invocation=event.kind==16;
+        if(event.kind<1 || event.kind>16 || event.rank>8 ||
+           (invocation && (event.rank || !event.actual)) ||
            (saved && (event.witness==UINT64_MAX || event.tensor==UINT64_MAX || !event.rank || event.actual)) ||
            (!saved && (event.witness!=UINT64_MAX || event.tensor!=UINT64_MAX))) { semantic_content_integrity_trap();return; }
         bool empty=false;
@@ -248,8 +259,9 @@ __device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& wo
             if(units>UINT64_MAX/event.dimensions[axis]) { work.overflow=1;return; }
             units*=event.dimensions[axis];
         }
-        if(units>UINT64_MAX-declared_bound) { semantic_content_integrity_trap();return; }
-        declared_bound+=units;
+        const uint64_t work_bound=invocation ? 0 : units;
+        if(work_bound>UINT64_MAX-declared_bound) { semantic_content_integrity_trap();return; }
+        declared_bound+=work_bound;
         if(event.actual) {
             if(event.actual%alignof(uint64_t) || event.actual>UINT64_MAX-3*sizeof(uint64_t)) {
                 semantic_content_integrity_trap();return;
@@ -260,7 +272,14 @@ __device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& wo
             if(actual[1]>1) { semantic_content_integrity_trap();return; }
             if(actual[1]) { work.overflow=1;return; }
             if(!actual[2] || actual[0]>units) { semantic_content_integrity_trap();return; }
+            if(invocation && (actual[0]!=1 || actual[2]!=1)) {
+                semantic_content_integrity_trap();return;
+            }
             units=actual[0];
+        }
+        if(invocation) {
+            if(model_calls)++*model_calls;
+            units=0;
         }
         if(!execution_work_add(work,units,true))return;
         ++work.model_events;
@@ -275,7 +294,8 @@ extern "C" __global__ void semantic_model_evaluation_result(
     if(blockIdx.x || threadIdx.x)return;
     auto* output=reinterpret_cast<uint64_t*>(result);
     ExecutionWork work{};
-    consume_model_work(ModelWorkInput{events,count,bound},work);
+    uint64_t model_calls=0;
+    consume_model_work(ModelWorkInput{events,count,bound},work,&model_calls);
     const auto* values=reinterpret_cast<const float*>(losses);
     const auto* selected=reinterpret_cast<const uint64_t*>(selection);
     uint64_t status=selected[0] || !*reinterpret_cast<const uint8_t*>(admissible) ? 1 : 0;
@@ -287,7 +307,7 @@ extern "C" __global__ void semantic_model_evaluation_result(
         output[i+1]=__float_as_uint(value);
     }
     output[0]=status;output[7]=work.model_once;output[8]=work.model_events;
-    output[9]=work.model_bound;output[10]=retained_bytes;
+    output[9]=work.model_bound;output[10]=retained_bytes;output[11]=model_calls;
 }
 struct TaskFacts {
     uint64_t truth[3],correct[3],g,p,c;
