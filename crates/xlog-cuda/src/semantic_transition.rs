@@ -9704,8 +9704,11 @@ impl SemanticPreparedStep {
 #[cfg(feature = "semantic-policy")]
 pub struct SemanticCompletedExecutionObservation {
     original: SemanticPreparedStep,
+    requested_transition: SemanticTransitionKind,
+    outcome: SemanticPreparedStepOutcome,
     predecessor: Option<SemanticPublishedIdentity>,
     successor: Option<SemanticPublishedIdentity>,
+    model_binding: Option<(u64, Identity256, Identity256)>,
     quantities: [u64; 4],
 }
 
@@ -9729,6 +9732,19 @@ impl SemanticCompletedExecutionObservation {
 
     pub fn successor(&self) -> Option<SemanticPublishedIdentity> {
         self.successor
+    }
+
+    /// Original checked outcome, retained without its retired device owners.
+    pub fn outcome(&self) -> &SemanticPreparedStepOutcome {
+        &self.outcome
+    }
+
+    pub fn requested_transition(&self) -> SemanticTransitionKind {
+        self.requested_transition
+    }
+
+    pub fn model_binding(&self) -> Option<(u64, Identity256, Identity256)> {
+        self.model_binding
     }
 }
 
@@ -9970,6 +9986,14 @@ struct PreparedStepStorage {
     transition_recorded: u8,
     drain_recorded: bool,
     observed: bool,
+    // Original reconciled CPU evidence survives prepared-storage retirement in
+    // the issued execution observation; it owns no graph, reader or tensor.
+    #[cfg(feature = "semantic-policy")]
+    observed_outcome: Option<SemanticPreparedStepOutcome>,
+    #[cfg(feature = "semantic-policy")]
+    observed_parent: Option<PublicationHeader>,
+    #[cfg(feature = "semantic-policy")]
+    observed_result: Option<PreparedStepResult>,
     result: TrackedCudaSlice<PreparedStepResult>,
     training_origin: Option<DeviceMemoryView<SemanticTrainingViewOriginRecord>>,
     training_view: Option<SemanticSelectedTrainingView>,
@@ -10605,7 +10629,7 @@ impl PreparedModelWork {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct PreparedStepResult {
     abi: u64,
     word: u64,
@@ -14691,10 +14715,23 @@ impl SemanticTransitionSession {
                 {
                     return Err(SemanticTransitionError::ObservationMismatch);
                 }
-                outcomes.push(SemanticPreparedStepOutcome::Skipped {
+                #[cfg(feature = "semantic-policy")]
+                let token = step.token;
+                let outcome = SemanticPreparedStepOutcome::Skipped {
                     step,
                     status: lease.status,
-                });
+                };
+                #[cfg(feature = "semantic-policy")]
+                {
+                    self.steps
+                        .get_mut(&token)
+                        .expect("retained original step")
+                        .prepared
+                        .as_mut()
+                        .expect("retained original prepared owner")
+                        .observed_outcome = Some(outcome.clone());
+                }
+                outcomes.push(outcome);
                 continue;
             }
             let inputs = Arc::clone(
@@ -14808,13 +14845,29 @@ impl SemanticTransitionSession {
                     .expect("retained original prepared owner")
                     .group_update_published = true;
             }
-            outcomes.push(SemanticPreparedStepOutcome::Completed {
+            #[cfg(feature = "semantic-policy")]
+            let token = step.token;
+            let outcome = SemanticPreparedStepOutcome::Completed {
                 step,
                 invocation,
                 bank,
                 transition,
                 outcome,
-            });
+            };
+            #[cfg(feature = "semantic-policy")]
+            {
+                let prepared = self
+                    .steps
+                    .get_mut(&token)
+                    .expect("retained original step")
+                    .prepared
+                    .as_mut()
+                    .expect("retained original prepared owner");
+                prepared.observed_parent = Some(parent);
+                prepared.observed_result = Some(result);
+                prepared.observed_outcome = Some(outcome.clone());
+            }
+            outcomes.push(outcome);
         }
         let control = self.publication_read(storage.control.view())?[0];
         if control.abi != 1
@@ -15920,6 +15973,12 @@ impl SemanticTransitionSession {
                     transition_recorded: 0,
                     drain_recorded: false,
                     observed: false,
+                    #[cfg(feature = "semantic-policy")]
+                    observed_outcome: None,
+                    #[cfg(feature = "semantic-policy")]
+                    observed_parent: None,
+                    #[cfg(feature = "semantic-policy")]
+                    observed_result: None,
                     result,
                     training_origin: training_origins
                         .as_ref()
@@ -16862,6 +16921,18 @@ impl SemanticTransitionSession {
             ));
         }
         let prepared = original.prepared.as_ref().expect("checked original step");
+        let requested_transition = self
+            .prepared_segment
+            .as_ref()
+            .expect("checked prepared scope")
+            .requested_kind(step, &self.publication_issuer)?;
+        let original_outcome = prepared
+            .observed_outcome
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .clone();
+        let original_parent = prepared.observed_parent;
+        let original_result = prepared.observed_result;
         let reader = prepared.reader.view();
         let result = prepared.result.view();
         let mut streams = original.consumer_streams.clone();
@@ -16890,6 +16961,11 @@ impl SemanticTransitionSession {
                     || lease.abi != 0
                     || lease.transition_kind != 0
                     || !matches!(lease.status, 1..=5 | 7)
+                    || original_parent.is_some()
+                    || original_result.is_some()
+                    || !matches!(&original_outcome,
+                        SemanticPreparedStepOutcome::Skipped { step: issued, status }
+                            if issued.same_handle(step) && *status == lease.status)
                 {
                     return Err(SemanticTransitionError::ObservationMismatch);
                 }
@@ -16903,8 +16979,11 @@ impl SemanticTransitionSession {
                     .completed_model_calls(&actual, false)?;
                 return Ok(SemanticCompletedExecutionObservation {
                     original: step.clone(),
+                    requested_transition,
+                    outcome: original_outcome,
                     predecessor: None,
                     successor: None,
+                    model_binding: None,
                     quantities: [0; 4],
                 });
             }
@@ -16917,6 +16996,17 @@ impl SemanticTransitionSession {
             let parent = self.publication_read(parent)?[0];
             let transition =
                 validate_prepared_completion(&lease, &parent, &result, parent.instance)?;
+            if original_parent != Some(parent)
+                || original_result != Some(result)
+                || !matches!(&original_outcome,
+                    SemanticPreparedStepOutcome::Completed {
+                        step: issued, bank, transition: issued_transition, ..
+                    } if issued.same_handle(step)
+                        && u64::from(*bank) == lease.bank
+                        && *issued_transition == transition)
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
             let prepared = self.steps[&step.token]
                 .prepared
                 .as_ref()
@@ -16968,8 +17058,15 @@ impl SemanticTransitionSession {
             };
             Ok(SemanticCompletedExecutionObservation {
                 original: step.clone(),
+                requested_transition,
+                outcome: original_outcome,
                 predecessor: Some(identity(parent)),
                 successor: (result.advanced == 1).then(|| identity(result.header)),
+                model_binding: Some((
+                    parent.model_generation,
+                    parent.model_geometry_digest,
+                    parent.model_numerical_digest,
+                )),
                 quantities: [work.raw, work.model_once, work.native_attempt, calls],
             })
         })();

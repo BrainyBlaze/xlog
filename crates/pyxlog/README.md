@@ -89,3 +89,7 @@ selected cohort, CUDA storage, or reader. Retain the original object when passin
 native execution custody; a cold dictionary projection is only a serialization,
 not a replacement for that object. These observations describe the original
 execution, not preparation expenditure or a whole-process physical memory peak.
+The step observation also retains its original native-reconciled transition,
+skip or refusal, selected bank, and parent/model binding as CPU-only evidence.
+Those facts remain tied to the original issuance after prepared storage retires;
+an editable cold record cannot replace them or keep retired model owners alive.
