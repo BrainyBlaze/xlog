@@ -84,6 +84,8 @@ pub(super) struct EvaluationStorage {
     source_material: Identity256,
     stream: u64,
     submitted: bool,
+    report_submitted: bool,
+    consumer_streams: Option<Vec<u64>>,
     result: Option<SemanticModelEvaluationResult>,
 }
 
@@ -220,6 +222,8 @@ impl SemanticTransitionSession {
             source_material,
             stream: self.stream.cu_stream() as u64,
             submitted: false,
+            report_submitted: false,
+            consumer_streams: None,
             result: None,
         });
         self.guard_evaluation_cohort(&handle)?;
@@ -299,9 +303,10 @@ impl SemanticTransitionSession {
         handle: &SemanticModelEvaluation,
     ) -> Result<(), SemanticTransitionError> {
         self.checked_reader(lease)?;
-        if lease.token != handle.token || self.evaluation(handle)?.result.is_some() {
+        let evaluation = self.evaluation(handle)?;
+        if lease.token != handle.token || evaluation.submitted || evaluation.result.is_some() {
             return Err(publication_input_error(
-                "evaluation is closed or belongs to another acquired parent",
+                "evaluation is submitted, closed or belongs to another acquired parent",
             ));
         }
         Ok(())
@@ -424,7 +429,10 @@ impl SemanticTransitionSession {
         streams: &[u64],
     ) -> Result<SemanticCompletedModelEvaluation, SemanticTransitionError> {
         self.checked_evaluation_parent(lease, handle)?;
-        let parent = self.published_identity(lease)?;
+        let streams = self
+            .step_consumer_streams(lease.token, streams)?
+            .into_iter()
+            .collect::<Vec<_>>();
         self.checked_content_witness(lease, witness)?;
         let output = &self.steps[&lease.token].content[witness.index];
         if output.tensors.len() != 3 {
@@ -547,6 +555,7 @@ impl SemanticTransitionSession {
         );
         recorder.write(&evaluation.report);
         evaluation.submitted = true;
+        evaluation.consumer_streams = Some(streams);
         let arguments = (
             input.events,
             input.count,
@@ -573,39 +582,81 @@ impl SemanticTransitionSession {
             }
             .map_err(|error| XlogError::Kernel(error.to_string()))
         })?;
-        self.complete_step_consumers(lease, streams)?;
-        let report = self.steps[&handle.token]
-            .evaluation
-            .as_ref()
-            .expect("retained evaluation")
-            .report
-            .view();
-        let words = self.publication_read(report)?;
-        let material =
-            Identity256::from_bytes(Sha256::digest(self.published_state_material(lease)?).into());
-        let evaluation = self
-            .steps
+        // Entry is irreversible even when enqueue fails before its operation
+        // closure. Only a successful consuming commit permits report resolution.
+        self.steps
             .get_mut(&handle.token)
-            .expect("retained invocation")
+            .expect("submitted invocation")
             .evaluation
             .as_mut()
-            .expect("retained evaluation");
-        if material != evaluation.source_material {
-            self.poisoned = true;
+            .expect("submitted evaluation")
+            .report_submitted = true;
+        self.resolve_model_evaluation(lease, handle)
+    }
+
+    /// Complete only the already submitted original report. No recording,
+    /// output witness, stream roster or result kernel can be submitted again.
+    /// Driver failure remains terminal quarantine, never a reset or replay.
+    pub fn resolve_model_evaluation(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        handle: &SemanticModelEvaluation,
+    ) -> Result<SemanticCompletedModelEvaluation, SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        let evaluation = self.evaluation(handle)?;
+        if lease.token != handle.token || !evaluation.report_submitted {
             return Err(publication_input_error(
-                "read-only evaluation changed the full original publication",
+                "evaluation resolution requires its original submitted invocation",
             ));
         }
-        let result = SemanticModelEvaluationResult {
-            status: words[0],
-            loss_bits: std::array::from_fn(|index| words[index + 1] as u32),
-            model_work: words[7],
-            operation_count: words[8],
-            work_bound: words[9],
-            retained_allocation_bytes: words[10],
-            model_calls: words[11],
+        let parent = self.published_identity(lease)?;
+        let result = if let Some(result) = self.evaluation(handle)?.result {
+            result
+        } else {
+            let streams = self
+                .evaluation(handle)?
+                .consumer_streams
+                .as_ref()
+                .ok_or_else(|| {
+                    publication_input_error("evaluation lost its original consumer streams")
+                })?
+                .clone();
+            self.complete_step_consumers(lease, &streams)?;
+            let report = self.steps[&handle.token]
+                .evaluation
+                .as_ref()
+                .expect("retained evaluation")
+                .report
+                .view();
+            let words = self.publication_read(report)?;
+            let material = Identity256::from_bytes(
+                Sha256::digest(self.published_state_material(lease)?).into(),
+            );
+            let evaluation = self
+                .steps
+                .get_mut(&handle.token)
+                .expect("retained invocation")
+                .evaluation
+                .as_mut()
+                .expect("retained evaluation");
+            if material != evaluation.source_material {
+                self.poisoned = true;
+                return Err(publication_input_error(
+                    "read-only evaluation changed the full original publication",
+                ));
+            }
+            let result = SemanticModelEvaluationResult {
+                status: words[0],
+                loss_bits: std::array::from_fn(|index| words[index + 1] as u32),
+                model_work: words[7],
+                operation_count: words[8],
+                work_bound: words[9],
+                retained_allocation_bytes: words[10],
+                model_calls: words[11],
+            };
+            evaluation.result = Some(result);
+            result
         };
-        evaluation.result = Some(result);
         if !matches!(result.status, 0 | 1) {
             return Err(publication_input_error(
                 "incomplete evaluation expenditure retains its original invocation; no completed numerical result is available",
@@ -620,6 +671,19 @@ impl SemanticTransitionSession {
         })
     }
 
+    /// A late cold failure may resolve this same submission. A poisoned
+    /// Session or a known incomplete work report can never use this handoff.
+    pub fn model_evaluation_completion_pending(&self, handle: &SemanticModelEvaluation) -> bool {
+        !self.is_poisoned()
+            && self.evaluation(handle).is_ok_and(|evaluation| {
+                evaluation.report_submitted
+                    && evaluation.consumer_streams.is_some()
+                    && evaluation
+                        .result
+                        .is_none_or(|result| matches!(result.status, 0 | 1))
+            })
+    }
+
     /// Cancellation joins actual consumers before allowing the original parent
     /// to be reused. Unknown completion never clears the retained invocation.
     pub fn cancel_model_evaluation(
@@ -629,15 +693,6 @@ impl SemanticTransitionSession {
         streams: &[u64],
     ) -> Result<(), SemanticTransitionError> {
         self.checked_evaluation_parent(lease, handle)?;
-        if self
-            .evaluation(handle)?
-            .result
-            .is_some_and(|result| !matches!(result.status, 0 | 1))
-        {
-            return Err(publication_input_error(
-                "incomplete evaluation expenditure retains its original invocation; cancellation cannot reopen admission",
-            ));
-        }
         self.complete_step_consumers(lease, streams)?;
         self.guard_evaluation_cohort(handle)?;
         let material =

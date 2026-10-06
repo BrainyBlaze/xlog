@@ -3147,10 +3147,29 @@ not certify complete work. Neither nonzero status is a loss certificate. Do not
 record status two as an ordinary numerical refusal or retry the invocation.
 Operation count is registrar occurrences, not model forward calls.
 
-These statuses exist only when `finish` returns its result. A witness validation,
+These statuses exist only when completion returns its result. A witness validation,
 consumer join, content-integrity, or full-publication recheck exception is not a
 returned refusal status and does not establish reusable state or known completion.
 It retains the existing cancellation or quarantine requirements.
+
+`finish` accepts an output witness exactly once and retains the complete original
+consumer-stream roster before submitting the result kernel. If a late cold
+completion or observation-allocation failure occurs while that original native
+submission remains unpoisoned, it raises `SemanticModelEvaluationPending`, with
+the original exception as its cause. Keep the original Runtime, cold objective,
+evaluation, output witness, tensors and content owners alive. Do not execute
+another forward, call `finish` again, replace streams, cancel that submission,
+or prepare a replacement evaluation.
+
+Use `evaluation.resolve_completion()` without arguments to complete that same
+submitted report through its retained streams and full-publication check. It
+never begins recording or launches the numerical result kernel again. Once the
+immutable observation is issued, resolution returns that identical Python
+object; a late delivery failure cannot manufacture a replacement observation.
+Further resolvable cold failure raises the same pending exception. CUDA/context
+failure still poisons and retains the original Session; this resolver does not
+clear quarantine or make that failure recoverable. Known incomplete work never
+issues a completed observation or the resolvable pending signal.
 
 Memory accounting includes the live native managers and the queried slab backing
 allocation. It is not a time-sampled whole-process peak and does not cover unrelated
@@ -3159,9 +3178,10 @@ peak measurement remain necessary. Preparation and completion export full native
 material and metadata cold; neither belongs inside a claimed zero-transfer loop.
 
 Successful completion restores the original task phase without changing its
-authority snapshot. `cancel(consumer_streams=...)` does so only after joining actual
-consumers and revalidating the original full publication. Unknown completion keeps
-native buffers retained and blocks mutation/release. Dropping an unfinished owner
+authority snapshot. Before output submission, `cancel(consumer_streams=...)` does
+so only after joining actual consumers and revalidating the original full
+publication. Cancellation is forbidden after output submission. Unknown
+completion keeps native buffers retained and blocks mutation/release. Dropping an unfinished owner
 quarantines its Session; it is not cancellation or proof of completion. Keep all
 Python producers and aliases alive until known completion and creator-thread cleanup.
 
