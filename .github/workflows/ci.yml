@@ -62,7 +62,8 @@ jobs:
         id: rust
         run: |
           bash scripts/install_rust_toolchain.sh --toolchain stable --component rustfmt
-          printf 'version=%s\n' "$(rustc --version | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
+          rust_version=$("$CARGO_HOME/bin/rustc" --version | cut -d ' ' -f 2)
+          printf 'version=%s\n' "$rust_version" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
