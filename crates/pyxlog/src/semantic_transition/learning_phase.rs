@@ -192,12 +192,14 @@ enum Completion {
         resolve: Py<PyAny>,
         readback_observed: bool,
     },
+    RetirementUnknown,
+    Retired,
     Committed,
     Abandoned,
 }
 
 struct PreparedCandidate {
-    owner: Py<PySemanticTransitionRestoredCheckpoint>,
+    owner: Option<Py<PySemanticTransitionRestoredCheckpoint>>,
     checkpoint: Arc<[u8]>,
 }
 
@@ -241,6 +243,7 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     scientific_owner: Py<PyAny>,
     recipe: Py<PySemanticLearningPhaseRecipe>,
     restore_model: Py<PyAny>,
+    retire_restored_model: Py<PyAny>,
     source_serializer: Py<PyAny>,
     candidate_serializer: Py<PyAny>,
     refresh_snapshot: Py<PyAny>,
@@ -558,7 +561,7 @@ impl PySemanticLearningPhaseTransition {
             .lock()
             .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))? =
             Some(PreparedCandidate {
-                owner: candidate,
+                owner: Some(candidate),
                 checkpoint: checkpoint.into(),
             });
         self.verify(py, true)?;
@@ -801,9 +804,26 @@ impl PySemanticLearningPhaseTransition {
             invalid("learning-phase preparation has no complete verified candidate checkpoint")
         })?;
         Ok((
-            candidate.owner.clone_ref(py),
+            candidate
+                .owner
+                .as_ref()
+                .ok_or_else(|| invalid("private candidate consumers and owners have retired"))?
+                .clone_ref(py),
             Arc::clone(&candidate.checkpoint),
         ))
+    }
+
+    fn candidate_checkpoint(&self) -> PyResult<Arc<[u8]>> {
+        let candidate = self
+            .candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?;
+        candidate
+            .as_ref()
+            .map(|candidate| Arc::clone(&candidate.checkpoint))
+            .ok_or_else(|| {
+                invalid("learning-phase preparation has no complete candidate checkpoint")
+            })
     }
 
     fn private_restore(&self) -> PyResult<MutexGuard<'_, Option<PrivateRestoreOwners>>> {
@@ -1007,36 +1027,143 @@ impl PySemanticLearningPhaseTransition {
         Ok(candidate_owner.clone_ref(py))
     }
 
+    fn retire_candidate(&self, py: Python<'_>) -> PyResult<()> {
+        {
+            let completion = self.status_lock()?;
+            match &*completion {
+                Completion::Retired => return Ok(()),
+                Completion::Prepared
+                | Completion::Unknown {
+                    readback_observed: false,
+                    ..
+                } => {}
+                _ => {
+                    return Err(invalid(
+                        "private candidate retirement is single-attempt; unknown consumer completion retains its original owners",
+                    ))
+                }
+            }
+        }
+        let (candidate_owner, _) = self.candidate(py)?;
+        {
+            let candidate = candidate_owner.borrow(py);
+            let successor = candidate.session.borrow(py);
+            let issued = candidate.task_use.borrow(py);
+            let acquired = candidate.parent.borrow(py);
+            let owner = successor.owner()?;
+            issued.require_current(&owner)?;
+            acquired.require_task(py, &issued)?;
+            if !matches!(issued.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
+                return Err(invalid(
+                    "private retirement lost its original candidate task",
+                ));
+            }
+            owner
+                .published_identity(&*acquired.lease()?)
+                .map_err(xlog_err)?;
+        }
+        // The original model owner must return its aliases and join the actual
+        // consumers. No native/task/lease mutex is held across its callback.
+        // Mark the attempt before external code: neither a callback exception
+        // nor a false durable-absence response authorizes a second retirement.
+        *self.status_lock()? = Completion::RetirementUnknown;
+        let model = candidate_owner.borrow(py).model.clone_ref(py);
+        let result = self.retire_restored_model.bind(py).call1((model,))?;
+        if !result.is_none() {
+            return Err(invalid(
+                "original model retirement must return None after known consumer release",
+            ));
+        }
+        {
+            let candidate = candidate_owner.borrow(py);
+            let successor = candidate.session.borrow(py);
+            let acquired = candidate.parent.borrow(py);
+            successor
+                .owner()?
+                .require_retired_publication(&*acquired.lease()?)
+                .map_err(xlog_err)?;
+        }
+        // Keep known retirement distinct from an unknown callback outcome. A
+        // later authority failure may finish source continuation, but must not
+        // send the retirement callback or durable resolver again.
+        *self.status_lock()? = Completion::Retired;
+        Ok(())
+    }
+
     fn abandon(&self, py: Python<'_>) -> PyResult<()> {
         self.verify(py, false)?;
+        self.retire_candidate(py)?;
+        self.verify(py, false)?;
         let source = self.source.borrow(py);
-        let (candidate, _) = self.candidate(py)?;
-        let candidate = candidate.borrow(py);
-        let successor = candidate.session.borrow(py);
         let task = self.task_use.borrow(py);
-        let issued = candidate.task_use.borrow(py);
+        let resumed = match &task.state()?.phase {
+            TaskUsePhase::ArenaPreparing(original) => *original.clone(),
+            _ => return Err(invalid("source lost its retained learning preparation")),
+        };
+        let candidate_owner = self
+            .candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?
+            .as_ref()
+            .ok_or_else(|| invalid("private retirement lost its complete outcome"))?
+            .owner
+            .as_ref()
+            .map(|owner| owner.clone_ref(py));
+        if let Some(candidate_owner) = candidate_owner {
+            let candidate = candidate_owner.borrow(py);
+            let successor = candidate.session.borrow(py);
+            let issued = candidate.task_use.borrow(py);
+            let mut new = issued.state()?;
+            match new.phase {
+                TaskUsePhase::ArenaPreparing(_) => {
+                    successor.owner()?.abort();
+                    new.phase = TaskUsePhase::Refused;
+                }
+                // A later cold-finalization failure may retain an already
+                // invalidated owner. Its known retirement is never re-executed.
+                TaskUsePhase::Refused => {}
+                _ => {
+                    return Err(invalid(
+                        "private retirement lost its original candidate task",
+                    ))
+                }
+            }
+            successor.learning_preparing.store(false, Ordering::Release);
+        }
+        // Preserve the complete cold outcome, but relinquish actual native/model
+        // owners before resuming source use. Python finalizers run without locks.
+        let retired = self
+            .candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?
+            .as_mut()
+            .ok_or_else(|| invalid("private retirement lost its complete outcome"))?
+            .owner
+            .take();
+        let construction = self.private_restore()?.take();
+        drop(retired);
+        drop(construction);
+        // Released Python owners can run finalizers against the source. Verify
+        // its original live checkpoint again before unwrapping its task phase.
+        self.verify(py, false)?;
         let mut retention = source
             .learning_transition
             .lock()
             .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?;
         let mut completion = self.status_lock()?;
         let mut old = task.state()?;
-        let mut new = issued.state()?;
-        let resumed = match &old.phase {
-            TaskUsePhase::ArenaPreparing(original) => *original.clone(),
-            _ => return Err(invalid("source lost its retained learning preparation")),
-        };
-        let mut owner = successor.owner()?;
-        owner.abort();
+        if !matches!(old.phase, TaskUsePhase::ArenaPreparing(_))
+            || !matches!(*completion, Completion::Retired)
+        {
+            return Err(invalid(
+                "source continuation lost its known candidate retirement",
+            ));
+        }
         old.phase = resumed;
-        new.phase = TaskUsePhase::Refused;
         *completion = Completion::Abandoned;
         source.learning_preparing.store(false, Ordering::Release);
-        successor.learning_preparing.store(false, Ordering::Release);
         let retained = retention.take();
-        drop(owner);
         drop(old);
-        drop(new);
         drop(completion);
         drop(retention);
         drop(retained);
@@ -1078,6 +1205,7 @@ impl PySemanticLearningPhaseTransition {
             Completion::PreparationUnknown => "unknown",
             Completion::Prepared => "prepared",
             Completion::Unknown { .. } => "unknown",
+            Completion::RetirementUnknown | Completion::Retired => "unknown",
             Completion::Committed => "committed",
             Completion::Abandoned => "abandoned",
         })
@@ -1085,7 +1213,7 @@ impl PySemanticLearningPhaseTransition {
 
     #[getter]
     fn checkpoint_sha256(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
-        let (_, checkpoint) = self.candidate(py)?;
+        let checkpoint = self.candidate_checkpoint()?;
         Ok(PyBytes::new(py, &Sha256::digest(&checkpoint)).unbind())
     }
 
@@ -1147,6 +1275,16 @@ impl PySemanticLearningPhaseTransition {
         if preparation_unknown {
             self.resolve_preparation_record(py)?;
             return Ok(None);
+        }
+        let retirement_known = matches!(*self.status_lock()?, Completion::Retired);
+        if retirement_known {
+            self.abandon(py)?;
+            return Ok(None);
+        }
+        if matches!(*self.status_lock()?, Completion::RetirementUnknown) {
+            return Err(invalid(
+                "unknown private consumer retirement must retain the same owners; checkpoint absence cannot resolve or repeat it",
+            ));
         }
         let (resolve, readback_observed) = match &*self.status_lock()? {
             Completion::Unknown {
@@ -1263,7 +1401,7 @@ impl PySemanticTransitionController {
 
     #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
-        snapshot_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, resolve_checkpoint=None,
+        snapshot_restored_model, retire_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, resolve_checkpoint=None,
         max_checkpoint_bytes=None, max_total_checkpoint_bytes=None))]
     #[expect(
         clippy::too_many_arguments,
@@ -1284,6 +1422,7 @@ impl PySemanticTransitionController {
         snapshot_model_state: &Bound<'_, PyAny>,
         restore_model: &Bound<'_, PyAny>,
         snapshot_restored_model: &Bound<'_, PyAny>,
+        retire_restored_model: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
         phase_record_owner: Py<PyAny>,
         phase_record_limits: &Bound<'_, PyAny>,
@@ -1328,6 +1467,7 @@ impl PySemanticTransitionController {
             || !snapshot_model_state.is_callable()
             || !restore_model.is_callable()
             || !snapshot_restored_model.is_callable()
+            || !retire_restored_model.is_callable()
             || !refresh_snapshot.is_callable()
         {
             return Err(invalid("phase preparation requires its original destination, serializers, restore and authority owner"));
@@ -1403,6 +1543,7 @@ impl PySemanticTransitionController {
                 scientific_owner: scientific_owner.clone_ref(py),
                 recipe: recipe.clone_ref(py),
                 restore_model: restore_model.clone().unbind(),
+                retire_restored_model: retire_restored_model.clone().unbind(),
                 source_serializer: snapshot_model_state.clone().unbind(),
                 candidate_serializer: snapshot_restored_model.clone().unbind(),
                 refresh_snapshot: refresh_snapshot.clone().unbind(),
