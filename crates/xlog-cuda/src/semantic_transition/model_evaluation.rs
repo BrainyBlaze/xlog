@@ -37,6 +37,7 @@ pub struct SemanticModelEvaluationResult {
     pub operation_count: u64,
     pub work_bound: u64,
     pub retained_allocation_bytes: u64,
+    pub model_calls: u64,
 }
 
 pub(super) struct EvaluationStorage {
@@ -153,7 +154,7 @@ impl SemanticTransitionSession {
         };
         let bytes = event_capacity
             .checked_mul(size_of::<ModelWorkEvent>() + 3 * size_of::<u64>())
-            .and_then(|bytes| bytes.checked_add(11 * size_of::<u64>()))
+            .and_then(|bytes| bytes.checked_add(12 * size_of::<u64>()))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let mut reservation = self
             .provider
@@ -162,7 +163,7 @@ impl SemanticTransitionSession {
             .map_err(|error| runtime_error("evaluation work reservation", error))?;
         let work = PreparedModelWork::allocate(&self.provider, &mut reservation, event_capacity)?;
         let report = reservation
-            .alloc(11)
+            .alloc(12)
             .map_err(|error| runtime_error("evaluation report allocation", error))?;
         let handle = SemanticModelEvaluation {
             issuer: Arc::clone(&self.publication_issuer),
@@ -350,6 +351,27 @@ impl SemanticTransitionSession {
         Ok(slot)
     }
 
+    /// Same original work registrar and stream as the actual read-only model.
+    pub fn record_evaluation_model_invocation(
+        &mut self,
+        handle: &SemanticModelEvaluation,
+    ) -> Result<(), SemanticTransitionError> {
+        self.evaluation(handle)?;
+        let result = self
+            .steps
+            .get_mut(&handle.token)
+            .expect("checked invocation")
+            .evaluation
+            .as_mut()
+            .expect("checked evaluation")
+            .work
+            .record_invocation(&self.domain, &mut self.poisoned);
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
     /// Freeze the same registrar, validate its genuine output witness, then
     /// observe only after stream completion and exact full-publication recheck.
     /// A failed completion retains every buffer in the Session and quarantines it.
@@ -451,6 +473,11 @@ impl SemanticTransitionSession {
         evaluation
             .work
             .recording
+            .require_model_invocations()
+            .map_err(publication_input_error)?;
+        evaluation
+            .work
+            .recording
             .freeze()
             .map_err(publication_input_error)?;
         evaluation.work.evaluation_recording = false;
@@ -490,7 +517,7 @@ impl SemanticTransitionSession {
         );
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
             // SAFETY: all typed inputs and the complete native result are retained
-            // by this invocation; the kernel writes exactly eleven U64 words.
+            // by this invocation; the kernel writes exactly twelve U64 words.
             unsafe {
                 kernel.clone().launch_in(
                     enqueue,
@@ -534,6 +561,7 @@ impl SemanticTransitionSession {
             operation_count: words[8],
             work_bound: words[9],
             retained_allocation_bytes: words[10],
+            model_calls: words[11],
         };
         evaluation.result = Some(result);
         Ok(result)

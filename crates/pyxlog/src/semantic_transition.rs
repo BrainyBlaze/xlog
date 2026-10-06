@@ -10530,6 +10530,48 @@ impl PySemanticPreparedStep {
         }
     }
 
+    /// Original joined step work and CUDA-executed model-call markers. This is
+    /// not preparation expenditure or a physical memory/resource-unit result.
+    #[getter]
+    fn execution_measurements(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        if session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "execution observation cannot overlap recording, import or retirement",
+            ));
+        }
+        let mut owner = session.owner()?;
+        let binding = self.content_binding_with_owner(py, &owner)?;
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = (&mut owner, binding);
+            Err(invalid(
+                "execution observation requires the semantic-policy feature",
+            ))
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            let (device_work, model_work, native_work, model_calls) = owner
+                .prepared_execution_measurements(&self.inner)
+                .map_err(xlog_err)?;
+            if self.content_binding_with_owner(py, &owner)? != binding {
+                return Err(invalid(
+                    "original operation authority changed during execution observation",
+                ));
+            }
+            let report = PyDict::new(py);
+            report.set_item("device_work", device_work)?;
+            report.set_item("model_work", model_work)?;
+            report.set_item("native_work", native_work)?;
+            report.set_item("model_calls", model_calls)?;
+            Ok(report.unbind())
+        }
+    }
+
     /// Cold original Update observations, including known refusals. Availability
     /// is authored by the original CUDA execution; incomplete accumulators are
     /// never exported as measurement bits. The host-only snapshot grants no
@@ -10742,6 +10784,17 @@ impl PySemanticPreparedStep {
             consumer_stream,
             SemanticTransitionSession::model_work_buffer,
         )
+    }
+
+    /// Enqueue the native call marker at each actual model forward site, inside
+    /// the same bank capture as that forward. It consumes one original event
+    /// slot, not a caller-supplied count or an additional logical work tariff.
+    fn record_model_invocation(&self, py: Python<'_>) -> PyResult<()> {
+        self.session.borrow(py).require_creator()?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        self.content_binding_with_owner(py, &owner)?;
+        owner.record_model_invocation(&self.inner).map_err(xlog_err)
     }
 
     /// Record a bounded device-produced category and reset its original slot.
