@@ -1268,6 +1268,12 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.py()
                 .get_type::<semantic_transition::SemanticCompletedSegmentPending>(),
         )?;
+        m.add(
+            "SemanticModelEvaluationPending",
+            m.py()
+                .get_type::<semantic_transition::model_evaluation::SemanticModelEvaluationPending>(
+                ),
+        )?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticEvaluationCohort>()?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticModelEvaluation>()?;
         m.add_class::<semantic_transition::PySemanticCompletedExecutionObservation>()?;

@@ -26011,29 +26011,7 @@ impl SemanticTransitionSession {
         token: u64,
         consumer_streams: &[u64],
     ) -> Result<(), SemanticTransitionError> {
-        let step = self
-            .steps
-            .get(&token)
-            .ok_or_else(|| publication_input_error("original step has been fully released"))?;
-        let mut streams = consumer_streams.iter().copied().collect::<BTreeSet<_>>();
-        if !step.consumer_streams.is_subset(&streams)
-            || self
-                .readers
-                .get(&token)
-                .is_some_and(|reader| !reader.consumer_streams.is_subset(&streams))
-        {
-            return Err(publication_input_error(
-                "release omits a consumer stream that received a published alias",
-            ));
-        }
-        for &stream in &streams {
-            dlpack_consumer_stream(stream)?;
-        }
-        // Managed tensor producers negotiated readiness onto the legacy default
-        // stream. Join it even when validation rejected a handoff before hashing.
-        if !step.content.is_empty() {
-            streams.insert(1);
-        }
+        let streams = self.step_consumer_streams(token, consumer_streams)?;
         let result = (|| {
             self.stream
                 .context()
@@ -26078,6 +26056,37 @@ impl SemanticTransitionSession {
             self.release_events.clear();
         }
         result
+    }
+
+    fn step_consumer_streams(
+        &self,
+        token: u64,
+        consumer_streams: &[u64],
+    ) -> Result<BTreeSet<u64>, SemanticTransitionError> {
+        let step = self
+            .steps
+            .get(&token)
+            .ok_or_else(|| publication_input_error("original step has been fully released"))?;
+        let mut streams = consumer_streams.iter().copied().collect::<BTreeSet<_>>();
+        if !step.consumer_streams.is_subset(&streams)
+            || self
+                .readers
+                .get(&token)
+                .is_some_and(|reader| !reader.consumer_streams.is_subset(&streams))
+        {
+            return Err(publication_input_error(
+                "release omits a consumer stream that received a published alias",
+            ));
+        }
+        for &stream in &streams {
+            dlpack_consumer_stream(stream)?;
+        }
+        // Managed tensor producers negotiated readiness onto the legacy default
+        // stream. Join it even when validation rejected a handoff before hashing.
+        if !step.content.is_empty() {
+            streams.insert(1);
+        }
+        Ok(streams)
     }
 
     /// Retire all aliases and their final consumer use while keeping the actual
