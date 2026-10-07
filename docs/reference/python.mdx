@@ -350,8 +350,10 @@ that digest to repair a crash window. Neither digest means private Q is accepted
 The canonical loader restores the full original Source Q, or an independently
 sealed Source descendant, preserving Source model and phase. Before allocation
 or the actual factory it installs the cumulative Proposal expense authenticated
-by the signed private Q; the earlier Source snapshot cannot refund it. The
-complete terminal history and separately measured tail usage remain unchanged.
+by the signed private Q; the earlier Source snapshot cannot refund it.
+Source-only cancellation described below instead proves no private entry and
+retains the original Source cumulative expense without manufacturing private Q.
+The complete terminal history and separately measured tail usage remain unchanged.
 The application checks original Source ordinal/request/envelope against its
 trusted fence before Native admission; that check alone never authorizes Source
 execution or retry of the refused target request.
@@ -368,6 +370,11 @@ history; the restored full history additionally contains actual Delivery.
 This property is `None` for terminal Source recovery. Its readonly
 `learning_phase_refusal` is instead
 `(cause, original_result_bytes, full_terminal_history_bytes, signed_terminal_record)`.
+For known Source-evaluation cancellation before private restoration and acceptance,
+the result element is `None`: no scientific comparison was entered. The readonly
+`learning_phase_program` supplies the original frozen program bytes from the same
+verified closure, including this terminal case. Restore that program with its
+actual terminal history; do not call `next_operation` to authorize a refused schedule.
 No scientific comparison or refused attempt is repeated.
 
 After known Delivery, terminal Source resumption or known full restoration, that actual Session owns one
@@ -561,7 +568,7 @@ conflicting effects on aliases refuse the entire private candidate.
 
 `controller.prepare_learning_phase_transition(task_use, *, parent, recipe, source_checkpoint,
 consumer_streams, snapshot, scientific_owner, scientific_refusal_type, source_model, execute_phase_instruction,
-resource_observer, feedback_interventions, learning_grant_ref,
+release_cancelled_phase_execution, resource_observer, feedback_interventions, learning_grant_ref,
 checkpoint_destination, snapshot_model_state, restore_model,
 snapshot_restored_model, retire_restored_model, retire_source_model,
 refresh_snapshot, phase_record_owner, phase_record_limits,
@@ -578,7 +585,8 @@ grant covering the complete dependency closure; fast-adaptation permission alone
 cannot authorize this durable full checkpoint. Fresh publication, data-use,
 retention and revocation checks remain independent of scientific acceptance.
 The pending owner retains the exact original `source_model`, callable
-`execute_phase_instruction`, named `xlog.resource_observer.v2` capsule and
+`execute_phase_instruction`, callable `release_cancelled_phase_execution`,
+named `xlog.resource_observer.v2` capsule and
 `feedback_interventions` tuple before entering the original issuer/store callbacks.
 The tuple contains exactly two builtin bytes objects in real/control order, each
 `b"xlog.learning-feedback-intervention.v1\0"` followed by one byte: `0` for
@@ -921,17 +929,44 @@ slot 2 after it, under the same original issuer, hash chain and byte/count bound
 Its payload is `xlog.learning-phase.refusal.v1`, a zero byte, then ten U64LE
 length-prefixed fields: terminal cause, full original Source Q, full selected
 private Q, original prefix history, original comparison result, full terminal
-history, original Delivery entry material, canonical reason, verified Source
-authority snapshot, and three U64LE actual resource-usage words. Signed-chain
+history, original terminal operation entry material, canonical reason, verified
+Source authority snapshot, and three U64LE actual resource-usage words. Signed-chain
 slots are distinct from frozen operation ordinals. Kind 3 never authorizes the
 selection of private Q or acceptance of its scientific phase. Known Source
 resumption instead retains distinct Source-continuation checkpoint custody.
 
+Known native cancellation of a Source evaluation before the first private restore
+uses that same kind 3 and canonical loader, with cause
+`source-evaluation-cancelled`. The private-checkpoint and comparison-result fields
+have zero length to bind their proven absence, not a copied Source masquerading
+as private Q or an empty scientific result. The entry material and one terminal
+history record identify the actual original Source evaluation ordinal and branch,
+not Delivery. The reason retains its original native parent and actual cancelled
+work/calls. After known evaluation cleanup, Native calls the original captured
+`release_cancelled_phase_execution() -> None` once to release the failed execution
+frames retained by the Runtime and store. It opens region 3 of the same original
+report through the actual Source TaskUse cold callback scope. The callback must
+close that region with its actual work; it must not retire the Source model or
+receipt, execute another instruction, restore a model, or repeat cancellation.
+Unknown callback completion or region closure retains the original frame without
+another call. Native then drops its own numerical frames and verifies and
+serializes Source in region 4 of that report, before its sole observer finish.
+Ordinary Source evaluation leaves these two terminal-only regions unentered and
+cancels them before closing its original report. Private evaluation retains its
+original three regions. The retained history stops there; no later operation,
+model factory or acceptance is entered.
+The cumulative Proposal expense remains the genuine Source expense, separately
+from the measured cancelled evaluation. Private-branch and numerical-segment
+cancellation do not acquire this Source-only authority.
+
 `pending.refusal_outcome` is `None` until exact terminal readback, then the readonly
 tuple `(cause, original_result_bytes, full_history_bytes, signed_terminal_record)`.
+Only the proven Source-evaluation cancellation above has `original_result=None`;
+all complete-prefix causes retain their exact original comparison bytes.
 `resolve_checkpoint()` or `continue_preparation()` continues that same retained
 refusal without another scientific comparison, model call, retirement or write.
-`refused` means full known private release, terminal readback and Source resumption.
+`refused` means known evaluation cleanup with no private entry, or full known private
+release, followed by terminal readback and Source resumption.
 Only then `pending.refusal_checkpoint_custody` returns readonly
 `(issuer_bytes32, origin_tuple3)` from that same actual Source Session; before it
 returns `None`. The origin is `(phase_id, kind3_record_sha256, source_Q_sha256)`.

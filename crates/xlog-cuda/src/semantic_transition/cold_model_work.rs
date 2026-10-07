@@ -639,9 +639,10 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
-    /// The phase calls this only after native cancellation or known complete
-    /// private retirement has joined consumers. The original report and physical
-    /// interval remain open; entered, failed or unknown regions stay unchanged.
+    /// The phase calls this only after known numerical completion, native
+    /// cancellation or complete private retirement has joined consumers. The
+    /// original report and physical interval remain open; entered, failed or
+    /// unknown regions stay unchanged, including at the report's full extent.
     pub fn cancel_unentered_cold_model_work_regions(
         &mut self,
         handle: &SemanticColdModelWork,
@@ -649,7 +650,7 @@ impl SemanticTransitionSession {
     ) -> Result<(), SemanticTransitionError> {
         let storage = self.cold_model_work(handle)?;
         if storage.state != RecordingState::Recording
-            || before >= storage.regions.len()
+            || before > storage.regions.len()
             || storage.regions[..before]
                 .iter()
                 .any(|state| !matches!(state, RecordingState::Waiting | RecordingState::Closed))

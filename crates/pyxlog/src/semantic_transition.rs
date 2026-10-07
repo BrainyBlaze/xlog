@@ -8357,6 +8357,28 @@ impl PySemanticTransitionRestoredCheckpoint {
             .transpose()
     }
 
+    /// Original frozen program of the same known accepted or terminal custody.
+    #[getter]
+    fn learning_phase_program(&self, py: Python<'_>) -> PyResult<Option<Py<PyBytes>>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        if session.learning_preparing.load(Ordering::Acquire) {
+            return Err(invalid(
+                "private or unknown Source cannot expose known scientific program custody",
+            ));
+        }
+        let program = session
+            .checkpoint_custody()?
+            .as_ref()
+            .map(|custody| Arc::clone(&custody.closure.program));
+        if program.as_ref().is_some_and(|program| program.is_empty()) {
+            return Err(invalid(
+                "authenticated phase custody lost its original frozen program",
+            ));
+        }
+        Ok(program.map(|program| PyBytes::new(py, &program).unbind()))
+    }
+
     /// Original terminal disposition is separate from accepted phase custody.
     #[getter]
     fn learning_phase_refusal(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {

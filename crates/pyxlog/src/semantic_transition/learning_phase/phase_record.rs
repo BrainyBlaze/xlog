@@ -238,6 +238,12 @@ fn append_fields(target: &mut Vec<u8>, fields: &[&[u8]]) -> PyResult<()> {
     Ok(())
 }
 
+pub(super) fn refusal_payload(fields: [&[u8]; 10]) -> PyResult<Arc<[u8]>> {
+    let mut payload = b"xlog.learning-phase.refusal.v1\0".to_vec();
+    append_fields(&mut payload, &fields)?;
+    Ok(payload.into())
+}
+
 impl PhaseRecords {
     pub(super) fn new(fields: &[&[u8]], limits: RecordLimits) -> PyResult<Self> {
         let input_bytes = fields
