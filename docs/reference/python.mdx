@@ -651,6 +651,17 @@ treated as completion. Unknown callbacks or resource readback retain their actua
 owners and never replay evaluation or serialization. Final candidate handoff,
 late scientific acceptance, delivery and fresh recovery remain required.
 
+The final private candidate retains those exact selected real owners and the
+unchanged saved full checkpoint, only after known checkpoint accounting, physical
+release and the original sole delivery entry. The native checkpoint issuer is
+shared with canonical restoration; it verifies the real Session, controller,
+task issuance and publication without repeating a model factory or exposing a
+Python constructor. Final recompute state, task capsule, Session configuration
+and initial prefill must still match the full checkpoint before retention.
+The initial restored publication is not substituted for the learned successor.
+This handoff alone does not measure the subsequent model verification callbacks
+or implement the budgeted delivery tail.
+
 ABI version 2 extends the same observer with `bind_step_capture` and
 `read_step_interval`. Registration passes the actual capture stream immediately
 after enqueueing the admission or release kernel, inside its original capture.

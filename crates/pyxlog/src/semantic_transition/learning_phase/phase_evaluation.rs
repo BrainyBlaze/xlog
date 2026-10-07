@@ -955,7 +955,7 @@ impl PySemanticLearningPhaseTransition {
                 .begin_cold_model_work(&work)
                 .map_err(xlog_err)?;
             if branch == "source" {
-                verify_original_source(py, &task, &parent, &manifest, &saved_snapshot)?;
+                verify_phase_checkpoint(py, &task, &parent, &manifest, &saved_snapshot)?;
             } else {
                 let custody = source
                     .owner()?
@@ -1086,7 +1086,7 @@ impl PySemanticLearningPhaseTransition {
         let cohort = cohort.extract::<PyRef<'_, PySemanticEvaluationCohort>>()?;
         let measured = receipt.require_phase_observation(py, &parent, &cohort)?;
         if branch == "source" {
-            verify_original_source(py, &task, &parent, &manifest, &saved_snapshot)?;
+            verify_phase_checkpoint(py, &task, &parent, &manifest, &saved_snapshot)?;
         }
         let (native, peak) = self.finish_evaluation_expense(py)?;
         let work = measured
