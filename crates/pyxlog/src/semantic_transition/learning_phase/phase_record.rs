@@ -96,13 +96,20 @@ impl<'a> RecordReader<'a> {
 /// Authenticate the complete original lifecycle before any replacement CUDA
 /// owner exists. The issuer and limits come from the independent consumer pin,
 /// never from an untrusted record header or a newly generated signing key.
-pub(super) fn delivery_payloads<'a>(
-    records: [&'a [u8]; 3],
+pub(super) struct LifecyclePayloads<'a> {
+    pub(super) admission: &'a [u8],
+    pub(super) preparation: Option<&'a [u8]>,
+    pub(super) completion: &'a [u8],
+    pub(super) refused: bool,
+}
+
+pub(super) fn lifecycle_payloads<'a>(
+    records: &[&'a [u8]],
     issuer: [u8; 32],
     phase_id: [u8; 32],
     limits: RecordLimits,
-) -> PyResult<[&'a [u8]; 3]> {
-    if limits.records < 3 {
+) -> PyResult<LifecyclePayloads<'a>> {
+    if limits.records < 3 || !matches!(records.len(), 2 | 3) {
         return Err(invalid(
             "original phase bounds cannot contain the complete lifecycle",
         ));
@@ -121,7 +128,8 @@ pub(super) fn delivery_payloads<'a>(
     let mut previous = [0u8; 32];
     let mut total = 0u64;
     let mut payloads = [&[][..]; 3];
-    for (ordinal, bytes) in records.into_iter().enumerate() {
+    let mut kinds = [0u8; 3];
+    for (ordinal, bytes) in records.iter().copied().enumerate() {
         total = total
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| invalid("original phase record total overflowed"))?;
@@ -139,9 +147,11 @@ pub(super) fn delivery_payloads<'a>(
         key.verify_strict(message, &signature)
             .map_err(|_| invalid("signed phase record differs from its independent issuer"))?;
         let mut reader = RecordReader(message);
-        if reader.take(RECORD_DOMAIN.len())? != RECORD_DOMAIN
-            || reader.take(1)? != [ordinal as u8]
-            || reader.take(32)? != phase_id
+        if reader.take(RECORD_DOMAIN.len())? != RECORD_DOMAIN {
+            return Err(invalid("signed phase record has another original domain"));
+        }
+        kinds[ordinal] = reader.take(1)?[0];
+        if reader.take(32)? != phase_id
             || reader.take(32)? != issuer
             || reader.word()? != ordinal as u64
             || reader.take(32)? != previous
@@ -156,6 +166,15 @@ pub(super) fn delivery_payloads<'a>(
         reader.finish()?;
         previous = Sha256::digest(bytes).into();
     }
+    let refused = match &kinds[..records.len()] {
+        [0, 1, 2] => false,
+        [0, 3] | [0, 1, 3] => true,
+        _ => {
+            return Err(invalid(
+                "signed phase chain changed its original lifecycle order",
+            ))
+        }
+    };
     let admission = payloads[0];
     let digest: [u8; 32] = Sha256::digest(admission).into();
     if !admission.starts_with(INPUT_DOMAIN) || digest != phase_id {
@@ -173,7 +192,12 @@ pub(super) fn delivery_payloads<'a>(
         ));
     }
     inputs.finish()?;
-    Ok(payloads)
+    Ok(LifecyclePayloads {
+        admission: payloads[0],
+        preparation: (records.len() == 3).then_some(payloads[1]),
+        completion: payloads[records.len() - 1],
+        refused,
+    })
 }
 
 pub(super) struct RecordAttempt {
