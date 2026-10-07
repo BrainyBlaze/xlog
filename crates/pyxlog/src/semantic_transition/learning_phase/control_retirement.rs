@@ -78,6 +78,9 @@ impl PySemanticLearningPhaseTransition {
             self.prepare_private_trajectory(py, pending, "control")?;
             self.execute_private_numerical_sequence(py, pending, "control")?;
             self.execute_private_evaluations(py, "control")?;
+            if self.cancelled_evaluation_refusal_retained()? {
+                return Ok(());
+            }
             self.execute_private_checkpoint(py, "control")?;
         }
         self.execute_control_retirement(py)

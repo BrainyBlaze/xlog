@@ -59,7 +59,7 @@ pub(super) struct DeliveryExpense {
 
 impl PySemanticLearningPhaseTransition {
     pub(super) fn terminal_refusal_retained(&self) -> PyResult<bool> {
-        Ok(self.cancelled_source_refusal_retained()?
+        Ok(self.cancelled_evaluation_refusal_retained()?
             || self
                 .delivery_expense()?
                 .as_ref()
@@ -120,8 +120,8 @@ impl PySemanticLearningPhaseTransition {
         py: Python<'_>,
         cause: &'static str,
     ) -> PyResult<()> {
-        if self.cancelled_source_refusal_retained()? {
-            return self.finish_cancelled_source_evaluation(py);
+        if self.cancelled_evaluation_refusal_retained()? {
+            return self.finish_cancelled_phase_evaluation(py);
         }
         if matches!(*self.status_lock()?, Completion::Refused) {
             return Ok(());
@@ -275,8 +275,8 @@ impl PySemanticLearningPhaseTransition {
                 ))
             }
         };
-        if self.cancelled_source_refusal_retained()? {
-            let closure = self.cancelled_source_closure(py)?;
+        if self.cancelled_evaluation_refusal_retained()? {
+            let closure = self.cancelled_evaluation_closure(py)?;
             self.install_source_checkpoint_custody(py, closure)?;
         } else {
             self.install_terminal_source_custody(py)?;
@@ -824,8 +824,8 @@ impl PySemanticLearningPhaseTransition {
         let Some(record) = record else {
             return Ok(None);
         };
-        if self.cancelled_source_refusal_retained()? {
-            return self.cancelled_source_outcome(py, &record).map(Some);
+        if self.cancelled_evaluation_refusal_retained()? {
+            return self.cancelled_evaluation_outcome(py, &record).map(Some);
         }
         let retained = self.delivery_expense()?;
         let tail = retained
