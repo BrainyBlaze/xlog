@@ -290,6 +290,7 @@ impl PySemanticTransitionController {
         let work = retained_work(py, &self.session.borrow(py))?;
         let task = work.borrow(py).parent.borrow(py).task_use.clone_ref(py);
         self.require_issued(&task.borrow(py))?;
-        task.borrow(py).active_cold_model_work(py)
+        let original = task.borrow(py).active_cold_model_work(py);
+        original
     }
 }

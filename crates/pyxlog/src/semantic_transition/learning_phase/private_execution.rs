@@ -468,11 +468,8 @@ impl PySemanticLearningPhaseTransition {
                     "private preparation callback changed its original build position",
                 ));
             }
-            (
-                group.restored.borrow(py).parent.clone_ref(py),
-                group.ordinal,
-                previous,
-            )
+            let parent = group.restored.borrow(py).parent.clone_ref(py);
+            (parent, group.ordinal, previous)
         };
         self.finish_private_cold_report(py, previous)?;
         self.issue_private_cold_callback(
