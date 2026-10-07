@@ -1006,6 +1006,7 @@ impl PySemanticLearningPhaseTransition {
         {
             self.execute_control_branch(py, pending)?;
             self.prepare_private_trajectory(py, pending, "real")?;
+            self.execute_private_group(py, "real")?;
             return self.finish_preparation(py);
         }
         #[cfg(not(feature = "semantic-policy"))]
@@ -2078,6 +2079,7 @@ impl PySemanticLearningPhaseTransition {
                 pending
                     .execute_control_branch(py, &slf)
                     .and_then(|()| pending.prepare_private_trajectory(py, &slf, "real"))
+                    .and_then(|()| pending.execute_private_group(py, "real"))
                     .and_then(|()| pending.finish_preparation(py))
             }
             #[cfg(not(feature = "semantic-policy"))]

@@ -664,16 +664,17 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
-    pub(super) fn control_execution_input(
+    pub(super) fn private_execution_input(
         &self,
         py: Python<'_>,
+        branch: &'static str,
     ) -> PyResult<(Py<PySemanticTransitionRestoredCheckpoint>, u64)> {
         self.require_known_private_restore(py)?;
         let retained = self.trajectory_start()?;
         let operation = retained.as_ref().expect("retained original trajectory");
-        if operation.branch != "control" {
+        if operation.branch != branch {
             return Err(invalid(
-                "control numerical execution requires its original control restore",
+                "private numerical execution requires its original branch restore",
             ));
         }
         if !operation.recorded || operation.report.is_none() || !operation.child_joined {
