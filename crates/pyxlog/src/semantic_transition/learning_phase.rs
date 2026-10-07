@@ -1005,6 +1005,7 @@ impl PySemanticLearningPhaseTransition {
         #[cfg(feature = "semantic-policy")]
         {
             self.execute_control_branch(py, pending)?;
+            self.prepare_private_trajectory(py, pending, "real")?;
             return self.finish_preparation(py);
         }
         #[cfg(not(feature = "semantic-policy"))]
@@ -2011,7 +2012,7 @@ impl PySemanticLearningPhaseTransition {
         if entered && candidate_entered {
             #[cfg(feature = "semantic-policy")]
             if !final_candidate_known && !pending.control_retirement_retained()? {
-                pending.require_known_control_restore(py)?;
+                pending.require_known_private_restore(py)?;
             }
             if final_candidate_known {
                 // The actual canonical save proves known complete construction,
@@ -2076,6 +2077,7 @@ impl PySemanticLearningPhaseTransition {
             {
                 pending
                     .execute_control_branch(py, &slf)
+                    .and_then(|()| pending.prepare_private_trajectory(py, &slf, "real"))
                     .and_then(|()| pending.finish_preparation(py))
             }
             #[cfg(not(feature = "semantic-policy"))]
