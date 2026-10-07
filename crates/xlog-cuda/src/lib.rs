@@ -105,7 +105,9 @@ pub use semantic_transition::{
     SEMANTIC_TRANSITION_GENERATION,
 };
 #[cfg(feature = "semantic-policy")]
-pub use semantic_transition::{SemanticColdModelWork, SemanticColdModelWorkResult};
+pub use semantic_transition::{
+    SemanticColdModelWork, SemanticColdModelWorkResult, SemanticColdNativeWork,
+};
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{
     SemanticCompletedActionComponentMaterial, SemanticCompletedActionLaneMaterial,

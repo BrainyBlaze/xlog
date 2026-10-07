@@ -12,7 +12,9 @@ mod learning_phase;
 mod model_evaluation;
 mod prepared_replay;
 #[cfg(feature = "semantic-policy")]
-pub use cold_model_work::{SemanticColdModelWork, SemanticColdModelWorkResult};
+pub use cold_model_work::{
+    SemanticColdModelWork, SemanticColdModelWorkResult, SemanticColdNativeWork,
+};
 pub use learning_phase::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseRecord,
     SemanticLearningPhaseTransition,

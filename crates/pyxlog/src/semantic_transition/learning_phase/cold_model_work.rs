@@ -7,6 +7,9 @@ use xlog_cuda::SemanticColdModelWork;
 #[pyclass(name = "SemanticColdModelWork", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticColdModelWork {
     pub(super) parent: Py<PySemanticPublishedParent>,
+    // The work may precede child allocation. Its original allocation/report
+    // reader stays held while the actual child owns the model callback.
+    pub(super) reader: Py<PySemanticPublishedParent>,
     pub(super) inner: SemanticColdModelWork,
     pub(super) active: AtomicBool,
 }
@@ -37,7 +40,7 @@ impl PySemanticColdModelWork {
     #[getter]
     fn consumer_stream(&self, py: Python<'_>) -> PyResult<u64> {
         self.check(py)?;
-        self.parent
+        self.reader
             .borrow(py)
             .session
             .borrow(py)
@@ -55,7 +58,7 @@ impl PySemanticColdModelWork {
     ) -> PyResult<Py<PyAny>> {
         self.check(py)?;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
-        let parent = self.parent.borrow(py);
+        let parent = self.reader.borrow(py);
         let source = parent.session.borrow(py);
         let tensor = source
             .owner()?
@@ -68,7 +71,7 @@ impl PySemanticColdModelWork {
     /// Attach the existing recorder once, even for a CPU/meta-only callback.
     fn begin(&self, py: Python<'_>) -> PyResult<()> {
         self.check(py)?;
-        self.parent
+        self.reader
             .borrow(py)
             .session
             .borrow(py)
@@ -81,7 +84,7 @@ impl PySemanticColdModelWork {
     /// allocator completion; the enclosing native operation joins those later.
     fn end(&self, py: Python<'_>) -> PyResult<()> {
         self.check(py)?;
-        self.parent
+        self.reader
             .borrow(py)
             .session
             .borrow(py)
@@ -92,7 +95,7 @@ impl PySemanticColdModelWork {
 
     fn fail(&self, py: Python<'_>) -> PyResult<()> {
         self.check(py)?;
-        self.parent
+        self.reader
             .borrow(py)
             .session
             .borrow(py)
@@ -103,7 +106,7 @@ impl PySemanticColdModelWork {
 
     fn record_model_invocation(&self, py: Python<'_>) -> PyResult<()> {
         self.check(py)?;
-        self.parent
+        self.reader
             .borrow(py)
             .session
             .borrow(py)
@@ -140,7 +143,7 @@ impl PySemanticColdModelWork {
         device_produced: bool,
     ) -> PyResult<usize> {
         self.check(py)?;
-        let parent = self.parent.borrow(py);
+        let parent = self.reader.borrow(py);
         let source = parent.session.borrow(py);
         let mut owner = source.owner()?;
         let result = (|| {
@@ -158,13 +161,13 @@ impl PySemanticColdModelWork {
 
 /// Visibility belongs to the actual callback's Session, not the source phase's
 /// first registrar. Private restored Sessions use the same callback boundary.
-pub(super) struct ColdCallbackScope<'a> {
+pub(in crate::semantic_transition) struct ColdCallbackScope<'a> {
     active: &'a AtomicBool,
     session: &'a PySemanticTransitionSession,
 }
 
 impl<'a> ColdCallbackScope<'a> {
-    pub(super) fn enter(
+    pub(in crate::semantic_transition) fn enter(
         py: Python<'_>,
         session: &'a PySemanticTransitionSession,
         work: &'a PySemanticColdModelWork,

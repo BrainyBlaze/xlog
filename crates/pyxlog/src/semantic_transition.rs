@@ -227,7 +227,7 @@ impl PySemanticTransitionSession {
         memory_bytes: u64,
         proposal_expense: Arc<Mutex<ProposalExpense>>,
         checkpoint_sources: Arc<Mutex<CheckpointSources>>,
-        allocation_domain: Option<(Arc<CudaKernelProvider>, ResidentExecutionDomain)>,
+        allocation_domain: Option<CheckpointAllocationDomain>,
     ) -> PyResult<Self> {
         let editable_source = cold_task::editable_source_from_admission(&records)?;
         let native_capacities = SemanticHypergraphCapacities::try_new(
@@ -243,8 +243,16 @@ impl PySemanticTransitionSession {
             max_references: admission_limits.2,
             max_utf8_bytes: admission_limits.3,
         };
+        #[cfg(feature = "semantic-policy")]
+        let mut cold_work = None;
         let (provider, original_domain) = match allocation_domain {
-            Some((provider, domain)) => {
+            Some(allocation) => {
+                let provider = allocation.provider;
+                let domain = allocation.domain;
+                #[cfg(feature = "semantic-policy")]
+                {
+                    cold_work = allocation.cold_work;
+                }
                 if provider.device().ordinal() != device_ordinal
                     || provider.memory().budget_limit_bytes() != memory_bytes
                 {
@@ -277,9 +285,20 @@ impl PySemanticTransitionSession {
         let domain = provider
             .bind_resident_execution_domain(runtime, stream_id, stream)
             .map_err(xlog_err)?;
+        #[cfg(not(feature = "semantic-policy"))]
         let mut graph = provider
             .allocate_semantic_hypergraph(&domain, native_capacities)
             .map_err(xlog_err)?;
+        #[cfg(feature = "semantic-policy")]
+        let mut graph = match cold_work {
+            Some(work) => provider.allocate_semantic_hypergraph_for_cold_work(
+                &domain,
+                native_capacities,
+                work,
+            ),
+            None => provider.allocate_semantic_hypergraph(&domain, native_capacities),
+        }
+        .map_err(xlog_err)?;
         graph
             .admit_records(graph.empty_root(), records, limits)
             .map_err(xlog_err)?;
@@ -322,6 +341,13 @@ struct SemanticCheckpointManifest {
     task: Vec<u8>,
     session: Vec<u8>,
     initial_prefill: Vec<u8>,
+}
+
+struct CheckpointAllocationDomain {
+    provider: Arc<CudaKernelProvider>,
+    domain: ResidentExecutionDomain,
+    #[cfg(feature = "semantic-policy")]
+    cold_work: Option<xlog_cuda::SemanticColdNativeWork>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1584,7 +1610,7 @@ impl PySemanticTransitionSession {
         shared_checkpoint_sources: Option<&Arc<Mutex<CheckpointSources>>>,
         learning_owner: Option<&Py<learning_phase::PySemanticLearningPhaseTransition>>,
     ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
-        if learning_transition.is_some() != learning_owner.is_some() {
+        if learning_transition.is_some() && learning_owner.is_none() {
             return Err(invalid(
                 "private phase restoration requires its original native pending owner",
             ));
@@ -1592,11 +1618,11 @@ impl PySemanticTransitionSession {
         if !checkpoint.is_exact_instance_of::<PyBytes>() {
             return Err(invalid("checkpoint restore requires exact builtin bytes"));
         }
-        if let (Some(transition), Some(pending)) = (learning_transition, learning_owner) {
+        if let Some(pending) = learning_owner {
             pending.borrow(py).require_restore_admission(
                 py,
                 checkpoint.cast::<PyBytes>()?.as_bytes(),
-                transition,
+                learning_transition,
             )?;
         }
         if !restore_model.is_callable() {
@@ -1778,8 +1804,14 @@ impl PySemanticTransitionSession {
         session
             .borrow(py)
             .learning_preparing
-            .store(learning_transition.is_some(), Ordering::Release);
+            .store(learning_owner.is_some(), Ordering::Release);
         if let Some(pending) = learning_owner {
+            *session
+                .borrow(py)
+                .learning_transition
+                .lock()
+                .map_err(|_| invalid("learning-phase retention mutex is poisoned"))? =
+                Some(pending.clone_ref(py));
             pending.borrow(py).retain_restore_session(py, &session)?;
         }
         let native_binding = (|| -> PyResult<TaskCheckpointBinding> {
@@ -1853,7 +1885,7 @@ impl PySemanticTransitionSession {
                 authority,
                 checkpoint: seed,
                 state: Mutex::new(TaskUseState {
-                    phase: if learning_transition.is_some() {
+                    phase: if learning_owner.is_some() {
                         TaskUsePhase::ArenaPreparing(Box::new(task_phase))
                     } else {
                         task_phase
@@ -1901,6 +1933,25 @@ impl PySemanticTransitionSession {
             let issued = task_use.borrow(py);
             let acquired = parent.borrow(py);
             let _reads = ImportReadScope::checkpoint(&restored, &issued, &acquired, py)?;
+            #[cfg(feature = "semantic-policy")]
+            let callback_work = learning_owner
+                .map(|pending| pending.borrow(py).restore_callback_work(py, &parent))
+                .transpose()?;
+            #[cfg(feature = "semantic-policy")]
+            let callback_work_owner = callback_work.as_ref().map(|work| work.borrow(py));
+            #[cfg(feature = "semantic-policy")]
+            let _callback = callback_work_owner
+                .as_ref()
+                .zip(callback_work.as_ref())
+                .map(|(work, retained)| {
+                    learning_phase::cold_model_work::ColdCallbackScope::enter(
+                        py,
+                        &restored,
+                        work,
+                        retained.clone_ref(py),
+                    )
+                })
+                .transpose()?;
             restore_model
                 .call1((
                     controller.clone_ref(py),
@@ -11087,10 +11138,15 @@ impl PySemanticTensorContentWitness {
             let ContentStepOwner::Published(parent) = &self.parent else {
                 return Err(invalid("source feedback projection requires its original acquired source, not a private prepared step"));
             };
-            pending
-                .borrow(py)
-                .require_source_feedback_projection(py, &session, parent)?;
-            Ok(None)
+            let pending = pending.borrow(py);
+            if pending.is_original_source(py, &session) {
+                pending.require_source_feedback_projection(py, &session, parent)?;
+                Ok(None)
+            } else {
+                pending
+                    .private_restore_feedback_projection(py, &session, parent)
+                    .map(Some)
+            }
         }
     }
 

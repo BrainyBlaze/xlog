@@ -1,7 +1,7 @@
 //! Cold phase ownership through the canonical checkpoint and restoration path.
 
 use super::*;
-use pyo3::types::{PyCFunction, PyCapsule, PyCapsuleMethods};
+use pyo3::types::{PyCapsule, PyCapsuleMethods};
 use xlog_cuda::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseTransition,
 };
@@ -18,6 +18,10 @@ use cold_model_work::{ColdCallbackScope, PySemanticColdModelWork};
 mod source_execution;
 #[cfg(feature = "semantic-policy")]
 use source_execution::SourceEvaluation;
+#[cfg(feature = "semantic-policy")]
+mod private_restore;
+#[cfg(feature = "semantic-policy")]
+use private_restore::PrivateTrajectoryStart;
 
 struct PhaseRecordStore {
     pin: Py<PyAny>,
@@ -371,6 +375,8 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     source_evaluations: Mutex<Vec<SourceEvaluation>>,
     #[cfg(feature = "semantic-policy")]
     source_evaluation_active: AtomicBool,
+    #[cfg(feature = "semantic-policy")]
+    private_trajectory_start: Mutex<Option<PrivateTrajectoryStart>>,
     candidate_entered: AtomicBool,
     completion: Mutex<Completion>,
     operating: AtomicBool,
@@ -741,8 +747,6 @@ impl PySemanticLearningPhaseTransition {
         let task = self.task_use.borrow(py);
         let acquired = self.parent.borrow(py);
         let checkpoint = self.source_checkpoint.as_slice();
-        let source_checkpoint = PyBytes::new(py, checkpoint);
-        let source_checkpoint = source_checkpoint.as_any();
         let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
         let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
         let inputs = &self.preparation_inputs;
@@ -753,28 +757,9 @@ impl PySemanticLearningPhaseTransition {
         let initial = AuthoritySnapshot::parse(&inputs.snapshot)?;
         let prior_snapshot = &inputs.prior_snapshot;
         let scientific_owner = &self.scientific_owner;
-        let recipe = &self.recipe;
         let snapshot_model_state = self.source_serializer.bind(py);
-        let snapshot_restored_model = self.candidate_serializer.bind(py);
-        let restore_model = self.restore_model.bind(py);
         let refresh_snapshot = self.refresh_snapshot.bind(py);
         let learning_grant_ref = self.grant_reference.as_str();
-        let resolve_checkpoint = inputs
-            .resolve_checkpoint
-            .as_ref()
-            .map(|value| value.bind(py));
-        let checkpoint_limit = inputs
-            .max_checkpoint_bytes
-            .as_ref()
-            .map(|value| value.python_value(py))
-            .transpose()?;
-        let total_limit = inputs
-            .max_total_checkpoint_bytes
-            .as_ref()
-            .map(|value| value.python_value(py))
-            .transpose()?;
-        let max_checkpoint_bytes = checkpoint_limit.as_ref().map(|value| value.bind(py));
-        let max_total_checkpoint_bytes = total_limit.as_ref().map(|value| value.bind(py));
         // Continuation has a distinct, fresh authority admission. A confirmed
         // old issuer or record cannot extend the original data-use grants.
         let refreshed = refresh_snapshot.call0()?;
@@ -844,6 +829,7 @@ impl PySemanticLearningPhaseTransition {
                     py,
                     PySemanticColdModelWork {
                         parent: self.parent.clone_ref(py),
+                        reader: self.parent.clone_ref(py),
                         inner,
                         active: AtomicBool::new(false),
                     },
@@ -919,12 +905,12 @@ impl PySemanticLearningPhaseTransition {
                 let mut owner = source.owner()?;
                 let lease = acquired.lease()?;
                 let work = work.borrow(py);
-                if entered {
-                    owner.resolve_cold_model_work(&lease, &work.inner)
-                } else {
-                    owner.finish_cold_model_work(&lease, &work.inner, &streams)
-                }
-                .map_err(xlog_err)?
+                // Entering preparation is not proof that this report reached
+                // submission. Native dispatches from the original report's
+                // actual state without re-entering the model callback.
+                owner
+                    .finish_cold_model_work(&lease, &work.inner, &streams)
+                    .map_err(xlog_err)?
             };
             // Retain the actual components before refusal. Other source S
             // still requires its genuine producers, never substituted zeroes.
@@ -991,66 +977,18 @@ impl PySemanticLearningPhaseTransition {
             self.record_source_preparation(py, peak)?;
             self.execute_source_evaluations(py)?;
         }
-        self.candidate_entered.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| invalid("private candidate preparation has already entered execution; retain its original outcome"))?;
-        let mut transition = recipe.borrow(py).inner.clone();
-        // Private state changes consume the actual native Admission, not an
-        // early scientific success or a fabricated acceptance preimage.
-        transition.admission = self.records()?.confirmed_admission()?.to_vec();
-        let fresh = refresh_snapshot.call0()?;
-        let current =
-            AuthoritySnapshot::parse(&ColdValue::read(&fresh, &mut (16 * 1024 * 1024), 0)?)?;
-        current.newer_than(&authority)?;
-        check_learning_grant(&task, learning_grant_ref, &current)?;
-        task.state()?.snapshot = initial.clone();
-        let candidate = PySemanticTransitionSession::restore_checkpoint_impl(
-            py,
-            source_checkpoint,
-            source.device_ordinal,
-            &fresh,
-            restore_model,
-            task.checkpoint.training_domain.python_value(py)?.bind(py),
-            None,
-            Some(&transition),
-            resolve_checkpoint,
-            max_checkpoint_bytes,
-            max_total_checkpoint_bytes,
-            Some(refresh_snapshot),
-            Some(&task.checkpoint.proposal_expense),
-            Some(&task.checkpoint.checkpoint_sources),
-            Some(pending),
-        )?;
-        let candidate_model = candidate.borrow(py).model.clone_ref(py);
-        let serializer = snapshot_restored_model.clone().unbind();
-        let snapshot_candidate = PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
-            serializer
-                .bind(args.py())
-                .call1((candidate_model.clone_ref(args.py()),))
-                .map(Bound::unbind)
-        })?;
-        let fresh = refresh_snapshot.call0()?;
-        let checkpoint = {
-            let new = candidate.borrow(py);
-            let blob = new.controller.borrow(py).save_checkpoint(
-                py,
-                &new.task_use.borrow(py),
-                &new.parent.borrow(py),
-                consumer_streams,
-                &fresh,
-                snapshot_candidate.as_any(),
-            )?;
-            blob.bind(py).as_bytes().to_vec()
-        };
-        *self
-            .candidate
-            .lock()
-            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))? =
-            Some(PreparedCandidate {
-                owner: Some(candidate),
-                checkpoint: checkpoint.into(),
-                preparation_outcome: None,
-            });
-        self.finish_preparation(py)
+        #[cfg(feature = "semantic-policy")]
+        {
+            self.prepare_control_trajectory(py, pending)?;
+            return self.finish_preparation(py);
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = pending;
+            Err(invalid(
+                "private scientific trajectory execution requires semantic-policy",
+            ))
+        }
     }
 
     fn preparation_outcome(&self) -> PyResult<Arc<[u8]>> {
@@ -1092,7 +1030,6 @@ impl PySemanticLearningPhaseTransition {
     fn finish_scientific_acceptance(&self, py: Python<'_>) -> PyResult<()> {
         if self.acceptance()?.is_none() {
             self.records()?.require_preparation_admission()?;
-            self.verify(py, true)?;
             self.preparation_inputs
                 .require_program(py, &self.scientific_owner)?;
             // The scientific owner validates its entire measured prefix when
@@ -1105,6 +1042,9 @@ impl PySemanticLearningPhaseTransition {
                 ));
             }
             let next = next.cast::<PyTuple>()?;
+            if next.is_empty() || next.len() != 1 {
+                return Err(invalid("final acceptance cannot precede complete original source, control and real execution"));
+            }
             let (next_material, _) = Self::singleton_lifecycle_material(next)?;
             let next_material = ColdValue::from_canonical_bytes(&next_material)?;
             let fields = next_material.fields(6)?;
@@ -1114,6 +1054,7 @@ impl PySemanticLearningPhaseTransition {
             {
                 return Err(invalid("final acceptance cannot precede complete original source, control and real execution"));
             }
+            self.verify(py, true)?;
             let (candidate, checkpoint) = self.candidate(py)?;
             let history = self.scientific_owner.bind(py).getattr("history_bytes")?;
             if !history.is_exact_instance_of::<PyBytes>()
@@ -1276,17 +1217,18 @@ impl PySemanticLearningPhaseTransition {
         &self,
         py: Python<'_>,
         checkpoint: &[u8],
-        transition: &SemanticLearningPhaseTransition,
+        transition: Option<&SemanticLearningPhaseTransition>,
     ) -> PyResult<()> {
         self.source.borrow(py).require_creator()?;
-        let admission = self.records()?.confirmed_admission()?;
-        if checkpoint != self.source_checkpoint
-            || transition.admission.as_slice() != admission.as_ref()
-            || transition.recipe_digest() != self.recipe.borrow(py).inner.recipe_digest()
+        #[cfg(feature = "semantic-policy")]
+        return self.require_private_restore_admission(py, checkpoint, transition);
+        #[cfg(not(feature = "semantic-policy"))]
         {
-            return Err(invalid("private restore changed its original confirmed admission, full source or complete recipe"));
+            let _ = (checkpoint, transition);
+            Err(invalid(
+                "private scientific trajectory execution requires semantic-policy",
+            ))
         }
-        Ok(())
     }
 
     pub(super) fn restore_allocation_domain(
@@ -1294,7 +1236,7 @@ impl PySemanticLearningPhaseTransition {
         py: Python<'_>,
         device_ordinal: usize,
         memory_bytes: u64,
-    ) -> PyResult<(Arc<CudaKernelProvider>, ResidentExecutionDomain)> {
+    ) -> PyResult<CheckpointAllocationDomain> {
         let source = self.source.borrow(py);
         source.require_creator()?;
         if !matches!(*self.status_lock()?, Completion::Preparing)
@@ -1307,11 +1249,16 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         self.records()?.require_preparation_admission()?;
-        let domain = source
+        let (provider, domain) = source
             .owner()?
             .checkpoint_allocation_domain()
             .map_err(xlog_err)?;
-        Ok(domain)
+        Ok(CheckpointAllocationDomain {
+            provider,
+            domain,
+            #[cfg(feature = "semantic-policy")]
+            cold_work: Some(self.private_restore_native_work(py)?),
+        })
     }
 
     fn finish_preparation_readback(&self, py: Python<'_>) -> PyResult<&'static str> {
@@ -2031,19 +1978,30 @@ impl PySemanticLearningPhaseTransition {
         }
         let entered = pending.preparation_entered.load(Ordering::Acquire);
         let candidate_entered = pending.candidate_entered.load(Ordering::Acquire);
+        let final_candidate_known = pending
+            .candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?
+            .is_some();
         if entered && candidate_entered {
-            // The actual canonical save proves known complete construction,
-            // not full scientific execution or resource use. Only remaining
-            // cold verification may continue; a retained scientific return is
-            // reused and an entered failed comparison is never called again.
-            pending.candidate(py)?;
-            pending.records()?.require_preparation_admission()?;
-            if let Some(acceptance) = pending.acceptance()?.as_ref() {
-                if let Some(error) = &acceptance.error {
-                    return Err(error.clone_ref(py));
-                }
-                if acceptance.result.is_none() {
-                    return Err(invalid("unknown scientific comparison cannot be repeated by preparation continuation"));
+            #[cfg(feature = "semantic-policy")]
+            if !final_candidate_known {
+                pending.require_known_control_restore(py)?;
+            }
+            if final_candidate_known {
+                // The actual canonical save proves known complete construction,
+                // not full scientific execution or resource use. Only remaining
+                // cold verification may continue; a retained scientific return is
+                // reused and an entered failed comparison is never called again.
+                pending.candidate(py)?;
+                pending.records()?.require_preparation_admission()?;
+                if let Some(acceptance) = pending.acceptance()?.as_ref() {
+                    if let Some(error) = &acceptance.error {
+                        return Err(error.clone_ref(py));
+                    }
+                    if acceptance.result.is_none() {
+                        return Err(invalid("unknown scientific comparison cannot be repeated by preparation continuation"));
+                    }
                 }
             }
         } else if entered {
@@ -2086,8 +2044,21 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         *pending.status_lock()? = Completion::Preparing;
-        let result = if entered && candidate_entered {
+        let result = if entered && candidate_entered && final_candidate_known {
             pending.finish_preparation(py)
+        } else if entered && candidate_entered {
+            #[cfg(feature = "semantic-policy")]
+            {
+                pending
+                    .prepare_control_trajectory(py, &slf)
+                    .and_then(|()| pending.finish_preparation(py))
+            }
+            #[cfg(not(feature = "semantic-policy"))]
+            {
+                Err(invalid(
+                    "private scientific trajectory execution requires semantic-policy",
+                ))
+            }
         } else {
             pending.prepare_candidate(py, &slf)
         };
@@ -2336,6 +2307,8 @@ impl PySemanticTransitionController {
                 source_evaluations: Mutex::new(Vec::new()),
                 #[cfg(feature = "semantic-policy")]
                 source_evaluation_active: AtomicBool::new(false),
+                #[cfg(feature = "semantic-policy")]
+                private_trajectory_start: Mutex::new(None),
                 candidate_entered: AtomicBool::new(false),
                 completion: Mutex::new(Completion::Preparing),
                 operating: AtomicBool::new(false),
