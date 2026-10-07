@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CostModelKind"],"struct":["MemoryBudget","RuntimeConfig"]};

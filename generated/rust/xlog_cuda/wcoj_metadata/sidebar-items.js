@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT"],"enum":["Wcoj4CycleRootAggValue","WcojRootAggValue"],"struct":["LayoutSignature","RootMetadata","WcojCycle4HgWorkPlanU32","WcojCycle4HgWorkPlanU64","WcojRelationMetadata","WcojTriangleHgCountPhaseU32","WcojTriangleHgWorkPlanU32","WcojTriangleHgWorkPlanU64"],"type":["HeatDist","VertexId"]};

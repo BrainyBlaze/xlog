@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TruthValue","WfsLiteral"],"fn":["evaluate_wfs_rules","evaluate_wfs_with_rules"],"struct":["WfsAtom","WfsConfig","WfsContext","WfsResult","WfsRule"]};

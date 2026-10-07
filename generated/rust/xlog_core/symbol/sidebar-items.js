@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SymbolSnapshotError"],"fn":["clear","count","from_arrow","intern","memory_usage","resolve","resolve_checked","snapshot_checked","to_arrow"],"struct":["SymbolSnapshot"]};

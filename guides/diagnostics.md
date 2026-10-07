@@ -1,0 +1,371 @@
+# Diagnostics and provenance
+
+Inspect why XLOG produced a result — rule and induced-rule provenance, proof traces, relation deltas, host-transfer audits, and neural hot-loop state — without perturbing the production data path.
+
+When XLOG returns an answer, these tools tell you *why*: which rule fired, which
+facts supported it, why one learned rule was kept over another, and whether an
+incremental update stayed fast. Most surfaces return metadata without downloading
+relation rows. Relation evidence additionally returns the annotated facts stored in
+its native snapshot; validating their membership downloads one bounded boolean mask,
+one byte per distinct annotated fact, rather than the relation columns.
+
+Reach for this page when a result surprises you, when a rule you expected did not
+fire, or when an update that should have been cheap suddenly got slow — and you
+want an audit trail rather than a guess.
+
+<Note>
+Rule, delta, and hot-loop diagnostics report metadata, hashes, counters, and runtime
+state rather than relation rows. Relation evidence returns caller-annotated complete
+facts and may perform the bounded membership-mask transfer described above. It still
+does not download the stored relation columns; use an explicit export when you need
+those rows.
+</Note>
+
+Throughout this page, a few recurring terms:
+
+- **Provenance** — a record of where something came from (which source rule, which
+  facts, which search).
+- **Delta** — the set of changes in an incremental update (rows inserted or deleted),
+  as opposed to recomputing everything from scratch.
+- **SCC (strongly connected component)** — a cluster of rules that depend on each
+  other recursively. XLOG evaluates one SCC at a time, so an incremental update can
+  recompute some SCCs while reusing cached results for others.
+
+## What you can inspect
+
+| Question | Surface | How you read it |
+|---|---|---|
+| Which rules exist, and where did each come from? | Rule provenance | `xlog explain`, `rule_provenance()` |
+| Why did a specific query answer hold? | Proof traces | `xlog explain`, `proof_traces()` |
+| Why was a mined or induced rule kept, and what did it beat? | Induced-rule provenance | `InducedRuleProvenance` |
+| Did my incremental update stay incremental? | Relation-delta debugging | `apply_relation_delta_debug(...)`, `delta_stats()` |
+| Is the neural hot loop actually host-free? | Host-transfer audits | `neural_hot_loop_diagnostics()` |
+| Why was a module import rejected? | Module diagnostics | `error[E0400]` for a missing module, `error[E0401]` for a cycle, `error[E0402]` for conflicting imported function definitions, `error[E0403]` for importing a predicate its source module keeps private, `error[E0404]` for an item the module does not export, `error[E0405]` for entry-file-only content, `error[E0406]` for a hidden dependency, `error[E0407]` for an unanchored logical path that identifies multiple loaded files, `error[E0408]` for incompatible predicate declarations, `error[E0409]` for a conflicting domain alias, `error[E0410]` for multiple definitions of an exported function name, `error[E0411]` for mixed predicate visibility within an imported module, `error[E0412]` for conflicting inferred head-column types of undeclared predicate contributions, or `error[E0413]` when a contributing clause contains invalid resolver-time type evidence |
+| Was a pragma in an imported module ignored? | Ignored-pragma warnings | `warning[W0510]` on stderr from `xlog run` / `xlog prob` / `xlog explain`; `ModuleResolver::ignored_import_pragmas()` |
+| Which roles and source records annotate a stored complete fact? | Relation evidence | `relation(name)`, `evidence(name=None)` |
+| How long did each stratum take, and which fast join route fired? | Execution stats | `xlog run --stats` |
+
+<Note>
+If you embed the Rust crate rather than calling the CLI: `ExecutionStats` and
+`StratumStats` — the structs behind `xlog run --stats` — are `#[non_exhaustive]`
+(`crates/xlog-runtime/src/profiler.rs`). You cannot build them with a struct literal
+or exhaustively match their fields from outside the crate; read the fields you need.
+The field names and values `--stats` prints are unaffected.
+</Note>
+
+## Rule provenance and proof traces
+
+**When to use it.** You want to know what rules are in play and how a particular
+answer was derived — for example, to confirm a query answer came from the rule you
+expected and not a rewrite.
+
+**How.** The fastest path is the CLI:
+
+```bash
+xlog explain program.xlog
+```
+
+This prints compact `rule_provenance:` and `proof_traces:` sections as text. For
+machine-readable output, use JSON:
+
+```bash
+xlog explain program.xlog --format json
+```
+
+The JSON emits the full arrays with stable snake-case keys. From Python, the same
+records come back as dictionaries:
+
+```python
+program.rule_provenance()   # list of rule-provenance dicts
+program.proof_traces()      # list of proof-trace dicts
+# rule_provenance() -> [{'rule_id': ..., 'head': ..., 'source_kind': 'source', ...}, ...]
+```
+
+These methods are available on `CompiledLogicProgram`, `LogicRelationSession`, and
+`CompiledProgram`.
+
+**How do I know it worked.** You get one `rule_provenance` entry per rule and one
+`proof_traces` entry per explained query answer. Each carries the fields below.
+
+`xlog_logic::diagnostics` is the shared source of truth for both records. A
+`RuleProvenance` record tells you what a rule is and where it came from; a
+`QueryProofTrace` reconstructs the derivation behind a query answer.
+
+```rust
+pub enum RuleSourceKind { Source, Generated, Mined, Imported, RuntimeInjected }
+
+pub struct RuleProvenance {
+    pub rule_id: String,
+    pub head: String,
+    pub source_kind: RuleSourceKind,
+    pub source_span: Option<String>,
+    pub generation_trace_hash: Option<String>,
+    pub support_relation_ids: Vec<String>,
+    pub counterexample_relation_ids: Vec<String>,
+}
+
+pub struct QueryProofTrace {
+    pub query_id: String,
+    pub query: String,
+    pub answer_relation: String,
+    pub rule_ids: Vec<String>,
+    pub source_facts: Vec<String>,
+    pub rejected_alternatives: Vec<String>,
+}
+```
+
+Generated rewrite rules are included when you supply a generated program — for
+example, the magic-set path, a query-rewriting optimization that produces new
+helper rules. Duplicate generated rules whose text matches a source rule are
+suppressed, so the report names only genuinely new rules.
+
+For generated-rule candidates, the JSON output adds a `generated_rule_diagnostics`
+array. Its `row_decisions` explain each row that was accepted or rejected. The sibling
+`generated_rule_diagnostics_status` and `generated_rule_diagnostics_reason` fields
+state whether those decisions were available. Per-row analysis runs only after
+execution normalization and relational compilation succeed, while its rule and
+predicate names remain in source form. It reads deterministic extensional facts and
+discovered external JSON rows using each predicate's declared scalar types. For each
+row you get:
+
+- `failed_predicates` — the predicates that did not hold,
+- `threshold_comparisons` — the left/right values and pass/fail status of each
+  threshold check,
+- `aggregate_inputs` — the candidate source row used for the decision.
+
+The analyzer searches extensional matches lazily in source order. It stops at the
+first accepting witness and exhausts the available matches when a row is rejected, so
+intermediate search state stays bounded without changing the decision. The section is
+`not_available`, with an explanatory reason and an empty diagnostics array, when
+normalization or relational compilation fails, an external row is invalid, a required
+support predicate is derived by rules, or a candidate or support relation is
+probabilistic or supplied by an annotated disjunction. Those cases require execution
+or probabilistic semantics rather than deterministic fact matching and are never
+presented as completed row decisions.
+
+## Induced-rule provenance
+
+**When to use it.** After rule learning or mining, you want to audit *which* rule the
+search selected and *why the others lost* — not just the winner, but the alternatives
+it beat.
+
+**How.** Rule learning and mining produce first-class `InducedRuleProvenance` records:
+
+```rust
+pub struct InducedRuleProvenance {
+    pub rule_id: String,
+    pub rule_source: String,
+    pub source_kind: RuleSourceKind,
+    pub search_space_size: u64,
+    pub predicate_inventory: Vec<String>,
+    pub support_rows: Vec<InductionSupportRow>,
+    pub rejected_alternatives: Vec<InductionAlternative>,
+    pub falsification_count: u64,
+    pub generation_trace_hash: String,
+}
+```
+
+**How do I know it worked.** Each `InductionSupportRow` names the relation, row
+offset, and caller-supplied row hash of retained positive support. Each
+`InductionAlternative` keeps a rejected candidate's source, support count, and
+falsification count.
+
+This is an audit layer over the induction scorer. It records which rule was selected
+and why the others were not; it does not change the scoring itself.
+
+## Relation-delta debugging
+
+**When to use it.** You feed XLOG an incremental update and want to confirm the engine
+actually recomputed incrementally instead of quietly falling back to a full recompute —
+the difference between a fast update and a silent performance cliff.
+
+**How.** pyxlog returns delta metadata from the normal delta APIs and from
+`apply_relation_delta_debug`:
+
+```python
+report = session.apply_relation_delta_debug(updates, check_equivalence=True)
+print(report["planner_telemetry"])
+print(report["equivalent_to_full_recompute"])   # only when check_equivalence=True
+```
+
+`check_equivalence` defaults to `False`. Verifying it re-runs a full recompute and
+compares the query stores — an intentionally expensive audit you opt into, not a cost
+you pay on every update.
+
+The underlying `LogicDeltaReport` is metadata-only:
+
+```rust
+pub struct LogicDeltaReport {
+    pub input_delta_count: usize,
+    pub changed_relations: usize,
+    pub changed_relation_names: Vec<String>,
+    pub insert_rows: u64,
+    pub delete_rows: u64,
+    pub affected_sccs: usize,
+    pub recomputed_sccs: usize,
+    pub incremental_sccs: usize,
+    pub planner_telemetry: DeltaPlannerTelemetry,
+    pub debug_trace: Vec<String>,
+}
+```
+
+**How do I know it worked.** Compare `incremental_sccs` against `recomputed_sccs`: a
+healthy incremental update touches few recomputed SCCs. The nested `planner_telemetry`
+is the audit surface for the incremental planner. It reports cache reuse, the fallback
+decision, the count of affected / recomputed / incremental SCCs, estimated and measured
+delta speedups when available, and free-text planner advice about the
+incremental-versus-full tradeoff.
+
+Relation callbacks receive the same changed-relation names and debug trace in their
+metadata payload; that path stays metadata-only too. Batch update dictionaries reject
+unknown keys before mutation. If all rows for a relation cancel during coalescing,
+`changed_relations` is `0`, no callback or generation increment is emitted for that
+relation, and the retained runtime version does not advance. If a delta operation fails
+before commit but after preparation takes ownership of cached derived state, the
+authoritative relation rows and evidence remain unchanged, but XLOG discards the derived
+cache and retained runtime. The next `evaluate()` rebuilds them.
+
+## Host-transfer audits
+
+**When to use it.** XLOG's neural hot loop — the tight per-step inference loop for the
+`nn/4` predicate — is designed to run without moving data between GPU and host on every
+step. When you suspect a stray transfer is slowing it down, you want a transfer count.
+
+**How.** `neural_hot_loop_diagnostics()` returns one dictionary for the `nn/4` loop:
+
+```python
+diag = program.neural_hot_loop_diagnostics()
+```
+
+The dictionary contains:
+
+- `post_load_dtoh_bytes`, `post_load_htod_bytes`, `post_load_dtoh_calls`,
+  `post_load_htod_calls` — the device-to-host (DtoH) and host-to-device (HtoD) traffic
+  after load,
+- `control_plane_bytes_per_iteration` and `control_plane_status`,
+- `scalar_sync_checks` and `scalar_sync_status`,
+- nested `cuda_graph` and `circuit_cache` counters.
+
+**How do I know it worked.** A clean loop shows **zero post-load host traffic**. Non-zero
+counts tell you exactly where a transfer crept in.
+
+When the runtime cannot supply a particular counter, its value is `None` and the matching
+status field explains why. An unavailable probe is reported as unavailable, never as a
+fake zero.
+
+**Seeing what the transfers would have cost.** A zero-traffic report is easier to trust
+once you have seen the counters move. Set `XLOG_FORCE_HOST_ROUNDTRIP=1` before the run
+and XLOG pushes each neural-output tensor GPU → host → GPU at the neural-to-symbolic
+handoff instead of passing it straight through. The round trip preserves every value, so
+your results do not change; only the data path does. Run once with the variable set and
+once without, and the difference is the per-iteration transfer bill a host-resident
+reasoner would pay.
+
+## Relation evidence
+
+**When to use it.** You need to audit the semantic role of each relation column and the
+source records attached to a complete fact, including ternary and higher-arity facts.
+
+**How.** Load roles and whole-fact provenance through the native session API:
+
+```python
+columns = [subject, predicate, object_id]
+roles = [
+    {"name": "subject"},
+    {"name": "predicate"},
+    {"name": "object_id"},
+]
+session.put_relation_with_provenance(
+    "observed_edge",
+    columns,
+    roles=roles,
+    facts=[{
+        "tuple": [12, 4, 91],
+        "provenance": [
+            {"source": "extractor", "document": "record-17"},
+            {"source": "review", "kind": "confirmation"},
+        ],
+    }],
+)
+
+session.evidence()                              # program hash + relation snapshots
+session.relation("observed_edge").provenance() # native RelationEvidence snapshot
+```
+
+**How do I know it worked.** The relation snapshot reports `metadata_present`,
+`row_count`, ordered `roles`, and canonical `facts`. Each fact has a stable `identity`,
+a friendly `tuple`, exact typed `cells`, and all distinct provenance records. Repeating
+the same fact or record does not change the result order: fact entries merge by their
+complete typed tuple and exact duplicate records collapse. Duplicate stored rows still
+count separately in `row_count`, but share the one evidence entry for that typed tuple.
+The opaque identity is a domain-separated SHA-256 digest of the predicate name, arity,
+and each ordered cell's scalar type and exact little-endian bytes. It is independent of
+row position, role labels, and provenance records.
+
+The evidence is updated with the relation. Provenance-bearing inserts add records;
+deletes remove the records for the complete deleted fact; coalesced batch updates do not
+leave evidence for canceled inserts. Plain replacement, metadata-free manifest
+replacement, relation removal, and session clear remove prior evidence and reset a
+positional role contract. Validation failures change neither data nor evidence.
+Insert evidence requires accompanying insert columns, positive arity, and an existing
+registered role contract; each annotated fact must occur in that specific insert buffer.
+An empty `facts` or `insert_facts` list still invokes those preconditions.
+
+Nullary relations support metadata-free storage and deltas, but reject provenance-aware
+replacement, every provenance-manifest import/export, and any insert or delta that
+supplies `facts` or `insert_facts`, including an empty list.
+
+Persistent replacement methods snapshot imported DLPack columns with a
+device-to-device copy. Later writes through a retained producer tensor cannot bypass
+relation versions or make the validated `RelationEvidence` stale; transient evaluation
+inputs remain zero-copy.
+
+Invalid role, whole-fact provenance, insert-evidence, or manifest input raises
+`pyxlog.RelationMetadataError`, a `ValueError` subclass. `session.relation(name)` and
+`session.evidence(name)` raise `KeyError` when the relation is not stored. A
+`RelationEvidence` object is an immutable snapshot: later session changes do not alter
+it, and mutating a dictionary returned by `provenance()` does not alter the snapshot.
+`evidence(name)` filters only the returned `relations` mapping; its `program_hash` is
+still computed over every stored relation, so it matches an unfiltered read at the same
+session state.
+
+Without `pyxlog._native`, `RelationEvidence` and `RelationMetadataError` remain
+importable at package level. The fallback metadata error subclasses `ValueError`, while
+constructing fallback `RelationEvidence` raises `RuntimeError`. Native evidence
+instances and session operations require the extension. Source builds with the
+extension expose the API; packaged availability is determined by release notes.
+
+Whole-fact membership validation stays on the GPU except for one boolean result mask.
+`host_transfer_stats()` accounts for that mask as one device-to-host call and one byte
+per distinct evidence fact. A relation with roles but no facts performs no membership
+transfer. To audit a zero-transfer path, enable the deterministic transfer gate before
+the operation:
+
+```python
+session.reset_host_transfer_stats()
+session.reset_deterministic_d2h_violations()
+session.set_strict_deterministic_d2h(True)
+try:
+    session.put_relation_with_provenance(
+        "observed_edge",
+        columns,
+        roles=roles,
+        facts=[],
+    )
+finally:
+    session.set_strict_deterministic_d2h(False)
+
+assert session.host_transfer_stats()["dtoh_bytes"] == 0
+assert session.deterministic_d2h_violation_count() == 0
+```
+
+If evidence facts are present, strict mode rejects the membership-mask transfer before
+the relation or evidence changes. Use the normal accounting mode when that bounded,
+deterministic validation transfer is acceptable.
+
+<Note>
+The native evidence store is session-local and in-memory. Use
+`export_relation_with_provenance()` for an exact version-1 manifest paired with
+in-process DLPack columns, and reconstruct it with
+`put_relation_from_manifest()`. The manifest alone is not relation persistence.
+</Note>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["prop_dedup_determinism","prop_filter_idempotence","prop_join_correctness","prop_sort_stability"]};
