@@ -1074,16 +1074,22 @@ impl PySemanticLearningPhaseTransition {
         {
             self.record_source_preparation(py, peak)?;
             self.execute_source_evaluations(py)?;
-            if self.cancelled_source_refusal_retained()? {
+            if self.cancelled_evaluation_refusal_retained()? {
                 return Ok(());
             }
         }
         #[cfg(feature = "semantic-policy")]
         {
             self.execute_control_branch(py, pending)?;
+            if self.cancelled_evaluation_refusal_retained()? {
+                return Ok(());
+            }
             self.prepare_private_trajectory(py, pending, "real")?;
             self.execute_private_numerical_sequence(py, pending, "real")?;
             self.execute_private_evaluations(py, "real")?;
+            if self.cancelled_evaluation_refusal_retained()? {
+                return Ok(());
+            }
             self.execute_private_checkpoint(py, "real")?;
             self.retain_final_checkpoint_candidate(py)?;
             return self.finish_preparation(py);
@@ -1169,7 +1175,7 @@ impl PySemanticLearningPhaseTransition {
             &selected.native,
             &admission,
             recipe,
-            self.preparation_inputs.final_phase,
+            Some(self.preparation_inputs.final_phase),
         )?;
         Ok(())
     }
@@ -2230,14 +2236,21 @@ impl PySemanticLearningPhaseTransition {
         } else if entered && candidate_entered {
             #[cfg(feature = "semantic-policy")]
             {
-                pending
-                    .execute_control_branch(py, &slf)
-                    .and_then(|()| pending.prepare_private_trajectory(py, &slf, "real"))
-                    .and_then(|()| pending.execute_private_numerical_sequence(py, &slf, "real"))
-                    .and_then(|()| pending.execute_private_evaluations(py, "real"))
-                    .and_then(|()| pending.execute_private_checkpoint(py, "real"))
-                    .and_then(|()| pending.retain_final_checkpoint_candidate(py))
-                    .and_then(|()| pending.finish_preparation(py))
+                (|| {
+                    pending.execute_control_branch(py, &slf)?;
+                    if pending.cancelled_evaluation_refusal_retained()? {
+                        return Ok(());
+                    }
+                    pending.prepare_private_trajectory(py, &slf, "real")?;
+                    pending.execute_private_numerical_sequence(py, &slf, "real")?;
+                    pending.execute_private_evaluations(py, "real")?;
+                    if pending.cancelled_evaluation_refusal_retained()? {
+                        return Ok(());
+                    }
+                    pending.execute_private_checkpoint(py, "real")?;
+                    pending.retain_final_checkpoint_candidate(py)?;
+                    pending.finish_preparation(py)
+                })()
             }
             #[cfg(not(feature = "semantic-policy"))]
             {
