@@ -26879,11 +26879,7 @@ impl SemanticTransitionSession {
     /// Destroy the joined cold owner outside the Python Session mutex, then
     /// complete the allocator's real pending deallocations before returning.
     pub fn finish_observed_cold_release(self) -> Result<(), SemanticTransitionError> {
-        let memory = Arc::clone(self.provider.memory());
-        drop(self);
-        memory
-            .reap_pending_deallocations()
-            .map_err(|error| runtime_error("fresh cold allocation retirement", error))?;
+        let memory = self.finish_joined_allocation_release()?;
         if memory.allocated_bytes() != 0
             || memory
                 .runtime()
@@ -26894,6 +26890,43 @@ impl SemanticTransitionSession {
             ));
         }
         Ok(())
+    }
+
+    /// Join a genuinely retired private publication before destroying its
+    /// Session. Released readers alone cannot substitute for full retirement.
+    pub fn join_retired_publication_release(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_retired_publication(lease)?;
+        if let Err(error) = self
+            .stream
+            .context()
+            .bind_to_thread()
+            .and_then(|_| self.stream.context().synchronize())
+        {
+            self.poisoned = true;
+            return Err(runtime_error("retired publication completion", error));
+        }
+        Ok(())
+    }
+
+    /// Finish actual deallocation on the shared allocation owner. The held
+    /// source and unrelated allocations remain part of its live baseline;
+    /// their presence must not be treated as private retirement failure.
+    pub fn finish_retired_publication_release(self) -> Result<(), SemanticTransitionError> {
+        self.finish_joined_allocation_release().map(|_| ())
+    }
+
+    fn finish_joined_allocation_release(
+        self,
+    ) -> Result<Arc<crate::memory::GpuMemoryManager>, SemanticTransitionError> {
+        let memory = Arc::clone(self.provider.memory());
+        drop(self);
+        memory
+            .reap_pending_deallocations()
+            .map_err(|error| runtime_error("joined allocation retirement", error))?;
+        Ok(memory)
     }
 
     /// Inspect the actual cold root, or a decoded replay predecessor, through

@@ -606,6 +606,20 @@ cannot replay its callback; exceeding the original budget cannot advance the
 schedule. Retained private owners cannot invoke public checkpoint save outside
 this original one-shot operation.
 
+The following original control retirement uses the same held model and full
+checkpoint, not a replacement task or an inferred abort. Its original model
+retirement callback runs once under the checkpoint read scope and cold registrar.
+The Runtime must close that registrar after releasing the actual parent and all
+delivered control model references, preserving the original consumer streams and
+single-attempt quarantine. Native requires genuine full publication retirement
+before joining and destroying the private Session, invalidates its original task
+aliases, drains actual pending deallocations and drops completed control frames
+outside their locks. The original shared source allocations remain held; their
+nonzero baseline is not private retirement failure. These releases belong to one
+continuous physical interval, whose measured native/model work and peak are
+recorded against the original retirement budget before the next branch. Unknown
+model or Session release cannot replay its original callback or destructor.
+
 ABI version 2 extends the same observer with `bind_step_capture` and
 `read_step_interval`. Registration passes the actual capture stream immediately
 after enqueueing the admission or release kernel, inside its original capture.
@@ -619,10 +633,10 @@ tail. Every step includes already-held allocations and the whole-process baselin
 neither copying nor distributing the group's peak proves those individual peaks.
 Original views and events remain held until the complete group is consumed.
 
-This numerical group, its control evaluations and checkpoint do not implement
-control retirement, the remaining private control/real schedule, post-comparison
-delivery or fresh-process recovery. They cannot issue a prepared or accepted
-outcome before that complete original schedule.
+This numerical group, its control evaluations, checkpoint and retirement do not
+implement the remaining private control/real schedule, post-comparison delivery
+or fresh-process recovery. They cannot issue a prepared or accepted outcome
+before that complete original schedule.
 
 `physical_peak_bytes` is usable only with `PHYSICAL_PEAK_VALID` and
 `ALLOCATOR_COMPLETED`, complete requested/enabled physical coverage without an

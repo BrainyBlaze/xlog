@@ -29,6 +29,12 @@ pub(super) struct PrivateTrajectoryStart {
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(super) fn drop_retired_control_restore_owners(&self) -> PyResult<()> {
+        let original = self.trajectory_start()?.take();
+        drop(original);
+        Ok(())
+    }
+
     fn trajectory_start(&self) -> PyResult<MutexGuard<'_, Option<PrivateTrajectoryStart>>> {
         self.private_trajectory_start
             .lock()

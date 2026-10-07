@@ -116,6 +116,12 @@ impl Drop for PrivateTaskCallbackScope<'_> {
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(super) fn drop_retired_control_execution_owners(&self) -> PyResult<()> {
+        let original = self.private_group()?.take();
+        drop(original);
+        Ok(())
+    }
+
     pub(super) fn control_evaluation_input(
         &self,
         py: Python<'_>,

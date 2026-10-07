@@ -232,6 +232,43 @@ impl PySemanticTransitionSession {
         Ok(())
     }
 
+    fn release_retired_publication(
+        &self,
+        py: Python<'_>,
+        parent: &PySemanticPublishedParent,
+    ) -> PyResult<()> {
+        self.require_creator()?;
+        if !std::ptr::eq(self, &*parent.session.borrow(py))
+            || self.importing.load(Ordering::Acquire)
+            || self.recording.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "private Session release requires its original retired publication outside callbacks",
+            ));
+        }
+        let owner = {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|_| invalid("native semantic session owner mutex is poisoned"))?;
+            let live = guard
+                .as_mut()
+                .ok_or_else(|| invalid("private native Session was already released"))?;
+            live.join_retired_publication_release(&*parent.lease()?)
+                .map_err(xlog_err)?;
+            // Invalidate original task aliases before any released Python
+            // producer can run a finalizer against this terminal Session.
+            self.issuance.fetch_add(1, Ordering::AcqRel);
+            guard.take().expect("checked retired private Session")
+        };
+        owner
+            .finish_retired_publication_release()
+            .map_err(xlog_err)?;
+        drain_export_owners();
+        Ok(())
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "canonical admission preserves the original device, storage bounds, expense and optional shared allocation owner"
