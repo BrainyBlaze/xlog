@@ -136,6 +136,9 @@ pub(crate) struct PySemanticTransitionSession {
     prepared_segment: Mutex<Option<PreparedPythonSegment>>,
     learning_preparing: AtomicBool,
     learning_transition: Mutex<Option<Py<learning_phase::PySemanticLearningPhaseTransition>>>,
+    #[cfg(feature = "semantic-policy")]
+    active_cold_model_work:
+        Mutex<Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>>,
     issuance: Arc<AtomicU64>,
     proposal_expense: Arc<Mutex<ProposalExpense>>,
     checkpoint_sources: Arc<Mutex<CheckpointSources>>,
@@ -299,6 +302,8 @@ impl PySemanticTransitionSession {
             prepared_segment: Mutex::new(None),
             learning_preparing: AtomicBool::new(false),
             learning_transition: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            active_cold_model_work: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
             proposal_expense,
             checkpoint_sources,
@@ -18127,6 +18132,8 @@ mod tests {
             prepared_segment: Mutex::new(None),
             learning_preparing: AtomicBool::new(false),
             learning_transition: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            active_cold_model_work: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
             proposal_expense: Arc::new(Mutex::new(super::ProposalExpense {
                 capacity: None,

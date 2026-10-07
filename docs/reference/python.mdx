@@ -754,6 +754,21 @@ consumers and completes its report before ending the original physical interval.
 An explicitly attached, completed CPU/meta-only recorder may have no model events;
 an absent recorder, overflow or unknown completion is not a zero result.
 This owner grants no evaluation, backward-tape or content-admission rights.
+Lookup uses the actual callback's Session and exact TaskUse; it does not borrow
+the source phase's first registrar for a different Session. Callback return or
+exception clears only this temporary visibility, not the original native
+completion owner. A later native-issued invocation receives a distinct registrar
+and scratch allocation only after the prior native report completes and all of
+its scratch aliases are gone. Its Admission and original event capacity cannot
+change, and completed recording is never reopened. Outstanding scratch aliases
+also prevent state-changing work and release.
+
+The connected Python path still issues this scope only for the first source
+preparation serializer. Mandatory later source/candidate serializers require
+their own original checkpoint or delivery operation, registrar and continuous
+whole-operation physical interval; Session-scoped lookup alone does not implement
+that executor or attest its expense.
+
 The same original owner also retains one private native tally. Actually reached
 snapshot commands, the original serializer's tensor-content and retained
 ModelContract guards, and published-content guards use the existing native unit

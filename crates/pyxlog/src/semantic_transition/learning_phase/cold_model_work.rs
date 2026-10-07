@@ -156,34 +156,76 @@ impl PySemanticColdModelWork {
     }
 }
 
-/// Visibility is bounded by the actual native callback, including exceptions.
-pub(super) struct ColdCallbackScope<'a>(pub(super) &'a AtomicBool);
+/// Visibility belongs to the actual callback's Session, not the source phase's
+/// first registrar. Private restored Sessions use the same callback boundary.
+pub(super) struct ColdCallbackScope<'a> {
+    active: &'a AtomicBool,
+    session: &'a PySemanticTransitionSession,
+}
+
+impl<'a> ColdCallbackScope<'a> {
+    pub(super) fn enter(
+        py: Python<'_>,
+        session: &'a PySemanticTransitionSession,
+        work: &'a PySemanticColdModelWork,
+        retained: Py<PySemanticColdModelWork>,
+    ) -> PyResult<Self> {
+        session.require_creator()?;
+        if !std::ptr::eq(&*retained.borrow(py), work)
+            || !std::ptr::eq(&*work.parent.borrow(py).session.borrow(py), session)
+        {
+            return Err(invalid(
+                "cold callback requires its actual original Session and registrar",
+            ));
+        }
+        let mut current = session
+            .active_cold_model_work
+            .lock()
+            .map_err(|_| invalid("active cold callback custody mutex is poisoned"))?;
+        if current.is_some() {
+            return Err(invalid("another cold callback is already active"));
+        }
+        work.active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| invalid("the original cold registrar is already active"))?;
+        *current = Some(retained);
+        drop(current);
+        let scope = Self {
+            active: &work.active,
+            session,
+        };
+        work.check(py)?;
+        Ok(scope)
+    }
+}
 
 impl Drop for ColdCallbackScope<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.active.store(false, Ordering::Release);
+        let retained = self
+            .session
+            .active_cold_model_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        // Dropping visibility cannot release or complete the native work. Its
+        // original operation retains the registrar and asynchronous storage.
+        drop(retained);
     }
 }
 
 fn retained_work(
     py: Python<'_>,
-    source: &PySemanticTransitionSession,
+    session: &PySemanticTransitionSession,
 ) -> PyResult<Py<PySemanticColdModelWork>> {
-    source.require_creator()?;
-    let pending = source
-        .learning_transition
+    session.require_creator()?;
+    let work = session
+        .active_cold_model_work
         .lock()
-        .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?
+        .map_err(|_| invalid("active cold callback custody mutex is poisoned"))?
         .as_ref()
-        .map(|pending| pending.clone_ref(py))
-        .ok_or_else(|| invalid("there is no original admitted cold operation"))?;
-    let pending = pending.borrow(py);
-    let work = pending
-        .source_preparation()?
-        .as_ref()
-        .and_then(|source| source.cold_model_work.as_ref())
         .map(|work| work.clone_ref(py))
-        .ok_or_else(|| invalid("the original cold model registrar has not been issued"))?;
+        .ok_or_else(|| invalid("there is no original admitted cold callback in this Session"))?;
     work.borrow(py).check(py)?;
     Ok(work)
 }

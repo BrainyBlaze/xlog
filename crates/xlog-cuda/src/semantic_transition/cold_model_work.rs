@@ -53,6 +53,7 @@ enum RecordingState {
 
 pub(super) struct ColdModelWorkStorage {
     invocation: Arc<()>,
+    aliases: Arc<()>,
     operation_ordinal: u64,
     admission: Arc<[u8]>,
     work: PreparedModelWork,
@@ -88,12 +89,13 @@ impl SemanticTransitionSession {
 
     pub(super) fn require_completed_cold_model_work(&self) -> Result<(), SemanticTransitionError> {
         if self.steps.values().any(|step| {
-            step.cold_model_work
-                .as_ref()
-                .is_some_and(|storage| storage.state != RecordingState::Completed)
+            step.cold_model_work.as_ref().is_some_and(|storage| {
+                storage.state != RecordingState::Completed
+                    || Arc::strong_count(&storage.aliases) != 1
+            })
         }) {
             return Err(publication_input_error(
-                "state-changing work or release cannot interrupt an original cold model operation",
+                "state-changing work or release requires completed cold model work without scratch aliases",
             ));
         }
         Ok(())
@@ -112,12 +114,24 @@ impl SemanticTransitionSession {
         self.require_completed_cold_model_work()?;
         self.checked_reader(lease)?;
         let step = self.checked_step(lease)?;
+        // A later actual callback is a new invocation, never a reopened
+        // recording. The previous report is complete and its scratch aliases
+        // are gone before replacement; the enclosing operation retains its
+        // returned immutable result and physical interval independently.
+        if step.cold_model_work.as_ref().is_some_and(|previous| {
+            !Arc::ptr_eq(&previous.admission, &admission)
+                || previous.work.actual.len() / 3 != capacity
+                || previous.operation_ordinal > operation_ordinal
+        }) {
+            return Err(publication_input_error(
+                "a later cold callback cannot change its original admission, capacity or operation order",
+            ));
+        }
         if capacity == 0
             || admission.is_empty()
             || self.prepared_segment.is_some()
             || step.prepared.is_some()
             || step.evaluation.is_some()
-            || step.cold_model_work.is_some()
         {
             return Err(publication_input_error(
                 "cold model work requires its sole admitted operation and positive original capacity",
@@ -144,11 +158,15 @@ impl SemanticTransitionSession {
             operation_ordinal,
             admission: Arc::clone(&admission),
         };
+        // Keep the completed storage until all new allocation succeeds. The
+        // new invocation is retained before reset or any model callback; an
+        // allocation failure grants no rights to replay the prior callback.
         self.steps
             .get_mut(&lease.token)
             .expect("checked original reader")
             .cold_model_work = Some(ColdModelWorkStorage {
             invocation,
+            aliases: Arc::new(()),
             operation_ordinal,
             admission,
             work,
@@ -237,8 +255,17 @@ impl SemanticTransitionSession {
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
         // This is the Session's own stream, already joined by cold completion,
         // not an additional external consumer omitted from the frozen roster.
+        let scratch = Arc::clone(&storage.aliases);
         let guard = Arc::clone(&self.checked_step(lease)?.aliases);
-        self.export_owned_view(view, vec![capacity, 3], vec![3, 1], (1, 64), guard, stream)
+        self.export_owned_view(
+            view,
+            vec![capacity, 3],
+            vec![3, 1],
+            (1, 64),
+            guard,
+            stream,
+            Some(scratch),
+        )
     }
 
     pub fn begin_cold_model_work(

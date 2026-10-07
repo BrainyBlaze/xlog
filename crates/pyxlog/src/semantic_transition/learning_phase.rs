@@ -828,7 +828,7 @@ impl PySemanticLearningPhaseTransition {
             {
                 let _reads = ImportReadScope::checkpoint(&source, &task, &acquired, py)?;
                 #[cfg(feature = "semantic-policy")]
-                let work = self
+                let callback_work = self
                     .source_preparation()?
                     .as_ref()
                     .expect("retained source group")
@@ -837,11 +837,10 @@ impl PySemanticLearningPhaseTransition {
                     .expect("issued original cold work")
                     .clone_ref(py);
                 #[cfg(feature = "semantic-policy")]
-                let work = work.borrow(py);
+                let work = callback_work.borrow(py);
                 #[cfg(feature = "semantic-policy")]
-                work.active.store(true, Ordering::Release);
-                #[cfg(feature = "semantic-policy")]
-                let _callback = ColdCallbackScope(&work.active);
+                let _callback =
+                    ColdCallbackScope::enter(py, &source, &work, callback_work.clone_ref(py))?;
                 let result = snapshot_model_state.call0();
                 #[cfg(feature = "semantic-policy")]
                 if result.is_err() {

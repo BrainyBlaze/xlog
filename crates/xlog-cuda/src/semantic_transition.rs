@@ -16543,7 +16543,7 @@ impl SemanticTransitionSession {
             .expect("checked fixed step")
             .consumer_streams
             .insert(consumer_stream);
-        self.export_owned_view(view, shape, strides, dtype, guard, consumer_stream)
+        self.export_owned_view(view, shape, strides, dtype, guard, consumer_stream, None)
     }
 
     pub fn prepared_source(
@@ -25993,7 +25993,7 @@ impl SemanticTransitionSession {
             .expect("validated native reader")
             .consumer_streams
             .insert(consumer_stream);
-        self.export_owned_view(view, shape, strides, dtype, guard, consumer_stream)
+        self.export_owned_view(view, shape, strides, dtype, guard, consumer_stream, None)
     }
 
     fn export_step_view(
@@ -26012,9 +26012,13 @@ impl SemanticTransitionSession {
             .expect("validated output step")
             .consumer_streams
             .insert(consumer_stream);
-        self.export_owned_view(view, shape, strides, dtype, guard, consumer_stream)
+        self.export_owned_view(view, shape, strides, dtype, guard, consumer_stream, None)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owned exports retain publication aliases and optional independent scratch custody"
+    )]
     fn export_owned_view(
         &mut self,
         view: DeviceMemoryView<u8>,
@@ -26023,6 +26027,7 @@ impl SemanticTransitionSession {
         dtype: (u8, u8),
         guard: Arc<()>,
         consumer_stream: u64,
+        retained_owner: Option<Arc<dyn Send + Sync>>,
     ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
         let storage = Arc::clone(
             self.publication
@@ -26046,7 +26051,7 @@ impl SemanticTransitionSession {
             guard,
             storage,
             None,
-            None,
+            retained_owner,
         ))
     }
 
