@@ -8238,6 +8238,7 @@ impl PublicationStorage {
         role: u64,
         index: u64,
         layout: SemanticTensorLayout,
+        cold_work: Option<&DeviceMemoryView<u64>>,
     ) -> Result<(), SemanticTransitionError> {
         let mut recorder = domain.new_strict_recorder();
         recorder.read(&reader);
@@ -8253,6 +8254,9 @@ impl PublicationStorage {
         for allocation in &self.allocations {
             recorder.read(allocation);
         }
+        if let Some(work) = cold_work {
+            recorder.read_write(work);
+        }
         let arguments = (
             self.control.device_ptr_value(),
             role,
@@ -8260,6 +8264,7 @@ impl PublicationStorage {
             layout,
             u64::from(is_tensor_role(role)),
             *reader.device_ptr(),
+            cold_work.map_or(0, |work| *work.device_ptr()),
         );
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
             // SAFETY: the original device lease selects its actual directory;
@@ -10974,15 +10979,20 @@ impl ModelContentSeals {
         &self,
         domain: &ResidentExecutionDomain,
         poisoned: &mut bool,
+        cold_work: Option<&DeviceMemoryView<u64>>,
     ) -> Result<(), SemanticTransitionError> {
         let mut recorder = domain.new_strict_recorder();
         recorder.read(&self.ranges);
         recorder.read(&self.contract);
+        if let Some(work) = cold_work {
+            recorder.read_write(work);
+        }
         let arguments = (
             self.contract.device_ptr_value(),
             self.contract.len() as u64,
             self.ranges.device_ptr_value()
                 + ((self.ranges.len() - 1) * size_of::<PublicationRange>()) as u64,
+            cold_work.map_or(0, |work| *work.device_ptr()),
         );
         let execute = self.guard.clone();
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
@@ -11182,9 +11192,13 @@ impl TensorContentBuffers {
         execute: &CudaFunction,
         verify: bool,
     ) -> Result<(), SemanticTransitionError> {
-        self.enqueue_with_custody(domain, poisoned, execute, verify, None, false)
+        self.enqueue_with_custody(domain, poisoned, execute, verify, None, false, None)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "original replay custody and cold operation accounting have distinct owners"
+    )]
     fn enqueue_with_custody(
         &self,
         domain: &ResidentExecutionDomain,
@@ -11193,12 +11207,13 @@ impl TensorContentBuffers {
         verify: bool,
         custody: Option<&PreparedReplayCustody>,
         completed: bool,
+        cold_work: Option<&DeviceMemoryView<u64>>,
     ) -> Result<(), SemanticTransitionError> {
         if let TensorContentSeals::Model(model) = &self.seals {
             if !verify || model.ranges.len() != self.tensors.len() + 1 {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
-            model.verify_contract(domain, poisoned)?;
+            model.verify_contract(domain, poisoned, cold_work)?;
         }
         for (ordinal, tensor) in self.tensors.iter().enumerate() {
             if let TensorContentSeals::Captured(digests) = &self.seals {
@@ -11257,6 +11272,9 @@ impl TensorContentBuffers {
                 bytes,
             )?;
             let mut recorder = domain.new_strict_recorder();
+            if let Some(work) = cold_work {
+                recorder.read_write(work);
+            }
             if let Some(source) = &tensor.source {
                 recorder.read(source);
             }
@@ -11302,6 +11320,7 @@ impl TensorContentBuffers {
                 tensor.layout,
                 expected,
                 u64::from(verify),
+                cold_work.map_or(0, |work| *work.device_ptr()),
             );
             let execute = execute.clone();
             enqueue_recorded(domain, poisoned, recorder, |enqueue| {
@@ -21280,6 +21299,7 @@ impl SemanticTransitionSession {
                 role as u64,
                 index,
                 layout,
+                None,
             )?;
         }
         if prepared.inputs_recorded {
@@ -23938,6 +23958,7 @@ impl SemanticTransitionSession {
     ) -> Result<(), SemanticTransitionError> {
         self.checked_reader(lease)?;
         dlpack_consumer_stream(consumer_stream)?;
+        let cold_work = self.cold_native_work(lease.token)?;
         let storage = Arc::clone(
             self.publication
                 .as_ref()
@@ -24041,6 +24062,7 @@ impl SemanticTransitionSession {
                     role,
                     index,
                     layout,
+                    cold_work.as_ref(),
                 )?;
             }
             self.order_content_consumers(consumer_stream)
@@ -24418,6 +24440,7 @@ impl SemanticTransitionSession {
         consumer_stream: u64,
         verify: bool,
     ) -> Result<(), SemanticTransitionError> {
+        let cold_work = self.cold_native_work(witness.reader_token)?;
         let execute = self
             .provider
             .device()
@@ -24467,6 +24490,7 @@ impl SemanticTransitionSession {
                 verify,
                 custody,
                 retained,
+                cold_work.as_ref(),
             )?;
             self.order_content_consumers(consumer_stream)
         })();

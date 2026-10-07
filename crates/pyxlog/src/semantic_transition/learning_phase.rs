@@ -927,7 +927,7 @@ impl PySemanticLearningPhaseTransition {
                 .expect("completed original model component");
             let recorded_work = result
                 .model_work
-                .checked_add(result.semantic_graph_work)
+                .checked_add(result.native_work)
                 .ok_or_else(|| {
                     invalid("source model and semantic work overflowed its original expense")
                 })?;

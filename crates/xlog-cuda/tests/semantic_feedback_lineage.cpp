@@ -158,7 +158,7 @@ static void content_guard_follows_each_acquired_publication() {
     PublicationLease lease{};
     require(publication_acquire(control,lease)==0,"first content reader acquisition failed");
     const auto consume=[&] { semantic_publication_content_guard(reinterpret_cast<uint64_t>(&control),
-        1,0,PublicationTensorLayout{},0,reinterpret_cast<uint64_t>(&lease)); };
+        1,0,PublicationTensorLayout{},0,reinterpret_cast<uint64_t>(&lease),0); };
     consume();
     // A retained reader keeps its original parent even if publication advances.
     control.word=3;values[1].token^=1;consume();values[1].token^=1;
@@ -227,7 +227,7 @@ static void retained_model_contract_preserves_original_seal_after_bank_reuse() {
     require(publication_release(control,next_lease)==0,"reused model contract reader release failed");
 
     const auto consume=[&] { semantic_retained_model_contract_guard(reinterpret_cast<uint64_t>(retained_payload.data()),
-        retained_payload.size(),reinterpret_cast<uint64_t>(&retained_range)); };
+        retained_payload.size(),reinterpret_cast<uint64_t>(&retained_range),0); };
     consume();
     for(uint64_t byte : {uint64_t(0),uint64_t(retained_payload.size()-1)})
         require_content_trap([&] { retained_payload[byte]^=1;consume(); },
@@ -252,7 +252,7 @@ static void retained_model_contract_preserves_original_seal_after_bank_reuse() {
     require_content_trap([&] { retained_range.index=1;consume(); },
         "retained model contract accepted another publication index");
     const auto rejects_arguments=[&](uint64_t data,uint64_t length,uint64_t range,const char* message) {
-        require_content_trap([&] { semantic_retained_model_contract_guard(data,length,range); },message);
+        require_content_trap([&] { semantic_retained_model_contract_guard(data,length,range,0); },message);
     };
     const uint64_t data=reinterpret_cast<uint64_t>(retained_payload.data());
     const uint64_t range=reinterpret_cast<uint64_t>(&retained_range);
@@ -300,7 +300,7 @@ static void active_content_requires_computed_acquired_bank() {
     const auto seal_table=[&] { require(publication_range_digest(control,ranges[1],nullptr,ranges[1].digest)==0,
         "active table seal failed"); };
     const auto consume=[&] { semantic_publication_content_guard(reinterpret_cast<uint64_t>(&control),
-        ranges[0].role,ranges[0].index,layout,1,reinterpret_cast<uint64_t>(&lease)); };
+        ranges[0].role,ranges[0].index,layout,1,reinterpret_cast<uint64_t>(&lease),0); };
     seal_table();
     require_content_trap(consume);
     table.header.active_computed=1;seal_table();
@@ -760,7 +760,7 @@ static void active_continuation_preserves_physical_holes(uint64_t role) {
     seal_active_publication();
     PublicationLease lease{};lease.abi=1;lease.active=1;lease.word=3;lease.bank=1;lease.epoch=1;
     const auto consume=[&] { semantic_publication_content_guard(reinterpret_cast<uint64_t>(&control),
-        next_ranges[0].role,next_ranges[0].index,layout,1,reinterpret_cast<uint64_t>(&lease)); };
+        next_ranges[0].role,next_ranges[0].index,layout,1,reinterpret_cast<uint64_t>(&lease),0); };
     consume();
     next_values[0]=999.0f;consume();
     require_content_trap([&] { next_values[66]+=1.0f;consume(); },
@@ -875,11 +875,11 @@ static void scalar_model_content_seals_one_cell_without_reshaping() {
         for(uint64_t i=0;i<content_bytes;++i)
             require(view[sizeof(view.prefix)+i]==original[i],"scalar traversal missed its original cell");
         semantic_tensor_content_witness(reinterpret_cast<uint64_t>(original.data()),range.length_bytes,
-            range,scalar,reinterpret_cast<uint64_t>(range.digest),1);
+            range,scalar,reinterpret_cast<uint64_t>(range.digest),1,0);
         require_content_trap([&] {
             original[0]^=1;
             semantic_tensor_content_witness(reinterpret_cast<uint64_t>(original.data()),range.length_bytes,
-                range,scalar,reinterpret_cast<uint64_t>(range.digest),1);
+                range,scalar,reinterpret_cast<uint64_t>(range.digest),1,0);
         });
         // The mutation above belongs to the isolated trap child. Both rank
         // comparisons below must hash the same unchanged parent payload.
@@ -923,7 +923,7 @@ static void empty_model_storage_keeps_metadata_without_device_cells() {
             "empty model buffer fabricated cells or lost its exact zero span");
         require(publication_range_digest(control,range,&layout,range.digest)==0,
             "empty model buffer lost its metadata seal");
-        semantic_tensor_content_witness(0,0,range,layout,reinterpret_cast<uint64_t>(range.digest),1);
+        semantic_tensor_content_witness(0,0,range,layout,reinterpret_cast<uint64_t>(range.digest),1,0);
         auto next=range;next.storage_slot=1;
         require(publication_validate_destinations(control,&range,&next,1)==0,
             "zero-byte destination owners were confused with invalid pointers");
@@ -1230,7 +1230,7 @@ static void original_content_seal_accepts_equal_strided_producer_for_type() {
         publication_identity_equal(backing.data(),sealed.backing_digest),
         "canonical original model backing could not be sealed");
     semantic_publication_content_guard(reinterpret_cast<uint64_t>(&fixture.control),
-        sealed.role,sealed.index,canonical,1,reinterpret_cast<uint64_t>(&fixture.lease));
+        sealed.role,sealed.index,canonical,1,reinterpret_cast<uint64_t>(&fixture.lease),0);
     const std::array<uint64_t,4> original_digest{
         sealed.digest[0],sealed.digest[1],sealed.digest[2],sealed.digest[3]};
 
@@ -1238,7 +1238,7 @@ static void original_content_seal_accepts_equal_strided_producer_for_type() {
         auto range=sealed;range.length_bytes=length;
         auto layout=canonical;layout.strides_bytes[0]=width;layout.strides_bytes[1]=column_stride;
         semantic_tensor_content_witness(reinterpret_cast<uint64_t>(data),length,range,layout,
-            reinterpret_cast<uint64_t>(sealed.digest),1);
+            reinterpret_cast<uint64_t>(sealed.digest),1,0);
         require(publication_identity_equal(sealed.digest,original_digest.data()),
             "verification replaced the original model content seal");
     };
@@ -1257,7 +1257,7 @@ static void original_content_seal_accepts_equal_strided_producer_for_type() {
     require_content_trap([&] {
         reinterpret_cast<uint8_t*>(published)[0]^=1;
         semantic_publication_content_guard(reinterpret_cast<uint64_t>(&fixture.control),
-            sealed.role,sealed.index,canonical,1,reinterpret_cast<uint64_t>(&fixture.lease));
+            sealed.role,sealed.index,canonical,1,reinterpret_cast<uint64_t>(&fixture.lease),0);
     });
 
     for(uint32_t field=0;field<4;++field) {
@@ -1877,7 +1877,7 @@ static void acquired_feedback_history() {
     const auto output_witness=[&](uint64_t index,uint64_t verify) {
         PublicationRange range{};range.index=index;range.length_bytes=output_bytes[index];
         semantic_tensor_content_witness(output_data[index],output_bytes[index],range,output_layouts[index],
-            reinterpret_cast<uint64_t>(output_digests[index].data()),verify);
+            reinterpret_cast<uint64_t>(output_digests[index].data()),verify,0);
     };
     encode();
     require(status==std::array<uint64_t,3>{0,0,0},"valid acquired feedback encoding refused");

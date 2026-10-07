@@ -754,10 +754,15 @@ consumers and completes its report before ending the original physical interval.
 An explicitly attached, completed CPU/meta-only recorder may have no model events;
 an absent recorder, overflow or unknown completion is not a zero result.
 This owner grants no evaluation, backward-tape or content-admission rights.
-The same original owner also retains a private semantic-graph tally. Actually
-reached snapshot commands use the existing native unit registry: events are charged
-only where their producer actually visits a table/chain, hashes a block or writes
-canonical bytes. These are new cold occurrences,
+The same original owner also retains one private native tally. Actually reached
+snapshot commands, the original serializer's tensor-content and retained
+ModelContract guards, and published-content guards use the existing native unit
+registry: events are charged only where their producer actually visits a
+table/chain, hashes a block or writes canonical bytes. The guards retain that same
+allocation through their strict read/write ordering, including the full
+selected-model descriptor and ModelContract hash checks. Report submission
+closes these cold producers; continuation only reads the original result.
+These are new cold occurrences,
 not charges copied from an old resident receipt. The original completion report
 joins them with model work and checks their sum against the unchanged operation
 budget; overflow or unknown completion retains the original allocation without
