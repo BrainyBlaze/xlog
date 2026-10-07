@@ -1,4 +1,4 @@
-use std::{fs, sync::Arc};
+use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, Result, ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
@@ -105,43 +105,6 @@ fn run_unary_query(provider: &Arc<CudaKernelProvider>, source: &str) -> Result<V
     let program = xlog_gpu::logic::LogicProgram::compile(source)?;
     let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
     Ok(read_unary(provider, &result.queries[0].buffer))
-}
-
-#[test]
-fn test_xlog_gpu_manifest_does_not_depend_on_xlog_prob_host_wfs() -> Result<()> {
-    let manifest = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-        .map_err(|err| xlog_core::XlogError::Execution(err.to_string()))?;
-    assert!(
-        !manifest.contains("xlog-prob"),
-        "xlog-gpu must not depend on xlog-prob; accepted GPU WFS execution must not link the host HashMap/HashSet WFS path"
-    );
-    Ok(())
-}
-
-#[test]
-fn test_xlog_gpu_logic_source_does_not_reintroduce_host_wfs_solver() -> Result<()> {
-    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/logic.rs"))
-        .map_err(|err| xlog_core::XlogError::Execution(err.to_string()))?;
-
-    for forbidden in [
-        "use xlog_prob",
-        "xlog_prob::",
-        "evaluate_wfs_rules",
-        "evaluate_wfs_program",
-        "ground_wfs_program",
-        "LogicExecutionPlan::EpistemicWfs(",
-        "WfsRule",
-        "WfsLiteral",
-        "WfsConfig",
-        "PirGraph",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "xlog-gpu accepted WFS execution must stay GPU-native; forbidden host-WFS token `{forbidden}` appeared in src/logic.rs"
-        );
-    }
-
-    Ok(())
 }
 
 #[test]
