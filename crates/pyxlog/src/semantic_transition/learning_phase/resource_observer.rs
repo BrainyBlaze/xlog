@@ -166,9 +166,12 @@ impl ResourceObserver {
     pub(super) fn begin(&self, py: Python<'_>, ordinal: u64) -> PyResult<()> {
         self.require_original(py)?;
         let mut retained = self.interval()?;
-        if retained.is_some() {
+        if retained
+            .as_ref()
+            .is_some_and(|original| !original.released || ordinal <= original.ordinal)
+        {
             return Err(invalid(
-                "resource interval begin is single-attempt; retain the original interval",
+                "the next resource interval requires known release and a later original operation; an unknown interval cannot be replaced",
             ));
         }
         let mut nonce = [0; 32];

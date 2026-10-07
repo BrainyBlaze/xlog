@@ -25192,6 +25192,7 @@ impl SemanticTransitionSession {
             lease.header.training_cursor,
             lease.header.training_rng,
             self.training_origins.clone(),
+            self.cold_native_work(lease.token)?.as_ref(),
         );
         if matches!(
             &result,

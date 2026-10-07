@@ -1,4 +1,6 @@
 #include <stdint.h>
+#define XLOG_SEMANTIC_GRAPH_DEVICE_ONLY
+#include "semantic_hypergraph.cu"
 
 struct SemanticTrainingViewOriginRecord {
     uint64_t present;
@@ -98,6 +100,7 @@ struct TrainingViewLaunch {
     uint64_t logical_positions;
     uint64_t kinds;
     uint64_t parents;
+    uint64_t cold_work;
 };
 
 __device__ bool semantic_training_identity_equal(const uint64_t* left, const uint64_t* right) {
@@ -156,12 +159,15 @@ __device__ bool semantic_training_origin_matches(const SemanticTrainingViewOrigi
 }
 
 extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch launch) {
+    auto* work = reinterpret_cast<semantic_graph::NativeWorkTally*>(launch.cold_work);
     auto* selection = reinterpret_cast<SemanticTrainingViewSelection*>(launch.selection);
     auto* selection_words = reinterpret_cast<uint64_t*>(selection);
     for (uint64_t word = threadIdx.x;
          word < sizeof(SemanticTrainingViewSelection) / sizeof(uint64_t);
          word += blockDim.x) {
         selection_words[word] = 0;
+        semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+            sizeof(selection_words[word]));
     }
     __syncthreads();
     const auto* coordinates = launch.coordinates
@@ -173,6 +179,9 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
         selection->row_count = launch.row_count;
         selection->capacity = launch.capacity;
         selection->origin_candidate = UINT64_MAX;
+        semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+            sizeof(selection->status)+sizeof(selection->row_count)+sizeof(selection->capacity)+
+            sizeof(selection->origin_candidate));
     }
     __syncthreads();
     if (selection->status != 0) {
@@ -185,12 +194,17 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
     if (threadIdx.x == 0 &&
         (descriptor.ordinal != cursor || descriptor.raw_bytes != launch.selected_view_bytes)) {
         selection->status = 2;
+        semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+            sizeof(selection->status));
     }
     __syncthreads();
     if (selection->status == 0) {
         for (uint64_t offset = threadIdx.x; offset < descriptor.raw_bytes; offset += blockDim.x) {
+            semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::TableSlot, 1);
             if (raw[offset] != selected[offset]) {
-                atomicCAS(reinterpret_cast<unsigned long long*>(&selection->status), 0ULL, 2ULL);
+                if (atomicCAS(reinterpret_cast<unsigned long long*>(&selection->status), 0ULL, 2ULL) == 0ULL)
+                    semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+                        sizeof(selection->status));
             }
         }
     }
@@ -200,11 +214,13 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
         const auto* candidates = reinterpret_cast<const SemanticTrainingViewOriginRecord*>(
             launch.origin_candidates);
         for (uint64_t row = 0; row < launch.row_count; ++row) {
+            semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::TableSlot, 1);
             const auto item = descriptors[row];
             uint64_t origin_candidate = UINT64_MAX;
             if (item.basis == 1 && semantic_training_historical_origin_valid(item.origin)) {
                 uint64_t matches = 0;
                 for (uint64_t candidate = 0; candidate < launch.origin_candidate_count; ++candidate) {
+                    semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::TableSlot, 1);
                     if (semantic_training_origin_matches(item.origin, candidates[candidate])) {
                         origin_candidate = candidate;
                         ++matches;
@@ -212,9 +228,13 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
                 }
                 if (matches > 1 || (row == cursor && matches != 1)) {
                     selection->status = 3;
+                    semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+                        sizeof(selection->status));
                 }
             } else if ((item.basis != 2 && item.basis != 3) || item.origin.present != 0) {
                 selection->status = 3;
+                semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+                    sizeof(selection->status));
             }
             roster[row].ordinal = item.ordinal;
             roster[row].basis = item.basis;
@@ -230,8 +250,12 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
                 roster[row].content_identity[i] = item.content_identity[i];
             }
             roster[row].origin = item.origin;
+            semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+                sizeof(roster[row]));
             if (row == cursor) {
                 selection->origin_candidate = origin_candidate;
+                semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+                    sizeof(selection->origin_candidate));
             }
         }
     }
@@ -252,10 +276,16 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
             selection->training_rng[i] =
                 launch.coordinates ? coordinates[i + 1] : launch.training_rng[i];
         }
+        semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+            sizeof(selection->ordinal)+sizeof(selection->basis)+sizeof(selection->window)+
+            sizeof(selection->source_length)+sizeof(selection->block_size)+sizeof(selection->prefix_extent)+
+            sizeof(selection->answer_start)+sizeof(selection->origin)+sizeof(selection->identity)+
+            sizeof(selection->source_identity)+sizeof(selection->content_identity)+sizeof(selection->training_rng));
     }
 }
 
 extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch launch) {
+    auto* work = reinterpret_cast<semantic_graph::NativeWorkTally*>(launch.cold_work);
     const auto* selection = reinterpret_cast<const SemanticTrainingViewSelection*>(launch.selection);
     auto* output_token_ids = reinterpret_cast<int64_t*>(launch.token_ids);
     auto* output_mask_labels = reinterpret_cast<int64_t*>(launch.mask_labels);
@@ -285,6 +315,11 @@ extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch laun
         output_logical_positions[output_offset + index] = -1;
         output_kinds[output_offset + index] = 0;
         output_parents[output_offset + index] = -2;
+        semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+            sizeof(output_token_ids[0])+sizeof(output_mask_labels[0])+sizeof(output_mask_weights[0])+
+            sizeof(output_ar_labels[0])+sizeof(output_retention_labels[0])+sizeof(output_branch_labels[0])+
+            sizeof(output_branch_ids[0])+sizeof(output_source_slots[0])+sizeof(output_logical_positions[0])+
+            sizeof(output_kinds[0])+sizeof(output_parents[0]));
     }
     __syncthreads();
     if (selection->status != 0) {
@@ -319,6 +354,11 @@ extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch laun
             output_logical_positions[output_offset + index] = logical_positions[index];
             output_kinds[output_offset + index] = kinds[index];
             output_parents[output_offset + index] = parents[index];
+            semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+                sizeof(output_token_ids[0])+sizeof(output_mask_labels[0])+sizeof(output_mask_weights[0])+
+                sizeof(output_ar_labels[0])+sizeof(output_retention_labels[0])+sizeof(output_branch_labels[0])+
+                sizeof(output_branch_ids[0])+sizeof(output_source_slots[0])+sizeof(output_logical_positions[0])+
+                sizeof(output_kinds[0])+sizeof(output_parents[0]));
         }
     }
 }

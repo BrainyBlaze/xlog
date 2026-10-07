@@ -14,6 +14,10 @@ use resource_observer::ResourceObserver;
 pub(crate) mod cold_model_work;
 #[cfg(feature = "semantic-policy")]
 use cold_model_work::{ColdCallbackScope, PySemanticColdModelWork};
+#[cfg(feature = "semantic-policy")]
+mod source_execution;
+#[cfg(feature = "semantic-policy")]
+use source_execution::SourceEvaluation;
 
 struct PhaseRecordStore {
     pin: Py<PyAny>,
@@ -325,7 +329,10 @@ struct SourcePreparation {
     decoded_verified: bool,
     model_result: Option<Py<PyAny>>,
     resource_finish_entered: bool,
+    physical_peak: Option<u64>,
     verified: bool,
+    record_entered: bool,
+    recorded: bool,
 }
 
 /// Native-issued pending owner. No candidate owner escapes before durable commit.
@@ -336,6 +343,7 @@ struct SourcePreparation {
     frozen
 )]
 pub(crate) struct PySemanticLearningPhaseTransition {
+    source_controller: Py<PySemanticTransitionController>,
     source: Py<PySemanticTransitionSession>,
     task_use: Py<PySemanticTransitionTaskUse>,
     parent: Py<PySemanticPublishedParent>,
@@ -359,6 +367,10 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     preparation_inputs: PreparationInputs,
     preparation_entered: AtomicBool,
     source_preparation: Mutex<Option<SourcePreparation>>,
+    #[cfg(feature = "semantic-policy")]
+    source_evaluations: Mutex<Vec<SourceEvaluation>>,
+    #[cfg(feature = "semantic-policy")]
+    source_evaluation_active: AtomicBool,
     candidate_entered: AtomicBool,
     completion: Mutex<Completion>,
     operating: AtomicBool,
@@ -392,7 +404,21 @@ fn check_learning_grant<'a>(
         .find(|grant| grant.reference == reference)
         .ok_or_else(|| invalid("phase transition requires an original task training grant"))?;
     task.authority.check_snapshot(snapshot)?;
-    if let CheckpointTaskPhase::Segment(operation) = checkpoint_task_phase(&*task.state()?)? {
+    let task_phase = {
+        let state = task.state()?;
+        if matches!(state.phase, TaskUsePhase::Evaluating(_)) {
+            state
+                .content_handoff_binding()?
+                .0
+                .map(CheckpointTaskPhase::Segment)
+                .ok_or_else(|| {
+                    invalid("pending phase evaluation lost its original admitted task operation")
+                })?
+        } else {
+            checkpoint_task_phase(&state)?
+        }
+    };
+    if let CheckpointTaskPhase::Segment(operation) = task_phase {
         task.authority.check_use(&operation, snapshot, false)?;
     }
     task.authority.check_grants(
@@ -640,7 +666,10 @@ impl PySemanticLearningPhaseTransition {
             decoded_verified: false,
             model_result: None,
             resource_finish_entered: false,
+            physical_peak: None,
             verified: false,
+            record_entered: false,
+            recorded: false,
         });
         let decode = self
             .store()?
@@ -916,7 +945,22 @@ impl PySemanticLearningPhaseTransition {
         // Missing physical producer/baseline/coverage/allocator completion is
         // not zero or a reservation. Keep the completed source result and all
         // original owners; explicit continuation only reads this same interval.
-        let peak = inputs.resource_observer.physical_peak(py)?;
+        let saved_peak = self
+            .source_preparation()?
+            .as_ref()
+            .expect("retained original source group")
+            .physical_peak;
+        let peak = match saved_peak {
+            Some(peak) => peak,
+            None => {
+                let peak = inputs.resource_observer.physical_peak(py)?;
+                self.source_preparation()?
+                    .as_mut()
+                    .expect("retained original source group")
+                    .physical_peak = Some(peak);
+                peak
+            }
+        };
         #[cfg(feature = "semantic-policy")]
         {
             let retained = self.source_preparation()?;
@@ -941,6 +985,11 @@ impl PySemanticLearningPhaseTransition {
             .physical_memory_limit;
         if peak > memory_limit {
             return Err(invalid("source preparation exceeded its original physical memory budget; retain the actual result without admitting private work"));
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            self.record_source_preparation(py, peak)?;
+            self.execute_source_evaluations(py)?;
         }
         self.candidate_entered.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| invalid("private candidate preparation has already entered execution; retain its original outcome"))?;
@@ -2092,7 +2141,7 @@ impl PySemanticTransitionController {
         reason = "the original task, scientific acceptance, durable destination and model owners are independent mandatory inputs"
     )]
     fn prepare_learning_phase_transition(
-        &self,
+        slf: Py<Self>,
         py: Python<'_>,
         task_use: Py<PySemanticTransitionTaskUse>,
         parent: Py<PySemanticPublishedParent>,
@@ -2120,16 +2169,17 @@ impl PySemanticTransitionController {
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PySemanticLearningPhaseTransition>> {
+        let controller = slf.borrow(py);
         if !cfg!(feature = "semantic-policy") {
             return Err(invalid(
                 "cold model work requires the semantic-policy build",
             ));
         }
-        let source = self.session.borrow(py);
+        let source = controller.session.borrow(py);
         source.require_creator()?;
         let task = task_use.borrow(py);
         let acquired = parent.borrow(py);
-        self.require_issued(&task)?;
+        controller.require_issued(&task)?;
         acquired.require_task(py, &task)?;
         if !source_checkpoint.is_exact_instance_of::<PyBytes>() {
             return Err(invalid(
@@ -2258,7 +2308,8 @@ impl PySemanticTransitionController {
         let pending = Py::new(
             py,
             PySemanticLearningPhaseTransition {
-                source: self.session.clone_ref(py),
+                source_controller: slf.clone_ref(py),
+                source: controller.session.clone_ref(py),
                 task_use: task_use.clone_ref(py),
                 parent: parent.clone_ref(py),
                 candidate: Mutex::new(None),
@@ -2281,6 +2332,10 @@ impl PySemanticTransitionController {
                 preparation_inputs,
                 preparation_entered: AtomicBool::new(false),
                 source_preparation: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                source_evaluations: Mutex::new(Vec::new()),
+                #[cfg(feature = "semantic-policy")]
+                source_evaluation_active: AtomicBool::new(false),
                 candidate_entered: AtomicBool::new(false),
                 completion: Mutex::new(Completion::Preparing),
                 operating: AtomicBool::new(false),

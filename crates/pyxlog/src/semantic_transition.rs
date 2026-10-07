@@ -7252,7 +7252,13 @@ impl TaskUseState {
                 reads: true,
             } => operation,
             TaskUsePhase::ArenaPreparing(original) | TaskUsePhase::Evaluating(original) => {
-                match original.as_ref() {
+                let mut original = original.as_ref();
+                while let TaskUsePhase::ArenaPreparing(inner) | TaskUsePhase::Evaluating(inner) =
+                    original
+                {
+                    original = inner.as_ref();
+                }
+                match original {
                     TaskUsePhase::Segment(operation) => operation,
                     _ => {
                         return Err(invalid(
