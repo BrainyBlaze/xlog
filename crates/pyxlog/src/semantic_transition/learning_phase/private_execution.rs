@@ -13,6 +13,7 @@ enum PrivateColdRole {
 }
 
 pub(super) struct PrivateExecutionGroup {
+    branch: &'static str,
     entries: Py<PyTuple>,
     materials: Vec<Vec<u8>>,
     instruction: Vec<u8>,
@@ -122,14 +123,20 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
-    pub(super) fn control_evaluation_input(
+    pub(super) fn private_evaluation_input(
         &self,
         py: Python<'_>,
+        branch: &'static str,
     ) -> PyResult<(super::phase_evaluation::EvaluationOwners, u64)> {
         let retained = self.private_group()?;
         let group = retained
             .as_ref()
             .ok_or_else(|| invalid("private evaluation lost its original numerical group"))?;
+        if group.branch != branch {
+            return Err(invalid(
+                "private evaluation changed its original branch handoff",
+            ));
+        }
         if group.records_completed != group.kinds.len()
             || !group.records_released
             || group.budget_exceeded
@@ -820,12 +827,36 @@ impl PySemanticLearningPhaseTransition {
                 .bind(py)
                 .as_any(),
         )?;
-        Ok((materials[1].clone(), false).into_pyobject(py)?.unbind())
+        let retained = self.private_group()?;
+        let branch = retained.as_ref().expect("original private group").branch;
+        let (material, enabled) = match branch {
+            "real" => (materials[0].clone(), true),
+            "control" => (materials[1].clone(), false),
+            _ => {
+                return Err(invalid(
+                    "private numerical feedback lost its original branch",
+                ))
+            }
+        };
+        Ok((material, enabled).into_pyobject(py)?.unbind())
     }
 
-    pub(super) fn execute_control_group(&self, py: Python<'_>) -> PyResult<()> {
+    pub(super) fn execute_private_group(
+        &self,
+        py: Python<'_>,
+        branch: &'static str,
+    ) -> PyResult<()> {
+        if self
+            .private_group()?
+            .as_ref()
+            .is_some_and(|group| group.branch != branch)
+        {
+            return Err(invalid(
+                "private execution cannot replace its original branch group",
+            ));
+        }
         if self.private_group()?.is_none() {
-            let (restored, ordinal) = self.control_execution_input(py)?;
+            let (restored, ordinal) = self.private_execution_input(py, branch)?;
             self.preparation_inputs
                 .require_program(py, &self.scientific_owner)?;
             let next = self.scientific_owner.bind(py).getattr("next_operation")?;
@@ -847,7 +878,7 @@ impl PySemanticLearningPhaseTransition {
                 let expected = ordinal
                     .checked_add(index as u64)
                     .ok_or_else(|| invalid("private numerical position overflowed"))?;
-                if fields[1].text()? != "control"
+                if fields[1].text()? != branch
                     || fields[2].unsigned()? != expected
                     || fields[3].unsigned()? != index as u64
                     || original_instruction
@@ -855,7 +886,7 @@ impl PySemanticLearningPhaseTransition {
                         .is_some_and(|original| original != &instruction)
                 {
                     return Err(invalid(
-                        "private execution changed its original contiguous control roster",
+                        "private execution changed its original contiguous branch roster",
                     ));
                 }
                 let kind = transition_kind(&fields[0])?;
@@ -875,6 +906,7 @@ impl PySemanticLearningPhaseTransition {
                 original_instruction = Some(instruction);
             }
             *self.private_group()? = Some(PrivateExecutionGroup {
+                branch,
                 entries: entries.clone().unbind(),
                 materials,
                 instruction: original_instruction.expect("nonempty group"),
@@ -1072,10 +1104,10 @@ impl PySemanticLearningPhaseTransition {
                 }
             }
         };
-        self.finish_control_group(py, &returned)
+        self.finish_private_group(py, &returned)
     }
 
-    fn finish_control_group(&self, py: Python<'_>, returned: &Py<PyAny>) -> PyResult<()> {
+    fn finish_private_group(&self, py: Python<'_>, returned: &Py<PyAny>) -> PyResult<()> {
         {
             let retained = self.private_group()?;
             let group = retained.as_ref().expect("retained original group");
@@ -1446,12 +1478,26 @@ impl PySemanticLearningPhaseTransition {
                     .checked_add(index as u64)
                     .ok_or_else(|| invalid("private history ordinal overflowed"))?,
             )?;
-            arguments.set_item("branch", "control")?;
+            let branch = self
+                .private_group()?
+                .as_ref()
+                .expect("original private group")
+                .branch;
+            arguments.set_item("branch", branch)?;
             arguments.set_item(
                 "step",
                 rows.get_item(index)?.cast::<PyTuple>()?.get_item(0)?,
             )?;
-            arguments.set_item("feedback_intervention_bytes", materials[1].clone())?;
+            let intervention = match branch {
+                "real" => materials[0].clone(),
+                "control" => materials[1].clone(),
+                _ => {
+                    return Err(invalid(
+                        "private history lost its original branch intervention",
+                    ))
+                }
+            };
+            arguments.set_item("feedback_intervention_bytes", intervention)?;
             arguments.set_item("resource_usage", (work, peaks[index], calls))?;
             let callback = self.scientific_owner.bind(py).getattr("record_step")?;
             self.private_group()?

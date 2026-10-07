@@ -113,7 +113,7 @@ impl PySemanticLearningPhaseTransition {
                 "control checkpoint precedes its complete original evaluations",
             ));
         }
-        let (owners, mut ordinal) = self.control_evaluation_input(py)?;
+        let (owners, mut ordinal) = self.private_evaluation_input(py, "control")?;
         if let Some(evaluation) = self
             .phase_evaluations()?
             .last()
@@ -446,7 +446,7 @@ impl PySemanticLearningPhaseTransition {
             {
                 self.release_evaluation_record(py)?;
             }
-            let (owners, mut ordinal) = self.control_evaluation_input(py)?;
+            let (owners, mut ordinal) = self.private_evaluation_input(py, "control")?;
             if let Some(previous) = self
                 .phase_evaluations()?
                 .last()
