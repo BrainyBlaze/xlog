@@ -775,7 +775,11 @@ ModelContract guards, and published-content guards use the existing native unit
 registry: events are charged only where their producer actually visits a
 table/chain, hashes a block or writes canonical bytes. The guards retain that same
 allocation through their strict read/write ordering, including the full
-selected-model descriptor and ModelContract hash checks. Report submission
+selected-model descriptor and ModelContract hash checks. The original GPU
+content-view and model-identity producers charge their canonical prefix and
+identity-input byte writes in that same tally, before their hashes. This is
+logical native work, not a charge for CPU codecs or host/device copies, and it
+does not change the event tariffs or model-call count. Report submission
 closes these cold producers; continuation only reads the original result.
 These are new cold occurrences,
 not charges copied from an old resident receipt. The original completion report
