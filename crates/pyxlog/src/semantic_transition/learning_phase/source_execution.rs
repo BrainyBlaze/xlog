@@ -30,6 +30,50 @@ pub(super) struct SourceEvaluation {
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(in crate::semantic_transition) fn require_source_feedback_projection(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        parent: &Py<PySemanticPublishedParent>,
+    ) -> PyResult<()> {
+        if !std::ptr::eq(session, &*self.source.borrow(py))
+            || parent.as_ptr() != self.parent.as_ptr()
+            || !session.learning_preparing.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "source feedback projection changed its original Session or held parent",
+            ));
+        }
+        self.records()?.require_preparation_admission()?;
+        feedback_materials(
+            self.preparation_inputs
+                .feedback_interventions
+                .bind(py)
+                .as_any(),
+        )?;
+        let cold_callback = session
+            .active_cold_model_work
+            .lock()
+            .map_err(|_| invalid("active cold callback owner mutex is poisoned"))?
+            .is_some();
+        if !cold_callback && !self.source_evaluation_active.load(Ordering::Acquire) {
+            return Err(invalid("held source feedback is readable only inside its original serialization or evaluation callback"));
+        }
+        if self.source_evaluation_active.load(Ordering::Acquire) {
+            let retained = self.source_evaluations()?;
+            let current = retained
+                .last()
+                .ok_or_else(|| invalid("source feedback lost its original evaluation entry"))?;
+            Self::require_source_evaluation_entry(py, current)?;
+            if !current.ready || !current.evaluation_admitted || current.callback_result.is_some() {
+                return Err(invalid(
+                    "source feedback lost its actual admitted source evaluation",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn source_evaluations(&self) -> PyResult<MutexGuard<'_, Vec<SourceEvaluation>>> {
         self.source_evaluations
             .lock()
@@ -38,7 +82,7 @@ impl PySemanticLearningPhaseTransition {
 
     /// This is not general public admission. Only the one retained original
     /// source callback can issue its read-only evaluation, once, on that parent.
-    pub(super) fn require_source_evaluation(
+    pub(in crate::semantic_transition) fn require_source_evaluation(
         &self,
         py: Python<'_>,
         controller: &PySemanticTransitionController,

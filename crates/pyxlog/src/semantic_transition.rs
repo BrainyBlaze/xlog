@@ -11034,6 +11034,7 @@ pub(crate) struct PySemanticTensorContentWitness {
     _producers: Vec<Py<PyAny>>,
     parent: ContentStepOwner,
     session: Py<PySemanticTransitionSession>,
+    model_binding: bool,
 }
 
 #[pyclass(
@@ -11049,6 +11050,50 @@ pub(crate) struct PySemanticModelForwardWitness {
 
 #[pymethods]
 impl PySemanticTensorContentWitness {
+    /// Cold projection from this actual model-content owner. An ordinary
+    /// model or the held original source has no private feedback intervention;
+    /// an unbound private child must never be treated as that ordinary case.
+    #[getter]
+    fn learning_feedback_intervention(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        if !self.model_binding {
+            return Err(invalid(
+                "feedback intervention projection requires its original model-content witness",
+            ));
+        }
+        {
+            let owner = session.owner()?;
+            self.parent.binding(py, &owner, false)?;
+        }
+        if !session.learning_preparing.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        return Err(invalid(
+            "private learning feedback requires the semantic-policy owner",
+        ));
+        #[cfg(feature = "semantic-policy")]
+        {
+            let pending = session
+                .learning_transition
+                .lock()
+                .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?
+                .as_ref()
+                .map(|pending| pending.clone_ref(py))
+                .ok_or_else(|| {
+                    invalid("private model content lost its original learning-feedback owner")
+                })?;
+            let ContentStepOwner::Published(parent) = &self.parent else {
+                return Err(invalid("source feedback projection requires its original acquired source, not a private prepared step"));
+            };
+            pending
+                .borrow(py)
+                .require_source_feedback_projection(py, &session, parent)?;
+            Ok(None)
+        }
+    }
+
     /// Enqueue verification against this witness's original content baseline.
     /// Native checks their original pointers, metadata and device bytes. DLPack
     /// callbacks run without Session, reader or task-state locks; their complete
@@ -16810,6 +16855,7 @@ impl PySemanticTransitionController {
         let mut owner = session.owner()?;
         task_use.require_identity(&owner)?;
         let state = task_use.state()?;
+        let model_binding = matches!(&binding_kind, TensorContentBinding::Model(_));
         let inner = match &parent {
             ContentStepOwner::Published(acquired) => {
                 let acquired = acquired.borrow(py);
@@ -16869,6 +16915,7 @@ impl PySemanticTransitionController {
             _producers: producers,
             parent,
             session: self.session.clone_ref(py),
+            model_binding,
         })
     }
 
