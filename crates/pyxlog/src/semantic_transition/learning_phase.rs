@@ -315,7 +315,7 @@ struct SourcePreparation {
     entry_material: Vec<u8>,
     instruction: Vec<u8>,
     physical_memory_limit: u64,
-    model_work_limit: u64,
+    work_limit: u64,
     model_calls_limit: u64,
     #[cfg(feature = "semantic-policy")]
     cold_model_work: Option<Py<PySemanticColdModelWork>>,
@@ -630,7 +630,7 @@ impl PySemanticLearningPhaseTransition {
             entry_material: material,
             instruction: instruction_material,
             physical_memory_limit: limits[1],
-            model_work_limit: limits[0],
+            work_limit: limits[0],
             model_calls_limit: limits[2],
             #[cfg(feature = "semantic-policy")]
             cold_model_work: None,
@@ -898,8 +898,8 @@ impl PySemanticLearningPhaseTransition {
                 }
                 .map_err(xlog_err)?
             };
-            // Retain the actual component before refusal. Complete source S
-            // still requires its genuine native contribution, never a zero.
+            // Retain the actual components before refusal. Other source S
+            // still requires its genuine producers, never substituted zeroes.
             let mut retained = self.source_preparation()?;
             let source = retained.as_mut().expect("retained original source group");
             source.model_work_result = Some(result);
@@ -925,10 +925,14 @@ impl PySemanticLearningPhaseTransition {
             let result = source
                 .model_work_result
                 .expect("completed original model component");
-            if result.model_work > source.model_work_limit
-                || result.model_calls > source.model_calls_limit
-            {
-                return Err(invalid("source model work exceeded its original operation budget; retain the actual result"));
+            let recorded_work = result
+                .model_work
+                .checked_add(result.semantic_graph_work)
+                .ok_or_else(|| {
+                    invalid("source model and semantic work overflowed its original expense")
+                })?;
+            if recorded_work > source.work_limit || result.model_calls > source.model_calls_limit {
+                return Err(invalid("source model and semantic work exceeded its original operation budget; retain the actual result"));
             }
         }
         let memory_limit = self

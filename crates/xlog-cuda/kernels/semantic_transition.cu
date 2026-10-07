@@ -287,18 +287,23 @@ __device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& wo
     }
     if(declared_bound!=input.bound) { semantic_content_integrity_trap();return; }
 }
-// Cold model component only; CPU codec and native semantic work are not model
-// work. Empty input is admitted only after the original recorder has closed.
+// The original cold operation joins model work and its actually reached semantic
+// commands. CPU codec is not CUDA model work; no old resident attempt is charged.
+// Empty model input requires the original recorder to have explicitly closed.
 extern "C" __global__ void semantic_cold_model_work_result(
-    uint64_t events,uint64_t count,uint64_t bound,uint64_t result) {
+    uint64_t events,uint64_t count,uint64_t bound,uint64_t semantic_work,uint64_t result) {
     if(blockIdx.x || threadIdx.x)return;
     ExecutionWork work{};
     uint64_t calls=0;
+    execution_work_merge_native(work,
+        *reinterpret_cast<const semantic_graph::NativeWorkTally*>(semantic_work));
     consume_model_work(ModelWorkInput{events,count,bound},work,&calls);
     auto* output=reinterpret_cast<uint64_t*>(result);
     output[0]=work.overflow || work.model_events!=count || work.model_bound!=bound ? 1 : 0;
     output[1]=work.model_once;output[2]=work.model_events;
     output[3]=work.model_bound;output[4]=calls;
+    output[5]=work.native_attempt;
+    for(uint32_t i=0;i<9;++i)output[6+i]=work.native_events[i];
 }
 // Cold observation only: no Update, RNG, optimizer or publication side effect.
 extern "C" __global__ void semantic_model_evaluation_result(

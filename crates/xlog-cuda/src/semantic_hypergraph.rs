@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use xlog_core::{symbol, RelId, ScalarType, Schema, XlogError};
 
 use crate::launch::LaunchEnqueueError;
-use crate::memory::TrackedCudaSlice;
+use crate::memory::{DeviceMemoryView, TrackedCudaSlice};
 use crate::provider::resident_schedule::{validate_execution_domain, ResidentExecutionDomain};
 use crate::semantic_transition::Identity256;
 use crate::{
@@ -2437,6 +2437,7 @@ struct SemanticKernelLaunchSpec<'a> {
     owner: u64,
     capacities: SemanticHypergraphCapacities,
     arena_words: u64,
+    cold_work: Option<&'a DeviceMemoryView<u64>>,
 }
 
 #[repr(C)]
@@ -2558,11 +2559,46 @@ pub struct SemanticHypergraph {
     stats: SemanticHypergraphExecutionStats,
     device_controlled: bool,
     poisoned: bool,
+    // The enclosing cold operation retains this same private allocation until
+    // its original completion is known. Ordinary resident attempts own theirs.
+    cold_work: Option<DeviceMemoryView<u64>>,
     // Retire device state before releasing its allocation and driver owner.
     provider: Arc<CudaKernelProvider>,
 }
 
 impl SemanticHypergraph {
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn begin_cold_work(
+        &mut self,
+        work: DeviceMemoryView<u64>,
+    ) -> Result<(), SemanticHypergraphError> {
+        self.ensure_not_poisoned()?;
+        if self.cold_work.is_some() || work.len() != 11 {
+            return Err(admission_error(
+                "cold semantic work requires its sole original native tally",
+            ));
+        }
+        self.cold_work = Some(work);
+        Ok(())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn complete_cold_work(
+        &mut self,
+        work: &DeviceMemoryView<u64>,
+    ) -> Result<(), SemanticHypergraphError> {
+        self.ensure_not_poisoned()?;
+        if self.cold_work.as_ref().is_none_or(|original| {
+            original.device_ptr() != work.device_ptr() || original.len() != work.len()
+        }) {
+            return Err(admission_error(
+                "cold semantic completion lost its original native tally",
+            ));
+        }
+        self.cold_work = None;
+        Ok(())
+    }
+
     pub(crate) fn transition_owner(
         &self,
     ) -> Result<(Arc<CudaKernelProvider>, ResidentExecutionDomain), SemanticHypergraphError> {
@@ -2813,6 +2849,7 @@ impl CudaKernelProvider {
             stats: SemanticHypergraphExecutionStats::default(),
             device_controlled: false,
             poisoned: false,
+            cold_work: None,
         };
         let command = graph.command_for(OP_INITIALIZE);
         let receipt = graph.run(command, ArenaAccess::ReadWrite)?;
@@ -3652,6 +3689,7 @@ impl SemanticHypergraph {
                 owner: self.owner,
                 capacities: self.capacities,
                 arena_words: self.arena_words,
+                cold_work: self.cold_work.as_ref(),
             },
             SemanticKernelLaunchIo {
                 arena: &mut self.arena,
@@ -3686,6 +3724,7 @@ impl SemanticHypergraph {
                 owner: self.owner,
                 capacities: self.capacities,
                 arena_words: self.arena_words,
+                cold_work: self.cold_work.as_ref(),
             },
             SemanticKernelLaunchIo {
                 arena: &mut self.arena,
@@ -4131,6 +4170,10 @@ fn enqueue_device_command(
         }
     }
     recorder.write(receipts);
+    let cold_work = spec.cold_work.map_or(0, |work| {
+        recorder.read_write(work);
+        *work.device_ptr()
+    });
     let mut descriptor = DeviceLaunchDescriptor {
         expected_owner: spec.owner,
         root_capacity: u64::from(spec.capacities.roots),
@@ -4257,7 +4300,7 @@ fn enqueue_device_command(
                     block_dim: (1, 1, 1),
                     shared_mem_bytes: 0,
                 },
-                (arena, descriptor),
+                (arena, descriptor, cold_work),
             )
         })
     } {
@@ -4885,7 +4928,7 @@ pub(crate) mod tests {
                             block_dim: (1, 1, 1),
                             shared_mem_bytes: 0,
                         },
-                        (graph.arena.device_ptr_value(), descriptor),
+                        (graph.arena.device_ptr_value(), descriptor, 0u64),
                     )
                 })
             }
@@ -6879,7 +6922,7 @@ pub(crate) mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (graph.arena.device_ptr_value(), descriptor),
+                    (graph.arena.device_ptr_value(), descriptor, 0u64),
                 )
             })
         }

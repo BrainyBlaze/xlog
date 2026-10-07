@@ -754,7 +754,15 @@ consumers and completes its report before ending the original physical interval.
 An explicitly attached, completed CPU/meta-only recorder may have no model events;
 an absent recorder, overflow or unknown completion is not a zero result.
 This owner grants no evaluation, backward-tape or content-admission rights.
-Its model-work component is not the full operation's native work or physical peak.
+The same original owner also retains a private semantic-graph tally. Actually
+reached snapshot commands use the existing native unit registry: events are charged
+only where their producer actually visits a table/chain, hashes a block or writes
+canonical bytes. These are new cold occurrences,
+not charges copied from an old resident receipt. The original completion report
+joins them with model work and checks their sum against the unchanged operation
+budget; overflow or unknown completion retains the original allocation without
+resetting or replaying commands. Other cold producers and the physical peak are
+still required before this can be the full operation expense.
 
 The returned native-issued `SemanticLearningPhaseTransition` retains both
 owners privately. A fast successor resumes inference; consolidation resumes

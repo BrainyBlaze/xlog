@@ -22,19 +22,22 @@ impl SemanticColdModelWork {
         }
         capacity
             .checked_mul(size_of::<ModelWorkEvent>() + 3 * size_of::<u64>())
-            .and_then(|bytes| bytes.checked_add(5 * size_of::<u64>()))
+            .and_then(|bytes| bytes.checked_add((15 + 11) * size_of::<u64>()))
             .filter(|bytes| *bytes <= isize::MAX as usize)
             .ok_or(SemanticTransitionError::GenerationExhausted)
     }
 }
 
-/// The model component, not the complete operation's native work or physical peak.
+/// Actual model and semantic-graph components, not the complete operation's
+/// native work or physical peak. Other cold producers remain independent.
 #[derive(Clone, Copy, Debug)]
 pub struct SemanticColdModelWorkResult {
     pub model_work: u64,
     pub operation_count: u64,
     pub work_bound: u64,
     pub model_calls: u64,
+    pub semantic_graph_work: u64,
+    pub semantic_graph_events: [u64; 9],
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,6 +56,7 @@ pub(super) struct ColdModelWorkStorage {
     operation_ordinal: u64,
     admission: Arc<[u8]>,
     work: PreparedModelWork,
+    semantic_graph_work: TrackedCudaSlice<u64>,
     report: TrackedCudaSlice<u64>,
     state: RecordingState,
     result: Option<SemanticColdModelWorkResult>,
@@ -83,6 +87,7 @@ impl SemanticTransitionSession {
         admission: Arc<[u8]>,
     ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
         self.ensure_quiescent()?;
+        self.require_completed_cold_model_work()?;
         self.checked_reader(lease)?;
         let step = self.checked_step(lease)?;
         if capacity == 0
@@ -103,8 +108,11 @@ impl SemanticTransitionSession {
             .reserve_bytes(bytes as u64)
             .map_err(|error| runtime_error("cold model work reservation", error))?;
         let work = PreparedModelWork::allocate(&self.provider, &mut reservation, capacity)?;
+        let semantic_graph_work = reservation
+            .alloc(11)
+            .map_err(|error| runtime_error("cold semantic work allocation", error))?;
         let report = reservation
-            .alloc(5)
+            .alloc(15)
             .map_err(|error| runtime_error("cold model work report allocation", error))?;
         let invocation = Arc::new(());
         let handle = SemanticColdModelWork {
@@ -122,6 +130,7 @@ impl SemanticTransitionSession {
             operation_ordinal,
             admission,
             work,
+            semantic_graph_work,
             report,
             state: RecordingState::Waiting,
             result: None,
@@ -133,6 +142,21 @@ impl SemanticTransitionSession {
             .expect("retained cold work")
             .work
             .reset_slots(&self.domain, &mut self.poisoned, 0, capacity)?;
+        let storage = self
+            .steps
+            .get_mut(&lease.token)
+            .expect("retained reader")
+            .cold_model_work
+            .as_mut()
+            .expect("retained cold work");
+        // Initialize the actual tally once, before the original semantic commands.
+        // This fixed instrumentation metadata is not a fabricated work occurrence.
+        self.provider
+            .htod_launch_metadata_sync_copy_into(&[0u64; 11], &mut storage.semantic_graph_work)
+            .map_err(|error| runtime_error("cold semantic work initialization", error))?;
+        self.graph
+            .begin_cold_work(storage.semantic_graph_work.view())
+            .map_err(SemanticTransitionError::Semantic)?;
         Ok(handle)
     }
 
@@ -311,8 +335,8 @@ impl SemanticTransitionSession {
     }
 
     /// Native completion, after the callback and all original consumer joins.
-    /// Only its model component is returned; full native S and physical M remain
-    /// the original operation's independent mandatory producers.
+    /// Model and reached semantic commands are returned together. Other native S
+    /// and physical M remain the original operation's mandatory producers.
     pub fn finish_cold_model_work(
         &mut self,
         lease: &SemanticPublishedLease,
@@ -363,15 +387,17 @@ impl SemanticTransitionSession {
         };
         let mut recorder = self.domain.new_strict_recorder();
         work.record_reads(&mut recorder);
+        recorder.read(&storage.semantic_graph_work);
         recorder.write(&storage.report);
         let arguments = (
             input.events,
             input.count,
             input.bound,
+            storage.semantic_graph_work.device_ptr_value(),
             storage.report.device_ptr_value(),
         );
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
-            // SAFETY: the retained private input and five-word report belong to
+            // SAFETY: the retained private inputs and fifteen-word report belong to
             // this one operation; no model alias can modify event metadata.
             unsafe {
                 kernel.clone().launch_in(
@@ -432,7 +458,7 @@ impl SemanticTransitionSession {
             .cold_model_work
             .as_mut()
             .expect("completed cold work");
-        if words.len() != 5
+        if words.len() != 15
             || words[0] != 0
             || words[2] != storage.work.recording.events().len() as u64
             || Some(words[3]) != storage.work.recording.frozen_bound()
@@ -445,6 +471,11 @@ impl SemanticTransitionSession {
                     .iter()
                     .filter(|event| event.kind == ModelWorkKind::ModelInvocation as u64)
                     .count() as u64
+            || words[6..15]
+                .iter()
+                .try_fold(0u64, |sum, units| sum.checked_add(*units))
+                != Some(words[5])
+            || words[1].checked_add(words[5]).is_none()
         {
             storage.state = RecordingState::Failed;
             return Err(publication_input_error(
@@ -456,7 +487,14 @@ impl SemanticTransitionSession {
             operation_count: words[2],
             work_bound: words[3],
             model_calls: words[4],
+            semantic_graph_work: words[5],
+            semantic_graph_events: words[6..15]
+                .try_into()
+                .expect("checked original native event extent"),
         };
+        self.graph
+            .complete_cold_work(&storage.semantic_graph_work.view())
+            .map_err(SemanticTransitionError::Semantic)?;
         storage.result = Some(result);
         storage.state = RecordingState::Completed;
         Ok(result)
