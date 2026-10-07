@@ -230,7 +230,7 @@ __device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& wo
     if(work.overflow)return;
     // The count is frozen in the same native launch descriptor as the original
     // step. The private input allocation is never exported to the model.
-    if(!input.events || !input.count || !input.bound || input.events%alignof(ModelWorkEvent) ||
+    if(!input.events || !input.count || input.events%alignof(ModelWorkEvent) ||
        input.count>UINT64_MAX/sizeof(ModelWorkEvent) ||
        input.events>UINT64_MAX-input.count*sizeof(ModelWorkEvent)) {
         semantic_content_integrity_trap();return;
@@ -286,6 +286,24 @@ __device__ void consume_model_work(const ModelWorkInput& input,ExecutionWork& wo
         if(work.model_once>input.bound) { work.overflow=1;return; }
     }
     if(declared_bound!=input.bound) { semantic_content_integrity_trap();return; }
+}
+// The original cold operation joins model work and its actually reached semantic
+// commands. CPU codec is not CUDA model work; no old resident attempt is charged.
+// Empty model input requires the original recorder to have explicitly closed.
+extern "C" __global__ void semantic_cold_model_work_result(
+    uint64_t events,uint64_t count,uint64_t bound,uint64_t semantic_work,uint64_t result) {
+    if(blockIdx.x || threadIdx.x)return;
+    ExecutionWork work{};
+    uint64_t calls=0;
+    execution_work_merge_native(work,
+        *reinterpret_cast<const semantic_graph::NativeWorkTally*>(semantic_work));
+    consume_model_work(ModelWorkInput{events,count,bound},work,&calls);
+    auto* output=reinterpret_cast<uint64_t*>(result);
+    output[0]=work.overflow || work.model_events!=count || work.model_bound!=bound ? 1 : 0;
+    output[1]=work.model_once;output[2]=work.model_events;
+    output[3]=work.model_bound;output[4]=calls;
+    output[5]=work.native_attempt;
+    for(uint32_t i=0;i<9;++i)output[6+i]=work.native_events[i];
 }
 // Cold observation only: no Update, RNG, optimizer or publication side effect.
 extern "C" __global__ void semantic_model_evaluation_result(
@@ -1456,8 +1474,11 @@ __device__ uint8_t* publication_range_bytes(const PublicationControl& control,co
     return publication_resolve_range(control,range,&bytes) ? bytes : nullptr;
 }
 __device__ const PublicationRange* publication_find_range(const PublicationRange* ranges,uint64_t count,
-        uint64_t role,uint64_t index=0) {
-    for(uint64_t i=0;i<count;++i)if(ranges[i].role==role && ranges[i].index==index)return &ranges[i];
+        uint64_t role,uint64_t index=0,semantic_graph::NativeWorkTally* work=nullptr) {
+    for(uint64_t i=0;i<count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+        if(ranges[i].role==role && ranges[i].index==index)return &ranges[i];
+    }
     return nullptr;
 }
 __device__ bool publication_model_cache_ready(const PublicationControl& control,const PublicationBank& bank) {
@@ -1496,8 +1517,9 @@ struct TensorLayoutTableView {
     const ActiveRow* rows;
 };
 __device__ bool publication_tensor_table(const PublicationControl& control,
-        const PublicationRange* ranges,uint64_t count,TensorLayoutTableView* view) {
-    const auto* table=publication_find_range(ranges,count,55);
+        const PublicationRange* ranges,uint64_t count,TensorLayoutTableView* view,
+        semantic_graph::NativeWorkTally* work=nullptr) {
+    const auto* table=publication_find_range(ranges,count,55,0,work);
     if(!table || table->index || table->logical_begin || table->logical_end ||
        table->length_bytes<sizeof(TensorLayoutTableHeader))return false;
     const auto* bytes=publication_range_bytes(control,*table);
@@ -1515,15 +1537,19 @@ __device__ bool publication_tensor_table(const PublicationControl& control,
     return true;
 }
 __device__ const PublicationTensorLayout* publication_find_layout(const PublicationControl& control,
-        const PublicationRange* ranges,uint64_t count,uint64_t role,uint64_t index) {
+        const PublicationRange* ranges,uint64_t count,uint64_t role,uint64_t index,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     TensorLayoutTableView table{};
-    if(!publication_tensor_table(control,ranges,count,&table))return nullptr;
-    for(uint64_t i=0;i<table.header->layout_count;++i)
+    if(!publication_tensor_table(control,ranges,count,&table,work))return nullptr;
+    for(uint64_t i=0;i<table.header->layout_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(table.layouts[i].role==role && table.layouts[i].index==index)return &table.layouts[i];
+    }
     return nullptr;
 }
 
-__device__ bool publication_active_map_shape(const TensorLayoutTableView& table,const PublicationContract& contract) {
+__device__ bool publication_active_map_shape(const TensorLayoutTableView& table,const PublicationContract& contract,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     uint64_t capacity=0,text_limit=0,position_end=0;
     if(!publication_text_position_limit(contract,&text_limit) ||
        !semantic_graph::checked_add(contract.window_capacity,contract.feedback_capacity,&capacity) ||
@@ -1531,6 +1557,7 @@ __device__ bool publication_active_map_shape(const TensorLayoutTableView& table,
        table.header->active_row_count>capacity)return false;
     uint64_t text_slots=0,last_kind=0,last_position=0;
     for(uint64_t i=0;i<table.header->active_row_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         const auto& row=table.rows[i];
         const uint64_t order=row.kind==1 ? 1 : row.kind==3 ? 2 : row.kind==2 ? 3 : 0;
         if(!order || order<last_kind || row.physical_row>=capacity ||
@@ -1646,7 +1673,7 @@ __device__ uint64_t publication_content_view(const uint8_t* data,uint64_t length
 }
 __device__ uint64_t publication_tensor_view(const PublicationControl& control,const PublicationRange& range,
         const PublicationTensorLayout* layout,PublicationTensorBytes* view,uint64_t* content_bytes,
-        const TensorLayoutTableView* active_table=nullptr) {
+        const TensorLayoutTableView* active_table=nullptr,semantic_graph::NativeWorkTally* work=nullptr) {
     uint8_t* bytes=nullptr;
     if(!publication_resolve_range(control,range,&bytes) ||
        publication_content_view(bytes,range.length_bytes,range,layout,view,content_bytes))return 1;
@@ -1673,9 +1700,11 @@ __device__ uint64_t publication_tensor_view(const PublicationControl& control,co
            layout->logical_axis>=layout->rank ||
            range.logical_end!=active_table->header->active_row_count ||
            range.logical_end>layout->dimensions[layout->logical_axis])return 1;
-        for(uint64_t row=0;row<range.logical_end;++row)
+        for(uint64_t row=0;row<range.logical_end;++row) {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
             if(active_table->rows[row].physical_row>=layout->dimensions[layout->logical_axis] ||
                (row && active_table->rows[row-1].physical_row>=active_table->rows[row].physical_row))return 1;
+        }
         view->active_rows=active_table->rows;
         view->dense=false;
         if(*content_bytes) {
@@ -1692,28 +1721,30 @@ __device__ uint64_t publication_tensor_view(const PublicationControl& control,co
     }
     return 0;
 }
-__device__ uint64_t publication_content_digest(const PublicationTensorBytes& view,uint64_t bytes,uint64_t* digest) {
+__device__ uint64_t publication_content_digest(const PublicationTensorBytes& view,uint64_t bytes,uint64_t* digest,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     if(bytes>UINT64_MAX/8-sizeof(view.prefix))return 1;
-    semantic_graph::sha256(view,sizeof(view.prefix)+bytes,digest);
+    semantic_graph::sha256(view,sizeof(view.prefix)+bytes,digest,work);
     return 0;
 }
 __device__ uint64_t publication_range_digest(const PublicationControl& control,const PublicationRange& range,
-        const PublicationTensorLayout* layout,uint64_t* digest,const TensorLayoutTableView* active_table=nullptr) {
+        const PublicationTensorLayout* layout,uint64_t* digest,const TensorLayoutTableView* active_table=nullptr,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     PublicationTensorBytes view{};uint64_t bytes=0;
-    if(publication_tensor_view(control,range,layout,&view,&bytes,active_table))return 1;
-    return publication_content_digest(view,bytes,digest);
+    if(publication_tensor_view(control,range,layout,&view,&bytes,active_table,work))return 1;
+    return publication_content_digest(view,bytes,digest,work);
 }
 
 // Full model backing bytes are sealed separately from typed logical content.
 // The descriptor retains both seals, so stride gaps and sibling storage slices
 // survive export/restoration without changing the tensor-witness hash format.
 __device__ uint64_t publication_backing_digest(const PublicationControl& control,
-        const PublicationRange& range,uint64_t* digest) {
+        const PublicationRange& range,uint64_t* digest,semantic_graph::NativeWorkTally* work=nullptr) {
     if(range.role<18 || range.role>25 || range.storage_slot>=control.storage_count || !control.storage)return 1;
     const auto& allocation=reinterpret_cast<const PublicationStorageEntry*>(control.storage)[range.storage_slot];
     if(allocation.generation!=range.generation || allocation.pointer>UINT64_MAX-allocation.bytes ||
        allocation.bytes>UINT64_MAX/8 || (!allocation.pointer && allocation.bytes))return 1;
-    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(allocation.pointer),allocation.bytes,digest);
+    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(allocation.pointer),allocation.bytes,digest,work);
     return 0;
 }
 
@@ -1729,7 +1760,7 @@ __device__ void semantic_content_integrity_trap() {
 // generation selected by a later publication. Resolve that generation from the
 // acquired bank and verify its original record and numerical seals together.
 __device__ uint64_t publication_validate_selected_model(const PublicationControl& control,
-        const PublicationBank& bank);
+        const PublicationBank& bank,semantic_graph::NativeWorkTally* work=nullptr);
 
 // Resolve the range in the current device lease, not a host-selected bank.
 // The native owner retains both directories and the original sealing layout.
@@ -1737,8 +1768,11 @@ __device__ uint64_t publication_validate_selected_model(const PublicationControl
 // PrefixSource uses has_layout=0; its typed export is not its sealing format.
 // All writes precede this kernel and every consumer follows it in stream order.
 extern "C" __global__ void semantic_publication_content_guard(uint64_t control_ptr,
-        uint64_t role,uint64_t index,PublicationTensorLayout layout,uint64_t has_layout,uint64_t lease_ptr) {
+        uint64_t role,uint64_t index,PublicationTensorLayout layout,uint64_t has_layout,uint64_t lease_ptr,
+        uint64_t cold_work_ptr) {
     if(blockIdx.x || threadIdx.x)return;
+    auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(cold_work_ptr);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     if(!control_ptr || control_ptr%alignof(PublicationControl) || control_ptr>UINT64_MAX-sizeof(PublicationControl) ||
        !lease_ptr || lease_ptr%alignof(PublicationLease) || lease_ptr>UINT64_MAX-sizeof(PublicationLease) ||
        !role || role>55 || has_layout>1 || has_layout!=uint64_t(publication_tensor_role(role))) {
@@ -1761,23 +1795,23 @@ extern "C" __global__ void semantic_publication_content_guard(uint64_t control_p
     }
     const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[lease.bank]);
     const uint64_t count=bank->header.range_count;
-    const auto* selected=publication_find_range(ranges,count,role,index);
+    const auto* selected=publication_find_range(ranges,count,role,index,work);
     if(!selected) { semantic_content_integrity_trap();return; }
     // Authenticate the complete model binding at its contract boundary; tensor
     // guards below keep checking individual payloads against their own seals.
-    if(role==44 && publication_validate_selected_model(control,*bank)) {
+    if(role==44 && publication_validate_selected_model(control,*bank,work)) {
         semantic_content_integrity_trap();return;
     }
     const auto& range=*selected;
     uint64_t digest[4];
     TensorLayoutTableView table{};
     if(range.role>=51 && range.role<=54) {
-        const auto* table_range=publication_find_range(ranges,count,55);
-        if(!table_range || publication_range_digest(control,*table_range,nullptr,digest) ||
+        const auto* table_range=publication_find_range(ranges,count,55,0,work);
+        if(!table_range || publication_range_digest(control,*table_range,nullptr,digest,nullptr,work) ||
            !publication_identity_equal(digest,table_range->digest) ||
-           !publication_tensor_table(control,ranges,count,&table) || table.header->active_computed!=1 ||
-           !publication_active_map_shape(table,contract)) { semantic_content_integrity_trap();return; }
-        const auto* sealed_layout=publication_find_layout(control,ranges,count,range.role,range.index);
+           !publication_tensor_table(control,ranges,count,&table,work) || table.header->active_computed!=1 ||
+           !publication_active_map_shape(table,contract,work)) { semantic_content_integrity_trap();return; }
+        const auto* sealed_layout=publication_find_layout(control,ranges,count,range.role,range.index,work);
         if(!sealed_layout) { semantic_content_integrity_trap();return; }
         const auto* actual=reinterpret_cast<const uint64_t*>(sealed_layout);
         const auto* expected=reinterpret_cast<const uint64_t*>(&layout);
@@ -1790,10 +1824,10 @@ extern "C" __global__ void semantic_publication_content_guard(uint64_t control_p
            range.logical_begin || range.logical_end!=table.header->active_row_count ||
            ((range.length_bytes==0)!=(table.header->active_row_count==0))) { semantic_content_integrity_trap();return; }
     }
-    if(publication_range_digest(control,range,has_layout ? &layout : nullptr,digest,&table) ||
+    if(publication_range_digest(control,range,has_layout ? &layout : nullptr,digest,&table,work) ||
        !publication_identity_equal(digest,range.digest))semantic_content_integrity_trap();
     if(range.role>=18 && range.role<=25 &&
-       (publication_backing_digest(control,range,digest) ||
+       (publication_backing_digest(control,range,digest,work) ||
         !publication_identity_equal(digest,range.backing_digest)))semantic_content_integrity_trap();
 }
 
@@ -1802,8 +1836,10 @@ extern "C" __global__ void semantic_publication_content_guard(uint64_t control_p
 // keeps its original offset; data_ptr already starts at the copied interval.
 // Expected digest bytes remain in that private range, independent of bank reuse.
 extern "C" __global__ void semantic_retained_model_contract_guard(uint64_t data_ptr,
-        uint64_t length_bytes,uint64_t range_ptr) {
+        uint64_t length_bytes,uint64_t range_ptr,uint64_t cold_work_ptr) {
     if(blockIdx.x || threadIdx.x)return;
+    auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(cold_work_ptr);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     if(!data_ptr || !length_bytes || data_ptr>UINT64_MAX-length_bytes ||
        !range_ptr || range_ptr%alignof(PublicationRange) || range_ptr>UINT64_MAX-sizeof(PublicationRange) ||
        (data_ptr<range_ptr+sizeof(PublicationRange) && range_ptr<data_ptr+length_bytes)) {
@@ -1814,7 +1850,7 @@ extern "C" __global__ void semantic_retained_model_contract_guard(uint64_t data_
     if(range.role!=44 || range.index || range.generation!=1 ||
        range.offset_bytes>UINT64_MAX-range.length_bytes ||
        publication_content_view(reinterpret_cast<const uint8_t*>(data_ptr),length_bytes,range,nullptr,&view,&bytes) ||
-       publication_content_digest(view,bytes,digest) || !publication_identity_equal(digest,range.digest))
+       publication_content_digest(view,bytes,digest,work) || !publication_identity_equal(digest,range.digest))
         semantic_content_integrity_trap();
 }
 
@@ -1822,8 +1858,11 @@ extern "C" __global__ void semantic_retained_model_contract_guard(uint64_t data_
 // producer. Capture precedes hooks; verify precedes consumption on its stream.
 // A mismatch is fatal to this CUDA context and has no host status/readback path.
 extern "C" __global__ void semantic_tensor_content_witness(uint64_t data,uint64_t length,
-        PublicationRange range,PublicationTensorLayout layout,uint64_t expected_digest_ptr,uint64_t verify) {
+        PublicationRange range,PublicationTensorLayout layout,uint64_t expected_digest_ptr,uint64_t verify,
+        uint64_t cold_work_ptr) {
     if(blockIdx.x || threadIdx.x)return;
+    auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(cold_work_ptr);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     if(verify>1 || !expected_digest_ptr || expected_digest_ptr%alignof(uint64_t) ||
        expected_digest_ptr>UINT64_MAX-4*sizeof(uint64_t) || data>UINT64_MAX-length ||
        (length && data<expected_digest_ptr+4*sizeof(uint64_t) && expected_digest_ptr<data+length)) {
@@ -1831,13 +1870,13 @@ extern "C" __global__ void semantic_tensor_content_witness(uint64_t data,uint64_
     }
     PublicationTensorBytes view{};uint64_t bytes=0,digest[4];
     if(publication_content_view(reinterpret_cast<const uint8_t*>(data),length,range,&layout,&view,&bytes) ||
-       publication_content_digest(view,bytes,digest)) {
+       publication_content_digest(view,bytes,digest,work)) {
         semantic_content_integrity_trap();return;
     }
     auto* expected=reinterpret_cast<uint64_t*>(expected_digest_ptr);
     if(verify) {
         if(!publication_identity_equal(digest,expected))semantic_content_integrity_trap();
-    } else semantic_graph::copy_identity(expected,digest);
+    } else semantic_graph::copy_identity(expected,digest,work);
 }
 
 // The admitted prefix is uploaded by the native task owner before this hook.
@@ -2361,9 +2400,10 @@ __device__ bool semantic_canary_log_normalizer(const ModelUpdateCanaryInputs& in
     return isfinite(logarithm);
 }
 
-__device__ void publication_fold(uint64_t* digest,uint64_t role,uint64_t index,const uint64_t* content);
+__device__ void publication_fold(uint64_t* digest,uint64_t role,uint64_t index,const uint64_t* content,
+        semantic_graph::NativeWorkTally* work=nullptr);
 __device__ uint64_t publication_validate_selected_model(const PublicationControl& control,
-        const PublicationBank& bank);
+        const PublicationBank& bank,semantic_graph::NativeWorkTally* work);
 
 extern "C" __global__ void semantic_publication_record_model_forward_receipts(
         ModelForwardReceiptInputs inputs) {
@@ -3078,10 +3118,11 @@ __device__ uint64_t publication_logical_range_digest(const PublicationControl& c
     semantic_graph::sha256(input,128+bytes,digest);
     return 0;
 }
-__device__ void publication_fold(uint64_t* digest,uint64_t role,uint64_t index,const uint64_t* content) {
-    uint64_t words[10];semantic_graph::copy_identity(words,digest);words[4]=role;words[5]=index;
-    semantic_graph::copy_identity(words+6,content);
-    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(words),sizeof(words),digest);
+__device__ void publication_fold(uint64_t* digest,uint64_t role,uint64_t index,const uint64_t* content,
+        semantic_graph::NativeWorkTally* work) {
+    uint64_t words[10];semantic_graph::copy_identity(words,digest,work);words[4]=role;words[5]=index;
+    semantic_graph::copy_identity(words+6,content,work);
+    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(words),sizeof(words),digest,work);
 }
 struct PublicationSemanticReceiptBytes {
     const semantic_graph::Receipt* receipts;
@@ -3134,13 +3175,14 @@ __device__ bool publication_model_contract_layout(const ModelContractLayout& lay
 }
 
 __device__ uint64_t publication_finalize_model_contract(const PublicationControl& control,
-        const PublicationHeader& header,const PublicationRange& record,bool compare_only) {
+        const PublicationHeader& header,const PublicationRange& record,bool compare_only,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     const auto& layout=reinterpret_cast<const PublicationContract*>(control.contract)->model_contract_layout;
     auto* bytes=publication_range_bytes(control,record);
     if(record.role!=44 || record.index || record.logical_begin || record.logical_end || !bytes ||
        !publication_model_contract_layout(layout,record.length_bytes))return 1;
     uint64_t schema_digest[4],identity[4];uint8_t generation[8];
-    semantic_graph::sha256(bytes+layout.schema_begin,layout.schema_bytes,schema_digest);
+    semantic_graph::sha256(bytes+layout.schema_begin,layout.schema_bytes,schema_digest,work);
     for(uint32_t i=0;i<8;++i)generation[i]=uint8_t(header.model_generation>>(8*i));
     const char domain[]="xlog.semantic.model-identity.v1";
     uint8_t input[sizeof(domain)+32+8+32];
@@ -3148,7 +3190,7 @@ __device__ uint64_t publication_finalize_model_contract(const PublicationControl
     publication_copy_bytes(input+sizeof(domain),reinterpret_cast<const uint8_t*>(schema_digest),32);
     publication_copy_bytes(input+sizeof(domain)+32,generation,8);
     publication_copy_bytes(input+sizeof(domain)+40,reinterpret_cast<const uint8_t*>(header.model_numerical_digest),32);
-    semantic_graph::sha256(input,sizeof(input),identity);
+    semantic_graph::sha256(input,sizeof(input),identity,work);
     const uint64_t offsets[]={layout.schema_digest_offset,layout.generation_offset,layout.numerical_digest_offset,layout.identity_offset};
     const uint64_t lengths[]={32,8,32,32};
     const uint8_t* values[]={reinterpret_cast<const uint8_t*>(schema_digest),generation,
@@ -3244,17 +3286,18 @@ struct PublicationSealedBankBytes {
     }
 };
 __device__ void publication_original_descriptor_digest(const PublicationControl& control,
-        const PublicationBank& bank,uint64_t* output) {
+        const PublicationBank& bank,uint64_t* output,semantic_graph::NativeWorkTally* work=nullptr) {
     const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[bank.header.publication_word&1]);
-    semantic_graph::sha256(PublicationSealedBankBytes{&bank},sizeof(bank),output);
+    semantic_graph::sha256(PublicationSealedBankBytes{&bank},sizeof(bank),output,work);
     for(uint64_t i=0;i<bank.header.range_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         uint64_t digest[4];
-        semantic_graph::sha256(reinterpret_cast<const uint8_t*>(&ranges[i]),sizeof(PublicationRange),digest);
-        publication_fold(output,ranges[i].role,ranges[i].index,digest);
+        semantic_graph::sha256(reinterpret_cast<const uint8_t*>(&ranges[i]),sizeof(PublicationRange),digest,work);
+        publication_fold(output,ranges[i].role,ranges[i].index,digest,work);
     }
 }
 __device__ uint64_t publication_validate_selected_model(const PublicationControl& control,
-        const PublicationBank& bank) {
+        const PublicationBank& bank,semantic_graph::NativeWorkTally* work) {
     if(!control.contract || control.contract%alignof(PublicationContract) ||
        control.contract>UINT64_MAX-sizeof(PublicationContract))return 1;
     const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
@@ -3266,21 +3309,24 @@ __device__ uint64_t publication_validate_selected_model(const PublicationControl
        header.range_count>(UINT64_MAX-directory)/sizeof(PublicationRange) ||
        !publication_bank_matches(control,bank,header.publication_word))return 1;
     const auto* ranges=reinterpret_cast<const PublicationRange*>(directory);
-    uint64_t digest[4];publication_original_descriptor_digest(control,bank,digest);
+    uint64_t digest[4];publication_original_descriptor_digest(control,bank,digest,work);
     if(!publication_identity_equal(digest,header.descriptor_digest))return 1;
-    const auto* model=publication_find_range(ranges,header.range_count,44);
-    if(!model || publication_range_digest(control,*model,nullptr,digest) ||
+    const auto* model=publication_find_range(ranges,header.range_count,44,0,work);
+    if(!model || publication_range_digest(control,*model,nullptr,digest,nullptr,work) ||
        !publication_identity_equal(digest,model->digest) ||
-       publication_finalize_model_contract(control,header,*model,true))return 1;
+       publication_finalize_model_contract(control,header,*model,true,work))return 1;
     // Fold the original typed and full-backing seals in their canonical order.
     // Individual consumers still verify actual payloads against those seals;
     // neither admission nor this check reseals a supplied consumer tensor.
     const char domain[]="xlog.semantic.model-numerics.v1";
-    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(domain),sizeof(domain),digest);
-    publication_fold(digest,0,0,header.model_geometry_digest);
-    for(uint64_t i=0;i<header.range_count;++i)if(ranges[i].role>=18 && ranges[i].role<=25) {
-        publication_fold(digest,ranges[i].role,ranges[i].index,ranges[i].digest);
-        publication_fold(digest,ranges[i].role,ranges[i].index,ranges[i].backing_digest);
+    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(domain),sizeof(domain),digest,work);
+    publication_fold(digest,0,0,header.model_geometry_digest,work);
+    for(uint64_t i=0;i<header.range_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+        if(ranges[i].role>=18 && ranges[i].role<=25) {
+            publication_fold(digest,ranges[i].role,ranges[i].index,ranges[i].digest,work);
+            publication_fold(digest,ranges[i].role,ranges[i].index,ranges[i].backing_digest,work);
+        }
     }
     return publication_identity_equal(digest,header.model_numerical_digest) ? 0 : 1;
 }

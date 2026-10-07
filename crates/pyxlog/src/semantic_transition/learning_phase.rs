@@ -10,6 +10,10 @@ mod phase_record;
 use phase_record::{PhaseRecords, RecordKind, RecordLimits};
 mod resource_observer;
 use resource_observer::ResourceObserver;
+#[cfg(feature = "semantic-policy")]
+pub(crate) mod cold_model_work;
+#[cfg(feature = "semantic-policy")]
+use cold_model_work::{ColdCallbackScope, PySemanticColdModelWork};
 
 struct PhaseRecordStore {
     pin: Py<PyAny>,
@@ -231,6 +235,7 @@ struct PreparationInputs {
     prior_snapshot: AuthoritySnapshot,
     grant: ColdValue,
     frozen_program: Vec<u8>,
+    cold_model_work_capacity: usize,
     resolve_checkpoint: Option<Py<PyAny>>,
     max_checkpoint_bytes: Option<ColdValue>,
     max_total_checkpoint_bytes: Option<ColdValue>,
@@ -310,9 +315,16 @@ struct SourcePreparation {
     entry_material: Vec<u8>,
     instruction: Vec<u8>,
     physical_memory_limit: u64,
+    work_limit: u64,
+    model_calls_limit: u64,
+    #[cfg(feature = "semantic-policy")]
+    cold_model_work: Option<Py<PySemanticColdModelWork>>,
+    #[cfg(feature = "semantic-policy")]
+    model_work_result: Option<xlog_cuda::SemanticColdModelWorkResult>,
     decoded: Option<Py<PyAny>>,
     decoded_verified: bool,
     model_result: Option<Py<PyAny>>,
+    resource_finish_entered: bool,
     verified: bool,
 }
 
@@ -618,9 +630,16 @@ impl PySemanticLearningPhaseTransition {
             entry_material: material,
             instruction: instruction_material,
             physical_memory_limit: limits[1],
+            work_limit: limits[0],
+            model_calls_limit: limits[2],
+            #[cfg(feature = "semantic-policy")]
+            cold_model_work: None,
+            #[cfg(feature = "semantic-policy")]
+            model_work_result: None,
             decoded: None,
             decoded_verified: false,
             model_result: None,
+            resource_finish_entered: false,
             verified: false,
         });
         let decode = self
@@ -638,14 +657,16 @@ impl PySemanticLearningPhaseTransition {
             .decoded = Some(decoded.clone().unbind());
         if !decoded.is_exact_instance_of::<PyTuple>() {
             return Err(invalid(
-                "original source decoder requires its exact lifecycle triple",
+                "original source decoder requires its exact preparation tuple including cold model capacity",
             ));
         }
         let decoded = decoded.cast::<PyTuple>()?;
-        if decoded.len() != 3
+        if decoded.len() != 4
             || ColdValue::read(&decoded.get_item(0)?, &mut 128, 0)?.text()? != "prepare"
             || !decoded.get_item(1)?.is_none()
             || !decoded.get_item(2)?.is_none()
+            || ColdValue::read(&decoded.get_item(3)?, &mut 128, 0)?.unsigned()?
+                != self.preparation_inputs.cold_model_work_capacity as u64
         {
             return Err(invalid(
                 "source decoder changed the original preparation lifecycle",
@@ -778,10 +799,55 @@ impl PySemanticLearningPhaseTransition {
                     .quiesce_published_reader(&*acquired.lease()?, &streams)
                     .map_err(xlog_err)?;
             }
+            #[cfg(feature = "semantic-policy")]
+            {
+                let admission = self.records()?.confirmed_admission()?;
+                let inner = source
+                    .owner()?
+                    .prepare_cold_model_work(
+                        &*acquired.lease()?,
+                        inputs.cold_model_work_capacity,
+                        0,
+                        admission,
+                    )
+                    .map_err(xlog_err)?;
+                let work = Py::new(
+                    py,
+                    PySemanticColdModelWork {
+                        parent: self.parent.clone_ref(py),
+                        inner,
+                        active: AtomicBool::new(false),
+                    },
+                )?;
+                self.source_preparation()?
+                    .as_mut()
+                    .expect("retained original source group")
+                    .cold_model_work = Some(work);
+            }
             verify_original_source(py, &task, &acquired, &manifest, &saved_snapshot)?;
             {
                 let _reads = ImportReadScope::checkpoint(&source, &task, &acquired, py)?;
-                let result = snapshot_model_state.call0()?;
+                #[cfg(feature = "semantic-policy")]
+                let work = self
+                    .source_preparation()?
+                    .as_ref()
+                    .expect("retained source group")
+                    .cold_model_work
+                    .as_ref()
+                    .expect("issued original cold work")
+                    .clone_ref(py);
+                #[cfg(feature = "semantic-policy")]
+                let work = work.borrow(py);
+                #[cfg(feature = "semantic-policy")]
+                work.active.store(true, Ordering::Release);
+                #[cfg(feature = "semantic-policy")]
+                let _callback = ColdCallbackScope(&work.active);
+                let result = snapshot_model_state.call0();
+                #[cfg(feature = "semantic-policy")]
+                if result.is_err() {
+                    source.owner()?.fail_cold_model_work(&work.inner);
+                }
+                let result = result?;
                 self.source_preparation()?
                     .as_mut()
                     .expect("retained original source group")
@@ -804,12 +870,71 @@ impl PySemanticLearningPhaseTransition {
                 .as_mut()
                 .expect("retained original source group")
                 .verified = true;
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            let (work, result) = {
+                let retained = self.source_preparation()?;
+                let source = retained.as_ref().expect("retained original source group");
+                (
+                    source
+                        .cold_model_work
+                        .as_ref()
+                        .expect("issued original cold work")
+                        .clone_ref(py),
+                    source.model_work_result,
+                )
+            };
+            let result = if let Some(result) = result {
+                result
+            } else {
+                let mut owner = source.owner()?;
+                let lease = acquired.lease()?;
+                let work = work.borrow(py);
+                if entered {
+                    owner.resolve_cold_model_work(&lease, &work.inner)
+                } else {
+                    owner.finish_cold_model_work(&lease, &work.inner, &streams)
+                }
+                .map_err(xlog_err)?
+            };
+            // Retain the actual components before refusal. Other source S
+            // still requires its genuine producers, never substituted zeroes.
+            let mut retained = self.source_preparation()?;
+            let source = retained.as_mut().expect("retained original source group");
+            source.model_work_result = Some(result);
+        }
+        let finish_needed = {
+            let mut retained = self.source_preparation()?;
+            let source = retained.as_mut().expect("retained original source group");
+            let needed = !source.resource_finish_entered;
+            source.resource_finish_entered = true;
+            needed
+        };
+        if finish_needed {
             inputs.resource_observer.finish(py)?;
         }
         // Missing physical producer/baseline/coverage/allocator completion is
         // not zero or a reservation. Keep the completed source result and all
         // original owners; explicit continuation only reads this same interval.
         let peak = inputs.resource_observer.physical_peak(py)?;
+        #[cfg(feature = "semantic-policy")]
+        {
+            let retained = self.source_preparation()?;
+            let source = retained.as_ref().expect("retained original source group");
+            let result = source
+                .model_work_result
+                .expect("completed original model component");
+            let recorded_work = result
+                .model_work
+                .checked_add(result.native_work)
+                .ok_or_else(|| {
+                    invalid("source model and semantic work overflowed its original expense")
+                })?;
+            if recorded_work > source.work_limit || result.model_calls > source.model_calls_limit {
+                return Err(invalid("source model and semantic work exceeded its original operation budget; retain the actual result"));
+            }
+        }
         let memory_limit = self
             .source_preparation()?
             .as_ref()
@@ -1961,7 +2086,7 @@ impl PySemanticTransitionController {
     #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner,
         source_model, execute_phase_instruction, resource_observer, feedback_interventions,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
-        snapshot_restored_model, retire_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, resolve_checkpoint=None,
+        snapshot_restored_model, retire_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, cold_model_work_capacity, resolve_checkpoint=None,
         max_checkpoint_bytes=None, max_total_checkpoint_bytes=None))]
     #[expect(
         clippy::too_many_arguments,
@@ -1991,10 +2116,16 @@ impl PySemanticTransitionController {
         phase_record_owner: Py<PyAny>,
         phase_record_limits: &Bound<'_, PyAny>,
         frozen_program_bytes: &Bound<'_, PyAny>,
+        cold_model_work_capacity: &Bound<'_, PyAny>,
         resolve_checkpoint: Option<&Bound<'_, PyAny>>,
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PySemanticLearningPhaseTransition>> {
+        if !cfg!(feature = "semantic-policy") {
+            return Err(invalid(
+                "cold model work requires the semantic-policy build",
+            ));
+        }
         let source = self.session.borrow(py);
         source.require_creator()?;
         let task = task_use.borrow(py);
@@ -2018,6 +2149,13 @@ impl PySemanticTransitionController {
             ));
         }
         let record_limits = RecordLimits::read(phase_record_limits)?;
+        let cold_capacity_material = ColdValue::read(cold_model_work_capacity, &mut 128, 0)?;
+        let cold_model_work_capacity = usize::try_from(cold_capacity_material.unsigned()?)
+            .ok().filter(|capacity| *capacity > 0)
+            .ok_or_else(|| invalid("cold model work requires an exact positive capacity with bounded allocation arithmetic"))?;
+        #[cfg(feature = "semantic-policy")]
+        xlog_cuda::SemanticColdModelWork::allocation_bytes(cold_model_work_capacity)
+            .map_err(xlog_err)?;
         let feedback_materials = feedback_materials(feedback_interventions)?;
         if source_model.bind(py).is_none() || !execute_phase_instruction.is_callable() {
             return Err(invalid(
@@ -2089,6 +2227,7 @@ impl PySemanticTransitionController {
                 checkpoint_destination.as_bytes(),
                 feedback_materials[0].as_bytes(),
                 feedback_materials[1].as_bytes(),
+                &cold_capacity_material.canonical_bytes(),
             ],
             record_limits,
         )?;
@@ -2108,6 +2247,7 @@ impl PySemanticTransitionController {
             prior_snapshot,
             grant: grant_value,
             frozen_program: frozen_program_bytes.cast::<PyBytes>()?.as_bytes().to_vec(),
+            cold_model_work_capacity,
             resolve_checkpoint: resolve_checkpoint.map(|callback| callback.clone().unbind()),
             max_checkpoint_bytes: max_checkpoint_bytes
                 .map(|value| ColdValue::read(value, &mut 1024, 0))

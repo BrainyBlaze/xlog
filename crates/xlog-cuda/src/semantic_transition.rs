@@ -5,10 +5,14 @@
 //! world state. Descriptor meanings belong to the retained semantic admission.
 
 use crate::semantic_work::{ExecutionWork, ModelWorkEvent, ModelWorkKind, ModelWorkRecording};
+#[cfg(feature = "semantic-policy")]
+mod cold_model_work;
 mod learning_phase;
 #[cfg(feature = "semantic-policy")]
 mod model_evaluation;
 mod prepared_replay;
+#[cfg(feature = "semantic-policy")]
+pub use cold_model_work::{SemanticColdModelWork, SemanticColdModelWorkResult};
 pub use learning_phase::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseRecord,
     SemanticLearningPhaseTransition,
@@ -8234,6 +8238,7 @@ impl PublicationStorage {
         role: u64,
         index: u64,
         layout: SemanticTensorLayout,
+        cold_work: Option<&DeviceMemoryView<u64>>,
     ) -> Result<(), SemanticTransitionError> {
         let mut recorder = domain.new_strict_recorder();
         recorder.read(&reader);
@@ -8249,6 +8254,9 @@ impl PublicationStorage {
         for allocation in &self.allocations {
             recorder.read(allocation);
         }
+        if let Some(work) = cold_work {
+            recorder.read_write(work);
+        }
         let arguments = (
             self.control.device_ptr_value(),
             role,
@@ -8256,6 +8264,7 @@ impl PublicationStorage {
             layout,
             u64::from(is_tensor_role(role)),
             *reader.device_ptr(),
+            cold_work.map_or(0, |work| *work.device_ptr()),
         );
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
             // SAFETY: the original device lease selects its actual directory;
@@ -9660,6 +9669,8 @@ struct StepContentStorage {
     prepared: Option<PreparedStepStorage>,
     #[cfg(feature = "semantic-policy")]
     evaluation: Option<model_evaluation::EvaluationStorage>,
+    #[cfg(feature = "semantic-policy")]
+    cold_model_work: Option<cold_model_work::ColdModelWorkStorage>,
 }
 
 impl StepContentStorage {
@@ -9678,6 +9689,8 @@ impl StepContentStorage {
             prepared: None,
             #[cfg(feature = "semantic-policy")]
             evaluation: None,
+            #[cfg(feature = "semantic-policy")]
+            cold_model_work: None,
         }
     }
 }
@@ -10306,7 +10319,7 @@ struct PreparedModelWork {
     invocation: CudaFunction,
     capture_bank: Option<usize>,
     replay_cursor: usize,
-    evaluation_recording: bool,
+    uncaptured_recording: bool,
 }
 
 const PREPARED_TRANSITION_BANKS: u8 = 0b11;
@@ -10428,7 +10441,7 @@ impl PreparedModelWork {
             invocation,
             capture_bank: None,
             replay_cursor: 0,
-            evaluation_recording: false,
+            uncaptured_recording: false,
         })
     }
 
@@ -10448,7 +10461,7 @@ impl PreparedModelWork {
 
     #[cfg(feature = "semantic-policy")]
     fn begin_capture(&mut self, bank: usize, recorded: u8) -> Result<(), &'static str> {
-        if bank > 1 || self.capture_bank.is_some() || self.evaluation_recording {
+        if bank > 1 || self.capture_bank.is_some() || self.uncaptured_recording {
             return Err("model work capture requires one inactive bank recording");
         }
         if (bank == 0 && (recorded != 0 || self.recording.frozen_bound().is_some()))
@@ -10465,7 +10478,7 @@ impl PreparedModelWork {
         match self.capture_bank {
             Some(0) => Ok(self.recording.events().len()),
             Some(1) => Ok(self.replay_cursor),
-            None if self.evaluation_recording => Ok(self.recording.events().len()),
+            None if self.uncaptured_recording => Ok(self.recording.events().len()),
             _ => Err("model work event requires an active prepared bank capture"),
         }
     }
@@ -10474,7 +10487,7 @@ impl PreparedModelWork {
         let slot = self.next_slot()?;
         match self.capture_bank {
             Some(0) => self.recording.push(event)?,
-            None if self.evaluation_recording => self.recording.push(event)?,
+            None if self.uncaptured_recording => self.recording.push(event)?,
             Some(1) => {
                 if self.recording.events().get(slot) != Some(&event) {
                     return Err("second model branch differs from original work geometry");
@@ -10482,6 +10495,42 @@ impl PreparedModelWork {
                 self.replay_cursor += 1;
             }
             _ => return Err("model work event requires an active prepared bank capture"),
+        }
+        Ok(slot)
+    }
+
+    /// One registrar for prepared, read-only and cold model occurrences. Their
+    /// distinct callers check authority; geometry and actual-slot units do not
+    /// acquire an alternative definition at a new execution boundary.
+    fn record_operation(
+        &mut self,
+        kind: ModelWorkKind,
+        dimensions: &[u64],
+        device_produced: bool,
+        domain: &ResidentExecutionDomain,
+        poisoned: &mut bool,
+    ) -> Result<usize, SemanticTransitionError> {
+        let slot = self.next_slot().map_err(publication_input_error)?;
+        if slot >= self.actual.len() / 3 {
+            return Err(publication_input_error(
+                "model work exceeds its original event capacity",
+            ));
+        }
+        let event = if device_produced {
+            let actual = self
+                .actual
+                .device_ptr_value()
+                .checked_add((slot * 3 * size_of::<u64>()) as u64)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            ModelWorkEvent::device_operation(kind, dimensions, actual)
+        } else {
+            ModelWorkEvent::operation(kind, dimensions)
+        }
+        .map_err(publication_input_error)?;
+        let recorded = self.record_event(event).map_err(publication_input_error)?;
+        debug_assert_eq!(recorded, slot);
+        if device_produced {
+            self.reset_slots(domain, poisoned, slot, 1)?;
         }
         Ok(slot)
     }
@@ -10930,15 +10979,20 @@ impl ModelContentSeals {
         &self,
         domain: &ResidentExecutionDomain,
         poisoned: &mut bool,
+        cold_work: Option<&DeviceMemoryView<u64>>,
     ) -> Result<(), SemanticTransitionError> {
         let mut recorder = domain.new_strict_recorder();
         recorder.read(&self.ranges);
         recorder.read(&self.contract);
+        if let Some(work) = cold_work {
+            recorder.read_write(work);
+        }
         let arguments = (
             self.contract.device_ptr_value(),
             self.contract.len() as u64,
             self.ranges.device_ptr_value()
                 + ((self.ranges.len() - 1) * size_of::<PublicationRange>()) as u64,
+            cold_work.map_or(0, |work| *work.device_ptr()),
         );
         let execute = self.guard.clone();
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
@@ -11138,9 +11192,13 @@ impl TensorContentBuffers {
         execute: &CudaFunction,
         verify: bool,
     ) -> Result<(), SemanticTransitionError> {
-        self.enqueue_with_custody(domain, poisoned, execute, verify, None, false)
+        self.enqueue_with_custody(domain, poisoned, execute, verify, None, false, None)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "original replay custody and cold operation accounting have distinct owners"
+    )]
     fn enqueue_with_custody(
         &self,
         domain: &ResidentExecutionDomain,
@@ -11149,12 +11207,13 @@ impl TensorContentBuffers {
         verify: bool,
         custody: Option<&PreparedReplayCustody>,
         completed: bool,
+        cold_work: Option<&DeviceMemoryView<u64>>,
     ) -> Result<(), SemanticTransitionError> {
         if let TensorContentSeals::Model(model) = &self.seals {
             if !verify || model.ranges.len() != self.tensors.len() + 1 {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
-            model.verify_contract(domain, poisoned)?;
+            model.verify_contract(domain, poisoned, cold_work)?;
         }
         for (ordinal, tensor) in self.tensors.iter().enumerate() {
             if let TensorContentSeals::Captured(digests) = &self.seals {
@@ -11213,6 +11272,9 @@ impl TensorContentBuffers {
                 bytes,
             )?;
             let mut recorder = domain.new_strict_recorder();
+            if let Some(work) = cold_work {
+                recorder.read_write(work);
+            }
             if let Some(source) = &tensor.source {
                 recorder.read(source);
             }
@@ -11258,6 +11320,7 @@ impl TensorContentBuffers {
                 tensor.layout,
                 expected,
                 u64::from(verify),
+                cold_work.map_or(0, |work| *work.device_ptr()),
             );
             let execute = execute.clone();
             enqueue_recorded(domain, poisoned, recorder, |enqueue| {
@@ -16333,23 +16396,13 @@ impl SemanticTransitionSession {
                 .ok_or_else(|| {
                     publication_input_error("model work requires its cold reservation")
                 })?;
-            let slot = work.next_slot().map_err(publication_input_error)?;
-            if slot >= work.actual.len() / 3 {
-                return Err(publication_input_error(
-                    "model work exceeds its cold event capacity",
-                ));
-            }
-            let actual = work
-                .actual
-                .device_ptr_value()
-                .checked_add((slot * 3 * size_of::<u64>()) as u64)
-                .ok_or(SemanticTransitionError::GenerationExhausted)?;
-            let event = ModelWorkEvent::device_operation(kind, upper_dimensions, actual)
-                .map_err(publication_input_error)?;
-            let recorded = work.record_event(event).map_err(publication_input_error)?;
-            debug_assert_eq!(recorded, slot);
-            work.reset_slots(&self.domain, &mut self.poisoned, slot, 1)?;
-            Ok(slot)
+            work.record_operation(
+                kind,
+                upper_dimensions,
+                true,
+                &self.domain,
+                &mut self.poisoned,
+            )
         })();
         if result.is_err() {
             self.poisoned = true;
@@ -16368,8 +16421,6 @@ impl SemanticTransitionSession {
     ) -> Result<(), SemanticTransitionError> {
         self.check_prepared_content_stream(step, self.stream.cu_stream() as u64)?;
         let result = (|| {
-            let event =
-                ModelWorkEvent::operation(kind, dimensions).map_err(publication_input_error)?;
             let work = self
                 .steps
                 .get_mut(&step.token)
@@ -16382,9 +16433,8 @@ impl SemanticTransitionSession {
                 .ok_or_else(|| {
                     publication_input_error("model work requires its original cold reservation")
                 })?;
-            work.record_event(event)
+            work.record_operation(kind, dimensions, false, &self.domain, &mut self.poisoned)
                 .map(|_| ())
-                .map_err(publication_input_error)
         })();
         if result.is_err() {
             self.poisoned = true;
@@ -21249,6 +21299,7 @@ impl SemanticTransitionSession {
                 role as u64,
                 index,
                 layout,
+                None,
             )?;
         }
         if prepared.inputs_recorded {
@@ -23907,6 +23958,7 @@ impl SemanticTransitionSession {
     ) -> Result<(), SemanticTransitionError> {
         self.checked_reader(lease)?;
         dlpack_consumer_stream(consumer_stream)?;
+        let cold_work = self.cold_native_work(lease.token)?;
         let storage = Arc::clone(
             self.publication
                 .as_ref()
@@ -24010,6 +24062,7 @@ impl SemanticTransitionSession {
                     role,
                     index,
                     layout,
+                    cold_work.as_ref(),
                 )?;
             }
             self.order_content_consumers(consumer_stream)
@@ -24387,6 +24440,7 @@ impl SemanticTransitionSession {
         consumer_stream: u64,
         verify: bool,
     ) -> Result<(), SemanticTransitionError> {
+        let cold_work = self.cold_native_work(witness.reader_token)?;
         let execute = self
             .provider
             .device()
@@ -24436,6 +24490,7 @@ impl SemanticTransitionSession {
                 verify,
                 custody,
                 retained,
+                cold_work.as_ref(),
             )?;
             self.order_content_consumers(consumer_stream)
         })();

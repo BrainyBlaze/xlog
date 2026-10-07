@@ -14,6 +14,7 @@ struct NativeWorkTally {
     uint64_t events[9] = {};
     uint64_t overflow = 0;
 };
+static_assert(sizeof(NativeWorkTally) == 11 * sizeof(uint64_t), "native work tally ABI");
 __device__ void charge_native(NativeWorkTally *work, NativeWorkEvent event, uint64_t count) {
     if (!work || work->overflow) return;
     const unsigned kind = unsigned(event);
@@ -2102,7 +2103,10 @@ __device__ inline void execute(uint64_t *arena, const LaunchDescriptor &descript
 
 #ifndef XLOG_SEMANTIC_GRAPH_DEVICE_ONLY
 extern "C" __global__ void semantic_hypergraph_execute(uint64_t *arena,
-                                    semantic_graph::LaunchDescriptor descriptor) {
-    if (blockIdx.x == 0 && threadIdx.x == 0) semantic_graph::execute(arena, descriptor);
+                                    semantic_graph::LaunchDescriptor descriptor,
+                                    uint64_t cold_work) {
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+        semantic_graph::execute(arena, descriptor,
+            reinterpret_cast<semantic_graph::NativeWorkTally *>(cold_work));
 }
 #endif
