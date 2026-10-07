@@ -59,10 +59,11 @@ pub(super) struct DeliveryExpense {
 
 impl PySemanticLearningPhaseTransition {
     pub(super) fn terminal_refusal_retained(&self) -> PyResult<bool> {
-        Ok(self
-            .delivery_expense()?
-            .as_ref()
-            .is_some_and(|entry| entry.refusal.is_some()))
+        Ok(self.cancelled_source_refusal_retained()?
+            || self
+                .delivery_expense()?
+                .as_ref()
+                .is_some_and(|entry| entry.refusal.is_some()))
     }
 
     pub(in crate::semantic_transition) fn require_terminal_refusal_cold_callback(
@@ -119,6 +120,9 @@ impl PySemanticLearningPhaseTransition {
         py: Python<'_>,
         cause: &'static str,
     ) -> PyResult<()> {
+        if self.cancelled_source_refusal_retained()? {
+            return self.finish_cancelled_source_evaluation(py);
+        }
         if matches!(*self.status_lock()?, Completion::Refused) {
             return Ok(());
         }
@@ -251,6 +255,10 @@ impl PySemanticLearningPhaseTransition {
                 .map_err(xlog_err)?;
         }
         self.finish_delivery_expense(py)?;
+        self.resume_terminal_source(py)
+    }
+
+    pub(super) fn resume_terminal_source(&self, py: Python<'_>) -> PyResult<()> {
         let source = self.source.borrow(py);
         let task = self.task_use.borrow(py);
         // Only CPU authority freshness follows the measured and signed tail.
@@ -267,7 +275,12 @@ impl PySemanticLearningPhaseTransition {
                 ))
             }
         };
-        self.install_terminal_source_custody(py)?;
+        if self.cancelled_source_refusal_retained()? {
+            let closure = self.cancelled_source_closure(py)?;
+            self.install_source_checkpoint_custody(py, closure)?;
+        } else {
+            self.install_terminal_source_custody(py)?;
+        }
         let mut retention = source
             .learning_transition
             .lock()
@@ -361,6 +374,14 @@ impl PySemanticLearningPhaseTransition {
                 source_native: Arc::from(source_manifest.native.as_slice()),
             }),
         });
+        self.install_source_checkpoint_custody(py, closure)
+    }
+
+    fn install_source_checkpoint_custody(
+        &self,
+        py: Python<'_>,
+        closure: Arc<cold_restore::VerifiedClosure>,
+    ) -> PyResult<()> {
         let origin: [u8; 32] = Sha256::digest(&self.source_checkpoint).into();
         let source = self.source.borrow(py);
         let mut custody = source.checkpoint_custody()?;
@@ -687,6 +708,7 @@ impl PySemanticLearningPhaseTransition {
                 &history,
                 &instruction,
                 ordinal,
+                "real",
                 &reason,
                 usage,
             )?;
@@ -726,8 +748,7 @@ impl PySemanticLearningPhaseTransition {
                         .clone();
                     let reason = reason.canonical_bytes();
                     let usage: Vec<u8> = usage.into_iter().flat_map(u64::to_le_bytes).collect();
-                    let mut payload = b"xlog.learning-phase.refusal.v1\0".to_vec();
-                    for field in [
+                    let payload = phase_record::refusal_payload([
                         cause.as_bytes(),
                         self.source_checkpoint.as_slice(),
                         checkpoint.as_ref(),
@@ -738,12 +759,8 @@ impl PySemanticLearningPhaseTransition {
                         reason.as_slice(),
                         snapshot.as_slice(),
                         usage.as_slice(),
-                    ] {
-                        payload.extend_from_slice(&(field.len() as u64).to_le_bytes());
-                        payload.extend_from_slice(field);
-                    }
+                    ])?;
                     self.records()?.check_payload_length(payload.len())?;
-                    let payload: Arc<[u8]> = payload.into();
                     self.delivery_expense()?
                         .as_mut()
                         .expect("original delivery")
@@ -768,7 +785,7 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
-    fn resolve_terminal_record(&self, py: Python<'_>) -> PyResult<()> {
+    pub(super) fn resolve_terminal_record(&self, py: Python<'_>) -> PyResult<()> {
         let (phase_id, ordinal, digest) = {
             let records = self.records()?;
             let attempt = records
@@ -807,6 +824,9 @@ impl PySemanticLearningPhaseTransition {
         let Some(record) = record else {
             return Ok(None);
         };
+        if self.cancelled_source_refusal_retained()? {
+            return self.cancelled_source_outcome(py, &record).map(Some);
+        }
         let retained = self.delivery_expense()?;
         let tail = retained
             .as_ref()
