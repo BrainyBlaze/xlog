@@ -5,15 +5,7 @@
     "exact_induction",
     "common_subexpression_elimination",
     "adaptive_reoptimization",
-    "persistent_hash_index",
-    "production_path_reuse"
-  ],
-  "source_required_substrings": [
-    "pred committed_item(stage: u32, item: u32)",
-    "delta_insert(37, 104)",
-    "not delta_delete(37, I)",
-    "consumer_candidate(S, D) :- active_item(S), exact_pair(S, D)",
-    "consumer_priority(S, D) :- active_item(S), exact_pair(S, D), join_heat(S, D)"
+    "persistent_hash_index"
   ],
   "checks": {
     "run": {

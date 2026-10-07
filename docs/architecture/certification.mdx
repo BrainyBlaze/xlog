@@ -96,6 +96,9 @@ The script does the following:
 
 Use `--mode smoke` for a shorter manual CUDA smoke gate; it is not the complete
 release gate. `--dry-run` only describes commands and never certifies GPU behavior.
+It does not create or delete temporary directories. A real run allocates one
+unique validation directory and prints its location; wheel, CLI, and installed
+Python artifacts stay there for inspection instead of overwriting shared paths.
 
 ### Run only the resident acceptance gates
 

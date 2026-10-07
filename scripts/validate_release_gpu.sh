@@ -5,9 +5,9 @@ usage() {
   cat <<'EOF'
 usage: scripts/validate_release_gpu.sh [--mode smoke|release] [--dry-run]
 
-Run the canonical manual release-validation flow on a supported Linux x86_64
-CUDA machine. GitHub Actions do not run this script; maintainers run it
-manually before dispatching the publish workflow.
+Run the canonical manual release-validation flow on an authorized Linux x86_64
+CUDA machine. GPU builds are LOCAL only; GitHub Actions never run this script.
+This command does not grant runtime, resource, or release-publication authority.
 
 XLOG_PINNED_CORPUS_ROOT must name the exact clean pinned corpus checkout.
 EOF
@@ -170,12 +170,16 @@ if [[ "$dry_run" != "1" ]]; then
   require_cmd maturin
 fi
 
-wheel_dir="${TMPDIR:-/tmp}/xlog-wheel-validation"
-bundle_dir="${TMPDIR:-/tmp}/xlog-cli-validation"
-python_install_dir="${TMPDIR:-/tmp}/xlog-python-wheel-site"
-
-rm -rf "$wheel_dir" "$bundle_dir" "$python_install_dir"
-mkdir -p "$wheel_dir" "$bundle_dir"
+if [[ "$dry_run" == "1" ]]; then
+  validation_dir="${TMPDIR:-/tmp}/xlog-release-validation.<unique>"
+else
+  validation_dir=$(mktemp -d "${TMPDIR:-/tmp}/xlog-release-validation.XXXXXX")
+  printf 'Validation artifacts: %s\n' "$validation_dir"
+fi
+wheel_dir="$validation_dir/wheels"
+bundle_dir="$validation_dir/cli"
+python_install_dir="$validation_dir/python-site"
+run_cmd mkdir -p "$wheel_dir" "$bundle_dir"
 
 cd "$repo_root"
 

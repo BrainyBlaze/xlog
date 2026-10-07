@@ -1,5 +1,4 @@
 import argparse
-import ctypes
 import os
 import re
 import subprocess
@@ -7,39 +6,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.install_pyxlog_for_python import VERIFY_IMPORT_SNIPPET
 
-
-def _build_runtime_env() -> dict[str, str]:
-    env = os.environ.copy()
-
-    # WSL often exposes only libcuda.so.1; cudarc expects libcuda.so/libnvcuda.so.
-    try:
-        ctypes.CDLL("libcuda.so")
-        return env
-    except OSError:
-        pass
-
-    wsl_cuda = Path("/usr/lib/wsl/lib/libcuda.so.1")
-    if not wsl_cuda.exists():
-        return env
-
-    shim_dir = Path("/tmp/xlog-cuda-shim")
-    shim_dir.mkdir(parents=True, exist_ok=True)
-    for soname in ("libcuda.so", "libnvcuda.so"):
-        link = shim_dir / soname
-        if link.exists() or link.is_symlink():
-            link.unlink()
-        link.symlink_to(wsl_cuda)
-
-    existing = env.get("LD_LIBRARY_PATH", "")
-    env["LD_LIBRARY_PATH"] = (
-        f"{shim_dir}:{existing}" if existing else str(shim_dir)
-    )
-    print(f"INFO: Added CUDA loader shim at {shim_dir}")
-    return env
-
-
-RUNTIME_ENV = _build_runtime_env()
+RUNTIME_ENV = os.environ.copy()
 
 
 def run_cmd(cmd, cwd=None, timeout_sec=None):
@@ -86,73 +56,6 @@ def run_neural_cmd(cmd, cwd: Path, timeout_sec: int = 300) -> None:
     raise SystemExit(proc.returncode)
 
 
-def _can_import_pyxlog() -> bool:
-    probe = subprocess.run(
-        [sys.executable, "-c", "import pyxlog"],
-        cwd=ROOT,
-        env=RUNTIME_ENV,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    return probe.returncode == 0
-
-
-def _prepend_env_path(var: str, path: Path) -> None:
-    current = RUNTIME_ENV.get(var, "")
-    RUNTIME_ENV[var] = f"{path}:{current}" if current else str(path)
-
-
-def ensure_pyxlog_available(mode: str) -> None:
-    if mode != "release" and _can_import_pyxlog():
-        return
-
-    cargo_cmd = ["cargo", "build", "-q", "-p", "pyxlog", "--features", "host-io"]
-    if mode == "release":
-        cargo_cmd.append("--release")
-    run_cmd(cargo_cmd, cwd=ROOT)
-
-    target_dir = ROOT / "target" / ("release" if mode == "release" else "debug")
-    linux_lib = target_dir / "libpyxlog.so"
-    mac_lib = target_dir / "libpyxlog.dylib"
-    native_lib = linux_lib if linux_lib.exists() else mac_lib
-    if not native_lib.exists():
-        raise SystemExit(f"Unable to locate built pyxlog native library in {target_dir}")
-
-    # pyxlog is a package (`pyxlog/__init__.py`) whose native module is
-    # `pyxlog._native`; stage that package shape under target/{profile} so
-    # examples can import the just-built workspace artifact without installing
-    # a wheel.
-    stale_top_level = target_dir / "pyxlog.so"
-    if stale_top_level.exists() or stale_top_level.is_symlink():
-        stale_top_level.unlink()
-
-    source_pkg = ROOT / "crates" / "pyxlog" / "python" / "pyxlog"
-    staged_pkg = target_dir / "pyxlog"
-    staged_pkg.mkdir(exist_ok=True)
-    for child in source_pkg.iterdir():
-        if child.name.startswith("_native") and child.suffix in {".so", ".dylib", ".pyd"}:
-            continue
-        dest = staged_pkg / child.name
-        if dest.exists() or dest.is_symlink():
-            if dest.is_dir() and not dest.is_symlink():
-                continue
-            dest.unlink()
-        if not dest.exists():
-            dest.symlink_to(child, target_is_directory=child.is_dir())
-
-    native_name = "_native.so" if linux_lib.exists() else "_native.dylib"
-    native_dest = staged_pkg / native_name
-    if native_dest.exists() or native_dest.is_symlink():
-        native_dest.unlink()
-    native_dest.symlink_to(native_lib)
-
-    _prepend_env_path("PYTHONPATH", target_dir)
-    print(f"INFO: Added pyxlog module path at {target_dir}")
-
-    if not _can_import_pyxlog():
-        raise SystemExit("Unable to import pyxlog after building extension module")
-
-
 def prob_engine_args(xlog: Path) -> list[str]:
     source = xlog.read_text(encoding="utf-8")
     match = re.search(r"^\s*#pragma\s+prob_engine\s*=\s*([a-zA-Z_]+)\s*$", source, re.MULTILINE)
@@ -162,7 +65,7 @@ def prob_engine_args(xlog: Path) -> list[str]:
     if engine == "exact_ddnnf":
         return ["--prob-engine", engine]
     if engine == "mc":
-        # Keep CI runtime bounded for stochastic examples.
+        # Keep explicit manual validation bounded for stochastic examples.
         mc_samples = os.environ.get("XLOG_VALIDATE_MC_SAMPLES", "100")
         return ["--prob-engine", engine, "--samples", mc_samples]
     return []
@@ -211,7 +114,7 @@ def main() -> int:
         )
 
     # Python examples (DLPack, etc.)
-    ensure_pyxlog_available(args.mode)
+    run_cmd([sys.executable, "-c", VERIFY_IMPORT_SNIPPET], cwd=ROOT)
     if "XLOG_PY_EXAMPLE_MC_SAMPLES" not in os.environ:
         # Keep the all-examples gate bounded; callers that want a longer
         # statistical run can override XLOG_PY_EXAMPLE_MC_SAMPLES directly.

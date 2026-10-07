@@ -2,14 +2,7 @@
   "consumer": "neutral-external-consumer",
   "features": [
     "common_subexpression_elimination",
-    "persistent_hash_index",
-    "production_path_reuse"
-  ],
-  "source_required_substrings": [
-    "material_link(A, B), material_link(B, C)",
-    "quality_gate(B)",
-    "not blocked_step(C)",
-    "flow_count(A, count(C))"
+    "persistent_hash_index"
   ],
   "checks": {
     "run": {

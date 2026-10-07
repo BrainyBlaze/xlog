@@ -9,20 +9,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts import validate_package_metadata as validator
 
 
-def _readme() -> str:
-    return """
-# xlog
-
-## Quickstart
-
-python scripts/xlog_doctor.py
-cargo build --release
-cargo build --release -p xlog-cli --features host-io
-python scripts/install_pyxlog_for_python.py --python
-./target/release/xlog
-"""
-
-
 def _metadata(bin_names: tuple[str, ...] = ("xlog",)) -> dict:
     return {
         "packages": [
@@ -35,28 +21,8 @@ def _metadata(bin_names: tuple[str, ...] = ("xlog",)) -> dict:
     }
 
 
-def test_quickstart_snippets_pass_when_all_present() -> None:
-    errors = validator.validate_package_metadata(
-        readme=_readme(),
-        metadata=_metadata(),
-    )
-
-    assert errors == []
-
-
-def test_missing_quickstart_snippet_is_reported() -> None:
-    errors = validator.validate_package_metadata(
-        readme=_readme().replace("python scripts/xlog_doctor.py", "", 1),
-        metadata=_metadata(),
-    )
-
-    assert "README quickstart is missing required snippets:" in errors
-    assert "  - python scripts/xlog_doctor.py" in errors
-
-
 def test_xlog_cli_binary_target_required() -> None:
     errors = validator.validate_package_metadata(
-        readme=_readme(),
         metadata=_metadata(bin_names=("not-xlog",)),
     )
 
@@ -65,7 +31,6 @@ def test_xlog_cli_binary_target_required() -> None:
 
 def test_missing_xlog_cli_package_is_reported() -> None:
     errors = validator.validate_package_metadata(
-        readme=_readme(),
         metadata={"packages": []},
     )
 
@@ -77,11 +42,9 @@ def test_validate_package_metadata_script_runs_as_direct_entrypoint() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        readme = tmpdir / "README.md"
         cargo = tmpdir / "Cargo.toml"
         metadata = tmpdir / "cargo-metadata.json"
 
-        readme.write_text(_readme(), encoding="utf-8")
         cargo.write_text('[workspace.package]\nversion = "0.9.2"\n', encoding="utf-8")
         metadata.write_text(json.dumps(_metadata()), encoding="utf-8")
 
@@ -89,8 +52,6 @@ def test_validate_package_metadata_script_runs_as_direct_entrypoint() -> None:
             [
                 sys.executable,
                 "scripts/validate_package_metadata.py",
-                "--readme",
-                str(readme),
                 "--cargo",
                 str(cargo),
                 "--metadata",

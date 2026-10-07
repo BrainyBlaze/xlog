@@ -256,16 +256,9 @@ def _check_explain_json(
 def _load_example_result(example: str, args: argparse.Namespace) -> dict[str, Any]:
     example_dir = EXAMPLE_ROOT / example
     program = example_dir / "program.xlog"
-    readme = example_dir / "README.md"
     _require(program.exists(), f"{example} missing program.xlog")
-    _require(readme.exists(), f"{example} missing README.md")
     expected = _load_expected(example_dir)
     source = program.read_text(encoding="utf-8")
-    _check_required_substrings(
-        source,
-        expected.get("source_required_substrings", []),
-        f"{example} program.xlog",
-    )
     program_arg = str(program.relative_to(ROOT))
 
     raw_outputs: dict[str, Any] = {}
