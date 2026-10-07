@@ -482,7 +482,8 @@ impl PySemanticLearningPhaseTransition {
                 let original_work = work.borrow(py);
                 let _cold =
                     ColdCallbackScope::enter(py, &session, &original_work, work.clone_ref(py))?;
-                let result = self.retire_restored_model.bind(py).call1((model,))?;
+                let callback = self.model_owner(py, PhaseModelOwner::RetirePrivate)?;
+                let result = callback.bind(py).call1((model,))?;
                 if !result.is_none() {
                     return Err(invalid(
                         "original control model retirement must return None after known release",
@@ -584,10 +585,10 @@ impl PySemanticLearningPhaseTransition {
         }
         // Publication retirement is already known. Drop every model-bearing
         // frame outside its mutex before the joined Session deallocation drain.
-        self.drop_retired_control_evaluation_owners()?;
-        self.drop_retired_control_checkpoint()?;
-        self.drop_retired_control_execution_owners()?;
-        self.drop_retired_control_restore_owners()?;
+        self.drop_completed_evaluation_owners("control")?;
+        self.drop_completed_private_checkpoints("control")?;
+        self.drop_completed_private_execution_owners("control")?;
+        self.drop_completed_private_restore_owners("control")?;
         let construction = {
             let mut retained = self.private_restore()?;
             if retained

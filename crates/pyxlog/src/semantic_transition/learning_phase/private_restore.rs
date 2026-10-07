@@ -30,8 +30,25 @@ pub(super) struct PrivateTrajectoryStart {
 }
 
 impl PySemanticLearningPhaseTransition {
-    pub(super) fn drop_retired_control_restore_owners(&self) -> PyResult<()> {
-        let original = self.trajectory_start()?.take();
+    pub(super) fn drop_completed_private_restore_owners(
+        &self,
+        branch: &'static str,
+    ) -> PyResult<()> {
+        let original = {
+            let mut retained = self.trajectory_start()?;
+            if retained.as_ref().is_some_and(|entry| {
+                entry.branch != branch
+                    || !entry.recorded
+                    || !entry.released
+                    || !entry.child_joined
+                    || entry.restore_error.is_some()
+            }) {
+                return Err(invalid(
+                    "model retirement cannot discard an unfinished private restore",
+                ));
+            }
+            retained.take()
+        };
         drop(original);
         Ok(())
     }
@@ -425,7 +442,7 @@ impl PySemanticLearningPhaseTransition {
                 self.trajectory_start()?.as_mut().expect("retained original trajectory").restore_entered = true;
                 let result = PySemanticTransitionSession::restore_checkpoint_impl(
                     py, checkpoint.as_any(), self.source.borrow(py).device_ordinal, &snapshot,
-                    self.restore_model.bind(py), domain.bind(py), None, None,
+                    self.model_owner(py, PhaseModelOwner::Restore)?.bind(py), domain.bind(py), None, None,
                     self.preparation_inputs.resolve_checkpoint.as_ref().map(|callback| callback.bind(py)),
                     checkpoint_limit.as_ref().map(|value| value.bind(py)),
                     total_limit.as_ref().map(|value| value.bind(py)), Some(self.refresh_snapshot.bind(py)),

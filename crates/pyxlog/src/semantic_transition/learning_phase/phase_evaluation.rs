@@ -81,23 +81,25 @@ impl Drop for EvaluationColdVisibility<'_> {
 }
 
 impl PySemanticLearningPhaseTransition {
-    pub(super) fn drop_retired_control_evaluation_owners(&self) -> PyResult<()> {
+    pub(super) fn drop_completed_evaluation_owners(&self, branch: &'static str) -> PyResult<()> {
         let mut retained = self.phase_evaluations()?;
         if retained
             .iter()
-            .filter(|entry| entry.branch == "control")
+            .filter(|entry| entry.branch == branch)
             .any(|entry| !entry.recorded || !entry.released || entry.budget_exceeded)
         {
             return Err(invalid(
-                "control retirement cannot discard an unfinished evaluation",
+                "model retirement cannot discard an unfinished evaluation",
             ));
         }
         let mut original = Vec::new();
-        while retained
-            .last()
-            .is_some_and(|entry| entry.branch == "control")
-        {
-            original.push(retained.pop().expect("retained control evaluation"));
+        let mut index = 0;
+        while index < retained.len() {
+            if retained[index].branch == branch {
+                original.push(retained.remove(index));
+            } else {
+                index += 1;
+            }
         }
         drop(retained);
         drop(original);
@@ -815,7 +817,7 @@ impl PySemanticLearningPhaseTransition {
                         controller: self.source_controller.clone_ref(py),
                         task: self.task_use.clone_ref(py),
                         parent: self.parent.clone_ref(py),
-                        model: self.preparation_inputs.source_model.clone_ref(py),
+                        model: self.model_owner(py, PhaseModelOwner::Source)?,
                     },
                     branch: "source",
                     entries: entries.clone().unbind(),
@@ -1026,7 +1028,8 @@ impl PySemanticLearningPhaseTransition {
                 session: &session,
                 py,
             };
-            let returned = inputs.execute_phase_instruction.bind(py).call1(arguments);
+            let callback = self.model_owner(py, PhaseModelOwner::Execute)?;
+            let returned = callback.bind(py).call1(arguments);
             let mut retained = self.phase_evaluations()?;
             let current = retained.last_mut().expect("retained evaluation");
             match returned {

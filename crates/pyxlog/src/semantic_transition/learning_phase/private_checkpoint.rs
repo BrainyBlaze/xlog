@@ -107,6 +107,7 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         let session = selected.parent.borrow(py).session.clone_ref(py);
+        self.prepare_delivery_expense(py, next.cast::<PyTuple>()?, &selected)?;
         {
             let construction = self.private_restore()?;
             let construction = construction.as_ref().ok_or_else(|| {
@@ -221,17 +222,20 @@ impl PySemanticLearningPhaseTransition {
         ))
     }
 
-    pub(super) fn drop_retired_control_checkpoint(&self) -> PyResult<()> {
+    pub(super) fn drop_completed_private_checkpoints(&self, branch: &'static str) -> PyResult<()> {
         let mut retained = self.private_checkpoints()?;
-        if retained
-            .last()
-            .is_some_and(|entry| entry.branch != "control")
-        {
+        if retained.iter().any(|entry| {
+            entry.branch != branch
+                || !entry.recorded
+                || !entry.released
+                || entry.budget_exceeded
+                || entry.error.is_some()
+        }) {
             return Err(invalid(
-                "control retirement cannot discard another branch checkpoint",
+                "model retirement cannot discard unfinished or unrelated private checkpoints",
             ));
         }
-        let original = retained.pop();
+        let original = std::mem::take(&mut *retained);
         drop(retained);
         drop(original);
         Ok(())
@@ -492,7 +496,7 @@ impl PySemanticLearningPhaseTransition {
                 .as_ref()
                 .expect("original checkpoint registrar")
                 .clone_ref(py);
-            let serializer = self.candidate_serializer.clone_ref(py);
+            let serializer = self.model_owner(py, PhaseModelOwner::SerializeCandidate)?;
             let selected = model.clone_ref(py);
             let session = parent.borrow(py).session.clone_ref(py);
             let snapshot_model = pyo3::types::PyCFunction::new_closure(

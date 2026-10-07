@@ -118,8 +118,26 @@ impl Drop for PrivateTaskCallbackScope<'_> {
 }
 
 impl PySemanticLearningPhaseTransition {
-    pub(super) fn drop_retired_control_execution_owners(&self) -> PyResult<()> {
-        let original = self.private_group()?.take();
+    pub(super) fn drop_completed_private_execution_owners(
+        &self,
+        branch: &'static str,
+    ) -> PyResult<()> {
+        let original = {
+            let mut retained = self.private_group()?;
+            if retained.as_ref().is_some_and(|group| {
+                group.branch != branch
+                    || group.records_completed != group.kinds.len()
+                    || !group.records_released
+                    || group.budget_exceeded
+                    || group.callback_error.is_some()
+                    || group.previous.is_some()
+            }) {
+                return Err(invalid(
+                    "model retirement cannot discard unfinished private execution owners",
+                ));
+            }
+            retained.take()
+        };
         drop(original);
         Ok(())
     }
@@ -1157,17 +1175,14 @@ impl PySemanticLearningPhaseTransition {
                         invalid("private cold callback custody mutex is poisoned")
                     })? = Some(work);
                 }
-                let result = self
-                    .preparation_inputs
-                    .execute_phase_instruction
-                    .bind(py)
-                    .call1((
-                        child.controller.clone_ref(py),
-                        child.task_use.clone_ref(py),
-                        child.parent.clone_ref(py),
-                        child.model.clone_ref(py),
-                        entries,
-                    ));
+                let callback = self.model_owner(py, PhaseModelOwner::Execute)?;
+                let result = callback.bind(py).call1((
+                    child.controller.clone_ref(py),
+                    child.task_use.clone_ref(py),
+                    child.parent.clone_ref(py),
+                    child.model.clone_ref(py),
+                    entries,
+                ));
                 let mut retained = self.private_group()?;
                 let group = retained.as_mut().expect("retained original group");
                 match result {
