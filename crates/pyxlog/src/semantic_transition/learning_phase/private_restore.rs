@@ -22,8 +22,10 @@ pub(super) struct PrivateTrajectoryStart {
     report: Option<SemanticColdModelWorkResult>,
     model_binding: Option<(u64, Identity256, Identity256)>,
     observer_finish_entered: bool,
+    physical_peak: Option<u64>,
     record_entered: bool,
     recorded: bool,
+    released: bool,
 }
 
 impl PySemanticLearningPhaseTransition {
@@ -110,8 +112,10 @@ impl PySemanticLearningPhaseTransition {
                 report: None,
                 model_binding: None,
                 observer_finish_entered: false,
+                physical_peak: None,
                 record_entered: false,
                 recorded: false,
+                released: false,
             });
         }
         self.require_trajectory_entry(py)?;
@@ -407,6 +411,29 @@ impl PySemanticLearningPhaseTransition {
         py: Python<'_>,
         restored: &Py<PySemanticTransitionRestoredCheckpoint>,
     ) -> PyResult<()> {
+        {
+            let retained = self.trajectory_start()?;
+            let operation = retained.as_ref().expect("retained original trajectory");
+            if operation.recorded && operation.released {
+                let report = operation.report.expect("known original trajectory report");
+                let work = report
+                    .native_work
+                    .checked_add(report.model_work)
+                    .ok_or_else(|| invalid("private trajectory actual work overflowed"))?;
+                let peak = operation
+                    .physical_peak
+                    .expect("known original trajectory memory");
+                if work > operation.budget[0]
+                    || peak > operation.budget[1]
+                    || report.model_calls > operation.budget[2]
+                {
+                    return Err(invalid("private trajectory exceeded its original budget; retain the actual recorded expenditure"));
+                }
+                // A later operation may now own the observer. Read only this
+                // completed original restore, never that later interval.
+                return Ok(());
+            }
+        }
         let streams = checkpoint_consumer_streams(
             self.preparation_inputs
                 .consumer_streams
@@ -502,6 +529,10 @@ impl PySemanticLearningPhaseTransition {
             .preparation_inputs
             .resource_observer
             .physical_peak(py)?;
+        self.trajectory_start()?
+            .as_mut()
+            .expect("retained original trajectory")
+            .physical_peak = Some(peak);
         let (instruction, ordinal, budget, entered, recorded) = {
             let retained = self.trajectory_start()?;
             let operation = retained.as_ref().expect("retained original trajectory");
@@ -566,6 +597,10 @@ impl PySemanticLearningPhaseTransition {
                 .recorded = true;
         }
         self.preparation_inputs.resource_observer.release(py)?;
+        self.trajectory_start()?
+            .as_mut()
+            .expect("retained original trajectory")
+            .released = true;
         if work > budget[0] || peak > budget[1] || report.model_calls > budget[2] {
             return Err(invalid("private trajectory exceeded its original budget; retain the actual recorded expenditure"));
         }
@@ -586,5 +621,30 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         Ok(())
+    }
+
+    pub(super) fn control_execution_input(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(Py<PySemanticTransitionRestoredCheckpoint>, u64)> {
+        self.require_known_control_restore(py)?;
+        let retained = self.trajectory_start()?;
+        let operation = retained.as_ref().expect("retained original trajectory");
+        if !operation.recorded || operation.report.is_none() || !operation.child_joined {
+            return Err(invalid(
+                "private numerical execution requires its actual recorded source restore",
+            ));
+        }
+        Ok((
+            operation
+                .restored
+                .as_ref()
+                .expect("known restore")
+                .clone_ref(py),
+            operation
+                .ordinal
+                .checked_add(1)
+                .ok_or_else(|| invalid("private execution position overflowed"))?,
+        ))
     }
 }

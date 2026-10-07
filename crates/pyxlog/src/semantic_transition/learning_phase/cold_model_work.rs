@@ -21,17 +21,35 @@ impl PySemanticColdModelWork {
         source.require_creator()?;
         if !self.active.load(Ordering::Acquire)
             || !source.learning_preparing.load(Ordering::Acquire)
-            || !matches!(
-                &parent.task_use.borrow(py).state()?.phase,
-                TaskUsePhase::CheckpointReading { original, .. }
-                    if matches!(original.as_ref(), TaskUsePhase::ArenaPreparing(_))
-            )
         {
             return Err(invalid(
                 "cold model work is accessible only inside its original admitted callback",
             ));
         }
-        Ok(())
+        if matches!(&parent.task_use.borrow(py).state()?.phase,
+            TaskUsePhase::CheckpointReading { original, .. } if matches!(original.as_ref(), TaskUsePhase::ArenaPreparing(_)))
+        {
+            return Ok(());
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            let pending = source
+                .learning_transition
+                .lock()
+                .map_err(|_| invalid("private cold callback lost its original phase mutex"))?
+                .as_ref()
+                .map(|pending| pending.clone_ref(py))
+                .ok_or_else(|| {
+                    invalid("private cold callback lost its original native phase owner")
+                })?;
+            return pending
+                .borrow(py)
+                .require_private_numeric_cold_callback(py, self);
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        Err(invalid(
+            "private numerical cold work requires semantic-policy",
+        ))
     }
 }
 
@@ -238,6 +256,21 @@ impl PySemanticTransitionTaskUse {
     /// The original owner is available inside the callback, before prepare
     /// returns. Another task or a stale retained handle cannot borrow its rights.
     fn active_cold_model_work(&self, py: Python<'_>) -> PyResult<Py<PySemanticColdModelWork>> {
+        #[cfg(feature = "semantic-policy")]
+        {
+            let source = self.session.borrow(py);
+            let pending = source
+                .learning_transition
+                .lock()
+                .map_err(|_| invalid("private cold callback lost its original phase mutex"))?
+                .as_ref()
+                .map(|pending| pending.clone_ref(py));
+            if let Some(pending) = pending {
+                if pending.borrow(py).private_adoption_due()? {
+                    return pending.borrow(py).private_adoption_work(py, &source, self);
+                }
+            }
+        }
         let work = retained_work(py, &self.session.borrow(py))?;
         if !std::ptr::eq(
             &*work.borrow(py).parent.borrow(py).task_use.borrow(py),
@@ -255,7 +288,8 @@ impl PySemanticTransitionTaskUse {
 impl PySemanticTransitionController {
     fn active_cold_model_work(&self, py: Python<'_>) -> PyResult<Py<PySemanticColdModelWork>> {
         let work = retained_work(py, &self.session.borrow(py))?;
-        self.require_issued(&work.borrow(py).parent.borrow(py).task_use.borrow(py))?;
-        Ok(work)
+        let task = work.borrow(py).parent.borrow(py).task_use.clone_ref(py);
+        self.require_issued(&task.borrow(py))?;
+        task.borrow(py).active_cold_model_work(py)
     }
 }

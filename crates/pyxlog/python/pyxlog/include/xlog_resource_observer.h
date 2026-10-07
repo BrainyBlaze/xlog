@@ -7,8 +7,8 @@
 extern "C" {
 #endif
 
-#define XLOG_RESOURCE_OBSERVER_ABI_VERSION UINT32_C(1)
-#define XLOG_RESOURCE_OBSERVER_CAPSULE_NAME "xlog.resource_observer.v1"
+#define XLOG_RESOURCE_OBSERVER_ABI_VERSION UINT32_C(2)
+#define XLOG_RESOURCE_OBSERVER_CAPSULE_NAME "xlog.resource_observer.v2"
 
 /* Completion and coverage are independent. COMPLETE means the requested
  * supported trace was delivered; it does not certify physical memory peaks,
@@ -196,6 +196,33 @@ typedef struct XlogResourceObserverApi {
     uint32_t (*read_interval)(void *context, void *interval,
                               XlogResourceTraceView *view);
     uint32_t (*release_interval)(void *context, void *interval);
+    /* Cold registration immediately AFTER the actual admission kernel (site=0)
+     * or release kernel (site=1) is enqueued, inside that original stream capture.
+     * capture_stream is the original CUstream handle, encoded as uint64_t. The
+     * producer must resolve its exact capture graph/dependency node here and
+     * retain that identity for original GPU activity correlation. Admission is
+     * unconditional; release belongs to its actual conditional body and may
+     * be skipped. Ordinals are frozen schedule coordinates, not measurements.
+     * Capture timestamps are NOT execution boundaries. Never place a host
+     * callback, readback or synchronization between graph steps to obtain them.
+     * Unknown registration retains the original interval and capture owners. */
+    uint32_t (*bind_step_capture)(void *context, void *interval,
+                                  uint64_t operation_ordinal,
+                                  uint64_t step_ordinal, uint64_t capture_stream,
+                                  uint32_t site);
+    /* Read a stable original step view only after whole-interval finish. The
+     * same continuous physical producer authenticates GPU execution boundaries
+     * in its original activity timestamp scale. First start equals whole start
+     * before group allocations; interiors join contiguously at the next step's
+     * real GPU admission; last end equals whole end after retirement/adoption.
+     * Every interval includes already-held shared allocations and the absolute
+     * process baseline. All validity/coverage/loss/completion requirements above
+     * apply independently to every step. Group maxima, capture-time timestamps,
+     * ordinal ordering or a copied scalar never prove a step's physical peak.
+     * This read never flushes, registers, finishes or executes anything. */
+    uint32_t (*read_step_interval)(void *context, void *interval,
+                                   uint64_t operation_ordinal,
+                                   XlogResourceTraceView *view);
 } XlogResourceObserverApi;
 
 #ifdef __cplusplus
