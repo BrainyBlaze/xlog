@@ -13,7 +13,8 @@ mod model_evaluation;
 mod prepared_replay;
 #[cfg(feature = "semantic-policy")]
 pub use cold_model_work::{
-    SemanticColdModelWork, SemanticColdModelWorkResult, SemanticColdNativeWork,
+    SemanticColdModelWork, SemanticColdModelWorkRegion, SemanticColdModelWorkResult,
+    SemanticColdNativeWork,
 };
 pub use learning_phase::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseRecord,
@@ -21,8 +22,8 @@ pub use learning_phase::{
 };
 #[cfg(feature = "semantic-policy")]
 pub use model_evaluation::{
-    SemanticCompletedModelEvaluation, SemanticEvaluationCohort, SemanticModelEvaluation,
-    SemanticModelEvaluationResult,
+    SemanticCancelledModelEvaluation, SemanticCompletedModelEvaluation, SemanticEvaluationCohort,
+    SemanticModelEvaluation, SemanticModelEvaluationResult,
 };
 #[cfg(feature = "semantic-policy")]
 pub use prepared_replay::SemanticCompletedReplayMaterials;

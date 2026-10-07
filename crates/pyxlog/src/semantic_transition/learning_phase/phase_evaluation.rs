@@ -1,10 +1,14 @@
 //! Original read-only phase observations over held source or private model owners.
 
 use super::super::model_evaluation::{
-    PySemanticCompletedModelEvaluation, PySemanticEvaluationCohort, SemanticModelEvaluationPending,
+    PySemanticCompletedModelEvaluation, PySemanticEvaluationCohort, PySemanticModelEvaluation,
+    SemanticModelEvaluationPending,
 };
 use super::*;
-use xlog_cuda::{SemanticColdModelWork, SemanticColdModelWorkResult, SemanticColdNativeWork};
+use xlog_cuda::{
+    SemanticCancelledModelEvaluation, SemanticColdModelWork, SemanticColdModelWorkResult,
+    SemanticColdNativeWork, SemanticModelEvaluation,
+};
 
 pub(super) struct EvaluationOwners {
     pub(super) controller: Py<PySemanticTransitionController>,
@@ -30,15 +34,293 @@ pub(super) struct PhaseEvaluation {
     callback_result: Option<Py<PyAny>>,
     callback_error: Option<PyErr>,
     work: Option<SemanticColdModelWork>,
+    regions: Vec<Py<PySemanticColdModelWork>>,
+    cold_stage: EvaluationColdStage,
+    native_evaluation: Option<Py<PySemanticModelEvaluation>>,
+    cancelled: Option<SemanticCancelledModelEvaluation>,
+    cancelled_expense: Option<(u64, u64, u64)>,
     custody: Option<SemanticColdNativeWork>,
     work_closed: bool,
     work_result: Option<SemanticColdModelWorkResult>,
     observer_finish_entered: bool,
     record_entered: bool,
     recorded: bool,
+    physical_peak: Option<u64>,
+    released: bool,
+    budget_exceeded: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::semantic_transition) enum EvaluationColdStage {
+    Preparation,
+    OutputProjection,
+    AwaitingCompletion,
+    Cleanup,
+}
+
+struct EvaluationColdVisibility<'a> {
+    session: &'a PySemanticTransitionSession,
+    py: Python<'a>,
+}
+
+impl Drop for EvaluationColdVisibility<'_> {
+    fn drop(&mut self) {
+        let original = self
+            .session
+            .active_cold_model_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(original) = original {
+            original
+                .borrow(self.py)
+                .active
+                .store(false, Ordering::Release);
+        }
+    }
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(in crate::semantic_transition) fn cancel_phase_evaluation(
+        &self,
+        py: Python<'_>,
+        original: &PySemanticModelEvaluation,
+        cancelled: &SemanticCancelledModelEvaluation,
+        native: &SemanticModelEvaluation,
+        parent: &PySemanticPublishedParent,
+    ) -> PyResult<()> {
+        let mut retained = self.phase_evaluations()?;
+        let current = retained
+            .last_mut()
+            .ok_or_else(|| invalid("cancelled evaluation lost its original phase owner"))?;
+        Self::require_evaluation_entry(py, current)?;
+        if !self.phase_evaluation_active.load(Ordering::Acquire)
+            || current
+                .native_evaluation
+                .as_ref()
+                .is_none_or(|owner| !std::ptr::eq(&*owner.borrow(py), original))
+            || !std::ptr::eq(&*current.owners.parent.borrow(py), parent)
+            || current.cancelled.is_some()
+        {
+            return Err(invalid(
+                "evaluation cancellation changed its original invocation or parent",
+            ));
+        }
+        let session = parent.session.borrow(py);
+        let owner = session.owner()?;
+        if !cancelled.belongs_to(&owner, native)
+            || cancelled.parent()
+                != owner
+                    .published_identity(&*parent.lease()?)
+                    .map_err(xlog_err)?
+        {
+            return Err(invalid(
+                "cancelled evaluation lost its original native expenditure proof",
+            ));
+        }
+        drop(owner);
+        // Retain the actual cancel proof before attempting any further state
+        // transition. Failed/entered cold registration remains quarantined.
+        current.cancelled = Some(cancelled.clone());
+        self.source
+            .borrow(py)
+            .owner()?
+            .cancel_unentered_cold_model_work_regions(
+                current
+                    .work
+                    .as_ref()
+                    .ok_or_else(|| invalid("cancelled evaluation lost its original cold report"))?,
+                2,
+            )
+            .map_err(xlog_err)?;
+        current.cold_stage = EvaluationColdStage::Cleanup;
+        Self::clear_evaluation_cold_visibility(py, &session);
+        Ok(())
+    }
+
+    pub(in crate::semantic_transition) fn bind_phase_evaluation(
+        &self,
+        py: Python<'_>,
+        original: &Py<PySemanticModelEvaluation>,
+    ) -> PyResult<()> {
+        let mut retained = self.phase_evaluations()?;
+        let current = retained
+            .last_mut()
+            .ok_or_else(|| invalid("phase evaluation lost its original admission"))?;
+        Self::require_evaluation_entry(py, current)?;
+        if !self.phase_evaluation_active.load(Ordering::Acquire)
+            || !current.evaluation_admitted
+            || current.native_evaluation.is_some()
+        {
+            return Err(invalid(
+                "phase evaluation cannot replace its original native invocation",
+            ));
+        }
+        current.native_evaluation = Some(original.clone_ref(py));
+        Ok(())
+    }
+
+    pub(in crate::semantic_transition) fn evaluation_cold_boundary(
+        &self,
+        py: Python<'_>,
+        original: &PySemanticModelEvaluation,
+        from: EvaluationColdStage,
+        to: EvaluationColdStage,
+    ) -> PyResult<()> {
+        let mut retained = self.phase_evaluations()?;
+        let current = retained
+            .last_mut()
+            .ok_or_else(|| invalid("phase evaluation lost its original cold lifecycle"))?;
+        Self::require_evaluation_entry(py, current)?;
+        if !self.phase_evaluation_active.load(Ordering::Acquire)
+            || current
+                .native_evaluation
+                .as_ref()
+                .is_none_or(|owner| !std::ptr::eq(&*owner.borrow(py), original))
+        {
+            return Err(invalid(
+                "phase evaluation changed its actual native cold boundary",
+            ));
+        }
+        // Known completion may restore the same already retained receipt after
+        // a late phase-visibility failure. It cannot mint another cleanup region.
+        if from == EvaluationColdStage::AwaitingCompletion
+            && to == EvaluationColdStage::Cleanup
+            && current.cold_stage == to
+        {
+            return Ok(());
+        }
+        if current.cold_stage != from {
+            return Err(invalid(
+                "phase evaluation cannot repeat or reorder its cold regions",
+            ));
+        }
+        let index = match from {
+            EvaluationColdStage::Preparation => Some(0),
+            EvaluationColdStage::OutputProjection => Some(1),
+            EvaluationColdStage::AwaitingCompletion => None,
+            EvaluationColdStage::Cleanup => {
+                return Err(invalid("evaluation cleanup has no new numerical boundary"))
+            }
+        };
+        if let Some(index) = index {
+            let region = current
+                .regions
+                .get(index)
+                .ok_or_else(|| invalid("phase evaluation lost its original region proof"))?;
+            let region = region.borrow(py);
+            self.source
+                .borrow(py)
+                .owner()?
+                .require_closed_cold_model_work_region(
+                    region.region.as_ref().expect("original evaluation region"),
+                )
+                .map_err(xlog_err)?;
+        }
+        current.cold_stage = to;
+        Self::clear_evaluation_cold_visibility(
+            py,
+            &current.owners.parent.borrow(py).session.borrow(py),
+        );
+        Ok(())
+    }
+
+    fn clear_evaluation_cold_visibility(py: Python<'_>, session: &PySemanticTransitionSession) {
+        let original = session
+            .active_cold_model_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(original) = original {
+            original.borrow(py).active.store(false, Ordering::Release);
+        }
+    }
+
+    pub(in crate::semantic_transition) fn require_evaluation_cold_callback(
+        &self,
+        py: Python<'_>,
+        work: &PySemanticColdModelWork,
+    ) -> PyResult<()> {
+        let retained = self.phase_evaluations()?;
+        let current = retained
+            .last()
+            .ok_or_else(|| invalid("evaluation cold callback lost its original operation"))?;
+        Self::require_evaluation_entry(py, current)?;
+        let index = match current.cold_stage {
+            EvaluationColdStage::Preparation => 0,
+            EvaluationColdStage::OutputProjection => 1,
+            EvaluationColdStage::Cleanup => 2,
+            EvaluationColdStage::AwaitingCompletion => {
+                return Err(invalid(
+                    "pending evaluation cannot open cleanup or repeat output projection",
+                ))
+            }
+        };
+        if !self.phase_evaluation_active.load(Ordering::Acquire)
+            || current.callback_result.is_some()
+            || current
+                .regions
+                .get(index)
+                .is_none_or(|original| !std::ptr::eq(&*original.borrow(py), work))
+            || current.owners.parent.as_ptr() != work.parent.as_ptr()
+            || self.parent.as_ptr() != work.reader.as_ptr()
+        {
+            return Err(invalid(
+                "evaluation cold callback changed its actual region, TaskUse or parent",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(in crate::semantic_transition) fn evaluation_cold_work(
+        &self,
+        py: Python<'_>,
+        task: &PySemanticTransitionTaskUse,
+    ) -> PyResult<Option<Py<PySemanticColdModelWork>>> {
+        if !self.phase_evaluation_active.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let retained = self.phase_evaluations()?;
+        let current = retained
+            .last()
+            .ok_or_else(|| invalid("evaluation cold callback lost its original operation"))?;
+        if !std::ptr::eq(&*current.owners.task.borrow(py), task) {
+            return Err(invalid(
+                "evaluation cold callback changed its original issuing TaskUse",
+            ));
+        }
+        let index = match current.cold_stage {
+            EvaluationColdStage::Preparation => 0,
+            EvaluationColdStage::OutputProjection => 1,
+            EvaluationColdStage::Cleanup => 2,
+            EvaluationColdStage::AwaitingCompletion => return Err(invalid(
+                "pending evaluation retains its original closed regions; cleanup is not admitted",
+            )),
+        };
+        let original = current
+            .regions
+            .get(index)
+            .ok_or_else(|| invalid("evaluation cold callback lost its actual region owner"))?
+            .clone_ref(py);
+        drop(retained);
+        self.require_evaluation_cold_callback(py, &original.borrow(py))?;
+        let session = task.session.borrow(py);
+        let mut visible = session
+            .active_cold_model_work
+            .lock()
+            .map_err(|_| invalid("evaluation cold visibility mutex is poisoned"))?;
+        if visible
+            .as_ref()
+            .is_some_and(|previous| previous.as_ptr() != original.as_ptr())
+        {
+            return Err(invalid(
+                "evaluation cold region cannot replace another active callback",
+            ));
+        }
+        original.borrow(py).active.store(true, Ordering::Release);
+        *visible = Some(original.clone_ref(py));
+        Ok(Some(original))
+    }
     pub(super) fn source_evaluation_count(&self) -> PyResult<usize> {
         Ok(self
             .phase_evaluations()?
@@ -94,6 +376,9 @@ impl PySemanticLearningPhaseTransition {
     /// Project each original control observation only after the selected group
     /// and its physical interval are fully consumed. No new model is restored.
     pub(super) fn execute_control_evaluations(&self, py: Python<'_>) -> PyResult<()> {
+        if self.control_evaluations_done.load(Ordering::Acquire) {
+            return Ok(());
+        }
         loop {
             let unfinished = self
                 .phase_evaluations()?
@@ -103,7 +388,13 @@ impl PySemanticLearningPhaseTransition {
                 self.execute_evaluation(py)?;
                 continue;
             }
-            self.preparation_inputs.resource_observer.release(py)?;
+            if self
+                .phase_evaluations()?
+                .last()
+                .is_some_and(|evaluation| evaluation.branch == "control")
+            {
+                self.release_evaluation_record(py)?;
+            }
             let (owners, mut ordinal) = self.control_evaluation_input(py)?;
             if let Some(previous) = self
                 .phase_evaluations()?
@@ -138,6 +429,7 @@ impl PySemanticLearningPhaseTransition {
             if ColdValue::read(&operation, &mut 128, 0)?.text()? != "evaluation"
                 || ColdValue::read(&branch, &mut 128, 0)?.text()? != "control"
             {
+                self.control_evaluations_done.store(true, Ordering::Release);
                 return Ok(());
             }
             let (material, instruction) = Self::singleton_lifecycle_material(entries)?;
@@ -174,12 +466,20 @@ impl PySemanticLearningPhaseTransition {
                 callback_result: None,
                 callback_error: None,
                 work: None,
+                regions: Vec::new(),
+                cold_stage: EvaluationColdStage::Preparation,
+                native_evaluation: None,
+                cancelled: None,
+                cancelled_expense: None,
                 custody: None,
                 work_closed: false,
                 work_result: None,
                 observer_finish_entered: false,
                 record_entered: false,
                 recorded: false,
+                physical_peak: None,
+                released: false,
+                budget_exceeded: false,
             });
         }
     }
@@ -372,7 +672,9 @@ impl PySemanticLearningPhaseTransition {
                 .last()
                 .is_some_and(|evaluation| !evaluation.recorded);
             if !unfinished {
-                self.preparation_inputs.resource_observer.release(py)?;
+                if !self.phase_evaluations()?.is_empty() {
+                    self.release_evaluation_record(py)?;
+                }
                 self.preparation_inputs
                     .require_program(py, &self.scientific_owner)?;
                 let next = self.scientific_owner.bind(py).getattr("next_operation")?;
@@ -445,12 +747,20 @@ impl PySemanticLearningPhaseTransition {
                     callback_result: None,
                     callback_error: None,
                     work: None,
+                    regions: Vec::new(),
+                    cold_stage: EvaluationColdStage::Preparation,
+                    native_evaluation: None,
+                    cancelled: None,
+                    cancelled_expense: None,
                     custody: None,
                     work_closed: false,
                     work_result: None,
                     observer_finish_entered: false,
                     record_entered: false,
                     recorded: false,
+                    physical_peak: None,
+                    released: false,
+                    budget_exceeded: false,
                 });
             }
             self.execute_evaluation(py)?;
@@ -458,6 +768,16 @@ impl PySemanticLearningPhaseTransition {
     }
 
     fn execute_evaluation(&self, py: Python<'_>) -> PyResult<()> {
+        let terminal = self
+            .phase_evaluations()?
+            .last()
+            .expect("retained evaluation")
+            .callback_error
+            .as_ref()
+            .map(|error| error.clone_ref(py));
+        if let Some(error) = terminal {
+            return self.finish_cancelled_evaluation(py, error);
+        }
         let (controller, task_owner, parent_owner, model, branch) = {
             let retained = self.phase_evaluations()?;
             let current = retained.last().expect("retained original evaluation");
@@ -502,8 +822,6 @@ impl PySemanticLearningPhaseTransition {
                 current.callback_entered,
             )
         };
-        let streams = inputs.consumer_streams.python_value(py)?;
-        let streams = checkpoint_consumer_streams(streams.bind(py), &mut (16 * 1024 * 1024))?;
         if !started {
             // Retain entry before begin: a failed begin or allocation is not
             // proof of nonentry, and may not start a replacement interval.
@@ -526,6 +844,27 @@ impl PySemanticLearningPhaseTransition {
                 .last_mut()
                 .expect("retained evaluation")
                 .work = Some(work.clone());
+            let regions = source
+                .owner()?
+                .prepare_cold_model_work_regions(&work, 3)
+                .map_err(xlog_err)?;
+            for region in regions {
+                let original = Py::new(
+                    py,
+                    PySemanticColdModelWork {
+                        parent: parent_owner.clone_ref(py),
+                        reader: self.parent.clone_ref(py),
+                        inner: work.clone(),
+                        region: Some(region),
+                        active: AtomicBool::new(false),
+                    },
+                )?;
+                self.phase_evaluations()?
+                    .last_mut()
+                    .expect("retained evaluation")
+                    .regions
+                    .push(original);
+            }
             source
                 .owner()?
                 .begin_cold_model_work(&work)
@@ -598,6 +937,10 @@ impl PySemanticLearningPhaseTransition {
                     &session,
                 )?)
             };
+            let _cold_visibility = EvaluationColdVisibility {
+                session: &session,
+                py,
+            };
             let returned = inputs.execute_phase_instruction.bind(py).call1(arguments);
             let mut retained = self.phase_evaluations()?;
             let current = retained.last_mut().expect("retained evaluation");
@@ -612,6 +955,11 @@ impl PySemanticLearningPhaseTransition {
                         error.is_instance_of::<SemanticModelEvaluationPending>(py);
                     if !current.callback_pending {
                         current.callback_error = Some(error.clone_ref(py));
+                    }
+                    let cancelled = !current.callback_pending && current.cancelled.is_some();
+                    drop(retained);
+                    if cancelled {
+                        return self.finish_cancelled_evaluation(py, error);
                     }
                     return Err(error);
                 }
@@ -652,79 +1000,10 @@ impl PySemanticLearningPhaseTransition {
         let cohort = row.get_item(2)?;
         let cohort = cohort.extract::<PyRef<'_, PySemanticEvaluationCohort>>()?;
         let measured = receipt.require_phase_observation(py, &parent, &cohort)?;
-        let (work, closed, work_result) = {
-            let retained = self.phase_evaluations()?;
-            let current = retained.last().expect("retained evaluation");
-            (
-                current
-                    .work
-                    .clone()
-                    .ok_or_else(|| invalid("evaluation lost its native expense owner"))?,
-                current.work_closed,
-                current.work_result,
-            )
-        };
-        if !closed {
-            if branch == "source" {
-                verify_original_source(py, &task, &parent, &manifest, &saved_snapshot)?;
-            }
-            source
-                .owner()?
-                .close_cold_model_work(&work)
-                .map_err(xlog_err)?;
-            self.phase_evaluations()?
-                .last_mut()
-                .expect("retained evaluation")
-                .work_closed = true;
+        if branch == "source" {
+            verify_original_source(py, &task, &parent, &manifest, &saved_snapshot)?;
         }
-        let native = match work_result {
-            Some(result) => result,
-            None => {
-                let custody = self
-                    .phase_evaluations()?
-                    .last()
-                    .expect("retained evaluation")
-                    .custody
-                    .as_ref()
-                    .cloned();
-                if let Some(custody) = custody {
-                    parent
-                        .session
-                        .borrow(py)
-                        .owner()?
-                        .detach_shared_cold_native_work(&custody)
-                        .map_err(xlog_err)?;
-                    self.phase_evaluations()?
-                        .last_mut()
-                        .expect("retained evaluation")
-                        .custody = None;
-                    drop(custody);
-                }
-                // Only the original native Closed/Submitted state proves
-                // report nonentry or submission. An attempted finish can fail
-                // on a still-live scratch alias before submitting anything.
-                let result = source
-                    .owner()?
-                    .finish_cold_model_work(&*self.parent.borrow(py).lease()?, &work, &streams)
-                    .map_err(xlog_err)?;
-                self.phase_evaluations()?
-                    .last_mut()
-                    .expect("retained evaluation")
-                    .work_result = Some(result);
-                result
-            }
-        };
-        let finish_needed = {
-            let mut retained = self.phase_evaluations()?;
-            let current = retained.last_mut().expect("retained evaluation");
-            let needed = !current.observer_finish_entered;
-            current.observer_finish_entered = true;
-            needed
-        };
-        if finish_needed {
-            inputs.resource_observer.finish(py)?;
-        }
-        let peak = inputs.resource_observer.physical_peak(py)?;
+        let (native, peak) = self.finish_evaluation_expense(py)?;
         let work = measured
             .model_work
             .checked_add(native.native_work)
@@ -776,15 +1055,186 @@ impl PySemanticLearningPhaseTransition {
             .last_mut()
             .expect("retained evaluation")
             .record_entered = true;
+        self.phase_evaluations()?
+            .last_mut()
+            .expect("retained evaluation")
+            .budget_exceeded = work > budget[0] || peak > budget[1] || calls > budget[2];
         callback.call((), Some(&arguments))?;
         self.phase_evaluations()?
             .last_mut()
             .expect("retained evaluation")
             .recorded = true;
-        inputs.resource_observer.release(py)?;
-        if work > budget[0] || peak > budget[1] || calls > budget[2] {
+        self.release_evaluation_record(py)
+    }
+
+    fn release_evaluation_record(&self, py: Python<'_>) -> PyResult<()> {
+        let (recorded, released, exceeded) = {
+            let retained = self.phase_evaluations()?;
+            let current = retained.last().expect("retained evaluation");
+            (current.recorded, current.released, current.budget_exceeded)
+        };
+        if !recorded {
+            return Err(invalid(
+                "evaluation release precedes its original known history record",
+            ));
+        }
+        if !released {
+            self.preparation_inputs.resource_observer.release(py)?;
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained evaluation")
+                .released = true;
+        }
+        if exceeded {
             return Err(invalid("phase evaluation exceeded its original operation budget; its actual observation is retained"));
         }
         Ok(())
+    }
+
+    /// Both known observation and known cancellation consume this same original
+    /// cold report and physical interval. Neither can replay the model callback.
+    fn finish_evaluation_expense(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(SemanticColdModelWorkResult, u64)> {
+        let (work, closed, work_result, parent, custody, cached_peak) = {
+            let retained = self.phase_evaluations()?;
+            let current = retained.last().expect("retained evaluation");
+            if current.cold_stage != EvaluationColdStage::Cleanup
+                || (current.callback_result.is_none() && current.cancelled.is_none())
+            {
+                return Err(invalid("evaluation expense lacks its original known numerical completion or cancellation"));
+            }
+            (
+                current
+                    .work
+                    .clone()
+                    .ok_or_else(|| invalid("evaluation lost its native expense owner"))?,
+                current.work_closed,
+                current.work_result,
+                current.owners.parent.clone_ref(py),
+                current.custody.clone(),
+                current.physical_peak,
+            )
+        };
+        let source = self.source.borrow(py);
+        if !closed {
+            source
+                .owner()?
+                .close_cold_model_work(&work)
+                .map_err(xlog_err)?;
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained evaluation")
+                .work_closed = true;
+        }
+        let native = match work_result {
+            Some(result) => result,
+            None => {
+                if let Some(custody) = custody {
+                    parent
+                        .borrow(py)
+                        .session
+                        .borrow(py)
+                        .owner()?
+                        .detach_shared_cold_native_work(&custody)
+                        .map_err(xlog_err)?;
+                    self.phase_evaluations()?
+                        .last_mut()
+                        .expect("retained evaluation")
+                        .custody = None;
+                    drop(custody);
+                }
+                let streams = self.preparation_inputs.consumer_streams.python_value(py)?;
+                let streams =
+                    checkpoint_consumer_streams(streams.bind(py), &mut (16 * 1024 * 1024))?;
+                // Native Closed/Submitted custody, not an attempted finish flag,
+                // chooses the original submit or read-only resolution.
+                let result = source
+                    .owner()?
+                    .finish_cold_model_work(&*self.parent.borrow(py).lease()?, &work, &streams)
+                    .map_err(xlog_err)?;
+                self.phase_evaluations()?
+                    .last_mut()
+                    .expect("retained evaluation")
+                    .work_result = Some(result);
+                result
+            }
+        };
+        let finish_needed = {
+            let mut retained = self.phase_evaluations()?;
+            let current = retained.last_mut().expect("retained evaluation");
+            let needed = !current.observer_finish_entered;
+            current.observer_finish_entered = true;
+            needed
+        };
+        if finish_needed {
+            self.preparation_inputs.resource_observer.finish(py)?;
+        }
+        let peak = match cached_peak {
+            Some(peak) => peak,
+            None => {
+                let peak = self
+                    .preparation_inputs
+                    .resource_observer
+                    .physical_peak(py)?;
+                self.phase_evaluations()?
+                    .last_mut()
+                    .expect("retained evaluation")
+                    .physical_peak = Some(peak);
+                peak
+            }
+        };
+        Ok((native, peak))
+    }
+
+    fn finish_cancelled_evaluation(&self, py: Python<'_>, original: PyErr) -> PyResult<()> {
+        let (cancelled, cached, released) = {
+            let retained = self.phase_evaluations()?;
+            let current = retained.last().expect("retained evaluation");
+            (
+                current.cancelled.clone(),
+                current.cancelled_expense,
+                current.released,
+            )
+        };
+        let Some(cancelled) = cancelled else {
+            return Err(original);
+        };
+        let result = (|| {
+            if cached.is_none() {
+                let (cold, peak) = self.finish_evaluation_expense(py)?;
+                let work = cancelled
+                    .model_work()
+                    .checked_add(cold.model_work)
+                    .and_then(|work| work.checked_add(cold.native_work))
+                    .ok_or_else(|| invalid("cancelled evaluation expenditure overflowed"))?;
+                let calls = cancelled
+                    .model_calls()
+                    .checked_add(cold.model_calls)
+                    .ok_or_else(|| invalid("cancelled evaluation calls overflowed"))?;
+                let mut retained = self.phase_evaluations()?;
+                let current = retained.last_mut().expect("retained evaluation");
+                current.cancelled_expense = Some((work, peak, calls));
+                current.budget_exceeded = work > current.budget[0]
+                    || peak > current.budget[1]
+                    || calls > current.budget[2];
+            }
+            if !released {
+                self.preparation_inputs.resource_observer.release(py)?;
+                self.phase_evaluations()?
+                    .last_mut()
+                    .expect("retained evaluation")
+                    .released = true;
+            }
+            Ok::<(), PyErr>(())
+        })();
+        if let Err(incomplete) = result {
+            incomplete.set_cause(py, Some(original));
+            return Err(incomplete);
+        }
+        // Cancellation is terminal, never a record_evaluation observation or
+        // permission to advance the original scientific schedule.
+        Err(original)
     }
 }

@@ -15,7 +15,7 @@ pub(crate) mod cold_model_work;
 #[cfg(feature = "semantic-policy")]
 use cold_model_work::{ColdCallbackScope, PySemanticColdModelWork};
 #[cfg(feature = "semantic-policy")]
-mod phase_evaluation;
+pub(super) mod phase_evaluation;
 #[cfg(feature = "semantic-policy")]
 use phase_evaluation::PhaseEvaluation;
 #[cfg(feature = "semantic-policy")]
@@ -379,6 +379,8 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     phase_evaluations: Mutex<Vec<PhaseEvaluation>>,
     #[cfg(feature = "semantic-policy")]
     phase_evaluation_active: AtomicBool,
+    #[cfg(feature = "semantic-policy")]
+    control_evaluations_done: AtomicBool,
     #[cfg(feature = "semantic-policy")]
     private_trajectory_start: Mutex<Option<PrivateTrajectoryStart>>,
     #[cfg(feature = "semantic-policy")]
@@ -839,6 +841,7 @@ impl PySemanticLearningPhaseTransition {
                         parent: self.parent.clone_ref(py),
                         reader: self.parent.clone_ref(py),
                         inner,
+                        region: None,
                         active: AtomicBool::new(false),
                     },
                 )?;
@@ -2319,6 +2322,8 @@ impl PySemanticTransitionController {
                 phase_evaluations: Mutex::new(Vec::new()),
                 #[cfg(feature = "semantic-policy")]
                 phase_evaluation_active: AtomicBool::new(false),
+                #[cfg(feature = "semantic-policy")]
+                control_evaluations_done: AtomicBool::new(false),
                 #[cfg(feature = "semantic-policy")]
                 private_trajectory_start: Mutex::new(None),
                 #[cfg(feature = "semantic-policy")]

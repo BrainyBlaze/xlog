@@ -679,6 +679,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "semantic_model_invocation",
             "semantic_cold_model_work_result",
             "semantic_model_evaluation_result",
+            "semantic_model_cancellation_work_result",
             "semantic_learning_fold",
             #[cfg(feature = "semantic-policy")]
             "semantic_policy_uniform_domains",

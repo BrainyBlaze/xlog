@@ -2,7 +2,7 @@
 //! callback. It grants none of the prepared/evaluation numerical authorities.
 
 use super::*;
-use xlog_cuda::SemanticColdModelWork;
+use xlog_cuda::{SemanticColdModelWork, SemanticColdModelWorkRegion};
 
 #[pyclass(name = "SemanticColdModelWork", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticColdModelWork {
@@ -11,6 +11,7 @@ pub(crate) struct PySemanticColdModelWork {
     // reader stays held while the actual child owns the model callback.
     pub(super) reader: Py<PySemanticPublishedParent>,
     pub(super) inner: SemanticColdModelWork,
+    pub(super) region: Option<SemanticColdModelWorkRegion>,
     pub(super) active: AtomicBool,
 }
 
@@ -42,6 +43,11 @@ impl PySemanticColdModelWork {
                 .ok_or_else(|| {
                     invalid("private cold callback lost its original native phase owner")
                 })?;
+            if self.region.is_some() {
+                return pending
+                    .borrow(py)
+                    .require_evaluation_cold_callback(py, self);
+            }
             return pending
                 .borrow(py)
                 .require_private_numeric_cold_callback(py, self);
@@ -78,10 +84,13 @@ impl PySemanticColdModelWork {
         let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
         let parent = self.reader.borrow(py);
         let source = parent.session.borrow(py);
-        let tensor = source
-            .owner()?
-            .cold_model_work_buffer(&*parent.lease()?, &self.inner, stream)
-            .map_err(xlog_err)?;
+        let mut owner = source.owner()?;
+        let tensor = if let Some(region) = &self.region {
+            owner.cold_model_work_region_buffer(&*parent.lease()?, region, stream)
+        } else {
+            owner.cold_model_work_buffer(&*parent.lease()?, &self.inner, stream)
+        }
+        .map_err(xlog_err)?;
         let tensor = retain_export_owner(tensor, self.parent.clone_ref(py), source.owner_thread)?;
         crate::dlpack_capsule_from_tensor(py, tensor)
     }
@@ -89,26 +98,30 @@ impl PySemanticColdModelWork {
     /// Attach the existing recorder once, even for a CPU/meta-only callback.
     fn begin(&self, py: Python<'_>) -> PyResult<()> {
         self.check(py)?;
-        self.reader
-            .borrow(py)
-            .session
-            .borrow(py)
-            .owner()?
-            .begin_cold_model_work(&self.inner)
-            .map_err(xlog_err)
+        let reader = self.reader.borrow(py);
+        let session = reader.session.borrow(py);
+        let mut owner = session.owner()?;
+        if let Some(region) = &self.region {
+            owner.begin_cold_model_work_region(region)
+        } else {
+            owner.begin_cold_model_work(&self.inner)
+        }
+        .map_err(xlog_err)
     }
 
     /// Close registration only. Callback return does not certify CUDA or
     /// allocator completion; the enclosing native operation joins those later.
     fn end(&self, py: Python<'_>) -> PyResult<()> {
         self.check(py)?;
-        self.reader
-            .borrow(py)
-            .session
-            .borrow(py)
-            .owner()?
-            .close_cold_model_work(&self.inner)
-            .map_err(xlog_err)
+        let reader = self.reader.borrow(py);
+        let session = reader.session.borrow(py);
+        let mut owner = session.owner()?;
+        if let Some(region) = &self.region {
+            owner.close_cold_model_work_region(region)
+        } else {
+            owner.close_cold_model_work(&self.inner)
+        }
+        .map_err(xlog_err)
     }
 
     fn fail(&self, py: Python<'_>) -> PyResult<()> {
@@ -124,13 +137,15 @@ impl PySemanticColdModelWork {
 
     fn record_model_invocation(&self, py: Python<'_>) -> PyResult<()> {
         self.check(py)?;
-        self.reader
-            .borrow(py)
-            .session
-            .borrow(py)
-            .owner()?
-            .record_cold_model_invocation(&self.inner)
-            .map_err(xlog_err)
+        let reader = self.reader.borrow(py);
+        let session = reader.session.borrow(py);
+        let mut owner = session.owner()?;
+        if let Some(region) = &self.region {
+            owner.record_cold_model_region_invocation(region)
+        } else {
+            owner.record_cold_model_invocation(&self.inner)
+        }
+        .map_err(xlog_err)
     }
 
     fn record_model_work(
@@ -166,9 +181,12 @@ impl PySemanticColdModelWork {
         let mut owner = source.owner()?;
         let result = (|| {
             let (kind, values, rank) = parse_model_work(kind, dimensions)?;
-            owner
-                .record_cold_model_work(&self.inner, kind, &values[..rank], device_produced)
-                .map_err(xlog_err)
+            if let Some(region) = &self.region {
+                owner.record_cold_model_work_region(region, kind, &values[..rank], device_produced)
+            } else {
+                owner.record_cold_model_work(&self.inner, kind, &values[..rank], device_produced)
+            }
+            .map_err(xlog_err)
         })();
         if result.is_err() {
             owner.fail_cold_model_work(&self.inner);
@@ -266,6 +284,9 @@ impl PySemanticTransitionTaskUse {
                 .as_ref()
                 .map(|pending| pending.clone_ref(py));
             if let Some(pending) = pending {
+                if let Some(work) = pending.borrow(py).evaluation_cold_work(py, self)? {
+                    return Ok(work);
+                }
                 if pending.borrow(py).private_adoption_due()? {
                     return pending.borrow(py).private_adoption_work(py, &source, self);
                 }

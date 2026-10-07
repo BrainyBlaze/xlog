@@ -261,6 +261,7 @@ impl PySemanticLearningPhaseTransition {
                     .as_ref()
                     .expect("retained original work")
                     .clone(),
+                region: None,
                 active: AtomicBool::new(false),
             },
         )?;

@@ -403,6 +403,7 @@ impl PySemanticLearningPhaseTransition {
                 parent: parent.clone_ref(py),
                 reader: self.parent.clone_ref(py),
                 inner,
+                region: None,
                 active: AtomicBool::new(true),
             },
         )?;
@@ -962,6 +963,7 @@ impl PySemanticLearningPhaseTransition {
                     parent: child.parent.clone_ref(py),
                     reader: self.parent.clone_ref(py),
                     inner,
+                    region: None,
                     active: AtomicBool::new(false),
                 },
             )?;

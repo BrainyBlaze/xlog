@@ -327,6 +327,19 @@ extern "C" __global__ void semantic_model_evaluation_result(
     output[0]=status;output[7]=work.model_once;output[8]=work.model_events;
     output[9]=work.model_bound;output[10]=retained_bytes;output[11]=model_calls;
 }
+// Cancellation observes only the actual original work roster. It emits no
+// losses, selection status or successful model observation.
+extern "C" __global__ void semantic_model_cancellation_work_result(
+    uint64_t events,uint64_t count,uint64_t bound,uint64_t result) {
+    if(blockIdx.x || threadIdx.x)return;
+    ExecutionWork work{};
+    uint64_t calls=0;
+    consume_model_work(ModelWorkInput{events,count,bound},work,&calls);
+    auto* output=reinterpret_cast<uint64_t*>(result);
+    output[0]=work.overflow || work.model_events!=count || work.model_bound!=bound ? 1 : 0;
+    output[1]=work.model_once;output[2]=work.model_events;
+    output[3]=work.model_bound;output[4]=calls;
+}
 struct TaskFacts {
     uint64_t truth[3],correct[3],g,p,c;
     int64_t v;
