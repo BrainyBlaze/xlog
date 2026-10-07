@@ -40,6 +40,57 @@ pub(super) struct DeliveryExpense {
 }
 
 impl PySemanticLearningPhaseTransition {
+    /// Known signed Delivery alone authorizes a checkpoint signer. This cold
+    /// CPU custody does not repeat model work, change Q or enter another region.
+    pub(super) fn install_delivered_checkpoint_custody(&self, py: Python<'_>) -> PyResult<()> {
+        let (phase_id, delivery_digest, admission) = self.records()?.delivered_identity()?;
+        let payload = self
+            .delivery_expense()?
+            .as_ref()
+            .and_then(|delivery| delivery.payload.as_ref().map(Arc::clone))
+            .ok_or_else(|| invalid("known signed Delivery lost its original payload"))?;
+        let mut reader = phase_record::RecordReader(
+            payload
+                .strip_prefix(b"xlog.learning-phase.delivery.v1\0")
+                .ok_or_else(|| invalid("known signed Delivery lost its original domain"))?,
+        );
+        let checkpoint = reader.field()?;
+        let history: Arc<[u8]> = Arc::from(reader.field()?);
+        reader.field()?;
+        reader.field()?;
+        let snapshot =
+            AuthoritySnapshot::parse(&ColdValue::from_canonical_bytes(reader.field()?)?)?;
+        reader.field()?;
+        reader.finish()?;
+        let acceptance = self.acceptance()?;
+        let accepted = acceptance
+            .as_ref()
+            .and_then(|accepted| accepted.result.as_ref())
+            .ok_or_else(|| invalid("known signed Delivery lost its original accepted result"))?;
+        let acceptance = Arc::from(accepted.bind(py).cast::<PyBytes>()?.as_bytes());
+        let (candidate, original) = self.candidate(py)?;
+        if original.as_ref() != checkpoint {
+            return Err(invalid(
+                "known signed Delivery changed its original candidate checkpoint",
+            ));
+        }
+        let closure = Arc::new(cold_restore::VerifiedClosure {
+            phase_id,
+            delivery_digest,
+            admission,
+            program: Arc::from(self.preparation_inputs.frozen_program.as_slice()),
+            history,
+            acceptance,
+            snapshot,
+        });
+        let result = candidate
+            .borrow(py)
+            .session
+            .borrow(py)
+            .install_checkpoint_custody(closure, Sha256::digest(checkpoint).into());
+        result
+    }
+
     fn delivery_expense(&self) -> PyResult<MutexGuard<'_, Option<DeliveryExpense>>> {
         self.delivery_expense
             .lock()
