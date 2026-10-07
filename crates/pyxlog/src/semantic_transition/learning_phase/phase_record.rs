@@ -77,6 +77,7 @@ pub(super) struct PhaseRecords {
     ordinal: u64,
     total_bytes: u64,
     previous: [u8; 32],
+    admission: Option<Arc<[u8]>>,
     pub(super) attempt: Option<RecordAttempt>,
 }
 
@@ -127,6 +128,7 @@ impl PhaseRecords {
             ordinal: 0,
             total_bytes: 0,
             previous: [0; 32],
+            admission: None,
             attempt: None,
         })
     }
@@ -136,12 +138,26 @@ impl PhaseRecords {
     }
 
     pub(super) fn require_preparation_admission(&self) -> PyResult<()> {
-        if !self.issuer_pinned || self.ordinal != 1 || self.attempt.is_some() {
+        if !self.issuer_pinned
+            || self.ordinal != 1
+            || self.attempt.is_some()
+            || self.admission.is_none()
+        {
             return Err(invalid(
                 "private phase allocation requires exact durable readback of its original signed admission",
             ));
         }
         Ok(())
+    }
+
+    /// Only the exact, signed, durably read-back Admission authorizes private
+    /// native writes. Scientific acceptance is not obtained before those writes.
+    pub(super) fn confirmed_admission(&self) -> PyResult<Arc<[u8]>> {
+        self.require_preparation_admission()?;
+        self.admission
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| invalid("private phase lost its original confirmed native admission"))
     }
 
     /// A confirmed original pin may still precede the first admission write.
@@ -244,8 +260,9 @@ impl PhaseRecords {
             .checked_add(attempt.bytes.len() as u64)
             .ok_or_else(|| invalid("phase record total size overflowed"))?;
         self.previous = attempt.digest;
-        if attempt.kind == RecordKind::PreparationOutcome {
-            self.preparation_outcome_known = true;
+        match attempt.kind {
+            RecordKind::Admission => self.admission = Some(Arc::clone(&attempt.bytes)),
+            RecordKind::PreparationOutcome => self.preparation_outcome_known = true,
         }
         self.attempt = None;
         Ok(())

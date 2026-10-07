@@ -1,8 +1,10 @@
 //! Cold learning-phase transitions over the complete native model allocation map.
 //!
-//! The trusted scientific owner supplies acceptance and the complete copy/reset
-//! recipe. This module owns phase writes, validates alias effects, and retains
-//! acceptance and ancestry; it never infers a phase from a tensor role or grant.
+//! The privileged native owner supplies its durably confirmed Admission and the
+//! complete copy/reset recipe. Scientific acceptance follows private execution
+//! and belongs outside its immutable checkpoint. This module owns phase writes,
+//! validates alias effects, and retains admission and ancestry; it never infers
+//! a phase from a tensor role or grant.
 
 use super::*;
 
@@ -58,8 +60,9 @@ impl SemanticLearningCopyReset {
 }
 
 /// A transition request, not an assertion that a scientific criterion passed.
-/// Acceptance is obtained from the original trusted scientific owner at the public
-/// Controller boundary, separately from checking the original data-use grants.
+/// The privileged Controller supplies its original signed, durably read-back
+/// Admission, separately from checking original data-use grants. This is permission
+/// for private work, never a claim that the scientific comparison passed.
 #[derive(Clone, Debug)]
 pub struct SemanticLearningPhaseTransition {
     pub source: SemanticLearningPhase,
@@ -67,7 +70,7 @@ pub struct SemanticLearningPhaseTransition {
     pub phase_index: u64,
     pub completed_updates_index: u64,
     pub recipe: Vec<SemanticLearningCopyReset>,
-    pub acceptance: Vec<u8>,
+    pub admission: Vec<u8>,
 }
 
 /// Retained evidence for one actual native cold phase change. Ordinary Update and
@@ -83,7 +86,7 @@ pub struct SemanticLearningPhaseRecord {
     pub completed_updates: u64,
     pub recipe_digest: Identity256,
     pub recipe: Vec<SemanticLearningCopyReset>,
-    pub acceptance: Vec<u8>,
+    pub admission: Vec<u8>,
 }
 
 impl SemanticLearningPhaseTransition {
@@ -135,11 +138,11 @@ impl SemanticLearningPhaseTransition {
                 SemanticLearningPhase::Consolidation,
                 SemanticLearningPhase::Fast
             )
-        ) || self.acceptance.is_empty()
+        ) || self.admission.is_empty()
             || self.phase_index == self.completed_updates_index
         {
             return Err(publication_input_error(
-                "learning transition lacks its permitted boundary or original acceptance",
+                "learning transition lacks its permitted boundary or original native admission",
             ));
         }
         material.require_successful_recompute()?;
@@ -162,7 +165,7 @@ impl SemanticLearningPhaseTransition {
             }
         } else if self.source != SemanticLearningPhase::Alignment {
             return Err(publication_input_error(
-                "learning lineage must begin with accepted alignment",
+                "learning lineage must begin with admitted alignment",
             ));
         }
         let expected = material
@@ -261,7 +264,7 @@ impl SemanticLearningPhaseTransition {
                 completed_updates: updates as u64,
                 recipe_digest: self.recipe_digest(),
                 recipe: self.recipe.clone(),
-                acceptance: self.acceptance.clone(),
+                admission: self.admission.clone(),
             },
             fold,
         ))
@@ -1173,7 +1176,7 @@ pub(super) fn encode_history(
                 material_u64(bytes, value);
             }
         }
-        material_bytes(bytes, &record.acceptance).map_err(SemanticTransitionError::Semantic)?;
+        material_bytes(bytes, &record.admission).map_err(SemanticTransitionError::Semantic)?;
     }
     Ok(())
 }
@@ -1239,7 +1242,7 @@ pub(super) fn decode_history(
                 }
             });
         }
-        let acceptance = reader
+        let admission = reader
             .bytes()
             .map_err(SemanticTransitionError::Semantic)?
             .to_vec();
@@ -1258,7 +1261,7 @@ pub(super) fn decode_history(
             completed_updates,
             recipe_digest,
             recipe,
-            acceptance,
+            admission,
         });
     }
     Ok(history)
@@ -1280,9 +1283,9 @@ pub(super) fn validate_history(
             phase_index: record.phase_index,
             completed_updates_index: record.completed_updates_index,
             recipe: record.recipe.clone(),
-            acceptance: record.acceptance.clone(),
+            admission: record.admission.clone(),
         };
-        if record.acceptance.is_empty()
+        if record.admission.is_empty()
             || record.phase_index == record.completed_updates_index
             || keys.windows(2).any(|pair| pair[0] >= pair[1])
             || keys.iter().any(|(role, _)| !(18..=25).contains(role))
