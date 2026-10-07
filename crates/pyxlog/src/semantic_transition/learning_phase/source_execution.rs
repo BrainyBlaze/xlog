@@ -22,7 +22,6 @@ pub(super) struct SourceEvaluation {
     callback_error: Option<PyErr>,
     work: Option<SemanticColdModelWork>,
     work_closed: bool,
-    work_finish_entered: bool,
     work_result: Option<SemanticColdModelWorkResult>,
     observer_finish_entered: bool,
     record_entered: bool,
@@ -274,7 +273,6 @@ impl PySemanticLearningPhaseTransition {
                     callback_error: None,
                     work: None,
                     work_closed: false,
-                    work_finish_entered: false,
                     work_result: None,
                     observer_finish_entered: false,
                     record_entered: false,
@@ -438,7 +436,7 @@ impl PySemanticLearningPhaseTransition {
         let cohort = row.get_item(2)?;
         let cohort = cohort.extract::<PyRef<'_, PySemanticEvaluationCohort>>()?;
         let measured = receipt.require_phase_observation(py, &parent, &cohort)?;
-        let (work, closed, finish_entered, work_result) = {
+        let (work, closed, work_result) = {
             let retained = self.source_evaluations()?;
             let current = retained.last().expect("retained evaluation");
             (
@@ -447,7 +445,6 @@ impl PySemanticLearningPhaseTransition {
                     .clone()
                     .ok_or_else(|| invalid("evaluation lost its native expense owner"))?,
                 current.work_closed,
-                current.work_finish_entered,
                 current.work_result,
             )
         };
@@ -465,20 +462,13 @@ impl PySemanticLearningPhaseTransition {
         let native = match work_result {
             Some(result) => result,
             None => {
-                self.source_evaluations()?
-                    .last_mut()
-                    .expect("retained evaluation")
-                    .work_finish_entered = true;
-                let result = if finish_entered {
-                    source
-                        .owner()?
-                        .resolve_cold_model_work(&*parent.lease()?, &work)
-                } else {
-                    source
-                        .owner()?
-                        .finish_cold_model_work(&*parent.lease()?, &work, &streams)
-                }
-                .map_err(xlog_err)?;
+                // Only the original native Closed/Submitted state proves
+                // report nonentry or submission. An attempted finish can fail
+                // on a still-live scratch alias before submitting anything.
+                let result = source
+                    .owner()?
+                    .finish_cold_model_work(&*parent.lease()?, &work, &streams)
+                    .map_err(xlog_err)?;
                 self.source_evaluations()?
                     .last_mut()
                     .expect("retained evaluation")

@@ -905,12 +905,12 @@ impl PySemanticLearningPhaseTransition {
                 let mut owner = source.owner()?;
                 let lease = acquired.lease()?;
                 let work = work.borrow(py);
-                if entered {
-                    owner.resolve_cold_model_work(&lease, &work.inner)
-                } else {
-                    owner.finish_cold_model_work(&lease, &work.inner, &streams)
-                }
-                .map_err(xlog_err)?
+                // Entering preparation is not proof that this report reached
+                // submission. Native dispatches from the original report's
+                // actual state without re-entering the model callback.
+                owner
+                    .finish_cold_model_work(&lease, &work.inner, &streams)
+                    .map_err(xlog_err)?
             };
             // Retain the actual components before refusal. Other source S
             // still requires its genuine producers, never substituted zeroes.
