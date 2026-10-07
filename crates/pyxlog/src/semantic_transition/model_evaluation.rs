@@ -491,8 +491,19 @@ impl PySemanticTransitionController {
                 let pending = pending.ok_or(public_error)?;
                 pending
                     .borrow(py)
-                    .require_source_evaluation(py, self, &issued, &acquired)?;
+                    .require_phase_evaluation(py, self, &issued, &acquired)?;
             }
+        } else if session.learning_preparing.load(Ordering::Acquire) {
+            #[cfg(feature = "semantic-policy")]
+            {
+                let pending = private_execution_owner(py, &session)?
+                    .ok_or_else(|| invalid("private evaluation lost its original phase owner"))?;
+                pending
+                    .borrow(py)
+                    .require_phase_evaluation(py, self, &issued, &acquired)?;
+            }
+            #[cfg(not(feature = "semantic-policy"))]
+            return Err(invalid("private evaluation requires semantic-policy"));
         }
         if acquired.session.as_ptr() != self.session.as_ptr() {
             return Err(invalid("evaluation parent belongs to another Session"));

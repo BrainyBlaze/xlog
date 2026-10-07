@@ -63,15 +63,10 @@ impl PySemanticLearningPhaseTransition {
             let fields = ColdValue::from_canonical_bytes(&material)?;
             let fields = fields.fields(6)?;
             let ordinal = fields[2].unsigned()?;
-            let expected = u64::try_from(
-                self.source_evaluations
-                    .lock()
-                    .map_err(|_| invalid("source evaluation custody mutex is poisoned"))?
-                    .len(),
-            )
-            .ok()
-            .and_then(|count| count.checked_add(1))
-            .ok_or_else(|| invalid("private trajectory position overflowed"))?;
+            let expected = u64::try_from(self.source_evaluation_count()?)
+                .ok()
+                .and_then(|count| count.checked_add(1))
+                .ok_or_else(|| invalid("private trajectory position overflowed"))?;
             if fields[0].text()? != "trajectory-start"
                 || fields[1].text()? != "control"
                 || ordinal != expected

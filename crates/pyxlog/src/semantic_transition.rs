@@ -11161,6 +11161,11 @@ impl PySemanticTensorContentWitness {
             let ContentStepOwner::Published(parent) = &self.parent else {
                 return Err(invalid("source feedback projection requires its original acquired source, not a private prepared step"));
             };
+            if let Some(projection) =
+                pending.private_evaluation_feedback_projection(py, &session, parent)?
+            {
+                return Ok(Some(projection));
+            }
             if pending.is_original_source(py, &session) {
                 pending.require_source_feedback_projection(py, &session, parent)?;
                 Ok(None)

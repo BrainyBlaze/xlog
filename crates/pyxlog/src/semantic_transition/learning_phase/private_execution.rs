@@ -56,14 +56,14 @@ pub(super) struct PrivateExecutionGroup {
 /// Only the retained numerical callback sees the original inner native phase.
 /// Suspension restores its actual Recording/Prepared/CompletedPending state
 /// inside ArenaPreparing; it neither clears privacy nor invents nonentry.
-struct PrivateExecutionScope<'a> {
+pub(super) struct PrivateTaskCallbackScope<'a> {
     active: &'a AtomicBool,
     task: &'a PySemanticTransitionTaskUse,
     session: &'a PySemanticTransitionSession,
 }
 
-impl<'a> PrivateExecutionScope<'a> {
-    fn enter(
+impl<'a> PrivateTaskCallbackScope<'a> {
+    pub(super) fn enter(
         active: &'a AtomicBool,
         task: &'a PySemanticTransitionTaskUse,
         session: &'a PySemanticTransitionSession,
@@ -92,7 +92,7 @@ impl<'a> PrivateExecutionScope<'a> {
     }
 }
 
-impl Drop for PrivateExecutionScope<'_> {
+impl Drop for PrivateTaskCallbackScope<'_> {
     fn drop(&mut self) {
         let work = self
             .session
@@ -116,6 +116,49 @@ impl Drop for PrivateExecutionScope<'_> {
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(super) fn control_evaluation_input(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(super::phase_evaluation::EvaluationOwners, u64)> {
+        let retained = self.private_group()?;
+        let group = retained
+            .as_ref()
+            .ok_or_else(|| invalid("private evaluation lost its original numerical group"))?;
+        if group.records_completed != group.kinds.len()
+            || !group.records_released
+            || group.budget_exceeded
+        {
+            return Err(invalid("private evaluation precedes its complete original numerical receipts or physical release"));
+        }
+        let returned = group
+            .callback_result
+            .as_ref()
+            .ok_or_else(|| invalid("private evaluation lost its selected parent/model handoff"))?;
+        let returned = returned.bind(py).cast::<PyTuple>()?;
+        let restored = group.restored.borrow(py);
+        let parent = group
+            .selected_parent
+            .as_ref()
+            .expect("known selected parent");
+        if returned.get_item(0)?.as_ptr() != parent.as_ptr() {
+            return Err(invalid(
+                "private evaluation changed its selected native parent",
+            ));
+        }
+        Ok((
+            super::phase_evaluation::EvaluationOwners {
+                controller: restored.controller.clone_ref(py),
+                task: restored.task_use.clone_ref(py),
+                parent: parent.clone_ref(py),
+                model: returned.get_item(1)?.unbind(),
+            },
+            group
+                .ordinal
+                .checked_add(group.kinds.len() as u64)
+                .ok_or_else(|| invalid("private evaluation position overflowed"))?,
+        ))
+    }
+
     fn private_group(&self) -> PyResult<MutexGuard<'_, Option<PrivateExecutionGroup>>> {
         self.private_execution
             .lock()
@@ -967,8 +1010,11 @@ impl PySemanticLearningPhaseTransition {
                 fresh.newer_than(&task.state()?.snapshot)?;
                 check_learning_grant(&task, &self.grant_reference, &fresh)?;
                 task.state()?.snapshot = fresh;
-                let _scope =
-                    PrivateExecutionScope::enter(&self.private_execution_active, &task, &session)?;
+                let _scope = PrivateTaskCallbackScope::enter(
+                    &self.private_execution_active,
+                    &task,
+                    &session,
+                )?;
                 self.private_group()?
                     .as_mut()
                     .expect("retained original group")

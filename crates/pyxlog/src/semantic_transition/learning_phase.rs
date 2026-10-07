@@ -15,9 +15,9 @@ pub(crate) mod cold_model_work;
 #[cfg(feature = "semantic-policy")]
 use cold_model_work::{ColdCallbackScope, PySemanticColdModelWork};
 #[cfg(feature = "semantic-policy")]
-mod source_execution;
+mod phase_evaluation;
 #[cfg(feature = "semantic-policy")]
-use source_execution::SourceEvaluation;
+use phase_evaluation::PhaseEvaluation;
 #[cfg(feature = "semantic-policy")]
 mod private_restore;
 #[cfg(feature = "semantic-policy")]
@@ -376,9 +376,9 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     preparation_entered: AtomicBool,
     source_preparation: Mutex<Option<SourcePreparation>>,
     #[cfg(feature = "semantic-policy")]
-    source_evaluations: Mutex<Vec<SourceEvaluation>>,
+    phase_evaluations: Mutex<Vec<PhaseEvaluation>>,
     #[cfg(feature = "semantic-policy")]
-    source_evaluation_active: AtomicBool,
+    phase_evaluation_active: AtomicBool,
     #[cfg(feature = "semantic-policy")]
     private_trajectory_start: Mutex<Option<PrivateTrajectoryStart>>,
     #[cfg(feature = "semantic-policy")]
@@ -989,6 +989,7 @@ impl PySemanticLearningPhaseTransition {
         {
             self.prepare_control_trajectory(py, pending)?;
             self.execute_control_group(py)?;
+            self.execute_control_evaluations(py)?;
             return self.finish_preparation(py);
         }
         #[cfg(not(feature = "semantic-policy"))]
@@ -2061,6 +2062,7 @@ impl PySemanticLearningPhaseTransition {
                 pending
                     .prepare_control_trajectory(py, &slf)
                     .and_then(|()| pending.execute_control_group(py))
+                    .and_then(|()| pending.execute_control_evaluations(py))
                     .and_then(|()| pending.finish_preparation(py))
             }
             #[cfg(not(feature = "semantic-policy"))]
@@ -2314,9 +2316,9 @@ impl PySemanticTransitionController {
                 preparation_entered: AtomicBool::new(false),
                 source_preparation: Mutex::new(None),
                 #[cfg(feature = "semantic-policy")]
-                source_evaluations: Mutex::new(Vec::new()),
+                phase_evaluations: Mutex::new(Vec::new()),
                 #[cfg(feature = "semantic-policy")]
-                source_evaluation_active: AtomicBool::new(false),
+                phase_evaluation_active: AtomicBool::new(false),
                 #[cfg(feature = "semantic-policy")]
                 private_trajectory_start: Mutex::new(None),
                 #[cfg(feature = "semantic-policy")]
