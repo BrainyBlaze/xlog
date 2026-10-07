@@ -13,6 +13,7 @@ pub(super) enum RecordKind {
     Admission = 0,
     PreparationOutcome = 1,
     Delivery = 2,
+    TerminalRefusal = 3,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -194,6 +195,8 @@ pub(super) struct PhaseRecords {
     pub(super) pin_attempted: bool,
     pub(super) preparation_outcome_known: bool,
     pub(super) delivery_known: bool,
+    pub(super) refusal_known: bool,
+    pub(super) refusal_record: Option<Arc<[u8]>>,
     ordinal: u64,
     total_bytes: u64,
     previous: [u8; 32],
@@ -247,6 +250,8 @@ impl PhaseRecords {
             pin_attempted: false,
             preparation_outcome_known: false,
             delivery_known: false,
+            refusal_known: false,
+            refusal_record: None,
             ordinal: 0,
             total_bytes: 0,
             previous: [0; 32],
@@ -343,13 +348,20 @@ impl PhaseRecords {
         if self.ordinal >= self.limits.records {
             return Err(invalid("original phase record count is exhausted"));
         }
-        let ordered = match kind {
-            RecordKind::Admission => self.ordinal == 0 && self.admission.is_none(),
-            RecordKind::PreparationOutcome => self.ordinal == 1 && self.admission.is_some(),
-            RecordKind::Delivery => {
-                self.ordinal == 2 && self.preparation_outcome_known && !self.delivery_known
-            }
-        };
+        let ordered = !self.refusal_known
+            && match kind {
+                RecordKind::Admission => self.ordinal == 0 && self.admission.is_none(),
+                RecordKind::PreparationOutcome => self.ordinal == 1 && self.admission.is_some(),
+                RecordKind::Delivery => {
+                    self.ordinal == 2 && self.preparation_outcome_known && !self.delivery_known
+                }
+                RecordKind::TerminalRefusal => {
+                    self.admission.is_some()
+                        && !self.delivery_known
+                        && (self.ordinal == 1
+                            || self.ordinal == 2 && self.preparation_outcome_known)
+                }
+            };
         if !ordered {
             return Err(invalid(
                 "phase record changed its original signed lifecycle order",
@@ -418,6 +430,10 @@ impl PhaseRecords {
             RecordKind::Admission => self.admission = Some(Arc::clone(&attempt.bytes)),
             RecordKind::PreparationOutcome => self.preparation_outcome_known = true,
             RecordKind::Delivery => self.delivery_known = true,
+            RecordKind::TerminalRefusal => {
+                self.refusal_known = true;
+                self.refusal_record = Some(Arc::clone(&attempt.bytes));
+            }
         }
         self.attempt = None;
         Ok(())

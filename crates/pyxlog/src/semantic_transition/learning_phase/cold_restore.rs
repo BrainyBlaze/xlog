@@ -53,7 +53,7 @@ fn digest(bytes: &[u8]) -> Value {
 /// Check the existing cold JSON transport, including Python's ASCII escapes,
 /// exact integer spellings, sorted object keys and absence of duplicate keys.
 /// This is not an alternate scientific-program or executable-instruction codec.
-fn json(bytes: &[u8]) -> PyResult<Value> {
+pub(super) fn json(bytes: &[u8]) -> PyResult<Value> {
     fn string(text: &str, out: &mut Vec<u8>) {
         out.push(b'"');
         for character in text.chars() {
@@ -191,6 +191,77 @@ fn require_fields(value: &Value, names: &[&str]) -> PyResult<()> {
     Ok(())
 }
 
+/// Recognize only the original negative comparison of a complete prefix.
+/// A contract exception with no comparisons is not a scientific zero result.
+pub(super) fn scientific_refusal_reason(
+    program: &[u8],
+    prefix: &[u8],
+    result: &[u8],
+) -> PyResult<ColdValue> {
+    let program = json(program)?;
+    let prefix = json(prefix)?;
+    let result = json(result)?;
+    require_fields(
+        &result,
+        &[
+            "format",
+            "program",
+            "history",
+            "outcome",
+            "comparisons",
+            "reason",
+            "boundary",
+        ],
+    )?;
+    if result["program"] != program
+        || result["history"] != prefix
+        || result["format"] != program["format"]
+        || result["outcome"] != "phase-refused"
+        || result["comparisons"].as_array().is_none_or(Vec::is_empty)
+        || program["schedule"]
+            .as_array()
+            .and_then(|steps| steps.len().checked_sub(1))
+            != prefix["records"].as_array().map(Vec::len)
+    {
+        return Err(invalid(
+            "scientific refusal lacks its original complete program, prefix and comparisons",
+        ));
+    }
+    Ok(ColdValue::Text(
+        result["reason"]
+            .as_str()
+            .filter(|reason| !reason.is_empty())
+            .ok_or_else(|| invalid("scientific refusal lost its original negative reason"))?
+            .to_owned(),
+    ))
+}
+
+pub(super) fn require_terminal_history(
+    prefix: &[u8],
+    history: &[u8],
+    instruction: &[u8],
+    ordinal: u64,
+    reason: &ColdValue,
+    usage: [u64; 3],
+) -> PyResult<()> {
+    let mut prefix = json(prefix)?;
+    let history = json(history)?;
+    let records = prefix["records"]
+        .as_array_mut()
+        .ok_or_else(|| invalid("terminal refusal lost its original prefix records"))?;
+    let record = serde_json::json!({
+        "instruction_sha256": digest(instruction), "operation_ordinal": ordinal,
+        "branch": "real", "resource_usage": usage, "refusal": host(reason)?,
+    });
+    records.push(record);
+    if prefix != history {
+        return Err(invalid(
+            "terminal refusal changed its original prefix or actual final observation",
+        ));
+    }
+    Ok(())
+}
+
 fn recipe_material(record: &xlog_cuda::SemanticLearningPhaseRecord) -> Vec<u8> {
     let integer = |value: u64| ColdValue::Integer(value.to_string());
     let views = record
@@ -241,11 +312,11 @@ pub(super) fn require_executed_lineage(
     final_native: &[u8],
     admission: &[u8],
     recipe_bytes: &[u8],
+    final_phase: SemanticLearningPhase,
 ) -> PyResult<Vec<xlog_cuda::SemanticLearningPhaseRecord>> {
     let recipe = ColdValue::from_canonical_bytes(recipe_bytes)?;
     let recipe = recipe.fields(5)?;
     let source_phase = phase(recipe[0].text()?)?;
-    let target_phase = phase(recipe[1].text()?)?;
     let original = SemanticTransitionSession::checkpoint_learning_phase_history(source_native)
         .map_err(xlog_err)?;
     let final_phases = SemanticTransitionSession::checkpoint_learning_phase_history(final_native)
@@ -258,7 +329,7 @@ pub(super) fn require_executed_lineage(
         .iter()
         .any(|record| record.admission.as_slice() != admission)
         || added[0].source != source_phase
-        || added.last().expect("nonempty native phase lineage").target != target_phase
+        || added.last().expect("nonempty native phase lineage").target != final_phase
         || recipe_material(&added[0]) != recipe_bytes
     {
         return Err(invalid(
@@ -392,11 +463,17 @@ impl VerifiedClosure {
                 "cold phase delivery changed its actual native publication identity",
             ));
         }
+        let program = json(program_bytes)?;
+        let declared_phase =
+            phase(program["final_phase"].as_str().ok_or_else(|| {
+                invalid("signed program lost its original declared final phase")
+            })?)?;
         let added = require_executed_lineage(
             &source_manifest.native,
             &final_manifest.native,
             raw[0],
             recipe_bytes,
+            declared_phase,
         )?;
         let final_phase = added.last().expect("nonempty native phase lineage");
         if added[0].source != source_phase || final_phase.target != target_phase {
@@ -404,7 +481,6 @@ impl VerifiedClosure {
                 "cold phase delivery differs from its original signed native admission or recipe",
             ));
         }
-        let program = json(program_bytes)?;
         let prefix = json(prefix_bytes)?;
         let history = json(history_bytes)?;
         let acceptance = json(acceptance_bytes)?;

@@ -2621,6 +2621,24 @@ impl SemanticHypergraph {
             .and_then(|_| self.cold_work.clone())
     }
 
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn require_cold_work_owner(
+        &self,
+        work: &DeviceMemoryView<u64>,
+        borrowed: bool,
+    ) -> Result<(), SemanticHypergraphError> {
+        self.ensure_not_poisoned()?;
+        if self.cold_work.as_ref().is_none_or(|original| {
+            original.device_ptr() != work.device_ptr() || original.len() != work.len()
+        }) || self.cold_work_custody.is_some() != borrowed
+        {
+            return Err(admission_error(
+                "cold ownership handoff changed its original tally or custody",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn transition_owner(
         &self,
     ) -> Result<(Arc<CudaKernelProvider>, ResidentExecutionDomain), SemanticHypergraphError> {

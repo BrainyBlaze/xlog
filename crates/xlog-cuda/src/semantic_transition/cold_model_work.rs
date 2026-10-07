@@ -214,6 +214,108 @@ impl SemanticTransitionSession {
             .map_err(SemanticTransitionError::Semantic)
     }
 
+    /// Keep the same open operation alive at its already attached surviving
+    /// reader before the private issuer is completely retired. Move the actual
+    /// storage and region states: no allocation, copy, reset or new invocation.
+    #[cfg(feature = "semantic-policy")]
+    pub fn handoff_cold_model_work(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        handle: &SemanticColdModelWork,
+        survivor: &mut SemanticTransitionSession,
+        survivor_lease: &SemanticPublishedLease,
+        streams: &[u64],
+    ) -> Result<(SemanticColdModelWork, Vec<SemanticColdModelWorkRegion>), SemanticTransitionError>
+    {
+        self.checked_reader(lease)?;
+        survivor.checked_reader(survivor_lease)?;
+        survivor.require_completed_cold_model_work()?;
+        let original = self.cold_model_work(handle)?;
+        if lease.token != handle.token
+            || !Arc::ptr_eq(&self.provider, &survivor.provider)
+            || self.domain.stream_id() != survivor.domain.stream_id()
+            || Arc::ptr_eq(&self.publication_issuer, &survivor.publication_issuer)
+            || original.state != RecordingState::Recording
+            || original.regions.is_empty()
+            || original
+                .regions
+                .iter()
+                .any(|state| !matches!(state, RecordingState::Waiting | RecordingState::Closed))
+            || survivor
+                .checked_step(survivor_lease)?
+                .cold_model_work
+                .as_ref()
+                .is_some_and(|prior| {
+                    !Arc::ptr_eq(&prior.admission, &original.admission)
+                        || prior.operation_ordinal > original.operation_ordinal
+                        || prior.work.actual.len() != original.work.actual.len()
+                })
+        {
+            return Err(publication_input_error(
+                "cold ownership handoff requires the same known open operation and attached survivor",
+            ));
+        }
+        // All actual consumers join before changing graph visibility. A failed
+        // join leaves the same issuer/report retained, never a second transfer.
+        self.quiesce_published_reader(lease, streams)?;
+        survivor.quiesce_published_reader(survivor_lease, streams)?;
+        let original = self.cold_model_work(handle)?;
+        let view = original.native_work.view();
+        let custody = Arc::clone(&original.aliases);
+        let regions = original.regions.len();
+        self.graph
+            .require_cold_work_owner(&view, false)
+            .map_err(SemanticTransitionError::Semantic)?;
+        survivor
+            .graph
+            .require_cold_work_owner(&view, true)
+            .map_err(SemanticTransitionError::Semantic)?;
+        // Validation and joins above precede these ownership-only changes.
+        // The old storage remains live until the graph ownership is transferred.
+        self.graph
+            .complete_cold_work(&view)
+            .map_err(SemanticTransitionError::Semantic)?;
+        survivor
+            .graph
+            .complete_cold_work(&view)
+            .map_err(SemanticTransitionError::Semantic)?;
+        survivor
+            .graph
+            .begin_cold_work(view.clone())
+            .map_err(SemanticTransitionError::Semantic)?;
+        self.graph
+            .begin_borrowed_cold_work(view, custody)
+            .map_err(SemanticTransitionError::Semantic)?;
+        let storage = self
+            .steps
+            .get_mut(&lease.token)
+            .expect("checked original reader")
+            .cold_model_work
+            .take()
+            .expect("checked original cold report");
+        let transferred = SemanticColdModelWork {
+            issuer: Arc::clone(&survivor.publication_issuer),
+            invocation: Arc::clone(&storage.invocation),
+            token: survivor_lease.token,
+            operation_ordinal: storage.operation_ordinal,
+            admission: Arc::clone(&storage.admission),
+        };
+        survivor
+            .steps
+            .get_mut(&survivor_lease.token)
+            .expect("checked surviving reader")
+            .cold_model_work = Some(storage);
+        Ok((
+            transferred.clone(),
+            (0..regions)
+                .map(|index| SemanticColdModelWorkRegion {
+                    work: transferred.clone(),
+                    index,
+                })
+                .collect(),
+        ))
+    }
+
     /// The actual model recorder must have closed before a prepared graph can
     /// take over numerical execution. Waiting or failed registration is not a
     /// CPU-only or zero-work observation.
@@ -537,9 +639,9 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
-    /// The phase calls this only after the original evaluation's native cancel
-    /// has joined consumers and issued its immutable expenditure proof. A region
-    /// already entered, failed or unknown is never converted into nonentry.
+    /// The phase calls this only after native cancellation or known complete
+    /// private retirement has joined consumers. The original report and physical
+    /// interval remain open; entered, failed or unknown regions stay unchanged.
     pub fn cancel_unentered_cold_model_work_regions(
         &mut self,
         handle: &SemanticColdModelWork,

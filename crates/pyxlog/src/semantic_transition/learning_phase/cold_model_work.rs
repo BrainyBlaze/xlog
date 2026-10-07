@@ -44,6 +44,12 @@ impl PySemanticColdModelWork {
                     invalid("private cold callback lost its original native phase owner")
                 })?;
             if self.region.is_some() {
+                if pending
+                    .borrow(py)
+                    .require_terminal_refusal_cold_callback(py, self)?
+                {
+                    return Ok(());
+                }
                 return pending
                     .borrow(py)
                     .require_evaluation_cold_callback(py, self);

@@ -10,8 +10,26 @@ struct DeliveryCall {
     error: Option<PyErr>,
 }
 
+struct RefusalTail {
+    cause: &'static str,
+    prefix: Arc<[u8]>,
+    result: Arc<[u8]>,
+    reason: ColdValue,
+    handoff_entered: bool,
+    handed_off: bool,
+    transferred_regions: Option<Vec<xlog_cuda::SemanticColdModelWorkRegion>>,
+    source_verified: [bool; 3],
+    retired: bool,
+    owners_dropped: bool,
+    release_entered: bool,
+    native_released: bool,
+    history: Option<Arc<[u8]>>,
+}
+
 pub(super) struct DeliveryExpense {
-    owners: EvaluationOwners,
+    owners: Option<EvaluationOwners>,
+    reader: Py<PySemanticPublishedParent>,
+    refusal: Option<RefusalTail>,
     entries: Py<PyTuple>,
     material: Vec<u8>,
     instruction: Vec<u8>,
@@ -40,6 +58,682 @@ pub(super) struct DeliveryExpense {
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(super) fn terminal_refusal_retained(&self) -> PyResult<bool> {
+        Ok(self
+            .delivery_expense()?
+            .as_ref()
+            .is_some_and(|entry| entry.refusal.is_some()))
+    }
+
+    pub(in crate::semantic_transition) fn require_terminal_refusal_cold_callback(
+        &self,
+        py: Python<'_>,
+        work: &PySemanticColdModelWork,
+    ) -> PyResult<bool> {
+        let retained = self.delivery_expense()?;
+        let Some(current) = retained.as_ref().filter(|entry| entry.refusal.is_some()) else {
+            return Ok(false);
+        };
+        let tail = current.refusal.as_ref().expect("original refusal");
+        if !tail.handed_off
+            || tail.retired
+            || !current.calls[8].entered
+            || !std::ptr::eq(&*current.regions[8].borrow(py), work)
+            || current.reader.as_ptr() != work.reader.as_ptr()
+        {
+            return Err(invalid(
+                "terminal private retirement changed its original admitted region",
+            ));
+        }
+        Ok(true)
+    }
+
+    fn require_terminal_source(&self, py: Python<'_>, serialize: bool) -> PyResult<()> {
+        let source = self.source.borrow(py);
+        source.require_creator()?;
+        let task = self.task_use.borrow(py);
+        if !matches!(task.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
+            return Err(invalid(
+                "terminal refusal lost its original held source task",
+            ));
+        }
+        let refreshed = self.refresh_snapshot.bind(py).call0()?;
+        let snapshot =
+            AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut (16 * 1024 * 1024), 0)?)?;
+        snapshot.newer_than(&task.state()?.snapshot)?;
+        check_learning_grant(&task, &self.grant_reference, &snapshot)?;
+        let manifest = SemanticCheckpointManifest::decode(&self.source_checkpoint)?;
+        let parent = self.parent.borrow(py);
+        verify_phase_native(py, &task, &parent, &manifest.native, true)?;
+        if serialize {
+            let model = self.delivery_model_call(py, 6)?;
+            require_model_bytes(model.bind(py), &manifest.model)?;
+            verify_phase_native(py, &task, &parent, &manifest.native, true)?;
+        }
+        task.state()?.snapshot = snapshot;
+        Ok(())
+    }
+
+    pub(super) fn finish_terminal_refusal(
+        &self,
+        py: Python<'_>,
+        cause: &'static str,
+    ) -> PyResult<()> {
+        if matches!(*self.status_lock()?, Completion::Refused) {
+            return Ok(());
+        }
+        if !self.terminal_refusal_retained()? {
+            let (prefix, result, reason) = {
+                let accepted = self.acceptance()?;
+                let accepted = accepted.as_ref().ok_or_else(|| {
+                    invalid("terminal refusal lost its original complete comparison")
+                })?;
+                let result =
+                    if cause == "scientific-comparison-refused" {
+                        Arc::clone(accepted.refusal.as_ref().ok_or_else(|| {
+                            invalid("unknown comparison is not a scientific refusal")
+                        })?)
+                    } else {
+                        Arc::from(
+                            accepted
+                                .result
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    invalid("private abandonment lost its positive original result")
+                                })?
+                                .bind(py)
+                                .cast::<PyBytes>()?
+                                .as_bytes(),
+                        )
+                    };
+                let reason = if cause == "scientific-comparison-refused" {
+                    cold_restore::scientific_refusal_reason(
+                        &self.preparation_inputs.frozen_program,
+                        &accepted.history,
+                        &result,
+                    )?
+                } else {
+                    ColdValue::Text(cause.to_owned())
+                };
+                (Arc::clone(&accepted.history), result, reason)
+            };
+            let allowed = match &*self.status_lock()? {
+                Completion::Preparing => cause == "scientific-comparison-refused",
+                Completion::Prepared => cause == "private-candidate-abandoned",
+                Completion::Unknown {
+                    readback_observed: false,
+                    ..
+                } => cause == "checkpoint-publication-absent",
+                _ => false,
+            };
+            let mut retained = self.delivery_expense()?;
+            let current = retained
+                .as_mut()
+                .ok_or_else(|| invalid("terminal refusal lost its original measured tail"))?;
+            if !allowed
+                || current.source_retired
+                || current.calls[8].entered
+                || self.records()?.attempt.is_some()
+                || self.records()?.delivery_known
+            {
+                return Err(invalid("terminal refusal cannot undo unknown or known accepted publication or source release"));
+            }
+            current.refusal = Some(RefusalTail {
+                cause,
+                prefix,
+                result,
+                reason,
+                handoff_entered: false,
+                handed_off: false,
+                transferred_regions: None,
+                source_verified: [false; 3],
+                retired: false,
+                owners_dropped: false,
+                release_entered: false,
+                native_released: false,
+                history: None,
+            });
+        }
+        self.require_delivery_entry(py)?;
+        let verified = self
+            .delivery_expense()?
+            .as_ref()
+            .expect("original delivery")
+            .refusal
+            .as_ref()
+            .expect("original refusal")
+            .source_verified[0];
+        if !verified {
+            self.require_terminal_source(py, false)?;
+            self.delivery_expense()?
+                .as_mut()
+                .expect("original delivery")
+                .refusal
+                .as_mut()
+                .expect("original refusal")
+                .source_verified[0] = true;
+        }
+        self.handoff_terminal_report(py)?;
+        self.retire_terminal_candidate(py)?;
+        let verified = self
+            .delivery_expense()?
+            .as_ref()
+            .expect("original delivery")
+            .refusal
+            .as_ref()
+            .expect("original refusal")
+            .source_verified[2];
+        if !verified {
+            self.require_terminal_source(py, true)?;
+            self.delivery_expense()?
+                .as_mut()
+                .expect("original delivery")
+                .refusal
+                .as_mut()
+                .expect("original refusal")
+                .source_verified[2] = true;
+        }
+        let (work, closed) = {
+            let retained = self.delivery_expense()?;
+            let current = retained.as_ref().expect("original delivery");
+            (
+                current.work.clone().expect("original work"),
+                current.work_closed,
+            )
+        };
+        if !closed {
+            // Known complete private release proves the remaining callbacks were
+            // never entered. Entered/failed/unknown regions cannot be cancelled.
+            self.source
+                .borrow(py)
+                .owner()?
+                .cancel_unentered_cold_model_work_regions(&work, 8)
+                .map_err(xlog_err)?;
+        }
+        self.finish_delivery_expense(py)?;
+        let source = self.source.borrow(py);
+        let task = self.task_use.borrow(py);
+        // Only CPU authority freshness follows the measured and signed tail.
+        let refreshed = self.refresh_snapshot.bind(py).call0()?;
+        let snapshot =
+            AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut (16 * 1024 * 1024), 0)?)?;
+        snapshot.newer_than(&task.state()?.snapshot)?;
+        check_learning_grant(&task, &self.grant_reference, &snapshot)?;
+        let resumed = match &task.state()?.phase {
+            TaskUsePhase::ArenaPreparing(original) => *original.clone(),
+            _ => {
+                return Err(invalid(
+                    "terminal refusal lost its original source continuation",
+                ))
+            }
+        };
+        let mut retention = source
+            .learning_transition
+            .lock()
+            .map_err(|_| invalid("source refusal retention mutex is poisoned"))?;
+        let mut state = task.state()?;
+        if !matches!(state.phase, TaskUsePhase::ArenaPreparing(_)) || !self.records()?.refusal_known
+        {
+            return Err(invalid(
+                "source continuation precedes exact terminal durable readback",
+            ));
+        }
+        state.snapshot = snapshot;
+        state.phase = resumed;
+        *self.status_lock()? = Completion::Refused;
+        source.learning_preparing.store(false, Ordering::Release);
+        let original = retention.take();
+        drop(state);
+        drop(retention);
+        drop(original);
+        Ok(())
+    }
+
+    fn handoff_terminal_report(&self, py: Python<'_>) -> PyResult<()> {
+        let (work, entered, handed_off) = {
+            let retained = self.delivery_expense()?;
+            let current = retained.as_ref().expect("original delivery");
+            let tail = current.refusal.as_ref().expect("original refusal");
+            (
+                current.work.clone().expect("original report"),
+                tail.handoff_entered,
+                tail.handed_off,
+            )
+        };
+        if !handed_off {
+            if entered {
+                return Err(invalid(
+                    "unknown report handoff cannot move or allocate its original report again",
+                ));
+            }
+            let (candidate, _) = self.candidate(py)?;
+            let parent = candidate.borrow(py).parent.clone_ref(py);
+            let streams = self.preparation_inputs.consumer_streams.python_value(py)?;
+            let streams = checkpoint_consumer_streams(streams.bind(py), &mut (16 * 1024 * 1024))?;
+            self.delivery_expense()?
+                .as_mut()
+                .expect("original delivery")
+                .refusal
+                .as_mut()
+                .expect("original refusal")
+                .handoff_entered = true;
+            let (transferred, regions) = {
+                let parent = parent.borrow(py);
+                let private = parent.session.borrow(py);
+                let source = self.source.borrow(py);
+                let original = self.parent.borrow(py);
+                let mut private_owner = private.owner()?;
+                let mut source_owner = source.owner()?;
+                private_owner
+                    .handoff_cold_model_work(
+                        &*parent.lease()?,
+                        &work,
+                        &mut source_owner,
+                        &*original.lease()?,
+                        &streams,
+                    )
+                    .map_err(xlog_err)?
+            };
+            let mut retained = self.delivery_expense()?;
+            let current = retained.as_mut().expect("original delivery");
+            current.work = Some(transferred);
+            current.reader = self.parent.clone_ref(py);
+            let tail = current.refusal.as_mut().expect("original refusal");
+            tail.transferred_regions = Some(regions);
+            tail.handed_off = true;
+        }
+        let rebuild = self
+            .delivery_expense()?
+            .as_ref()
+            .expect("original delivery")
+            .refusal
+            .as_ref()
+            .expect("original refusal")
+            .transferred_regions
+            .is_some();
+        if rebuild {
+            let (parent, _) = self.candidate(py)?;
+            let parent = parent.borrow(py).parent.clone_ref(py);
+            let (work, regions) = {
+                let retained = self.delivery_expense()?;
+                let current = retained.as_ref().expect("original delivery");
+                (
+                    current.work.clone().expect("transferred report"),
+                    current
+                        .refusal
+                        .as_ref()
+                        .expect("original refusal")
+                        .transferred_regions
+                        .clone()
+                        .expect("original region states"),
+                )
+            };
+            let mut original = Vec::with_capacity(regions.len());
+            for (index, region) in regions.into_iter().enumerate() {
+                original.push(Py::new(
+                    py,
+                    PySemanticColdModelWork {
+                        parent: if index == 8 || index % 2 == 1 {
+                            parent.clone_ref(py)
+                        } else {
+                            self.parent.clone_ref(py)
+                        },
+                        reader: self.parent.clone_ref(py),
+                        inner: work.clone(),
+                        region: Some(region),
+                        active: AtomicBool::new(false),
+                    },
+                )?);
+            }
+            let replaced = {
+                let mut retained = self.delivery_expense()?;
+                let current = retained.as_mut().expect("original delivery");
+                current
+                    .refusal
+                    .as_mut()
+                    .expect("original refusal")
+                    .transferred_regions = None;
+                std::mem::replace(&mut current.regions, original)
+            };
+            drop(replaced);
+        }
+        Ok(())
+    }
+
+    fn retire_terminal_candidate(&self, py: Python<'_>) -> PyResult<()> {
+        let retired = self
+            .delivery_expense()?
+            .as_ref()
+            .expect("original delivery")
+            .refusal
+            .as_ref()
+            .expect("original refusal")
+            .retired;
+        if !retired {
+            let result = self.delivery_model_call(py, 8)?;
+            if !result.bind(py).is_none() {
+                return Err(invalid(
+                    "private retirement must return None after known consumer release",
+                ));
+            }
+            let (candidate, _) = self.candidate(py)?;
+            let candidate = candidate.borrow(py);
+            candidate
+                .session
+                .borrow(py)
+                .owner()?
+                .require_retired_publication(&*candidate.parent.borrow(py).lease()?)
+                .map_err(xlog_err)?;
+            self.delivery_expense()?
+                .as_mut()
+                .expect("original delivery")
+                .refusal
+                .as_mut()
+                .expect("original refusal")
+                .retired = true;
+        }
+        let dropped = self
+            .delivery_expense()?
+            .as_ref()
+            .expect("original delivery")
+            .refusal
+            .as_ref()
+            .expect("original refusal")
+            .owners_dropped;
+        if !dropped {
+            self.drop_completed_evaluation_owners("real")?;
+            self.drop_completed_private_checkpoints("real")?;
+            self.drop_completed_private_execution_owners("real")?;
+            self.drop_completed_private_restore_owners("real")?;
+            let construction = self.private_restore()?.take();
+            let owners = self
+                .delivery_expense()?
+                .as_mut()
+                .expect("original delivery")
+                .owners
+                .take();
+            drop(construction);
+            drop(owners);
+            self.require_terminal_source(py, false)?;
+            let mut retained = self.delivery_expense()?;
+            let tail = retained
+                .as_mut()
+                .expect("original delivery")
+                .refusal
+                .as_mut()
+                .expect("original refusal");
+            tail.source_verified[1] = true;
+            tail.owners_dropped = true;
+        }
+        let (entered, released) = {
+            let retained = self.delivery_expense()?;
+            let tail = retained
+                .as_ref()
+                .expect("original delivery")
+                .refusal
+                .as_ref()
+                .expect("original refusal");
+            (tail.release_entered, tail.native_released)
+        };
+        if !released {
+            if entered {
+                return Err(invalid(
+                    "unknown private native deallocation cannot repeat or release its report",
+                ));
+            }
+            let (candidate, _) = self.candidate(py)?;
+            let candidate = candidate.borrow(py);
+            self.delivery_expense()?
+                .as_mut()
+                .expect("original delivery")
+                .refusal
+                .as_mut()
+                .expect("original refusal")
+                .release_entered = true;
+            let private = candidate.session.borrow(py);
+            private.release_retired_publication(py, &candidate.parent.borrow(py))?;
+            private.learning_preparing.store(false, Ordering::Release);
+            let retained = private
+                .learning_transition
+                .lock()
+                .map_err(|_| invalid("private refusal retention mutex is poisoned"))?
+                .take();
+            drop(retained);
+            self.delivery_expense()?
+                .as_mut()
+                .expect("original delivery")
+                .refusal
+                .as_mut()
+                .expect("original refusal")
+                .native_released = true;
+        }
+        let retired = self
+            .candidate
+            .lock()
+            .map_err(|_| invalid("refusal candidate custody mutex is poisoned"))?
+            .as_mut()
+            .expect("original candidate")
+            .owner
+            .take();
+        let custody = self
+            .delivery_expense()?
+            .as_mut()
+            .expect("original delivery")
+            .custody
+            .take();
+        drop(retired);
+        drop(custody);
+        Ok(())
+    }
+
+    fn record_terminal_tail(&self, py: Python<'_>, usage: [u64; 3]) -> PyResult<()> {
+        let (entered, recorded, instruction, ordinal, reason, prefix, result, cause) = {
+            let retained = self.delivery_expense()?;
+            let current = retained.as_ref().expect("original delivery");
+            let tail = current.refusal.as_ref().expect("original refusal");
+            (
+                current.record_entered,
+                current.recorded,
+                current.instruction.clone(),
+                current.ordinal,
+                tail.reason.clone(),
+                Arc::clone(&tail.prefix),
+                Arc::clone(&tail.result),
+                tail.cause,
+            )
+        };
+        if !recorded {
+            if entered {
+                return Err(invalid(
+                    "unknown terminal history append cannot repeat its original callback",
+                ));
+            }
+            let arguments = PyDict::new(py);
+            arguments.set_item("instruction_bytes", PyBytes::new(py, &instruction))?;
+            arguments.set_item("operation_ordinal", ordinal)?;
+            arguments.set_item("branch", "real")?;
+            arguments.set_item("resource_usage", (usage[0], usage[1], usage[2]))?;
+            arguments.set_item("refusal", reason.python_value(py)?)?;
+            let callback = self.scientific_owner.bind(py).getattr("record_refusal")?;
+            {
+                let mut retained = self.delivery_expense()?;
+                let current = retained.as_mut().expect("original delivery");
+                current.record_entered = true;
+                current.budget_exceeded = usage
+                    .into_iter()
+                    .zip(current.budget)
+                    .any(|(actual, limit)| actual > limit);
+            }
+            callback.call((), Some(&arguments))?;
+            self.delivery_expense()?
+                .as_mut()
+                .expect("original delivery")
+                .recorded = true;
+        }
+        let history = self
+            .delivery_expense()?
+            .as_ref()
+            .expect("original delivery")
+            .refusal
+            .as_ref()
+            .expect("original refusal")
+            .history
+            .as_ref()
+            .map(Arc::clone);
+        let history = if let Some(history) = history {
+            history
+        } else {
+            let history = self.scientific_owner.bind(py).getattr("history_bytes")?;
+            if !history.is_exact_instance_of::<PyBytes>() {
+                return Err(invalid(
+                    "terminal refusal requires its actual full history bytes",
+                ));
+            }
+            let history: Arc<[u8]> = Arc::from(history.cast::<PyBytes>()?.as_bytes());
+            cold_restore::require_terminal_history(
+                &prefix,
+                &history,
+                &instruction,
+                ordinal,
+                &reason,
+                usage,
+            )?;
+            self.delivery_expense()?
+                .as_mut()
+                .expect("original delivery")
+                .refusal
+                .as_mut()
+                .expect("original refusal")
+                .history = Some(Arc::clone(&history));
+            history
+        };
+        if !self.records()?.refusal_known {
+            if self.records()?.attempt.is_some() {
+                self.resolve_terminal_record(py)?;
+            } else {
+                let payload = self
+                    .delivery_expense()?
+                    .as_ref()
+                    .expect("original delivery")
+                    .payload
+                    .as_ref()
+                    .map(Arc::clone);
+                let payload = if let Some(payload) = payload {
+                    payload
+                } else {
+                    let source = self.source.borrow(py);
+                    let task = self.task_use.borrow(py);
+                    let snapshot = task.state()?.snapshot.canonical.clone();
+                    source.require_creator()?;
+                    let checkpoint = self.candidate_checkpoint()?;
+                    let material = self
+                        .delivery_expense()?
+                        .as_ref()
+                        .expect("original delivery")
+                        .material
+                        .clone();
+                    let reason = reason.canonical_bytes();
+                    let usage: Vec<u8> = usage.into_iter().flat_map(u64::to_le_bytes).collect();
+                    let mut payload = b"xlog.learning-phase.refusal.v1\0".to_vec();
+                    for field in [
+                        cause.as_bytes(),
+                        self.source_checkpoint.as_slice(),
+                        checkpoint.as_ref(),
+                        prefix.as_ref(),
+                        result.as_ref(),
+                        history.as_ref(),
+                        material.as_slice(),
+                        reason.as_slice(),
+                        snapshot.as_slice(),
+                        usage.as_slice(),
+                    ] {
+                        payload.extend_from_slice(&(field.len() as u64).to_le_bytes());
+                        payload.extend_from_slice(field);
+                    }
+                    self.records()?.check_payload_length(payload.len())?;
+                    let payload: Arc<[u8]> = payload.into();
+                    self.delivery_expense()?
+                        .as_mut()
+                        .expect("original delivery")
+                        .payload = Some(Arc::clone(&payload));
+                    payload
+                };
+                self.append_phase_record(py, RecordKind::TerminalRefusal, &payload)?;
+            }
+        }
+        if !self
+            .delivery_expense()?
+            .as_ref()
+            .expect("original delivery")
+            .released
+        {
+            self.preparation_inputs.resource_observer.release(py)?;
+            self.delivery_expense()?
+                .as_mut()
+                .expect("original delivery")
+                .released = true;
+        }
+        Ok(())
+    }
+
+    fn resolve_terminal_record(&self, py: Python<'_>) -> PyResult<()> {
+        let (phase_id, ordinal, digest) = {
+            let records = self.records()?;
+            let attempt = records
+                .attempt
+                .as_ref()
+                .ok_or_else(|| invalid("terminal resolution lost its original signed attempt"))?;
+            if attempt.kind != RecordKind::TerminalRefusal {
+                return Err(invalid(
+                    "terminal refusal cannot resolve another lifecycle record",
+                ));
+            }
+            (records.phase_id, attempt.ordinal, attempt.digest)
+        };
+        let resolver = self
+            .store()?
+            .as_ref()
+            .ok_or_else(|| invalid("terminal refusal lost its original durable store"))?
+            .resolve
+            .clone_ref(py);
+        let readback = resolver.bind(py).call1((
+            &self.destination,
+            PyBytes::new(py, &phase_id),
+            ordinal,
+            PyBytes::new(py, &digest),
+        ))?;
+        if readback.is_none() || readback.is_exact_instance_of::<PyBool>() {
+            return Err(invalid("terminal record readback remains unknown; retain the original refusal without another write"));
+        }
+        let mut records = self.records()?;
+        records.confirm(&readback)?;
+        records.advance()
+    }
+
+    pub(super) fn terminal_refusal_outcome(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        let record = self.records()?.refusal_record.as_ref().map(Arc::clone);
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        let retained = self.delivery_expense()?;
+        let tail = retained
+            .as_ref()
+            .expect("original delivery")
+            .refusal
+            .as_ref()
+            .expect("original refusal");
+        Ok(Some(
+            (
+                tail.cause,
+                PyBytes::new(py, &tail.result),
+                PyBytes::new(py, tail.history.as_ref().expect("known terminal history")),
+                PyBytes::new(py, &record),
+            )
+                .into_pyobject(py)?
+                .unbind(),
+        ))
+    }
+
     /// Known signed Delivery alone authorizes a checkpoint signer. This cold
     /// CPU custody does not repeat model work, change Q or enter another region.
     pub(super) fn install_delivered_checkpoint_custody(&self, py: Python<'_>) -> PyResult<()> {
@@ -139,12 +833,16 @@ impl PySemanticLearningPhaseTransition {
         {
             let mut retained = self.delivery_expense()?;
             if let Some(original) = retained.as_ref() {
+                let owners = original
+                    .owners
+                    .as_ref()
+                    .ok_or_else(|| invalid("late expense selected owners are already retired"))?;
                 if original.material != material
                     || original.instruction != instruction
-                    || original.owners.controller.as_ptr() != selected.controller.as_ptr()
-                    || original.owners.task.as_ptr() != selected.task.as_ptr()
-                    || original.owners.parent.as_ptr() != selected.parent.as_ptr()
-                    || original.owners.model.as_ptr() != selected.model.as_ptr()
+                    || owners.controller.as_ptr() != selected.controller.as_ptr()
+                    || owners.task.as_ptr() != selected.task.as_ptr()
+                    || owners.parent.as_ptr() != selected.parent.as_ptr()
+                    || owners.model.as_ptr() != selected.model.as_ptr()
                 {
                     return Err(invalid(
                         "late expense cannot replace its original selected owners or entry",
@@ -152,12 +850,14 @@ impl PySemanticLearningPhaseTransition {
                 }
             } else {
                 *retained = Some(DeliveryExpense {
-                    owners: EvaluationOwners {
+                    owners: Some(EvaluationOwners {
                         controller: selected.controller.clone_ref(py),
                         task: selected.task.clone_ref(py),
                         parent: selected.parent.clone_ref(py),
                         model: selected.model.clone_ref(py),
-                    },
+                    }),
+                    reader: selected.parent.clone_ref(py),
+                    refusal: None,
                     entries: entries.clone().unbind(),
                     material,
                     instruction,
@@ -310,7 +1010,16 @@ impl PySemanticLearningPhaseTransition {
             let published = parent.borrow(py);
             let session = published.session.borrow(py);
             let task = published.task_use.borrow(py);
-            let callback_kind = if index == 8 {
+            let refusal_retirement = index == 8
+                && self
+                    .delivery_expense()?
+                    .as_ref()
+                    .expect("original delivery")
+                    .refusal
+                    .is_some();
+            let callback_kind = if refusal_retirement {
+                PhaseModelOwner::RetirePrivate
+            } else if index == 8 {
                 PhaseModelOwner::RetireSource
             } else if source_call {
                 PhaseModelOwner::SerializeSource
@@ -318,7 +1027,14 @@ impl PySemanticLearningPhaseTransition {
                 PhaseModelOwner::SerializeCandidate
             };
             let callback = self.model_owner(py, callback_kind)?;
-            let arguments = if index == 8 {
+            let arguments = if refusal_retirement {
+                let (candidate, _) = self.candidate(py)?;
+                Some(
+                    (candidate.borrow(py).model.clone_ref(py),)
+                        .into_pyobject(py)?
+                        .unbind(),
+                )
+            } else if index == 8 {
                 let source = self.model_owner(py, PhaseModelOwner::Source)?;
                 let (candidate, _) = self.candidate(py)?;
                 Some((source, candidate).into_pyobject(py)?.unbind())
@@ -329,14 +1045,20 @@ impl PySemanticLearningPhaseTransition {
                 let model = candidate.borrow(py).model.clone_ref(py);
                 Some((model,).into_pyobject(py)?.unbind())
             };
-            let _reads = ImportReadScope::checkpoint(&session, &task, &published, py)?;
-            let original = region.borrow(py);
-            let _scope = ColdCallbackScope::enter(py, &session, &original, region.clone_ref(py))?;
+            let _reads = if refusal_retirement {
+                None
+            } else {
+                Some(ImportReadScope::checkpoint(
+                    &session, &task, &published, py,
+                )?)
+            };
             self.delivery_expense()?
                 .as_mut()
                 .expect("original delivery")
                 .calls[index]
                 .entered = true;
+            let original = region.borrow(py);
+            let _scope = ColdCallbackScope::enter(py, &session, &original, region.clone_ref(py))?;
             let returned = match arguments {
                 Some(arguments) => callback.bind(py).call1(arguments.bind(py)),
                 None => callback.bind(py).call0(),
@@ -397,7 +1119,7 @@ impl PySemanticLearningPhaseTransition {
         Ok(self
             .delivery_expense()?
             .as_ref()
-            .is_some_and(|entry| entry.calls[8].entered))
+            .is_some_and(|entry| entry.refusal.is_none() && entry.calls[8].entered))
     }
 
     fn retire_delivery_source(&self, py: Python<'_>) -> PyResult<()> {
@@ -576,24 +1298,40 @@ impl PySemanticLearningPhaseTransition {
 
     pub(super) fn finish_delivery_expense(&self, py: Python<'_>) -> PyResult<()> {
         self.require_delivery_entry(py)?;
-        if !matches!(
-            *self.status_lock()?,
-            Completion::Unknown {
-                readback_observed: true,
-                ..
-            }
-        ) {
+        let refusing = self.terminal_refusal_retained()?;
+        if !refusing
+            && !matches!(
+                *self.status_lock()?,
+                Completion::Unknown {
+                    readback_observed: true,
+                    ..
+                }
+            )
+        {
             return Err(invalid(
                 "delivery requires exact durable readback of its original accepted checkpoint",
             ));
         }
-        self.retire_delivery_source(py)?;
+        if !refusing {
+            self.retire_delivery_source(py)?;
+        } else if !self
+            .delivery_expense()?
+            .as_ref()
+            .expect("original delivery")
+            .refusal
+            .as_ref()
+            .is_some_and(|tail| {
+                tail.native_released && tail.source_verified.iter().all(|verified| *verified)
+            })
+        {
+            return Err(invalid("terminal accounting precedes known private release and unchanged source verification"));
+        }
         let (work, reader, closed, verified, cached_report) = {
             let retained = self.delivery_expense()?;
             let current = retained.as_ref().expect("original delivery");
             (
                 current.work.clone().expect("original delivery work"),
-                current.owners.parent.clone_ref(py),
+                current.reader.clone_ref(py),
                 current.work_closed,
                 current.candidate_verified,
                 current.report,
@@ -606,7 +1344,7 @@ impl PySemanticLearningPhaseTransition {
             // tail. The source was verified before its real retirement; only the
             // actual final selected private checkpoint can still be read.
             let parent = reader.borrow(py);
-            if !verified {
+            if !verified && !refusing {
                 let (_, checkpoint) = self.candidate(py)?;
                 let manifest = SemanticCheckpointManifest::decode(&checkpoint)?;
                 let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
@@ -680,6 +1418,9 @@ impl PySemanticLearningPhaseTransition {
             .model_work
             .checked_add(report.native_work)
             .ok_or_else(|| invalid("complete delivery expenditure overflowed"))?;
+        if refusing {
+            return self.record_terminal_tail(py, [expenditure, peak, report.model_calls]);
+        }
         let (recorded, entered, instruction, ordinal, budget) = {
             let retained = self.delivery_expense()?;
             let current = retained.as_ref().expect("original delivery");

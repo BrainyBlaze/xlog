@@ -231,10 +231,8 @@ enum Completion {
         resolve: Py<PyAny>,
         readback_observed: bool,
     },
-    RetirementUnknown,
-    Retired,
+    Refused,
     Committed,
-    Abandoned,
 }
 
 struct PreparedCandidate {
@@ -250,6 +248,7 @@ struct ScientificAcceptance {
     history: Arc<[u8]>,
     result: Option<Py<PyAny>>,
     error: Option<PyErr>,
+    refusal: Option<Arc<[u8]>>,
 }
 
 /// Immutable inputs retained before the first external issuer/store callback.
@@ -262,6 +261,7 @@ struct PreparationInputs {
     prior_snapshot: AuthoritySnapshot,
     grant: ColdValue,
     frozen_program: Vec<u8>,
+    final_phase: SemanticLearningPhase,
     cold_model_work_capacity: usize,
     resolve_checkpoint: Option<Py<PyAny>>,
     max_checkpoint_bytes: Option<ColdValue>,
@@ -400,6 +400,7 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     scientific_owner: Py<PyAny>,
     accept_learning_phase: Py<PyAny>,
     scientific_acceptance: Mutex<Option<ScientificAcceptance>>,
+    scientific_refusal_type: Py<pyo3::types::PyType>,
     recipe: Py<PySemanticLearningPhaseRecipe>,
     model_owners: Mutex<Option<PhaseModelOwners>>,
     refresh_snapshot: Py<PyAny>,
@@ -1106,6 +1107,16 @@ impl PySemanticLearningPhaseTransition {
     /// are immutable; neither the factory nor scientific acceptance is repeated.
     fn finish_preparation(&self, py: Python<'_>) -> PyResult<()> {
         self.finish_scientific_acceptance(py)?;
+        #[cfg(feature = "semantic-policy")]
+        {
+            let refused = self
+                .acceptance()?
+                .as_ref()
+                .is_some_and(|call| call.refusal.is_some());
+            if refused {
+                return self.finish_terminal_refusal(py, "scientific-comparison-refused");
+            }
+        }
         let outcome = self.preparation_outcome()?;
         // An attempted signed write belongs exclusively to its resolver, even
         // when the candidate and the unsigned outcome are already known.
@@ -1152,6 +1163,7 @@ impl PySemanticLearningPhaseTransition {
             &selected.native,
             &admission,
             recipe,
+            self.preparation_inputs.final_phase,
         )?;
         Ok(())
     }
@@ -1259,15 +1271,43 @@ impl PySemanticLearningPhaseTransition {
                 history: Arc::clone(&history),
                 result: None,
                 error: None,
+                refusal: None,
             });
             let result = self.accept_learning_phase.bind(py).call1(arguments);
-            let mut retained = self.acceptance()?;
-            let retained = retained.as_mut().expect("retained before scientific entry");
             match result {
-                Ok(result) => retained.result = Some(result.unbind()),
+                Ok(result) => {
+                    self.acceptance()?
+                        .as_mut()
+                        .expect("original comparison")
+                        .result = Some(result.unbind())
+                }
                 Err(error) => {
-                    retained.error = Some(error.clone_ref(py));
-                    return Err(error);
+                    self.acceptance()?
+                        .as_mut()
+                        .expect("original comparison")
+                        .error = Some(error.clone_ref(py));
+                    // The exact canonical class is captured before admission.
+                    // Read its original bytes once, never recognize arbitrary
+                    // exceptions by inheritance, text or attribute names alone.
+                    if !error.get_type(py).is(self.scientific_refusal_type.bind(py)) {
+                        return Err(error);
+                    }
+                    let original = error.value(py).getattr("result_bytes")?;
+                    if !original.is_exact_instance_of::<PyBytes>() {
+                        return Err(invalid(
+                            "scientific refusal requires its original exact result bytes",
+                        ));
+                    }
+                    let bytes = original.cast::<PyBytes>()?.as_bytes();
+                    cold_restore::scientific_refusal_reason(
+                        &self.preparation_inputs.frozen_program,
+                        &history,
+                        bytes,
+                    )?;
+                    self.acceptance()?
+                        .as_mut()
+                        .expect("original comparison")
+                        .refusal = Some(Arc::from(bytes));
                 }
             }
         }
@@ -1276,6 +1316,9 @@ impl PySemanticLearningPhaseTransition {
             let retained = retained
                 .as_ref()
                 .expect("original scientific call retained");
+            if retained.refusal.is_some() {
+                return Ok(());
+            }
             if let Some(error) = &retained.error {
                 return Err(error.clone_ref(py));
             }
@@ -1847,149 +1890,29 @@ impl PySemanticLearningPhaseTransition {
         Ok(candidate_owner.clone_ref(py))
     }
 
-    fn retire_candidate(&self, py: Python<'_>) -> PyResult<()> {
+    fn abandon(&self, py: Python<'_>) -> PyResult<()> {
+        #[cfg(feature = "semantic-policy")]
         {
-            let completion = self.status_lock()?;
-            match &*completion {
-                Completion::Retired => return Ok(()),
-                Completion::Prepared
-                | Completion::Unknown {
+            let cause = if matches!(
+                *self.status_lock()?,
+                Completion::Unknown {
                     readback_observed: false,
                     ..
-                } => {}
-                _ => {
-                    return Err(invalid(
-                        "private candidate retirement is single-attempt; unknown consumer completion retains its original owners",
-                    ));
                 }
-            }
+            ) {
+                "checkpoint-publication-absent"
+            } else {
+                "private-candidate-abandoned"
+            };
+            self.finish_terminal_refusal(py, cause)
         }
-        let (candidate_owner, _) = self.candidate(py)?;
+        #[cfg(not(feature = "semantic-policy"))]
         {
-            let candidate = candidate_owner.borrow(py);
-            let successor = candidate.session.borrow(py);
-            let issued = candidate.task_use.borrow(py);
-            let acquired = candidate.parent.borrow(py);
-            let owner = successor.owner()?;
-            issued.require_current(&owner)?;
-            acquired.require_task(py, &issued)?;
-            if !matches!(issued.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
-                return Err(invalid(
-                    "private retirement lost its original candidate task",
-                ));
-            }
-            owner
-                .published_identity(&*acquired.lease()?)
-                .map_err(xlog_err)?;
+            let _ = py;
+            Err(invalid(
+                "terminal private retirement requires semantic-policy",
+            ))
         }
-        // The original model owner must return its aliases and join the actual
-        // consumers. No native/task/lease mutex is held across its callback.
-        // Mark the attempt before external code: neither a callback exception
-        // nor a false durable-absence response authorizes a second retirement.
-        *self.status_lock()? = Completion::RetirementUnknown;
-        let model = candidate_owner.borrow(py).model.clone_ref(py);
-        let callback = self.model_owner(py, PhaseModelOwner::RetirePrivate)?;
-        let result = callback.bind(py).call1((model,))?;
-        if !result.is_none() {
-            return Err(invalid(
-                "original model retirement must return None after known consumer release",
-            ));
-        }
-        {
-            let candidate = candidate_owner.borrow(py);
-            let successor = candidate.session.borrow(py);
-            let acquired = candidate.parent.borrow(py);
-            successor
-                .owner()?
-                .require_retired_publication(&*acquired.lease()?)
-                .map_err(xlog_err)?;
-        }
-        // Keep known retirement distinct from an unknown callback outcome. A
-        // later authority failure may finish source continuation, but must not
-        // send the retirement callback or durable resolver again.
-        *self.status_lock()? = Completion::Retired;
-        Ok(())
-    }
-
-    fn abandon(&self, py: Python<'_>) -> PyResult<()> {
-        self.verify(py, false)?;
-        self.retire_candidate(py)?;
-        self.verify(py, false)?;
-        let source = self.source.borrow(py);
-        let task = self.task_use.borrow(py);
-        let resumed = match &task.state()?.phase {
-            TaskUsePhase::ArenaPreparing(original) => *original.clone(),
-            _ => return Err(invalid("source lost its retained learning preparation")),
-        };
-        let candidate_owner = self
-            .candidate
-            .lock()
-            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?
-            .as_ref()
-            .ok_or_else(|| invalid("private retirement lost its complete outcome"))?
-            .owner
-            .as_ref()
-            .map(|owner| owner.clone_ref(py));
-        if let Some(candidate_owner) = candidate_owner {
-            let candidate = candidate_owner.borrow(py);
-            let successor = candidate.session.borrow(py);
-            let issued = candidate.task_use.borrow(py);
-            let mut new = issued.state()?;
-            match new.phase {
-                TaskUsePhase::ArenaPreparing(_) => {
-                    successor.owner()?.abort();
-                    new.phase = TaskUsePhase::Refused;
-                }
-                // A later cold-finalization failure may retain an already
-                // invalidated owner. Its known retirement is never re-executed.
-                TaskUsePhase::Refused => {}
-                _ => {
-                    return Err(invalid(
-                        "private retirement lost its original candidate task",
-                    ));
-                }
-            }
-            successor.learning_preparing.store(false, Ordering::Release);
-        }
-        // Preserve the complete cold outcome, but relinquish actual native/model
-        // owners before resuming source use. Python finalizers run without locks.
-        let retired = self
-            .candidate
-            .lock()
-            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?
-            .as_mut()
-            .ok_or_else(|| invalid("private retirement lost its complete outcome"))?
-            .owner
-            .take();
-        let construction = self.private_restore()?.take();
-        drop(retired);
-        drop(construction);
-        // Released Python owners can run finalizers against the source. Verify
-        // its original live checkpoint again before unwrapping its task phase.
-        self.verify(py, false)?;
-        self.preparation_inputs.resource_observer.release(py)?;
-        let mut retention = source
-            .learning_transition
-            .lock()
-            .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?;
-        let mut completion = self.status_lock()?;
-        let mut old = task.state()?;
-        if !matches!(old.phase, TaskUsePhase::ArenaPreparing(_))
-            || !matches!(*completion, Completion::Retired)
-        {
-            return Err(invalid(
-                "source continuation lost its known candidate retirement",
-            ));
-        }
-        old.phase = resumed;
-        *completion = Completion::Abandoned;
-        source.learning_preparing.store(false, Ordering::Release);
-        let retained = retention.take();
-        drop(old);
-        drop(completion);
-        drop(retention);
-        drop(retained);
-        Ok(())
     }
 }
 
@@ -2022,14 +1945,18 @@ impl PySemanticLearningPhaseTransition {
 
     #[getter]
     fn status(&self) -> PyResult<&'static str> {
+        #[cfg(feature = "semantic-policy")]
+        if self.terminal_refusal_retained()? && !matches!(*self.status_lock()?, Completion::Refused)
+        {
+            return Ok("refusal-pending");
+        }
         Ok(match &*self.status_lock()? {
             Completion::Preparing => "preparing",
             Completion::PreparationUnknown => "unknown",
             Completion::Prepared => "prepared",
             Completion::Unknown { .. } => "unknown",
-            Completion::RetirementUnknown | Completion::Retired => "unknown",
+            Completion::Refused => "refused",
             Completion::Committed => "committed",
-            Completion::Abandoned => "abandoned",
         })
     }
 
@@ -2037,6 +1964,19 @@ impl PySemanticLearningPhaseTransition {
     fn checkpoint_sha256(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
         let checkpoint = self.candidate_checkpoint()?;
         Ok(PyBytes::new(py, &Sha256::digest(&checkpoint)).unbind())
+    }
+
+    /// Original result, full terminal history and signed terminal record; never
+    /// an accepted checkpoint or authorization to replay the failed attempt.
+    #[getter]
+    fn refusal_outcome(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        #[cfg(feature = "semantic-policy")]
+        return self.terminal_refusal_outcome(py);
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = py;
+            Ok(None)
+        }
     }
 
     /// The trusted durable owner implements commit(destination, bytes, sha256)
@@ -2056,6 +1996,12 @@ impl PySemanticLearningPhaseTransition {
         if !matches!(*self.status_lock()?, Completion::Prepared) {
             return Err(invalid(
                 "phase checkpoint commit is single-attempt; resolve unknown completion instead",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if self.terminal_refusal_retained()? {
+            return Err(invalid(
+                "a retained terminal refusal cannot publish or activate its private checkpoint",
             ));
         }
         self.verify(py, true)?;
@@ -2093,20 +2039,15 @@ impl PySemanticLearningPhaseTransition {
     ) -> PyResult<Option<Py<PySemanticTransitionRestoredCheckpoint>>> {
         let _operation = PhaseOperation::begin(&self.operating)?;
         self.source.borrow(py).require_creator()?;
+        #[cfg(feature = "semantic-policy")]
+        if self.terminal_refusal_retained()? {
+            self.finish_terminal_refusal(py, "scientific-comparison-refused")?;
+            return Ok(None);
+        }
         let preparation_unknown = matches!(*self.status_lock()?, Completion::PreparationUnknown);
         if preparation_unknown {
             self.resolve_preparation_record(py)?;
             return Ok(None);
-        }
-        let retirement_known = matches!(*self.status_lock()?, Completion::Retired);
-        if retirement_known {
-            self.abandon(py)?;
-            return Ok(None);
-        }
-        if matches!(*self.status_lock()?, Completion::RetirementUnknown) {
-            return Err(invalid(
-                "unknown private consumer retirement must retain the same owners; checkpoint absence cannot resolve or repeat it",
-            ));
         }
         let (resolve, readback_observed) = match &*self.status_lock()? {
             Completion::Unknown {
@@ -2148,6 +2089,14 @@ impl PySemanticLearningPhaseTransition {
         let operation = PhaseOperation::begin(&pending.operating)?;
         let source = pending.source.borrow(py);
         source.require_creator()?;
+        #[cfg(feature = "semantic-policy")]
+        if pending.terminal_refusal_retained()? {
+            pending.finish_terminal_refusal(py, "scientific-comparison-refused")?;
+            drop(source);
+            drop(operation);
+            drop(pending);
+            return Ok(slf);
+        }
         if !matches!(*pending.status_lock()?, Completion::PreparationUnknown) {
             return Err(invalid(
                 "preparation continuation requires the original unknown pending owner",
@@ -2173,10 +2122,12 @@ impl PySemanticLearningPhaseTransition {
                 pending.candidate(py)?;
                 pending.records()?.require_preparation_admission()?;
                 if let Some(acceptance) = pending.acceptance()?.as_ref() {
-                    if let Some(error) = &acceptance.error {
-                        return Err(error.clone_ref(py));
+                    if acceptance.refusal.is_none() {
+                        if let Some(error) = &acceptance.error {
+                            return Err(error.clone_ref(py));
+                        }
                     }
-                    if acceptance.result.is_none() {
+                    if acceptance.result.is_none() && acceptance.refusal.is_none() {
                         return Err(invalid("unknown scientific comparison cannot be repeated by preparation continuation"));
                     }
                 }
@@ -2284,7 +2235,7 @@ impl PySemanticTransitionController {
         Ok(pending)
     }
 
-    #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner,
+    #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner, scientific_refusal_type,
         source_model, execute_phase_instruction, resource_observer, feedback_interventions,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
         snapshot_restored_model, retire_restored_model, retire_source_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, cold_model_work_capacity, resolve_checkpoint=None,
@@ -2303,6 +2254,7 @@ impl PySemanticTransitionController {
         consumer_streams: &Bound<'_, PyAny>,
         snapshot: &Bound<'_, PyAny>,
         scientific_owner: Py<PyAny>,
+        scientific_refusal_type: Py<pyo3::types::PyType>,
         source_model: Py<PyAny>,
         execute_phase_instruction: &Bound<'_, PyAny>,
         resource_observer: &Bound<'_, PyAny>,
@@ -2435,6 +2387,21 @@ impl PySemanticTransitionController {
             ],
             record_limits,
         )?;
+        if !scientific_refusal_type
+            .bind(py)
+            .is_subclass_of::<pyo3::exceptions::PyException>()?
+        {
+            return Err(invalid(
+                "scientific refusal requires its original exception class",
+            ));
+        }
+        let final_phase = phase(
+            cold_restore::json(frozen_program_bytes.cast::<PyBytes>()?.as_bytes())?["final_phase"]
+                .as_str()
+                .ok_or_else(|| {
+                    invalid("frozen learning program requires its original declared final phase")
+                })?,
+        )?;
         let accept_learning_phase = scientific_owner.bind(py).getattr("accept_learning_phase")?;
         if !accept_learning_phase.is_callable() {
             return Err(invalid(
@@ -2449,6 +2416,7 @@ impl PySemanticTransitionController {
             prior_snapshot,
             grant: grant_value,
             frozen_program: frozen_program_bytes.cast::<PyBytes>()?.as_bytes().to_vec(),
+            final_phase,
             cold_model_work_capacity,
             resolve_checkpoint: resolve_checkpoint.map(|callback| callback.clone().unbind()),
             max_checkpoint_bytes: max_checkpoint_bytes
@@ -2471,6 +2439,7 @@ impl PySemanticTransitionController {
                 scientific_owner: scientific_owner.clone_ref(py),
                 accept_learning_phase: accept_learning_phase.unbind(),
                 scientific_acceptance: Mutex::new(None),
+                scientific_refusal_type,
                 recipe: recipe.clone_ref(py),
                 model_owners: Mutex::new(Some(PhaseModelOwners {
                     source: source_model,
