@@ -2114,15 +2114,8 @@ impl PySemanticTransitionSession {
             }
             return Err(error);
         }
-        Py::new(
-            py,
-            PySemanticTransitionRestoredCheckpoint {
-                session,
-                controller,
-                task_use,
-                parent,
-                model,
-            },
+        PySemanticTransitionRestoredCheckpoint::issue(
+            py, session, controller, task_use, parent, model,
         )
     }
 }
@@ -8071,8 +8064,9 @@ pub(crate) struct PySemanticPublishedParent {
     continuation_producers: Mutex<Vec<Py<PyAny>>>,
 }
 
-/// Complete result of one checkpoint restoration. Its fields are the exact
-/// owners passed to the single trusted model factory and cannot be replaced.
+/// Complete native-issued checkpoint owners. A restore retains the exact model
+/// factory owners; a learned handoff retains its verified selected publication
+/// and model. Fields cannot be replaced or minted by a Python caller.
 #[pyclass(
     name = "SemanticTransitionRestoredCheckpoint",
     module = "pyxlog._native",
@@ -8084,6 +8078,51 @@ pub(crate) struct PySemanticTransitionRestoredCheckpoint {
     task_use: Py<PySemanticTransitionTaskUse>,
     parent: Py<PySemanticPublishedParent>,
     model: Py<PyAny>,
+}
+
+impl PySemanticTransitionRestoredCheckpoint {
+    fn issue(
+        py: Python<'_>,
+        session: Py<PySemanticTransitionSession>,
+        controller: Py<PySemanticTransitionController>,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        parent: Py<PySemanticPublishedParent>,
+        model: Py<PyAny>,
+    ) -> PyResult<Py<Self>> {
+        {
+            let original = session.borrow(py);
+            original.require_creator()?;
+            let controlled = controller.borrow(py);
+            let task = task_use.borrow(py);
+            let acquired = parent.borrow(py);
+            if controlled.session.as_ptr() != session.as_ptr()
+                || task.session.as_ptr() != session.as_ptr()
+                || acquired.session.as_ptr() != session.as_ptr()
+                || !Arc::ptr_eq(&controlled.identity, &task.controller)
+                || acquired.task_use.as_ptr() != task_use.as_ptr()
+            {
+                return Err(invalid(
+                    "complete checkpoint owners changed their original Session, controller or task",
+                ));
+            }
+            let owner = original.owner()?;
+            task.require_current(&owner)?;
+            acquired.require_task(py, &task)?;
+            owner
+                .published_identity(&*acquired.lease()?)
+                .map_err(xlog_err)?;
+        }
+        Py::new(
+            py,
+            Self {
+                session,
+                controller,
+                task_use,
+                parent,
+                model,
+            },
+        )
+    }
 }
 
 #[pymethods]
@@ -15574,15 +15613,13 @@ impl PySemanticTransitionController {
                 }
                 state.snapshot = latest;
             }
-            let admitted = Py::new(
+            let admitted = PySemanticTransitionRestoredCheckpoint::issue(
                 py,
-                PySemanticTransitionRestoredCheckpoint {
-                    session: successor,
-                    controller,
-                    task_use: candidate_task.clone_ref(py),
-                    parent: candidate_parent,
-                    model,
-                },
+                successor,
+                controller,
+                candidate_task.clone_ref(py),
+                candidate_parent,
+                model,
             )?;
             {
                 let source = self.session.borrow(py);

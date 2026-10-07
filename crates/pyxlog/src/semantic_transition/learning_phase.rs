@@ -502,7 +502,7 @@ fn verify_phase_native(
     Ok(())
 }
 
-fn verify_original_source(
+fn verify_phase_checkpoint(
     py: Python<'_>,
     task: &PySemanticTransitionTaskUse,
     parent: &PySemanticPublishedParent,
@@ -517,7 +517,7 @@ fn verify_original_source(
     let binding = TaskCheckpointBinding::from_owner(&owner)?;
     if task.checkpoint.encode(saved_snapshot, &phase, &binding)? != manifest.task {
         return Err(invalid(
-            "phase source checkpoint differs from its original live task capsule",
+            "phase checkpoint differs from its original live task capsule",
         ));
     }
     let config = SemanticCheckpointSessionConfig {
@@ -527,7 +527,7 @@ fn verify_original_source(
     };
     if config.encode()? != manifest.session {
         return Err(invalid(
-            "phase source checkpoint differs from its original Session configuration",
+            "phase checkpoint differs from its original Session configuration",
         ));
     }
     let (initial_prefill, _) = owner
@@ -535,7 +535,7 @@ fn verify_original_source(
         .map_err(xlog_err)?;
     if initial_prefill != manifest.initial_prefill {
         return Err(invalid(
-            "phase source checkpoint differs from its original initial prefill",
+            "phase checkpoint differs from its original initial prefill",
         ));
     }
     Ok(())
@@ -866,7 +866,7 @@ impl PySemanticLearningPhaseTransition {
                     .expect("retained original source group")
                     .cold_model_work = Some(work);
             }
-            verify_original_source(py, &task, &acquired, &manifest, &saved_snapshot)?;
+            verify_phase_checkpoint(py, &task, &acquired, &manifest, &saved_snapshot)?;
             {
                 let _reads = ImportReadScope::checkpoint(&source, &task, &acquired, py)?;
                 #[cfg(feature = "semantic-policy")]
@@ -895,7 +895,7 @@ impl PySemanticLearningPhaseTransition {
                     .model_result = Some(result.clone().unbind());
                 require_model_bytes(&result, &manifest.model)?;
             }
-            verify_original_source(py, &task, &acquired, &manifest, &saved_snapshot)?;
+            verify_phase_checkpoint(py, &task, &acquired, &manifest, &saved_snapshot)?;
             if task.state()?.snapshot.canonical != prior_snapshot.canonical {
                 return Err(invalid(
                     "phase source authority changed during model verification",
@@ -1011,6 +1011,7 @@ impl PySemanticLearningPhaseTransition {
             self.execute_private_group(py, "real")?;
             self.execute_private_evaluations(py, "real")?;
             self.execute_private_checkpoint(py, "real")?;
+            self.retain_final_checkpoint_candidate(py)?;
             return self.finish_preparation(py);
         }
         #[cfg(not(feature = "semantic-policy"))]
@@ -2086,6 +2087,7 @@ impl PySemanticLearningPhaseTransition {
                     .and_then(|()| pending.execute_private_group(py, "real"))
                     .and_then(|()| pending.execute_private_evaluations(py, "real"))
                     .and_then(|()| pending.execute_private_checkpoint(py, "real"))
+                    .and_then(|()| pending.retain_final_checkpoint_candidate(py))
                     .and_then(|()| pending.finish_preparation(py))
             }
             #[cfg(not(feature = "semantic-policy"))]

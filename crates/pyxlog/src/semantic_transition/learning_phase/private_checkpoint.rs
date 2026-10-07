@@ -49,6 +49,144 @@ impl PySemanticLearningPhaseTransition {
         self.save_private_checkpoint(py, branch, owners, ordinal)
     }
 
+    pub(super) fn retain_final_checkpoint_candidate(&self, py: Python<'_>) -> PyResult<()> {
+        self.records()?.require_preparation_admission()?;
+        self.preparation_inputs
+            .require_program(py, &self.scientific_owner)?;
+        let (selected, _) = self.private_checkpoint_input(py, "real")?;
+        let (checkpoint, ordinal) = {
+            let retained = self.private_checkpoints()?;
+            let current = retained
+                .last()
+                .filter(|entry| entry.branch == "real")
+                .ok_or_else(|| invalid("final handoff lost its original full real checkpoint"))?;
+            Self::require_private_checkpoint_entry(py, current)?;
+            if !current.recorded
+                || !current.released
+                || current.budget_exceeded
+                || current.error.is_some()
+                || current.owners.controller.as_ptr() != selected.controller.as_ptr()
+                || current.owners.task.as_ptr() != selected.task.as_ptr()
+                || current.owners.parent.as_ptr() != selected.parent.as_ptr()
+                || current.owners.model.as_ptr() != selected.model.as_ptr()
+            {
+                return Err(invalid("final handoff precedes known checkpoint accounting or changed its selected owners"));
+            }
+            (
+                Arc::<[u8]>::from(
+                    current
+                        .saved
+                        .as_ref()
+                        .ok_or_else(|| invalid("final handoff lost its saved full checkpoint"))?
+                        .bind(py)
+                        .as_bytes(),
+                ),
+                current.ordinal,
+            )
+        };
+        let next = self.scientific_owner.bind(py).getattr("next_operation")?;
+        if !next.is_exact_instance_of::<PyTuple>() {
+            return Err(invalid(
+                "final handoff requires the complete original prefix before delivery",
+            ));
+        }
+        let (material, _) = Self::singleton_lifecycle_material(next.cast::<PyTuple>()?)?;
+        let material = ColdValue::from_canonical_bytes(&material)?;
+        let fields = material.fields(6)?;
+        if fields[0].text()? != "delivery"
+            || fields[1].text()? != "real"
+            || fields[2].unsigned()?
+                != ordinal
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("final handoff position overflowed"))?
+            || fields[3].unsigned()? != 0
+            || fields[5] != ColdValue::None
+        {
+            return Err(invalid(
+                "final handoff changed its sole contiguous original delivery tail",
+            ));
+        }
+        let session = selected.parent.borrow(py).session.clone_ref(py);
+        {
+            let construction = self.private_restore()?;
+            let construction = construction.as_ref().ok_or_else(|| {
+                invalid("final handoff lost its original private Session construction")
+            })?;
+            if construction.session.as_ptr() != session.as_ptr()
+                || !session
+                    .borrow(py)
+                    .learning_preparing
+                    .load(Ordering::Acquire)
+                || !matches!(*self.status_lock()?, Completion::Preparing)
+            {
+                return Err(invalid(
+                    "final handoff changed its actual private preparation owner",
+                ));
+            }
+        }
+        let manifest = SemanticCheckpointManifest::decode(&checkpoint)?;
+        let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
+        verify_phase_checkpoint(
+            py,
+            &selected.task.borrow(py),
+            &selected.parent.borrow(py),
+            &manifest,
+            &saved_snapshot,
+        )?;
+        {
+            let retained = self
+                .candidate
+                .lock()
+                .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?;
+            if let Some(original) = retained.as_ref() {
+                let owner = original
+                    .owner
+                    .as_ref()
+                    .ok_or_else(|| {
+                        invalid("final handoff cannot replace retired candidate owners")
+                    })?
+                    .borrow(py);
+                if original.checkpoint.as_ref() != checkpoint.as_ref()
+                    || owner.session.as_ptr() != session.as_ptr()
+                    || owner.controller.as_ptr() != selected.controller.as_ptr()
+                    || owner.task_use.as_ptr() != selected.task.as_ptr()
+                    || owner.parent.as_ptr() != selected.parent.as_ptr()
+                    || owner.model.as_ptr() != selected.model.as_ptr()
+                {
+                    return Err(invalid(
+                        "final handoff cannot replace its original complete candidate",
+                    ));
+                }
+                return Ok(());
+            }
+        }
+        // This issues the actual selected owners, not another restoration or
+        // a wrapper around the initial, now superseded publication.
+        let owner = PySemanticTransitionRestoredCheckpoint::issue(
+            py,
+            session,
+            selected.controller,
+            selected.task,
+            selected.parent,
+            selected.model,
+        )?;
+        let mut retained = self
+            .candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?;
+        if retained.is_some() {
+            return Err(invalid(
+                "final handoff cannot replace an already retained candidate",
+            ));
+        }
+        *retained = Some(PreparedCandidate {
+            owner: Some(owner),
+            checkpoint,
+            preparation_outcome: None,
+        });
+        Ok(())
+    }
+
     pub(super) fn control_retirement_input(
         &self,
         py: Python<'_>,
