@@ -48,13 +48,34 @@ impl PySemanticLearningPhaseTransition {
         Ok(self.control_retirement()?.is_some())
     }
 
+    pub(super) fn real_trajectory_ordinal(&self) -> PyResult<u64> {
+        let retained = self.control_retirement()?;
+        let current = retained
+            .as_ref()
+            .ok_or_else(|| invalid("real trajectory precedes original control retirement"))?;
+        if !current.recorded
+            || !current.released
+            || !current.session_released
+            || !current.model_owners_dropped
+            || !current.owners_dropped
+            || current.budget_exceeded
+            || current.error.is_some()
+        {
+            return Err(invalid("real trajectory requires known complete original control retirement and accounting"));
+        }
+        current
+            .ordinal
+            .checked_add(1)
+            .ok_or_else(|| invalid("real trajectory position overflowed"))
+    }
+
     pub(super) fn execute_control_branch(
         &self,
         py: Python<'_>,
         pending: &Py<Self>,
     ) -> PyResult<()> {
         if !self.control_retirement_retained()? {
-            self.prepare_control_trajectory(py, pending)?;
+            self.prepare_private_trajectory(py, pending, "control")?;
             self.execute_control_group(py)?;
             self.execute_control_evaluations(py)?;
             self.execute_control_checkpoint(py)?;

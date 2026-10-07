@@ -1,9 +1,10 @@
-//! The first private trajectory consumes the original decoder's source restore.
+//! Original private trajectories share the canonical decoded source restore.
 
 use super::*;
 use xlog_cuda::{SemanticColdModelWork, SemanticColdModelWorkResult, SemanticColdNativeWork};
 
 pub(super) struct PrivateTrajectoryStart {
+    branch: &'static str,
     entries: Py<PyTuple>,
     material: Vec<u8>,
     instruction: Vec<u8>,
@@ -54,7 +55,28 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
-    fn capture_control_trajectory(&self, py: Python<'_>) -> PyResult<()> {
+    fn capture_private_trajectory(&self, py: Python<'_>, branch: &'static str) -> PyResult<()> {
+        let expected = match branch {
+            "control" => u64::try_from(self.source_evaluation_count()?)
+                .ok()
+                .and_then(|count| count.checked_add(1))
+                .ok_or_else(|| invalid("private trajectory position overflowed"))?,
+            "real" => self.real_trajectory_ordinal()?,
+            _ => {
+                return Err(invalid(
+                    "private source restore requires its original real or control arm",
+                ))
+            }
+        };
+        if self
+            .trajectory_start()?
+            .as_ref()
+            .is_some_and(|entry| entry.branch != branch || entry.ordinal != expected)
+        {
+            return Err(invalid(
+                "private trajectory cannot replace its original branch or position",
+            ));
+        }
         if self.trajectory_start()?.is_none() {
             self.preparation_inputs
                 .require_program(py, &self.scientific_owner)?;
@@ -69,18 +91,14 @@ impl PySemanticLearningPhaseTransition {
             let fields = ColdValue::from_canonical_bytes(&material)?;
             let fields = fields.fields(6)?;
             let ordinal = fields[2].unsigned()?;
-            let expected = u64::try_from(self.source_evaluation_count()?)
-                .ok()
-                .and_then(|count| count.checked_add(1))
-                .ok_or_else(|| invalid("private trajectory position overflowed"))?;
             if fields[0].text()? != "trajectory-start"
-                || fields[1].text()? != "control"
+                || fields[1].text()? != branch
                 || ordinal != expected
                 || fields[3].unsigned()? != 0
                 || fields[5] != ColdValue::None
             {
                 return Err(invalid(
-                    "first private trajectory differs from the original control source restore",
+                    "private trajectory differs from its original branch source restore",
                 ));
             }
             let budget = fields[4].fields(3)?;
@@ -95,6 +113,7 @@ impl PySemanticLearningPhaseTransition {
                 ));
             }
             *self.trajectory_start()? = Some(PrivateTrajectoryStart {
+                branch,
                 entries: entries.clone().unbind(),
                 material,
                 instruction,
@@ -317,17 +336,28 @@ impl PySemanticLearningPhaseTransition {
                 .bind(py)
                 .as_any(),
         )?;
-        // This entry is the frozen control trajectory: preserve the original
-        // material and select the real tensor zeroing path, never detach it.
-        Ok((materials[1].clone(), false).into_pyobject(py)?.unbind())
+        let retained = self.trajectory_start()?;
+        let branch = retained
+            .as_ref()
+            .expect("original private trajectory")
+            .branch;
+        // Preserve the actual frozen intervention: real uses the original
+        // feedback tensor; control executes the existing positive-zero path.
+        let (material, enabled) = match branch {
+            "real" => (materials[0].clone(), true),
+            "control" => (materials[1].clone(), false),
+            _ => return Err(invalid("private feedback lost its original branch")),
+        };
+        Ok((material, enabled).into_pyobject(py)?.unbind())
     }
 
-    pub(super) fn prepare_control_trajectory(
+    pub(super) fn prepare_private_trajectory(
         &self,
         py: Python<'_>,
         pending: &Py<Self>,
+        branch: &'static str,
     ) -> PyResult<()> {
-        self.capture_control_trajectory(py)?;
+        self.capture_private_trajectory(py, branch)?;
         let (started, entered, restored, error, ordinal) = {
             let retained = self.trajectory_start()?;
             let operation = retained.as_ref().expect("retained original trajectory");
@@ -386,8 +416,12 @@ impl PySemanticLearningPhaseTransition {
                     .map(|value| value.python_value(py)).transpose()?;
                 let total_limit = self.preparation_inputs.max_total_checkpoint_bytes.as_ref()
                     .map(|value| value.python_value(py)).transpose()?;
-                self.candidate_entered.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .map_err(|_| invalid("private trajectory has already entered its original restore"))?;
+                if branch == "control" {
+                    self.candidate_entered.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .map_err(|_| invalid("private trajectory has already entered its original restore"))?;
+                } else if !self.candidate_entered.load(Ordering::Acquire) {
+                    return Err(invalid("real restoration lost the original entered phase"));
+                }
                 self.trajectory_start()?.as_mut().expect("retained original trajectory").restore_entered = true;
                 let result = PySemanticTransitionSession::restore_checkpoint_impl(
                     py, checkpoint.as_any(), self.source.borrow(py).device_ordinal, &snapshot,
@@ -405,10 +439,10 @@ impl PySemanticLearningPhaseTransition {
                 }
             }
         };
-        self.finish_control_trajectory(py, &restored)
+        self.finish_private_trajectory(py, &restored)
     }
 
-    fn finish_control_trajectory(
+    fn finish_private_trajectory(
         &self,
         py: Python<'_>,
         restored: &Py<PySemanticTransitionRestoredCheckpoint>,
@@ -569,7 +603,12 @@ impl PySemanticLearningPhaseTransition {
             let arguments = PyDict::new(py);
             arguments.set_item("instruction_bytes", PyBytes::new(py, &instruction))?;
             arguments.set_item("operation_ordinal", ordinal)?;
-            arguments.set_item("branch", "control")?;
+            let branch = self
+                .trajectory_start()?
+                .as_ref()
+                .expect("original private trajectory")
+                .branch;
+            arguments.set_item("branch", branch)?;
             arguments.set_item("restored_parent", parent.identity(py)?)?;
             arguments.set_item(
                 "model_binding",
@@ -609,7 +648,7 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
-    pub(super) fn require_known_control_restore(&self, py: Python<'_>) -> PyResult<()> {
+    pub(super) fn require_known_private_restore(&self, py: Python<'_>) -> PyResult<()> {
         self.records()?.require_preparation_admission()?;
         self.require_trajectory_entry(py)?;
         let retained = self.trajectory_start()?;
@@ -629,9 +668,14 @@ impl PySemanticLearningPhaseTransition {
         &self,
         py: Python<'_>,
     ) -> PyResult<(Py<PySemanticTransitionRestoredCheckpoint>, u64)> {
-        self.require_known_control_restore(py)?;
+        self.require_known_private_restore(py)?;
         let retained = self.trajectory_start()?;
         let operation = retained.as_ref().expect("retained original trajectory");
+        if operation.branch != "control" {
+            return Err(invalid(
+                "control numerical execution requires its original control restore",
+            ));
+        }
         if !operation.recorded || operation.report.is_none() || !operation.child_joined {
             return Err(invalid(
                 "private numerical execution requires its actual recorded source restore",
