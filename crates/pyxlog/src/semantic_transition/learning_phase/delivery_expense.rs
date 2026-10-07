@@ -693,9 +693,24 @@ impl PySemanticLearningPhaseTransition {
                         ));
                     }
                     let identity = reader.borrow(py).identity(py)?;
-                    let identity =
-                        ColdValue::read(identity.bind(py).as_any(), &mut (16 * 1024 * 1024), 0)?
-                            .canonical_bytes();
+                    // The acquired native identity contains digest bytes. General
+                    // metadata transport deliberately does not accept bytes;
+                    // retain these exact native-issued fields, not a Python
+                    // conversion or a relaxation of that public transport.
+                    let identity = identity.bind(py);
+                    let digest = |index| -> PyResult<ColdValue> {
+                        let field = identity.get_item(index)?;
+                        Ok(ColdValue::Bytes(Arc::from(
+                            field.cast::<PyBytes>()?.as_bytes(),
+                        )))
+                    };
+                    let identity = ColdValue::Sequence(vec![
+                        digest(0)?,
+                        ColdValue::read(&identity.get_item(1)?, &mut 128, 0)?,
+                        digest(2)?,
+                        digest(3)?,
+                    ])
+                    .canonical_bytes();
                     let material = self
                         .delivery_expense()?
                         .as_ref()
