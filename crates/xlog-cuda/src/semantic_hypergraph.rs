@@ -2604,6 +2604,17 @@ impl SemanticHypergraph {
     }
 
     #[cfg(feature = "semantic-policy")]
+    pub(crate) fn begin_borrowed_cold_work(
+        &mut self,
+        work: DeviceMemoryView<u64>,
+        custody: Arc<()>,
+    ) -> Result<(), SemanticHypergraphError> {
+        self.begin_cold_work(work)?;
+        self.cold_work_custody = Some(custody);
+        Ok(())
+    }
+
+    #[cfg(feature = "semantic-policy")]
     pub(crate) fn borrowed_cold_work(&self) -> Option<DeviceMemoryView<u64>> {
         self.cold_work_custody
             .as_ref()

@@ -9741,6 +9741,10 @@ impl SemanticCompletedExecutionObservation {
         Arc::ptr_eq(&self.original.issuer, &session.publication_issuer)
     }
 
+    pub fn belongs_to_step(&self, step: &SemanticPreparedStep) -> bool {
+        self.original.same_handle(step)
+    }
+
     pub fn predecessor(&self) -> Option<SemanticPublishedIdentity> {
         self.predecessor
     }

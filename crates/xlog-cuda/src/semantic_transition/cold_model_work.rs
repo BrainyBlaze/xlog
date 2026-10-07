@@ -31,6 +31,7 @@ impl SemanticColdModelWork {
 /// The original operation's native tally carried into its actual child graph.
 /// Construction is private; neither a raw pointer nor another report can mint
 /// this custody. Allocation and stream identity remain those of the issuer.
+#[derive(Clone)]
 pub struct SemanticColdNativeWork {
     provider: Arc<CudaKernelProvider>,
     domain: ResidentExecutionDomain,
@@ -94,6 +95,20 @@ impl SemanticTransitionSession {
         &self,
         token: u64,
     ) -> Result<Option<DeviceMemoryView<u64>>, SemanticTransitionError> {
+        // Captured steps already own their execution tally. Keep a borrowed
+        // cold tally out of capture, but retain it for final-use guards and
+        // resource retirement after the actual completed handoff.
+        if self
+            .steps
+            .get(&token)
+            .is_some_and(|step| step.prepared.is_some())
+            && self
+                .prepared_segment
+                .as_ref()
+                .is_some_and(|build| build.capturing)
+        {
+            return Ok(None);
+        }
         let Some(storage) = self
             .steps
             .get(&token)
@@ -150,6 +165,54 @@ impl SemanticTransitionSession {
         self.graph
             .complete_cold_work(&work)
             .map_err(SemanticTransitionError::Semantic)
+    }
+
+    /// Attach the original phase's open tally to an already restored reader,
+    /// before its next actual cold preparation. No new counter is allocated.
+    pub fn attach_shared_cold_native_work(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        work: SemanticColdNativeWork,
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        let (view, custody) = work.graph_custody(&self.provider, &self.domain)?;
+        self.graph
+            .begin_borrowed_cold_work(view, custody)
+            .map_err(SemanticTransitionError::Semantic)
+    }
+
+    /// Remove visibility of this exact borrowed tally before its issuer joins
+    /// and reads the report. Detachment is not completion or resource release;
+    /// the original work allocation and unfinished report remain retained.
+    pub fn detach_shared_cold_native_work(
+        &mut self,
+        work: &SemanticColdNativeWork,
+    ) -> Result<(), SemanticTransitionError> {
+        if !Arc::ptr_eq(&self.provider, &work.provider)
+            || self.domain.stream_id() != work.domain.stream_id()
+        {
+            return Err(publication_input_error(
+                "cold detachment changed its original allocation owner or stream",
+            ));
+        }
+        self.graph
+            .complete_cold_work(&work.work)
+            .map_err(SemanticTransitionError::Semantic)
+    }
+
+    /// The actual model recorder must have closed before a prepared graph can
+    /// take over numerical execution. Waiting or failed registration is not a
+    /// CPU-only or zero-work observation.
+    pub fn require_closed_cold_model_work(
+        &self,
+        handle: &SemanticColdModelWork,
+    ) -> Result<(), SemanticTransitionError> {
+        if self.cold_model_work(handle)?.state != RecordingState::Closed {
+            return Err(publication_input_error(
+                "prepared execution requires its original closed cold preparation recorder",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn require_completed_cold_model_work(&self) -> Result<(), SemanticTransitionError> {

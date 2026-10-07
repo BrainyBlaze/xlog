@@ -72,6 +72,23 @@ fn completed_segment_pending(py: Python<'_>, original: PyErr) -> PyErr {
     pending
 }
 
+#[cfg(feature = "semantic-policy")]
+fn private_execution_owner(
+    py: Python<'_>,
+    session: &PySemanticTransitionSession,
+) -> PyResult<Option<Py<learning_phase::PySemanticLearningPhaseTransition>>> {
+    if !session.learning_preparing.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    session
+        .learning_transition
+        .lock()
+        .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?
+        .as_ref()
+        .map(|pending| Some(pending.clone_ref(py)))
+        .ok_or_else(|| invalid("private execution lost its original native phase owner"))
+}
+
 type PredicateInput = (u32, String, Vec<(String, u8, String)>, Vec<usize>);
 type RecordInput = (u32, Vec<(u8, Py<PyAny>)>, Vec<u32>);
 type SupportInput = (u32, String, u32, u32, u32, u32);
@@ -11135,10 +11152,20 @@ impl PySemanticTensorContentWitness {
                 .ok_or_else(|| {
                     invalid("private model content lost its original learning-feedback owner")
                 })?;
+            let pending = pending.borrow(py);
+            if pending.private_numeric_active() {
+                return pending
+                    .private_numeric_feedback_projection(py, &session, &self.parent)
+                    .map(Some);
+            }
             let ContentStepOwner::Published(parent) = &self.parent else {
                 return Err(invalid("source feedback projection requires its original acquired source, not a private prepared step"));
             };
-            let pending = pending.borrow(py);
+            if let Some(projection) =
+                pending.private_evaluation_feedback_projection(py, &session, parent)?
+            {
+                return Ok(Some(projection));
+            }
             if pending.is_original_source(py, &session) {
                 pending.require_source_feedback_projection(py, &session, parent)?;
                 Ok(None)
@@ -13514,6 +13541,17 @@ impl PySemanticTransitionController {
             return Err(invalid("segment task belongs to another Session"));
         }
         let transitions = prepared_transitions(transitions)?;
+        #[cfg(feature = "semantic-policy")]
+        let private = private_execution_owner(py, &session)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(private) = &private {
+            private.borrow(py).require_private_group_build(
+                py,
+                &session,
+                &issued,
+                &transitions.clone().collect::<Vec<_>>(),
+            )?;
+        }
         let cold_capacity = SemanticSegmentColdCapacity {
             tensor_content_capacity: usize::try_from(
                 ColdValue::read(tensor_content_capacity, &mut 128, 0)?.unsigned()?,
@@ -13574,6 +13612,12 @@ impl PySemanticTransitionController {
             let stream = owner.prepared_stream(&handles[0]).map_err(xlog_err)?;
             (scope, state.snapshot.canonical.clone(), handles, stream)
         };
+        #[cfg(feature = "semantic-policy")]
+        if let Some(private) = &private {
+            private
+                .borrow(py)
+                .retain_private_build_scope(py, &session, &issued, &scope, &handles)?;
+        }
         let mut steps = Vec::with_capacity(handles.len());
         for inner in handles {
             steps.push(Py::new(
@@ -13618,6 +13662,12 @@ impl PySemanticTransitionController {
         )?;
         kwargs.set_item("consumer_stream", stream.cu_stream() as u64)?;
         let prepare = recording_callback(check, || producer.bind(py).getattr("prepare_segment"))?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(private) = &private {
+            private
+                .borrow(py)
+                .begin_private_model_preparation(py, &session, &issued, false)?;
+        }
         let prepared = recording_callback(check, || {
             prepare.call((task_use.clone_ref(py),), Some(&kwargs))
         })?;
@@ -13642,6 +13692,12 @@ impl PySemanticTransitionController {
         let recorded = (|| -> PyResult<()> {
             let prepare_successors =
                 recording_callback(check, || prepared.getattr("prepare_unpublished_successors"))?;
+            #[cfg(feature = "semantic-policy")]
+            if let Some(private) = &private {
+                private
+                    .borrow(py)
+                    .begin_private_model_preparation(py, &session, &issued, true)?;
+            }
             recording_callback(check, || {
                 let value = prepare_successors.call0()?;
                 if !value.is_none() {
@@ -13651,6 +13707,12 @@ impl PySemanticTransitionController {
                 }
                 Ok(())
             })?;
+            #[cfg(feature = "semantic-policy")]
+            if let Some(private) = &private {
+                private
+                    .borrow(py)
+                    .private_capture_boundary(py, &session, &issued, false)?;
+            }
             let external: Arc<dyn Send + Sync> = resources.clone();
             let (mut capture, capture_stream) = {
                 let mut owner = session.owner()?;
@@ -13670,10 +13732,24 @@ impl PySemanticTransitionController {
                 let admission = capture.add_conditional_if(
                     &stream,
                     |handle| -> PyResult<()> {
-                        let result = session
-                            .owner()?
-                            .record_prepared_step_admission(&native, handle)
-                            .map_err(xlog_err);
+                        let result = (|| -> PyResult<()> {
+                            session
+                                .owner()?
+                                .record_prepared_step_admission(&native, handle)
+                                .map_err(xlog_err)?;
+                            #[cfg(feature = "semantic-policy")]
+                            if let Some(private) = &private {
+                                private.borrow(py).bind_private_step_capture(
+                                    py,
+                                    &session,
+                                    &issued,
+                                    &step.borrow(py),
+                                    stream.cu_stream() as u64,
+                                    false,
+                                )?;
+                            }
+                            Ok(())
+                        })();
                         if let Err(value) = &result {
                             *admission_error.borrow_mut() = Some(value.clone_ref(py));
                         }
@@ -13801,10 +13877,24 @@ impl PySemanticTransitionController {
                     },
                     |body| {
                         body.capture_on_stream(&stream, || -> PyResult<()> {
-                            let result = session
-                                .owner()?
-                                .record_prepared_step_release(&native)
-                                .map_err(xlog_err);
+                            let result = (|| -> PyResult<()> {
+                                session
+                                    .owner()?
+                                    .record_prepared_step_release(&native)
+                                    .map_err(xlog_err)?;
+                                #[cfg(feature = "semantic-policy")]
+                                if let Some(private) = &private {
+                                    private.borrow(py).bind_private_step_capture(
+                                        py,
+                                        &session,
+                                        &issued,
+                                        &step.borrow(py),
+                                        stream.cu_stream() as u64,
+                                        true,
+                                    )?;
+                                }
+                                Ok(())
+                            })();
                             if let Err(value) = &result {
                                 *release_error.borrow_mut() = Some(value.clone_ref(py));
                             }
@@ -13844,6 +13934,12 @@ impl PySemanticTransitionController {
         let cleanup = finish_with_cleanup(py, before_cleanup, cleanup);
         let cleanup = finish_with_cleanup(py, cleanup, check());
         finish_with_cleanup(py, recorded, cleanup)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(private) = &private {
+            private
+                .borrow(py)
+                .private_capture_boundary(py, &session, &issued, true)?;
+        }
         issued.state()?.finish_build(&scope)?;
         guard.committed = true;
         Ok(())
@@ -13906,6 +14002,11 @@ impl PySemanticTransitionController {
                     .collect::<Vec<_>>(),
             )
         };
+        if let Some(private) = private_execution_owner(py, &session)? {
+            private
+                .borrow(py)
+                .finish_private_group_preparation(py, &session, &issued, &scope)?;
+        }
         let mut guard = PreparedBuildGuard {
             session: &session,
             task_use: &issued,
@@ -14191,6 +14292,15 @@ impl PySemanticTransitionController {
             issued.authority.check_use(&operation, &fresh, false)?;
             state.snapshot = fresh;
             state.phase = TaskUsePhase::Segment(operation.clone());
+            drop(state);
+            if let Some(private) = private_execution_owner(py, &session)? {
+                private.borrow(py).retain_private_selected_parent(
+                    py,
+                    &session,
+                    &issued,
+                    &retained_parent,
+                )?;
+            }
             Ok(result.clone_ref(py))
         })();
         // An original pending handoff remains pending if another fresh-rights
@@ -14232,6 +14342,13 @@ impl PySemanticTransitionController {
             ));
         }
         let _retirement = PreparedRetirementGuard(&session.retiring);
+        if let Some(private) = private_execution_owner(py, &session)? {
+            private.borrow(py).begin_private_segment_retirement(
+                py,
+                &session,
+                &task_use.borrow(py),
+            )?;
+        }
         let snapshot = task_use.borrow(py).state()?.snapshot.canonical.clone();
         let mut budget = 16 * 1024 * 1024;
         let streams = ColdValue::read(consumer_streams, &mut budget, 0)?;
@@ -14374,6 +14491,13 @@ impl PySemanticTransitionController {
         drop(resources);
         drop(prepared);
         drop(steps);
+        if let Some(private) = private_execution_owner(py, &session)? {
+            private.borrow(py).retain_private_segment_retirement(
+                py,
+                &session,
+                &task_use.borrow(py),
+            )?;
+        }
         drain_export_owners();
         Ok(())
     }
@@ -15805,6 +15929,9 @@ impl PySemanticTransitionController {
         self.require_issued(task_use)?;
         parent.require_task(py, task_use)?;
         let session = self.session.borrow(py);
+        if session.learning_preparing.load(Ordering::Acquire) {
+            return Err(invalid("private numerical execution uses only its original complete prepared roster, not a separate transition"));
+        }
         let mut owner = session.owner()?;
         task_use.require_current(&owner)?;
         let mut budget = 16 * 1024 * 1024;

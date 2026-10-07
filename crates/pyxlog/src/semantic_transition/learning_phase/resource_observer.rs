@@ -21,6 +21,8 @@ type Begin = unsafe extern "C" fn(*mut c_void, *const u8, u64, *mut *mut c_void)
 type Finish = unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32;
 type Read = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut TraceView) -> u32;
 type Release = unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32;
+type BindStep = unsafe extern "C" fn(*mut c_void, *mut c_void, u64, u64, u64, u32) -> u32;
+type ReadStep = unsafe extern "C" fn(*mut c_void, *mut c_void, u64, *mut TraceView) -> u32;
 
 // These are the exact layouts of the installed xlog_resource_observer.h.
 // Event storage remains producer-owned; this memory consumer never dereferences it.
@@ -39,6 +41,8 @@ struct Api {
     finish: Option<Finish>,
     read: Option<Read>,
     release: Option<Release>,
+    bind_step: Option<BindStep>,
+    read_step: Option<ReadStep>,
 }
 
 #[repr(C)]
@@ -68,7 +72,16 @@ struct TraceView {
     event_size: u64,
 }
 
-const _: () = assert!(size_of::<Api>() == 48 && size_of::<TraceView>() == 200);
+const _: () = assert!(size_of::<Api>() == 64 && size_of::<TraceView>() == 200);
+
+struct StepInterval {
+    ordinal: u64,
+    capture_stream: u64,
+    end_attempted: bool,
+    capture_finished: bool,
+    boundaries: Option<(u64, u64)>,
+    peak: Option<u64>,
+}
 
 struct Interval {
     nonce: [u8; 32],
@@ -80,6 +93,7 @@ struct Interval {
     physical_peak: Option<u64>,
     release_attempted: bool,
     released: bool,
+    steps: Vec<StepInterval>,
 }
 
 /// The capsule pins the original immutable table, context and function code.
@@ -95,12 +109,14 @@ pub(super) struct ResourceObserver {
     finish: Finish,
     read: Read,
     release: Release,
+    bind_step: BindStep,
+    read_step: ReadStep,
     interval: Mutex<Option<Interval>>,
 }
 
 impl ResourceObserver {
     pub(super) fn capture(capsule: &Bound<'_, PyCapsule>) -> PyResult<Self> {
-        let pointer = capsule.pointer_checked(Some(c"xlog.resource_observer.v1"))?;
+        let pointer = capsule.pointer_checked(Some(c"xlog.resource_observer.v2"))?;
         if !(pointer.as_ptr() as usize).is_multiple_of(align_of::<Api>()) {
             return Err(invalid(
                 "resource observer table has invalid C ABI alignment",
@@ -110,7 +126,7 @@ impl ResourceObserver {
         // for its complete lifetime. Read only its common header before checking
         // the exact supported layout; no old-size table is read as the new ABI.
         let header = unsafe { &*pointer.as_ptr().cast::<ApiHeader>() };
-        if header.abi_version != 1 || header.struct_size as usize != size_of::<Api>() {
+        if header.abi_version != 2 || header.struct_size as usize != size_of::<Api>() {
             return Err(invalid(
                 "resource observer requires the exact installed C ABI table",
             ));
@@ -121,7 +137,7 @@ impl ResourceObserver {
         let api = unsafe { &*pointer.as_ptr().cast::<Api>() };
         let missing = || {
             invalid(
-                "resource observer requires its original context and all four interval functions",
+                "resource observer requires its original context, interval and step-boundary functions",
             )
         };
         if api.context.is_null() {
@@ -136,6 +152,8 @@ impl ResourceObserver {
             finish: api.finish.ok_or_else(missing)?,
             read: api.read.ok_or_else(missing)?,
             release: api.release.ok_or_else(missing)?,
+            bind_step: api.bind_step.ok_or_else(missing)?,
+            read_step: api.read_step.ok_or_else(missing)?,
             interval: Mutex::new(None),
         })
     }
@@ -145,7 +163,7 @@ impl ResourceObserver {
             || self
                 .capsule
                 .bind(py)
-                .pointer_checked(Some(c"xlog.resource_observer.v1"))?
+                .pointer_checked(Some(c"xlog.resource_observer.v2"))?
                 .as_ptr() as usize
                 != self.table
         {
@@ -188,6 +206,7 @@ impl ResourceObserver {
             physical_peak: None,
             release_attempted: false,
             released: false,
+            steps: Vec::new(),
         });
         let interval = retained.as_mut().expect("retained before original begin");
         let mut handle = std::ptr::null_mut();
@@ -209,6 +228,98 @@ impl ResourceObserver {
             return Err(invalid(
                 "original resource interval begin is unknown; retain the same pending and observer",
             ));
+        }
+        Ok(())
+    }
+
+    /// These are cold capture delimiters, NOT execution timestamps. The same
+    /// producer binds the actual captured node/correlation identities, then
+    /// obtains original GPU execution boundaries in its own timestamp scale.
+    pub(super) fn bind_step_capture(
+        &self,
+        py: Python<'_>,
+        ordinal: u64,
+        step: u64,
+        capture_stream: u64,
+        end: bool,
+    ) -> PyResult<()> {
+        self.require_original(py)?;
+        let mut retained = self.interval()?;
+        let interval = retained
+            .as_mut()
+            .ok_or_else(|| invalid("step capture lost its original observer interval"))?;
+        if !interval.begun
+            || interval.finish_attempted
+            || interval.release_attempted
+            || capture_stream == 0
+        {
+            return Err(invalid(
+                "step capture requires its original open whole-process interval",
+            ));
+        }
+        if end {
+            let count = interval.steps.len() as u64;
+            let current = interval
+                .steps
+                .last_mut()
+                .ok_or_else(|| invalid("step capture end has no original beginning"))?;
+            if current.ordinal != ordinal
+                || current.capture_stream != capture_stream
+                || current.end_attempted
+                || step.checked_add(1) != Some(count)
+            {
+                return Err(invalid("step capture changed or repeated its original end"));
+            }
+            current.end_attempted = true;
+        } else {
+            if step != interval.steps.len() as u64
+                || ordinal
+                    != interval
+                        .ordinal
+                        .checked_add(step)
+                        .ok_or_else(|| invalid("step interval ordinal overflowed"))?
+                || interval
+                    .steps
+                    .last()
+                    .is_some_and(|original| !original.capture_finished)
+            {
+                return Err(invalid(
+                    "step capture changed its complete contiguous original roster",
+                ));
+            }
+            // Retain before invoking the producer. Unknown binding cannot
+            // repeat capture or issue another step-boundary owner.
+            interval.steps.push(StepInterval {
+                ordinal,
+                capture_stream,
+                end_attempted: false,
+                capture_finished: false,
+                boundaries: None,
+                peak: None,
+            });
+        }
+        // SAFETY: original pinned ABI2 context and handle; these immutable
+        // original ordinals and stream identify the kernel just enqueued inside
+        // its actual capture. The collector resolves and retains the node here.
+        let status = unsafe {
+            (self.bind_step)(
+                self.context as *mut c_void,
+                interval.handle as *mut c_void,
+                ordinal,
+                step,
+                capture_stream,
+                u32::from(end),
+            )
+        };
+        if status != COMPLETE {
+            return Err(invalid("original graph-step boundary binding is unknown; retain the same interval and capture owners"));
+        }
+        if end {
+            interval
+                .steps
+                .last_mut()
+                .expect("original capture end")
+                .capture_finished = true;
         }
         Ok(())
     }
@@ -309,6 +420,89 @@ impl ResourceObserver {
         Ok(view.physical_peak_bytes)
     }
 
+    pub(super) fn step_physical_peaks(&self, py: Python<'_>, count: usize) -> PyResult<Vec<u64>> {
+        let group_peak = self.physical_peak(py)?;
+        let mut retained = self.interval()?;
+        let interval = retained.as_mut().expect("known original physical interval");
+        if count == 0
+            || interval.steps.len() != count
+            || interval.steps.iter().any(|step| !step.capture_finished)
+        {
+            return Err(invalid(
+                "physical step results require the complete original captured roster",
+            ));
+        }
+        let (group_start, group_end) = interval.boundaries.expect("known group boundaries");
+        let mut previous_end = group_start;
+        let mut peaks = Vec::with_capacity(count);
+        for step in &mut interval.steps {
+            if step.peak.is_none() {
+                // SAFETY: the exact installed integer/pointer C record is
+                // initialized; validity and original custody are checked below.
+                let mut view: TraceView = unsafe { std::mem::zeroed() };
+                view.struct_size = size_of::<TraceView>() as u32;
+                view.state = UNKNOWN;
+                // SAFETY: read only this sealed original subinterval. No
+                // capture, flush, finish, launch or registration is repeated.
+                let status = unsafe {
+                    (self.read_step)(
+                        self.context as *mut c_void,
+                        interval.handle as *mut c_void,
+                        step.ordinal,
+                        &mut view,
+                    )
+                };
+                let required = START_VALID
+                    | END_VALID
+                    | DELIVERY_DRAINED
+                    | STARTED_BEFORE_CUDA
+                    | PHYSICAL_PEAK_VALID
+                    | ALLOCATOR_COMPLETED;
+                if status != COMPLETE
+                    || view.struct_size as usize != size_of::<TraceView>()
+                    || view.original_attempt_nonce != interval.nonce
+                    || view.operation_ordinal != step.ordinal
+                    || view.boundary_flags & (START_VALID | END_VALID) != (START_VALID | END_VALID)
+                    || view.start != previous_end
+                    || view.end < view.start
+                    || view.end > group_end
+                    || step
+                        .boundaries
+                        .is_some_and(|original| original != (view.start, view.end))
+                {
+                    return Err(invalid("original per-step execution boundaries are unknown; retain the same interval and captured roster"));
+                }
+                step.boundaries = Some((view.start, view.end));
+                if !matches!(view.state, COMPLETE | INCOMPLETE)
+                    || view.boundary_flags & required != required
+                    || view.requested_coverage & PHYSICAL_MEMORY == 0
+                    || view.enabled_coverage & PHYSICAL_MEMORY == 0
+                    || view.unsupported_coverage & PHYSICAL_MEMORY != 0
+                    || view.process_dropped_records != 0
+                    || view.process_errors != 0
+                    || view.process_buffer_overflows != 0
+                {
+                    return Err(invalid("original per-step physical memory or execution boundaries are unknown; group peak cannot replace them"));
+                }
+                step.peak = Some(view.physical_peak_bytes);
+            }
+            let (start, end) = step.boundaries.expect("known original step boundaries");
+            if start != previous_end {
+                return Err(invalid(
+                    "original physical step intervals have a gap or overlap",
+                ));
+            }
+            previous_end = end;
+            peaks.push(step.peak.expect("known original step peak"));
+        }
+        if previous_end != group_end || peaks.iter().copied().max() != Some(group_peak) {
+            return Err(invalid(
+                "original physical step intervals do not cover the complete whole-process interval",
+            ));
+        }
+        Ok(peaks)
+    }
+
     /// Final owner release is allowed only after this original physical result
     /// was consumed. A failed release is irreversible and retains the capsule.
     pub(super) fn release(&self, py: Python<'_>) -> PyResult<()> {
@@ -320,7 +514,10 @@ impl ResourceObserver {
         if interval.released {
             return Ok(());
         }
-        if interval.physical_peak.is_none() || interval.release_attempted {
+        if interval.physical_peak.is_none()
+            || interval.steps.iter().any(|step| step.peak.is_none())
+            || interval.release_attempted
+        {
             return Err(invalid(
                 "unknown physical completion or release retains its original interval and owners",
             ));
