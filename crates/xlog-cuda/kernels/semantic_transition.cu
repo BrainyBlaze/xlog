@@ -1603,14 +1603,18 @@ struct PublicationTensorBytes {
 // Publication seals and transient witnesses traverse the same logical bytes.
 // Storage addresses, padding and strides do not enter the content identity.
 __device__ uint64_t publication_content_view(const uint8_t* data,uint64_t length,const PublicationRange& range,
-        const PublicationTensorLayout* layout,PublicationTensorBytes* view,uint64_t* content_bytes) {
+        const PublicationTensorLayout* layout,PublicationTensorBytes* view,uint64_t* content_bytes,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     const uint64_t pointer=reinterpret_cast<uint64_t>(data);
     if(range.logical_end<range.logical_begin || range.length_bytes!=length ||
        (length && !data) || pointer>UINT64_MAX-length)return 1;
     view->bytes=data;view->layout=layout;view->active_rows=nullptr;view->dense=false;
-    for(uint32_t i=0;i<16;++i)view->prefix[i]=0;
-    view->prefix[0]=0x786c6f6772616e31ULL;view->prefix[1]=range.role;view->prefix[2]=range.index;
-    view->prefix[3]=range.logical_begin;view->prefix[4]=range.logical_end;
+    for(uint32_t i=0;i<16;++i)view->prefix[i]=semantic_graph::written_word(0,work);
+    view->prefix[0]=semantic_graph::written_word(0x786c6f6772616e31ULL,work);
+    view->prefix[1]=semantic_graph::written_word(range.role,work);
+    view->prefix[2]=semantic_graph::written_word(range.index,work);
+    view->prefix[3]=semantic_graph::written_word(range.logical_begin,work);
+    view->prefix[4]=semantic_graph::written_word(range.logical_end,work);
     *content_bytes=length;
     if(!layout)return 0;
     // U8, U32, U64, F16, BF16, F32, I64, Bool8 and F64 retain distinct type codes.
@@ -1618,8 +1622,10 @@ __device__ uint64_t publication_content_view(const uint8_t* data,uint64_t length
     if(layout->role!=range.role || layout->index!=range.index || layout->rank>4 ||
        layout->scalar_type<1 || layout->scalar_type>9 || layout->element_bytes!=sizes[layout->scalar_type] ||
        (layout->logical_axis!=UINT64_MAX && layout->logical_axis>=layout->rank) || pointer%layout->element_bytes)return 1;
-    view->prefix[5]=layout->element_bytes;view->prefix[6]=layout->scalar_type;
-    view->prefix[7]=layout->rank;view->prefix[8]=layout->logical_axis;
+    view->prefix[5]=semantic_graph::written_word(layout->element_bytes,work);
+    view->prefix[6]=semantic_graph::written_word(layout->scalar_type,work);
+    view->prefix[7]=semantic_graph::written_word(layout->rank,work);
+    view->prefix[8]=semantic_graph::written_word(layout->logical_axis,work);
     bool empty=false;
     uint32_t axes[4],axis_count=0;
     for(uint32_t i=0;i<layout->rank;++i) {
@@ -1629,7 +1635,7 @@ __device__ uint64_t publication_content_view(const uint8_t* data,uint64_t length
             dimension=range.logical_end-range.logical_begin;
             if(dimension>layout->dimensions[i])return 1;
         }
-        view->dimensions[i]=dimension;view->prefix[9+i]=dimension;
+        view->dimensions[i]=dimension;view->prefix[9+i]=semantic_graph::written_word(dimension,work);
         empty|=dimension==0;
         if(layout->dimensions[i]>1)axes[axis_count++]=i;
     }
@@ -1676,7 +1682,7 @@ __device__ uint64_t publication_tensor_view(const PublicationControl& control,co
         const TensorLayoutTableView* active_table=nullptr,semantic_graph::NativeWorkTally* work=nullptr) {
     uint8_t* bytes=nullptr;
     if(!publication_resolve_range(control,range,&bytes) ||
-       publication_content_view(bytes,range.length_bytes,range,layout,view,content_bytes))return 1;
+       publication_content_view(bytes,range.length_bytes,range,layout,view,content_bytes,work))return 1;
     if(!layout)return bytes ? 0 : 1;
     const bool empty_model=range.role>=18 && range.role<=25 &&
         layout->logical_axis==UINT64_MAX && !*content_bytes;
@@ -1849,7 +1855,7 @@ extern "C" __global__ void semantic_retained_model_contract_guard(uint64_t data_
     PublicationTensorBytes view{};uint64_t bytes=0,digest[4];
     if(range.role!=44 || range.index || range.generation!=1 ||
        range.offset_bytes>UINT64_MAX-range.length_bytes ||
-       publication_content_view(reinterpret_cast<const uint8_t*>(data_ptr),length_bytes,range,nullptr,&view,&bytes) ||
+       publication_content_view(reinterpret_cast<const uint8_t*>(data_ptr),length_bytes,range,nullptr,&view,&bytes,work) ||
        publication_content_digest(view,bytes,digest,work) || !publication_identity_equal(digest,range.digest))
         semantic_content_integrity_trap();
 }
@@ -1869,7 +1875,7 @@ extern "C" __global__ void semantic_tensor_content_witness(uint64_t data,uint64_
         semantic_content_integrity_trap();return;
     }
     PublicationTensorBytes view{};uint64_t bytes=0,digest[4];
-    if(publication_content_view(reinterpret_cast<const uint8_t*>(data),length,range,&layout,&view,&bytes) ||
+    if(publication_content_view(reinterpret_cast<const uint8_t*>(data),length,range,&layout,&view,&bytes,work) ||
        publication_content_digest(view,bytes,digest,work)) {
         semantic_content_integrity_trap();return;
     }
@@ -2921,8 +2927,9 @@ extern "C" __global__ void semantic_publication_prepare_drain(uint64_t control_p
     semantic_graph::copy_identity(pending.prefix_identity,
         reinterpret_cast<const uint64_t*>(prefix_bytes));
 }
-__device__ void publication_copy_bytes(uint8_t* to,const uint8_t* from,uint64_t count) {
-    for(uint64_t i=0;i<count;++i)to[i]=from[i];
+__device__ void publication_copy_bytes(uint8_t* to,const uint8_t* from,uint64_t count,
+        semantic_graph::NativeWorkTally* work=nullptr) {
+    for(uint64_t i=0;i<count;++i)to[i]=semantic_graph::written_byte(from[i],work);
 }
 __device__ uint64_t publication_apply_continuation(const PublicationControl& control,
         const PublicationBank& base,PublicationBank& next,const PendingContinuation& pending) {
@@ -3120,7 +3127,9 @@ __device__ uint64_t publication_logical_range_digest(const PublicationControl& c
 }
 __device__ void publication_fold(uint64_t* digest,uint64_t role,uint64_t index,const uint64_t* content,
         semantic_graph::NativeWorkTally* work) {
-    uint64_t words[10];semantic_graph::copy_identity(words,digest,work);words[4]=role;words[5]=index;
+    uint64_t words[10];semantic_graph::copy_identity(words,digest,work);
+    words[4]=semantic_graph::written_word(role,work);
+    words[5]=semantic_graph::written_word(index,work);
     semantic_graph::copy_identity(words+6,content,work);
     semantic_graph::sha256(reinterpret_cast<const uint8_t*>(words),sizeof(words),digest,work);
 }
@@ -3183,13 +3192,14 @@ __device__ uint64_t publication_finalize_model_contract(const PublicationControl
        !publication_model_contract_layout(layout,record.length_bytes))return 1;
     uint64_t schema_digest[4],identity[4];uint8_t generation[8];
     semantic_graph::sha256(bytes+layout.schema_begin,layout.schema_bytes,schema_digest,work);
-    for(uint32_t i=0;i<8;++i)generation[i]=uint8_t(header.model_generation>>(8*i));
+    for(uint32_t i=0;i<8;++i)
+        generation[i]=semantic_graph::written_byte(uint8_t(header.model_generation>>(8*i)),work);
     const char domain[]="xlog.semantic.model-identity.v1";
     uint8_t input[sizeof(domain)+32+8+32];
-    publication_copy_bytes(input,reinterpret_cast<const uint8_t*>(domain),sizeof(domain));
-    publication_copy_bytes(input+sizeof(domain),reinterpret_cast<const uint8_t*>(schema_digest),32);
-    publication_copy_bytes(input+sizeof(domain)+32,generation,8);
-    publication_copy_bytes(input+sizeof(domain)+40,reinterpret_cast<const uint8_t*>(header.model_numerical_digest),32);
+    publication_copy_bytes(input,reinterpret_cast<const uint8_t*>(domain),sizeof(domain),work);
+    publication_copy_bytes(input+sizeof(domain),reinterpret_cast<const uint8_t*>(schema_digest),32,work);
+    publication_copy_bytes(input+sizeof(domain)+32,generation,8,work);
+    publication_copy_bytes(input+sizeof(domain)+40,reinterpret_cast<const uint8_t*>(header.model_numerical_digest),32,work);
     semantic_graph::sha256(input,sizeof(input),identity,work);
     const uint64_t offsets[]={layout.schema_digest_offset,layout.generation_offset,layout.numerical_digest_offset,layout.identity_offset};
     const uint64_t lengths[]={32,8,32,32};
@@ -3200,7 +3210,7 @@ __device__ uint64_t publication_finalize_model_contract(const PublicationControl
     for(uint32_t field=0;field<4;++field) {
         if(compare_only) {
             for(uint64_t i=0;i<lengths[field];++i)if(bytes[offsets[field]+i]!=values[field][i])return 1;
-        } else publication_copy_bytes(bytes+offsets[field],values[field],lengths[field]);
+        } else publication_copy_bytes(bytes+offsets[field],values[field],lengths[field],work);
     }
     return 0;
 }
