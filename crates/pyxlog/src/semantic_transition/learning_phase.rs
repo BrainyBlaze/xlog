@@ -1148,7 +1148,7 @@ impl PySemanticLearningPhaseTransition {
                 .ok_or_else(|| invalid("executed phase lost its original input domain"))?,
         );
         let source_checkpoint = reader.field()?;
-        if source_checkpoint != self.source_checkpoint.as_ref()
+        if source_checkpoint != self.source_checkpoint.as_slice()
             || reader.field()? != self.preparation_inputs.frozen_program.as_slice()
         {
             return Err(invalid(
