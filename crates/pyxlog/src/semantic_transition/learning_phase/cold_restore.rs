@@ -9,13 +9,15 @@ use rand::rngs::OsRng;
 use serde_json::{Map, Value};
 
 pub(super) const SOURCE_EVALUATION_CANCELLED: &str = "source-evaluation-cancelled";
+pub(super) const PRIVATE_EVALUATION_CANCELLED: &str = "private-evaluation-cancelled";
 
-pub(super) fn cancelled_source_reason(
+pub(super) fn cancelled_evaluation_reason(
     proof: &xlog_cuda::SemanticCancelledModelEvaluation,
+    cause: &str,
 ) -> ColdValue {
     let parent = proof.parent();
     ColdValue::Sequence(vec![
-        ColdValue::Text(SOURCE_EVALUATION_CANCELLED.to_owned()),
+        ColdValue::Text(cause.to_owned()),
         ColdValue::Sequence(vec![
             ColdValue::Text(hex(parent.instance.as_bytes())),
             ColdValue::Integer(parent.word.to_string()),
@@ -389,14 +391,15 @@ fn recipe_material(record: &xlog_cuda::SemanticLearningPhaseRecord) -> Vec<u8> {
     .canonical_bytes()
 }
 
-/// Both the live producer and cold recovery must prove the actual complete
-/// native transition, not infer it from a frozen recipe or phase marker.
+/// Live and cold custody prove the original executed native prefix. Complete
+/// delivery additionally requires a transition reaching its declared final phase;
+/// cancelled evaluation preserves genuine absence or partial phase progress.
 pub(super) fn require_executed_lineage(
     source_native: &[u8],
     final_native: &[u8],
     admission: &[u8],
     recipe_bytes: &[u8],
-    final_phase: SemanticLearningPhase,
+    final_phase: Option<SemanticLearningPhase>,
 ) -> PyResult<Vec<xlog_cuda::SemanticLearningPhaseRecord>> {
     let recipe = ColdValue::from_canonical_bytes(recipe_bytes)?;
     let recipe = recipe.fields(5)?;
@@ -407,20 +410,43 @@ pub(super) fn require_executed_lineage(
         .map_err(xlog_err)?;
     let added = final_phases
         .strip_prefix(original.as_slice())
-        .filter(|phases| !phases.is_empty())
         .ok_or_else(|| invalid("phase checkpoint lacks its original executed native transition"))?;
     if added
         .iter()
         .any(|record| record.admission.as_slice() != admission)
-        || added[0].source != source_phase
-        || added.last().expect("nonempty native phase lineage").target != final_phase
-        || recipe_material(&added[0]) != recipe_bytes
+        || added.first().is_some_and(|first| {
+            first.source != source_phase || recipe_material(first) != recipe_bytes
+        })
+        || final_phase
+            .is_some_and(|expected| added.last().map(|last| last.target) != Some(expected))
     {
         return Err(invalid(
             "phase checkpoint differs from its original executed recipe or signed admission",
         ));
     }
     Ok(added.to_vec())
+}
+
+fn require_private_expense(
+    source: &SemanticCheckpointManifest,
+    private: &SemanticCheckpointManifest,
+) -> PyResult<ProposalExpense> {
+    let (source_seed, _, _, _) = TaskCheckpointSeed::decode(&source.task)?;
+    let (private_seed, _, _, _) = TaskCheckpointSeed::decode(&private.task)?;
+    let expense = private_seed.proposal_expense()?;
+    if source.session != private.session
+        || source_seed.training_domain != private_seed.training_domain
+        || source_seed.training_objective != private_seed.training_objective
+        || source_seed.checkpoint_source_limits()? != private_seed.checkpoint_source_limits()?
+        || source_seed.proposal_expense()?.capacity != expense.capacity
+        || source_seed.proposal_expense()?.spent > expense.spent
+    {
+        return Err(invalid(
+            "terminal phase changed original Source configuration, task or cumulative expense",
+        ));
+    }
+    require_retained_arena_authority(&source_seed.authority, &private_seed.authority)?;
+    Ok(expense)
 }
 
 impl VerifiedClosure {
@@ -470,9 +496,13 @@ impl VerifiedClosure {
                 "terminal phase changed its original full Source checkpoint",
             ));
         }
-        if cause == SOURCE_EVALUATION_CANCELLED {
+        if matches!(
+            cause,
+            SOURCE_EVALUATION_CANCELLED | PRIVATE_EVALUATION_CANCELLED
+        ) {
+            let source_only = cause == SOURCE_EVALUATION_CANCELLED;
             if lifecycle.preparation.is_some()
-                || !private.is_empty()
+                || source_only != private.is_empty()
                 || !result_bytes.is_empty()
                 || pending_target.is_some()
             {
@@ -480,7 +510,7 @@ impl VerifiedClosure {
             }
             let manifest = SemanticCheckpointManifest::decode(source)?;
             let (seed, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
-            let expense = seed.proposal_expense()?;
+            let mut expense = seed.proposal_expense()?;
             let source_parent =
                 SemanticTransitionSession::state_material_projection(&manifest.native)
                     .map_err(xlog_err)?
@@ -509,10 +539,58 @@ impl VerifiedClosure {
             let ordinal = records.len();
             let schedule = program["schedule"]
                 .as_array()
+                .filter(|schedule| schedule.len() > 1)
                 .ok_or_else(|| invalid("cancelled Source lost its original frozen schedule"))?;
             let entry = schedule
                 .get(ordinal)
                 .ok_or_else(|| invalid("cancelled Source invented a terminal ordinal"))?;
+            let branch = entry["branch"]
+                .as_str()
+                .ok_or_else(|| invalid("cancelled evaluation lost its original branch"))?;
+            let cancelled_parent = if source_only {
+                if branch != "source" {
+                    return Err(invalid("Source cancellation changed its original branch"));
+                }
+                source_parent
+            } else {
+                if !matches!(branch, "control" | "real") {
+                    return Err(invalid(
+                        "private cancellation requires its actual original private branch",
+                    ));
+                }
+                let private_manifest = SemanticCheckpointManifest::decode(private)?;
+                let (_, private_snapshot, _, _) =
+                    TaskCheckpointSeed::decode(&private_manifest.task)?;
+                expense = require_private_expense(&manifest, &private_manifest)?;
+                snapshot.newer_than(&private_snapshot)?;
+                // Initial trajectory construction is an exact Source restore.
+                // Only executed cold restores may add a phase. No transition
+                // yet is genuine absence, never a fabricated first recipe.
+                let added = require_executed_lineage(
+                    &manifest.native,
+                    &private_manifest.native,
+                    admission,
+                    recipe_bytes,
+                    None,
+                )?;
+                let restored = schedule
+                    .iter()
+                    .take(ordinal)
+                    .filter(|entry| entry["branch"] == branch && entry["operation"] == "restore")
+                    .count();
+                if added.len() > restored
+                    || !schedule.iter().take(ordinal).any(|entry| {
+                        entry["branch"] == branch && entry["operation"] == "trajectory-start"
+                    })
+                {
+                    return Err(invalid(
+                        "cancelled private checkpoint extends beyond its actual original prefix",
+                    ));
+                }
+                SemanticTransitionSession::state_material_projection(&private_manifest.native)
+                    .map_err(xlog_err)?
+                    .publication
+            };
             let reason_fields = reason.fields(4)?;
             let entry_fields = ColdValue::from_canonical_bytes(entry_material)?;
             let entry_fields = entry_fields.fields(6)?;
@@ -522,15 +600,16 @@ impl VerifiedClosure {
                 .ok_or_else(|| invalid("cancelled Source lost its original program format"))?;
             if ordinal == 0
                 || ordinal >= schedule.len() - 1
-                || records
-                    .iter()
-                    .zip(schedule)
-                    .enumerate()
-                    .any(|(index, (_, operation))| {
-                        operation["branch"] != "source"
-                            || index == 0 && operation["operation"] != "prepare"
-                            || index != 0 && operation["operation"] != "evaluation"
-                    })
+                || source_only
+                    && records
+                        .iter()
+                        .zip(schedule)
+                        .enumerate()
+                        .any(|(index, (_, operation))| {
+                            operation["branch"] != "source"
+                                || index == 0 && operation["operation"] != "prepare"
+                                || index != 0 && operation["operation"] != "evaluation"
+                        })
                 || prefix["format"] != format
                 || history["format"] != format
                 || prefix["program_sha256"] != digest(program_bytes)
@@ -554,16 +633,15 @@ impl VerifiedClosure {
                         original_recipe.inner.recipe_digest().as_bytes().as_slice(),
                     )))?
                 || entry["operation"] != "evaluation"
-                || entry["branch"] != "source"
                 || entry["step_ordinal"].as_u64() != Some(0)
                 || entry_fields[0].text()? != "evaluation"
-                || entry_fields[1].text()? != "source"
+                || entry_fields[1].text()? != branch
                 || entry_fields[2].unsigned()? != ordinal as u64
                 || entry_fields[3].unsigned()? != 0
                 || host(&entry_fields[4])? != entry["budget"]
                 || host(&entry_fields[5])? != entry["comparison"]
                 || reason_fields[0].text()? != cause
-                || host(&reason_fields[1])? != identity_value(source_parent)
+                || host(&reason_fields[1])? != identity_value(cancelled_parent)
                 || reason_fields[2].unsigned()? > usage_words[0]
                 || reason_fields[3].unsigned()? > usage_words[2]
             {
@@ -575,7 +653,7 @@ impl VerifiedClosure {
                 history_bytes,
                 &instruction,
                 ordinal as u64,
-                "source",
+                branch,
                 &reason,
                 usage_words,
             )?;
@@ -645,23 +723,9 @@ impl VerifiedClosure {
         }
         let source_manifest = SemanticCheckpointManifest::decode(source)?;
         let private_manifest = SemanticCheckpointManifest::decode(private)?;
-        let (source_seed, source_snapshot, _, _) =
-            TaskCheckpointSeed::decode(&source_manifest.task)?;
-        let (private_seed, private_snapshot, _, _) =
-            TaskCheckpointSeed::decode(&private_manifest.task)?;
-        let expense = private_seed.proposal_expense()?;
-        if source_manifest.session != private_manifest.session
-            || source_seed.training_domain != private_seed.training_domain
-            || source_seed.training_objective != private_seed.training_objective
-            || source_seed.checkpoint_source_limits()? != private_seed.checkpoint_source_limits()?
-            || source_seed.proposal_expense()?.capacity != expense.capacity
-            || source_seed.proposal_expense()?.spent > expense.spent
-        {
-            return Err(invalid(
-                "terminal phase changed original Source configuration, task or cumulative expense",
-            ));
-        }
-        require_retained_arena_authority(&source_seed.authority, &private_seed.authority)?;
+        let (_, source_snapshot, _, _) = TaskCheckpointSeed::decode(&source_manifest.task)?;
+        let (_, private_snapshot, _, _) = TaskCheckpointSeed::decode(&private_manifest.task)?;
+        let expense = require_private_expense(&source_manifest, &private_manifest)?;
         let program = json(program_bytes)?;
         let declared_phase =
             phase(program["final_phase"].as_str().ok_or_else(|| {
@@ -672,7 +736,7 @@ impl VerifiedClosure {
             &private_manifest.native,
             admission,
             recipe_bytes,
-            declared_phase,
+            Some(declared_phase),
         )?;
         let source_parent =
             SemanticTransitionSession::state_material_projection(&source_manifest.native)
@@ -972,7 +1036,7 @@ impl VerifiedClosure {
             &final_manifest.native,
             raw[0],
             recipe_bytes,
-            declared_phase,
+            Some(declared_phase),
         )?;
         let final_phase = added.last().expect("nonempty native phase lineage");
         if added[0].source != source_phase || final_phase.target != target_phase {
@@ -1310,7 +1374,10 @@ impl VerifiedClosure {
             .map(|refusal| {
                 Ok((
                     refusal.cause.as_ref(),
-                    if refusal.cause.as_ref() == SOURCE_EVALUATION_CANCELLED {
+                    if matches!(
+                        refusal.cause.as_ref(),
+                        SOURCE_EVALUATION_CANCELLED | PRIVATE_EVALUATION_CANCELLED
+                    ) {
                         py.None()
                     } else {
                         PyBytes::new(py, &self.acceptance).into_any().unbind()
