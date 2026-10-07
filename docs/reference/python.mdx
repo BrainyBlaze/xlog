@@ -532,12 +532,12 @@ Full backing allocations, padding, strides, and shared storage are retained;
 conflicting effects on aliases refuse the entire private candidate.
 
 `controller.prepare_learning_phase_transition(task_use, *, parent, recipe, source_checkpoint,
-consumer_streams, snapshot, scientific_owner, source_model, execute_phase_instruction,
+consumer_streams, snapshot, scientific_owner, scientific_refusal_type, source_model, execute_phase_instruction,
 resource_observer, feedback_interventions, learning_grant_ref,
 checkpoint_destination, snapshot_model_state, restore_model,
 snapshot_restored_model, retire_restored_model, retire_source_model,
 refresh_snapshot, phase_record_owner, phase_record_limits,
-frozen_program_bytes)` takes the exact builtin full
+frozen_program_bytes, cold_model_work_capacity)` takes the exact builtin full
 `source_checkpoint` bytes already used by the original scientific owner. It
 quiesces the successful recompute parent and verifies the supplied native state,
 task capsule, original Proposal expense, Session configuration, initial prefill
@@ -860,13 +860,52 @@ then releases the original held residency and its native/model ownership.
 Native then positively verifies the original lease has
 no reader, retained step, unfinished evaluation or captured executable; `abort`,
 reader-only release and a failed identity lookup do not establish retirement.
-Only after known retirement does native drop its candidate owners and resume the
-unchanged source, without refunding expense. The full candidate checkpoint remains
-available as cold material. A callback failure or uncertain native release retains
-the same pending and candidate with `unknown` status; neither the callback nor a
-factory is repeated. If retirement is known but later source authority validation
-fails, resolution may finish that source validation without repeating retirement
-or the durable resolver. This is not fresh-process or frozen-program recovery.
+Native moves the same original late report, device tally and finite region states
+to the already attached Source reader before this full private release. It does
+not allocate or reset a replacement report. Private deallocation, finalizers and
+the final unchanged Source verification precede the original observer completion.
+Only exact signed terminal readback and fresh original authority allow Source to
+resume; expense is not refunded. The complete private checkpoint remains cold
+material. Unknown model release or native deallocation retains the same pending
+with `refusal-pending` status and cannot repeat the callback or factory.
+
+`scientific_refusal_type` is the exact exception class from the canonical original
+scientific owner, supplied by the trusted integration before admission, never by
+a request. Native recognizes that exact type only at the sole acceptance call.
+Its original `result_bytes` must bind the complete frozen program/prefix and
+nonempty actual comparisons; contract exceptions or other errors remain unknown.
+The frozen program must declare `final_phase` before execution. The complete
+original recipe proves the first transition; the last actual native transition
+must reach this separate declared phase, including an explicit consolidation
+exit when the program declares fast. Missing `final_phase` has no default.
+
+The terminal observation occupies the original final Delivery instruction and
+operation ordinal with branch `real`, actual measured usage and the original
+refusal reason. It is not successful Delivery or another scheduled step. Native
+keeps the original scientific result bytes unchanged, and separately signs the
+full history containing this terminal observation. For deliberate private
+abandonment or known publication absence, the original positive comparison is
+retained unchanged; the terminal cause identifies the distinct native decision.
+Neither an unknown publication nor known accepted Q permits Source continuation.
+
+Terminal record kind 3 uses signed-chain slot 1 before a positive outcome, or
+slot 2 after it, under the same original issuer, hash chain and byte/count bounds.
+Its payload is `xlog.learning-phase.refusal.v1`, a zero byte, then ten U64LE
+length-prefixed fields: terminal cause, full original Source Q, full selected
+private Q, original prefix history, original comparison result, full terminal
+history, original Delivery entry material, canonical reason, verified Source
+authority snapshot, and three U64LE actual resource-usage words. Signed-chain
+slots are distinct from frozen operation ordinals. Kind 3 never authorizes the
+accepted checkpoint loader or a checkpoint signing key.
+
+`pending.refusal_outcome` is `None` until exact terminal readback, then the readonly
+tuple `(cause, original_result_bytes, full_history_bytes, signed_terminal_record)`.
+`resolve_checkpoint()` or `continue_preparation()` continues that same retained
+refusal without another scientific comparison, model call, retirement or write.
+`refused` means full known private release, terminal readback and Source resumption.
+The consumer must retain this outcome and its original records/fence, including
+after process loss. Fresh-process terminal recovery and measured GPU execution
+remain separate requirements; this live-owner completion does not prove them.
 
 The source retains the native pending owner **before** its first serializer,
 scientific callback or restoration operation. During preparation its status is
@@ -983,7 +1022,8 @@ The canonical resolver returns these distinct result/status pairs:
 | --- | --- | --- |
 | `None` | `unknown` | Keep the same pending, store, source, private owners and recovery fence; neither owner is runnable. |
 | `None` | `prepared` | The preparation outcome is known, but no model handoff or final publication occurred. Keep all owners and the fence. Repeated resolution returns the same pair without callbacks, commit or abandonment. |
-| `None` | `abandoned` | Native has revalidated and resumed the source after the retained final resolver proved absence before any exact durable checkpoint readback. Cleanup is permitted; expense is not refunded. |
+| `None` | `refusal-pending` | Keep the same pending, store, Source, remaining private owners and fence. Only the original retained terminal continuation/readback is allowed. |
+| `None` | `refused` | Native has completely released private owners, verified unchanged Source and durably confirmed the signed terminal history before resuming Source. Retain the terminal outcome and original records; expense is not refunded. |
 | `SemanticTransitionRestoredCheckpoint` | `committed` | The exact original controller/task/parent/model successor is durably published and activated. Retain this handoff before fallible application cleanup. |
 
 `prepared` permits a separate deliberate initial `commit_checkpoint` with the

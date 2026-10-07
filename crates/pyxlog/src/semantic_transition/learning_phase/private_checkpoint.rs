@@ -563,6 +563,10 @@ impl PySemanticLearningPhaseTransition {
                 }
             }
         };
+        // These are the actual final full snapshots of both frozen branches.
+        // Check the complete executed recipe before recording either snapshot
+        // or retiring control; trajectory-start alone cannot change the phase.
+        self.require_executed_phase_lineage(saved.bind(py).as_bytes())?;
         let (work, closed, cached_report, custody) = {
             let retained = self.private_checkpoints()?;
             let current = retained.last().expect("original checkpoint");
