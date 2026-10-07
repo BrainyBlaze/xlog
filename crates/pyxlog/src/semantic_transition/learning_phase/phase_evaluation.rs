@@ -81,6 +81,34 @@ impl Drop for EvaluationColdVisibility<'_> {
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(super) fn control_checkpoint_input(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(EvaluationOwners, u64)> {
+        if !self.control_evaluations_done.load(Ordering::Acquire) {
+            return Err(invalid(
+                "control checkpoint precedes its complete original evaluations",
+            ));
+        }
+        let (owners, mut ordinal) = self.control_evaluation_input(py)?;
+        if let Some(evaluation) = self
+            .phase_evaluations()?
+            .last()
+            .filter(|entry| entry.branch == "control")
+        {
+            if !evaluation.recorded || !evaluation.released || evaluation.budget_exceeded {
+                return Err(invalid(
+                    "control checkpoint precedes known evaluation accounting and release",
+                ));
+            }
+            ordinal = evaluation
+                .ordinal
+                .checked_add(1)
+                .ok_or_else(|| invalid("private checkpoint position overflowed"))?;
+        }
+        Ok((owners, ordinal))
+    }
+
     pub(in crate::semantic_transition) fn cancel_phase_evaluation(
         &self,
         py: Python<'_>,

@@ -26,6 +26,10 @@ use private_restore::PrivateTrajectoryStart;
 mod private_execution;
 #[cfg(feature = "semantic-policy")]
 use private_execution::PrivateExecutionGroup;
+#[cfg(feature = "semantic-policy")]
+mod private_checkpoint;
+#[cfg(feature = "semantic-policy")]
+use private_checkpoint::PrivateCheckpoint;
 
 struct PhaseRecordStore {
     pin: Py<PyAny>,
@@ -381,6 +385,10 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     phase_evaluation_active: AtomicBool,
     #[cfg(feature = "semantic-policy")]
     control_evaluations_done: AtomicBool,
+    #[cfg(feature = "semantic-policy")]
+    private_checkpoints: Mutex<Vec<PrivateCheckpoint>>,
+    #[cfg(feature = "semantic-policy")]
+    private_checkpoint_active: AtomicBool,
     #[cfg(feature = "semantic-policy")]
     private_trajectory_start: Mutex<Option<PrivateTrajectoryStart>>,
     #[cfg(feature = "semantic-policy")]
@@ -993,6 +1001,7 @@ impl PySemanticLearningPhaseTransition {
             self.prepare_control_trajectory(py, pending)?;
             self.execute_control_group(py)?;
             self.execute_control_evaluations(py)?;
+            self.execute_control_checkpoint(py)?;
             return self.finish_preparation(py);
         }
         #[cfg(not(feature = "semantic-policy"))]
@@ -2066,6 +2075,7 @@ impl PySemanticLearningPhaseTransition {
                     .prepare_control_trajectory(py, &slf)
                     .and_then(|()| pending.execute_control_group(py))
                     .and_then(|()| pending.execute_control_evaluations(py))
+                    .and_then(|()| pending.execute_control_checkpoint(py))
                     .and_then(|()| pending.finish_preparation(py))
             }
             #[cfg(not(feature = "semantic-policy"))]
@@ -2324,6 +2334,10 @@ impl PySemanticTransitionController {
                 phase_evaluation_active: AtomicBool::new(false),
                 #[cfg(feature = "semantic-policy")]
                 control_evaluations_done: AtomicBool::new(false),
+                #[cfg(feature = "semantic-policy")]
+                private_checkpoints: Mutex::new(Vec::new()),
+                #[cfg(feature = "semantic-policy")]
+                private_checkpoint_active: AtomicBool::new(false),
                 #[cfg(feature = "semantic-policy")]
                 private_trajectory_start: Mutex::new(None),
                 #[cfg(feature = "semantic-policy")]
