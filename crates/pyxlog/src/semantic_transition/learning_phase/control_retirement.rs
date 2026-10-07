@@ -76,7 +76,7 @@ impl PySemanticLearningPhaseTransition {
     ) -> PyResult<()> {
         if !self.control_retirement_retained()? {
             self.prepare_private_trajectory(py, pending, "control")?;
-            self.execute_private_group(py, "control")?;
+            self.execute_private_numerical_sequence(py, "control")?;
             self.execute_private_evaluations(py, "control")?;
             self.execute_private_checkpoint(py, "control")?;
         }

@@ -1008,7 +1008,7 @@ impl PySemanticLearningPhaseTransition {
         {
             self.execute_control_branch(py, pending)?;
             self.prepare_private_trajectory(py, pending, "real")?;
-            self.execute_private_group(py, "real")?;
+            self.execute_private_numerical_sequence(py, "real")?;
             self.execute_private_evaluations(py, "real")?;
             self.execute_private_checkpoint(py, "real")?;
             self.retain_final_checkpoint_candidate(py)?;
@@ -2084,7 +2084,7 @@ impl PySemanticLearningPhaseTransition {
                 pending
                     .execute_control_branch(py, &slf)
                     .and_then(|()| pending.prepare_private_trajectory(py, &slf, "real"))
-                    .and_then(|()| pending.execute_private_group(py, "real"))
+                    .and_then(|()| pending.execute_private_numerical_sequence(py, "real"))
                     .and_then(|()| pending.execute_private_evaluations(py, "real"))
                     .and_then(|()| pending.execute_private_checkpoint(py, "real"))
                     .and_then(|()| pending.retain_final_checkpoint_candidate(py))

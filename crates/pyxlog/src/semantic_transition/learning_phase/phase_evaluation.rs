@@ -127,7 +127,7 @@ impl PySemanticLearningPhaseTransition {
                 "private checkpoint precedes its complete original evaluations",
             ));
         }
-        let (owners, mut ordinal) = self.private_evaluation_input(py, branch)?;
+        let (owners, mut ordinal) = self.private_group_successor_input(py, branch)?;
         if let Some(evaluation) = self
             .phase_evaluations()?
             .last()
@@ -465,7 +465,7 @@ impl PySemanticLearningPhaseTransition {
             {
                 self.release_evaluation_record(py)?;
             }
-            let (owners, mut ordinal) = self.private_evaluation_input(py, branch)?;
+            let (owners, mut ordinal) = self.private_group_successor_input(py, branch)?;
             if let Some(previous) = self
                 .phase_evaluations()?
                 .last()
