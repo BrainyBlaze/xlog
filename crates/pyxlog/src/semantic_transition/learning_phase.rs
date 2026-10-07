@@ -23,6 +23,10 @@ mod private_restore;
 #[cfg(feature = "semantic-policy")]
 use private_restore::PrivateTrajectoryStart;
 #[cfg(feature = "semantic-policy")]
+mod intermediate_restore;
+#[cfg(feature = "semantic-policy")]
+use intermediate_restore::IntermediateRestore;
+#[cfg(feature = "semantic-policy")]
 mod private_execution;
 #[cfg(feature = "semantic-policy")]
 use private_execution::PrivateExecutionGroup;
@@ -34,6 +38,10 @@ use private_checkpoint::PrivateCheckpoint;
 mod control_retirement;
 #[cfg(feature = "semantic-policy")]
 use control_retirement::ControlRetirement;
+#[cfg(feature = "semantic-policy")]
+mod delivery_expense;
+#[cfg(feature = "semantic-policy")]
+use delivery_expense::DeliveryExpense;
 
 struct PhaseRecordStore {
     pin: Py<PyAny>,
@@ -246,8 +254,6 @@ struct ScientificAcceptance {
 /// Immutable inputs retained before the first external issuer/store callback.
 /// Continuation consumes these same inputs, never a replacement registration.
 struct PreparationInputs {
-    source_model: Py<PyAny>,
-    execute_phase_instruction: Py<PyAny>,
     resource_observer: ResourceObserver,
     feedback_interventions: Py<PyTuple>,
     consumer_streams: ColdValue,
@@ -259,6 +265,27 @@ struct PreparationInputs {
     resolve_checkpoint: Option<Py<PyAny>>,
     max_checkpoint_bytes: Option<ColdValue>,
     max_total_checkpoint_bytes: Option<ColdValue>,
+}
+
+struct PhaseModelOwners {
+    source: Py<PyAny>,
+    execute: Py<PyAny>,
+    restore: Py<PyAny>,
+    retire_private: Py<PyAny>,
+    serialize_source: Py<PyAny>,
+    serialize_candidate: Py<PyAny>,
+    retire_source: Py<PyAny>,
+}
+
+#[derive(Clone, Copy)]
+enum PhaseModelOwner {
+    Source,
+    Execute,
+    Restore,
+    RetirePrivate,
+    SerializeSource,
+    SerializeCandidate,
+    RetireSource,
 }
 
 /// The two original immutable materials, in real/control order. Reading this
@@ -304,10 +331,13 @@ impl PreparationInputs {
         require_model_bytes(&original_program, &self.frozen_program)
     }
 
-    fn require_execution_inputs(&self, py: Python<'_>) -> PyResult<()> {
-        if self.source_model.bind(py).is_none()
-            || !self.execute_phase_instruction.bind(py).is_callable()
-        {
+    fn require_execution_inputs(
+        &self,
+        py: Python<'_>,
+        source: &Py<PyAny>,
+        execute: &Py<PyAny>,
+    ) -> PyResult<()> {
+        if source.bind(py).is_none() || !execute.bind(py).is_callable() {
             return Err(invalid(
                 "phase preparation requires its original source model and instruction execution owner",
             ));
@@ -370,10 +400,7 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     accept_learning_phase: Py<PyAny>,
     scientific_acceptance: Mutex<Option<ScientificAcceptance>>,
     recipe: Py<PySemanticLearningPhaseRecipe>,
-    restore_model: Py<PyAny>,
-    retire_restored_model: Py<PyAny>,
-    source_serializer: Py<PyAny>,
-    candidate_serializer: Py<PyAny>,
+    model_owners: Mutex<Option<PhaseModelOwners>>,
     refresh_snapshot: Py<PyAny>,
     grant_reference: String,
     destination: String,
@@ -398,7 +425,13 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     #[cfg(feature = "semantic-policy")]
     control_retirement: Mutex<Option<ControlRetirement>>,
     #[cfg(feature = "semantic-policy")]
+    delivery_expense: Mutex<Option<DeliveryExpense>>,
+    #[cfg(feature = "semantic-policy")]
     private_trajectory_start: Mutex<Option<PrivateTrajectoryStart>>,
+    #[cfg(feature = "semantic-policy")]
+    intermediate_restore: Mutex<Option<IntermediateRestore>>,
+    #[cfg(feature = "semantic-policy")]
+    intermediate_snapshot_active: AtomicBool,
     #[cfg(feature = "semantic-policy")]
     private_execution: Mutex<Option<PrivateExecutionGroup>>,
     #[cfg(feature = "semantic-policy")]
@@ -542,6 +575,26 @@ fn verify_phase_checkpoint(
 }
 
 impl PySemanticLearningPhaseTransition {
+    fn model_owner(&self, py: Python<'_>, kind: PhaseModelOwner) -> PyResult<Py<PyAny>> {
+        let retained = self
+            .model_owners
+            .lock()
+            .map_err(|_| invalid("phase model owner custody mutex is poisoned"))?;
+        let owners = retained.as_ref().ok_or_else(|| {
+            invalid("original phase model callbacks have retired; they cannot be repeated")
+        })?;
+        Ok(match kind {
+            PhaseModelOwner::Source => &owners.source,
+            PhaseModelOwner::Execute => &owners.execute,
+            PhaseModelOwner::Restore => &owners.restore,
+            PhaseModelOwner::RetirePrivate => &owners.retire_private,
+            PhaseModelOwner::SerializeSource => &owners.serialize_source,
+            PhaseModelOwner::SerializeCandidate => &owners.serialize_candidate,
+            PhaseModelOwner::RetireSource => &owners.retire_source,
+        }
+        .clone_ref(py))
+    }
+
     fn singleton_lifecycle_material(entries: &Bound<'_, PyTuple>) -> PyResult<(Vec<u8>, Vec<u8>)> {
         if entries.len() != 1 {
             return Err(invalid(
@@ -776,14 +829,19 @@ impl PySemanticLearningPhaseTransition {
         let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
         let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
         let inputs = &self.preparation_inputs;
-        inputs.require_execution_inputs(py)?;
+        inputs.require_execution_inputs(
+            py,
+            &self.model_owner(py, PhaseModelOwner::Source)?,
+            &self.model_owner(py, PhaseModelOwner::Execute)?,
+        )?;
         let stream_values = inputs.consumer_streams.python_value(py)?;
         let consumer_streams = stream_values.bind(py);
         let streams = checkpoint_consumer_streams(consumer_streams, &mut (16 * 1024 * 1024))?;
         let initial = AuthoritySnapshot::parse(&inputs.snapshot)?;
         let prior_snapshot = &inputs.prior_snapshot;
         let scientific_owner = &self.scientific_owner;
-        let snapshot_model_state = self.source_serializer.bind(py);
+        let serializer = self.model_owner(py, PhaseModelOwner::SerializeSource)?;
+        let snapshot_model_state = serializer.bind(py);
         let refresh_snapshot = self.refresh_snapshot.bind(py);
         let learning_grant_ref = self.grant_reference.as_str();
         // Continuation has a distinct, fresh authority admission. A confirmed
@@ -803,7 +861,11 @@ impl PySemanticLearningPhaseTransition {
         self.capture_source_operation(py)?;
         // The original store callbacks can fail or change external authority.
         // Durable admission does not waive verification before execution.
-        inputs.require_execution_inputs(py)?;
+        inputs.require_execution_inputs(
+            py,
+            &self.model_owner(py, PhaseModelOwner::Source)?,
+            &self.model_owner(py, PhaseModelOwner::Execute)?,
+        )?;
         inputs.require_program(py, scientific_owner)?;
         self.require_source_operation(py)?;
         let refreshed = refresh_snapshot.call0()?;
@@ -814,7 +876,11 @@ impl PySemanticLearningPhaseTransition {
         check_learning_grant(&task, learning_grant_ref, &admitted_authority)?;
         // Refresh is external code too: recheck the retained inputs after it,
         // before marking execution entered or touching native/model state.
-        inputs.require_execution_inputs(py)?;
+        inputs.require_execution_inputs(
+            py,
+            &self.model_owner(py, PhaseModelOwner::Source)?,
+            &self.model_owner(py, PhaseModelOwner::Execute)?,
+        )?;
         inputs.require_program(py, scientific_owner)?;
         self.require_source_operation(py)?;
         // No native/model preparation is entered before the original signed
@@ -1008,7 +1074,7 @@ impl PySemanticLearningPhaseTransition {
         {
             self.execute_control_branch(py, pending)?;
             self.prepare_private_trajectory(py, pending, "real")?;
-            self.execute_private_numerical_sequence(py, "real")?;
+            self.execute_private_numerical_sequence(py, pending, "real")?;
             self.execute_private_evaluations(py, "real")?;
             self.execute_private_checkpoint(py, "real")?;
             self.retain_final_checkpoint_candidate(py)?;
@@ -1634,9 +1700,17 @@ impl PySemanticLearningPhaseTransition {
         let source_manifest = SemanticCheckpointManifest::decode(&self.source_checkpoint)?;
         verify_phase_native(py, &task, &parent, &source_manifest.native, true)?;
         {
-            let _reads = ImportReadScope::checkpoint(&source, &task, &parent, py)?;
-            let model = self.source_serializer.bind(py).call0()?;
-            require_model_bytes(&model, &source_manifest.model)?;
+            #[cfg(feature = "semantic-policy")]
+            let model = self.serialize_delivery_model(py, true)?;
+            #[cfg(not(feature = "semantic-policy"))]
+            let model = {
+                let _reads = ImportReadScope::checkpoint(&source, &task, &parent, py)?;
+                self.model_owner(py, PhaseModelOwner::SerializeSource)?
+                    .bind(py)
+                    .call0()?
+                    .unbind()
+            };
+            require_model_bytes(model.bind(py), &source_manifest.model)?;
         }
         verify_phase_native(py, &task, &parent, &source_manifest.native, true)?;
         if include_candidate {
@@ -1649,13 +1723,18 @@ impl PySemanticLearningPhaseTransition {
             let manifest = SemanticCheckpointManifest::decode(&checkpoint)?;
             verify_phase_native(py, &issued, &acquired, &manifest.native, false)?;
             {
-                let successor = candidate.session.borrow(py);
-                let _reads = ImportReadScope::checkpoint(&successor, &issued, &acquired, py)?;
-                let model = self
-                    .candidate_serializer
-                    .bind(py)
-                    .call1((candidate.model.clone_ref(py),))?;
-                require_model_bytes(&model, &manifest.model)?;
+                #[cfg(feature = "semantic-policy")]
+                let model = self.serialize_delivery_model(py, false)?;
+                #[cfg(not(feature = "semantic-policy"))]
+                let model = {
+                    let successor = candidate.session.borrow(py);
+                    let _reads = ImportReadScope::checkpoint(&successor, &issued, &acquired, py)?;
+                    self.model_owner(py, PhaseModelOwner::SerializeCandidate)?
+                        .bind(py)
+                        .call1((candidate.model.clone_ref(py),))?
+                        .unbind()
+                };
+                require_model_bytes(model.bind(py), &manifest.model)?;
             }
             verify_phase_native(py, &issued, &acquired, &manifest.native, false)?;
             issued.state()?.snapshot = snapshot.clone();
@@ -1665,8 +1744,21 @@ impl PySemanticLearningPhaseTransition {
     }
 
     fn activate(&self, py: Python<'_>) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
-        self.verify(py, true)?;
-        self.preparation_inputs.resource_observer.release(py)?;
+        #[cfg(feature = "semantic-policy")]
+        {
+            if !self.delivery_source_retirement_entered()? {
+                self.verify(py, true)?;
+            }
+            self.finish_delivery_expense(py)?;
+            // External history/store/observer calls do not extend expired
+            // authority. This cold refresh cannot read the retired source or
+            // add native/model work after the original physical interval.
+            self.refresh_delivery_authority(py)?;
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        return Err(invalid(
+            "complete learning-phase delivery requires semantic-policy",
+        ));
         let (candidate_owner, _) = self.candidate(py)?;
         let candidate = candidate_owner.borrow(py);
         let task = self.task_use.borrow(py);
@@ -1677,6 +1769,21 @@ impl PySemanticLearningPhaseTransition {
             .learning_transition
             .lock()
             .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?;
+        let mut successor_retention = successor
+            .learning_transition
+            .lock()
+            .map_err(|_| invalid("successor learning-phase retention mutex is poisoned"))?;
+        if !retention
+            .as_ref()
+            .is_some_and(|pending| std::ptr::eq(&*pending.borrow(py), self))
+            || !successor_retention
+                .as_ref()
+                .is_some_and(|pending| std::ptr::eq(&*pending.borrow(py), self))
+        {
+            return Err(invalid(
+                "delivery lost its original source or successor pending owner",
+            ));
+        }
         let mut completion = self.status_lock()?;
         let mut old = task.state()?;
         let mut new = issued.state()?;
@@ -1689,18 +1796,21 @@ impl PySemanticLearningPhaseTransition {
             TaskUsePhase::ArenaPreparing(original) => *original.clone(),
             _ => unreachable!("checked private learning successor"),
         };
-        TaskIssuance::issue(Arc::clone(&source.issuance))?;
+        // The actual source Session release already invalidated its issuance.
         old.phase = TaskUsePhase::Refused;
         new.phase = activated;
         *completion = Completion::Committed;
         source.learning_preparing.store(false, Ordering::Release);
         successor.learning_preparing.store(false, Ordering::Release);
         let retained = retention.take();
+        let retained_successor = successor_retention.take();
         drop(old);
         drop(new);
         drop(completion);
         drop(retention);
+        drop(successor_retention);
         drop(retained);
+        drop(retained_successor);
         Ok(candidate_owner.clone_ref(py))
     }
 
@@ -1745,7 +1855,8 @@ impl PySemanticLearningPhaseTransition {
         // nor a false durable-absence response authorizes a second retirement.
         *self.status_lock()? = Completion::RetirementUnknown;
         let model = candidate_owner.borrow(py).model.clone_ref(py);
-        let result = self.retire_restored_model.bind(py).call1((model,))?;
+        let callback = self.model_owner(py, PhaseModelOwner::RetirePrivate)?;
+        let result = callback.bind(py).call1((model,))?;
         if !result.is_none() {
             return Err(invalid(
                 "original model retirement must return None after known consumer release",
@@ -1973,6 +2084,12 @@ impl PySemanticLearningPhaseTransition {
             Completion::Prepared => return Ok(None),
             _ => return Err(invalid("only an unknown phase checkpoint needs resolution")),
         };
+        if readback_observed {
+            // The original Q is already durably known. Resolve only the retained
+            // delivery report/record; source retirement cannot undo that fact or
+            // authorize another publication callback.
+            return self.activate(py).map(Some);
+        }
         let (_, checkpoint) = self.candidate(py)?;
         let result = resolve.bind(py).call1((
             &self.destination,
@@ -1982,11 +2099,6 @@ impl PySemanticLearningPhaseTransition {
             return Ok(None);
         }
         if result.is_exact_instance_of::<PyBool>() && !result.extract::<bool>()? {
-            if readback_observed {
-                return Err(invalid(
-                    "phase resolver contradicted the original exact durable readback; retain the same pending owners",
-                ));
-            }
             self.abandon(py)?;
             return Ok(None);
         }
@@ -2084,7 +2196,7 @@ impl PySemanticLearningPhaseTransition {
                 pending
                     .execute_control_branch(py, &slf)
                     .and_then(|()| pending.prepare_private_trajectory(py, &slf, "real"))
-                    .and_then(|()| pending.execute_private_numerical_sequence(py, "real"))
+                    .and_then(|()| pending.execute_private_numerical_sequence(py, &slf, "real"))
                     .and_then(|()| pending.execute_private_evaluations(py, "real"))
                     .and_then(|()| pending.execute_private_checkpoint(py, "real"))
                     .and_then(|()| pending.retain_final_checkpoint_candidate(py))
@@ -2142,7 +2254,7 @@ impl PySemanticTransitionController {
     #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner,
         source_model, execute_phase_instruction, resource_observer, feedback_interventions,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
-        snapshot_restored_model, retire_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, cold_model_work_capacity, resolve_checkpoint=None,
+        snapshot_restored_model, retire_restored_model, retire_source_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, cold_model_work_capacity, resolve_checkpoint=None,
         max_checkpoint_bytes=None, max_total_checkpoint_bytes=None))]
     #[expect(
         clippy::too_many_arguments,
@@ -2168,6 +2280,7 @@ impl PySemanticTransitionController {
         restore_model: &Bound<'_, PyAny>,
         snapshot_restored_model: &Bound<'_, PyAny>,
         retire_restored_model: &Bound<'_, PyAny>,
+        retire_source_model: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
         phase_record_owner: Py<PyAny>,
         phase_record_limits: &Bound<'_, PyAny>,
@@ -2234,6 +2347,7 @@ impl PySemanticTransitionController {
             || !restore_model.is_callable()
             || !snapshot_restored_model.is_callable()
             || !retire_restored_model.is_callable()
+            || !retire_source_model.is_callable()
             || !refresh_snapshot.is_callable()
         {
             return Err(invalid(
@@ -2295,8 +2409,6 @@ impl PySemanticTransitionController {
             ));
         }
         let preparation_inputs = PreparationInputs {
-            source_model,
-            execute_phase_instruction: execute_phase_instruction.clone().unbind(),
             resource_observer,
             feedback_interventions: feedback_interventions.cast::<PyTuple>()?.clone().unbind(),
             consumer_streams: ColdValue::read(consumer_streams, &mut (16 * 1024 * 1024), 0)?,
@@ -2327,10 +2439,15 @@ impl PySemanticTransitionController {
                 accept_learning_phase: accept_learning_phase.unbind(),
                 scientific_acceptance: Mutex::new(None),
                 recipe: recipe.clone_ref(py),
-                restore_model: restore_model.clone().unbind(),
-                retire_restored_model: retire_restored_model.clone().unbind(),
-                source_serializer: snapshot_model_state.clone().unbind(),
-                candidate_serializer: snapshot_restored_model.clone().unbind(),
+                model_owners: Mutex::new(Some(PhaseModelOwners {
+                    source: source_model,
+                    execute: execute_phase_instruction.clone().unbind(),
+                    restore: restore_model.clone().unbind(),
+                    retire_private: retire_restored_model.clone().unbind(),
+                    serialize_source: snapshot_model_state.clone().unbind(),
+                    serialize_candidate: snapshot_restored_model.clone().unbind(),
+                    retire_source: retire_source_model.clone().unbind(),
+                })),
                 refresh_snapshot: refresh_snapshot.clone().unbind(),
                 grant_reference: learning_grant_ref.to_owned(),
                 destination: checkpoint_destination.to_owned(),
@@ -2355,7 +2472,13 @@ impl PySemanticTransitionController {
                 #[cfg(feature = "semantic-policy")]
                 control_retirement: Mutex::new(None),
                 #[cfg(feature = "semantic-policy")]
+                delivery_expense: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
                 private_trajectory_start: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                intermediate_restore: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                intermediate_snapshot_active: AtomicBool::new(false),
                 #[cfg(feature = "semantic-policy")]
                 private_execution: Mutex::new(None),
                 #[cfg(feature = "semantic-policy")]

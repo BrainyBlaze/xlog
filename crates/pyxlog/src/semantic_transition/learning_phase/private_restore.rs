@@ -30,8 +30,47 @@ pub(super) struct PrivateTrajectoryStart {
 }
 
 impl PySemanticLearningPhaseTransition {
-    pub(super) fn drop_retired_control_restore_owners(&self) -> PyResult<()> {
-        let original = self.trajectory_start()?.take();
+    pub(super) fn drop_completed_private_restore_owners(
+        &self,
+        branch: &'static str,
+    ) -> PyResult<()> {
+        let original = {
+            let mut retained = self.trajectory_start()?;
+            if retained.as_ref().is_some_and(|entry| {
+                entry.branch != branch
+                    || !entry.recorded
+                    || !entry.released
+                    || !entry.child_joined
+                    || entry.restore_error.is_some()
+            }) {
+                return Err(invalid(
+                    "model retirement cannot discard an unfinished private restore",
+                ));
+            }
+            retained.take()
+        };
+        drop(original);
+        self.drop_completed_intermediate_restore(branch)?;
+        Ok(())
+    }
+
+    pub(super) fn drop_completed_trajectory_model_references(&self) -> PyResult<()> {
+        let original = {
+            let mut retained = self.trajectory_start()?;
+            let original = retained
+                .as_mut()
+                .ok_or_else(|| invalid("intermediate restore lost its original trajectory"))?;
+            if !original.recorded
+                || !original.released
+                || !original.child_joined
+                || original.restore_error.is_some()
+            {
+                return Err(invalid(
+                    "intermediate restore cannot discard an unfinished trajectory",
+                ));
+            }
+            (original.restored.take(), original.callback_work.take())
+        };
         drop(original);
         Ok(())
     }
@@ -211,6 +250,9 @@ impl PySemanticLearningPhaseTransition {
         checkpoint: &[u8],
         transition: Option<&SemanticLearningPhaseTransition>,
     ) -> PyResult<()> {
+        if self.intermediate_restore_pending()? {
+            return self.require_intermediate_restore_admission(py, checkpoint, transition);
+        }
         self.records()?.require_preparation_admission()?;
         self.preparation_inputs
             .require_program(py, &self.scientific_owner)?;
@@ -237,6 +279,9 @@ impl PySemanticLearningPhaseTransition {
         &self,
         py: Python<'_>,
     ) -> PyResult<SemanticColdNativeWork> {
+        if self.intermediate_restore_pending()? {
+            return self.intermediate_restore_native_work(py);
+        }
         let work = self
             .trajectory_start()?
             .as_ref()
@@ -256,6 +301,9 @@ impl PySemanticLearningPhaseTransition {
         py: Python<'_>,
         parent: &Py<PySemanticPublishedParent>,
     ) -> PyResult<Py<PySemanticColdModelWork>> {
+        if self.intermediate_restore_pending()? {
+            return self.intermediate_factory_work(py, parent);
+        }
         self.require_private_restore_admission(py, &self.source_checkpoint, None)?;
         {
             let retained = self.private_restore()?;
@@ -317,18 +365,23 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         drop(retained);
-        let original = self
-            .trajectory_start()?
-            .as_ref()
-            .and_then(|operation| {
+        let intermediate = self.intermediate_feedback_work(py)?;
+        let (branch, original) = if let Some(original) = intermediate {
+            original
+        } else {
+            let retained = self.trajectory_start()?;
+            let operation = retained.as_ref().expect("original private trajectory");
+            (
+                operation.branch,
                 operation
                     .callback_work
                     .as_ref()
-                    .map(|work| work.clone_ref(py))
-            })
-            .ok_or_else(|| {
-                invalid("private feedback lacks its original model factory registrar")
-            })?;
+                    .ok_or_else(|| {
+                        invalid("private feedback lacks its original model factory registrar")
+                    })?
+                    .clone_ref(py),
+            )
+        };
         original.borrow(py).check(py)?;
         let materials = feedback_materials(
             self.preparation_inputs
@@ -336,11 +389,6 @@ impl PySemanticLearningPhaseTransition {
                 .bind(py)
                 .as_any(),
         )?;
-        let retained = self.trajectory_start()?;
-        let branch = retained
-            .as_ref()
-            .expect("original private trajectory")
-            .branch;
         // Preserve the actual frozen intervention: real uses the original
         // feedback tensor; control executes the existing positive-zero path.
         let (material, enabled) = match branch {
@@ -358,6 +406,15 @@ impl PySemanticLearningPhaseTransition {
         branch: &'static str,
     ) -> PyResult<()> {
         self.capture_private_trajectory(py, branch)?;
+        if self
+            .trajectory_start()?
+            .as_ref()
+            .is_some_and(|original| original.recorded && original.released)
+        {
+            // The initial scientific record remains immutable after an
+            // intermediate retirement drops its superseded model references.
+            return self.require_completed_trajectory_budget();
+        }
         let (started, entered, restored, error, ordinal) = {
             let retained = self.trajectory_start()?;
             let operation = retained.as_ref().expect("retained original trajectory");
@@ -425,7 +482,7 @@ impl PySemanticLearningPhaseTransition {
                 self.trajectory_start()?.as_mut().expect("retained original trajectory").restore_entered = true;
                 let result = PySemanticTransitionSession::restore_checkpoint_impl(
                     py, checkpoint.as_any(), self.source.borrow(py).device_ordinal, &snapshot,
-                    self.restore_model.bind(py), domain.bind(py), None, None,
+                    self.model_owner(py, PhaseModelOwner::Restore)?.bind(py), domain.bind(py), None, None,
                     self.preparation_inputs.resolve_checkpoint.as_ref().map(|callback| callback.bind(py)),
                     checkpoint_limit.as_ref().map(|value| value.bind(py)),
                     total_limit.as_ref().map(|value| value.bind(py)), Some(self.refresh_snapshot.bind(py)),
@@ -649,6 +706,9 @@ impl PySemanticLearningPhaseTransition {
     }
 
     pub(super) fn require_known_private_restore(&self, py: Python<'_>) -> PyResult<()> {
+        if self.intermediate_restore_retained()? {
+            return self.require_intermediate_continuation(py);
+        }
         self.records()?.require_preparation_admission()?;
         self.require_trajectory_entry(py)?;
         let retained = self.trajectory_start()?;
@@ -669,6 +729,9 @@ impl PySemanticLearningPhaseTransition {
         py: Python<'_>,
         branch: &'static str,
     ) -> PyResult<(Py<PySemanticTransitionRestoredCheckpoint>, u64)> {
+        if let Some(input) = self.intermediate_execution_input(py, branch)? {
+            return Ok(input);
+        }
         self.require_known_private_restore(py)?;
         let retained = self.trajectory_start()?;
         let operation = retained.as_ref().expect("retained original trajectory");
@@ -693,5 +756,29 @@ impl PySemanticLearningPhaseTransition {
                 .checked_add(1)
                 .ok_or_else(|| invalid("private execution position overflowed"))?,
         ))
+    }
+
+    fn require_completed_trajectory_budget(&self) -> PyResult<()> {
+        let retained = self.trajectory_start()?;
+        let original = retained.as_ref().expect("original completed trajectory");
+        let report = original
+            .report
+            .ok_or_else(|| invalid("completed trajectory lost its original report"))?;
+        let work = report
+            .native_work
+            .checked_add(report.model_work)
+            .ok_or_else(|| invalid("trajectory work overflowed"))?;
+        let peak = original
+            .physical_peak
+            .ok_or_else(|| invalid("completed trajectory lost its original physical peak"))?;
+        if work > original.budget[0]
+            || peak > original.budget[1]
+            || report.model_calls > original.budget[2]
+        {
+            return Err(invalid(
+                "original trajectory exceeded its recorded operation budget",
+            ));
+        }
+        Ok(())
     }
 }

@@ -12,6 +12,7 @@ const RECORD_OVERHEAD: usize = RECORD_DOMAIN.len() + 1 + 32 + 32 + 8 + 32 + 8 + 
 pub(super) enum RecordKind {
     Admission = 0,
     PreparationOutcome = 1,
+    Delivery = 2,
 }
 
 #[derive(Clone, Copy)]
@@ -57,7 +58,7 @@ impl RecordLimits {
 }
 
 pub(super) struct RecordAttempt {
-    kind: RecordKind,
+    pub(super) kind: RecordKind,
     pub(super) ordinal: u64,
     pub(super) bytes: Arc<[u8]>,
     pub(super) digest: [u8; 32],
@@ -74,6 +75,7 @@ pub(super) struct PhaseRecords {
     pub(super) issuer_pinned: bool,
     pub(super) pin_attempted: bool,
     pub(super) preparation_outcome_known: bool,
+    pub(super) delivery_known: bool,
     ordinal: u64,
     total_bytes: u64,
     previous: [u8; 32],
@@ -101,16 +103,17 @@ impl PhaseRecords {
         let admission_bytes = input_bytes
             .and_then(|input_bytes| input_bytes.checked_add(RECORD_OVERHEAD as u64))
             .ok_or_else(|| invalid("phase admission record size overflowed"))?;
-        // Reserve a complete outcome slot before admission. An oversized actual
-        // outcome cannot authorize publication or free the original owners.
-        if limits.records < 2
+        // Reserve both complete outcomes before admission. The caller's original
+        // bounds are never enlarged after model work or source retirement.
+        if limits.records < 3
             || admission_bytes > limits.record_bytes
             || admission_bytes
                 .checked_add(limits.record_bytes)
+                .and_then(|required| required.checked_add(limits.record_bytes))
                 .is_none_or(|required| required > limits.total_bytes)
         {
             return Err(invalid(
-                "phase record bounds cannot retain the full initial admission and its complete preparation outcome",
+                "phase record bounds cannot retain the full admission, preparation outcome and delivery",
             ));
         }
         let mut inputs = INPUT_DOMAIN.to_vec();
@@ -125,6 +128,7 @@ impl PhaseRecords {
             issuer_pinned: false,
             pin_attempted: false,
             preparation_outcome_known: false,
+            delivery_known: false,
             ordinal: 0,
             total_bytes: 0,
             previous: [0; 32],
@@ -201,6 +205,18 @@ impl PhaseRecords {
         if self.ordinal >= self.limits.records {
             return Err(invalid("original phase record count is exhausted"));
         }
+        let ordered = match kind {
+            RecordKind::Admission => self.ordinal == 0 && self.admission.is_none(),
+            RecordKind::PreparationOutcome => self.ordinal == 1 && self.admission.is_some(),
+            RecordKind::Delivery => {
+                self.ordinal == 2 && self.preparation_outcome_known && !self.delivery_known
+            }
+        };
+        if !ordered {
+            return Err(invalid(
+                "phase record changed its original signed lifecycle order",
+            ));
+        }
         let total = self.check_payload_length(payload.len())?;
         let mut bytes = RECORD_DOMAIN.to_vec();
         bytes.push(kind as u8);
@@ -263,6 +279,7 @@ impl PhaseRecords {
         match attempt.kind {
             RecordKind::Admission => self.admission = Some(Arc::clone(&attempt.bytes)),
             RecordKind::PreparationOutcome => self.preparation_outcome_known = true,
+            RecordKind::Delivery => self.delivery_known = true,
         }
         self.attempt = None;
         Ok(())

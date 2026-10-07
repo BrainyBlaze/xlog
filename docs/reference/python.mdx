@@ -491,7 +491,8 @@ conflicting effects on aliases refuse the entire private candidate.
 consumer_streams, snapshot, scientific_owner, source_model, execute_phase_instruction,
 resource_observer, feedback_interventions, learning_grant_ref,
 checkpoint_destination, snapshot_model_state, restore_model,
-snapshot_restored_model, retire_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits,
+snapshot_restored_model, retire_restored_model, retire_source_model,
+refresh_snapshot, phase_record_owner, phase_record_limits,
 frozen_program_bytes)` takes the exact builtin full
 `source_checkpoint` bytes already used by the original scientific owner. It
 quiesces the successful recompute parent and verifies the supplied native state,
@@ -759,6 +760,53 @@ against the supplied checkpoint; it does not create a replacement source.
 These callbacks execute cold, on the creator thread, outside native/task locks.
 Both model snapshots and native banks are checked again before any handoff.
 
+`retire_source_model(source_model, final_handoff) -> None` is mandatory and
+captured with the original model callbacks before admission. Native calls it once
+with the exact source model and actual final selected private owners, after exact
+durable readback of the accepted checkpoint. The original Runtime must join and
+release its source reader and use its application-owned cleanup hook to drop all
+source model references held by the Runtime, Worker, store and preparation
+closures. The hook cannot adopt the private candidate, replace the original
+pending or discard its recovery fence. Native then verifies actual source
+retirement, drops completed model-bearing frames and callbacks outside their
+mutexes, and releases the full original native Session. An uncertain callback,
+region end or native release retains the same pending without retry or source
+continuation.
+
+The sole original delivery interval begins before the first late native check
+following the complete real checkpoint. Its final candidate reader holds one
+report, shared native tally, eight original model-verification regions and one
+source-cleanup region. The same ordinal and whole-operation work, memory and
+call limits cover pre-acceptance verification, preparation-outcome verification,
+commit verification, activation verification and actual source retirement. No
+continuation resets that report or repeats an entered model callback. Native
+finishes the whole report and original physical observer only after known cleanup
+and the last candidate native verification. It records actual delivery history
+and obtains exact signed delivery readback before releasing the observer or
+making the candidate runnable. Budget excess preserves actual measured history
+and the already known checkpoint without activating the candidate.
+
+Each original intermediate `restore` uses the captured lifecycle decoder's
+`("restore", "current", recipe_or_none)` projection. Native saves the actual
+selected full checkpoint through the same controller, retires that private
+model and Session, and restores the saved checkpoint through the same canonical
+constructor and captured factory. The original coordinating owner and Worker
+remain; the retired private Runtime is never resumed. A supplied immutable
+`SemanticLearningPhaseRecipe` receives the original signed Admission; `None`
+preserves the current state and grants no inferred fold or reset.
+
+One original resource interval and shared native tally cover both full snapshots,
+old-model retirement, native deallocation and the next actual construction.
+Four ordered, single-attempt model regions cover the current snapshot,
+retirement, factory and restored snapshot. The original `record_restore` receives
+both full checkpoints, actual old/new publication identities and measured usage.
+Only known report, history, budget and observer release allow the next original
+numerical group to consume that new private handoff. The decoder, serializer,
+retirement callback and factory cannot be replayed after an unknown outcome.
+Initial, consecutive and later intermediate restores retain the same branch and
+original ordinals; real feedback and control positive-zero remain distinct.
+Subsequent full Recompute and fresh evaluations are still required.
+
 `retire_restored_model(returned_model) -> None` is the original model/runtime
 owner's mandatory retirement callback, retained before the factory is entered.
 Abandonment calls it once with the exact factory model while source use is still
@@ -797,8 +845,10 @@ the explicit tuple `phase_record_limits=(max_record_bytes, max_total_record_byte
 max_records)` from its original run document. There are no default limits. Native
 requires `0 < max_record_bytes <= max_total_record_bytes <= sys.maxsize` and
 `0 < max_records <= sys.maxsize`, checks the complete initial record before copying
-its payload, and reserves a complete bounded preparation-outcome slot before
-admission. These storage bounds are not checkpoint-source limits, learning rights,
+its payload, and reserves two complete bounded outcome slots before admission:
+preparation and delivery. The original count must be at least three, and the total
+must hold the initial admission plus twice `max_record_bytes`. Native never
+enlarges these original limits. These storage bounds are not checkpoint-source limits, learning rights,
 or whole-execution resource accounting.
 
 Native binds the original complete source checkpoint, `frozen_program_bytes`, full
@@ -830,7 +880,15 @@ The native owner captures these original callables once, before model or prepara
 callbacks. Before entering preparation it requires the independent issuer readback
 and exact readback of ordinal 0, the full signed admission. Ordinal 1 is the signed
 preparation outcome containing the actual complete candidate checkpoint and the
-scientific owner's full `history_bytes`. Each record binds its phase ID, issuer,
+scientific owner's completed-prefix `history_bytes`. Ordinal 2, kind 2, is the
+signed delivery in the same `xlog.learning-phase.record.v1` chain. Its payload
+starts with `xlog.learning-phase.delivery.v1` followed by a zero byte and six
+U64-little-endian-length-prefixed fields in order: unchanged full checkpoint,
+full history including actual delivery, original canonical delivery entry,
+canonical final published-parent identity, verified fresh authority snapshot,
+and three U64-little-endian resource values `(work, physical_peak, model_calls)`.
+The acceptance's prefix and checkpoint are not rewritten to include this later
+observation. Each record binds its phase ID, issuer,
 ordinal, predecessor digest, cumulative serialized bytes and immutable limits.
 The signature covers the complete versioned record, not merely its payload digest.
 Exact readback is verified against the original native key before progress advances.
@@ -846,6 +904,13 @@ or resume the source. Only exact readback of the retained full preparation outco
 can restore `prepared`; `None` remains unknown and early `False` never proves
 nonexecution. The public pending owner has no separate phase-record resolver.
 The store's `resolve_phase_record` callback is unchanged.
+Once exact checkpoint readback is known, resolution proceeds directly to the
+original delivery report and any original signed delivery write. It does not
+re-resolve or undo checkpoint publication, repeat source serializers or cleanup,
+resubmit a signed write, or repeat physical finish or release. A signed delivery
+record is not a fresh-process recovery loader or proof of full GPU execution;
+terminal refusal and whole-path runtime qualification
+remain separate required capabilities.
 
 For the same live pending, `pending.continue_preparation()` is a separate deliberate
 action, not part of resolution. Native permits it only after exact readback of the
