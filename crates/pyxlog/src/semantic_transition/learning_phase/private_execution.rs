@@ -13,6 +13,7 @@ enum PrivateColdRole {
 }
 
 pub(super) struct PrivateExecutionGroup {
+    previous: Option<Box<PrivateExecutionGroup>>,
     branch: &'static str,
     entries: Py<PyTuple>,
     materials: Vec<Vec<u8>>,
@@ -123,7 +124,7 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
-    pub(super) fn private_evaluation_input(
+    pub(super) fn private_group_successor_input(
         &self,
         py: Python<'_>,
         branch: &'static str,
@@ -841,10 +842,60 @@ impl PySemanticLearningPhaseTransition {
         Ok((material, enabled).into_pyobject(py)?.unbind())
     }
 
-    pub(super) fn execute_private_group(
+    pub(super) fn execute_private_numerical_sequence(
         &self,
         py: Python<'_>,
         branch: &'static str,
+    ) -> PyResult<()> {
+        self.execute_private_group(py, branch, None)?;
+        loop {
+            self.preparation_inputs
+                .require_program(py, &self.scientific_owner)?;
+            let next = self.scientific_owner.bind(py).getattr("next_operation")?;
+            if !next.is_exact_instance_of::<PyTuple>() || next.cast::<PyTuple>()?.is_empty() {
+                return Err(invalid(
+                    "private numerical sequence lost its original next group",
+                ));
+            }
+            let entries = next.cast::<PyTuple>()?;
+            let first = PyTuple::new(py, [entries.get_item(0)?])?;
+            let (material, _) = Self::singleton_lifecycle_material(&first)?;
+            let material = ColdValue::from_canonical_bytes(&material)?;
+            let fields = material.fields(6)?;
+            if fields[1].text()? != branch {
+                return Err(invalid(
+                    "private numerical sequence changed its original branch",
+                ));
+            }
+            if !matches!(fields[0].text()?, "proposal" | "update" | "recompute") {
+                // The original lifecycle executor, never a shortened numerical
+                // roster, must consume an evaluation or intermediate restore.
+                return Ok(());
+            }
+            let (selected, ordinal) = self.private_group_successor_input(py, branch)?;
+            if fields[2].unsigned()? != ordinal || fields[3].unsigned()? != 0 {
+                return Err(invalid(
+                    "private numerical sequence changed its contiguous original group position",
+                ));
+            }
+            let session = selected.parent.borrow(py).session.clone_ref(py);
+            let successor = PySemanticTransitionRestoredCheckpoint::issue(
+                py,
+                session,
+                selected.controller,
+                selected.task,
+                selected.parent,
+                selected.model,
+            )?;
+            self.execute_private_group(py, branch, Some((successor, ordinal)))?;
+        }
+    }
+
+    fn execute_private_group(
+        &self,
+        py: Python<'_>,
+        branch: &'static str,
+        input: Option<(Py<PySemanticTransitionRestoredCheckpoint>, u64)>,
     ) -> PyResult<()> {
         if self
             .private_group()?
@@ -855,8 +906,27 @@ impl PySemanticLearningPhaseTransition {
                 "private execution cannot replace its original branch group",
             ));
         }
-        if self.private_group()?.is_none() {
-            let (restored, ordinal) = self.private_execution_input(py, branch)?;
+        if let Some((_, ordinal)) = &input {
+            let retained = self.private_group()?;
+            let original = retained
+                .as_ref()
+                .ok_or_else(|| invalid("private successor lost its original completed group"))?;
+            if original.records_completed != original.kinds.len()
+                || !original.records_released
+                || original.budget_exceeded
+                || original.callback_error.is_some()
+                || original.ordinal.checked_add(original.kinds.len() as u64) != Some(*ordinal)
+            {
+                return Err(invalid(
+                    "private successor cannot replace unfinished, refused or unknown original work",
+                ));
+            }
+        }
+        if self.private_group()?.is_none() || input.is_some() {
+            let (restored, ordinal) = match input {
+                Some(input) => input,
+                None => self.private_execution_input(py, branch)?,
+            };
             self.preparation_inputs
                 .require_program(py, &self.scientific_owner)?;
             let next = self.scientific_owner.bind(py).getattr("next_operation")?;
@@ -905,7 +975,11 @@ impl PySemanticLearningPhaseTransition {
                 kinds.push(kind);
                 original_instruction = Some(instruction);
             }
+            // Retain the completed predecessor until the new original physical
+            // interval and shared native tally cover destruction of its owners.
+            let previous = self.private_group()?.take().map(Box::new);
             *self.private_group()? = Some(PrivateExecutionGroup {
+                previous,
                 branch,
                 entries: entries.clone().unbind(),
                 materials,
@@ -1015,6 +1089,15 @@ impl PySemanticLearningPhaseTransition {
                 .owner()?
                 .attach_shared_cold_native_work(&*child.parent.borrow(py).lease()?, custody)
                 .map_err(xlog_err)?;
+            let previous = self
+                .private_group()?
+                .as_mut()
+                .expect("retained successor group")
+                .previous
+                .take();
+            // Original Python finalizers and native deallocations run outside
+            // every phase mutex, inside this group's actual preparation interval.
+            drop(previous);
             self.private_group()?
                 .as_mut()
                 .expect("retained original group")
