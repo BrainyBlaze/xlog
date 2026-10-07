@@ -1587,6 +1587,13 @@ impl PySemanticTransitionSession {
         if !checkpoint.is_exact_instance_of::<PyBytes>() {
             return Err(invalid("checkpoint restore requires exact builtin bytes"));
         }
+        if let (Some(transition), Some(pending)) = (learning_transition, learning_owner) {
+            pending.borrow(py).require_restore_admission(
+                py,
+                checkpoint.cast::<PyBytes>()?.as_bytes(),
+                transition,
+            )?;
+        }
         if !restore_model.is_callable() {
             return Err(invalid(
                 "checkpoint restore requires one trusted model factory",

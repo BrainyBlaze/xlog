@@ -7627,7 +7627,7 @@ impl PublicationMaterial {
     fn encode(&self) -> Result<Vec<u8>, SemanticTransitionError> {
         self.validate()?;
         let mut bytes = b"XLOG-PUBLICATION-MATERIAL\0".to_vec();
-        material_u32(&mut bytes, 2);
+        material_u32(&mut bytes, 3);
         bytes.extend_from_slice(&publication_material_runtime());
         material_bytes(
             &mut bytes,
@@ -7682,7 +7682,7 @@ impl PublicationMaterial {
         let mut reader = SemanticMaterialReader::new(bytes);
         if reader.take(26).map_err(SemanticTransitionError::Semantic)?
             != b"XLOG-PUBLICATION-MATERIAL\0"
-            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 2
+            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 3
             || reader.take(32).map_err(SemanticTransitionError::Semantic)?
                 != publication_material_runtime()
         {

@@ -132,7 +132,7 @@ impl PySemanticLearningPhaseRecipe {
                 phase_index,
                 completed_updates_index,
                 recipe,
-                acceptance: Vec::new(),
+                admission: Vec::new(),
             },
         })
     }
@@ -208,6 +208,15 @@ struct PreparedCandidate {
     owner: Option<Py<PySemanticTransitionRestoredCheckpoint>>,
     checkpoint: Arc<[u8]>,
     preparation_outcome: Option<Arc<[u8]>>,
+}
+
+/// An immutable scientific call boundary. Even an exception is an entered
+/// attempt, not permission to repeat the original owner's comparison.
+struct ScientificAcceptance {
+    checkpoint: Arc<[u8]>,
+    history: Arc<[u8]>,
+    result: Option<Py<PyAny>>,
+    error: Option<PyErr>,
 }
 
 /// Immutable inputs retained before the first external issuer/store callback.
@@ -322,6 +331,8 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     private_restore: Mutex<Option<PrivateRestoreOwners>>,
     source_checkpoint: Vec<u8>,
     scientific_owner: Py<PyAny>,
+    accept_learning_phase: Py<PyAny>,
+    scientific_acceptance: Mutex<Option<ScientificAcceptance>>,
     recipe: Py<PySemanticLearningPhaseRecipe>,
     restore_model: Py<PyAny>,
     retire_restored_model: Py<PyAny>,
@@ -461,22 +472,22 @@ fn verify_original_source(
 }
 
 impl PySemanticLearningPhaseTransition {
-    fn source_entry_material(entries: &Bound<'_, PyTuple>) -> PyResult<(Vec<u8>, Vec<u8>)> {
+    fn singleton_lifecycle_material(entries: &Bound<'_, PyTuple>) -> PyResult<(Vec<u8>, Vec<u8>)> {
         if entries.len() != 1 {
             return Err(invalid(
-                "source preparation changed its original complete group",
+                "phase lifecycle changed its original singleton group",
             ));
         }
         let entry = entries.get_item(0)?;
         if !entry.is_exact_instance_of::<PyDict>() {
             return Err(invalid(
-                "source preparation changed its original exact scheduled entry",
+                "phase lifecycle changed its original exact scheduled entry",
             ));
         }
         let entry = entry.cast::<PyDict>()?;
         if entry.len() != 7 {
             return Err(invalid(
-                "source preparation changed its original scheduled fields",
+                "phase lifecycle changed its original scheduled fields",
             ));
         }
         for (key, _) in entry.iter() {
@@ -493,7 +504,7 @@ impl PySemanticLearningPhaseTransition {
                 .contains(&key.cast::<PyString>()?.to_str()?)
             {
                 return Err(invalid(
-                    "source preparation changed its original exact scheduled keys",
+                    "phase lifecycle changed its original exact scheduled keys",
                 ));
             }
         }
@@ -509,16 +520,16 @@ impl PySemanticLearningPhaseTransition {
         .map(|name| {
             let value = entry
                 .get_item(name)?
-                .ok_or_else(|| invalid("source preparation lost an original scheduled field"))?;
+                .ok_or_else(|| invalid("phase lifecycle lost an original scheduled field"))?;
             ColdValue::read(&value, &mut (16 * 1024 * 1024), 0)
         })
         .collect::<PyResult<Vec<_>>>()?;
         let instruction = entry
             .get_item("instruction")?
-            .ok_or_else(|| invalid("source preparation lost its original instruction bytes"))?;
+            .ok_or_else(|| invalid("phase lifecycle lost its original instruction bytes"))?;
         if !instruction.is_exact_instance_of::<PyBytes>() {
             return Err(invalid(
-                "source preparation changed its original exact instruction bytes",
+                "phase lifecycle changed its original exact instruction bytes",
             ));
         }
         Ok((
@@ -565,7 +576,7 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         let entry = entry.cast::<PyDict>()?;
-        let (material, instruction_material) = Self::source_entry_material(entries)?;
+        let (material, instruction_material) = Self::singleton_lifecycle_material(entries)?;
         let field = |name| -> PyResult<ColdValue> {
             let value = entry
                 .get_item(name)?
@@ -652,7 +663,7 @@ impl PySemanticLearningPhaseTransition {
         let source = retained
             .as_ref()
             .ok_or_else(|| invalid("source preparation lost its original scheduled group"))?;
-        let (material, instruction) = Self::source_entry_material(source.entries.bind(py))?;
+        let (material, instruction) = Self::singleton_lifecycle_material(source.entries.bind(py))?;
         if source.decoded.is_none()
             || !source.decoded_verified
             || material != source.entry_material
@@ -689,20 +700,15 @@ impl PySemanticLearningPhaseTransition {
         let stream_values = inputs.consumer_streams.python_value(py)?;
         let consumer_streams = stream_values.bind(py);
         let streams = checkpoint_consumer_streams(consumer_streams, &mut (16 * 1024 * 1024))?;
-        let snapshot_value = inputs.snapshot.python_value(py)?;
-        let snapshot = snapshot_value.bind(py);
         let initial = AuthoritySnapshot::parse(&inputs.snapshot)?;
         let prior_snapshot = &inputs.prior_snapshot;
-        let grant_value = &inputs.grant;
         let scientific_owner = &self.scientific_owner;
         let recipe = &self.recipe;
-        let parent = &self.parent;
         let snapshot_model_state = self.source_serializer.bind(py);
         let snapshot_restored_model = self.candidate_serializer.bind(py);
         let restore_model = self.restore_model.bind(py);
         let refresh_snapshot = self.refresh_snapshot.bind(py);
         let learning_grant_ref = self.grant_reference.as_str();
-        let checkpoint_destination = self.destination.as_str();
         let resolve_checkpoint = inputs
             .resolve_checkpoint
             .as_ref()
@@ -814,42 +820,10 @@ impl PySemanticLearningPhaseTransition {
         }
         self.candidate_entered.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| invalid("private candidate preparation has already entered execution; retain its original outcome"))?;
-        let acceptance = scientific_owner.bind(py).getattr("accept_learning_phase")?;
-        if !acceptance.is_callable() {
-            return Err(invalid(
-                "phase preparation requires the original scientific acceptance owner",
-            ));
-        }
-        let accepted = acceptance.call1((
-            parent.clone_ref(py),
-            recipe.clone_ref(py),
-            source_checkpoint,
-            grant_value.python_value(py)?,
-            checkpoint_destination,
-            snapshot,
-        ))?;
-        if !accepted.is_exact_instance_of::<PyBytes>()
-            || accepted.cast::<PyBytes>()?.as_bytes().is_empty()
-        {
-            return Err(invalid(
-                "scientific owner must return its complete original accepted criteria and result, not an acceptance flag",
-            ));
-        }
         let mut transition = recipe.borrow(py).inner.clone();
-        let mut retained = b"xlog.learning-phase.acceptance.v1\0".to_vec();
-        retained.extend_from_slice(&Sha256::digest(checkpoint));
-        retained.extend_from_slice(transition.recipe_digest().as_bytes());
-        for bytes in [
-            task.authority.canonical.as_slice(),
-            grant_value.canonical_bytes().as_slice(),
-            initial.canonical.as_slice(),
-            checkpoint_destination.as_bytes(),
-            accepted.cast::<PyBytes>()?.as_bytes(),
-        ] {
-            retained.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-            retained.extend_from_slice(bytes);
-        }
-        transition.acceptance = retained;
+        // Private state changes consume the actual native Admission, not an
+        // early scientific success or a fabricated acceptance preimage.
+        transition.admission = self.records()?.confirmed_admission()?.to_vec();
         let fresh = refresh_snapshot.call0()?;
         let current =
             AuthoritySnapshot::parse(&ColdValue::read(&fresh, &mut (16 * 1024 * 1024), 0)?)?;
@@ -903,33 +877,6 @@ impl PySemanticLearningPhaseTransition {
                 checkpoint: checkpoint.into(),
                 preparation_outcome: None,
             });
-        let history = scientific_owner.bind(py).getattr("history_bytes")?;
-        if !history.is_exact_instance_of::<PyBytes>() {
-            return Err(invalid(
-                "phase preparation outcome requires the original complete scientific history bytes",
-            ));
-        }
-        let (_, checkpoint) = self.candidate(py)?;
-        let outcome_length = checkpoint
-            .len()
-            .checked_add(history.cast::<PyBytes>()?.as_bytes().len())
-            .and_then(|length| length.checked_add(16))
-            .ok_or_else(|| invalid("complete phase preparation outcome size overflowed"))?;
-        self.records()?.check_payload_length(outcome_length)?;
-        let mut outcome = Vec::new();
-        for material in [checkpoint.as_ref(), history.cast::<PyBytes>()?.as_bytes()] {
-            outcome.extend_from_slice(&(material.len() as u64).to_le_bytes());
-            outcome.extend_from_slice(material);
-        }
-        // The canonical save has returned the complete original candidate.
-        // Freeze its outcome before fallible fresh-authority verification; a
-        // late cold failure must not discard it or re-enter model preparation.
-        self.candidate
-            .lock()
-            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?
-            .as_mut()
-            .ok_or_else(|| invalid("phase preparation lost its original complete candidate"))?
-            .preparation_outcome = Some(outcome.into());
         self.finish_preparation(py)
     }
 
@@ -948,6 +895,7 @@ impl PySemanticLearningPhaseTransition {
     /// Finish only the already known cold result. Its checkpoint and history
     /// are immutable; neither the factory nor scientific acceptance is repeated.
     fn finish_preparation(&self, py: Python<'_>) -> PyResult<()> {
+        self.finish_scientific_acceptance(py)?;
         let outcome = self.preparation_outcome()?;
         // An attempted signed write belongs exclusively to its resolver, even
         // when the candidate and the unsigned outcome are already known.
@@ -959,6 +907,212 @@ impl PySemanticLearningPhaseTransition {
         let construction = self.private_restore()?.take();
         drop(construction);
         *self.status_lock()? = Completion::Prepared;
+        Ok(())
+    }
+
+    fn acceptance(&self) -> PyResult<MutexGuard<'_, Option<ScientificAcceptance>>> {
+        self.scientific_acceptance
+            .lock()
+            .map_err(|_| invalid("original scientific acceptance custody mutex is poisoned"))
+    }
+
+    fn finish_scientific_acceptance(&self, py: Python<'_>) -> PyResult<()> {
+        if self.acceptance()?.is_none() {
+            self.records()?.require_preparation_admission()?;
+            self.verify(py, true)?;
+            self.preparation_inputs
+                .require_program(py, &self.scientific_owner)?;
+            // The scientific owner validates its entire measured prefix when
+            // projecting the next group. Delivery is the sole remaining
+            // operation at acceptance; a prepared candidate is not that proof.
+            let next = self.scientific_owner.bind(py).getattr("next_operation")?;
+            if !next.is_exact_instance_of::<PyTuple>() {
+                return Err(invalid(
+                    "final acceptance requires the original complete prefix before delivery",
+                ));
+            }
+            let next = next.cast::<PyTuple>()?;
+            let (next_material, _) = Self::singleton_lifecycle_material(next)?;
+            let next_material = ColdValue::from_canonical_bytes(&next_material)?;
+            let fields = next_material.fields(6)?;
+            if fields[0].text()? != "delivery"
+                || fields[1].text()? != "real"
+                || fields[3].unsigned()? != 0
+            {
+                return Err(invalid("final acceptance cannot precede complete original source, control and real execution"));
+            }
+            let (candidate, checkpoint) = self.candidate(py)?;
+            let history = self.scientific_owner.bind(py).getattr("history_bytes")?;
+            if !history.is_exact_instance_of::<PyBytes>()
+                || history.cast::<PyBytes>()?.as_bytes().is_empty()
+            {
+                return Err(invalid(
+                    "scientific acceptance requires the original complete history bytes",
+                ));
+            }
+            let history: Arc<[u8]> = Arc::from(history.cast::<PyBytes>()?.as_bytes());
+            let latest = self.refresh_snapshot.bind(py).call0()?;
+            let snapshot =
+                AuthoritySnapshot::parse(&ColdValue::read(&latest, &mut (16 * 1024 * 1024), 0)?)?;
+            {
+                let task = self.task_use.borrow(py);
+                snapshot.newer_than(&task.state()?.snapshot)?;
+                check_learning_grant(&task, &self.grant_reference, &snapshot)?;
+                let restored = candidate.borrow(py);
+                let task = restored.task_use.borrow(py);
+                snapshot.newer_than(&task.state()?.snapshot)?;
+                check_learning_grant(&task, &self.grant_reference, &snapshot)?;
+            }
+            self.preparation_inputs
+                .require_program(py, &self.scientific_owner)?;
+            require_model_bytes(
+                &self.scientific_owner.bind(py).getattr("history_bytes")?,
+                &history,
+            )?;
+            let (actual_parent, actual_model) = {
+                let restored = candidate.borrow(py);
+                (restored.parent.clone_ref(py), restored.model.clone_ref(py))
+            };
+            let source_manifest = SemanticCheckpointManifest::decode(&self.source_checkpoint)?;
+            verify_phase_native(
+                py,
+                &self.task_use.borrow(py),
+                &self.parent.borrow(py),
+                &source_manifest.native,
+                true,
+            )?;
+            {
+                let restored = candidate.borrow(py);
+                let final_manifest = SemanticCheckpointManifest::decode(&checkpoint)?;
+                verify_phase_native(
+                    py,
+                    &restored.task_use.borrow(py),
+                    &restored.parent.borrow(py),
+                    &final_manifest.native,
+                    false,
+                )?;
+            }
+            // Complete all fallible argument projection before marking the
+            // call entered. Snapshot is the verified immutable cold value.
+            let arguments = (
+                self.parent.clone_ref(py),
+                self.recipe.clone_ref(py),
+                PyBytes::new(py, &self.source_checkpoint),
+                self.preparation_inputs.grant.python_value(py)?,
+                &self.destination,
+                ColdValue::from_canonical_bytes(&snapshot.canonical)?.python_value(py)?,
+                actual_parent,
+                actual_model,
+                PyBytes::new(py, &checkpoint),
+                PyBytes::new(py, &self.preparation_inputs.frozen_program),
+                PyBytes::new(py, &history),
+            )
+                .into_pyobject(py)?;
+            // Retain the exact checkpoint/history before entering external
+            // code. No phase/native/task mutex survives into the owner.
+            *self.acceptance()? = Some(ScientificAcceptance {
+                checkpoint: Arc::clone(&checkpoint),
+                history: Arc::clone(&history),
+                result: None,
+                error: None,
+            });
+            let result = self.accept_learning_phase.bind(py).call1(arguments);
+            let mut retained = self.acceptance()?;
+            let retained = retained.as_mut().expect("retained before scientific entry");
+            match result {
+                Ok(result) => retained.result = Some(result.unbind()),
+                Err(error) => {
+                    retained.error = Some(error.clone_ref(py));
+                    return Err(error);
+                }
+            }
+        }
+        let (checkpoint, history, result) = {
+            let retained = self.acceptance()?;
+            let retained = retained
+                .as_ref()
+                .expect("original scientific call retained");
+            if let Some(error) = &retained.error {
+                return Err(error.clone_ref(py));
+            }
+            (
+                Arc::clone(&retained.checkpoint),
+                Arc::clone(&retained.history),
+                retained
+                    .result
+                    .as_ref()
+                    .ok_or_else(|| {
+                        invalid(
+                            "unknown scientific acceptance cannot repeat its original comparison",
+                        )
+                    })?
+                    .clone_ref(py),
+            )
+        };
+        let accepted = result.bind(py);
+        if !accepted.is_exact_instance_of::<PyBytes>()
+            || accepted.cast::<PyBytes>()?.as_bytes().is_empty()
+        {
+            return Err(invalid("scientific owner must return its complete original accepted criteria and result, not an acceptance flag"));
+        }
+        self.preparation_inputs
+            .require_program(py, &self.scientific_owner)?;
+        require_model_bytes(
+            &self.scientific_owner.bind(py).getattr("history_bytes")?,
+            &history,
+        )?;
+        if self.candidate_checkpoint()?.as_ref() != checkpoint.as_ref() {
+            return Err(invalid(
+                "scientific acceptance lost its original full final checkpoint",
+            ));
+        }
+        let accepted = accepted.cast::<PyBytes>()?.as_bytes();
+        let outcome_length = checkpoint
+            .len()
+            .checked_add(history.len())
+            .and_then(|length| length.checked_add(accepted.len()))
+            .and_then(|length| length.checked_add(24))
+            .ok_or_else(|| invalid("complete phase preparation outcome size overflowed"))?;
+        self.records()?.check_payload_length(outcome_length)?;
+        let mut outcome = Vec::with_capacity(outcome_length);
+        // Acceptance is outside Q and cannot change the bytes it accepted.
+        for material in [checkpoint.as_ref(), history.as_ref(), accepted] {
+            outcome.extend_from_slice(&(material.len() as u64).to_le_bytes());
+            outcome.extend_from_slice(material);
+        }
+        let mut candidate = self
+            .candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?;
+        let candidate = candidate
+            .as_mut()
+            .ok_or_else(|| invalid("scientific acceptance lost its original candidate"))?;
+        if let Some(original) = &candidate.preparation_outcome {
+            if original.as_ref() != outcome.as_slice() {
+                return Err(invalid(
+                    "scientific acceptance changed its retained complete outcome",
+                ));
+            }
+        } else {
+            candidate.preparation_outcome = Some(outcome.into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_restore_admission(
+        &self,
+        py: Python<'_>,
+        checkpoint: &[u8],
+        transition: &SemanticLearningPhaseTransition,
+    ) -> PyResult<()> {
+        self.source.borrow(py).require_creator()?;
+        let admission = self.records()?.confirmed_admission()?;
+        if checkpoint != self.source_checkpoint
+            || transition.admission.as_slice() != admission.as_ref()
+            || transition.recipe_digest() != self.recipe.borrow(py).inner.recipe_digest()
+        {
+            return Err(invalid("private restore changed its original confirmed admission, full source or complete recipe"));
+        }
         Ok(())
     }
 
@@ -1705,13 +1859,20 @@ impl PySemanticLearningPhaseTransition {
         let entered = pending.preparation_entered.load(Ordering::Acquire);
         let candidate_entered = pending.candidate_entered.load(Ordering::Acquire);
         if entered && candidate_entered {
-            // A successful canonical save plus the complete frozen outcome
-            // proves completed construction for this cold finalization, not
-            // full scientific execution or resource usage. Partial restoration
-            // cannot manufacture this state from checkpoint absence.
-            pending.preparation_outcome()?;
+            // The actual canonical save proves known complete construction,
+            // not full scientific execution or resource use. Only remaining
+            // cold verification may continue; a retained scientific return is
+            // reused and an entered failed comparison is never called again.
             pending.candidate(py)?;
             pending.records()?.require_preparation_admission()?;
+            if let Some(acceptance) = pending.acceptance()?.as_ref() {
+                if let Some(error) = &acceptance.error {
+                    return Err(error.clone_ref(py));
+                }
+                if acceptance.result.is_none() {
+                    return Err(invalid("unknown scientific comparison cannot be repeated by preparation continuation"));
+                }
+            }
         } else if entered {
             if !pending.source_verified()? {
                 return Err(invalid(
@@ -1931,6 +2092,12 @@ impl PySemanticTransitionController {
             ],
             record_limits,
         )?;
+        let accept_learning_phase = scientific_owner.bind(py).getattr("accept_learning_phase")?;
+        if !accept_learning_phase.is_callable() {
+            return Err(invalid(
+                "phase preparation requires its original final scientific acceptance owner",
+            ));
+        }
         let preparation_inputs = PreparationInputs {
             source_model,
             execute_phase_instruction: execute_phase_instruction.clone().unbind(),
@@ -1959,6 +2126,8 @@ impl PySemanticTransitionController {
                 private_restore: Mutex::new(None),
                 source_checkpoint: checkpoint.to_vec(),
                 scientific_owner: scientific_owner.clone_ref(py),
+                accept_learning_phase: accept_learning_phase.unbind(),
+                scientific_acceptance: Mutex::new(None),
                 recipe: recipe.clone_ref(py),
                 restore_model: restore_model.clone().unbind(),
                 retire_restored_model: retire_restored_model.clone().unbind(),
