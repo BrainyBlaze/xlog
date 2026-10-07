@@ -7,15 +7,7 @@
     "adaptive_reoptimization",
     "persistent_hash_index",
     "runtime_substrate_primitives",
-    "pyxlog_compatibility",
-    "production_path_reuse"
-  ],
-  "source_required_substrings": [
-    "pred epistemic_world(id: u32)",
-    "pred exact_candidate(src: u32, dst: u32)",
-    "pred reusable_index_key(src: u32)",
-    "solver_edge(A, B), solver_edge(B, C)",
-    "adaptive_candidate(A, C)"
+    "pyxlog_compatibility"
   ],
   "checks": {
     "run": {

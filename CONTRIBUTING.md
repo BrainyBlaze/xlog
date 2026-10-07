@@ -61,12 +61,19 @@ cargo fmt --all --check
 make lint-workflows
 make lint-shell
 make check-tracked-ignored
-cargo check --locked --lib \
-  -p xlog-core -p xlog-ir -p xlog-stats -p xlog-logic -p xlog-neural
+make check
 ```
 
+`make test` is the explicit manual workspace suite, not a source check. Runtime
+and resource authority is required independently for it and for certifications.
+
+Example validators require an already installed `pyxlog` wheel in their selected
+Python interpreter. Use the canonical `scripts/install_pyxlog_for_python.py`
+procedure for an authorized manual LOCAL build/install; validators do not build
+and stage competing debug copies or modify driver-library search paths.
+
 Select the following only for an explicitly authorized manual example/runtime
-validation. Despite its historical mode name, this command builds native artifacts
+validation. Despite its historical mode name, this command builds CLI artifacts
 and executes examples; it is not a fast-CI command:
 
 ```bash

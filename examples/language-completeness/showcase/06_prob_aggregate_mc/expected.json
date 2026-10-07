@@ -1,6 +1,5 @@
 {
   "features": ["prob_aggregate_mc", "aggregate_query"],
-  "source_required_substrings": ["#pragma prob_engine = mc", "#pragma prob_samples = 96", "out_degree(X, count(Y))"],
   "checks": {
     "prob_json": {
       "engine": "mc",

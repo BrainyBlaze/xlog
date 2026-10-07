@@ -2746,6 +2746,13 @@ promotion.rule_inventory  # RuleInventory | None
 These helpers package the ILP audit surface for downstream applications ("external
 consumers") as reusable pyxlog utilities:
 
+`CudaExecutionAudit` observes selected Python/Torch calls and explicitly recorded
+events. It does not measure native CUDA transfers; a caller's
+`device_resident=True` assertion is not residency evidence. The numerical
+`compute_transfer_diagnostics` helper reports prediction metrics across domains,
+not host/device transfer counts. Neither utility certifies native ZERO TRANSFER
+or replaces a complete measured GPU run.
+
 ```python
 from pyxlog.ilp.neurosymbolic import (
     NeuroSymbolicTrainingConfig,

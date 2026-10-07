@@ -3,7 +3,7 @@ SHELLCHECK ?= shellcheck
 PACKAGE_OUTPUT ?= dist
 PYTHON ?= python3
 
-.PHONY: doctor build build-host-io check check-warnings install-pyxlog package validate-release-local lint-workflows lint-shell check-tracked-ignored docs docs-validate
+.PHONY: doctor build build-host-io check test check-warnings install-pyxlog package validate-release-local lint-workflows lint-shell check-tracked-ignored docs docs-validate
 
 doctor:
 	python scripts/xlog_doctor.py
@@ -52,6 +52,7 @@ check-tracked-ignored:
 	fi; \
 	echo "No tracked files match .gitignore rules."'
 
+# GPU builds below are explicit manual LOCAL operations, never CI jobs.
 build:
 	cargo build --release
 
@@ -59,6 +60,11 @@ build-host-io:
 	cargo build --release -p xlog-cli --features host-io
 
 check:
+	cargo check --locked --lib \
+		-p xlog-core -p xlog-ir -p xlog-stats -p xlog-logic -p xlog-neural
+
+# Heavy native tests and certification require separate runtime/resource authority.
+test:
 	cargo test --workspace --all-targets --exclude pyxlog
 
 check-warnings:

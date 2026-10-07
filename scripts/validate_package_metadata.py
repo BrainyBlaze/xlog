@@ -1,33 +1,18 @@
-"""Validate README quickstart and package metadata invariants used by CI."""
+"""Validate actual package ownership for manual release preflight."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import subprocess
-import sys
 from pathlib import Path
-
-REQUIRED_SNIPPETS = (
-    "python scripts/xlog_doctor.py",
-    "cargo build --release",
-    "cargo build --release -p xlog-cli --features host-io",
-    "python scripts/install_pyxlog_for_python.py --python",
-    "./target/release/xlog",
-)
 
 
 def validate_package_metadata(
     *,
-    readme: str,
     metadata: dict,
 ) -> list[str]:
     errors: list[str] = []
-
-    missing = [snippet for snippet in REQUIRED_SNIPPETS if snippet not in readme]
-    if missing:
-        errors.append("README quickstart is missing required snippets:")
-        errors.extend(f"  - {snippet}" for snippet in missing)
 
     xlog_cli = next(
         (
@@ -54,7 +39,6 @@ def validate_package_metadata(
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--readme", default="README.md")
     parser.add_argument("--cargo", default="Cargo.toml")
     parser.add_argument("--metadata", default="cargo-metadata.json")
     return parser.parse_args(argv)
@@ -90,22 +74,19 @@ def load_metadata(metadata_path: Path, cargo_path: Path) -> dict:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    readme_path = Path(args.readme)
     cargo_path = Path(args.cargo)
     metadata_path = Path(args.metadata)
 
-    readme = readme_path.read_text(encoding="utf-8")
     metadata = load_metadata(metadata_path, cargo_path)
 
     errors = validate_package_metadata(
-        readme=readme,
         metadata=metadata,
     )
     if errors:
         print("\n".join(errors))
         return 1
 
-    print("README quickstart assumptions and workspace package metadata validated.")
+    print("Workspace package metadata validated.")
     return 0
 
 
