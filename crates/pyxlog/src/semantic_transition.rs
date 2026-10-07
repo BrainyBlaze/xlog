@@ -15622,6 +15622,12 @@ impl PySemanticTransitionController {
             task_use.state()?.require_public_use()?;
         }
         parent.require_task(py, task_use)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(private) = private_execution_owner(py, &self.session.borrow(py))? {
+            private
+                .borrow(py)
+                .require_private_checkpoint_save(py, self, task_use, parent)?;
+        }
         if !snapshot_model_state.is_callable() {
             return Err(invalid(
                 "checkpoint save requires one trusted model-state serializer",
