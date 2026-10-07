@@ -8,6 +8,25 @@ use phase_record::{lifecycle_payloads, RecordReader};
 use rand::rngs::OsRng;
 use serde_json::{Map, Value};
 
+pub(super) const SOURCE_EVALUATION_CANCELLED: &str = "source-evaluation-cancelled";
+
+pub(super) fn cancelled_source_reason(
+    proof: &xlog_cuda::SemanticCancelledModelEvaluation,
+) -> ColdValue {
+    let parent = proof.parent();
+    ColdValue::Sequence(vec![
+        ColdValue::Text(SOURCE_EVALUATION_CANCELLED.to_owned()),
+        ColdValue::Sequence(vec![
+            ColdValue::Text(hex(parent.instance.as_bytes())),
+            ColdValue::Integer(parent.word.to_string()),
+            ColdValue::Text(hex(parent.logical_digest.as_bytes())),
+            ColdValue::Text(hex(parent.state_digest.as_bytes())),
+        ]),
+        ColdValue::Integer(proof.model_work().to_string()),
+        ColdValue::Integer(proof.model_calls().to_string()),
+    ])
+}
+
 pub(in crate::semantic_transition) struct VerifiedClosure {
     pub(in crate::semantic_transition) phase_id: [u8; 32],
     pub(in crate::semantic_transition) completion_digest: [u8; 32],
@@ -249,6 +268,7 @@ pub(super) fn require_terminal_history(
     history: &[u8],
     instruction: &[u8],
     ordinal: u64,
+    branch: &str,
     reason: &ColdValue,
     usage: [u64; 3],
 ) -> PyResult<()> {
@@ -259,7 +279,7 @@ pub(super) fn require_terminal_history(
         .ok_or_else(|| invalid("terminal refusal lost its original prefix records"))?;
     let record = serde_json::json!({
         "instruction_sha256": digest(instruction), "operation_ordinal": ordinal,
-        "branch": "real", "resource_usage": usage, "refusal": host(reason)?,
+        "branch": branch, "resource_usage": usage, "refusal": host(reason)?,
     });
     records.push(record);
     if prefix != history {
@@ -422,6 +442,7 @@ impl VerifiedClosure {
         source_phase: SemanticLearningPhase,
         target_phase: SemanticLearningPhase,
         pending_target: Option<[u8; 32]>,
+        py: Python<'_>,
     ) -> PyResult<Self> {
         let mut reader = RecordReader(
             lifecycle
@@ -448,6 +469,145 @@ impl VerifiedClosure {
             return Err(invalid(
                 "terminal phase changed its original full Source checkpoint",
             ));
+        }
+        if cause == SOURCE_EVALUATION_CANCELLED {
+            if lifecycle.preparation.is_some()
+                || !private.is_empty()
+                || !result_bytes.is_empty()
+                || pending_target.is_some()
+            {
+                return Err(invalid("Source evaluation cancellation contradicts absent private restoration or scientific acceptance"));
+            }
+            let manifest = SemanticCheckpointManifest::decode(source)?;
+            let (seed, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
+            let expense = seed.proposal_expense()?;
+            let source_parent =
+                SemanticTransitionSession::state_material_projection(&manifest.native)
+                    .map_err(xlog_err)?
+                    .publication;
+            let recipe = ColdValue::from_canonical_bytes(recipe_bytes)?;
+            let fields = recipe.fields(5)?;
+            let values = fields
+                .iter()
+                .map(|field| field.python_value(py))
+                .collect::<PyResult<Vec<_>>>()?;
+            let original_recipe = PySemanticLearningPhaseRecipe::new(
+                values[0].bind(py),
+                values[1].bind(py),
+                values[2].bind(py),
+                values[3].bind(py),
+                values[4].bind(py),
+            )?;
+            let program = json(program_bytes)?;
+            let prefix = json(prefix_bytes)?;
+            let history = json(history_bytes)?;
+            require_fields(&prefix, &["format", "program_sha256", "records"])?;
+            require_fields(&history, &["format", "program_sha256", "records"])?;
+            let records = prefix["records"]
+                .as_array()
+                .ok_or_else(|| invalid("cancelled Source lacks its original actual prefix"))?;
+            let ordinal = records.len();
+            let schedule = program["schedule"]
+                .as_array()
+                .ok_or_else(|| invalid("cancelled Source lost its original frozen schedule"))?;
+            let entry = schedule
+                .get(ordinal)
+                .ok_or_else(|| invalid("cancelled Source invented a terminal ordinal"))?;
+            let reason_fields = reason.fields(4)?;
+            let entry_fields = ColdValue::from_canonical_bytes(entry_material)?;
+            let entry_fields = entry_fields.fields(6)?;
+            let format = program["format"]
+                .as_str()
+                .filter(|format| !format.is_empty())
+                .ok_or_else(|| invalid("cancelled Source lost its original program format"))?;
+            if ordinal == 0
+                || ordinal >= schedule.len() - 1
+                || records
+                    .iter()
+                    .zip(schedule)
+                    .enumerate()
+                    .any(|(index, (_, operation))| {
+                        operation["branch"] != "source"
+                            || index == 0 && operation["operation"] != "prepare"
+                            || index != 0 && operation["operation"] != "evaluation"
+                    })
+                || prefix["format"] != format
+                || history["format"] != format
+                || prefix["program_sha256"] != digest(program_bytes)
+                || history["program_sha256"] != digest(program_bytes)
+                || program["source_checkpoint_sha256"] != digest(source)
+                || program["source_parent"] != identity_value(source_parent)
+                || program["grant"] != host(grant)?
+                || program["destination"] != destination
+                || program["feedback_interventions"]["real"]
+                    != host(&ColdValue::Bytes(Arc::from(feedback[0])))?
+                || program["feedback_interventions"]["control"]
+                    != host(&ColdValue::Bytes(Arc::from(feedback[1])))?
+                || phase(
+                    program["final_phase"].as_str().ok_or_else(|| {
+                        invalid("cancelled Source lacks its original final phase")
+                    })?,
+                )? != target_phase
+                || phase(fields[0].text()?)? != source_phase
+                || program["recipe_digest"]
+                    != host(&ColdValue::Bytes(Arc::from(
+                        original_recipe.inner.recipe_digest().as_bytes().as_slice(),
+                    )))?
+                || entry["operation"] != "evaluation"
+                || entry["branch"] != "source"
+                || entry["step_ordinal"].as_u64() != Some(0)
+                || entry_fields[0].text()? != "evaluation"
+                || entry_fields[1].text()? != "source"
+                || entry_fields[2].unsigned()? != ordinal as u64
+                || entry_fields[3].unsigned()? != 0
+                || host(&entry_fields[4])? != entry["budget"]
+                || host(&entry_fields[5])? != entry["comparison"]
+                || reason_fields[0].text()? != cause
+                || host(&reason_fields[1])? != identity_value(source_parent)
+                || reason_fields[2].unsigned()? > usage_words[0]
+                || reason_fields[3].unsigned()? > usage_words[2]
+            {
+                return Err(invalid("cancelled Source changed its native proof, actual position, frozen inputs or measured expense"));
+            }
+            let instruction = unhex(&entry["instruction"]["bytes_hex"])?;
+            require_terminal_history(
+                prefix_bytes,
+                history_bytes,
+                &instruction,
+                ordinal as u64,
+                "source",
+                &reason,
+                usage_words,
+            )?;
+            let full_records = history["records"]
+                .as_array()
+                .expect("verified actual terminal history");
+            for (index, (entry, record)) in schedule.iter().zip(full_records).enumerate() {
+                require_operation_observation(entry, record, index, index == ordinal)?;
+            }
+            if records[0]["parent"] != identity_value(source_parent)
+                || records[0]["source_checkpoint_sha256"] != digest(source)
+            {
+                return Err(invalid(
+                    "cancelled Source changed its original completed preparation",
+                ));
+            }
+            snapshot.newer_than(&saved_snapshot)?;
+            return Ok(Self {
+                phase_id,
+                completion_digest: Sha256::digest(terminal_record).into(),
+                admission: Arc::from(admission),
+                program: Arc::from(program_bytes),
+                history: Arc::from(history_bytes),
+                acceptance: Arc::from(&[][..]),
+                snapshot,
+                refusal: Some(RefusalClosure {
+                    cause: Arc::from(cause),
+                    record: Arc::from(terminal_record),
+                    expense,
+                    source_native: Arc::from(manifest.native.as_slice()),
+                }),
+            });
         }
         if pending_target.is_some_and(|target| {
             lifecycle.preparation.is_none() || target != <[u8; 32]>::from(Sha256::digest(private))
@@ -593,6 +753,7 @@ impl VerifiedClosure {
             history_bytes,
             &instruction,
             ordinal as u64,
+            "real",
             &reason,
             usage_words,
         )?;
@@ -655,6 +816,7 @@ impl VerifiedClosure {
         fence: &Bound<'_, PyAny>,
         checkpoint_issuer: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        let py = issuer.py();
         let issuer: [u8; 32] = original_bytes(issuer, 32)?.try_into().unwrap();
         if !records.is_exact_instance_of::<PyTuple>() || !fence.is_exact_instance_of::<PyTuple>() {
             return Err(invalid(
@@ -735,6 +897,7 @@ impl VerifiedClosure {
                 source_phase,
                 target_phase,
                 pending_target,
+                py,
             )?;
             closure.require_checkpoint(checkpoint, source, checkpoint_issuer)?;
             return Ok(closure);
@@ -1147,7 +1310,11 @@ impl VerifiedClosure {
             .map(|refusal| {
                 Ok((
                     refusal.cause.as_ref(),
-                    PyBytes::new(py, &self.acceptance),
+                    if refusal.cause.as_ref() == SOURCE_EVALUATION_CANCELLED {
+                        py.None()
+                    } else {
+                        PyBytes::new(py, &self.acceptance).into_any().unbind()
+                    },
                     PyBytes::new(py, &self.history),
                     PyBytes::new(py, &refusal.record),
                 )

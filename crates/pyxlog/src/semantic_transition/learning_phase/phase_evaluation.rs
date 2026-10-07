@@ -48,6 +48,20 @@ pub(super) struct PhaseEvaluation {
     physical_peak: Option<u64>,
     released: bool,
     budget_exceeded: bool,
+    refusal: Option<CancelledSourceRefusal>,
+}
+
+struct CancelledSourceRefusal {
+    prefix: Arc<[u8]>,
+    reason: ColdValue,
+    cleanup_entered: bool,
+    cleanup_returned: bool,
+    cleanup_completed: bool,
+    serializer_entered: bool,
+    serialized_model: Option<Py<PyAny>>,
+    source_verified: bool,
+    history: Option<Arc<[u8]>>,
+    payload: Option<Arc<[u8]>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,6 +70,8 @@ pub(in crate::semantic_transition) enum EvaluationColdStage {
     OutputProjection,
     AwaitingCompletion,
     Cleanup,
+    CancelledExecutionCleanup,
+    SourceVerification,
 }
 
 struct EvaluationColdVisibility<'a> {
@@ -81,6 +97,602 @@ impl Drop for EvaluationColdVisibility<'_> {
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(super) fn cancelled_source_refusal_retained(&self) -> PyResult<bool> {
+        Ok(self
+            .phase_evaluations()?
+            .last()
+            .is_some_and(|current| current.refusal.is_some()))
+    }
+
+    fn capture_cancelled_source_refusal(&self, py: Python<'_>) -> PyResult<()> {
+        if self.cancelled_source_refusal_retained()? {
+            return Ok(());
+        }
+        if self.candidate_entered.load(Ordering::Acquire)
+            || self.private_restore()?.is_some()
+            || self.acceptance()?.is_some()
+            || self
+                .candidate
+                .lock()
+                .map_err(|_| invalid("phase candidate custody is poisoned"))?
+                .is_some()
+            || self.records()?.preparation_outcome_known
+        {
+            return Err(invalid("Source cancellation cannot replace entered private restoration or scientific acceptance"));
+        }
+        self.preparation_inputs
+            .require_program(py, &self.scientific_owner)?;
+        let history = self.scientific_owner.bind(py).getattr("history_bytes")?;
+        if !history.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "Source cancellation lost its original actual prefix history",
+            ));
+        }
+        let prefix: Arc<[u8]> = Arc::from(history.cast::<PyBytes>()?.as_bytes());
+        let mut retained = self.phase_evaluations()?;
+        let current = retained
+            .last_mut()
+            .ok_or_else(|| invalid("Source cancellation lost its original evaluation"))?;
+        Self::require_evaluation_entry(py, current)?;
+        if current.branch != "source"
+            || current.callback_pending
+            || current.callback_result.is_some()
+            || current.cold_stage != EvaluationColdStage::Cleanup
+            || current.work_closed
+            || current.observer_finish_entered
+            || current.record_entered
+            || current.released
+            || current.owners.parent.as_ptr() != self.parent.as_ptr()
+            || current.owners.task.as_ptr() != self.task_use.as_ptr()
+        {
+            return Err(invalid(
+                "Source cancellation lacks known original cleanup before its measured end",
+            ));
+        }
+        let cancelled = current
+            .cancelled
+            .as_ref()
+            .ok_or_else(|| invalid("Source cancellation lacks its original native proof"))?;
+        let region = current
+            .regions
+            .get(2)
+            .ok_or_else(|| invalid("Source cancellation lost its actual cleanup region"))?
+            .borrow(py);
+        self.source
+            .borrow(py)
+            .owner()?
+            .require_closed_cold_model_work_region(
+                region.region.as_ref().expect("original cleanup region"),
+            )
+            .map_err(xlog_err)?;
+        current.refusal = Some(CancelledSourceRefusal {
+            prefix,
+            reason: cold_restore::cancelled_source_reason(cancelled),
+            cleanup_entered: false,
+            cleanup_returned: false,
+            cleanup_completed: false,
+            serializer_entered: false,
+            serialized_model: None,
+            source_verified: false,
+            history: None,
+            payload: None,
+        });
+        Ok(())
+    }
+
+    pub(super) fn finish_cancelled_source_evaluation(&self, py: Python<'_>) -> PyResult<()> {
+        if matches!(*self.status_lock()?, Completion::Refused) {
+            return Ok(());
+        }
+        self.release_cancelled_source_execution(py)?;
+        // Only CPU proof is retained. Drop original native cohorts and failed
+        // Python numerical frames outside the mutex while the tally is recording.
+        let (prior, native, error) = {
+            let mut retained = self.phase_evaluations()?;
+            let count = retained.len();
+            if retained
+                .iter()
+                .take(count.saturating_sub(1))
+                .any(|previous| {
+                    !previous.recorded || !previous.released || previous.budget_exceeded
+                })
+            {
+                return Err(invalid(
+                    "Source cancellation cannot discard an unfinished original evaluation prefix",
+                ));
+            }
+            let current = retained
+                .last_mut()
+                .ok_or_else(|| invalid("terminal Source lost its evaluation"))?;
+            if current.refusal.is_none() {
+                return Err(invalid(
+                    "terminal Source lacks its original cancellation frame",
+                ));
+            }
+            let native = current.native_evaluation.take();
+            let error = current.callback_error.take();
+            let prior: Vec<_> = retained.drain(..count - 1).collect();
+            (prior, native, error)
+        };
+        drop(prior);
+        drop(native);
+        drop(error);
+        let verified = self
+            .phase_evaluations()?
+            .last()
+            .expect("retained cancellation")
+            .refusal
+            .as_ref()
+            .expect("original refusal")
+            .source_verified;
+        if !verified {
+            self.verify_cancelled_source(py)?;
+        }
+        let (cancelled, expense) = {
+            let retained = self.phase_evaluations()?;
+            let current = retained.last().expect("retained cancellation");
+            (
+                current
+                    .cancelled
+                    .clone()
+                    .expect("original native cancellation"),
+                current.cancelled_expense,
+            )
+        };
+        let usage = if let Some(usage) = expense {
+            [usage.0, usage.1, usage.2]
+        } else {
+            let (cold, peak) = self.finish_evaluation_expense(py)?;
+            let work = cancelled
+                .model_work()
+                .checked_add(cold.model_work)
+                .and_then(|work| work.checked_add(cold.native_work))
+                .ok_or_else(|| invalid("Source cancellation work overflowed"))?;
+            let calls = cancelled
+                .model_calls()
+                .checked_add(cold.model_calls)
+                .ok_or_else(|| invalid("Source cancellation calls overflowed"))?;
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained cancellation")
+                .cancelled_expense = Some((work, peak, calls));
+            [work, peak, calls]
+        };
+        self.record_cancelled_source(py, usage)?;
+        self.resume_terminal_source(py)
+    }
+
+    fn release_cancelled_source_execution(&self, py: Python<'_>) -> PyResult<()> {
+        let (entered, returned, region) = {
+            let mut retained = self.phase_evaluations()?;
+            let current = retained.last_mut().ok_or_else(|| {
+                invalid("cancelled execution lost its original Source evaluation")
+            })?;
+            Self::require_evaluation_entry(py, current)?;
+            let refusal = current
+                .refusal
+                .as_ref()
+                .ok_or_else(|| invalid("cancelled execution lacks its original refusal custody"))?;
+            if refusal.cleanup_completed {
+                return Ok(());
+            }
+            if current.branch != "source"
+                || current.cancelled.is_none()
+                || current.callback_pending
+                || current.callback_result.is_some()
+                || current.work_closed
+                || current.observer_finish_entered
+                || current.record_entered
+                || current.released
+            {
+                return Err(invalid("cancelled execution release requires known native Source cancellation before its measured end"));
+            }
+            current.cold_stage = EvaluationColdStage::CancelledExecutionCleanup;
+            (
+                refusal.cleanup_entered,
+                refusal.cleanup_returned,
+                current.regions[3].clone_ref(py),
+            )
+        };
+        let source = self.source.borrow(py);
+        source.require_creator()?;
+        if !returned {
+            if entered {
+                return Err(invalid(
+                    "unknown cancelled execution release cannot repeat its original callback",
+                ));
+            }
+            let _active = PhaseOperation::begin(&self.phase_evaluation_active)?;
+            let _visibility = EvaluationColdVisibility {
+                session: &source,
+                py,
+            };
+            let callback = self.model_owner(py, PhaseModelOwner::ReleaseCancelledExecution)?;
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained cancellation")
+                .refusal
+                .as_mut()
+                .expect("original cancellation")
+                .cleanup_entered = true;
+            let work = region.borrow(py);
+            let _callback = ColdCallbackScope::enter(py, &source, &work, region.clone_ref(py))?;
+            let result = callback.bind(py).call0()?;
+            if !result.is_none() {
+                return Err(invalid(
+                    "cancelled execution release requires the original known None completion",
+                ));
+            }
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained cancellation")
+                .refusal
+                .as_mut()
+                .expect("original cancellation")
+                .cleanup_returned = true;
+        }
+        source
+            .owner()?
+            .require_closed_cold_model_work_region(
+                region
+                    .borrow(py)
+                    .region
+                    .as_ref()
+                    .expect("original cancelled execution cleanup region"),
+            )
+            .map_err(xlog_err)?;
+        self.phase_evaluations()?
+            .last_mut()
+            .expect("retained cancellation")
+            .refusal
+            .as_mut()
+            .expect("original cancellation")
+            .cleanup_completed = true;
+        Ok(())
+    }
+
+    fn verify_cancelled_source(&self, py: Python<'_>) -> PyResult<()> {
+        let source = self.source.borrow(py);
+        source.require_creator()?;
+        let task = self.task_use.borrow(py);
+        if !matches!(task.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
+            return Err(invalid(
+                "cancelled evaluation lost its held original Source",
+            ));
+        }
+        let refreshed = self.refresh_snapshot.bind(py).call0()?;
+        let snapshot =
+            AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut (16 * 1024 * 1024), 0)?)?;
+        snapshot.newer_than(&task.state()?.snapshot)?;
+        check_learning_grant(&task, &self.grant_reference, &snapshot)?;
+        let manifest = SemanticCheckpointManifest::decode(&self.source_checkpoint)?;
+        let (seed, _, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
+        if seed.proposal_expense()? != task.checkpoint.proposal_expense()? {
+            return Err(invalid(
+                "Source cancellation changed its original cumulative Proposal expense",
+            ));
+        }
+        let parent = self.parent.borrow(py);
+        verify_phase_native(py, &task, &parent, &manifest.native, true)?;
+        let (entered, result, region) = {
+            let mut retained = self.phase_evaluations()?;
+            let current = retained.last_mut().expect("retained cancellation");
+            current.cold_stage = EvaluationColdStage::SourceVerification;
+            let refusal = current.refusal.as_ref().expect("original cancellation");
+            if !refusal.cleanup_completed {
+                return Err(invalid(
+                    "Source verification precedes known original execution-frame release",
+                ));
+            }
+            (
+                refusal.serializer_entered,
+                refusal
+                    .serialized_model
+                    .as_ref()
+                    .map(|result| result.clone_ref(py)),
+                current.regions[4].clone_ref(py),
+            )
+        };
+        let model = match result {
+            Some(result) => result,
+            None => {
+                if entered {
+                    return Err(invalid(
+                        "unknown terminal Source serializer cannot repeat its original callback",
+                    ));
+                }
+                let _active = PhaseOperation::begin(&self.phase_evaluation_active)?;
+                let _visibility = EvaluationColdVisibility {
+                    session: &source,
+                    py,
+                };
+                let _reads = ImportReadScope::checkpoint(&source, &task, &parent, py)?;
+                let callback = self.model_owner(py, PhaseModelOwner::SerializeSource)?;
+                self.phase_evaluations()?
+                    .last_mut()
+                    .expect("retained cancellation")
+                    .refusal
+                    .as_mut()
+                    .expect("original cancellation")
+                    .serializer_entered = true;
+                let work = region.borrow(py);
+                let _callback = ColdCallbackScope::enter(py, &source, &work, region.clone_ref(py))?;
+                let result = callback.bind(py).call0()?.unbind();
+                self.phase_evaluations()?
+                    .last_mut()
+                    .expect("retained cancellation")
+                    .refusal
+                    .as_mut()
+                    .expect("original cancellation")
+                    .serialized_model = Some(result.clone_ref(py));
+                result
+            }
+        };
+        source
+            .owner()?
+            .require_closed_cold_model_work_region(
+                region
+                    .borrow(py)
+                    .region
+                    .as_ref()
+                    .expect("original Source verification region"),
+            )
+            .map_err(xlog_err)?;
+        require_model_bytes(model.bind(py), &manifest.model)?;
+        verify_phase_native(py, &task, &parent, &manifest.native, true)?;
+        task.state()?.snapshot = snapshot;
+        self.phase_evaluations()?
+            .last_mut()
+            .expect("retained cancellation")
+            .refusal
+            .as_mut()
+            .expect("original cancellation")
+            .source_verified = true;
+        Ok(())
+    }
+
+    fn record_cancelled_source(&self, py: Python<'_>, usage: [u64; 3]) -> PyResult<()> {
+        let (entered, recorded, instruction, ordinal, material, prefix, reason) = {
+            let retained = self.phase_evaluations()?;
+            let current = retained.last().expect("retained cancellation");
+            let refusal = current.refusal.as_ref().expect("original cancellation");
+            (
+                current.record_entered,
+                current.recorded,
+                current.instruction.clone(),
+                current.ordinal,
+                current.material.clone(),
+                Arc::clone(&refusal.prefix),
+                refusal.reason.clone(),
+            )
+        };
+        if !recorded {
+            if entered {
+                return Err(invalid(
+                    "unknown Source refusal history append cannot repeat its callback",
+                ));
+            }
+            let arguments = PyDict::new(py);
+            arguments.set_item("instruction_bytes", PyBytes::new(py, &instruction))?;
+            arguments.set_item("operation_ordinal", ordinal)?;
+            arguments.set_item("branch", "source")?;
+            arguments.set_item("resource_usage", (usage[0], usage[1], usage[2]))?;
+            arguments.set_item("refusal", reason.python_value(py)?)?;
+            let callback = self.scientific_owner.bind(py).getattr("record_refusal")?;
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained cancellation")
+                .record_entered = true;
+            callback.call((), Some(&arguments))?;
+            let mut retained = self.phase_evaluations()?;
+            let current = retained.last_mut().expect("retained cancellation");
+            current.recorded = true;
+            current.budget_exceeded = usage
+                .into_iter()
+                .zip(current.budget)
+                .any(|(actual, limit)| actual > limit);
+        }
+        let history = self
+            .phase_evaluations()?
+            .last()
+            .expect("retained cancellation")
+            .refusal
+            .as_ref()
+            .expect("original cancellation")
+            .history
+            .as_ref()
+            .map(Arc::clone);
+        if history.is_none() {
+            let value = self.scientific_owner.bind(py).getattr("history_bytes")?;
+            if !value.is_exact_instance_of::<PyBytes>() {
+                return Err(invalid(
+                    "Source cancellation lost its actual terminal history",
+                ));
+            }
+            let history: Arc<[u8]> = Arc::from(value.cast::<PyBytes>()?.as_bytes());
+            cold_restore::require_terminal_history(
+                &prefix,
+                &history,
+                &instruction,
+                ordinal,
+                "source",
+                &reason,
+                usage,
+            )?;
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained cancellation")
+                .refusal
+                .as_mut()
+                .expect("original cancellation")
+                .history = Some(history);
+        }
+        if !self.records()?.refusal_known {
+            if self.records()?.attempt.is_some() {
+                self.resolve_terminal_record(py)?;
+            } else {
+                let payload = self
+                    .phase_evaluations()?
+                    .last()
+                    .expect("retained cancellation")
+                    .refusal
+                    .as_ref()
+                    .expect("original cancellation")
+                    .payload
+                    .as_ref()
+                    .map(Arc::clone);
+                let payload = match payload {
+                    Some(payload) => payload,
+                    None => {
+                        let retained = self.phase_evaluations()?;
+                        let refusal = retained
+                            .last()
+                            .expect("retained cancellation")
+                            .refusal
+                            .as_ref()
+                            .expect("original cancellation");
+                        let history =
+                            Arc::clone(refusal.history.as_ref().expect("known terminal history"));
+                        drop(retained);
+                        let snapshot = self.task_use.borrow(py).state()?.snapshot.canonical.clone();
+                        let reason = reason.canonical_bytes();
+                        let usage: Vec<u8> = usage.into_iter().flat_map(u64::to_le_bytes).collect();
+                        // Empty private/result fields mean proven absence for
+                        // this cause only; neither is a fabricated checkpoint or
+                        // a result of an entered scientific comparison.
+                        let payload = phase_record::refusal_payload([
+                            cold_restore::SOURCE_EVALUATION_CANCELLED.as_bytes(),
+                            self.source_checkpoint.as_slice(),
+                            &[],
+                            prefix.as_ref(),
+                            &[],
+                            history.as_ref(),
+                            material.as_slice(),
+                            reason.as_slice(),
+                            snapshot.as_slice(),
+                            usage.as_slice(),
+                        ])?;
+                        self.records()?.check_payload_length(payload.len())?;
+                        self.phase_evaluations()?
+                            .last_mut()
+                            .expect("retained cancellation")
+                            .refusal
+                            .as_mut()
+                            .expect("original cancellation")
+                            .payload = Some(Arc::clone(&payload));
+                        payload
+                    }
+                };
+                self.append_phase_record(py, RecordKind::TerminalRefusal, &payload)?;
+            }
+        }
+        let released = self
+            .phase_evaluations()?
+            .last()
+            .expect("retained cancellation")
+            .released;
+        if !released {
+            self.preparation_inputs.resource_observer.release(py)?;
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained cancellation")
+                .released = true;
+        }
+        Ok(())
+    }
+
+    pub(super) fn cancelled_source_closure(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Arc<cold_restore::VerifiedClosure>> {
+        let (phase_id, admission, record, issuer, limits) = {
+            let records = self.records()?;
+            if !records.refusal_known {
+                return Err(invalid(
+                    "Source cancellation custody precedes exact terminal readback",
+                ));
+            }
+            (
+                records.phase_id,
+                records.confirmed_admission()?,
+                Arc::clone(
+                    records
+                        .refusal_record
+                        .as_ref()
+                        .expect("known terminal record"),
+                ),
+                records.issuer(),
+                records.limits,
+            )
+        };
+        let retained = self.phase_evaluations()?;
+        let current = retained.last().expect("retained cancellation");
+        let refusal = current.refusal.as_ref().expect("original cancellation");
+        if !current.released || !refusal.source_verified {
+            return Err(invalid("Source cancellation custody precedes known physical release and Source verification"));
+        }
+        drop(retained);
+        let issuer = PyBytes::new(py, &issuer);
+        let records = PyTuple::new(
+            py,
+            [PyBytes::new(py, &admission), PyBytes::new(py, &record)],
+        )?;
+        let limits = (limits.record_bytes, limits.total_bytes, limits.records).into_pyobject(py)?;
+        let fence = (
+            PyBytes::new(py, &phase_id),
+            PyBytes::new(py, &Sha256::digest(&self.source_checkpoint)),
+            py.None(),
+            self.destination.as_str(),
+            phase_name(self.recipe.borrow(py).inner.source),
+            phase_name(self.preparation_inputs.final_phase),
+        )
+            .into_pyobject(py)?;
+        let closure = cold_restore::VerifiedClosure::read(
+            &self.source_checkpoint,
+            issuer.as_any(),
+            records.as_any(),
+            limits.as_any(),
+            fence.as_any(),
+            None,
+        )?;
+        let expense = closure
+            .refusal
+            .as_ref()
+            .expect("verified native cancellation")
+            .expense;
+        if expense != self.task_use.borrow(py).checkpoint.proposal_expense()? {
+            return Err(invalid(
+                "terminal Source custody changed its original cumulative Proposal expense",
+            ));
+        }
+        Ok(Arc::new(closure))
+    }
+
+    pub(super) fn cancelled_source_outcome(
+        &self,
+        py: Python<'_>,
+        record: &[u8],
+    ) -> PyResult<Py<PyTuple>> {
+        let retained = self.phase_evaluations()?;
+        let refusal = retained
+            .last()
+            .expect("retained cancellation")
+            .refusal
+            .as_ref()
+            .expect("original cancellation");
+        Ok((
+            cold_restore::SOURCE_EVALUATION_CANCELLED,
+            py.None(),
+            PyBytes::new(
+                py,
+                refusal.history.as_ref().expect("known terminal history"),
+            ),
+            PyBytes::new(py, record),
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+
     pub(super) fn drop_completed_evaluation_owners(&self, branch: &'static str) -> PyResult<()> {
         let mut retained = self.phase_evaluations()?;
         if retained
@@ -269,6 +881,16 @@ impl PySemanticLearningPhaseTransition {
             EvaluationColdStage::Cleanup => {
                 return Err(invalid("evaluation cleanup has no new numerical boundary"))
             }
+            EvaluationColdStage::CancelledExecutionCleanup => {
+                return Err(invalid(
+                    "cancelled execution cleanup has no numerical successor",
+                ))
+            }
+            EvaluationColdStage::SourceVerification => {
+                return Err(invalid(
+                    "terminal Source verification has no numerical successor",
+                ))
+            }
         };
         if let Some(index) = index {
             let region = current
@@ -317,12 +939,26 @@ impl PySemanticLearningPhaseTransition {
             EvaluationColdStage::Preparation => 0,
             EvaluationColdStage::OutputProjection => 1,
             EvaluationColdStage::Cleanup => 2,
+            EvaluationColdStage::CancelledExecutionCleanup => 3,
+            EvaluationColdStage::SourceVerification => 4,
             EvaluationColdStage::AwaitingCompletion => {
                 return Err(invalid(
                     "pending evaluation cannot open cleanup or repeat output projection",
                 ))
             }
         };
+        if matches!(
+            current.cold_stage,
+            EvaluationColdStage::CancelledExecutionCleanup
+                | EvaluationColdStage::SourceVerification
+        ) && (current.branch != "source"
+            || current.refusal.is_none()
+            || current.cancelled.is_none())
+        {
+            return Err(invalid(
+                "terminal Source callback lacks known original cancellation custody",
+            ));
+        }
         if !self.phase_evaluation_active.load(Ordering::Acquire)
             || current.callback_result.is_some()
             || current
@@ -360,6 +996,8 @@ impl PySemanticLearningPhaseTransition {
             EvaluationColdStage::Preparation => 0,
             EvaluationColdStage::OutputProjection => 1,
             EvaluationColdStage::Cleanup => 2,
+            EvaluationColdStage::CancelledExecutionCleanup => 3,
+            EvaluationColdStage::SourceVerification => 4,
             EvaluationColdStage::AwaitingCompletion => return Err(invalid(
                 "pending evaluation retains its original closed regions; cleanup is not admitted",
             )),
@@ -567,6 +1205,7 @@ impl PySemanticLearningPhaseTransition {
                 physical_peak: None,
                 released: false,
                 budget_exceeded: false,
+                refusal: None,
             });
         }
     }
@@ -848,9 +1487,13 @@ impl PySemanticLearningPhaseTransition {
                     physical_peak: None,
                     released: false,
                     budget_exceeded: false,
+                    refusal: None,
                 });
             }
             self.execute_evaluation(py)?;
+            if self.cancelled_source_refusal_retained()? {
+                return Ok(());
+            }
         }
     }
 
@@ -937,7 +1580,7 @@ impl PySemanticLearningPhaseTransition {
                 .work = Some(work.clone());
             let regions = source
                 .owner()?
-                .prepare_cold_model_work_regions(&work, 3)
+                .prepare_cold_model_work_regions(&work, if branch == "source" { 5 } else { 3 })
                 .map_err(xlog_err)?;
             for region in regions {
                 let original = Py::new(
@@ -1051,6 +1694,13 @@ impl PySemanticLearningPhaseTransition {
                     let cancelled = !current.callback_pending && current.cancelled.is_some();
                     drop(retained);
                     if cancelled {
+                        // The failed numerical callback has returned. Close its
+                        // visibility before entering the distinct original
+                        // execution-frame cleanup and Source serializer scopes.
+                        drop(_cold_visibility);
+                        drop(_private_scope);
+                        drop(_source_active);
+                        drop(callback);
                         return self.finish_cancelled_evaluation(py, error);
                     }
                     return Err(error);
@@ -1192,10 +1842,19 @@ impl PySemanticLearningPhaseTransition {
         let (work, closed, work_result, parent, custody, cached_peak) = {
             let retained = self.phase_evaluations()?;
             let current = retained.last().expect("retained evaluation");
-            if current.cold_stage != EvaluationColdStage::Cleanup
-                || (current.callback_result.is_none() && current.cancelled.is_none())
+            if !matches!(
+                current.cold_stage,
+                EvaluationColdStage::Cleanup | EvaluationColdStage::SourceVerification
+            ) || (current.callback_result.is_none() && current.cancelled.is_none())
             {
                 return Err(invalid("evaluation expense lacks its original known numerical completion or cancellation"));
+            }
+            if current
+                .refusal
+                .as_ref()
+                .is_some_and(|refusal| !refusal.cleanup_completed || !refusal.source_verified)
+            {
+                return Err(invalid("Source cancellation expense precedes known execution cleanup and Source verification"));
             }
             (
                 current
@@ -1211,6 +1870,18 @@ impl PySemanticLearningPhaseTransition {
         };
         let source = self.source.borrow(py);
         if !closed {
+            let unused_terminal_regions = {
+                let retained = self.phase_evaluations()?;
+                let current = retained.last().expect("retained evaluation");
+                (current.branch == "source" && current.refusal.is_none())
+                    .then_some(current.regions.len())
+            };
+            if let Some(end) = unused_terminal_regions {
+                source
+                    .owner()?
+                    .cancel_unentered_cold_model_work_regions(&work, end)
+                    .map_err(xlog_err)?;
+            }
             source
                 .owner()?
                 .close_cold_model_work(&work)
@@ -1281,6 +1952,18 @@ impl PySemanticLearningPhaseTransition {
     }
 
     fn finish_cancelled_evaluation(&self, py: Python<'_>, original: PyErr) -> PyResult<()> {
+        let source_cancelled = self
+            .phase_evaluations()?
+            .last()
+            .is_some_and(|current| current.branch == "source" && current.cancelled.is_some());
+        if source_cancelled {
+            self.capture_cancelled_source_refusal(py)?;
+            // The native proof, not this exception or its traceback, carries the
+            // known disposition. Release failed numerical frames before sealing
+            // the same original physical interval.
+            drop(original);
+            return self.finish_cancelled_source_evaluation(py);
+        }
         let (cancelled, cached, released) = {
             let retained = self.phase_evaluations()?;
             let current = retained.last().expect("retained evaluation");

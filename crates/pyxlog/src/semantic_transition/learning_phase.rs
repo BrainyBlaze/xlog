@@ -271,6 +271,7 @@ struct PreparationInputs {
 struct PhaseModelOwners {
     source: Py<PyAny>,
     execute: Py<PyAny>,
+    release_cancelled_execution: Py<PyAny>,
     restore: Py<PyAny>,
     retire_private: Py<PyAny>,
     serialize_source: Py<PyAny>,
@@ -282,6 +283,7 @@ struct PhaseModelOwners {
 enum PhaseModelOwner {
     Source,
     Execute,
+    ReleaseCancelledExecution,
     Restore,
     RetirePrivate,
     SerializeSource,
@@ -588,6 +590,7 @@ impl PySemanticLearningPhaseTransition {
         Ok(match kind {
             PhaseModelOwner::Source => &owners.source,
             PhaseModelOwner::Execute => &owners.execute,
+            PhaseModelOwner::ReleaseCancelledExecution => &owners.release_cancelled_execution,
             PhaseModelOwner::Restore => &owners.restore,
             PhaseModelOwner::RetirePrivate => &owners.retire_private,
             PhaseModelOwner::SerializeSource => &owners.serialize_source,
@@ -1071,6 +1074,9 @@ impl PySemanticLearningPhaseTransition {
         {
             self.record_source_preparation(py, peak)?;
             self.execute_source_evaluations(py)?;
+            if self.cancelled_source_refusal_retained()? {
+                return Ok(());
+            }
         }
         #[cfg(feature = "semantic-policy")]
         {
@@ -2283,7 +2289,7 @@ impl PySemanticTransitionController {
     }
 
     #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner, scientific_refusal_type,
-        source_model, execute_phase_instruction, resource_observer, feedback_interventions,
+        source_model, execute_phase_instruction, release_cancelled_phase_execution, resource_observer, feedback_interventions,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
         snapshot_restored_model, retire_restored_model, retire_source_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, cold_model_work_capacity, resolve_checkpoint=None,
         max_checkpoint_bytes=None, max_total_checkpoint_bytes=None))]
@@ -2304,6 +2310,7 @@ impl PySemanticTransitionController {
         scientific_refusal_type: Py<pyo3::types::PyType>,
         source_model: Py<PyAny>,
         execute_phase_instruction: &Bound<'_, PyAny>,
+        release_cancelled_phase_execution: &Bound<'_, PyAny>,
         resource_observer: &Bound<'_, PyAny>,
         feedback_interventions: &Bound<'_, PyAny>,
         learning_grant_ref: &Bound<'_, PyAny>,
@@ -2359,9 +2366,12 @@ impl PySemanticTransitionController {
         xlog_cuda::SemanticColdModelWork::allocation_bytes(cold_model_work_capacity)
             .map_err(xlog_err)?;
         let feedback_materials = feedback_materials(feedback_interventions)?;
-        if source_model.bind(py).is_none() || !execute_phase_instruction.is_callable() {
+        if source_model.bind(py).is_none()
+            || !execute_phase_instruction.is_callable()
+            || !release_cancelled_phase_execution.is_callable()
+        {
             return Err(invalid(
-                "phase preparation requires its original source model and instruction execution owner",
+                "phase preparation requires its original source model, instruction execution and cancelled-frame release owners",
             ));
         }
         let resource_observer = ResourceObserver::capture(resource_observer.cast::<PyCapsule>()?)?;
@@ -2491,6 +2501,7 @@ impl PySemanticTransitionController {
                 model_owners: Mutex::new(Some(PhaseModelOwners {
                     source: source_model,
                     execute: execute_phase_instruction.clone().unbind(),
+                    release_cancelled_execution: release_cancelled_phase_execution.clone().unbind(),
                     restore: restore_model.clone().unbind(),
                     retire_private: retire_restored_model.clone().unbind(),
                     serialize_source: snapshot_model_state.clone().unbind(),
