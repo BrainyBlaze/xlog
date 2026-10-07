@@ -234,6 +234,40 @@ fn recipe_material(record: &xlog_cuda::SemanticLearningPhaseRecord) -> Vec<u8> {
     .canonical_bytes()
 }
 
+/// Both the live producer and cold recovery must prove the actual complete
+/// native transition, not infer it from a frozen recipe or phase marker.
+pub(super) fn require_executed_lineage(
+    source_native: &[u8],
+    final_native: &[u8],
+    admission: &[u8],
+    recipe_bytes: &[u8],
+) -> PyResult<Vec<xlog_cuda::SemanticLearningPhaseRecord>> {
+    let recipe = ColdValue::from_canonical_bytes(recipe_bytes)?;
+    let recipe = recipe.fields(5)?;
+    let source_phase = phase(recipe[0].text()?)?;
+    let target_phase = phase(recipe[1].text()?)?;
+    let original = SemanticTransitionSession::checkpoint_learning_phase_history(source_native)
+        .map_err(xlog_err)?;
+    let final_phases = SemanticTransitionSession::checkpoint_learning_phase_history(final_native)
+        .map_err(xlog_err)?;
+    let added = final_phases
+        .strip_prefix(original.as_slice())
+        .filter(|phases| !phases.is_empty())
+        .ok_or_else(|| invalid("phase checkpoint lacks its original executed native transition"))?;
+    if added
+        .iter()
+        .any(|record| record.admission.as_slice() != admission)
+        || added[0].source != source_phase
+        || added.last().expect("nonempty native phase lineage").target != target_phase
+        || recipe_material(&added[0]) != recipe_bytes
+    {
+        return Err(invalid(
+            "phase checkpoint differs from its original executed recipe or signed admission",
+        ));
+    }
+    Ok(added.to_vec())
+}
+
 impl VerifiedClosure {
     pub(in crate::semantic_transition) fn read(
         checkpoint: &[u8],
@@ -358,24 +392,14 @@ impl VerifiedClosure {
                 "cold phase delivery changed its actual native publication identity",
             ));
         }
-        let original_phases =
-            SemanticTransitionSession::checkpoint_learning_phase_history(&source_manifest.native)
-                .map_err(xlog_err)?;
-        let final_phases =
-            SemanticTransitionSession::checkpoint_learning_phase_history(&final_manifest.native)
-                .map_err(xlog_err)?;
-        let added = final_phases
-            .strip_prefix(original_phases.as_slice())
-            .filter(|phases| !phases.is_empty())
-            .ok_or_else(|| {
-                invalid("cold phase delivery lacks its original native phase lineage")
-            })?;
+        let added = require_executed_lineage(
+            &source_manifest.native,
+            &final_manifest.native,
+            raw[0],
+            recipe_bytes,
+        )?;
         let final_phase = added.last().expect("nonempty native phase lineage");
-        if added.iter().any(|record| record.admission != raw[0])
-            || added[0].source != source_phase
-            || final_phase.target != target_phase
-            || recipe_material(&added[0]) != recipe_bytes
-        {
+        if added[0].source != source_phase || final_phase.target != target_phase {
             return Err(invalid(
                 "cold phase delivery differs from its original signed native admission or recipe",
             ));

@@ -1126,6 +1126,36 @@ impl PySemanticLearningPhaseTransition {
             .map_err(|_| invalid("original scientific acceptance custody mutex is poisoned"))
     }
 
+    fn require_executed_phase_lineage(&self, checkpoint: &[u8]) -> PyResult<()> {
+        let (inputs, admission) = {
+            let records = self.records()?;
+            (Arc::clone(&records.inputs), records.confirmed_admission()?)
+        };
+        let mut reader = phase_record::RecordReader(
+            inputs
+                .strip_prefix(b"xlog.learning-phase.inputs.v2\0")
+                .ok_or_else(|| invalid("executed phase lost its original input domain"))?,
+        );
+        let source_checkpoint = reader.field()?;
+        if source_checkpoint != self.source_checkpoint.as_ref()
+            || reader.field()? != self.preparation_inputs.frozen_program.as_slice()
+        {
+            return Err(invalid(
+                "executed phase changed its original source or frozen program",
+            ));
+        }
+        let recipe = reader.field()?;
+        let source = SemanticCheckpointManifest::decode(source_checkpoint)?;
+        let selected = SemanticCheckpointManifest::decode(checkpoint)?;
+        cold_restore::require_executed_lineage(
+            &source.native,
+            &selected.native,
+            &admission,
+            recipe,
+        )?;
+        Ok(())
+    }
+
     fn finish_scientific_acceptance(&self, py: Python<'_>) -> PyResult<()> {
         if self.acceptance()?.is_none() {
             self.records()?.require_preparation_admission()?;
@@ -1155,6 +1185,7 @@ impl PySemanticLearningPhaseTransition {
             }
             self.verify(py, true)?;
             let (candidate, checkpoint) = self.candidate(py)?;
+            self.require_executed_phase_lineage(&checkpoint)?;
             let history = self.scientific_owner.bind(py).getattr("history_bytes")?;
             if !history.is_exact_instance_of::<PyBytes>()
                 || history.cast::<PyBytes>()?.as_bytes().is_empty()
