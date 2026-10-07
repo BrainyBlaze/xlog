@@ -8,6 +8,7 @@ use xlog_cuda::{
 
 mod phase_record;
 use phase_record::{PhaseRecords, RecordKind, RecordLimits};
+pub(super) mod cold_restore;
 mod resource_observer;
 use resource_observer::ResourceObserver;
 #[cfg(feature = "semantic-policy")]
@@ -1754,6 +1755,7 @@ impl PySemanticLearningPhaseTransition {
             // authority. This cold refresh cannot read the retired source or
             // add native/model work after the original physical interval.
             self.refresh_delivery_authority(py)?;
+            self.install_delivered_checkpoint_custody(py)?;
         }
         #[cfg(not(feature = "semantic-policy"))]
         return Err(invalid(

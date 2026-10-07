@@ -153,6 +153,7 @@ pub(crate) struct PySemanticTransitionSession {
     prepared_segment: Mutex<Option<PreparedPythonSegment>>,
     learning_preparing: AtomicBool,
     learning_transition: Mutex<Option<Py<learning_phase::PySemanticLearningPhaseTransition>>>,
+    checkpoint_custody: Mutex<Option<learning_phase::cold_restore::CheckpointCustody>>,
     #[cfg(feature = "semantic-policy")]
     active_cold_model_work:
         Mutex<Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>>,
@@ -375,6 +376,7 @@ impl PySemanticTransitionSession {
             prepared_segment: Mutex::new(None),
             learning_preparing: AtomicBool::new(false),
             learning_transition: Mutex::new(None),
+            checkpoint_custody: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             active_cold_model_work: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
@@ -395,6 +397,7 @@ struct SemanticCheckpointManifest {
     task: Vec<u8>,
     session: Vec<u8>,
     initial_prefill: Vec<u8>,
+    phase_seal: Vec<u8>,
 }
 
 struct CheckpointAllocationDomain {
@@ -1114,8 +1117,28 @@ fn resolve_replay_checkpoint_referents(
 
 impl SemanticCheckpointManifest {
     const MAGIC: &'static [u8] = b"XLOG-SEMANTIC-CHECKPOINT\0";
-    const SECTION_COUNT: usize = 5;
-    const VERSION: u32 = 3;
+    const SECTION_COUNT: usize = 6;
+    const VERSION: u32 = 4;
+
+    /// The canonical unsigned state root covers every original section and
+    /// format version. The phase seal is outside this root to avoid self-signing.
+    fn unsigned_phase_root(&self) -> [u8; 32] {
+        let mut root = Sha256::new();
+        root.update(b"xlog.semantic.checkpoint.phase-root.v1\0");
+        root.update(Self::MAGIC);
+        root.update(Self::VERSION.to_le_bytes());
+        for section in [
+            &self.native,
+            &self.model,
+            &self.task,
+            &self.session,
+            &self.initial_prefill,
+        ] {
+            root.update((section.len() as u64).to_le_bytes());
+            root.update(Sha256::digest(section));
+        }
+        root.finalize().into()
+    }
 
     fn encode(self) -> PyResult<Vec<u8>> {
         let sections = [
@@ -1124,6 +1147,7 @@ impl SemanticCheckpointManifest {
             self.task,
             self.session,
             self.initial_prefill,
+            self.phase_seal,
         ];
         let mut bytes = Self::MAGIC.to_vec();
         bytes.extend_from_slice(&Self::VERSION.to_le_bytes());
@@ -1218,13 +1242,14 @@ impl SemanticCheckpointManifest {
             sections[index] = section.to_vec();
             payload = rest;
         }
-        let [native, model, task, session, initial_prefill] = sections;
+        let [native, model, task, session, initial_prefill, phase_seal] = sections;
         Ok(Self {
             native,
             model,
             task,
             session,
             initial_prefill,
+            phase_seal,
         })
     }
 }
@@ -1604,7 +1629,7 @@ impl PySemanticTransitionSession {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None))]
+    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None, learning_phase_issuer=None, learning_phase_records=None, learning_phase_record_limits=None, learning_phase_fence=None, learning_phase_checkpoint_issuer=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "restore uses the original bounded checkpoint-source resolver"
@@ -1621,8 +1646,59 @@ impl PySemanticTransitionSession {
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         refresh_snapshot: Option<&Bound<'_, PyAny>>,
+        learning_phase_issuer: Option<&Bound<'_, PyAny>>,
+        learning_phase_records: Option<&Bound<'_, PyAny>>,
+        learning_phase_record_limits: Option<&Bound<'_, PyAny>>,
+        learning_phase_fence: Option<&Bound<'_, PyAny>>,
+        learning_phase_checkpoint_issuer: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
-        Self::restore_checkpoint_impl(
+        if !checkpoint.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid("checkpoint restore requires exact builtin bytes"));
+        }
+        let raw = checkpoint.cast::<PyBytes>()?.as_bytes();
+        let closure = match (
+            learning_phase_issuer,
+            learning_phase_records,
+            learning_phase_record_limits,
+            learning_phase_fence,
+        ) {
+            (None, None, None, None) if learning_phase_checkpoint_issuer.is_none() => None,
+            (Some(issuer), Some(records), Some(limits), Some(fence)) => {
+                let verified = learning_phase::cold_restore::VerifiedClosure::read(
+                    raw,
+                    issuer,
+                    records,
+                    limits,
+                    fence,
+                    learning_phase_checkpoint_issuer,
+                )?;
+                let current = AuthoritySnapshot::parse(&ColdValue::read(
+                    snapshot,
+                    &mut (16 * 1024 * 1024),
+                    0,
+                )?)?;
+                current.newer_than(&verified.snapshot)?;
+                Some(Arc::new(verified))
+            }
+            _ => {
+                return Err(invalid(
+                    "cold phase restoration requires all original proof fields together",
+                ))
+            }
+        };
+        if closure.is_none() {
+            let manifest = SemanticCheckpointManifest::decode(raw)?;
+            if !manifest.phase_seal.is_empty()
+                || !SemanticTransitionSession::checkpoint_learning_phase_history(&manifest.native)
+                    .map_err(xlog_err)?
+                    .is_empty()
+            {
+                return Err(invalid(
+                    "phase-marked checkpoint requires its original complete signed lifecycle",
+                ));
+            }
+        }
+        let restored = Self::restore_checkpoint_impl(
             py,
             checkpoint,
             device_ordinal,
@@ -1638,11 +1714,114 @@ impl PySemanticTransitionSession {
             None,
             None,
             None,
+        )?;
+        if let Some(closure) = closure {
+            restored
+                .borrow(py)
+                .session
+                .borrow(py)
+                .install_checkpoint_custody(closure, Sha256::digest(raw).into())?;
+        }
+        Ok(restored)
+    }
+
+    /// Untrusted selector for locating the original separately pinned issuer.
+    /// This read does not verify a phase, create an owner or authorize restore.
+    #[staticmethod]
+    fn inspect_checkpoint_learning_phase_issuer(
+        py: Python<'_>,
+        checkpoint: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Py<PyBytes>>> {
+        if !checkpoint.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "checkpoint issuer selector requires exact builtin bytes",
+            ));
+        }
+        let manifest =
+            SemanticCheckpointManifest::decode(checkpoint.cast::<PyBytes>()?.as_bytes())?;
+        Ok(
+            learning_phase::cold_restore::checkpoint_issuer_selector(&manifest)?
+                .map(|issuer| PyBytes::new(py, &issuer).unbind()),
         )
+    }
+
+    #[getter]
+    fn learning_phase_checkpoint_issuer(&self, py: Python<'_>) -> PyResult<Option<Py<PyBytes>>> {
+        self.require_creator()?;
+        if self.learning_preparing.load(Ordering::Acquire) {
+            return Err(invalid(
+                "private or unknown phase cannot issue a checkpoint pin",
+            ));
+        }
+        Ok(self
+            .checkpoint_custody()?
+            .as_ref()
+            .map(|custody| PyBytes::new(py, &custody.issuer()).unbind()))
+    }
+
+    #[getter]
+    fn learning_phase_checkpoint_origin(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        self.require_creator()?;
+        if self.learning_preparing.load(Ordering::Acquire) {
+            return Err(invalid(
+                "private or unknown phase cannot issue checkpoint custody",
+            ));
+        }
+        self.checkpoint_custody()?
+            .as_ref()
+            .map(|custody| {
+                Ok((
+                    PyBytes::new(py, &custody.closure.phase_id),
+                    PyBytes::new(py, &custody.closure.delivery_digest),
+                    PyBytes::new(py, &custody.origin),
+                )
+                    .into_pyobject(py)?
+                    .unbind())
+            })
+            .transpose()
     }
 }
 
 impl PySemanticTransitionSession {
+    fn checkpoint_custody(
+        &self,
+    ) -> PyResult<MutexGuard<'_, Option<learning_phase::cold_restore::CheckpointCustody>>> {
+        self.checkpoint_custody
+            .lock()
+            .map_err(|_| invalid("native checkpoint custody mutex is poisoned"))
+    }
+
+    fn install_checkpoint_custody(
+        &self,
+        closure: Arc<learning_phase::cold_restore::VerifiedClosure>,
+        origin: [u8; 32],
+    ) -> PyResult<()> {
+        self.require_creator()?;
+        let mut retained = self.checkpoint_custody()?;
+        if let Some(current) = retained.as_ref() {
+            if current.closure.phase_id != closure.phase_id
+                || current.closure.delivery_digest != closure.delivery_digest
+                || current.origin != origin
+            {
+                return Err(invalid(
+                    "known checkpoint issuer cannot replace its original closure or origin",
+                ));
+            }
+        } else {
+            *retained = Some(learning_phase::cold_restore::CheckpointCustody::issue(
+                closure, origin,
+            ));
+        }
+        Ok(())
+    }
+
+    fn seal_owned_checkpoint(&self, mut manifest: SemanticCheckpointManifest) -> PyResult<Vec<u8>> {
+        if let Some(custody) = self.checkpoint_custody()?.as_ref() {
+            manifest.phase_seal = custody.seal(&manifest)?;
+        }
+        manifest.encode()
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "canonical restore keeps the original checkpoint, authority, domain and optional cold phase recipe explicit"
@@ -8151,6 +8330,24 @@ impl PySemanticTransitionRestoredCheckpoint {
     fn model(&self, py: Python<'_>) -> Py<PyAny> {
         self.model.clone_ref(py)
     }
+
+    /// Original verified program, full delivered history and accepted prefix.
+    /// Identities remain original; a fresh Session is not a rewritten history.
+    #[getter]
+    fn learning_phase_closure(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        if session.learning_preparing.load(Ordering::Acquire) {
+            return Err(invalid(
+                "private phase cannot expose a completed cold closure",
+            ));
+        }
+        let closure = session
+            .checkpoint_custody()?
+            .as_ref()
+            .map(|custody| Arc::clone(&custody.closure));
+        closure.map(|closure| closure.python_value(py)).transpose()
+    }
 }
 
 /// Native physical allocation origin of one exported tensor view. Instances
@@ -10638,14 +10835,17 @@ impl PySemanticPreparedStep {
             &task_binding,
         )?;
         let native_digest = Identity256::from_bytes(Sha256::digest(&native).into());
-        let checkpoint = SemanticCheckpointManifest {
-            native,
-            model: model?,
-            task,
-            session: config.encode()?,
-            initial_prefill,
-        }
-        .encode()?;
+        let checkpoint =
+            self.session
+                .borrow(py)
+                .seal_owned_checkpoint(SemanticCheckpointManifest {
+                    native,
+                    model: model?,
+                    task,
+                    session: config.encode()?,
+                    initial_prefill,
+                    phase_seal: Vec::new(),
+                })?;
         let referent = CheckpointReferent::from_checkpoint(&checkpoint)?.encode();
         {
             let session = self.session.borrow(py);
@@ -15623,6 +15823,15 @@ impl PySemanticTransitionController {
             )?;
             {
                 let source = self.session.borrow(py);
+                let restored = admitted.borrow(py);
+                let successor = restored.session.borrow(py);
+                let mut original_custody = source.checkpoint_custody()?;
+                let mut successor_custody = successor.checkpoint_custody()?;
+                if successor_custody.is_some() {
+                    return Err(invalid(
+                        "cold arena successor cannot replace original checkpoint custody",
+                    ));
+                }
                 let issued = candidate_task.borrow(py);
                 let mut source_state = task_use.state()?;
                 let mut candidate_state = issued.state()?;
@@ -15638,6 +15847,9 @@ impl PySemanticTransitionController {
                 TaskIssuance::issue(Arc::clone(&source.issuance))?;
                 source_state.phase = TaskUsePhase::Refused;
                 candidate_state.phase = activated_phase;
+                // This known in-process handoff moves the existing key, never
+                // reissues one or loses the previously completed phase history.
+                *successor_custody = original_custody.take();
             }
             Ok(admitted)
         })();
@@ -15814,14 +16026,17 @@ impl PySemanticTransitionController {
             .checkpoint
             .encode(&snapshot, &phase, &task_binding)?;
         let session = config.encode()?;
-        let checkpoint = SemanticCheckpointManifest {
-            native,
-            model,
-            task,
-            session,
-            initial_prefill,
-        }
-        .encode()?;
+        let checkpoint =
+            self.session
+                .borrow(py)
+                .seal_owned_checkpoint(SemanticCheckpointManifest {
+                    native,
+                    model,
+                    task,
+                    session,
+                    initial_prefill,
+                    phase_seal: Vec::new(),
+                })?;
         Ok(PyBytes::new(py, &checkpoint).unbind())
     }
 
@@ -18448,6 +18663,7 @@ mod tests {
             prepared_segment: Mutex::new(None),
             learning_preparing: AtomicBool::new(false),
             learning_transition: Mutex::new(None),
+            checkpoint_custody: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             active_cold_model_work: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),

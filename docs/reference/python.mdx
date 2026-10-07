@@ -325,6 +325,50 @@ must return its reconstructed semantic runtime. The frozen
 `SemanticTransitionRestoredCheckpoint` exposes that same `session`, `controller`,
 `task_use`, `parent`, and returned `model` through read-only properties; none is a
 replacement or second acquisition.
+
+Phase-marked checkpoints use this same loader with all four original cold proof
+keywords together: `learning_phase_issuer` is the independently pinned 32-byte
+issuer; `learning_phase_records` is the exact ordered tuple of Admission,
+preparation outcome and Delivery bytes; `learning_phase_record_limits` is the
+original `(record_bytes, total_bytes, count)`; `learning_phase_fence` is
+`(phase_id, source_checkpoint_sha256, delivered_checkpoint_sha256, destination,
+source_phase, target_phase)`, with all three identities as 32-byte values.
+Missing, refused, over-budget or altered history cannot enter the factory.
+Native authenticates the complete signatures, hash chain, limits, original
+scientific result, full ordered history and accepted checkpoint before allocation.
+Fresh authority must also be newer than the signed Delivery snapshot. The
+original checkpoint-source resolver and its separately registered limits remain
+unchanged; phase-record bounds do not replace or enlarge them.
+
+The read-only returned `learning_phase_closure` is
+`(phase_id, original_program_bytes, full_history_bytes, original_acceptance_bytes)`.
+Restore the original scientific owner from that program and full history, without
+freezing another program, repeating comparisons or rewriting original publication
+identities for the fresh instance. The acceptance retains its completed-prefix
+history; the restored full history additionally contains actual Delivery.
+
+After known Delivery or known full restoration, that actual Session owns one
+private checkpoint signing key. `session.learning_phase_checkpoint_issuer`
+returns its 32-byte public key; `session.learning_phase_checkpoint_origin`
+returns `(phase_id, delivery_record_sha256, actual_origin_checkpoint_sha256)`.
+The trusted consumer must independently pin these exact values with create-only
+durable readback before subsequent requests. Failed pin/readback retains the same
+known handoff, Session, issuer, lock and recovery fence; only original local
+readback can continue, not another restore, factory or key generation. Keep older
+pins usable until their durable checkpoints have been superseded. Private or
+unknown phase owners cannot issue a pin. No private key enters Python or a Q.
+
+Subsequent canonical checkpoint saves retain a compact native signature over the
+complete state and its original phase, Delivery and known origin. The same loader
+accepts these later states only with the additional
+`learning_phase_checkpoint_issuer` read from their independent trusted pin.
+This fifth field cannot stand alone. Only the byte-for-byte original Delivery Q
+may omit it; recovery never rolls a descendant back to that older checkpoint.
+`inspect_checkpoint_learning_phase_issuer(checkpoint)` returns an **untrusted
+selector** for locating the retained pin, not a verified key or permission to
+restore. Copying an Admission or stripping the seal cannot bypass the complete
+proof requirement. A known in-process arena handoff moves the same custody to
+its actual successor, preserving history without reissuing the key.
 The same controlled-reader owner encloses the factory and the existing cold
 arena/learning-phase model callbacks. It permits authentic native tensor/content
 reads, not segment execution or public activation of a private candidate. After
@@ -731,9 +775,10 @@ material now uses format 3; format 2 is not reinterpreted as admission-bearing
 material. The signed preparation outcome holds three length-prefixed materials:
 the unchanged full final checkpoint, its original scientific history, and the
 acceptance bytes. Acceptance stays outside the checkpoint whose bytes it binds.
-This boundary migration does not implement the still-required native schedule,
-whole-operation work/call measurements, private feedback binding or cold-process
-recovery; refusal of an incomplete prefix is not completion of that executor.
+Cold recovery consumes these same original records in the canonical loader
+described above. A preparation outcome is not a complete signed Delivery;
+refusing an incomplete prefix does not complete the scientific executor or
+establish its whole-operation work, physical memory or GPU transfer evidence.
 
 Destination acceptance must be derived from the original durable-training
 permission's resolved scope, never merely from the caller's destination string,
@@ -1061,7 +1106,8 @@ the complete checkpoint. The owner must check a retrieved
 source with `verify_checkpoint_referent(record, checkpoint)`; `restore_checkpoint`
 accepts `referent=record` and performs that same exact check before allocating a
 new owner.
-The complete checkpoint uses version 3 and the compact referent remains version 2;
+The complete checkpoint uses version 4 with a separate phase-seal section, and
+the compact referent remains version 2;
 the embedded task capsule uses version 5 to retain the original training domain,
 whole-task nominal Proposal expense and checkpoint-source registration.
 Older complete checkpoints, task capsules and version 1 referent sources are not

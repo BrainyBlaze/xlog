@@ -15,7 +15,7 @@ pub(super) enum RecordKind {
     Delivery = 2,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct RecordLimits {
     pub(super) record_bytes: u64,
     pub(super) total_bytes: u64,
@@ -44,7 +44,7 @@ impl RecordLimits {
         Ok(limits)
     }
 
-    fn encode(self) -> [u8; 24] {
+    pub(super) fn encode(self) -> [u8; 24] {
         let mut bytes = [0; 24];
         for (target, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip([
             self.record_bytes,
@@ -55,6 +55,124 @@ impl RecordLimits {
         }
         bytes
     }
+}
+
+/// A bounded slice of an original signed record or length-delimited payload.
+/// Parsing never invokes a Python callback or allocates from a declared length.
+pub(super) struct RecordReader<'a>(pub(super) &'a [u8]);
+
+impl<'a> RecordReader<'a> {
+    pub(super) fn take(&mut self, count: usize) -> PyResult<&'a [u8]> {
+        if count > self.0.len() {
+            return Err(invalid("signed phase material is truncated"));
+        }
+        let (value, remaining) = self.0.split_at(count);
+        self.0 = remaining;
+        Ok(value)
+    }
+
+    pub(super) fn word(&mut self) -> PyResult<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    pub(super) fn field(&mut self) -> PyResult<&'a [u8]> {
+        let count = usize::try_from(self.word()?)
+            .map_err(|_| invalid("signed phase field length exceeds this host"))?;
+        self.take(count)
+    }
+
+    pub(super) fn finish(self) -> PyResult<()> {
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            Err(invalid(
+                "signed phase material contains an unconsumed suffix",
+            ))
+        }
+    }
+}
+
+/// Authenticate the complete original lifecycle before any replacement CUDA
+/// owner exists. The issuer and limits come from the independent consumer pin,
+/// never from an untrusted record header or a newly generated signing key.
+pub(super) fn delivery_payloads<'a>(
+    records: [&'a [u8]; 3],
+    issuer: [u8; 32],
+    phase_id: [u8; 32],
+    limits: RecordLimits,
+) -> PyResult<[&'a [u8]; 3]> {
+    if limits.records < 3 {
+        return Err(invalid(
+            "original phase bounds cannot contain the complete lifecycle",
+        ));
+    }
+    if (records[0].len() as u64)
+        .checked_add(limits.record_bytes)
+        .and_then(|required| required.checked_add(limits.record_bytes))
+        .is_none_or(|required| required > limits.total_bytes)
+    {
+        return Err(invalid(
+            "original phase limits lost their reserved complete outcome custody",
+        ));
+    }
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&issuer)
+        .map_err(|_| invalid("independent phase issuer has an invalid encoding"))?;
+    let mut previous = [0u8; 32];
+    let mut total = 0u64;
+    let mut payloads = [&[][..]; 3];
+    for (ordinal, bytes) in records.into_iter().enumerate() {
+        total = total
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| invalid("original phase record total overflowed"))?;
+        if bytes.len() < RECORD_OVERHEAD
+            || bytes.len() as u64 > limits.record_bytes
+            || total > limits.total_bytes
+        {
+            return Err(invalid(
+                "signed phase chain exceeds its original record bounds",
+            ));
+        }
+        let (message, signature) = bytes.split_at(bytes.len() - 64);
+        let signature = ed25519_dalek::Signature::from_slice(signature)
+            .map_err(|_| invalid("signed phase record has an invalid signature encoding"))?;
+        key.verify_strict(message, &signature)
+            .map_err(|_| invalid("signed phase record differs from its independent issuer"))?;
+        let mut reader = RecordReader(message);
+        if reader.take(RECORD_DOMAIN.len())? != RECORD_DOMAIN
+            || reader.take(1)? != [ordinal as u8]
+            || reader.take(32)? != phase_id
+            || reader.take(32)? != issuer
+            || reader.word()? != ordinal as u64
+            || reader.take(32)? != previous
+            || reader.word()? != total
+            || reader.take(24)? != limits.encode()
+        {
+            return Err(invalid(
+                "signed phase record changed its original lifecycle or limits",
+            ));
+        }
+        payloads[ordinal] = reader.field()?;
+        reader.finish()?;
+        previous = Sha256::digest(bytes).into();
+    }
+    let admission = payloads[0];
+    let digest: [u8; 32] = Sha256::digest(admission).into();
+    if !admission.starts_with(INPUT_DOMAIN) || digest != phase_id {
+        return Err(invalid(
+            "phase admission changed its original input identity",
+        ));
+    }
+    let mut inputs = RecordReader(&admission[INPUT_DOMAIN.len()..]);
+    for _ in 0..8 {
+        inputs.field()?;
+    }
+    if inputs.field()? != limits.encode() {
+        return Err(invalid(
+            "phase admission changed its independent original bounds",
+        ));
+    }
+    inputs.finish()?;
+    Ok(payloads)
 }
 
 pub(super) struct RecordAttempt {
@@ -139,6 +257,26 @@ impl PhaseRecords {
 
     pub(super) fn issuer(&self) -> [u8; 32] {
         self.key.verifying_key().to_bytes()
+    }
+
+    pub(super) fn delivered_identity(&self) -> PyResult<([u8; 32], [u8; 32], Arc<[u8]>)> {
+        if !self.delivery_known
+            || self.ordinal != 3
+            || self.attempt.is_some()
+            || !self.issuer_pinned
+        {
+            return Err(invalid(
+                "checkpoint issuer requires known full signed Delivery readback",
+            ));
+        }
+        Ok((
+            self.phase_id,
+            self.previous,
+            self.admission
+                .as_ref()
+                .map(Arc::clone)
+                .ok_or_else(|| invalid("known Delivery lost its original native Admission"))?,
+        ))
     }
 
     pub(super) fn require_preparation_admission(&self) -> PyResult<()> {

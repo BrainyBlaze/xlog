@@ -22951,6 +22951,14 @@ impl SemanticTransitionSession {
         &self.learning_phases
     }
 
+    /// Inspect retained phase admissions through the same full-state codec,
+    /// before a cold restoration can allocate or invoke a model factory.
+    pub fn checkpoint_learning_phase_history(
+        bytes: &[u8],
+    ) -> Result<Vec<SemanticLearningPhaseRecord>, SemanticTransitionError> {
+        Ok(PublicationMaterial::decode(bytes)?.learning_phases)
+    }
+
     /// Admit a new immutable training arena after an exact cold restore, while
     /// its Session is still private. The saved publication is the only source
     /// of model, replay, receipt and optimizer bytes; only the live task
