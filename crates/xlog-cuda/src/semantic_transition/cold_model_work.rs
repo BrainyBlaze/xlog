@@ -131,7 +131,10 @@ impl SemanticTransitionSession {
             RecordingState::Waiting | RecordingState::Recording | RecordingState::Closed => {
                 Ok(Some(storage.native_work.view()))
             }
-            RecordingState::Completed => Ok(None),
+            // A completed local report does not hide the next original
+            // operation's borrowed tally. Late verification and retirement of
+            // this reader must charge their actual commands to that live owner.
+            RecordingState::Completed => Ok(self.graph.borrowed_cold_work()),
             _ => Err(publication_input_error(
                 "cold native producers cannot run after failure or report submission",
             )),
