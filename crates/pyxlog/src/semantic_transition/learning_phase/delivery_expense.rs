@@ -324,15 +324,18 @@ impl PySemanticLearningPhaseTransition {
                 let original = self.parent.borrow(py);
                 let mut private_owner = private.owner()?;
                 let mut source_owner = source.owner()?;
-                private_owner
+                let private_lease = parent.lease()?;
+                let source_lease = original.lease()?;
+                let transferred = private_owner
                     .handoff_cold_model_work(
-                        &*parent.lease()?,
+                        &private_lease,
                         &work,
                         &mut source_owner,
-                        &*original.lease()?,
+                        &source_lease,
                         &streams,
                     )
-                    .map_err(xlog_err)?
+                    .map_err(xlog_err)?;
+                transferred
             };
             let mut retained = self.delivery_expense()?;
             let current = retained.as_mut().expect("original delivery");
@@ -1029,11 +1032,8 @@ impl PySemanticLearningPhaseTransition {
             let callback = self.model_owner(py, callback_kind)?;
             let arguments = if refusal_retirement {
                 let (candidate, _) = self.candidate(py)?;
-                Some(
-                    (candidate.borrow(py).model.clone_ref(py),)
-                        .into_pyobject(py)?
-                        .unbind(),
-                )
+                let model = candidate.borrow(py).model.clone_ref(py);
+                Some((model,).into_pyobject(py)?.unbind())
             } else if index == 8 {
                 let source = self.model_owner(py, PhaseModelOwner::Source)?;
                 let (candidate, _) = self.candidate(py)?;
