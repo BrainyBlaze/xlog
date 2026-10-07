@@ -2783,12 +2783,12 @@ impl CudaKernelProvider {
         capacities: SemanticHypergraphCapacities,
         work: crate::SemanticColdNativeWork,
     ) -> Result<SemanticHypergraph, SemanticHypergraphError> {
-        let custody = work
-            .graph_custody(self, domain)
-            .map_err(|error| SemanticHypergraphError::Runtime {
-                operation: "cold graph custody",
-                detail: error.to_string(),
-            })?;
+        let custody =
+            work.graph_custody(self, domain)
+                .map_err(|error| SemanticHypergraphError::Runtime {
+                    operation: "cold graph custody",
+                    detail: error.to_string(),
+                })?;
         self.allocate_semantic_hypergraph_impl(domain, capacities, Some(custody))
     }
 
