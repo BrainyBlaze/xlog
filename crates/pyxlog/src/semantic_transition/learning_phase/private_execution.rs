@@ -191,6 +191,29 @@ impl PySemanticLearningPhaseTransition {
         ))
     }
 
+    pub(super) fn private_current_restore_input(
+        &self,
+        py: Python<'_>,
+        branch: &'static str,
+    ) -> PyResult<(super::phase_evaluation::EvaluationOwners, u64)> {
+        if self.private_group()?.is_some() {
+            return self.private_group_successor_input(py, branch);
+        }
+        // A restore can be the first private operation or immediately follow
+        // another restore. Use that actual known handoff, never the source copy.
+        let (restored, ordinal) = self.private_execution_input(py, branch)?;
+        let restored = restored.borrow(py);
+        Ok((
+            super::phase_evaluation::EvaluationOwners {
+                controller: restored.controller.clone_ref(py),
+                task: restored.task_use.clone_ref(py),
+                parent: restored.parent.clone_ref(py),
+                model: restored.model.clone_ref(py),
+            },
+            ordinal,
+        ))
+    }
+
     fn private_group(&self) -> PyResult<MutexGuard<'_, Option<PrivateExecutionGroup>>> {
         self.private_execution
             .lock()
@@ -863,9 +886,15 @@ impl PySemanticLearningPhaseTransition {
     pub(super) fn execute_private_numerical_sequence(
         &self,
         py: Python<'_>,
+        pending: &Py<Self>,
         branch: &'static str,
     ) -> PyResult<()> {
-        self.execute_private_group(py, branch, None)?;
+        if self.intermediate_restore_unfinished(branch)? {
+            self.execute_intermediate_restore(py, pending, branch)?;
+        }
+        if self.private_group()?.is_some() {
+            self.execute_private_group(py, branch, None)?;
+        }
         loop {
             self.preparation_inputs
                 .require_program(py, &self.scientific_owner)?;
@@ -885,10 +914,18 @@ impl PySemanticLearningPhaseTransition {
                     "private numerical sequence changed its original branch",
                 ));
             }
+            if fields[0].text()? == "restore" {
+                self.execute_intermediate_restore(py, pending, branch)?;
+                continue;
+            }
             if !matches!(fields[0].text()?, "proposal" | "update" | "recompute") {
-                // The original lifecycle executor, never a shortened numerical
-                // roster, must consume an evaluation or intermediate restore.
+                // The original lifecycle executor consumes the complete final
+                // evaluation roster; numerical groups are never shortened.
                 return Ok(());
+            }
+            if self.private_group()?.is_none() {
+                self.execute_private_group(py, branch, None)?;
+                continue;
             }
             let (selected, ordinal) = self.private_group_successor_input(py, branch)?;
             if fields[2].unsigned()? != ordinal || fields[3].unsigned()? != 0 {

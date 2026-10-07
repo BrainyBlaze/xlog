@@ -786,6 +786,27 @@ and obtains exact signed delivery readback before releasing the observer or
 making the candidate runnable. Budget excess preserves actual measured history
 and the already known checkpoint without activating the candidate.
 
+Each original intermediate `restore` uses the captured lifecycle decoder's
+`("restore", "current", recipe_or_none)` projection. Native saves the actual
+selected full checkpoint through the same controller, retires that private
+model and Session, and restores the saved checkpoint through the same canonical
+constructor and captured factory. The original coordinating owner and Worker
+remain; the retired private Runtime is never resumed. A supplied immutable
+`SemanticLearningPhaseRecipe` receives the original signed Admission; `None`
+preserves the current state and grants no inferred fold or reset.
+
+One original resource interval and shared native tally cover both full snapshots,
+old-model retirement, native deallocation and the next actual construction.
+Four ordered, single-attempt model regions cover the current snapshot,
+retirement, factory and restored snapshot. The original `record_restore` receives
+both full checkpoints, actual old/new publication identities and measured usage.
+Only known report, history, budget and observer release allow the next original
+numerical group to consume that new private handoff. The decoder, serializer,
+retirement callback and factory cannot be replayed after an unknown outcome.
+Initial, consecutive and later intermediate restores retain the same branch and
+original ordinals; real feedback and control positive-zero remain distinct.
+Subsequent full Recompute and fresh evaluations are still required.
+
 `retire_restored_model(returned_model) -> None` is the original model/runtime
 owner's mandatory retirement callback, retained before the factory is entered.
 Abandonment calls it once with the exact factory model while source use is still
@@ -888,7 +909,7 @@ original delivery report and any original signed delivery write. It does not
 re-resolve or undo checkpoint publication, repeat source serializers or cleanup,
 resubmit a signed write, or repeat physical finish or release. A signed delivery
 record is not a fresh-process recovery loader or proof of full GPU execution;
-intermediate restores, terminal refusal and whole-path runtime qualification
+terminal refusal and whole-path runtime qualification
 remain separate required capabilities.
 
 For the same live pending, `pending.continue_preparation()` is a separate deliberate

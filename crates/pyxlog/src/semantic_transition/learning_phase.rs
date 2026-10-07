@@ -23,6 +23,10 @@ mod private_restore;
 #[cfg(feature = "semantic-policy")]
 use private_restore::PrivateTrajectoryStart;
 #[cfg(feature = "semantic-policy")]
+mod intermediate_restore;
+#[cfg(feature = "semantic-policy")]
+use intermediate_restore::IntermediateRestore;
+#[cfg(feature = "semantic-policy")]
 mod private_execution;
 #[cfg(feature = "semantic-policy")]
 use private_execution::PrivateExecutionGroup;
@@ -424,6 +428,10 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     delivery_expense: Mutex<Option<DeliveryExpense>>,
     #[cfg(feature = "semantic-policy")]
     private_trajectory_start: Mutex<Option<PrivateTrajectoryStart>>,
+    #[cfg(feature = "semantic-policy")]
+    intermediate_restore: Mutex<Option<IntermediateRestore>>,
+    #[cfg(feature = "semantic-policy")]
+    intermediate_snapshot_active: AtomicBool,
     #[cfg(feature = "semantic-policy")]
     private_execution: Mutex<Option<PrivateExecutionGroup>>,
     #[cfg(feature = "semantic-policy")]
@@ -1066,7 +1074,7 @@ impl PySemanticLearningPhaseTransition {
         {
             self.execute_control_branch(py, pending)?;
             self.prepare_private_trajectory(py, pending, "real")?;
-            self.execute_private_numerical_sequence(py, "real")?;
+            self.execute_private_numerical_sequence(py, pending, "real")?;
             self.execute_private_evaluations(py, "real")?;
             self.execute_private_checkpoint(py, "real")?;
             self.retain_final_checkpoint_candidate(py)?;
@@ -2188,7 +2196,7 @@ impl PySemanticLearningPhaseTransition {
                 pending
                     .execute_control_branch(py, &slf)
                     .and_then(|()| pending.prepare_private_trajectory(py, &slf, "real"))
-                    .and_then(|()| pending.execute_private_numerical_sequence(py, "real"))
+                    .and_then(|()| pending.execute_private_numerical_sequence(py, &slf, "real"))
                     .and_then(|()| pending.execute_private_evaluations(py, "real"))
                     .and_then(|()| pending.execute_private_checkpoint(py, "real"))
                     .and_then(|()| pending.retain_final_checkpoint_candidate(py))
@@ -2467,6 +2475,10 @@ impl PySemanticTransitionController {
                 delivery_expense: Mutex::new(None),
                 #[cfg(feature = "semantic-policy")]
                 private_trajectory_start: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                intermediate_restore: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                intermediate_snapshot_active: AtomicBool::new(false),
                 #[cfg(feature = "semantic-policy")]
                 private_execution: Mutex::new(None),
                 #[cfg(feature = "semantic-policy")]

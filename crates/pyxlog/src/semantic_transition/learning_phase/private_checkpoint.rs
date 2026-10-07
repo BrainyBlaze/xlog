@@ -261,6 +261,9 @@ impl PySemanticLearningPhaseTransition {
         task: &PySemanticTransitionTaskUse,
         parent: &PySemanticPublishedParent,
     ) -> PyResult<()> {
+        if self.intermediate_snapshot_active.load(Ordering::Acquire) {
+            return self.require_intermediate_snapshot_save(py, controller, task, parent);
+        }
         if !self.private_checkpoint_active.load(Ordering::Acquire) {
             return Err(invalid(
                 "private checkpoint save belongs only to its original active operation",
