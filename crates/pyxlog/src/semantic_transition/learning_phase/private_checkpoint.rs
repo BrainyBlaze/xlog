@@ -40,9 +40,13 @@ impl PySemanticLearningPhaseTransition {
             .map_err(|_| invalid("private checkpoint custody mutex is poisoned"))
     }
 
-    pub(super) fn execute_control_checkpoint(&self, py: Python<'_>) -> PyResult<()> {
-        let (owners, ordinal) = self.control_checkpoint_input(py)?;
-        self.execute_private_checkpoint(py, "control", owners, ordinal)
+    pub(super) fn execute_private_checkpoint(
+        &self,
+        py: Python<'_>,
+        branch: &'static str,
+    ) -> PyResult<()> {
+        let (owners, ordinal) = self.private_checkpoint_input(py, branch)?;
+        self.save_private_checkpoint(py, branch, owners, ordinal)
     }
 
     pub(super) fn control_retirement_input(
@@ -147,7 +151,7 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
-    fn execute_private_checkpoint(
+    fn save_private_checkpoint(
         &self,
         py: Python<'_>,
         branch: &'static str,

@@ -390,6 +390,8 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     #[cfg(feature = "semantic-policy")]
     control_evaluations_done: AtomicBool,
     #[cfg(feature = "semantic-policy")]
+    real_evaluations_done: AtomicBool,
+    #[cfg(feature = "semantic-policy")]
     private_checkpoints: Mutex<Vec<PrivateCheckpoint>>,
     #[cfg(feature = "semantic-policy")]
     private_checkpoint_active: AtomicBool,
@@ -1007,6 +1009,8 @@ impl PySemanticLearningPhaseTransition {
             self.execute_control_branch(py, pending)?;
             self.prepare_private_trajectory(py, pending, "real")?;
             self.execute_private_group(py, "real")?;
+            self.execute_private_evaluations(py, "real")?;
+            self.execute_private_checkpoint(py, "real")?;
             return self.finish_preparation(py);
         }
         #[cfg(not(feature = "semantic-policy"))]
@@ -2080,6 +2084,8 @@ impl PySemanticLearningPhaseTransition {
                     .execute_control_branch(py, &slf)
                     .and_then(|()| pending.prepare_private_trajectory(py, &slf, "real"))
                     .and_then(|()| pending.execute_private_group(py, "real"))
+                    .and_then(|()| pending.execute_private_evaluations(py, "real"))
+                    .and_then(|()| pending.execute_private_checkpoint(py, "real"))
                     .and_then(|()| pending.finish_preparation(py))
             }
             #[cfg(not(feature = "semantic-policy"))]
@@ -2338,6 +2344,8 @@ impl PySemanticTransitionController {
                 phase_evaluation_active: AtomicBool::new(false),
                 #[cfg(feature = "semantic-policy")]
                 control_evaluations_done: AtomicBool::new(false),
+                #[cfg(feature = "semantic-policy")]
+                real_evaluations_done: AtomicBool::new(false),
                 #[cfg(feature = "semantic-policy")]
                 private_checkpoints: Mutex::new(Vec::new()),
                 #[cfg(feature = "semantic-policy")]

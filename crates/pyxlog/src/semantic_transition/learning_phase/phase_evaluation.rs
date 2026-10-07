@@ -104,24 +104,38 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
-    pub(super) fn control_checkpoint_input(
+    fn private_evaluation_completion(&self, branch: &'static str) -> PyResult<&AtomicBool> {
+        match branch {
+            "control" => Ok(&self.control_evaluations_done),
+            "real" => Ok(&self.real_evaluations_done),
+            _ => Err(invalid(
+                "private evaluations require an original private branch",
+            )),
+        }
+    }
+
+    pub(super) fn private_checkpoint_input(
         &self,
         py: Python<'_>,
+        branch: &'static str,
     ) -> PyResult<(EvaluationOwners, u64)> {
-        if !self.control_evaluations_done.load(Ordering::Acquire) {
+        if !self
+            .private_evaluation_completion(branch)?
+            .load(Ordering::Acquire)
+        {
             return Err(invalid(
-                "control checkpoint precedes its complete original evaluations",
+                "private checkpoint precedes its complete original evaluations",
             ));
         }
-        let (owners, mut ordinal) = self.private_evaluation_input(py, "control")?;
+        let (owners, mut ordinal) = self.private_evaluation_input(py, branch)?;
         if let Some(evaluation) = self
             .phase_evaluations()?
             .last()
-            .filter(|entry| entry.branch == "control")
+            .filter(|entry| entry.branch == branch)
         {
             if !evaluation.recorded || !evaluation.released || evaluation.budget_exceeded {
                 return Err(invalid(
-                    "control checkpoint precedes known evaluation accounting and release",
+                    "private checkpoint precedes known evaluation accounting and release",
                 ));
             }
             ordinal = evaluation
@@ -424,17 +438,22 @@ impl PySemanticLearningPhaseTransition {
         ))
     }
 
-    /// Project each original control observation only after the selected group
+    /// Project each original private observation only after the selected group
     /// and its physical interval are fully consumed. No new model is restored.
-    pub(super) fn execute_control_evaluations(&self, py: Python<'_>) -> PyResult<()> {
-        if self.control_evaluations_done.load(Ordering::Acquire) {
+    pub(super) fn execute_private_evaluations(
+        &self,
+        py: Python<'_>,
+        branch: &'static str,
+    ) -> PyResult<()> {
+        let completion = self.private_evaluation_completion(branch)?;
+        if completion.load(Ordering::Acquire) {
             return Ok(());
         }
         loop {
             let unfinished = self
                 .phase_evaluations()?
                 .last()
-                .is_some_and(|evaluation| evaluation.branch == "control" && !evaluation.recorded);
+                .is_some_and(|evaluation| evaluation.branch == branch && !evaluation.recorded);
             if unfinished {
                 self.execute_evaluation(py)?;
                 continue;
@@ -442,15 +461,15 @@ impl PySemanticLearningPhaseTransition {
             if self
                 .phase_evaluations()?
                 .last()
-                .is_some_and(|evaluation| evaluation.branch == "control")
+                .is_some_and(|evaluation| evaluation.branch == branch)
             {
                 self.release_evaluation_record(py)?;
             }
-            let (owners, mut ordinal) = self.private_evaluation_input(py, "control")?;
+            let (owners, mut ordinal) = self.private_evaluation_input(py, branch)?;
             if let Some(previous) = self
                 .phase_evaluations()?
                 .last()
-                .filter(|evaluation| evaluation.branch == "control")
+                .filter(|evaluation| evaluation.branch == branch)
             {
                 ordinal = previous
                     .ordinal
@@ -474,25 +493,40 @@ impl PySemanticLearningPhaseTransition {
             let operation = first
                 .get_item("operation")?
                 .ok_or_else(|| invalid("private evaluation lost its operation"))?;
-            let branch = first
+            let scheduled_branch = first
                 .get_item("branch")?
                 .ok_or_else(|| invalid("private evaluation lost its branch"))?;
-            if ColdValue::read(&operation, &mut 128, 0)?.text()? != "evaluation"
-                || ColdValue::read(&branch, &mut 128, 0)?.text()? != "control"
-            {
-                self.control_evaluations_done.store(true, Ordering::Release);
-                return Ok(());
+            if ColdValue::read(&scheduled_branch, &mut 128, 0)?.text()? != branch {
+                return Err(invalid(
+                    "private evaluation changed its original scheduled branch",
+                ));
+            }
+            let operation = ColdValue::read(&operation, &mut 128, 0)?;
+            let operation = operation.text()?;
+            if operation != "evaluation" && operation != "checkpoint" {
+                return Err(invalid(&format!(
+                    "private trajectory requires its next original {operation} group before final evaluations"
+                )));
             }
             let (material, instruction) = Self::singleton_lifecycle_material(entries)?;
             let fields = ColdValue::from_canonical_bytes(&material)?;
             let fields = fields.fields(6)?;
-            if fields[2].unsigned()? != ordinal
-                || fields[3].unsigned()? != 0
-                || fields[5] == ColdValue::None
-            {
+            if fields[2].unsigned()? != ordinal || fields[3].unsigned()? != 0 {
                 return Err(invalid(
-                    "private evaluation changed its contiguous original position or comparison",
+                    "private evaluation changed its contiguous original position",
                 ));
+            }
+            if operation == "checkpoint" {
+                if fields[5] != ColdValue::None {
+                    return Err(invalid(
+                        "private checkpoint acquired an evaluation comparison",
+                    ));
+                }
+                completion.store(true, Ordering::Release);
+                return Ok(());
+            }
+            if fields[5] == ColdValue::None {
+                return Err(invalid("private evaluation lost its original comparison"));
             }
             let budget = fields[4].fields(3)?;
             let budget = [
@@ -502,7 +536,7 @@ impl PySemanticLearningPhaseTransition {
             ];
             self.phase_evaluations()?.push(PhaseEvaluation {
                 owners,
-                branch: "control",
+                branch,
                 entries: entries.clone().unbind(),
                 material,
                 instruction,
