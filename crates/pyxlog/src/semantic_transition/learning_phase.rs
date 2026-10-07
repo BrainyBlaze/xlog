@@ -30,6 +30,10 @@ use private_execution::PrivateExecutionGroup;
 mod private_checkpoint;
 #[cfg(feature = "semantic-policy")]
 use private_checkpoint::PrivateCheckpoint;
+#[cfg(feature = "semantic-policy")]
+mod control_retirement;
+#[cfg(feature = "semantic-policy")]
+use control_retirement::ControlRetirement;
 
 struct PhaseRecordStore {
     pin: Py<PyAny>,
@@ -389,6 +393,8 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     private_checkpoints: Mutex<Vec<PrivateCheckpoint>>,
     #[cfg(feature = "semantic-policy")]
     private_checkpoint_active: AtomicBool,
+    #[cfg(feature = "semantic-policy")]
+    control_retirement: Mutex<Option<ControlRetirement>>,
     #[cfg(feature = "semantic-policy")]
     private_trajectory_start: Mutex<Option<PrivateTrajectoryStart>>,
     #[cfg(feature = "semantic-policy")]
@@ -998,10 +1004,7 @@ impl PySemanticLearningPhaseTransition {
         }
         #[cfg(feature = "semantic-policy")]
         {
-            self.prepare_control_trajectory(py, pending)?;
-            self.execute_control_group(py)?;
-            self.execute_control_evaluations(py)?;
-            self.execute_control_checkpoint(py)?;
+            self.execute_control_branch(py, pending)?;
             return self.finish_preparation(py);
         }
         #[cfg(not(feature = "semantic-policy"))]
@@ -2007,7 +2010,7 @@ impl PySemanticLearningPhaseTransition {
             .is_some();
         if entered && candidate_entered {
             #[cfg(feature = "semantic-policy")]
-            if !final_candidate_known {
+            if !final_candidate_known && !pending.control_retirement_retained()? {
                 pending.require_known_control_restore(py)?;
             }
             if final_candidate_known {
@@ -2072,10 +2075,7 @@ impl PySemanticLearningPhaseTransition {
             #[cfg(feature = "semantic-policy")]
             {
                 pending
-                    .prepare_control_trajectory(py, &slf)
-                    .and_then(|()| pending.execute_control_group(py))
-                    .and_then(|()| pending.execute_control_evaluations(py))
-                    .and_then(|()| pending.execute_control_checkpoint(py))
+                    .execute_control_branch(py, &slf)
                     .and_then(|()| pending.finish_preparation(py))
             }
             #[cfg(not(feature = "semantic-policy"))]
@@ -2338,6 +2338,8 @@ impl PySemanticTransitionController {
                 private_checkpoints: Mutex::new(Vec::new()),
                 #[cfg(feature = "semantic-policy")]
                 private_checkpoint_active: AtomicBool::new(false),
+                #[cfg(feature = "semantic-policy")]
+                control_retirement: Mutex::new(None),
                 #[cfg(feature = "semantic-policy")]
                 private_trajectory_start: Mutex::new(None),
                 #[cfg(feature = "semantic-policy")]

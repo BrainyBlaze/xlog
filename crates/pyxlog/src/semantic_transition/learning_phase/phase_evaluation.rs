@@ -81,6 +81,29 @@ impl Drop for EvaluationColdVisibility<'_> {
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(super) fn drop_retired_control_evaluation_owners(&self) -> PyResult<()> {
+        let mut retained = self.phase_evaluations()?;
+        if retained
+            .iter()
+            .filter(|entry| entry.branch == "control")
+            .any(|entry| !entry.recorded || !entry.released || entry.budget_exceeded)
+        {
+            return Err(invalid(
+                "control retirement cannot discard an unfinished evaluation",
+            ));
+        }
+        let mut original = Vec::new();
+        while retained
+            .last()
+            .is_some_and(|entry| entry.branch == "control")
+        {
+            original.push(retained.pop().expect("retained control evaluation"));
+        }
+        drop(retained);
+        drop(original);
+        Ok(())
+    }
+
     pub(super) fn control_checkpoint_input(
         &self,
         py: Python<'_>,

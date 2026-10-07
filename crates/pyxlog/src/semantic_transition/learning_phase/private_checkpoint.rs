@@ -45,6 +45,56 @@ impl PySemanticLearningPhaseTransition {
         self.execute_private_checkpoint(py, "control", owners, ordinal)
     }
 
+    pub(super) fn control_retirement_input(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(EvaluationOwners, Py<PyBytes>, u64)> {
+        let retained = self.private_checkpoints()?;
+        let current = retained
+            .last()
+            .filter(|entry| entry.branch == "control")
+            .ok_or_else(|| invalid("control retirement lost its original full checkpoint"))?;
+        Self::require_private_checkpoint_entry(py, current)?;
+        if !current.recorded || !current.released || current.budget_exceeded {
+            return Err(invalid(
+                "control retirement precedes known checkpoint accounting and release",
+            ));
+        }
+        Ok((
+            EvaluationOwners {
+                controller: current.owners.controller.clone_ref(py),
+                task: current.owners.task.clone_ref(py),
+                parent: current.owners.parent.clone_ref(py),
+                model: current.owners.model.clone_ref(py),
+            },
+            current
+                .saved
+                .as_ref()
+                .expect("original full checkpoint")
+                .clone_ref(py),
+            current
+                .ordinal
+                .checked_add(1)
+                .ok_or_else(|| invalid("control retirement position overflowed"))?,
+        ))
+    }
+
+    pub(super) fn drop_retired_control_checkpoint(&self) -> PyResult<()> {
+        let mut retained = self.private_checkpoints()?;
+        if retained
+            .last()
+            .is_some_and(|entry| entry.branch != "control")
+        {
+            return Err(invalid(
+                "control retirement cannot discard another branch checkpoint",
+            ));
+        }
+        let original = retained.pop();
+        drop(retained);
+        drop(original);
+        Ok(())
+    }
+
     fn require_private_checkpoint_entry(
         py: Python<'_>,
         current: &PrivateCheckpoint,
