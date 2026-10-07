@@ -882,7 +882,11 @@ impl PySemanticLearningPhaseTransition {
         let manifest = SemanticCheckpointManifest::decode(&self.source_checkpoint)?;
         let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
         let inputs = &self.preparation_inputs;
-        inputs.require_execution_inputs(py)?;
+        inputs.require_execution_inputs(
+            py,
+            &self.model_owner(py, PhaseModelOwner::Source)?,
+            &self.model_owner(py, PhaseModelOwner::Execute)?,
+        )?;
         inputs.require_program(py, &self.scientific_owner)?;
         self.records()?.require_preparation_admission()?;
         let fresh = self.refresh_snapshot.bind(py).call0()?;
