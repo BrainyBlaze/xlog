@@ -1698,6 +1698,11 @@ impl PySemanticTransitionSession {
                 ));
             }
         }
+        let expense = closure
+            .as_ref()
+            .map(|closure| closure.restored_expense(raw))
+            .transpose()?
+            .flatten();
         let restored = Self::restore_checkpoint_impl(
             py,
             checkpoint,
@@ -1711,7 +1716,7 @@ impl PySemanticTransitionSession {
             max_checkpoint_bytes,
             max_total_checkpoint_bytes,
             refresh_snapshot,
-            None,
+            expense.as_ref(),
             None,
             None,
         )?;
@@ -1772,7 +1777,7 @@ impl PySemanticTransitionSession {
             .map(|custody| {
                 Ok((
                     PyBytes::new(py, &custody.closure.phase_id),
-                    PyBytes::new(py, &custody.closure.delivery_digest),
+                    PyBytes::new(py, &custody.closure.completion_digest),
                     PyBytes::new(py, &custody.origin),
                 )
                     .into_pyobject(py)?
@@ -1800,7 +1805,7 @@ impl PySemanticTransitionSession {
         let mut retained = self.checkpoint_custody()?;
         if let Some(current) = retained.as_ref() {
             if current.closure.phase_id != closure.phase_id
-                || current.closure.delivery_digest != closure.delivery_digest
+                || current.closure.completion_digest != closure.completion_digest
                 || current.origin != origin
             {
                 return Err(invalid(
@@ -8346,7 +8351,30 @@ impl PySemanticTransitionRestoredCheckpoint {
             .checkpoint_custody()?
             .as_ref()
             .map(|custody| Arc::clone(&custody.closure));
-        closure.map(|closure| closure.python_value(py)).transpose()
+        closure
+            .filter(|closure| closure.refusal.is_none())
+            .map(|closure| closure.python_value(py))
+            .transpose()
+    }
+
+    /// Original terminal disposition is separate from accepted phase custody.
+    #[getter]
+    fn learning_phase_refusal(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        if session.learning_preparing.load(Ordering::Acquire) {
+            return Err(invalid(
+                "private or unknown Source cannot expose known terminal custody",
+            ));
+        }
+        let closure = session
+            .checkpoint_custody()?
+            .as_ref()
+            .map(|custody| Arc::clone(&custody.closure));
+        match closure {
+            Some(closure) => closure.refusal_value(py),
+            None => Ok(None),
+        }
     }
 }
 

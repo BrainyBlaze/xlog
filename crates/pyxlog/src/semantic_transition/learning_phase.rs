@@ -1979,6 +1979,53 @@ impl PySemanticLearningPhaseTransition {
         }
     }
 
+    /// Read the same known Source issuer, never create an accepted handoff or
+    /// issue another key while the consumer is resolving its original pin.
+    #[getter]
+    fn refusal_checkpoint_custody(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        if !matches!(*self.status_lock()?, Completion::Refused) {
+            return Ok(None);
+        }
+        let (phase_id, digest) = {
+            let records = self.records()?;
+            let terminal = records
+                .refusal_record
+                .as_ref()
+                .ok_or_else(|| invalid("known Source refusal lost its original signed record"))?;
+            (records.phase_id, <[u8; 32]>::from(Sha256::digest(terminal)))
+        };
+        let source = self.source.borrow(py);
+        source.require_creator()?;
+        if source.learning_preparing.load(Ordering::Acquire) {
+            return Err(invalid(
+                "known Source refusal is held by another unfinished phase",
+            ));
+        }
+        let retained = source.checkpoint_custody()?;
+        let custody = retained
+            .as_ref()
+            .ok_or_else(|| invalid("known Source refusal lost its original checkpoint issuer"))?;
+        if custody.closure.phase_id != phase_id
+            || custody.closure.completion_digest != digest
+            || custody.origin != <[u8; 32]>::from(Sha256::digest(&self.source_checkpoint))
+        {
+            return Err(invalid(
+                "Source refusal issuer differs from this original known terminal origin",
+            ));
+        }
+        let origin = (
+            PyBytes::new(py, &phase_id),
+            PyBytes::new(py, &digest),
+            PyBytes::new(py, &custody.origin),
+        )
+            .into_pyobject(py)?;
+        Ok(Some(
+            (PyBytes::new(py, &custody.issuer()), origin)
+                .into_pyobject(py)?
+                .unbind(),
+        ))
+    }
+
     /// The trusted durable owner implements commit(destination, bytes, sha256)
     /// and resolve(destination, sha256). Only exact durable readback accepts it.
     fn commit_checkpoint(

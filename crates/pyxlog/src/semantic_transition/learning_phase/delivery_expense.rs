@@ -267,6 +267,7 @@ impl PySemanticLearningPhaseTransition {
                 ))
             }
         };
+        self.install_terminal_source_custody(py)?;
         let mut retention = source
             .learning_transition
             .lock()
@@ -286,6 +287,94 @@ impl PySemanticLearningPhaseTransition {
         drop(state);
         drop(retention);
         drop(original);
+        Ok(())
+    }
+
+    fn install_terminal_source_custody(&self, py: Python<'_>) -> PyResult<()> {
+        let (phase_id, admission, record) = {
+            let records = self.records()?;
+            if !records.refusal_known {
+                return Err(invalid(
+                    "Source checkpoint custody precedes known terminal readback",
+                ));
+            }
+            (
+                records.phase_id,
+                records.confirmed_admission()?,
+                Arc::clone(
+                    records
+                        .refusal_record
+                        .as_ref()
+                        .expect("known terminal record"),
+                ),
+            )
+        };
+        let (cause, history, result, payload) = {
+            let retained = self.delivery_expense()?;
+            let current = retained.as_ref().expect("original delivery");
+            let refusal = current.refusal.as_ref().expect("original refusal");
+            if !refusal.native_released || !current.released {
+                return Err(invalid(
+                    "Source checkpoint custody precedes complete original terminal release",
+                ));
+            }
+            (
+                refusal.cause,
+                Arc::clone(refusal.history.as_ref().expect("known terminal history")),
+                Arc::clone(&refusal.result),
+                Arc::clone(current.payload.as_ref().expect("known terminal payload")),
+            )
+        };
+        let source_manifest = SemanticCheckpointManifest::decode(&self.source_checkpoint)?;
+        let private_manifest = SemanticCheckpointManifest::decode(&self.candidate_checkpoint()?)?;
+        let (private_seed, _, _, _) = TaskCheckpointSeed::decode(&private_manifest.task)?;
+        let expense = private_seed.proposal_expense()?;
+        if expense != self.task_use.borrow(py).checkpoint.proposal_expense()? {
+            return Err(invalid(
+                "terminal Source changed its signed cumulative Proposal expense",
+            ));
+        }
+        let mut reader = phase_record::RecordReader(
+            payload
+                .strip_prefix(b"xlog.learning-phase.refusal.v1\0")
+                .ok_or_else(|| invalid("known terminal payload lost its original domain"))?,
+        );
+        for _ in 0..8 {
+            reader.field()?;
+        }
+        let snapshot =
+            AuthoritySnapshot::parse(&ColdValue::from_canonical_bytes(reader.field()?)?)?;
+        reader.field()?;
+        reader.finish()?;
+        let closure = Arc::new(cold_restore::VerifiedClosure {
+            phase_id,
+            completion_digest: Sha256::digest(&record).into(),
+            admission,
+            program: Arc::from(self.preparation_inputs.frozen_program.as_slice()),
+            history,
+            acceptance: result,
+            snapshot,
+            refusal: Some(cold_restore::RefusalClosure {
+                cause: Arc::from(cause),
+                record,
+                expense,
+                source_native: Arc::from(source_manifest.native.as_slice()),
+            }),
+        });
+        let origin: [u8; 32] = Sha256::digest(&self.source_checkpoint).into();
+        let source = self.source.borrow(py);
+        let mut custody = source.checkpoint_custody()?;
+        if custody.as_ref().is_some_and(|current| {
+            current.closure.phase_id == closure.phase_id
+                && current.closure.completion_digest == closure.completion_digest
+                && current.origin == origin
+        }) {
+            return Ok(());
+        }
+        // A distinct terminal origin gets exactly one distinct issuer. Existing
+        // immutable public pins and signed records remain with the consumer.
+        // The Source is still held; no public pin is visible until resumption.
+        *custody = Some(cold_restore::CheckpointCustody::issue(closure, origin));
         Ok(())
     }
 
@@ -773,12 +862,13 @@ impl PySemanticLearningPhaseTransition {
         }
         let closure = Arc::new(cold_restore::VerifiedClosure {
             phase_id,
-            delivery_digest,
+            completion_digest: delivery_digest,
             admission,
             program: Arc::from(self.preparation_inputs.frozen_program.as_slice()),
             history,
             acceptance,
             snapshot,
+            refusal: None,
         });
         let result = candidate
             .borrow(py)
