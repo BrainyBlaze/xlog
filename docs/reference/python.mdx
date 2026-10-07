@@ -571,6 +571,27 @@ cohort and acquired private parent. Control feedback still uses the original
 positive-zero tensor path. Joined native/model reports and physical memory are
 recorded for each original evaluation without another model restore or forward.
 
+The same evaluation owns one continuous cold work report with three one-shot
+registration regions. `task_use.active_cold_model_work()` projects the current
+region: preparation after native admission, output projection after the existing
+numerical recorder, then cleanup after known native finish or resolution.
+Each region exports the original scratch before its own `begin()` and closes
+with `end()`; all events append to the same capacity without resetting slots or
+reopening the report. Native numerical begin requires closed preparation, and
+finish requires closed output projection. Finish and resolution stay outside
+the cold recorder. Pending retains the original report and closed regions and
+does not permit another preparation, projection or forward.
+
+Known native cancellation joins the same consumers and measures the original
+partial work roster before releasing evaluation storage. Its internal expense
+proof, not a successful observation, admits cleanup once. Only regions proved
+not entered by that cancellation may be skipped; failed or unknown registration
+is never reopened or declared complete. After known cancellation and cleanup,
+native retains the original error and actual expenditure, completes the same
+physical interval, and does not issue a scientific evaluation observation or
+advance the schedule. A complete terminal scientific refusal remains a separate
+required part of the full phase executor.
+
 ABI version 2 extends the same observer with `bind_step_capture` and
 `read_step_interval`. Registration passes the actual capture stream immediately
 after enqueueing the admission or release kernel, inside its original capture.

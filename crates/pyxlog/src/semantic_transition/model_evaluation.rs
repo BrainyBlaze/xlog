@@ -2,8 +2,8 @@
 
 use super::*;
 use xlog_cuda::{
-    SemanticCompletedModelEvaluation, SemanticEvaluationCohort, SemanticModelEvaluation,
-    SemanticModelEvaluationResult,
+    SemanticCancelledModelEvaluation, SemanticCompletedModelEvaluation, SemanticEvaluationCohort,
+    SemanticModelEvaluation, SemanticModelEvaluationResult,
 };
 
 pyo3::create_exception!(
@@ -103,9 +103,27 @@ pub(crate) struct PySemanticModelEvaluation {
     closed: AtomicBool,
     output: Mutex<Option<Py<PySemanticTensorContentWitness>>>,
     completed: Mutex<Option<Py<PySemanticCompletedModelEvaluation>>>,
+    cancelled: Mutex<Option<SemanticCancelledModelEvaluation>>,
+    cancel_entered: AtomicBool,
 }
 
 impl PySemanticModelEvaluation {
+    fn phase_cold_boundary(
+        &self,
+        py: Python<'_>,
+        from: learning_phase::phase_evaluation::EvaluationColdStage,
+        to: learning_phase::phase_evaluation::EvaluationColdStage,
+    ) -> PyResult<()> {
+        let parent = self.parent.borrow(py);
+        let session = parent.session.borrow(py);
+        if let Some(original) = private_execution_owner(py, &session)? {
+            original
+                .borrow(py)
+                .evaluation_cold_boundary(py, self, from, to)?;
+        }
+        Ok(())
+    }
+
     fn completion_error(&self, py: Python<'_>, original: PyErr) -> PyErr {
         let parent = self.parent.borrow(py);
         let session = parent.session.borrow(py);
@@ -169,6 +187,21 @@ impl PySemanticModelEvaluation {
     }
 
     fn restore_phase(&self, py: Python<'_>) -> PyResult<()> {
+        use learning_phase::phase_evaluation::EvaluationColdStage;
+        // Only a retained genuine completed receipt admits cleanup. Cancellation
+        // restores the ordinary phase but cannot synthesize that receipt.
+        if self
+            .completed
+            .lock()
+            .map_err(|_| invalid("evaluation completed observation owner is poisoned"))?
+            .is_some()
+        {
+            self.phase_cold_boundary(
+                py,
+                EvaluationColdStage::AwaitingCompletion,
+                EvaluationColdStage::Cleanup,
+            )?;
+        }
         let parent = self.parent.borrow(py);
         let issued = parent.task_use.borrow(py);
         let mut state = issued.state()?;
@@ -285,6 +318,12 @@ impl PySemanticModelEvaluation {
     }
 
     fn begin(&self, py: Python<'_>) -> PyResult<()> {
+        use learning_phase::phase_evaluation::EvaluationColdStage;
+        self.phase_cold_boundary(
+            py,
+            EvaluationColdStage::Preparation,
+            EvaluationColdStage::OutputProjection,
+        )?;
         let parent = self.parent.borrow(py);
         let session = parent.session.borrow(py);
         let mut owner = session.owner()?;
@@ -374,6 +413,12 @@ impl PySemanticModelEvaluation {
         }
         *retained = Some(output_witness.clone_ref(py));
         drop(retained);
+        use learning_phase::phase_evaluation::EvaluationColdStage;
+        self.phase_cold_boundary(
+            py,
+            EvaluationColdStage::OutputProjection,
+            EvaluationColdStage::AwaitingCompletion,
+        )?;
         let mut owner = session.owner()?;
         self.check(py, &owner)?;
         let result = owner
@@ -445,10 +490,29 @@ impl PySemanticModelEvaluation {
                 "submitted evaluation must resolve its original result, not cancel",
             ));
         }
-        owner
+        self.cancel_entered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                invalid("unknown evaluation cancellation cannot repeat its original invocation")
+            })?;
+        let cancelled = owner
             .cancel_model_evaluation(&*parent.lease()?, &self.inner, &streams)
             .map_err(xlog_err)?;
+        *self
+            .cancelled
+            .lock()
+            .map_err(|_| invalid("evaluation cancellation custody is poisoned"))? =
+            Some(cancelled.clone());
         drop(owner);
+        if let Some(original) = private_execution_owner(py, &session)? {
+            original.borrow(py).cancel_phase_evaluation(
+                py,
+                self,
+                &cancelled,
+                &self.inner,
+                &parent,
+            )?;
+        }
         self.restore_phase(py)
     }
 }
@@ -562,7 +626,7 @@ impl PySemanticTransitionController {
             }
         };
         drop(owner);
-        Py::new(
+        let original = Py::new(
             py,
             PySemanticModelEvaluation {
                 parent: parent.clone_ref(py),
@@ -572,7 +636,13 @@ impl PySemanticTransitionController {
                 closed: AtomicBool::new(false),
                 output: Mutex::new(None),
                 completed: Mutex::new(None),
+                cancelled: Mutex::new(None),
+                cancel_entered: AtomicBool::new(false),
             },
-        )
+        )?;
+        if let Some(pending) = private_execution_owner(py, &session)? {
+            pending.borrow(py).bind_phase_evaluation(py, &original)?;
+        }
+        Ok(original)
     }
 }
