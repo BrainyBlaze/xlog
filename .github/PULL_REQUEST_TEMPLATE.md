@@ -6,9 +6,9 @@
 ## Validation
 
 - [ ] I ran `cargo fmt --all --check`
-- [ ] I ran `make check`
-- [ ] I ran relevant Python/example checks for this change
-- [ ] I ran GPU validation on a real CUDA machine for CUDA-facing changes
+- [ ] I checked workflow/shell hygiene and CUDA-independent source compilation
+- [ ] I listed manual validation actually performed and any unverified runtime boundary
+- [ ] Any GPU build was explicit manual LOCAL work, not a CI job
 - [ ] I updated docs/templates for any support or workflow changes
 
 Commands run:
@@ -40,7 +40,9 @@ Complete this section if the change affects CUDA behavior, performance, packagin
 - GPU:
 - NVIDIA driver:
 - CUDA toolkit/runtime:
-- GPU validation host type: local machine / self-hosted runner / other
+- Authorized runtime host type:
+- Exact source/artifact used:
+- Runtime acceptance still missing:
 
 ## Risk and Notes
 

@@ -5,7 +5,7 @@ description: "Generated rustdoc entry points for the xlog workspace, plus docs.r
 
 This page links to the generated Rust API documentation for every crate in the xlog workspace, plus hosted fallbacks for the crates published to crates.io. "rustdoc" is Rust's standard tool for turning source comments into browsable HTML API reference.
 
-The docs build generates rustdoc for the full workspace in a temporary build directory, then attaches it to the exported site at `/generated/rust/` after the Mintlify export step. This keeps the generated Rustdoc HTML out of the Mintlify source tree while still publishing the generated API with the site. The CI docs build uses a rustdoc-only CUDA artifact mode: it documents the Rust API surface without compiling PTX or cubin files (the two compiled GPU-code formats that a release build would normally emit).
+The explicitly dispatched manual docs build generates rustdoc for the full workspace in a temporary build directory, then attaches it to the exported site at `/generated/rust/` after the Mintlify export step. This keeps the generated Rustdoc HTML out of the Mintlify source tree. Its rustdoc-only CUDA artifact mode documents the Rust API without compiling PTX or cubin files (the two compiled GPU-code formats that a release build would normally emit). Ordinary source CI does not run this full documentation build, and neither source CI nor manual Actions build GPU artifacts.
 
 <CardGroup cols={2}>
   <Card title="Workspace rustdoc" href="https://xlog.md/generated/rust/index.html">

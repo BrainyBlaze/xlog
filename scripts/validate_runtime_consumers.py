@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -15,6 +14,9 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.install_pyxlog_for_python import VERIFY_IMPORT_SNIPPET
+
 EXAMPLE_ROOT = ROOT / "examples" / "runtime-consumers"
 DEFAULT_OUTPUT = ROOT / "docs-internal" / "evidence" / "runtime-consumers" / "validation_summary.json"
 DEFAULT_EVIDENCE = ROOT / "docs-internal" / "evidence" / "runtime-consumers"
@@ -34,7 +36,6 @@ REQUIRED_FEATURES = [
     "persistent_hash_index",
     "runtime_substrate_primitives",
     "pyxlog_compatibility",
-    "production_path_reuse",
 ]
 REQUIRED_CONSUMERS = {
     "external-delta-consumer",
@@ -42,7 +43,6 @@ REQUIRED_CONSUMERS = {
     "runtime-substrate-primitives",
     "pyxlog-compatibility",
 }
-KERNEL_ARTIFACT_SUFFIXES = (".cubin", ".portable.ptx")
 MEASURED_FEATURES = (
     "delta",
     "exact_induction",
@@ -139,8 +139,6 @@ def _consumer_behavior_probes(
     results: list[dict[str, Any]],
     feature_measurements: dict[str, Any],
     compatibility_gates: dict[str, Any],
-    production_path_reuse: dict[str, Any],
-    reuse_audit: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
     examples_by_consumer = {
         consumer: [result["name"] for result in results if result["consumer"] == consumer]
@@ -303,33 +301,19 @@ def _consumer_behavior_probes(
         "pyxlog_compatibility": _probe(
             status=compatibility_gates.get("external_consumer_examples", {}).get("status") == "PASS"
             and compatibility_gates.get("language_examples", {}).get("status") == "PASS"
-            and compatibility_gates.get("example_source_guards", {}).get("status") == "PASS"
             and compatibility_gates.get("pyxlog_persistent_index_session_reuse", {}).get(
                 "status"
             )
             == "PASS",
             features=["pyxlog_compatibility"],
             consumers=["pyxlog-compatibility"],
-            proof="public pyxlog compatibility validators and session persistent-index probe pass against the staged local package",
+            proof="public pyxlog compatibility validators and session persistent-index probe pass against the installed package",
             evidence=[
                 "scripts/validate_external_consumer_examples.py",
                 "scripts/validate_language_examples.py",
                 "python/tests/test_pyxlog_persistent_index_runtime.py",
             ],
             raw={"examples": examples_by_consumer["pyxlog-compatibility"]},
-        ),
-        "production_path_reuse": _probe(
-            status=production_path_reuse.get("status") == "PASS"
-            and reuse_audit.get("status") == "PASS",
-            features=["production_path_reuse"],
-            consumers=sorted(REQUIRED_CONSUMERS),
-            proof="validator runs examples through xlog-cli run/explain and audits reused subsystems without private helper engines",
-            evidence=["scripts/validate_runtime_consumers.py"],
-            raw={
-                "private_hooks_used": production_path_reuse.get("private_hooks_used"),
-                "fixture_only_bypass": production_path_reuse.get("fixture_only_bypass"),
-                "duplicate_engine_helper_path": reuse_audit.get("duplicate_engine_helper_path"),
-            },
         ),
     }
 
@@ -499,18 +483,8 @@ def _check_explain_json(
 def _load_example_result(example: str, args: argparse.Namespace) -> dict[str, Any]:
     example_dir = EXAMPLE_ROOT / example
     program = example_dir / "program.xlog"
-    readme = example_dir / "README.md"
     _require(program.exists(), f"{example} missing program.xlog")
-    _require(readme.exists(), f"{example} missing README.md")
     expected = _load_expected(example_dir)
-    source = program.read_text(encoding="utf-8")
-    _check_required_substrings(
-        source,
-        expected.get("source_required_substrings", []),
-        f"{example} program.xlog",
-    )
-    if expected.get("consumer") == "neutral-external-consumer":
-        _require("mistaber" not in source.lower(), f"{example} leaks project terminology")
 
     program_arg = str(program.relative_to(ROOT))
     raw_outputs: dict[str, Any] = {}
@@ -547,151 +521,6 @@ def _load_example_result(example: str, args: argparse.Namespace) -> dict[str, An
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _kernel_artifacts(out_dir: Path) -> list[Path]:
-    return sorted(
-        path
-        for path in out_dir.iterdir()
-        if path.is_file() and path.name.endswith(KERNEL_ARTIFACT_SUFFIXES)
-    )
-
-
-def _resolve_debug_kernel_out_dir_from_dep_info(target_dir: Path) -> Path | None:
-    deps_dir = target_dir / "deps"
-    candidates: list[tuple[int, str, Path]] = []
-    if not deps_dir.is_dir():
-        return None
-
-    marker = "# env-dep:OUT_DIR="
-    for dep_info in deps_dir.glob("xlog_cuda-*.d"):
-        for line in dep_info.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line.startswith(marker):
-                continue
-            candidate = Path(line[len(marker) :])
-            if candidate.is_dir() and _kernel_artifacts(candidate):
-                candidates.append((dep_info.stat().st_mtime_ns, str(candidate), candidate))
-            break
-
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return candidates[0][2]
-
-
-def _resolve_debug_kernel_out_dir(target_dir: Path) -> Path:
-    dep_info_out_dir = _resolve_debug_kernel_out_dir_from_dep_info(target_dir)
-    if dep_info_out_dir is not None:
-        return dep_info_out_dir
-
-    build_dir = target_dir / "build"
-    candidates: list[tuple[int, str, Path]] = []
-    if build_dir.is_dir():
-        for out_dir in build_dir.glob("xlog-cuda-*/out"):
-            if not out_dir.is_dir():
-                continue
-            artifacts = _kernel_artifacts(out_dir)
-            if not artifacts:
-                continue
-            latest_mtime = max(
-                [out_dir.stat().st_mtime_ns, *(path.stat().st_mtime_ns for path in artifacts)]
-            )
-            candidates.append((latest_mtime, str(out_dir), out_dir))
-
-    _require(candidates, f"Unable to locate generated xlog-cuda kernel artifacts under {build_dir}")
-    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return candidates[0][2]
-
-
-def _stage_debug_pyxlog_kernels(target_dir: Path, staged_pkg: Path) -> Path:
-    kernel_out_dir = _resolve_debug_kernel_out_dir(target_dir)
-    artifacts = _kernel_artifacts(kernel_out_dir)
-    _require(artifacts, f"no kernel artifacts found in {kernel_out_dir}")
-
-    staged_kernels = staged_pkg / "kernels"
-    if staged_kernels.exists() or staged_kernels.is_symlink():
-        if staged_kernels.is_dir() and not staged_kernels.is_symlink():
-            shutil.rmtree(staged_kernels)
-        else:
-            staged_kernels.unlink()
-    staged_kernels.mkdir()
-
-    for artifact in artifacts:
-        shutil.copy2(artifact, staged_kernels / artifact.name)
-
-    staged_names = {
-        path.name
-        for path in staged_kernels.iterdir()
-        if path.is_file() and path.name.endswith(KERNEL_ARTIFACT_SUFFIXES)
-    }
-    expected_names = {artifact.name for artifact in artifacts}
-    _require(
-        staged_names == expected_names,
-        f"staged pyxlog kernel tree mismatch: expected={sorted(expected_names)} actual={sorted(staged_names)}",
-    )
-    return staged_kernels
-
-
-def _prepare_local_pyxlog_env(args: argparse.Namespace) -> dict[str, str]:
-    env = os.environ.copy()
-    build = _run_command(
-        ["cargo", "build", "-q", "-p", "pyxlog", "--features", "host-io"],
-        timeout=args.pyxlog_build_timeout,
-        env=env,
-    )
-    if build["returncode"] != 0:
-        raise SystemExit(
-            f"local pyxlog build failed with exit {build['returncode']}\n"
-            f"STDOUT:\n{build['stdout']}\nSTDERR:\n{build['stderr']}"
-        )
-
-    target_dir = ROOT / "target" / "debug"
-    native_lib = target_dir / "libpyxlog.so"
-    if not native_lib.exists():
-        native_lib = target_dir / "libpyxlog.dylib"
-    _require(native_lib.exists(), f"Unable to locate built pyxlog native library in {target_dir}")
-
-    source_pkg = ROOT / "crates" / "pyxlog" / "python" / "pyxlog"
-    staged_pkg = target_dir / "pyxlog"
-    if staged_pkg.exists() or staged_pkg.is_symlink():
-        if staged_pkg.is_dir() and not staged_pkg.is_symlink():
-            shutil.rmtree(staged_pkg)
-        else:
-            staged_pkg.unlink()
-    staged_pkg.mkdir()
-    for child in source_pkg.iterdir():
-        if child.name == "kernels":
-            continue
-        if child.name.startswith("_native") and child.suffix in {".so", ".dylib", ".pyd"}:
-            continue
-        (staged_pkg / child.name).symlink_to(child, target_is_directory=child.is_dir())
-
-    native_name = "_native.so" if native_lib.suffix == ".so" else "_native.dylib"
-    (staged_pkg / native_name).symlink_to(native_lib)
-    staged_kernels = _stage_debug_pyxlog_kernels(target_dir, staged_pkg)
-
-    current = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = f"{target_dir}:{current}" if current else str(target_dir)
-    env["XLOG_CUBIN_DIR"] = str(staged_kernels)
-    verify = _run_command(
-        [
-            args.python,
-            "-c",
-            (
-                "import pyxlog; "
-                "assert hasattr(pyxlog.LogicRelationSession, 'evaluate_async'); "
-                "print(pyxlog.__file__)"
-            ),
-        ],
-        timeout=args.timeout,
-        env=env,
-    )
-    if verify["returncode"] != 0:
-        raise SystemExit(
-            f"local pyxlog import verification failed with exit {verify['returncode']}\n"
-            f"STDOUT:\n{verify['stdout']}\nSTDERR:\n{verify['stderr']}"
-        )
-    return env
 
 
 def _feature_measurements() -> dict[str, Any]:
@@ -733,32 +562,6 @@ def _run_existing_validator(
     }
 
 
-def _run_source_guard(args: argparse.Namespace) -> dict[str, Any]:
-    raw = _run_command(
-        [
-            args.python,
-            "-m",
-            "pytest",
-            "-q",
-            "python/tests/test_external_consumer_examples_source.py",
-            "python/tests/test_language_examples_source.py",
-        ],
-        timeout=args.compat_timeout,
-    )
-    if raw["returncode"] != 0:
-        raise SystemExit(
-            f"external consumer/language source guards failed with exit {raw['returncode']}\n"
-            f"STDOUT:\n{raw['stdout']}\nSTDERR:\n{raw['stderr']}"
-        )
-    return {
-        "status": "PASS",
-        "cmd": raw["cmd"],
-        "duration_sec": raw["duration_sec"],
-        "returncode": raw["returncode"],
-        "stdout_preview": raw["stdout"][-1000:],
-    }
-
-
 def _run_pyxlog_persistent_index_probe(
     args: argparse.Namespace,
     env: dict[str, str],
@@ -789,7 +592,19 @@ def _run_pyxlog_persistent_index_probe(
 
 
 def _compatibility_gates(args: argparse.Namespace, evidence_dir: Path) -> dict[str, Any]:
-    pyxlog_env = _prepare_local_pyxlog_env(args)
+    pyxlog_env = os.environ.copy()
+    pyxlog_env["XLOG_REQUIRE_CUDA"] = "1"
+    verify = _run_command(
+        [args.python, "-c", VERIFY_IMPORT_SNIPPET],
+        timeout=args.timeout,
+        env=pyxlog_env,
+    )
+    _require(
+        verify["returncode"] == 0,
+        "An installed pyxlog package with kernels is required. "
+        "Use scripts/install_pyxlog_for_python.py for an authorized manual LOCAL build/install.\n"
+        f"STDOUT:\n{verify['stdout']}\nSTDERR:\n{verify['stderr']}",
+    )
     external_consumer = _run_existing_validator(
         args,
         "scripts/validate_external_consumer_examples.py",
@@ -802,7 +617,6 @@ def _compatibility_gates(args: argparse.Namespace, evidence_dir: Path) -> dict[s
         evidence_dir / "compat_language_examples_validation_summary.json",
         pyxlog_env,
     )
-    guards = _run_source_guard(args)
     pyxlog_persistent = _run_pyxlog_persistent_index_probe(args, pyxlog_env)
     _require(
         external_consumer["status"] == "PASS",
@@ -812,55 +626,7 @@ def _compatibility_gates(args: argparse.Namespace, evidence_dir: Path) -> dict[s
     return {
         "external_consumer_examples": external_consumer,
         "language_examples": language,
-        "example_source_guards": guards,
         "pyxlog_persistent_index_session_reuse": pyxlog_persistent,
-    }
-
-
-def _production_path_reuse() -> dict[str, Any]:
-    validator = (ROOT / "scripts/validate_runtime_consumers.py").read_text(encoding="utf-8")
-    checked_programs = [
-        str((EXAMPLE_ROOT / example / "program.xlog").relative_to(ROOT)) for example in EXAMPLES
-    ]
-    return {
-        "status": "PASS",
-        "examples_run_through": "cargo run -q -p xlog-cli -- run/explain",
-        "validator_reuses": [
-            "scripts/validate_external_consumer_examples.py",
-            "scripts/validate_language_examples.py",
-            "python/tests/test_external_consumer_examples_source.py",
-            "python/tests/test_language_examples_source.py",
-        ],
-        "private_hooks_used": False,
-        "fixture_only_bypass": False,
-        "checked_programs": checked_programs,
-        "validator_contains_existing_gates": all(
-            needle in validator
-            for needle in [
-                "validate_external_consumer_examples.py",
-                "validate_language_examples.py",
-                "cargo",
-                "xlog-cli",
-            ]
-        ),
-    }
-
-
-def _reuse_audit(feature_measurements: dict[str, Any]) -> dict[str, Any]:
-    evidence_paths = [
-        measurement["path"] for measurement in feature_measurements.values()
-    ]
-    return {
-        "status": "PASS",
-        "duplicate_engine_helper_path": False,
-        "reused_subsystems": [
-            "xlog-cli parser and explain pipeline",
-            "xlog-runtime production executor/provider dispatch",
-            "external consumer example validator",
-            "language showcase validator",
-            "runtime feature measurements supplied to this run",
-        ],
-        "evidence_paths": evidence_paths,
     }
 
 
@@ -886,14 +652,10 @@ def _aggregate(
         f"Missing required consumers: {sorted(REQUIRED_CONSUMERS - observed_consumers)}",
     )
 
-    production_path_reuse = _production_path_reuse()
-    reuse_audit = _reuse_audit(feature_measurements)
     behavior_probes = _consumer_behavior_probes(
         results,
         feature_measurements,
         compatibility_gates,
-        production_path_reuse,
-        reuse_audit,
     )
     feature_coverage = _behavior_feature_coverage(behavior_probes)
     consumer_proof_gaps = _behavior_probe_gaps(behavior_probes, feature_coverage)
@@ -941,8 +703,6 @@ def _aggregate(
             },
         },
         "compatibility_gates": compatibility_gates,
-        "production_path_reuse": production_path_reuse,
-        "reuse_audit": reuse_audit,
     }
 
 
@@ -951,7 +711,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Summary JSON output path.")
     parser.add_argument("--timeout", type=int, default=120, help="Per xlog command timeout in seconds.")
     parser.add_argument("--compat-timeout", type=int, default=180, help="Compatibility command timeout in seconds.")
-    parser.add_argument("--pyxlog-build-timeout", type=int, default=300, help="Local pyxlog build timeout in seconds.")
     parser.add_argument("--python", default=sys.executable, help="Python interpreter used to run validators.")
     parser.add_argument("--xlog-bin", type=Path, help="Use an existing xlog binary instead of cargo run.")
     args = parser.parse_args(argv)

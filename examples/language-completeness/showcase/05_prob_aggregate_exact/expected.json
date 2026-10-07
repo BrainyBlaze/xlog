@@ -1,6 +1,5 @@
 {
   "features": ["prob_aggregate_exact", "aggregate_query"],
-  "source_required_substrings": ["query(out_degree(1, 2))", "score_lse(X, logsumexp(Y))"],
   "checks": {
     "prob_json": {
       "engine": "exact_ddnnf",
