@@ -539,8 +539,19 @@ cold projection. Ordinary model bindings and the original held source return
 `None`; source reads remain limited to the actual serialization/evaluation
 callback. A transient capture is not a model binding, and a private child without
 its original intervention owner cannot be interpreted as an ordinary model.
-This source prefix does not implement the remaining private trajectories,
-post-comparison delivery or fresh-process recovery.
+The first private control trajectory also consumes the original lifecycle
+decoder: it restores the full source checkpoint with `None` copy/reset, not the
+phase's top-level recipe. Its original tally is attached before the canonical
+child graph initializer/admission. The same allocation/report reader survives
+the actual child model factory; inside that callback, the child's TaskUse
+exposes its original cold registrar. The model-content witness projects the
+original control material with `False` for the existing tensor zeroing path.
+The model factory must record its real work and relinquish scratch aliases;
+child completion joins the actual consumers before the original report closes.
+The measured trajectory-start is retained before another schedule projection.
+This prefix does not implement the remaining private numerical trajectories,
+post-comparison delivery or fresh-process recovery. It cannot issue a prepared
+or accepted outcome before that complete original schedule.
 
 `physical_peak_bytes` is usable only with `PHYSICAL_PEAK_VALID` and
 `ALLOCATOR_COMPLETED`, complete requested/enabled physical coverage without an

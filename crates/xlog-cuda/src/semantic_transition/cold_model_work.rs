@@ -28,6 +28,31 @@ impl SemanticColdModelWork {
     }
 }
 
+/// The original operation's native tally carried into its actual child graph.
+/// Construction is private; neither a raw pointer nor another report can mint
+/// this custody. Allocation and stream identity remain those of the issuer.
+pub struct SemanticColdNativeWork {
+    provider: Arc<CudaKernelProvider>,
+    domain: ResidentExecutionDomain,
+    work: DeviceMemoryView<u64>,
+    custody: Arc<()>,
+}
+
+impl SemanticColdNativeWork {
+    pub(crate) fn graph_custody(
+        self,
+        provider: &Arc<CudaKernelProvider>,
+        domain: &ResidentExecutionDomain,
+    ) -> Result<(DeviceMemoryView<u64>, Arc<()>), SemanticTransitionError> {
+        if !Arc::ptr_eq(provider, &self.provider) || domain.stream_id() != self.domain.stream_id() {
+            return Err(publication_input_error(
+                "cold child construction changed its original allocation owner or stream",
+            ));
+        }
+        Ok((self.work, self.custody))
+    }
+}
+
 /// Actual model and native components, not the complete operation's
 /// native work or physical peak. Other cold producers remain independent.
 #[derive(Clone, Copy, Debug)]
@@ -74,7 +99,7 @@ impl SemanticTransitionSession {
             .get(&token)
             .and_then(|step| step.cold_model_work.as_ref())
         else {
-            return Ok(None);
+            return Ok(self.graph.borrowed_cold_work());
         };
         match storage.state {
             RecordingState::Waiting | RecordingState::Recording | RecordingState::Closed => {
@@ -85,6 +110,46 @@ impl SemanticTransitionSession {
                 "cold native producers cannot run after failure or report submission",
             )),
         }
+    }
+
+    /// Mint only from the retained original invocation, before child admission.
+    /// The guard counts as a live alias until that actual child stream joins.
+    pub fn share_cold_native_work(
+        &self,
+        handle: &SemanticColdModelWork,
+    ) -> Result<SemanticColdNativeWork, SemanticTransitionError> {
+        let storage = self.cold_model_work(handle)?;
+        if !matches!(
+            storage.state,
+            RecordingState::Waiting | RecordingState::Recording
+        ) {
+            return Err(publication_input_error(
+                "cold child construction requires its original open operation",
+            ));
+        }
+        Ok(SemanticColdNativeWork {
+            provider: Arc::clone(&self.provider),
+            domain: self.domain.clone(),
+            work: storage.native_work.view(),
+            custody: Arc::clone(&storage.aliases),
+        })
+    }
+
+    /// Completion removes only a borrowed tally, after the actual reader's
+    /// entire consumer roster joins. Unknown completion keeps the same guard.
+    pub fn complete_shared_cold_native_work(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        streams: &[u64],
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        let work = self.graph.borrowed_cold_work().ok_or_else(|| {
+            publication_input_error("child completion lost its original borrowed tally")
+        })?;
+        self.complete_step_consumers(lease, streams)?;
+        self.graph
+            .complete_cold_work(&work)
+            .map_err(SemanticTransitionError::Semantic)
     }
 
     pub(super) fn require_completed_cold_model_work(&self) -> Result<(), SemanticTransitionError> {
@@ -393,11 +458,24 @@ impl SemanticTransitionSession {
         streams: &[u64],
     ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
         self.checked_reader(lease)?;
+        let storage = self.cold_model_work(handle)?;
+        if matches!(
+            storage.state,
+            RecordingState::Submitted | RecordingState::Completed
+        ) {
+            if storage.streams.as_deref() != Some(streams) {
+                return Err(publication_input_error(
+                    "cold completion changed its original submitted consumer roster",
+                ));
+            }
+            return self.resolve_cold_model_work(lease, handle);
+        }
         if lease.token != handle.token
             || self.cold_model_work(handle)?.state != RecordingState::Closed
+            || Arc::strong_count(&self.cold_model_work(handle)?.aliases) != 1
         {
             return Err(publication_input_error(
-                "cold completion requires its original explicitly closed recorder",
+                "cold completion requires its original closed recorder without scratch or child aliases",
             ));
         }
         self.quiesce_published_reader(lease, streams)?;

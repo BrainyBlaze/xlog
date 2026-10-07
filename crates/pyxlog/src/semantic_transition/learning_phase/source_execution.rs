@@ -30,6 +30,13 @@ pub(super) struct SourceEvaluation {
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(in crate::semantic_transition) fn is_original_source(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+    ) -> bool {
+        std::ptr::eq(session, &*self.source.borrow(py))
+    }
     pub(in crate::semantic_transition) fn require_source_feedback_projection(
         &self,
         py: Python<'_>,
